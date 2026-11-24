@@ -1577,7 +1577,12 @@ async def verify_warehouse_board(host: Seat, guest: Seat, pawn: str) -> dict:
                                {"map": dock, "epoch": epoch}, timeout=30)
 
     async def operate(seat, action, *args):
-        reply = await seat.bridge.command("fixture-warehouse-board", action, *args)
+        try:
+            reply = await seat.bridge.command("fixture-warehouse-board", action, *args)
+        except TimeoutError as error:
+            path = seat.bridge.directory / "status.tsv"
+            diagnostics = path.read_text(encoding="utf-8").splitlines()[:5] if path.is_file() else []
+            raise RuntimeError(f"Warehouse board fixture {action} timed out. Last status header {diagnostics}") from error
         return reply["ack"]["message"]
 
     before_host, before_guest = await operate(host, "inspect"), await operate(guest, "inspect")

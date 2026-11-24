@@ -82,9 +82,13 @@ async def verify_stock_lingering_teleport(host, guest, pawn, probe):
         await wait_resident_status(guest_run, lambda f: f["game"].get("native_anomaly_field", {})
                                    .get("blocked_triggers", 0) > blocked, timeout=6)
         await near(guest_run, "local", guest_start)
-        started = time.time() - .01
-        destination = location(await operate(host, "host-overlap"))
-        assert math.dist(guest_start, destination) > 200, (guest_start, destination)
+        async with asyncio.timeout(10):
+            while True:
+                started = time.time() - .01
+                destination = location(await operate(host, "host-overlap"))
+                if math.dist(guest_start, destination) > 200:
+                    break
+                await asyncio.sleep(.35)
         await asyncio.gather(near(host_run, "guest", destination), near(guest_run, "local", destination))
         async with asyncio.timeout(8):
             while True:

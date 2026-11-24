@@ -7,7 +7,7 @@ local rain_class = "/Game/Classes/Actors/Rain_BP.Rain_BP_C"
 local rain_asset = "NiagaraSystem /Game/Assets/PFX/NI_Rain_01.NI_Rain_01"
 local siren_hook = "/Game/Classes/Actors/AlarmSiren_BP.AlarmSiren_BP_C:StormSiren"
 local cue_path = "/Game/Assets/Sounds/CUEs/Alarm_Cues/StormSiren_03_Cue.StormSiren_03_Cue"
-local last, monitored, heard
+local last, monitored, heard, host_clock
 
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -101,6 +101,14 @@ LoopInGameThreadWithDelay(100, function()
             return stock_rain(world, statics, pawn, day, .85)
         end
         assert(not guest and valid(world.NetDriver.ClientConnections[1]))
+        if action == "resume" then
+            if host_clock and same(day, host_clock.actor) then day.UpdateInRealTime = host_clock.enabled end
+            host_clock = nil
+            return "restored"
+        end
+        if not host_clock or not same(day, host_clock.actor) then
+            host_clock = {actor = day, enabled = day.UpdateInRealTime}
+        end
         day.UpdateInRealTime = false
         if action == "dry" then
             local rain = day.RainController

@@ -62,29 +62,32 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False):
     await wait_resident_status(host_run, lambda f: f["game"]["map"] == CROSSROADS
                                and not f.get("awaiting_zone_guest")
                                and f["game"].get("native_guest_save", {}).get("state") == "bound")
-    await weather(host, "dry")
-    clear = await applied(0)
-    checkpoint = campaign_save_hashes(host.campaign)
-    before = await weather(guest, "localrain")
-    assert math.isclose(float(before.split(";")[0]), .85, abs_tol=.001), before
+    try:
+        await weather(host, "dry")
+        clear = await applied(0)
+        checkpoint = campaign_save_hashes(host.campaign)
+        before = await weather(guest, "localrain")
+        assert math.isclose(float(before.split(";")[0]), .85, abs_tol=.001), before
 
-    await weather(host, "wet")
-    wet = await applied(.55)
-    async with asyncio.timeout(5):
-        while await weather(guest, "siren") == "0":
-            await asyncio.sleep(.12)
-    wet_particles = await weather(guest, "particles")
-    assert wet_particles == "0", wet_particles
-    await weather(host, "dry")
-    dry = await applied(0)
-    assert await weather(guest, "particles") == "0"
-    assert await weather(guest, "siren") == "1"
-    local = (await weather(guest, "read")).split(";")
-    assert len(local) == 5 and local[1:3] == ["false", "false"] and all(float(v) == 0 for v in local[3:]), local
-    assert clear["epoch"] == wet["epoch"] == dry["epoch"] and clear["epoch"] != initial["zone_epoch"]
-    assert campaign_save_hashes(host.campaign) == checkpoint, "Weather projection wrote a campaign save"
-    if profile:
-        performance["crossroads"] = await profile_world(host, guest, CROSSROADS, probe)
+        await weather(host, "wet")
+        wet = await applied(.55)
+        async with asyncio.timeout(5):
+            while await weather(guest, "siren") == "0":
+                await asyncio.sleep(.12)
+        wet_particles = await weather(guest, "particles")
+        assert wet_particles == "0", wet_particles
+        await weather(host, "dry")
+        dry = await applied(0)
+        assert await weather(guest, "particles") == "0"
+        assert await weather(guest, "siren") == "1"
+        local = (await weather(guest, "read")).split(";")
+        assert len(local) == 5 and local[1:3] == ["false", "false"] and all(float(v) == 0 for v in local[3:]), local
+        assert clear["epoch"] == wet["epoch"] == dry["epoch"] and clear["epoch"] != initial["zone_epoch"]
+        assert campaign_save_hashes(host.campaign) == checkpoint, "Weather projection wrote a campaign save"
+        if profile:
+            performance["crossroads"] = await profile_world(host, guest, CROSSROADS, probe)
+    finally:
+        assert await weather(host, "resume") == "restored"
     result = {"stock_weather_travel": {"clear": clear, "wet": wet, "dry": dry,
                                       "guest_local_rain_before": before, "guest_local_rain_suppressed": local,
                                       "guest_stock_siren_callbacks": 1, "guest_wet_particle_count": int(wet_particles)}}

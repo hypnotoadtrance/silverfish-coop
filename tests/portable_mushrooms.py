@@ -58,7 +58,7 @@ async def verify_stock_mushrooms(host, guest, pawn):
     await host_fixture(mushrooms.APPROACH, guest_pick, guest_pawn)
     taken = await submit(guest_run, loot.FIXTURE, target=guest_pick)
     assert taken["ok"], taken
-    await wait_resident_status(host_run, lambda frame: guest_pick not in frame["game"].get(mushrooms.KEY, {}))
+    harvested = await wait_resident_status(host_run, lambda frame: guest_pick not in frame["game"].get(mushrooms.KEY, {}))
     await wait_resident_status(guest_run, lambda frame: guest_pick not in frame["game"].get(loot.KEY, {}))
     claim, = [event for event in await resident_events(host_run, arrival)
               if event["event"] == "native_mushroom_claimed" and event["id"] == guest_pick]
@@ -68,6 +68,9 @@ async def verify_stock_mushrooms(host, guest, pawn):
 
     patch = claim["patch"]
     removed = {host_pick, guest_pick}
+    harvested_at = harvested["game"]["native_scene"]["game_seconds"]
+    await wait_resident_status(host_run, lambda frame: frame["game"].get("native_scene", {}).get("game_seconds", 0)
+                               >= harvested_at + 2, timeout=12)
     growth = await stock_regrowth(host.bridge.directory, patch)
     count = growth["children_after"] - growth["children_before"]
 
