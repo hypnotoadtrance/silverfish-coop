@@ -10,6 +10,7 @@ from . import native_host_save, party
 from .guest_weapon_profiles import (
     AMMO_BY_PATH, BOLT_ACTION_AMMO, BOLT_ACTION_UNLOAD_CAPACITY, BOLT_ACTION_UNLOADS, FORTY_FIVE_BALL,
     MAX_TAKE_AMMO_ROUNDS, NINE_MM_BALL, TAKE_AMMO_MAGAZINES, TWELVE_GAUGE_BUCK,
+    compatible_magazine_round,
 )
 from .native_gold import valid_guid
 
@@ -123,8 +124,7 @@ def valid_take_ammo_result(weapon, ammo, rounds):
     magazine = TAKE_AMMO_MAGAZINES.get(weapon)
     round_type = AMMO_BY_PATH.get(ammo)
     return (magazine is not None and round_type is not None and rounds <= magazine.capacity
-            and round_type.caliber == magazine.ammo.caliber
-            and round_type.projectile_count == magazine.ammo.projectile_count)
+            and compatible_magazine_round(magazine.ammo, round_type))
 
 
 async def retain_guest_save(host, bridge, character: str, pawn: str) -> bool:

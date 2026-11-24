@@ -49,6 +49,17 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
         self.assertTrue(native_guest_weapon.valid_mounted_ammo("heavy-pistol-silenced", ball))
         self.assertFalse(native_guest_weapon.valid_mounted_ammo("rusty-pistol", alternate))
 
+    def test_shotgun_magazines_keep_each_stock_shell_and_its_projectile_count(self):
+        shells = guest_weapon_profiles.SHOTGUN_AMMO
+        self.assertEqual({ammo.row: ammo.projectile_count for ammo in shells}, {
+            "12Gauge_Buck": 9, "12Gauge_Slugs": 1, "12Gauge_DSAPI": 1,
+            "12Gauge_Frag12": 1, "12Gauge_DragonBreath": 12, "12Gauge_HyperBall": 3,
+        })
+        for ammo in shells:
+            with self.subTest(ammo=ammo.row):
+                self.assertTrue(native_guest_weapon.valid_mounted_ammo("sawn-off-shotgun", ammo.item_path))
+                self.assertFalse(native_guest_weapon.valid_mounted_ammo("rusty-pistol", ammo.item_path))
+
     def test_9mm_revolver_uses_the_stock_seven_round_ball_magazine(self):
         path = "/Game/Classes/Weapons/Wep_Revolver_9mm.Wep_Revolver_9mm_C"
         self.assertEqual(native_guest_weapon.FIRE_CLASSES["revolver-9mm"], path)
@@ -323,25 +334,31 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
         guid, operation = "1" * 32, "a" * 32
         proof = {"map": "zone", "action": "fire", "pawn": "exact pawn", "guid": guid, "ok": True,
                  "status": "equipped", "actor_ammo": 5, "stored_ammo": 5, "before": 6, "after": 5, "projectiles": 9}
-        for pawn, kind, equipped_guid, count, accepted in (
-            ("exact pawn", "sg-71-a", guid, 9, True),
-            ("exact pawn", "sg-71-a", "2" * 32, 9, False),
-            ("other pawn", "sg-71-a", guid, 9, False),
-            ("exact pawn", "pistol", guid, 9, False),
-            ("exact pawn", "sg-71-a", guid, 1, False),
-            ("exact pawn", "sg-71-a", guid, 8, False),
+        slugs = guest_weapon_profiles.TWELVE_GAUGE_SLUGS.item_path
+        dragon = guest_weapon_profiles.TWELVE_GAUGE_DRAGON_BREATH.item_path
+        for pawn, kind, equipped_guid, ammo, count, accepted in (
+            ("exact pawn", "sg-71-a", guid, None, 9, True),
+            ("exact pawn", "sg-71-a", "2" * 32, None, 9, False),
+            ("other pawn", "sg-71-a", guid, None, 9, False),
+            ("exact pawn", "pistol", guid, dragon, 12, False),
+            ("exact pawn", "sg-71-a", guid, None, 1, False),
+            ("exact pawn", "sg-71-a", guid, None, 8, False),
+            ("exact pawn", "sg-71-a", guid, slugs, 1, True),
+            ("exact pawn", "sg-71-a", guid, slugs, 9, False),
+            ("exact pawn", "sg-71-a", guid, dragon, 12, True),
         ):
-            with self.subTest(pawn=pawn, kind=kind, equipped_guid=equipped_guid, count=count):
+            with self.subTest(pawn=pawn, kind=kind, equipped_guid=equipped_guid, ammo=ammo, count=count):
                 host = self.host()
+                observed = dict(proof, projectiles=count)
                 bridge = SimpleNamespace(command=AsyncMock(return_value={
-                    "state": "hosting", "map": "zone", "native_guest_weapon": dict(proof, projectiles=count),
-                    "native_guest_equipped_weapons": {pawn: {"kind": kind, "guid": equipped_guid}},
+                    "state": "hosting", "map": "zone", "native_guest_weapon": observed,
+                    "native_guest_equipped_weapons": {pawn: {"kind": kind, "guid": equipped_guid, "ammo_class": ammo}},
                 }))
                 request = native_guest_weapon.perform(
                     host, bridge, "character", operation, "native-guest-weapon-fire", guid
                 )
                 if accepted:
-                    self.assertEqual((await request)["native_guest_weapon"], proof)
+                    self.assertEqual((await request)["native_guest_weapon"], observed)
                     self.assertEqual(host.checkpoint_native.await_args.kwargs,
                                      {"require_guest_frames": frozenset({"character"})})
                 else:

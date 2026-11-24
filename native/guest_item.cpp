@@ -640,7 +640,8 @@ namespace
 
     bool compatible_magazine_round(const profiles::StockAmmo& base, const profiles::StockAmmo& ammo)
     {
-        return base.caliber == ammo.caliber && base.projectile_count == ammo.projectile_count;
+        return base.caliber == ammo.caliber &&
+            (&base == &profiles::twelve_gauge_buck || base.projectile_count == ammo.projectile_count);
     }
 
     const profiles::StockAmmo* magazine_round(const profiles::Profile& profile, Unreal::UClass* ammo)
@@ -1597,14 +1598,15 @@ namespace
             return report(false, "guest_weapon_preloaded_magazine_required", 0, 0);
         if (!ordinary_magazine_payload(stock_profile, context, inventory, actor))
             return report(false, "guest_weapon_payload_unqualified");
-        const auto expected_projectiles = stock_profile ? stock_profile->ammo->projectile_count : 1;
+        auto* ammo_class = disarm ? nullptr : mounted_ammo(actor);
+        const auto* round = stock_profile ? magazine_round(*stock_profile, ammo_class) : nullptr;
+        const auto expected_projectiles = round ? round->projectile_count : 1;
         auto* projectile = disarm ? nullptr : stock_projectile(actor, expected_projectiles);
         const auto minimum = bolt || stock_profile ? 1 : 2;
         if (!disarm && (before != stored || before < minimum || before > magazine->GetPropertyValueInContainer(actor) ||
                         shot_cost->GetPropertyValueInContainer(actor) != 1 || !projectile ||
-                        (bolt && !bolt_round(actor, mounted_ammo(actor), projectile)) ||
-                        (stock_profile && !stock_round_matches(actor, mounted_ammo(actor), projectile,
-                            magazine_round(*stock_profile, mounted_ammo(actor))))))
+                        (bolt && !bolt_round(actor, ammo_class, projectile)) ||
+                        (stock_profile && !stock_round_matches(actor, ammo_class, projectile, round))))
             return report(false, "guest_weapon_preloaded_magazine_required");
 
         Unreal::FWeakObjectPtr held_actor;
@@ -1744,11 +1746,12 @@ namespace
             return reload_proof(lua, false, "stock_guest_weapon_reload_schema_unavailable");
 
         auto* ammo_class = mounted_ammo(actor);
+        const auto* round = stock_profile ? magazine_round(*stock_profile, ammo_class) : nullptr;
         AmmoStackSchema stack_schema;
         if (!stack_schema.read(ammo_class, inventory) ||
             (bolt && !bolt_round(actor, ammo_class, stock_projectile(actor))) ||
-            (stock_profile && !stock_round_matches(actor, ammo_class,
-                stock_projectile(actor, stock_profile->ammo->projectile_count), magazine_round(*stock_profile, ammo_class))))
+            (stock_profile && (!round || !stock_round_matches(actor, ammo_class,
+                stock_projectile(actor, round->projectile_count), round))))
             return reload_proof(lua, false, "stock_guest_weapon_reserve_schema_unavailable");
 
         const auto before = rounds->GetPropertyValueInContainer(actor);

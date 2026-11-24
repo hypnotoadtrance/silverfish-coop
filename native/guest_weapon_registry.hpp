@@ -28,6 +28,16 @@ namespace silverfish::guest_weapon_profiles
         STR("/Game/Classes/Items/Ammo_IntrRifle_BP.Ammo_IntrRifle_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Rifle_Inter.Projectile_Rifle_Inter_C"), 7, 1};
     inline constexpr StockAmmo twelve_gauge_buck{4, STR("12Gauge_Buck"),
         STR("/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_ShotGun_Pellet.Projectile_ShotGun_Pellet_C"), 5, 9};
+    inline constexpr StockAmmo twelve_gauge_slugs{4, STR("12Gauge_Slugs"),
+        STR("/Game/Classes/Items/Ammo_ShotgunShells_Slugs_BP.Ammo_ShotgunShells_Slugs_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_SG_Slug.Projectile_SG_Slug_C"), 10, 1};
+    inline constexpr StockAmmo twelve_gauge_dsapi{4, STR("12Gauge_DSAPI"),
+        STR("/Game/Classes/Items/Ammo_ShotgunShells_SlugsAP_BP.Ammo_ShotgunShells_SlugsAP_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_SG_SlugAP.Projectile_SG_SlugAP_C"), 7, 1};
+    inline constexpr StockAmmo twelve_gauge_frag{4, STR("12Gauge_Frag12"),
+        STR("/Game/Classes/Items/Ammo_ShotgunShells_Frag12_BP.Ammo_ShotgunShells_Frag12_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_SG_Frag12.Projectile_SG_Frag12_C"), 6, 1};
+    inline constexpr StockAmmo twelve_gauge_dragon_breath{4, STR("12Gauge_DragonBreath"),
+        STR("/Game/Classes/Items/Ammo_ShotgunShells_DragonBreath_BP.Ammo_ShotgunShells_DragonBreath_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_MoltenMetal_Slag.Projectile_MoltenMetal_Slag_C"), 8, 12};
+    inline constexpr StockAmmo twelve_gauge_hyperball{4, STR("12Gauge_HyperBall"),
+        STR("/Game/Classes/Items/Ammo_ShotgunShells_HyperBall_BP.Ammo_ShotgunShells_HyperBall_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_SG_HyperBall.Projectile_SG_HyperBall_C"), 18, 3};
     inline constexpr StockAmmo five_seven_ap{11, STR("5-7_AP"),
         STR("/Game/Classes/Items/Ammo_5-7_AP_BP.Ammo_5-7_AP_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_5-7_AP.Projectile_5-7_AP_C"), 7, 1};
     inline constexpr StockAmmo fifty_cal_fmj{6, STR("50Cal_FMJ"),
@@ -42,6 +52,11 @@ namespace silverfish::guest_weapon_profiles
         &forty_five_hollow_point,
         &five_six_fmj,
         &twelve_gauge_buck,
+        &twelve_gauge_slugs,
+        &twelve_gauge_dsapi,
+        &twelve_gauge_frag,
+        &twelve_gauge_dragon_breath,
+        &twelve_gauge_hyperball,
         &five_seven_ap,
         &fifty_cal_fmj,
         &thirty_06_fmj,

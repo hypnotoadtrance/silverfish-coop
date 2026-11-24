@@ -29,7 +29,7 @@ from tools.silverfish import (
 )
 from tools.silverfish.authored_loot import GUARANTEED_CRATES
 from tools.silverfish.control import NAME, current_status, submit
-from tools.silverfish.guest_weapon_profiles import FIREARMS, THIRTY_06_FMJ, THIRTY_06_INCENDIARY
+from tools.silverfish.guest_weapon_profiles import FIREARMS, SHOTGUN_AMMO, THIRTY_06_FMJ, THIRTY_06_INCENDIARY
 from tools.silverfish.service import PROTOCOL, menu_host_checkpoint
 from tools.silverfish.steam_cloud import FOLDER
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
@@ -2657,15 +2657,15 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
                 await asyncio.sleep(.1)
 
     profiles = {profile.kind: profile.magazine for profile in FIREARMS}
-    cases = (("revolver-9mm", "backpack"), ("break-action-50", "stored_equipment"),
-             ("obrez", "backpack"), ("obrez", "equipped"), ("revolver-9mm", "equipped"),
-             ("heavy-pistol-silenced", "equipped"), ("rifle-50-semi", "equipped"),
-             ("type33-scoped", "equipped"))
+    cases = (("revolver-9mm", "backpack", None), ("break-action-50", "stored_equipment", None),
+             ("obrez", "backpack", None), ("obrez", "equipped", THIRTY_06_INCENDIARY),
+             ("revolver-9mm", "equipped", None), ("heavy-pistol-silenced", "equipped", None),
+             ("rifle-50-semi", "equipped", None), ("type33-scoped", "equipped", None))
     if shotguns:
-        cases = tuple((kind, "equipped") for kind in (
-            "bolt-action-shotgun", "bolt-action-shotgun-suppressed", "sawn-off-shotgun", "sg-71-a",
-        ))
-    for kind, source in cases:
+        kinds = ("sg-71-a", "sawn-off-shotgun", "sg-71-b", "bolt-action-shotgun-suppressed",
+                 "bolt-action-shotgun", "sg-71-a-suppressed")
+        cases = tuple((kind, "equipped", alternate) for kind, alternate in zip(kinds, (None, *SHOTGUN_AMMO[1:]), strict=True))
+    for kind, source, alternate in cases:
         seed_started = time.time()
         seeded = await host.bridge.command("fixture-stock-take-ammo-seed", pawn, kind)
         guid = seeded["ack"]["message"]
@@ -2687,7 +2687,7 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
                 # The portable test bridge polls a file while gameplay uses the
                 # resident bridge. A gameplay acknowledgement can replace the
                 # readback before the test sees it. Retry reads only.
-                if action == "read":
+                if action != "equip":
                     try:
                         read = await guest.bridge.command("fixture-stock-take-ammo-loadout", str(slot), guid, action,
                                                           timeout=1.5)
@@ -2707,9 +2707,9 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
                                   and entry.get("native_guest_weapon", {}).get("guid") == guid
                                   for entry in await resident_events(guest_run, guest_frame)):
                         await asyncio.sleep(.1)
-                if kind == "obrez":
-                    changed = await host.bridge.command("fixture-stock-take-ammo-incendiary", pawn, guid)
-                    assert changed["ack"]["message"] == "stock incendiary ammo loaded"
+                if alternate:
+                    changed = await host.bridge.command("fixture-stock-take-ammo-select-round", pawn, guid, alternate.item_path)
+                    assert changed["ack"]["message"] == "stock round loaded"
             else:
                 assert await read_loadout() == f"{before['stored_ammo']},stored"
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
@@ -2725,10 +2725,7 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
                 await asyncio.sleep(.1)
         unloaded, = matches
         assert unloaded["remaining"] == 0 and unloaded["split"] == before["stored_ammo"], unloaded
-        if kind == "obrez":
-            expected = THIRTY_06_INCENDIARY if source == "equipped" else THIRTY_06_FMJ
-        else:
-            expected = profiles[kind].ammo
+        expected = alternate or (THIRTY_06_FMJ if kind == "obrez" else profiles[kind].ammo)
         assert unloaded["class_path"] == expected.item_path, unloaded
         inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
         ammo, = [row for row in inventory["items"] if row["guid"] == unloaded["new_guid"]]
@@ -2747,6 +2744,8 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
             assert (magazine["guid"], magazine["before"], magazine["after"]) == (guid, 0, 1), magazine
             async with asyncio.timeout(10):
                 while await read_loadout() != "1,1":
+                    await asyncio.sleep(.15)
+                while await read_loadout("ammo") != expected.item_path:
                     await asyncio.sleep(.15)
             proof["reload"] = magazine
             shot = await stock_input("primary")
@@ -5619,7 +5618,7 @@ if __name__ == "__main__":
     parser.add_argument("--stock-take-ammo", action="store_true",
                         help="unload guest firearms through the normal stock context menu")
     parser.add_argument("--stock-shotguns", action="store_true",
-                        help="verify guest shotgun Take Ammo, reload, and a nine-pellet shot")
+                        help="verify guest shotgun Take Ammo, reload, and fire for each stock 12-gauge round")
     parser.add_argument("--stock-npc-rivalry", action="store_true",
                         help="observe stock perception, attacks, and death between two NPC factions")
     parser.add_argument("--guest-ui-memory", action="store_true",

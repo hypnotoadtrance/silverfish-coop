@@ -317,7 +317,9 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
         if operation == "fire":
             equipped = snapshot.get("native_guest_equipped_weapons", {}).get(pawn, {})
             shot_kind = equipped.get("kind") if equipped.get("guid") == guid else None
-            expected_projectiles = PROJECTILES_PER_ROUND.get(shot_kind, 1)
+            ammo_class = equipped.get("ammo_class")
+            mounted = guest_weapon_profiles.AMMO_BY_PATH[ammo_class] if valid_mounted_ammo(shot_kind, ammo_class) else None
+            expected_projectiles = mounted.projectile_count if mounted else PROJECTILES_PER_ROUND.get(shot_kind, 1)
             projectile_count = proof.get("projectiles")
             if (proof["status"] != "equipped" or type(proof.get("before")) is not int
                     or proof.get("after") != stored or proof["before"] - stored != 1

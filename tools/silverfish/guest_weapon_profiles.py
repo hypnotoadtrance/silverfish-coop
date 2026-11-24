@@ -31,6 +31,27 @@ FIVE_SIX_FMJ = StockAmmo("five_six_fmj", 2, "5.6Intr_FMJ", "Ammo_IntrRifle_BP", 
 TWELVE_GAUGE_BUCK = StockAmmo(
     "twelve_gauge_buck", 4, "12Gauge_Buck", "Ammo_ShotgunShells_BP", "Projectile_ShotGun_Pellet", 5, projectile_count=9,
 )
+TWELVE_GAUGE_SLUGS = StockAmmo(
+    "twelve_gauge_slugs", 4, "12Gauge_Slugs", "Ammo_ShotgunShells_Slugs_BP", "Projectile_SG_Slug", 10,
+)
+TWELVE_GAUGE_DSAPI = StockAmmo(
+    "twelve_gauge_dsapi", 4, "12Gauge_DSAPI", "Ammo_ShotgunShells_SlugsAP_BP", "Projectile_SG_SlugAP", 7,
+)
+TWELVE_GAUGE_FRAG = StockAmmo(
+    "twelve_gauge_frag", 4, "12Gauge_Frag12", "Ammo_ShotgunShells_Frag12_BP", "Projectile_SG_Frag12", 6,
+)
+TWELVE_GAUGE_DRAGON_BREATH = StockAmmo(
+    "twelve_gauge_dragon_breath", 4, "12Gauge_DragonBreath", "Ammo_ShotgunShells_DragonBreath_BP",
+    "Projectile_MoltenMetal_Slag", 8, projectile_count=12,
+)
+TWELVE_GAUGE_HYPERBALL = StockAmmo(
+    "twelve_gauge_hyperball", 4, "12Gauge_HyperBall", "Ammo_ShotgunShells_HyperBall_BP",
+    "Projectile_SG_HyperBall", 18, projectile_count=3,
+)
+SHOTGUN_AMMO = (
+    TWELVE_GAUGE_BUCK, TWELVE_GAUGE_SLUGS, TWELVE_GAUGE_DSAPI, TWELVE_GAUGE_FRAG,
+    TWELVE_GAUGE_DRAGON_BREATH, TWELVE_GAUGE_HYPERBALL,
+)
 FIVE_SEVEN_AP = StockAmmo("five_seven_ap", 11, "5-7_AP", "Ammo_5-7_AP_BP", "Projectile_5-7_AP", 7)
 FIFTY_CAL_FMJ = StockAmmo("fifty_cal_fmj", 6, "50Cal_FMJ", "Ammo_50Cal_BP", "Projectile_50Cal", 8)
 THIRTY_06_FMJ = StockAmmo("thirty_06_fmj", 3, "30-06_FMJ", "Ammo_FullRifle_BP", "Projectile_Rifle_Heavy", 5)
@@ -38,7 +59,7 @@ THIRTY_06_INCENDIARY = StockAmmo(
     "thirty_06_incendiary", 3, "30-06_Incendiary", "Ammo_30-06_Incendiary_BP", "Projectile_30-06_Incendiary", 5,
 )
 STOCK_AMMO = (
-    NINE_MM_BALL, FORTY_FIVE_BALL, FORTY_FIVE_HOLLOW_POINT, FIVE_SIX_FMJ, TWELVE_GAUGE_BUCK, FIVE_SEVEN_AP, FIFTY_CAL_FMJ,
+    NINE_MM_BALL, FORTY_FIVE_BALL, FORTY_FIVE_HOLLOW_POINT, FIVE_SIX_FMJ, *SHOTGUN_AMMO, FIVE_SEVEN_AP, FIFTY_CAL_FMJ,
     THIRTY_06_FMJ, THIRTY_06_INCENDIARY,
 )
 
@@ -193,10 +214,17 @@ BOLT_ACTION_UNLOADS = frozenset(weapon.path for weapon in FIREARMS if weapon.kin
 BOLT_ACTION_AMMO = frozenset(ammo.item_path for ammo in (THIRTY_06_FMJ, THIRTY_06_INCENDIARY))
 MAX_TAKE_AMMO_ROUNDS = max(magazine.capacity for magazine in TAKE_AMMO_MAGAZINES.values())
 AMMO_BY_PATH = {ammo.item_path: ammo for ammo in STOCK_AMMO}
+
+
+def compatible_magazine_round(base: StockAmmo, candidate: StockAmmo) -> bool:
+    return base.caliber == candidate.caliber and (
+        base == TWELVE_GAUGE_BUCK or base.projectile_count == candidate.projectile_count
+    )
+
+
 AMMO_BY_KIND = {
     firearm.kind: frozenset(ammo.item_path for ammo in STOCK_AMMO
-                            if ammo.caliber == firearm.magazine.ammo.caliber
-                            and ammo.projectile_count == firearm.magazine.ammo.projectile_count)
+                            if compatible_magazine_round(firearm.magazine.ammo, ammo))
     if firearm.magazine else BOLT_ACTION_AMMO
     for firearm in FIREARMS if firearm.magazine or firearm.path in BOLT_ACTION_UNLOADS
 }
