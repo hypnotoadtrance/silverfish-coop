@@ -185,6 +185,9 @@ function fixed.command(args, state, phase)
                 return aim_fixture.aim_target(state, phase, args[4], args[5], "native-fixed-explosive",
                     entry.actor, nil, entry.mesh)
             end
+            if args[2] == "native-fixed-explosive-guest-aim-fixture" and entry and #args == 3 then
+                return aim_fixture.aim_fixed_guest(state, phase, entry.mesh)
+            end
             if args[2] == "native-fixed-explosive-flag-fixture" and entry and #args == 3 and phase == "hosting"
                 and (os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1" or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1") then
                 local targets = entry.actor.Activate_OnDestroyed

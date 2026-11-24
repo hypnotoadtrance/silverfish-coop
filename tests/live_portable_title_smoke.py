@@ -3588,7 +3588,10 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
             aimed = await host.bridge.command("native-fixed-explosive-aim-fixture", target, pawn, guid, timeout=6)
             await at_point(aimed["pawns"]["guest"]["location"])
             async with asyncio.timeout(5):
-                while await weapon_setup(guest, "aimtank") != "the guest crosshair is on the tank":
+                while True:
+                    aim = await guest.bridge.command("native-fixed-explosive-guest-aim-fixture", target)
+                    if aim["ack"]["message"] == "the guest crosshair is on the tank":
+                        break
                     await asyncio.sleep(.1)
             async with asyncio.timeout(7):
                 while True:

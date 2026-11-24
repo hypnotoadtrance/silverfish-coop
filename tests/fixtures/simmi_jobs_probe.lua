@@ -217,29 +217,16 @@ local function select_pistol(pawn)
     return "waiting"
 end
 
-local function aim_objective(state, tank)
-    local leaf = tank and state.map:match("/(Forest_01_P)$")
-        or not tank and (state.map:match("/(CrossRoads_P)$") or state.map:match("/(Lake_01_P)$"))
-    assert(leaf, "Scoped objective map required")
-    local name = tank and "Prop_FuelTank_C_1" or "SignalJammer_BP_C_1"
-    local actor = StaticFindObject(state.map .. "." .. leaf .. ":PersistentLevel." .. name)
+local function aim_jammer(state)
+    local leaf = state.map:match("/(CrossRoads_P)$") or state.map:match("/(Lake_01_P)$")
+    assert(leaf, "Scoped jammer map required")
+    local actor = StaticFindObject(state.map .. "." .. leaf .. ":PersistentLevel.SignalJammer_BP_C_1")
     local pawn = state.local_pawn.pawn
     local weapon, camera = pawn.EquipedItem, pawn.Camera
-    local component = valid(actor) and (tank and actor.PropMesh or actor.Capsule)
-    if not valid(actor) or not same(actor:GetWorld(), state.world) or not valid(component)
+    if not valid(actor) or not same(actor:GetWorld(), state.world) or not valid(actor.Capsule)
         or not exact(weapon, pistol_class) or not valid(camera) then return "waiting" end
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
-    local eye, center = camera:K2_GetComponentLocation(), component:K2_GetComponentLocation()
-    if tank then
-        local bounds = {}
-        trace:GetComponentBounds(component, bounds, {}, {})
-        center = bounds.Origin or bounds
-        local view = require("native_flood_jammer_aim_fixture").fixed_contact(pawn, weapon, camera, component, center)
-        if not view then return "waiting" end
-        state.controller:SetControlRotation(view)
-        camera:K2_SetWorldRotation(view, false, {}, true)
-        return "the guest crosshair is on the tank"
-    end
+    local eye, center = camera:K2_GetComponentLocation(), actor.Capsule:K2_GetComponentLocation()
     local color, ignored = {R=0, G=0, B=0, A=0}, {pawn, weapon}
     for _, height in ipairs({0, 8, -8, 16, -16, 25}) do
         local dx, dy, dz = center.X-eye.X, center.Y-eye.Y, center.Z+height-eye.Z
@@ -280,9 +267,7 @@ local function sync(state, phase)
         if portable and phase == "connected" and operation == "selectpistol" then
             return select_pistol(state.local_pawn.pawn)
         end
-        if portable and phase == "connected" and (operation == "aimjammer" or operation == "aimtank") then
-            return aim_objective(state, operation == "aimtank")
-        end
+        if portable and phase == "connected" and operation == "aimjammer" then return aim_jammer(state) end
         assert(state.map == area, "Simmi's stock board is only available in Observatory")
         if portable and phase == "hosting" then
             if operation == "seedpistol" then return seed_pistol(state) end

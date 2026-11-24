@@ -66,7 +66,7 @@ end
 
 -- Match the stock weapon capture: complex visibility from the camera, then
 -- stock projectile collision from the muzzle through the camera's impact.
-function fixture.fixed_contact(pawn, weapon, camera, mesh, center)
+local function fixed_contact(pawn, weapon, camera, mesh, center)
     local library = StaticFindObject(trace_path)
     local muzzle_component = weapon.Arrow_Muzzle
     if not valid(library) or not component(muzzle_component, weapon, "ArrowComponent") then return end
@@ -99,6 +99,28 @@ function fixture.fixed_contact(pawn, weapon, camera, mesh, center)
     end
 end
 
+local function mesh_center(mesh)
+    local bounds = {}
+    StaticFindObject(trace_path):GetComponentBounds(mesh, bounds, {}, {})
+    return bounds.Origin or bounds
+end
+
+function fixture.aim_fixed_guest(state, phase, mesh)
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    if not enabled or phase ~= "connected" or not valid(pawn) or not pawn:IsLocallyControlled()
+        or pawn:HasAuthority() or not same(pawn:GetWorld(), state.world) or not same(pawn.Controller, state.controller) then
+        refuse("local_guest_required")
+    end
+    local weapon, camera = pawn.EquipedItem, pawn.Camera
+    if not valid(weapon) or weapon:GetClass():GetFullName() ~= "BlueprintGeneratedClass " .. firearms.paths["light-pistol"]
+        or not component(camera, pawn, "CameraComponent") then return "waiting" end
+    local view = fixed_contact(pawn, weapon, camera, mesh, mesh_center(mesh))
+    if not view then return "waiting" end
+    state.controller:SetControlRotation(view)
+    camera:K2_SetWorldRotation(view, false, {}, true)
+    return "the guest crosshair is on the tank"
+end
+
 local function floor_at(context, center, x, y, radius, height)
     local top, bottom = {X = x, Y = y, Z = center.Z + 115}, {X = x, Y = y, Z = center.Z - context.floor_depth}
     local floor = trace(context, top, bottom, 0, false, context.ignored)
@@ -113,7 +135,7 @@ end
 
 local function align(context, center)
     if context.fixed then
-        local view, distance, aim = fixture.fixed_contact(context.pawn, context.weapon, context.camera,
+        local view, distance, aim = fixed_contact(context.pawn, context.weapon, context.camera,
             context.target_mesh, center)
         if not view then return end
         context.controller:SetControlRotation(view)
@@ -172,9 +194,7 @@ function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule
     context.floor_depth, context.aim_range, context.aim_pitch = rooftop and 1800 or 330, rooftop and 1600 or 550, rooftop and 70 or 56
     local center
     if fixed then
-        local bounds = {}
-        context.trace:GetComponentBounds(target_mesh, bounds, {}, {})
-        center = bounds.Origin or bounds
+        center = mesh_center(target_mesh)
     else
         center = target_capsule:K2_GetComponentLocation()
     end
