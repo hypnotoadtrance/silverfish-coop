@@ -1049,6 +1049,11 @@ local function run(action, actor_path)
         local point = assert(dock_fight_position(probe.guest, probe.actor, {pawn, probe.guest, probe.actor}, 350, true),
             "the guest has no clear retreat from the worker")
         return ("%.7f,%.7f,%.7f"):format(point.X, point.Y, point.Z)
+    elseif action == "dock-natural-arrive" then
+        assert(not host, "only the local guest can stage its retreat")
+        local point = position(actor_path)
+        assert(pawn:K2_TeleportTo(point, pawn.Controller:GetControlRotation()), "guest retreat placement failed")
+        return "ready"
     elseif action == "dock-natural-stop" then
         assert(host, "only the host can stop the test NPC")
         local actor = live_probe and live_probe.actor
