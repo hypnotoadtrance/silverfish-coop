@@ -104,7 +104,7 @@ local function select_stock(name, guid)
     return "waiting;" .. label
 end
 
-local function verify_semi_fence(name, guid)
+local function set_stock_mode(name, guid, semi)
     local world, pawn = current_player()
     assert(seat == "second" and not pawn:HasAuthority() and pawn:GetFullName() == name,
         "only the exact connected guest may check the stock fire selector")
@@ -114,20 +114,11 @@ local function verify_semi_fence(name, guid)
     local class = asset(weapon)
     assert(identity(row) == guid and same(row[item_class], class) and valid(held)
         and same(held:GetClass(), class) and same(held:GetOwner(), pawn) and same(held.Instigator, pawn)
-        and same(held:GetWorld(), world) and held.HasSelectFire == true and held.SemiAutoSelected == false,
-        "the exact selected SMG must start in stock automatic mode")
-    assert(type(SilverfishProbeNativeGuestHeldFire) == "function", "the guest held-fire fixture is unavailable")
-    held:ItemFireSelect(true)
-    local semi = held.SemiAutoSelected == true
-    local ok, result
-    if semi then
-        ok, result = SilverfishProbeNativeGuestHeldFire(pawn:GetAddress(), "press")
-        if ok == true then SilverfishProbeNativeGuestHeldFire(pawn:GetAddress(), "release") end
-        held:ItemFireSelect(true)
-    end
-    assert(semi and held.SemiAutoSelected == false, "stock selection did not switch to semi and back")
-    assert(ok == false and result == "native_guest_held_fire_fixture_requires_automatic_mode", tostring(result))
-    return "semi blocked; auto restored"
+        and same(held:GetWorld(), world) and held.HasSelectFire == true
+        and type(held.SemiAutoSelected) == "boolean", "the exact selected SMG must have a stock fire selector")
+    if held.SemiAutoSelected ~= semi then held:ItemFireSelect(true) end
+    assert(same(pawn.EquipedItem, held) and held.SemiAutoSelected == semi, "stock selection did not switch fire mode")
+    return semi and "semi" or "auto"
 end
 
 LoopInGameThreadWithDelay(40, function()
@@ -138,10 +129,11 @@ LoopInGameThreadWithDelay(40, function()
     if not input then return end
     local ticket, action, pawn, guid = input:match("^(%x+)\t([a-z]+)\t(Player_FP_C [^%c]+)\t(%x*)$")
     if not ticket or #ticket ~= 32 or ticket == last or #pawn > 512
-        or (action ~= "seed" or guid ~= "") and ((action ~= "select" and action ~= "mode") or #guid ~= 32) then return end
+        or (action ~= "seed" or guid ~= "")
+        and ((action ~= "select" and action ~= "semi" and action ~= "auto") or #guid ~= 32) then return end
     last = ticket
-    local handler = action == "mode" and verify_semi_fence or action == "select" and select_stock or seed
-    local ok, response = pcall(handler, pawn, guid)
+    local handler = action == "seed" and seed or action == "select" and select_stock or set_stock_mode
+    local ok, response = pcall(handler, pawn, guid, action == "semi")
     local reply = assert(io.open(prefix .. "reply.tsv", "wb"))
     local message = tostring(response):gsub("[%c]", " ")
     reply:write(ticket, "\t", ok and "ok" or "error", "\t", message)
