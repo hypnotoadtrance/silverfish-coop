@@ -1,5 +1,6 @@
 local flare = {}
 local guest_save = require("guest_save")
+local bolt_view = require("native_short_bolt_view")
 
 local folder = "/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/"
 local bolt = "BlueprintGeneratedClass " .. folder .. "Bolt_Projectile_BP.Bolt_Projectile_BP_C"
@@ -149,7 +150,7 @@ local function update_replica_grips(state, phase)
     end
 end
 
-function flare.start(role)
+function flare.start(role, short_bolt)
     if type(RegisterBeginPlayPreHook) ~= "function" or type(RegisterBeginPlayPostHook) ~= "function" then return end
     RegisterBeginPlayPreHook(function(context)
         local current = role()
@@ -193,6 +194,7 @@ function flare.start(role)
                     mesh:SetVisibility(true, false)
                     mesh:SetHiddenInGame(false, false)
                 end
+                bolt_view.started(actor, true)
             end
             if kind == "flare" then replicas[actor:GetAddress()] = {actor = actor} end
         else
@@ -201,10 +203,21 @@ function flare.start(role)
                 actor:SetReplicates(true)
                 actor:SetReplicateMovement(true)
                 projectiles[actor:GetAddress()] = {actor = actor, root = capsule(actor)}
+            elseif kind == "bolt" then
+                bolt_view.started(actor, false)
             end
             actor:ForceNetUpdate()
         end
     end)
+    if type(RegisterEndPlayPreHook) == "function" and short_bolt then
+        RegisterEndPlayPreHook(function(context, reason)
+            if role() ~= "host" then return end
+            local actor = context:get()
+            if not valid(actor) then return end
+            local world, origin, finish, rotation, from_guest = bolt_view.ended(actor, reason:get() == 0)
+            if world then short_bolt(world, origin, finish, rotation, from_guest) end
+        end)
+    end
 end
 
 local function faded(light)

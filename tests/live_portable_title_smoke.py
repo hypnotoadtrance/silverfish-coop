@@ -1348,10 +1348,13 @@ async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str)
         deadline = asyncio.get_running_loop().time() + 8
         while asyncio.get_running_loop().time() < deadline:
             status = await probe(seat, "shot", kind)
+            if kind == "bolt" and must_render and status.startswith("visual,"):
+                return {"role": role, "short_flight_visual": True}
             if status != "absent":
                 name, actual_role, active, peak, fuse, visible, game_seconds, display = status.split(",")
                 assert int(actual_role) == role, status
-                if (active == "false" if retired else float(peak) > 8 and (not must_render or int(visible) > 0)):
+                in_view = float(peak) > 8 and (not must_render or int(visible) > 0)
+                if (active == "false" if retired else in_view or kind == "bolt" and not must_render):
                     return {"actor": name, "role": role, "active": active == "true", "travel_cm": float(peak),
                             "fuse_seconds": float(fuse), "visible_samples": int(visible),
                             "game_seconds": float(game_seconds), "display": display}

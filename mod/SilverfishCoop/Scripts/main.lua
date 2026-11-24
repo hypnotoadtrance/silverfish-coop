@@ -1832,7 +1832,7 @@ native_mosby_station.start(bridge, players.is_downed)
 native_mindcore_carry.start(bridge)
 native_mindcore_carry_view.start(bridge, players.is_downed)
 native_mindcore_replication.start(function() return role == "client" and not leaving end)
-native_flare.start(function() return not leaving and role or nil end)
+native_flare.start(function() return not leaving and role or nil end, native_weapon_fire_view.short_bolt)
 native_anomaly_fields.start(function() return not leaving and role or nil end)
 native_corpse_view.start(function() return not leaving and role or nil end)
 native_damage_feedback.start(function() return role == "host" and not leaving end)
@@ -1857,6 +1857,7 @@ LoopInGameThreadWithDelay(25, function()
     if role == "host" and not leaving then pcall(native_corpse_view.update_host_grip, current_world) end
     if role == "host" and not leaving then pcall(native_zone.update_exit, current_world) end
     if role == "host" and not leaving then pcall(native_weapon_fire_view.flush, current_world) end
+    pcall(native_weapon_fire_view.animate_bolts, (role == "client" or role == "host") and not leaving and current_world or nil)
     if not leaving then pcall(native_voice.footsteps.update, current_world) end
     if native_avatar_lean_bridge.enabled then pcall(native_avatar_lean_bridge.update, current_world, role, leaving) end
     if not leaving then pcall(native_player_avatar.animate_head, current_world) end

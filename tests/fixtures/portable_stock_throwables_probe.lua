@@ -14,6 +14,7 @@ local profiles = {
     pipebomb = {"Gren_PipeBomb", "PipeBomb_Projectile_BP_C"},
 }
 local shots, blasts, last = {}, {}, nil
+local watch_pawn, short_bolt_samples
 
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -124,6 +125,7 @@ local function run(action, kind, arg)
     local profile = assert(profiles[kind], "unknown throwable kind")
     if action == "blasts" then return #blasts .. ":" .. table.concat(blasts, ";") end
     if action == "shot" then
+        if kind == "bolt" and (short_bolt_samples or 0) > 0 then return "visual," .. short_bolt_samples end
         local shot = shots[kind]
         if not shot then return "absent" end
         local active, result = false, {}
@@ -138,13 +140,17 @@ local function run(action, kind, arg)
         return ("%s,%d,%s,%.3f,%.3f,%d,%.3f,%s"):format(shot.name, shot.role, tostring(not not active), shot.peak,
             shot.fuse, shot.visible, shot.clock:GetTimeSeconds(shot.world) - shot.began, detail)
     end
-    if action == "reset" then shots[kind] = nil; return "reset" end
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
     assert(valid(world) and valid(world.NetDriver) and world:GetFullName() == world_name, "Observatory unavailable")
     local pawn = asset("/Script/Engine.Default__GameplayStatics"):GetPlayerPawn(world, 0)
     assert(valid(pawn) and pawn:IsLocallyControlled() and same(pawn.Save, world.OwningGameInstance.SaveSlot_Ref),
         "the local stock pawn is not ready")
+    if action == "reset" then
+        shots[kind] = nil
+        watch_pawn, short_bolt_samples = kind == "bolt" and pawn or nil, 0
+        return "reset"
+    end
     if action == "stage" then return stage_bolt(pawn, world, arg) end
     local name = profile[1]
     local class = asset(folder .. name .. "." .. name .. "_C")
@@ -188,6 +194,20 @@ local function run(action, kind, arg)
 end
 
 LoopInGameThreadWithDelay(25, function()
+    if valid(watch_pawn) and short_bolt_samples == 0 then
+        local class = StaticFindObject("/Script/Engine.StaticMeshComponent")
+        for _, component in ipairs(watch_pawn:K2_GetComponentsByClass(class) or {}) do
+            if component and type(component.type) == "function" and component:type() == "RemoteUnrealParam" then
+                component = component:get()
+            end
+            local mesh = valid(component) and component.StaticMesh
+            if valid(mesh) and component.bAbsoluteLocation and component:IsVisible() and not component.bHiddenInGame
+                and mesh:GetFullName() == "StaticMesh /Game/Assets/StaticMeshes/Mesh_Misc/SM_Bolt.SM_Bolt" then
+                short_bolt_samples = short_bolt_samples + 1
+                break
+            end
+        end
+    end
     for _, shot in pairs(shots) do
         if valid(shot.actor) and not shot.actor:IsActorBeingDestroyed() and valid(shot.actor.RootComponent) then
             local point = shot.actor:K2_GetActorLocation()

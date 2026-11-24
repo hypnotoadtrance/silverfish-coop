@@ -1,6 +1,7 @@
 local view = {}
 local npc_melee = require("native_npc_melee_view")
 local weapon_view = require("native_avatar_weapon_view")
+local bolt_view = require("native_short_bolt_view")
 
 local npc_base = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local turret_base = "/Game/Classes/NPCs/NPC_Assets/Turret_Master_BP.Turret_Master_BP_C"
@@ -107,6 +108,19 @@ end
 local function record(row)
     pending[#pending + 1] = row
     if #pending > maximum then table.remove(pending, 1) end
+end
+
+function view.short_bolt(world, origin, finish, rotation, from_guest)
+    if not current or not same(current.world, world) or type(SilverfishPublishLocalWeaponCue) ~= "function" then return end
+    serial = serial + 1
+    record({serial, "bolt-flight", origin.X, origin.Y, origin.Z, finish.X, finish.Y, finish.Z,
+        rotation.Pitch, rotation.Yaw, rotation.Roll, memory_only = true,
+        expires = current.statics:GetRealTimeSeconds(world) + .25})
+    if from_guest and valid(current.listener) then pcall(bolt_view.play, world, current.listener, origin, finish, rotation) end
+end
+
+function view.animate_bolts(get_world)
+    bolt_view.animate(get_world and get_world())
 end
 
 local function record_npc_melee(now, id, path, rate, blend_in, blend_out)
@@ -418,7 +432,10 @@ function view.flush(get_world)
         end
     end
     local rows = {current.map}
-    for _, entry in ipairs(pending) do rows[#rows + 1] = table.concat(entry, "|") end
+    for _, entry in ipairs(pending) do
+        if not entry.memory_only then rows[#rows + 1] = table.concat(entry, "|") end
+    end
+    if #rows == 1 then published, pending = serial, {}; return end
     local target = bridge .. "/native-weapon-shots"
     local temporary = target .. ".tmp"
     local file = io.open(temporary, "wb")
@@ -495,6 +512,22 @@ function view.command(args, state, phase, avatar)
         local values = {}
         for field in (args[index] .. "|"):gmatch("([^|]*)|") do values[#values + 1] = field end
         local id, path = math.tointeger(tonumber(values[1])), values[2]
+        if #values == 11 and id and id > last_played and path == "bolt-flight" then
+            local shot = {}
+            for axis = 3, 11 do
+                local value, limit = tonumber(values[axis]), axis <= 8 and 1e7 or 180
+                if not bounded(value, -limit, limit) then break end
+                shot[#shot + 1] = value
+            end
+            if #shot == 9 then
+                last_played = id
+                local ok, shown = pcall(bolt_view.play, state.world, pawn,
+                    {X = shot[1], Y = shot[2], Z = shot[3]}, {X = shot[4], Y = shot[5], Z = shot[6]},
+                    {Pitch = shot[7], Yaw = shot[8], Roll = shot[9]})
+                if ok and shown then receipts[#receipts + 1] = ("%d:bolt_flight"):format(id) end
+            end
+            goto next_cue
+        end
         if #values == 6 and id and id > last_played and path == "npc-impact" and stock_npc_impact(values[3]) then
             local x, y, z = tonumber(values[4]), tonumber(values[5]), tonumber(values[6])
             if bounded(x, -1e7, 1e7) and bounded(y, -1e7, 1e7) and bounded(z, -1e7, 1e7) then
