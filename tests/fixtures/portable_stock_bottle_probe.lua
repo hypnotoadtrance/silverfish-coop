@@ -33,7 +33,7 @@
             if watch.held_hits > 0 then
                 parts[#parts + 1] = ("held hits=%d peak impulse=%.1f"):format(watch.held_hits, watch.held_impulse)
             end
-            if current(actor) then
+            if current(actor) and not actor.Broken and valid(actor.PropMesh) then
                 local mesh = actor.PropMesh
                 local location = mesh:K2_GetComponentLocation()
                 parts[#parts + 1] = ("rest=(%.1f,%.1f,%.1f) health=%s awake=%s"):format(
@@ -94,16 +94,44 @@
             local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
             local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
             local color = {R = 0, G = 0, B = 0, A = 0}
+            local function ground(x, y, z)
+                local hit = {}
+                if trace:LineTraceSingle(pawn, {X=x,Y=y,Z=z+75}, {X=x,Y=y,Z=z-200},
+                    0, true, {pawn, remote, actor}, 0, hit, true, color, color, 0) then
+                    local floor = hit.OutHit or hit
+                    if floor.ImpactPoint and floor.ImpactNormal.Z > .9 then return floor.ImpactPoint end
+                end
+            end
+            local host_position = pawn:K2_GetActorLocation()
+            local lane
+            -- The authored shelf can pin the bottle against its lower mesh. Keep the same
+            -- stock actor and test its normal pickup and throw on clear warehouse floor.
+            for step = 0, 7 do
+                local angle = step * math.pi / 4
+                local dx, dy = math.cos(angle), math.sin(angle)
+                local near_floor = ground(host_position.X + 180*dx, host_position.Y + 180*dy, host_position.Z)
+                local far_floor = ground(host_position.X + 305*dx, host_position.Y + 305*dy, host_position.Z)
+                if near_floor and far_floor and math.abs(near_floor.Z - far_floor.Z) < 5 then
+                    local from = {X=near_floor.X, Y=near_floor.Y, Z=near_floor.Z+60}
+                    local to = {X=far_floor.X, Y=far_floor.Y, Z=far_floor.Z+60}
+                    if not trace:LineTraceSingle(pawn, from, to, 0, true, {pawn, remote, actor}, 0, {}, true, color, color, 0) then
+                        lane = far_floor
+                        break
+                    end
+                end
+            end
+            assert(lane and actor:K2_SetActorLocation({X=lane.X,Y=lane.Y,Z=lane.Z+24}, false, {}, true),
+                "could not place the stock bottle on clear warehouse floor")
+            actor:ForceNetUpdate()
+            point = actor.PropMesh:K2_GetComponentLocation()
             local original, facing = remote:K2_GetActorLocation(), remote.Controller:GetControlRotation()
             for step = 0, 7 do
                 local angle = step * math.pi / 4
                 local x, y = point.X + 125 * math.cos(angle), point.Y + 125 * math.sin(angle)
-                local hit = {}
-                if trace:LineTraceSingle(remote, {X=x,Y=y,Z=point.Z + 75}, {X=x,Y=y,Z=point.Z - 200},
-                    0, true, {remote, actor}, 0, hit, true, color, color, 0) then
-                    local floor = (hit.OutHit or hit).ImpactPoint
-                    local target = floor and {X=x,Y=y,Z=floor.Z + remote.CapsuleComponent:GetScaledCapsuleHalfHeight() + 3}
-                    if target and remote:K2_TeleportTo(target, facing) then
+                local floor = ground(x, y, point.Z)
+                if floor then
+                    local target = {X=x,Y=y,Z=floor.Z + remote.CapsuleComponent:GetScaledCapsuleHalfHeight() + 3}
+                    if remote:K2_TeleportTo(target, facing) then
                         local aim = math_api:FindLookAtRotation(remote.Camera:K2_GetComponentLocation(), point)
                         remote.Controller:SetControlRotation(aim)
                         remote.Camera:K2_SetWorldRotation(aim, false, {}, true)
