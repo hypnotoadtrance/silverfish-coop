@@ -6,13 +6,18 @@ local prefix = mailbox .. "/portable-dry-fire-"
 local map = "World /Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
 local click = "SoundCue /Game/Assets/Sounds/CUEs/Weapon_Cues/Reload_Cues/TriggerClick_Cue.TriggerClick_Cue"
 local factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
-local pistol_path = "/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C"
-local reserve_path = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
+local reserve_9mm = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
+local arm_profiles = {
+    arm = {"/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C", reserve_9mm, 9, 2},
+    ["arm-rusty"] = {"/Game/Classes/Weapons/Wep_RustyPistol.Wep_RustyPistol_C", reserve_9mm, 9, 2},
+    ["arm-light-ar"] = {"/Game/Classes/Weapons/Wep_LightAR_01.Wep_LightAR_01_C",
+        "/Game/Classes/Items/Ammo_IntrRifle_BP.Ammo_IntrRifle_BP_C", 7, 3},
+}
+local weapon_path, reserve_path, reserve_units, slot
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local payload = "DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"
-local slot = 2
 local last, local_pawn, peer, failure, world_address
 local hooked = false
 local clicks, projectiles, shot_sounds, muzzle_flashes = {}, 0, 0, 0
@@ -42,7 +47,7 @@ local function row_identity(row)
 end
 
 local function identify(row)
-    return same(row[item_class], asset(pistol_path)) and row_identity(row) or "-"
+    return same(row[item_class], asset(weapon_path)) and row_identity(row) or "-"
 end
 
 local function peer_muzzle(component)
@@ -117,12 +122,12 @@ local function seed(pawn, rounds)
     assert(same(local_pawn.Save, local_pawn:GetWorld().OwningGameInstance.SaveSlot_Ref)
         and (same(pawn, local_pawn) or not same(save, local_pawn.Save)), "fixture must use the co-op save and detached peer")
     local output = {}
-    local defaults = asset(pistol_path):GetCDO()
+    local defaults = asset(weapon_path):GetCDO()
     asset(factory):ItemActorToStruct(defaults, pawn, output)
     local row = output.Item or output
     row[ammo] = rounds
     local guid = identify(row)
-    assert(#guid == 32 and guid ~= string.rep("0", 32), "stock pistol did not receive a GUID")
+    assert(#guid == 32 and guid ~= string.rep("0", 32), "stock weapon did not receive a GUID")
     save.PlayerEquipment[slot] = row
     -- A reflected out table omits native InstancedStruct storage. Give the real
     -- inventory row the owning class's stock data through an Unreal struct copy.
@@ -134,8 +139,8 @@ end
 local function ready(pawn)
     local row = pawn.Save.PlayerEquipment[slot]
     local weapon = pawn.EquipedItem
-    if identify(row) == "-" or not valid(weapon) or not same(weapon:GetClass(), asset(pistol_path)) then return "waiting" end
-    assert(same(weapon.User, pawn) and pawn.Save.PlayerEquipIndex == slot - 1, "expected the stock pistol in the selected slot")
+    if identify(row) == "-" or not valid(weapon) or not same(weapon:GetClass(), asset(weapon_path)) then return "waiting" end
+    assert(same(weapon.User, pawn) and pawn.Save.PlayerEquipIndex == slot - 1, "expected the stock weapon in the selected slot")
     return ("%s,%d,%d"):format(identify(row), weapon.Ammo, row[ammo])
 end
 
@@ -151,19 +156,18 @@ end
 local function seed_reserve()
     assert(local_pawn:HasAuthority() and peer:HasAuthority() and valid(peer.Save) and not same(local_pawn.Save, peer.Save),
         "stock reload requires a detached authoritative guest inventory")
-    assert(read_reserve(peer) == "", "fixture expected no preexisting 9mm reserve")
+    assert(read_reserve(peer) == "", "fixture expected no preexisting matching reserve")
     local pack, output = peer.Save.PlayerBackpack, {}
     asset(factory):ItemActorToStruct(asset(reserve_path):GetCDO(), peer, output)
     local row = output.Item or output
-    assert(same(row[item_class], asset(reserve_path)) and row[ammo] == 9, "stock 9mm reserve factory did not produce nine rounds")
+    assert(same(row[item_class], asset(reserve_path)) and row[ammo] == reserve_units, "stock reserve did not match its profile")
     pack[pack:GetArrayNum() + 1] = row
     return read_reserve(peer)
 end
 
 local function run(action)
-    if action == "arm" then return arm() end
-    if action == "arm-rusty" then
-        pistol_path = "/Game/Classes/Weapons/Wep_RustyPistol.Wep_RustyPistol_C"
+    if arm_profiles[action] then
+        weapon_path, reserve_path, reserve_units, slot = table.unpack(arm_profiles[action])
         return arm()
     end
     if action == "disarm" then
@@ -174,7 +178,7 @@ local function run(action)
     if action == "seed-peer" then return seed(peer, 1) end
     if action == "projected" then return identify(local_pawn.Save.PlayerEquipment[slot]) end
     if action == "equip" then
-        assert(identify(local_pawn.Save.PlayerEquipment[slot]) ~= "-", "stock pistol is not in the projected slot")
+        assert(identify(local_pawn.Save.PlayerEquipment[slot]) ~= "-", "stock weapon is not in the projected slot")
         local_pawn:Equip_NextItem(slot - 1, false)
         return "selected"
     end

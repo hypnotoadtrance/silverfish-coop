@@ -48,6 +48,7 @@ from portable_dock_pursuit import verify_dock_pursuit
 from portable_held_mask import verify_stock_held_mask
 from portable_eye_board import verify_stock_eye_stacks
 from portable_guest_world_start import GuestWorldStartProof, resident_events, wait_resident_status
+from portable_light_ar import verify_stock_light_ar
 from portable_lingering_teleport import lingering_overlay, verify_stock_lingering_teleport
 from portable_personal_consumable import verify_personal_consumable_reconnect, verify_stock_personal_consumable
 from portable_wipe_chooser import verify_stock_wipe_chooser
@@ -4137,7 +4138,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  tutorial_dock_held_mask: bool = False, tutorial_dock_gait: bool = False,
                  stock_bandage_revisit: bool = False, stock_shovel: bool = False, stock_shovel_loot: bool = False,
                  stock_shovel_quest: bool = False,
-                 stock_take_ammo: bool = False,
+                 stock_take_ammo: bool = False, stock_light_ar: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False, nonmirrored_startup: bool = False,
                  compact_crate_status: bool = False, compact_world_view: bool = False,
@@ -4209,6 +4210,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, guest_combat=stock_npc_override,
                                                                rusty=rusty_pistol, npc_rivalry=stock_npc_rivalry,
                                                                memory_queue=resident_held_queue)),
+        (stock_light_ar, "observatory", "stock_light_ar",
+         lambda host, guest, pawn: verify_stock_light_ar(host, guest, pawn, portable_probe_command)),
         (resident_held_queue, weapon_campaign, "stock_held_queue",
          lambda host, guest, pawn: verify_stock_held_queue(host, guest, pawn, portable_probe_command,
                                                            stale_quick_slot=resident_stale_quick_slot)),
@@ -4381,6 +4384,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableFootstepProbe",
                                                      fixture="portable_footstep_probe.lua"))
+        if resident_weapon_cues or stock_light_ar:
+            for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableDryFireProbe",
                                                      fixture="portable_dry_fire_probe.lua"))
         if stock_unequip:
@@ -4779,6 +4784,8 @@ if __name__ == "__main__":
                         help="replay a prior stock inventory view after switching to the SMG")
     parser.add_argument("--rusty-pistol", action="store_true",
                         help="exercise the stock Rusty Pistol during the resident weapon checks")
+    parser.add_argument("--stock-light-ar", action="store_true",
+                        help="verify one guest stock LightAR tap and R reload with rifle FMJ")
     parser.add_argument("--tutorial-dock-combat", action="store_true",
                         help="follow the stock exit to Tutorial Dock and dispatch a shot at a placed worker")
     parser.add_argument("--tutorial-dock-retaliation", action="store_true",
@@ -4927,7 +4934,7 @@ if __name__ == "__main__":
                               "stock_storm_ambience",
                               "stock_melee_family", "stock_melee_edges", "stock_warehouse_switch", "stock_warehouse_board", "stock_bottle",
                               "stock_roaming_barter", "stock_critters", "stock_placed_item", "stock_throwables", "stock_eye_stacks",
-                              "stock_lingering_teleport"}
+                              "stock_lingering_teleport", "stock_light_ar"}
     if args.resident_held_queue and not args.resident_weapon_cues:
         parser.error("Use --resident-held-queue with --resident-weapon-cues")
     if args.resident_stale_quick_slot and not args.resident_held_queue:
@@ -5023,7 +5030,7 @@ if __name__ == "__main__":
                        stock_shovel=args.stock_shovel,
                        stock_shovel_loot=args.stock_shovel_loot,
                        stock_shovel_quest=args.stock_shovel_quest,
-                       stock_take_ammo=args.stock_take_ammo,
+                       stock_take_ammo=args.stock_take_ammo, stock_light_ar=args.stock_light_ar,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
                        guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory,
                        nonmirrored_startup=args.nonmirrored_startup,
