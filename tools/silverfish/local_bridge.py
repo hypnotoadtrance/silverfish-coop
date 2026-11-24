@@ -270,10 +270,11 @@ class LocalBridge:
     def publish_avatar_poses(self, frame: bytes) -> bool:
         return self._avatar_pose_buffer is not None and bool(self._publish_avatar_poses(frame, len(frame)))
 
-    def read_input(self):
-        buffer = ctypes.create_string_buffer(1024)
+    def read_input(self, limit: int = 64):
+        # Match native/local_bridge.cpp, including a primary input's optional stock target.
+        buffer = ctypes.create_string_buffer(1536)
         records = []
-        for _ in range(64):
+        for _ in range(min(limit, 64)):
             size = self._read_input(buffer, len(buffer))
             if not size:
                 break

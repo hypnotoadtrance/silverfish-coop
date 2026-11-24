@@ -738,6 +738,8 @@ class Bridge:
         self._local_board_records = deque(maxlen=64)
         self._local_crate_records = deque(maxlen=64)
         self._local_melee_records = deque(maxlen=64)
+        self._local_primary_records = deque(maxlen=64)
+        self._local_held_fire_records = deque(maxlen=64)
         self.status_source = "file"
         self._local_status = None
         self._file_command_lock = asyncio.Lock()
@@ -748,9 +750,10 @@ class Bridge:
         deadline = time.monotonic() + timeout
         streams = [("input.tsv", self.input_offset)]
         if guest:
+            if self.local_bridge is None:
+                streams.extend((("native-guest-primary-events", self.primary_input_offset),
+                                ("native-guest-held-fire-events", self.held_fire_offset)))
             streams.extend((
-                ("native-guest-primary-events", self.primary_input_offset),
-                ("native-guest-held-fire-events", self.held_fire_offset),
                 ("native-inventory-view-events", self.inventory_view_offset),
                 ("native-guest-inventory-equip-events", self.inventory_equip_offset),
                 ("native-shop-view-events", self.shop_view_offset),
@@ -786,14 +789,20 @@ class Bridge:
             await asyncio.sleep(min(.025, remaining))
 
     def _take_local_inputs(self, pending: deque[bytes]) -> list[bytes]:
-        if self.local_bridge is not None and self.local_bridge.input_ready():
-            for record in self.local_bridge.read_input():
+        # Leave backpressured input in the native FIFO until each weapon collector can keep another batch.
+        room = min(64 - len(self._local_primary_records), 64 - len(self._local_held_fire_records))
+        if room and self.local_bridge is not None and self.local_bridge.input_ready():
+            for record in self.local_bridge.read_input(room):
                 if record.startswith(b"wire-board\t"):
                     self._local_board_records.append(record)
                 elif record.startswith(b"loot-crate-open\t"):
                     self._local_crate_records.append(record)
                 elif record.startswith(b"native-guest-melee-edge\t"):
                     self._local_melee_records.append(record)
+                elif record.startswith(b"native-guest-primary-intent\t"):
+                    self._local_primary_records.append(record)
+                elif record.startswith(b"native-guest-held-fire-intent\t"):
+                    self._local_held_fire_records.append(record)
                 else:
                     self._local_interaction_records.append(record)
         records = list(pending)
@@ -874,17 +883,24 @@ class Bridge:
             events.append((sequence, event, area, pawn, offset))
         return events
 
-    def native_primary_input_requests(self) -> list[tuple[int, str, str, str, str] | tuple[int, str, str, str, str, str]]:
+    def _native_guest_input_records(self, pending: deque[bytes], filename: str, offset_name: str) -> list[bytes]:
+        if self.local_bridge is not None:
+            return self._take_local_inputs(pending)
+        offset = getattr(self, offset_name)
         try:
-            with (self.directory / "native-guest-primary-events").open("rb") as stream:
-                stream.seek(self.primary_input_offset)
+            with (self.directory / filename).open("rb") as stream:
+                stream.seek(offset)
                 batch = stream.read(4096)
         except OSError:
             return []
         end = batch.rfind(b"\n") + 1
-        self.primary_input_offset += end if end else len(batch) if len(batch) == 4096 else 0
+        setattr(self, offset_name, offset + (end or (len(batch) if len(batch) == 4096 else 0)))
+        return batch[:end].splitlines()
+
+    def native_primary_input_requests(self) -> list[tuple[int, str, str, str, str] | tuple[int, str, str, str, str, str]]:
+        rows = self._native_guest_input_records(self._local_primary_records, "native-guest-primary-events", "primary_input_offset")
         events = []
-        for line in batch[:end].splitlines():
+        for line in rows:
             fields = line.decode("utf-8", errors="replace").split("\t")
             if (len(fields) not in (6, 7) or fields[0] != "native-guest-primary-intent"
                     or not fields[1].isascii() or not fields[1].isdigit() or len(fields[1]) > 16
@@ -903,16 +919,9 @@ class Bridge:
 
     def guest_held_fire_requests(self) -> list[tuple[int, str, str, str, str, int]]:
         """Read ordered exact SMG edges without consuming an incomplete row."""
-        try:
-            with (self.directory / "native-guest-held-fire-events").open("rb") as stream:
-                stream.seek(self.held_fire_offset)
-                batch = stream.read(4096)
-        except OSError:
-            return []
-        end = batch.rfind(b"\n") + 1
-        self.held_fire_offset += end or (len(batch) if len(batch) == 4096 else 0)
+        rows = self._native_guest_input_records(self._local_held_fire_records, "native-guest-held-fire-events", "held_fire_offset")
         events = []
-        for raw in batch[:end].splitlines():
+        for raw in rows:
             fields = raw.decode("utf-8", errors="replace").split("\t")
             if len(fields) != 7 or fields[0] != "native-guest-held-fire-intent":
                 continue
@@ -2081,6 +2090,14 @@ class Bridge:
                     data[native_host_dig_live.GUEST_INTENT] = (sequence, fields[1], fields[2], fields[3], "spade")
                 elif fields[0] == "native-guest-primary-scope" and len(fields) == 6:
                     data["native_guest_primary_scope"] = dict(zip(("map", "pawn", "guid", "kind", "mode"), fields[1:]))
+                elif (fields[0] == "native-guest-primary-publication" and len(fields) == 7 and valid_guid(fields[3])
+                      and fields[4] in ("tap", "held") and (sequence := _held_input_sequence(fields[5]))
+                      and fields[6] in ("memory", "file")):
+                    published = data.setdefault("native_guest_primary_publication", {})
+                    if fields[4] in published:
+                        raise ValueError("Repeated stock primary publication channel")
+                    published[fields[4]] = dict(zip(("map", "pawn", "guid"), fields[1:4]),
+                                                sequence=sequence, lane=fields[6])
                 elif (fields[0] == "native-guest-held-fire" and len(fields) == 7 and valid_guid(fields[3])
                       and (stroke := _held_input_sequence(fields[4])) and fields[5] == "held"
                       and fields[6] in ("mapped-key", "edge-window", "headless-fixture")):
@@ -3276,6 +3293,14 @@ class Bridge:
                             or data.get("map") != held_input["map"]
                             or any(held_input[field] != primary.get(field) for field in ("map", "pawn", "guid"))):
                         del data[name]
+                published = data.pop("native_guest_primary_publication", {})
+                if published and data["state"] == "connected":
+                    current = {channel: entry for channel, entry in published.items()
+                               if entry["map"] == data.get("map")
+                               and (channel == "tap" or primary.get("kind") == "smg-standard")
+                               and all(entry[field] == primary.get(field) for field in ("map", "pawn", "guid"))}
+                    if current:
+                        data["native_guest_primary_publication"] = current
                 if marker_frame is not None and not malformed_markers:
                     with contextlib.suppress(ValueError):
                         data[native_downed_markers.KEY] = native_downed_markers.parse(marker_frame, marker_rows, data.get("map"))

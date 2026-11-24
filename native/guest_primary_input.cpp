@@ -948,7 +948,7 @@ namespace
         return result(lua, true, scope.seat.mirrored ? "stock_held" : "host_equipped");
     }
 
-    int take(const Lua& lua, bool host)
+    int take(const Lua& lua, bool host, bool peek = false)
     {
         if (!available() || scope.seat.host != host || !count || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
         const auto pawn = lua.get_integer();
@@ -966,8 +966,11 @@ namespace
         lua.set_integer(pawn);
         lua.set_string(scope.text);
         lua.set_string(scope.item->kind);
-        head = (head + 1) % receipt_limit;
-        --count;
+        if (!peek)
+        {
+            head = (head + 1) % receipt_limit;
+            --count;
+        }
         return 4;
     }
 
@@ -982,7 +985,7 @@ namespace
         return 1;
     }
 
-    int take_held(const Lua& lua, bool melee_edges)
+    int take_held(const Lua& lua, bool melee_edges, bool peek = false)
     {
         if (!available() || !(melee_edges ? scoped_melee_edges() : scoped_held_fire()) ||
             lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
@@ -999,9 +1002,40 @@ namespace
         lua.set_string(event.edge == HeldEdge::press ? "press" : event.edge == HeldEdge::release ? "release" : "cancel");
         lua.set_integer(static_cast<std::int64_t>(event.stroke));
         if (melee_edges) lua.set_integer(event.duration_ms);
-        held_head = (held_head + 1) % receipt_limit;
-        --held_count;
+        if (!peek)
+        {
+            held_head = (held_head + 1) % receipt_limit;
+            --held_count;
+        }
         return melee_edges ? 6 : 5;
+    }
+
+    int commit_guest_input(const Lua& lua)
+    {
+        if (!available() || scope.seat.host || lua.get_stack_size() != 3 || !lua.is_integer(1) ||
+            !lua.is_integer(2) || !lua.is_string(3)) return 0;
+        const auto pawn = lua.get_integer();
+        const auto sequence = lua.get_integer();
+        const auto channel = lua.get_string();
+        bool committed = false;
+        if (pawn == address(scope.seat.pawn.Get()) && sequence > 0)
+        {
+            const auto number = static_cast<std::uint64_t>(sequence);
+            if (channel == "tap" && count && receipts[head].sequence == number)
+            {
+                head = (head + 1) % receipt_limit;
+                --count;
+                committed = true;
+            }
+            else if (channel == "held" && scoped_held_fire() && held_count && held_receipts[held_head].receipt.sequence == number)
+            {
+                held_head = (held_head + 1) % receipt_limit;
+                --held_count;
+                committed = true;
+            }
+        }
+        lua.set_bool(committed);
+        return 1;
     }
 
     int read_held(const Lua& lua)
@@ -1354,6 +1388,8 @@ namespace silverfish::native_guest_primary_input
         {
             lua.register_function("SilverfishSetNativeGuestPrimaryScope", [](const Lua& lua) { return set_scope(lua, false); });
             lua.register_function("SilverfishTakeNativeGuestPrimaryIntent", [](const Lua& lua) { return take(lua, false); });
+            lua.register_function("SilverfishPeekNativeGuestPrimaryIntent", [](const Lua& lua) { return take(lua, false, true); });
+            lua.register_function("SilverfishCommitNativeGuestPrimaryInput", commit_guest_input);
             lua.register_function("SilverfishTakeNativeGuestMeleeInput", [](const Lua& lua) { return take_held(lua, true); });
             lua.register_function("SilverfishClearNativeGuestPrimaryScope", [](const Lua&) { return clear(false); });
             lua.register_function("SilverfishReadNativeGuestAim", read_aim);
@@ -1365,6 +1401,7 @@ namespace silverfish::native_guest_primary_input
             if (held_enabled())
             {
                 lua.register_function("SilverfishTakeNativeGuestHeldFireIntent", [](const Lua& lua) { return take_held(lua, false); });
+                lua.register_function("SilverfishPeekNativeGuestHeldFireIntent", [](const Lua& lua) { return take_held(lua, false, true); });
                 lua.register_function("SilverfishReadNativeGuestHeldFire", read_held);
                 if (fixtures(false))
                     lua.register_function("SilverfishProbeNativeGuestHeldFire", [](const Lua& lua) { return probe_held(lua, false); });

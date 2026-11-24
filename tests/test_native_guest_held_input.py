@@ -38,6 +38,43 @@ class GuestHeldInputBridgeTests(unittest.TestCase):
         self.assertEqual(self.bridge.guest_held_fire_requests(), [])
         self.assertEqual(self.bridge.native_primary_input_requests(), [])
 
+    def tap(self, sequence):
+        return f"native-guest-primary-intent\t{sequence}\t{MAP}\t{PAWN}\t{GUID}\trusty-pistol"
+
+    def test_legacy_primary_does_not_consume_an_incomplete_record(self):
+        path = self.directory / "native-guest-primary-events"
+        path.write_text(self.tap(1) + "\n" + self.tap(2), encoding="utf-8")
+        self.assertEqual(self.bridge.native_primary_input_requests(), [(1, MAP, PAWN, GUID, "rusty-pistol")])
+        self.assertEqual(self.bridge.native_primary_input_requests(), [])
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write("\n")
+        self.assertEqual(self.bridge.native_primary_input_requests(), [(2, MAP, PAWN, GUID, "rusty-pistol")])
+        self.assertEqual(self.bridge.native_primary_input_requests(), [])
+
+    def test_memory_routes_exact_ordered_rows_and_ignores_old_file_intents(self):
+        (self.directory / "native-guest-primary-events").write_text(self.tap(95) + "\n", encoding="utf-8")
+        (self.directory / "native-guest-held-fire-events").write_text(self.row(96, "press", 96) + "\n", encoding="utf-8")
+        batch = [self.tap(8), self.row(1, "press", 1), self.tap(9), self.row(2, "release", 1)]
+        self.bridge.local_bridge = Mock(input_ready=Mock(side_effect=[True, False, False, False]),
+                                      read_input=Mock(return_value=[row.encode() for row in batch]))
+        self.assertEqual(self.bridge.guest_held_fire_requests(), [(1, MAP, PAWN, GUID, "press", 1),
+                                                                  (2, MAP, PAWN, GUID, "release", 1)])
+        self.assertEqual(self.bridge.native_primary_input_requests(), [(8, MAP, PAWN, GUID, "rusty-pistol"),
+                                                                        (9, MAP, PAWN, GUID, "rusty-pistol")])
+        self.assertEqual(self.bridge.guest_held_fire_requests(), [])
+        self.assertEqual(self.bridge.native_primary_input_requests(), [])
+        self.bridge.local_bridge.read_input.assert_called_once_with(64)
+
+    def test_memory_leaves_native_rows_queued_while_a_collector_is_full(self):
+        self.bridge._local_held_fire_records.extend(self.row(seq, "press", seq).encode() for seq in range(1, 65))
+        self.bridge.local_bridge = Mock(input_ready=Mock(return_value=True),
+                                      read_input=Mock(return_value=[self.tap(8).encode()]))
+        self.assertEqual(self.bridge.native_primary_input_requests(), [])
+        self.bridge.local_bridge.read_input.assert_not_called()
+        self.assertEqual(self.bridge.guest_held_fire_requests(), [(seq, MAP, PAWN, GUID, "press", seq) for seq in range(1, 65)])
+        self.assertEqual(self.bridge.native_primary_input_requests(), [(8, MAP, PAWN, GUID, "rusty-pistol")])
+        self.bridge.local_bridge.read_input.assert_called_once_with(64)
+
     def test_snapshot_accepts_only_active_exact_standard_smg_scope(self):
         status = self.directory / "status.tsv"
         base = f"schema\t1\nsession\tclient\tconnected\t{MAP}\t0\t1\n"
@@ -67,6 +104,23 @@ class GuestHeldInputBridgeTests(unittest.TestCase):
         self.assertNotIn("native_guest_held_fire", snapshot)
         self.assertEqual(snapshot["native_guest_held_fire_fixture"]["stroke"], 38)
         self.assertEqual(snapshot["native_guest_held_fire_fixture"]["edge"], "release")
+
+    def test_publication_receipts_are_scoped_to_the_current_weapon(self):
+        status = self.directory / "status.tsv"
+        base = f"schema\t1\nsession\tclient\tconnected\t{MAP}\t0\t1\n"
+        scope = f"native-guest-primary-scope\t{MAP}\t{PAWN}\t{GUID}\t"
+        row = f"native-guest-primary-publication\t{MAP}\t{PAWN}\t{GUID}\t"
+        for kind, lane in (("smg-standard", "memory"), ("rusty-pistol", "file")):
+            with self.subTest(kind=kind, lane=lane):
+                status.write_text(base + scope + kind + "\tstock_held\n" + row + f"tap\t4\t{lane}\n"
+                                  + row + f"held\t5\t{lane}\n", encoding="utf-8")
+                result = self.bridge.snapshot()["native_guest_primary_publication"]
+                self.assertEqual(result["tap"], dict(map=MAP, pawn=PAWN, guid=GUID, sequence=4, lane=lane))
+                self.assertEqual("held" in result, kind == "smg-standard")
+        other = "B" * 32
+        scope = scope.replace(GUID, other)
+        status.write_text(base + scope + "smg-standard\tstock_held\n" + row + "held\t5\tmemory\n", encoding="utf-8")
+        self.assertNotIn("native_guest_primary_publication", self.bridge.snapshot())
 
 
 class GuestHeldInputRoutingTests(unittest.IsolatedAsyncioTestCase):
