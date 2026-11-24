@@ -124,21 +124,39 @@ namespace
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID};
     std::atomic<bool> installed{};
 
-    struct Press
+    struct ReloadWeapon
+    {
+        Unreal::FWeakObjectPtr receiver{};
+        std::string guid;
+        bool underbarrel{};
+
+        bool matches(const ReloadWeapon& other) const
+        {
+            return receiver.Get() && receiver.Get() == other.receiver.Get() &&
+                guid == other.guid && underbarrel == other.underbarrel;
+        }
+    };
+
+    ReloadWeapon reload_weapon(Unreal::UObject* pawn)
+    {
+        auto* receiver = object_field(pawn, STR("EquipedItem"));
+        auto guid = silverfish::native_guest_item::local_equipped_identity(pawn, receiver);
+        if (guid.empty()) return {};
+        const auto* intercept = object_field(receiver, STR("InputIntercept"));
+        const bool loki = intercept && silverfish::native_guest_item::active_loki_barrel(pawn, receiver) == intercept;
+        if (intercept && !loki) return {};
+        return {Unreal::FWeakObjectPtr{receiver}, std::move(guid), loki};
+    }
+
+    struct Input
     {
         Unreal::FWeakObjectPtr pawn{};
         Clock::time_point expires{};
+        ReloadWeapon weapon;
     };
 
-    struct Intent
-    {
-        Unreal::FWeakObjectPtr pawn{};
-        Clock::time_point expires{};
-        std::string underbarrel_guid;
-    };
-
-    Press press;
-    Intent pending;
+    Input press;
+    Input pending;
     std::uint64_t sequence{};
 
     void bind_schema()
@@ -230,6 +248,8 @@ namespace
         if (index == 0)
         {
             press = {};
+            press.weapon = reload_weapon(pawn);
+            if (press.weapon.guid.empty()) return;
             press.pawn = pawn;
             press.expires = now + press_timeout;
             return;
@@ -240,17 +260,13 @@ namespace
             press.expires = now + press_timeout;
             return;
         }
-        press = {};
+        auto started = std::exchange(press, {});
         // The stock Completed event checks whether the ammo menu actually opened.
         // Press duration alone does not turn a reload into an ammo selection.
         auto* changing_ammo = field<Unreal::FBoolProperty>(pawn, STR("IsChangingAmmo"));
         if (!changing_ammo || changing_ammo->GetPropertyValueInContainer(pawn) || sequence == max_sequence) return;
-        auto* receiver = object_field(pawn, STR("EquipedItem"));
-        auto guid = silverfish::native_guest_item::local_loki_identity(pawn, receiver);
-        if (object_field(receiver, STR("InputIntercept")) && guid.empty()) return;
-        pending.pawn = pawn;
-        pending.expires = now + intent_timeout;
-        pending.underbarrel_guid = std::move(guid);
+        if (!started.weapon.matches(reload_weapon(pawn))) return;
+        pending = {started.pawn, now + intent_timeout, std::move(started.weapon)};
         ++sequence;
     }
 
@@ -334,9 +350,13 @@ namespace
     int probe_input(const Lua& lua)
     {
         if (!fixture_enabled() || !Unreal::IsInGameThreadRaw() || !installed.load(std::memory_order_acquire) ||
-            lua.get_stack_size() != 1 || !lua.is_integer(1))
+            (lua.get_stack_size() != 1 && lua.get_stack_size() != 2) || !lua.is_integer(1) ||
+            (lua.get_stack_size() == 2 && !lua.is_string(2)))
             return fixture_result(lua, false, "native_guest_reload_fixture_scope_unavailable");
-        const auto address = lua.get_integer();
+        const auto edge = lua.get_stack_size() == 2 ? lua.get_string(2) : std::string{};
+        if (!edge.empty() && edge != "start" && edge != "cancel")
+            return fixture_result(lua, false, "native_guest_reload_fixture_scope_unavailable");
+        const auto address = lua.get_integer(1);
         if (address <= 0) return fixture_result(lua, false, "native_guest_reload_fixture_exact_pawn_required");
         schema = {};
         bind_schema();
@@ -349,7 +369,8 @@ namespace
         if (!local_client(pawn) || !standing_autonomous(pawn))
             return fixture_result(lua, false, "native_guest_reload_fixture_exact_local_client_required");
         const auto now = Clock::now();
-        if ((press.pawn.Get() && now < press.expires) || (pending.pawn.Get() && now < pending.expires) || sequence == max_sequence)
+        const bool pressed = press.pawn.Get() == pawn && now < press.expires;
+        if ((edge == "cancel" ? !pressed : pressed) || (pending.pawn.Get() && now < pending.expires) || sequence == max_sequence)
             return fixture_result(lua, false, "native_guest_reload_fixture_input_busy");
         const auto& started = schema.events[0];
         const auto& completed = schema.events[2];
@@ -362,9 +383,15 @@ namespace
             !factory.bind(schema.input.Get(), started.value->GetStruct().Get()))
             return fixture_result(lua, false, "native_guest_reload_fixture_wrapper_schema_unavailable");
 
+        const auto before = sequence;
+        if (edge == "cancel")
+        {
+            dispatch_fixture(pawn, completed, factory, false);
+            const bool cancelled = !press.pawn.Get() && !pending.pawn.Get() && sequence == before;
+            return fixture_result(lua, cancelled, cancelled ? "stock_cancelled" : "stock_reload_was_not_cancelled");
+        }
         press = {};
         pending = {};
-        const auto before = sequence;
         dispatch_fixture(pawn, started, factory, true);
         if (press.pawn.Get() != pawn || sequence != before)
         {
@@ -372,6 +399,7 @@ namespace
             pending = {};
             return fixture_result(lua, false, "native_guest_reload_fixture_started_not_guarded");
         }
+        if (edge == "start") return fixture_result(lua, true, "stock_started");
         dispatch_fixture(pawn, completed, factory, false);
         if (press.pawn.Get() || pending.pawn.Get() != pawn || sequence != before + 1 || !local_client(pawn))
         {
@@ -387,11 +415,14 @@ namespace
         if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 0 || !installed.load(std::memory_order_acquire)) return 0;
         auto* pawn = pending.pawn.Get();
         if (!pawn || Clock::now() >= pending.expires || !local_client(pawn) || !standing_autonomous(pawn)) return 0;
+        auto* receiver = object_field(pawn, STR("EquipedItem"));
+        if (!receiver || receiver != pending.weapon.receiver.Get() ||
+            (object_field(receiver, STR("InputIntercept")) != nullptr) != pending.weapon.underbarrel) return 0;
         lua.set_integer(static_cast<std::int64_t>(sequence));
         lua.set_integer(reinterpret_cast<std::intptr_t>(pawn));
-        if (pending.underbarrel_guid.empty()) return 2;
-        lua.set_string(pending.underbarrel_guid);
-        return 3;
+        lua.set_string(pending.weapon.guid);
+        lua.set_string(pending.weapon.underbarrel ? "loki" : "primary");
+        return 4;
     }
 
     int clear_intent(const Lua&)

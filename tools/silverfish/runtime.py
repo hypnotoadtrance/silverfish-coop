@@ -2091,10 +2091,12 @@ class Bridge:
                     data["native_campaign_npc_melee_sickness"] = {
                         **dict(zip(identities, fields[1:5])), **dict(zip(counters, map(int, fields[5:]))),
                     }
-                elif fields[0] == "native-guest-reload-intent" and len(fields) in (4, 5):
-                    data["native_guest_reload_intent"] = {"map": fields[1], "pawn": fields[2], "sequence": int(fields[3])}
-                    if len(fields) == 5 and valid_guid(fields[4]):
-                        data["native_guest_reload_intent"]["underbarrel_guid"] = fields[4]
+                elif (fields[0] == "native-guest-reload-intent" and len(fields) == 6
+                      and (sequence := _held_input_sequence(fields[3]))
+                      and valid_guid(fields[4]) and fields[5] in {"primary", "loki"}):
+                    data["native_guest_reload_intent"] = {
+                        "map": fields[1], "pawn": fields[2], "sequence": sequence, "guid": fields[4], "barrel": fields[5],
+                    }
                 elif (fields[0] == "native-guest-equipment-selection" and len(fields) == 5 and valid_guid(fields[4])
                       and (selection := _held_input_sequence(fields[3]))):
                     data["native_guest_equipment_selection"] = {"map": fields[1], "pawn": fields[2],

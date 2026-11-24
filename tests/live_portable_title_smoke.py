@@ -3173,6 +3173,7 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
     checkpoint = campaign_save_hashes(host.campaign)
     guest_frame = await wait_resident_status(guest_run, lambda frame: frame.get("state") == "connected")
     proofs = []
+    previous_equipped = None
 
     async def stock_input(name, count=1):
         event = f"native_guest_{name}_input"
@@ -3274,7 +3275,17 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
         await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
         proof = {"source": source, "kind": kind, **unloaded}
+        if kind == "cult-shotgun" and previous_equipped:
+            switched_slot, switched_guid = previous_equipped
+            switched = await guest.bridge.command("fixture-stock-take-ammo-loadout", str(switched_slot), switched_guid,
+                                                   "switch-during-reload")
+            assert switched["ack"]["message"] == "stock_cancelled", switched["ack"]
+            assert await read_loadout() == "0,stored"
+            assert await read_loadout("equip") == "0,0"
+            await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
+            proof["switch_cancelled_reload"] = True
         if source == "equipped":
+            previous_equipped = slot, guid
             reloads = await stock_input("reload", starting_rounds)
             assert [(row["guid"], row["before"], row["after"]) for row in reloads] == [
                 (guid, count, count + 1) for count in range(starting_rounds)], reloads

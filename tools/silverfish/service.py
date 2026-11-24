@@ -5566,7 +5566,11 @@ class Client:
 
         equipment = self.gameplay.get("native_equipped_weapon", {})
         kind, receiver = equipment.get("kind"), equipment.get("guid")
-        underbarrel = intent.get("underbarrel_guid") if fresh else None
+        selected = intent.get("guid") if fresh else receiver
+        if not native_gold.valid_guid(selected) or fresh and (selected != receiver or intent.get("barrel") not in {"primary", "loki"}):
+            self.tube_reload = None
+            return
+        underbarrel = fresh and intent.get("barrel") == "loki"
         magazine = guest_weapon_profiles.SINGLE_RELOAD_MAGAZINES.get(kind) if not underbarrel else None
         scope = self.host_session, self.zone_epoch, area, pawn, receiver
         if magazine and (not native_gold.valid_guid(receiver) or self.primary_scope != (area, pawn, receiver, kind)
@@ -5589,8 +5593,9 @@ class Client:
         if step:
             operation_key += f":{step}"
         operation = uuid.uuid5(self.bridge.input_namespace, operation_key).hex
-        target = f"{underbarrel}@{self.zone_epoch}@loki" if underbarrel else (
-            f"{receiver}@{self.zone_epoch}" if magazine else "equipped")
+        target = f"{selected}@{self.zone_epoch}"
+        if underbarrel:
+            target += "@loki"
         try:
             result = await self.gameplay_action("native-guest-weapon-reload", operation, target)
             self.control.event("native_guest_reload_input", operation_id=operation, sequence=sequence, **result)

@@ -3749,9 +3749,9 @@ Unreal::UObject* silverfish::native_guest_item::active_loki_barrel(Unreal::UObje
         ? child : nullptr;
 }
 
-std::string silverfish::native_guest_item::local_loki_identity(Unreal::UObject* pawn, Unreal::UObject* receiver)
+std::string silverfish::native_guest_item::local_equipped_identity(Unreal::UObject* pawn, Unreal::UObject* receiver)
 {
-    if (!active_loki_barrel(pawn, receiver)) return {};
+    if (!live(pawn) || !live(receiver) || object(pawn, STR("EquipedItem")) != receiver) return {};
     Context context;
     context.save = object(pawn, STR("Save"));
     if (!live(context.save) || context.save->GetClassPrivate() != find<Unreal::UClass>(save_path)) return {};

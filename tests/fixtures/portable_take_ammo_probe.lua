@@ -6,6 +6,17 @@
         assert(slot and slot >= 0 and slot < 8)
         local row = save.PlayerEquipment[slot + 1]
         if item_identity(row) ~= fields[4] then return "waiting" end
+        if fields[5] == "switch-during-reload" then
+            local before = equipped_guid(pawn, save)
+            assert(before and before ~= fields[4])
+            local started, result = SilverfishProbeNativeGuestReloadInput(pawn:GetAddress(), "start")
+            assert(started and result == "stock_started", result)
+            pawn:Equip_NextItem(slot, false)
+            assert(equipped_guid(pawn, save) == fields[4])
+            local cancelled, outcome = SilverfishProbeNativeGuestReloadInput(pawn:GetAddress(), "cancel")
+            assert(cancelled and outcome == "stock_cancelled", outcome)
+            return outcome
+        end
         if fields[5] == "equip" then
             pawn:Equip_NextItem(slot, false)
             local facing = pawn.Controller:GetControlRotation()

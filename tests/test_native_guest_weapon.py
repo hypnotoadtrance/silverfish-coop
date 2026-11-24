@@ -228,13 +228,21 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
             primary_scope=(area, "guest", guid, kind), viewer_role="guest", gameplay_seen=time.monotonic(),
             bridge=SimpleNamespace(input_namespace=uuid.uuid4()), control=Mock(),
             last_game={"map": area, "pawns": {"local": {"name": "guest"}},
-                       "native_guest_reload_intent": {"map": area, "pawn": "guest", "sequence": 1}},
+                       "native_guest_reload_intent": {
+                           "map": area, "pawn": "guest", "sequence": 1, "guid": guid, "barrel": "primary",
+                       }},
             gameplay={"native_equipped_weapon": {"kind": kind, "guid": guid}},
             gameplay_action=AsyncMock(return_value={"native_guest_weapon": {"guid": guid, "after": 1, "reserve_after": 2}}),
         )
+        intent = client.last_game["native_guest_reload_intent"]
+        intent["guid"] = "B" * 32
+        await service.Client.service_reload_input(client, True)
+        client.gameplay_action.assert_not_awaited()
+
+        intent.update(guid=guid, sequence=2)
         await service.Client.service_reload_input(client, True)
         scope, sequence, step, due = client.tube_reload
-        self.assertEqual((sequence, step), (1, 1))
+        self.assertEqual((sequence, step), (2, 1))
         self.assertGreater(due, time.monotonic())
         self.assertEqual(client.gameplay_action.await_args.args[2], f"{guid}@epoch")
         await service.Client.service_reload_input(client, True)
