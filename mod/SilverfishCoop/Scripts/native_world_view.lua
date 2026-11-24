@@ -33,6 +33,7 @@ local weather_fields = {
 local profiles = require("authored_world_view")
 local weather_view = require("native_weather_view")
 local lightning_host = require("native_weather_lightning_host")
+local storm_ambience = require("native_storm_ambience_host")
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -228,6 +229,8 @@ function view.observe(state, phase)
     if ok and weather then copy_weather(report, weather) end
     local rain_ok, rain = pcall(weather_view.read_rain, current)
     if rain_ok and rain then weather_view.copy_rain(report, rain) end
+    local storm_ok, storm = pcall(storm_ambience.capture, current)
+    if storm_ok then report.storm_ambience = storm end
     return report
 end
 
@@ -511,9 +514,10 @@ function view.status(state, phase)
     return ok and report or nil
 end
 
-function view.weather_cue_rows(state, phase, row)
+function view.weather_cue_rows(state, phase, row, host_report)
     local rows = weather_view.siren_rows(state, phase, row)
     for _, strike in ipairs(lightning_host.rows(state, phase, row)) do rows[#rows + 1] = strike end
+    if host_report then storm_ambience.append(rows, host_report.storm_ambience, row) end
     return rows
 end
 

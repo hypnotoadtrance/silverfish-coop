@@ -1334,7 +1334,7 @@ local function write_status(state, current_phase, failure, fields, pending, crat
             if host_world_view then host_world_view.sequence = sequence end
         end
         if host_world_view then rows[#rows + 1] = world_view_row("sample", host_world_view) end
-        for _, row in ipairs(native_world_view.weather_cue_rows(state, current_phase, status_row)) do
+        for _, row in ipairs(native_world_view.weather_cue_rows(state, current_phase, status_row, host_world_view)) do
             rows[#rows + 1] = row
         end
     elseif world_view_enabled and current_phase == "connected" then
