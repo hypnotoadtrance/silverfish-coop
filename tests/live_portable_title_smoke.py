@@ -1053,7 +1053,9 @@ async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict)
             if current.startswith("false;"):
                 break
             # Give the shooter another clear lane while the stock worker keeps moving and attacking.
-            retreat = tuple(map(float, (await command(host, "dock-natural-retreat")).split(",")))
+            destination = await command(host, "dock-natural-retreat")
+            retreat = tuple(map(float, destination.split(",")))
+            assert await command(guest, f"dock-natural-arrive\t{destination}") == "ready"
             local_point = None
             try:
                 async with asyncio.timeout(6):
