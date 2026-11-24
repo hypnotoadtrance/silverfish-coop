@@ -54,6 +54,7 @@ LoopInGameThreadWithDelay(1, function()
     previous = now
     if now >= active.deadline then
         active.elapsed = now - active.started
+        status_publication.mirror = active.original_mirror
         capture, complete = nil, active
     end
 end)
@@ -72,7 +73,10 @@ LoopInGameThreadWithDelay(50, function()
         local now = os.clock()
         capture, previous, complete = {
             rows = {frame = {}}, calls = {}, peak = 0, peak_calls = {}, started = now, deadline = now + window,
+            original_mirror = status_publication.mirror,
         }, nil, nil
+        -- Keep the private launch flags, and time the installed memory-only gameplay path.
+        status_publication.mirror = false
         message = "armed"
     elseif action == "read" then
         message = complete and result() or "sampling"

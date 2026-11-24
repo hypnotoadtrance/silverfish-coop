@@ -32,7 +32,7 @@ from tools.silverfish.control import NAME, current_status, submit
 from tools.silverfish.guest_weapon_profiles import FIREARMS, THIRTY_06_FMJ, THIRTY_06_INCENDIARY
 from tools.silverfish.service import PROTOCOL, menu_host_checkpoint
 from tools.silverfish.steam_cloud import FOLDER
-from tools.silverfish.travel import OBSERVATORY
+from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 from tools.silverfish.win_job import GameProcess
 from live_installed_title_smoke import boot_states, native_mailbox
 from live_loose_pickup_smoke import DEFAULT_ACTOR
@@ -67,16 +67,20 @@ from tools.silverfish.title_session import STATUS_FILE as TITLE_STATUS_FILE
 
 CABINET_RELEASE_SHA256 = "e35f410f7231f2c510b4ec43c34fb59ff7e9574187e2cd32fe66a61b3e87c14c"
 
-# These Observatory checks reacquire their target or seed their own starting
-# state. They can still give a valid result after an unrelated check fails.
-INDEPENDENT_RESIDENT_CHECKS = frozenset({"stock_food", "stock_cooked_meal", "stock_melee_edges"})
+# Checks that reacquire their target on an already loaded map can still run
+# when an unrelated fixture on the same map has failed.
+INDEPENDENT_RESIDENT_MAPS = {
+    "stock_food": OBSERVATORY, "stock_cooked_meal": OBSERVATORY, "stock_melee_edges": OBSERVATORY,
+    "stock_critters": CROSSROADS, "stock_lingering_teleport": CROSSROADS, "stock_mushrooms": CROSSROADS,
+    "stock_placed_item": CROSSROADS,
+}
 
 
 async def run_resident_checks(checks, host, guest, finish_check, skip_check):
     gameplay = {}
     blocking_failure = None
     for name, check in checks:
-        if blocking_failure and name not in INDEPENDENT_RESIDENT_CHECKS:
+        if blocking_failure and name not in INDEPENDENT_RESIDENT_MAPS:
             skip_check(name, blocking_failure)
             continue
         started = time.perf_counter()
@@ -85,7 +89,7 @@ async def run_resident_checks(checks, host, guest, finish_check, skip_check):
             frame = await wait_resident_status(host.campaign / "run", lambda f:
                 not f.get("awaiting_zone_guest")
                 and f.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
-            if blocking_failure and frame["game"].get("map") != OBSERVATORY:
+            if blocking_failure and frame["game"].get("map") != INDEPENDENT_RESIDENT_MAPS[name]:
                 skip_check(name, blocking_failure)
                 continue
             evidence = await check(host, guest, frame["game"]["native_guest_save"]["pawn"])

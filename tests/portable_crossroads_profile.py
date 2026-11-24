@@ -64,7 +64,9 @@ async def profile_world(host, guest, area, probe):
         return read_comparison(raw)
 
     async def collect():
-        return dict(zip(seats, await asyncio.gather(*(read(seat) for seat in seats.values())), strict=True))
+        profiles = await asyncio.gather(*(read(seat) for seat in seats.values()))
+        assert all("command_mailbox" not in profile["timings"] for profile in profiles), profiles
+        return dict(zip(seats, profiles, strict=True))
 
     def position(status):
         return status.get("game", {}).get("pawns", {}).get("local", {}).get("location")

@@ -19,7 +19,8 @@ async def verify_stock_mushrooms(host, guest, pawn):
         await enter_crossroads(host, pawn)
 
     arrival = await wait_resident_status(host_run, lambda frame: frame["game"].get("map") == CROSSROADS
-                                         and not frame.get("awaiting_zone_guest"), timeout=60)
+                                         and not frame.get("awaiting_zone_guest")
+                                         and frame["game"].get("native_guest_save", {}).get("state") == "bound", timeout=60)
     host_position = arrival["game"]["pawns"]["local"]["location"]
 
     def same_world(frame):
@@ -32,26 +33,28 @@ async def verify_stock_mushrooms(host, guest, pawn):
     joined = await wait_resident_status(guest_run, same_world, timeout=35)
 
     checkpoint = campaign_save_hashes(host.campaign)
-    located = await submit(host_run, mushrooms.LOCATE)
-    assert located["ok"], located
+    located = await host.bridge.command(mushrooms.LOCATE, timeout=8)
     rows = located[mushrooms.KEY]
     assert len(rows) >= 2, rows
     host_pick = next(iter(rows))
     guest_pick = next((key for key, row in rows.items() if key != host_pick and row["patch"] == rows[host_pick]["patch"]), None)
     assert guest_pick, f"No second mushroom near the first stock patch ({rows[host_pick]['patch']})"
+
+    async def host_fixture(action, key, target):
+        source = rows[key]
+        return await host.bridge.command(action, source["patch"], source["patch_guid"], target, timeout=8)
+
+    host_pawn = arrival["game"]["pawns"]["local"]["name"]
+    guest_pawn = arrival["game"]["native_guest_save"]["pawn"]
+    # Only nearby loose loot is projected, so move the guest to this patch first.
+    await host_fixture(mushrooms.APPROACH, guest_pick, guest_pawn)
     await wait_resident_status(guest_run, lambda frame: {host_pick, guest_pick} <= frame["game"].get(loot.KEY, {}).keys())
-
-    async def approach(role, key):
-        result = await submit(host_run, mushrooms.APPROACH, target=f"{role}@{key}")
-        assert result["ok"], result
-
-    await approach("host", host_pick)
-    taken = await submit(host_run, mushrooms.HARVEST, target=f"host@{host_pick}")
-    assert taken["ok"] and host_pick not in taken[mushrooms.KEY], taken
+    taken = await host_fixture(mushrooms.HARVEST, host_pick, host_pawn)
+    assert host_pick not in taken.get(mushrooms.KEY, {}), taken
     await wait_resident_status(guest_run, lambda frame: host_pick not in frame["game"].get(loot.KEY, {})
                                and guest_pick in frame["game"].get(loot.KEY, {}))
 
-    await approach("guest", guest_pick)
+    await host_fixture(mushrooms.APPROACH, guest_pick, guest_pawn)
     taken = await submit(guest_run, loot.FIXTURE, target=guest_pick)
     assert taken["ok"], taken
     await wait_resident_status(host_run, lambda frame: guest_pick not in frame["game"].get(mushrooms.KEY, {}))
