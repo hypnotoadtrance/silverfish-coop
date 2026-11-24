@@ -199,7 +199,8 @@ namespace
     // collector. Setting the internal root flag alone does not register a root.
     bool update_escrow_reference(Unreal::UObject* instance, Unreal::UObject* save, bool retain)
     {
-        auto* references = field<Unreal::FArrayProperty>(instance, STR("ReferencedObjects"));
+        auto* references = Unreal::CastField<Unreal::FArrayProperty>(
+            instance->GetPropertyByNameInChain(STR("ReferencedObjects")));
         auto* entry = references ? Unreal::CastField<Unreal::FObjectProperty>(references->GetInner()) : nullptr;
         if (!entry) return false;
         Unreal::FScriptArrayHelper objects(references, references->ContainerPtrToValuePtr<void>(instance));
