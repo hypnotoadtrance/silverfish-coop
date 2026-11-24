@@ -153,7 +153,7 @@ async def verify_stock_held_queue(host, guest, pawn, probe, *, stale_quick_slot=
             OBSERVATORY, pawn, guid, terminal["serial"]), started
         assert (terminal["map"], terminal["pawn"], terminal["character_id"], terminal["status"], terminal["before"]) == (
             OBSERVATORY, pawn, character, "released", load), terminal
-        assert 0 < terminal["rounds"] == terminal["projectiles"] == load - terminal["after"] < load, terminal
+        assert 1 < terminal["rounds"] == terminal["projectiles"] == load - terminal["after"] < load, terminal
         assert terminal["revision"] is None, terminal
         held = (await control(guest_run, "native-guest-weapon-inspect", target=guid))["native_guest_weapon"]
         assert held["actor_ammo"] == held["stored_ammo"] == terminal["after"], held
