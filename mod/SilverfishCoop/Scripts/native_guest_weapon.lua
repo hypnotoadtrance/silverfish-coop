@@ -256,13 +256,16 @@ local function allowed_ammo(kind, path)
     return path and weapon_profiles.ammo_options[kind] and weapon_profiles.ammo_options[kind][path]
 end
 
-local function loki_child(held, pawn, kind)
+local loki_class = "BlueprintGeneratedClass /Game/Classes/Weapons/Wep_Assets/Weapon_UnderBarrel_Loki.Weapon_UnderBarrel_Loki_C"
+
+function guest_weapon.loki_child(held, pawn, kind)
+    if not held or not held:IsValid() then return end
+    if not kind then kind = weapon_profiles.kinds[held:GetClass():GetFullName():match("^%S+ (%S+)$")] end
     local field = weapon_profiles.underbarrel[kind]
     local mount = field and held and held[field]
     local child = mount and mount:IsValid() and mount.ChildActor
     if child and child:IsValid() and not child:IsActorBeingDestroyed()
-        and child:GetClass():GetFullName() ==
-            "BlueprintGeneratedClass /Game/Classes/Weapons/Wep_Assets/Weapon_UnderBarrel_Loki.Weapon_UnderBarrel_Loki_C"
+        and child:GetClass():GetFullName() == loki_class
         and same(child.ParentWeapon, held) and same(child.User, pawn) and same(child.Player_Ref, pawn)
         and same(child:GetWorld(), pawn:GetWorld()) and valid_rounds(child, child.Ammo) then
         return child
@@ -271,7 +274,7 @@ end
 
 local function project_underbarrel(fields, pawn, held, kind)
     local rounds, path = math.tointeger(tonumber(fields[9])), fields[10]
-    local child = loki_child(held, pawn, kind)
+    local child = guest_weapon.loki_child(held, pawn, kind)
     if not child or not valid_rounds(child, rounds) or not allowed_ammo("bolt-action-shotgun-loki", path) then
         error("The co-op magazine no longer matches the selected underbarrel", 0)
     end
@@ -355,13 +358,18 @@ end
 local function play_reload(fields, state, phase)
     local area, name, guid, previous = fields[3], fields[4], fields[5], tonumber(fields[6])
     local save, pawn = save_scope.bind_guest(state, phase)
-    if #fields ~= 6 or not save or state.map ~= area or pawn:GetFullName() ~= name or pawn.Dead ~= false then return "" end
+    local underbarrel = #fields == 7 and fields[7] == "loki"
+    if (#fields ~= 6 and not underbarrel) or not save or state.map ~= area or pawn:GetFullName() ~= name
+        or pawn.Dead ~= false then return "" end
     local selected, kind = equipped_guid(pawn, save)
     local held = pawn.EquipedItem
     if not weapon_profiles.paths[kind] or selected ~= guid or not same(held:GetWorld(), state.world)
         or not same(held.User, pawn) or not same(held.Player_Ref, pawn)
-        or held:IsActorBeingDestroyed() or not valid_rounds(held, previous) or previous >= held.MagSize then return "" end
-    return require("native_avatar_weapon_view").local_reload(pawn, state.world, held, previous) or ""
+        or held:IsActorBeingDestroyed() then return "" end
+    local weapon = held
+    if underbarrel then weapon = guest_weapon.loki_child(held, pawn, kind) end
+    if not weapon or not valid_rounds(weapon, previous) or previous >= weapon.MagSize then return "" end
+    return require("native_avatar_weapon_view").local_reload(pawn, state.world, weapon, previous, held) or ""
 end
 
 function guest_weapon.preserve_magazine(pawn, save, projected, selected_slot)
@@ -537,7 +545,7 @@ function guest_weapon.rows(state, phase, status_row)
                 local mode = weapon_profiles.held_fire[profile] and held.HasSelectFire == true
                     and saved_mode(save, id, row[class_field])
                 local path = weapon_profiles.ammo_options[profile] and mounted_ammo_path(held)
-                local child = loki_child(held, pawn, profile)
+                local child = guest_weapon.loki_child(held, pawn, profile)
                 local shell = child and mounted_ammo_path(child)
                 local count = allowed_ammo("bolt-action-shotgun-loki", shell) and child.Ammo
                 return id, profile, amount, mode, allowed_ammo(profile, path) and path or nil,

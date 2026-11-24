@@ -222,14 +222,21 @@ local function npc_shooter(weapon)
     end
 end
 
+local loki_path = "/Game/Classes/Weapons/Wep_Assets/Weapon_UnderBarrel_Loki.Weapon_UnderBarrel_Loki_C"
+
 local function capture(context)
     local weapon = context:get()
-    local _, player = equipped_player(weapon)
+    if not valid(weapon) then return end
+    local path = weapon:GetClass():GetFullName():match("^BlueprintGeneratedClass (.+)$")
+    local receiver, player = equipped_player(weapon)
+    if not player and path == loki_path then
+        receiver, player = equipped_player(weapon.ParentWeapon)
+        if not player or not same(require("native_guest_weapon").loki_child(receiver, player), weapon) then return end
+    end
     local shooter = player or npc_shooter(weapon)
     if not shooter then return end
     local muzzle = weapon.Arrow_Muzzle
     if not valid(muzzle) or not same(muzzle:GetOwner(), weapon) then return end
-    local path = weapon:GetClass():GetFullName():match("^BlueprintGeneratedClass (.+)$")
     if not stock_weapon(path) then return end
     local position, rotation = muzzle:K2_GetComponentLocation(), muzzle:K2_GetComponentRotation()
     local scale, volume, pitch = weapon.MuzzleFlash_Scale, weapon.Fire_Volume, weapon.Fire_PitchShift
@@ -242,7 +249,7 @@ local function capture(context)
         local id = current.avatar.player_id({pawn = player, controller_object = player.Controller})
         if id then
             row[12] = id
-            last_round = {row = row, weapon = weapon, at = now}
+            last_round = {row = row, weapon = receiver, at = now}
         end
     end
     record(row)
@@ -453,6 +460,7 @@ end
 
 local function local_muzzle(pawn, path)
     local weapon = pawn.EquipedItem
+    if path == loki_path then weapon = require("native_guest_weapon").loki_child(weapon, pawn) end
     if not valid(weapon) or not same(weapon:GetWorld(), pawn:GetWorld()) or not same(weapon.User, pawn)
         or weapon:GetClass():GetFullName() ~= "BlueprintGeneratedClass " .. path then return end
     local muzzle = weapon.Arrow_Muzzle

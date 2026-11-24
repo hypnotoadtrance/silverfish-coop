@@ -5501,9 +5501,10 @@ class Client:
                 guid, previous = weapon.get("guid"), weapon.get("before")
                 if (pawn and weapon.get("map") == area and isinstance(guid, str)
                         and native_guest_weapon.GUID.fullmatch(guid) and type(previous) is int):
+                    view_mode = ("loki",) if weapon.get("status") == "underbarrel_equipped" else ()
                     try:
                         local_view = await self.bridge.command("native-guest-weapon-reload-view",
-                                                               area, pawn, guid, str(previous), timeout=1.5)
+                                                               area, pawn, guid, str(previous), *view_mode, timeout=1.5)
                     except (OSError, RuntimeError, TimeoutError) as error:
                         self.control.event("native_guest_reload_view_unavailable", reason=str(error))
                     else:

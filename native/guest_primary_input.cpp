@@ -1237,12 +1237,14 @@ namespace
             return result(lua, false, "native_guest_primary_fixture_value_unavailable");
         const FixtureMode fixture(FixtureDispatch::tap);
         const auto before = sequence;
+        const bool on_release = scope.item->action_on_release &&
+            !silverfish::native_guest_item::active_loki_barrel(pawn, scope.seat.held.Get());
         if (!toggle)
         {
             factory.dispatch(pawn, action, first, true);
             if (press.seat.pawn.Get() != pawn || !qualified(scope, Clock::now()))
                 return result(lua, false, "native_guest_primary_fixture_start_unverified");
-            if (scope.item->action_on_release && (sequence != before || count != 0))
+            if (on_release && (sequence != before || count != 0))
                 return result(lua, false, "native_guest_primary_fixture_fired_before_release");
         }
         factory.dispatch(pawn, action, scope.completed, false);

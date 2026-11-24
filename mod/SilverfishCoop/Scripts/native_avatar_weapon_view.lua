@@ -669,7 +669,7 @@ function view.reload_clip(weapon, previous_ammo)
     return weapon.Reload_Dry_Anim
 end
 
-function view.local_reload(pawn, world, held, previous_ammo)
+function view.local_reload(pawn, world, held, previous_ammo, receiver)
     local rig, clip = held.Wep_Skeli, view.reload_clip(held, previous_ammo)
     local clock = StaticFindObject(statics_type)
     if not valid(rig) or not same(rig:GetOwner(), held) or not valid(clip) or not valid(clock)
@@ -679,7 +679,7 @@ function view.local_reload(pawn, world, held, previous_ammo)
     if not valid(mesh) or not same(clip.Skeleton, mesh.Skeleton) or length <= 0 or length > 5 then return end
     clear_local_reload()
     if held.Reload_CancelsScope == true and pawn.Aiming == true then pawn:CancelScope() end
-    local_reload = {pawn = pawn, world = world, held = held, rig = rig,
+    local_reload = {pawn = pawn, world = world, held = receiver or held, rig = rig,
         previous_tick = rig.VisibilityBasedAnimTickOption, expires = clock:GetRealTimeSeconds(world) + length}
     rig.VisibilityBasedAnimTickOption = 0
     -- Let the owning weapon advance its stock animation and dispatch its notifies.

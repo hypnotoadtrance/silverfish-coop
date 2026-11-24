@@ -5,7 +5,7 @@
         local guid, kind = equipped_guid(pawn, pawn.Save)
         if guid ~= fields[3] then return "waiting" end
         local held = pawn.EquipedItem
-        local child = loki_child(held, pawn, kind)
+        local child = guest_weapon.loki_child(held, pawn, kind)
         if not child then return "waiting" end
         if fields[4] == "toggle" then
             held:ToggleMode(true)
