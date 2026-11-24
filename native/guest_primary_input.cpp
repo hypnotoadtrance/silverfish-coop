@@ -685,7 +685,7 @@ namespace
             }
         }
         if (next.completed.function.Get() && !next.seat.host && held_enabled() &&
-            silverfish::guest_weapon_profiles::stock_automatic(next.item->kind))
+            silverfish::guest_weapon_profiles::stock_held_fire(next.item->kind))
             bind_mapped_input(next);
         return next.completed.function.Get() ? std::string_view{} : "stock_guest_primary_wrappers_unavailable";
     }
@@ -717,10 +717,10 @@ namespace
     {
         // Keep the receipt route open after a mode change so it can drain a cancellation.
         return scope.item && !scope.seat.host && held_enabled() &&
-            silverfish::guest_weapon_profiles::stock_automatic(scope.item->kind);
+            silverfish::guest_weapon_profiles::stock_held_fire(scope.item->kind);
     }
 
-    bool stock_automatic_selected()
+    bool stock_held_fire_selected()
     {
         auto* receiver = scope.seat.held.Get();
         if (!scope.seat.mirrored || !live(receiver)) return false;
@@ -807,7 +807,7 @@ namespace
     {
         if (!held.id) return;
         if (now >= held.expires || !qualified(scope, now) || !can_act(scope.seat) ||
-            (scoped_held_fire() && !stock_automatic_selected()) ||
+            (scoped_held_fire() && !stock_held_fire_selected()) ||
             (held.proof != HeldProof::fixture && !local_game_focused()))
         {
             stop_held(HeldEdge::cancel, now);
@@ -923,7 +923,7 @@ namespace
         press = {scope.seat, scope.action, scope.completed, now + release_lease, active_generation};
         if (!can_act(scope.seat)) return;
         if (fixture_dispatch != FixtureDispatch::tap &&
-            ((scoped_held_fire() && stock_automatic_selected()) || scoped_melee_edges()))
+            ((scoped_held_fire() && stock_held_fire_selected()) || scoped_melee_edges()))
         {
             begin_held(now);
             return;
@@ -1244,7 +1244,7 @@ namespace
         check_held(now);
         discard_held(now);
         const bool starts = edge == "press";
-        if (starts && !melee_edges && !stock_automatic_selected())
+        if (starts && !melee_edges && !stock_held_fire_selected())
             return result(lua, false, "native_guest_held_fire_fixture_requires_automatic_mode");
         if (held_count || count || fixture_dispatch != FixtureDispatch::none ||
             (starts ? held.id != 0 || (press.seat.pawn.Get() && now < press.expires) :

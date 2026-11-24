@@ -130,14 +130,15 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
                 self.assertEqual(profile.magazine, guest_weapon_profiles.Magazine(
                     24, 0, 0.1, require_default_payload=True, ammo=ammo, reload_first_stack=True))
 
-    def test_held_fire_registry_includes_large_automatic_magazines_and_excludes_burst_and_pellets(self):
-        magazines = guest_weapon_profiles.STOCK_AUTOMATIC_MAGAZINES
+    def test_held_fire_registry_includes_large_automatic_and_burst_magazines(self):
+        magazines = guest_weapon_profiles.STOCK_HELD_FIRE_MAGAZINES
         self.assertEqual(magazines["bizon-01"].capacity, 64)
         self.assertEqual(magazines["light-ar-01"].capacity, 24)
         self.assertEqual(magazines["smg-standard"].capacity, 30)
-        self.assertNotIn("smg-03", magazines)
+        self.assertEqual(magazines["smg-03"].burst_length, 3)
+        self.assertNotIn("rusty-pistol", magazines)
         self.assertNotIn("sg-71-a", magazines)
-        self.assertEqual(guest_weapon_profiles.MAX_AUTOMATIC_ROUNDS, 64)
+        self.assertEqual(guest_weapon_profiles.MAX_HELD_FIRE_ROUNDS, 64)
 
 
 class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):

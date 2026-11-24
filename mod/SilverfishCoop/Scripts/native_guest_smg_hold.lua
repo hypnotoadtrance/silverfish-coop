@@ -26,7 +26,7 @@ local function check(ok, status, serial, before, after, rounds, projectiles)
     local dirty = type(status) == "string" and status:match("^mutation_unverified_guest_smg_hold_")
     if (ok ~= true and not dirty) or (ok == true and not states[status])
         or not math.tointeger(serial) or serial < 1 or serial >= 2 ^ 53
-        or not math.tointeger(before) or before < 1 or before > weapon_profiles.max_automatic_rounds
+        or not math.tointeger(before) or before < 1 or before > weapon_profiles.max_held_fire_rounds
         or not math.tointeger(after) or after < 0 or after > before
         or not math.tointeger(rounds) or rounds ~= before - after or projectiles ~= rounds then
         error("mutation_unverified_guest_smg_hold_abi", 0)

@@ -6,6 +6,7 @@ import uuid
 
 from tools.silverfish import native_guest_ui, native_smg_hold, runtime
 from tools.silverfish.control import submit
+from tools.silverfish.guest_weapon_profiles import STOCK_HELD_FIRE_MAGAZINES
 from tools.silverfish.travel import OBSERVATORY
 
 from portable_guest_world_start import resident_events, wait_resident_status
@@ -13,6 +14,11 @@ from portable_guest_world_start import resident_events, wait_resident_status
 
 KIND = "smg-standard"
 ROUNDS = 7
+RECEIVERS = {
+    KIND: ("standard", ROUNDS, "stock_held_queue"),
+    "bizon-01": ("bizon", 64, "stock_bizon_hold"),
+    "smg-03": ("burst", ROUNDS, "stock_burst_hold"),
+}
 FIXTURE = "native_guest_held_fire_fixture"
 PUBLICATION = "native_guest_primary_publication"
 TERMINAL = "native_guest_smg_hold_accepted"
@@ -50,8 +56,8 @@ async def replay_prior_selection(guest, character, pawn, guid, contents, source_
     return {"captured_slot": source_slot, "selected_slot": target_slot, "held_guid": guid, "receipt": receipt}
 
 
-async def verify_stock_held_queue(host, guest, pawn, probe, *, stale_quick_slot=False, bizon=False):
-    kind, load = ("bizon-01", 64) if bizon else (KIND, ROUNDS)
+async def verify_stock_held_queue(host, guest, pawn, probe, *, stale_quick_slot=False, kind=KIND):
+    fixture_name, load, check_name = RECEIVERS[kind]
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_frame = await wait_resident_status(host_run, lambda status:
         status.get("local_bridge") == "memory" and status.get("game", {}).get("map") == OBSERVATORY)
@@ -109,7 +115,7 @@ async def verify_stock_held_queue(host, guest, pawn, probe, *, stale_quick_slot=
                     return edges, terminals[0]
                 await asyncio.sleep(.04)
 
-    guid = await probe(host.bridge, "portable-held-queue", f"seed\t{pawn}\t" + ("bizon" if bizon else "standard"))
+    guid = await probe(host.bridge, "portable-held-queue", f"seed\t{pawn}\t{fixture_name}")
     assert re.fullmatch(r"[0-9A-F]{32}", guid), guid
     prior = await capture_prior_selection(host, pawn, character, previous["guid"], guid) if stale_quick_slot else None
 
@@ -133,7 +139,7 @@ async def verify_stock_held_queue(host, guest, pawn, probe, *, stale_quick_slot=
                 mode = await probe(guest.bridge, "portable-held-queue", "auto" + selector)
                 assert mode == "auto", mode
         else:
-            assert bizon and semi == "fixed-automatic", semi
+            assert kind != KIND and semi == "fixed-automatic", semi
             mode = semi
         pressed = (await control(guest_run, native_smg_hold.LOCAL_FIXTURE, target="press", milliseconds=400))[FIXTURE]
         assert (pressed["map"], pressed["pawn"], pressed["guid"], pressed["edge"], pressed["sequence"]) == (
@@ -154,6 +160,9 @@ async def verify_stock_held_queue(host, guest, pawn, probe, *, stale_quick_slot=
         assert (terminal["map"], terminal["pawn"], terminal["character_id"], terminal["status"], terminal["before"]) == (
             OBSERVATORY, pawn, character, "released", load), terminal
         assert 1 < terminal["rounds"] == terminal["projectiles"] == load - terminal["after"] < load, terminal
+        burst_length = STOCK_HELD_FIRE_MAGAZINES[kind].burst_length
+        if burst_length:
+            assert terminal["rounds"] == burst_length, terminal
         assert terminal["revision"] is None, terminal
         held = (await control(guest_run, "native-guest-weapon-inspect", target=guid))["native_guest_weapon"]
         assert held["actor_ammo"] == held["stored_ammo"] == terminal["after"], held
@@ -168,7 +177,7 @@ async def verify_stock_held_queue(host, guest, pawn, probe, *, stale_quick_slot=
                  "fire_mode": {"semi_hold_blocked": semi == "semi", "restored": mode}, "host_terminal": terminal}
         if stale_reply:
             proof["stale_quick_slot_reply"] = stale_reply
-        return {("stock_bizon_hold" if bizon else "stock_held_queue"): proof}
+        return {check_name: proof}
     finally:
         await stock_select(previous["guid"])
         await scoped(previous["guid"], previous["kind"])

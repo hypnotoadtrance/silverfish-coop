@@ -173,13 +173,13 @@ FIREARMS = (
 
 # Registered ordinary magazines use the stock primary-ammunition transaction.
 TAKE_AMMO_MAGAZINES = {weapon.path: weapon.magazine for weapon in FIREARMS if weapon.magazine}
-# The stock full-automatic graph uses zero BurstLength and one projectile per round.
+# The stock graph cycles on a held trigger for automatic and multi-round burst receivers.
 # The native input and authority adapters still verify the live receiver and stock functions.
-STOCK_AUTOMATIC_MAGAZINES = {
+STOCK_HELD_FIRE_MAGAZINES = {
     weapon.kind: magazine for weapon in FIREARMS
-    if (magazine := weapon.magazine) and magazine.burst_length == 0 and magazine.ammo.projectile_count == 1
+    if (magazine := weapon.magazine) and magazine.burst_length != 1 and magazine.ammo.projectile_count == 1
 }
-MAX_AUTOMATIC_ROUNDS = max(magazine.capacity for magazine in STOCK_AUTOMATIC_MAGAZINES.values())
+MAX_HELD_FIRE_ROUNDS = max(magazine.capacity for magazine in STOCK_HELD_FIRE_MAGAZINES.values())
 BOLT_ACTION_UNLOAD_CAPACITY = 5
 BOLT_ACTION_UNLOADS = frozenset(weapon.path for weapon in FIREARMS if weapon.kind in {"nagant-scoped", "obrez"})
 BOLT_ACTION_AMMO = frozenset(ammo.item_path for ammo in (THIRTY_06_FMJ, THIRTY_06_INCENDIARY))

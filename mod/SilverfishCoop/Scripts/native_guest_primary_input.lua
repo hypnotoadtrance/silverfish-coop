@@ -98,7 +98,7 @@ end
 
 local function drain_held(current, address)
     local take = embedded and SilverfishPeekNativeGuestHeldFireIntent or SilverfishTakeNativeGuestHeldFireIntent
-    if not held_event_path or not weapon_profiles.automatic[binding.kind] or type(take) ~= "function" then
+    if not held_event_path or not weapon_profiles.held_fire[binding.kind] or type(take) ~= "function" then
         return 0
     end
     local emitted, last = 0, nil
@@ -117,7 +117,7 @@ local function drain_held(current, address)
 end
 
 local function sample_held_view(current, address)
-    if not embedded or not held_enabled or not weapon_profiles.automatic[current.kind]
+    if not embedded or not held_enabled or not weapon_profiles.held_fire[current.kind]
         or type(SilverfishSampleNativeGuestHeldAim) ~= "function" then return end
     local stroke, x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz, actor, hx, hy, hz = SilverfishSampleNativeGuestHeldAim(address)
     if not valid_sequence(stroke) then return end
@@ -290,7 +290,7 @@ function primary.command(fields, state, phase)
     if action == "native-guest-held-fire-fixture" then
         local edge, duration = fields[4], math.tointeger(fields[5])
         if not held_enabled or not fixtures or (#fields ~= 4 and #fields ~= 5) or fields[3] ~= current.name
-            or not same_context(current, binding) or not weapon_profiles.automatic[binding.kind] or (edge ~= "press" and edge ~= "release")
+            or not same_context(current, binding) or not weapon_profiles.held_fire[binding.kind] or (edge ~= "press" and edge ~= "release")
             or (#fields == 5 and (edge ~= "press" or not duration or duration < 300 or duration > 1800
                 or type(ExecuteInGameThreadWithDelay) ~= "function"))
             or type(SilverfishProbeNativeGuestHeldFire) ~= "function" then
@@ -345,19 +345,19 @@ function primary.command(fields, state, phase)
 
     local guid, kind, extra = fields[5], fields[6], fields[7]
     local camera = kind == "camera"
-    local mode = weapon_profiles.automatic[kind] and extra
+    local mode = weapon_profiles.held_fire[kind] and extra
     local melee = melee_kinds[kind]
     if #fields ~= ((camera or mode) and 7 or 6) or fields[3] ~= current.map or fields[4] ~= current.name or not valid_guid(guid)
         or (camera and (current.map ~= camera_map or extra ~= camera_quest))
         or (mode and mode ~= "semi" and mode ~= "auto")
         or (not camera and not melee and kind ~= "blowtorch" and kind ~= "crowbar" and kind ~= "spade"
             and not weapon_profiles.paths[kind])
-        or (held_enabled and weapon_profiles.automatic[kind] and (type(SilverfishTakeNativeGuestHeldFireIntent) ~= "function"
+        or (held_enabled and weapon_profiles.held_fire[kind] and (type(SilverfishTakeNativeGuestHeldFireIntent) ~= "function"
             or type(SilverfishReadNativeGuestHeldFire) ~= "function"))
         or type(SilverfishSetNativeGuestPrimaryScope) ~= "function"
         or (embedded and (type(SilverfishEnqueueLocalBridgeInput) ~= "function"
             or type(SilverfishPeekNativeGuestPrimaryIntent) ~= "function" or type(SilverfishCommitNativeGuestPrimaryInput) ~= "function"
-            or (held_enabled and weapon_profiles.automatic[kind] and type(SilverfishPeekNativeGuestHeldFireIntent) ~= "function")))
+            or (held_enabled and weapon_profiles.held_fire[kind] and type(SilverfishPeekNativeGuestHeldFireIntent) ~= "function")))
         or type(SilverfishTakeNativeGuestPrimaryIntent) ~= "function" then
         primary.reset()
         error("The authenticated stock equipment selection is unavailable", 0)
@@ -397,7 +397,7 @@ function primary.rows(state, phase, status_row)
         rows[#rows + 1] = status_row("native-guest-primary-fixture", current.map, current.name, fixture_proof.guid,
             fixture_proof.sequence, fixture_proof.wrappers)
     end
-    if held_enabled and weapon_profiles.automatic[binding.kind] and can_use(current)
+    if held_enabled and weapon_profiles.held_fire[binding.kind] and can_use(current)
         and type(SilverfishReadNativeGuestHeldFire) == "function" then
         local address = current.pawn:GetAddress()
         local stroke, owner, guid, proof = SilverfishReadNativeGuestHeldFire(address)

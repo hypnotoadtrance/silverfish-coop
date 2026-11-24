@@ -2117,7 +2117,7 @@ namespace
         if (!inventory.item) return hold_result(lua, false, "native_guest_smg_hold_exact_weapon_required");
         context.weapon = qualified_weapon(inventory.row_class(inventory.item));
         const auto* profile = stock_magazine(context.weapon);
-        if (!profile || !profiles::stock_automatic(profile->kind))
+        if (!profile || !profiles::stock_held_fire(profile->kind))
             return hold_result(lua, false, "native_guest_smg_hold_exact_weapon_required");
         auto* actor = equipped(context, inventory);
         auto* action = find<Unreal::UFunction>(primary_path);
