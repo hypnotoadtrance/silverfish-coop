@@ -43,7 +43,7 @@ local function census(state, phase)
     if not valid(statics) or not valid(class) then return end
     local output = {}
     statics:GetAllActorsOfClass(state.world, class, output)
-    local actors, ids = {}, {}
+    local actors, addresses, ids = {}, {}, {}
     for _, actor in ipairs(output.OutActors or output) do
         if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
         -- Client copies of authored non-replicating actors can have a simulated role.
@@ -57,13 +57,19 @@ local function census(state, phase)
                 if not actor_id(id) or actors[id] or #ids == max_actors then return end
                 actors[id] = {actor = actor, hidden = actor.bHidden == true,
                     collision = actor:GetActorEnableCollision(), ticking = actor:IsActorTickEnabled()}
+                addresses[actor:GetAddress()] = actors[id]
                 ids[#ids + 1] = id
             end
         end
     end
     table.sort(ids)
-    visit = {actors = actors, ids = ids, phase = phase, world = state.world, map = state.map, statics = statics}
+    visit = {actors = actors, addresses = addresses, ids = ids, phase = phase, world = state.world, map = state.map, statics = statics}
     return visit
+end
+
+function props.ended(address, destroyed)
+    local entry = destroyed and visit and visit.addresses[address]
+    if entry then entry.ended = true end
 end
 
 function props.rows(state, phase, row)
@@ -72,7 +78,8 @@ function props.rows(state, phase, row)
     if phase == "connected" then return row("native-destructible-view", current.map, current.epoch or "-") end
     local ids = {}
     for _, id in ipairs(current.ids) do
-        if live(current.actors[id].actor) then ids[#ids + 1] = id end
+        local entry = current.actors[id]
+        if not entry.ended and live(entry.actor) then ids[#ids + 1] = id end
     end
     local roster = #ids > 0 and table.concat(ids, "|") or "-"
     if #roster <= max_roster_bytes then return row("native-destructible-roster", current.map, roster) end

@@ -238,6 +238,7 @@ function fields.start(role)
             pyrogeist.ended(address)
             canisters.ended(address, destroyed)
             fixed.ended(address)
+            destructibles.ended(address, destroyed)
         end)
     end
 end
