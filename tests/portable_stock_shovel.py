@@ -63,13 +63,13 @@ async def verify_stock_shovel_reconnect(host, guest, evidence):
     for source, destination in ((CROSSROADS, LAKE), (LAKE, BLACK_MARKET)):
         route, = [row for row in AUTHORED_ROUTES if (row.source, row.destination) == (source, destination)]
         if route.kind == "door":
-            for owner in ("host", character):
+            for owner in ("host", "guest"):
                 await action(host_run, "native-door-position", target=owner,
                              exit_position="near", entrance=route.entrance)
             await action(host_run, "native-door-probe", target="host", entrance=route.entrance)
         else:
             options = {"entrance": route.entrance, "exit_actor": route.actor}
-            for owner in ("host", character):
+            for owner in ("host", "guest"):
                 await action(host_run, "native-exit-position", target=owner, exit_position="near", **options)
             await action(host_run, "native-exit-position", target="host", exit_position="inside", **options)
         await wait_resident_status(host_run, lambda frame:

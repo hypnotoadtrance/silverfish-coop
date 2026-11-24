@@ -23,13 +23,13 @@ async def verify_stock_eye_stacks(host, guest, _pawn):
     for source, destination in zip(areas, areas[1:]):
         route, = [row for row in AUTHORED_ROUTES if (row.source, row.destination) == (source, destination)]
         if route.kind == "door":
-            for owner in ("host", character):
+            for owner in ("host", "guest"):
                 await place("native-door-position", target=owner, exit_position="near", entrance=route.entrance)
             entry = await place("native-door-probe", target="host", entrance=route.entrance)
             assert entry["native_door"]["decision"] in {"host_opening", "travel_requested"}, entry
         else:
             fields = {"entrance": route.entrance, "exit_actor": route.actor}
-            for owner in ("host", character):
+            for owner in ("host", "guest"):
                 await place("native-exit-position", target=owner, exit_position="near", **fields)
             await place("native-exit-position", target="host", exit_position="inside", **fields)
         arrival = await wait_resident_status(host_run, lambda frame:
