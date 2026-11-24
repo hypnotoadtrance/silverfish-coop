@@ -11,7 +11,12 @@
         local entry = assert(census(state, phase)[name], "the stock warehouse device is missing")
         local mode = fields[3]
         if radio and mode == "playback" then
-            return entry.actor.MediaPlayer:IsPlaying() and "playing" or "silent"
+            for _, player in ipairs(FindAllOf("MediaPlayer") or {}) do
+                if valid(player) and same(player:GetOuter(), entry.actor) then
+                    return player:IsPlaying() and "playing" or "silent"
+                end
+            end
+            return "no media player"
         elseif mode == "host" and phase == "hosting" then
             entry.actor:SendInteractionToActor(state.local_pawn.pawn, entry.box)
             return "host pressed"

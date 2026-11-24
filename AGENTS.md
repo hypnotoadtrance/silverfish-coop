@@ -10,4 +10,6 @@ Group related gameplay changes before running live tests. Use a small set of rep
 
 For each candidate, start one private host and guest and run compatible checks in sequence on those same processes. Reset or verify each check's starting state and keep its result and timing. Use a fresh private session for clean-start, save-reopen, transport setup, or other checks that depend on their starting state. The portable smoke runner supports combining `--stock-campfire`, `--resident-weapon-cues`, and `--stock-food`. Select only the checks affected by the change.
 
+When related checks span maps, start one campaign and arrange the checks in travel order. The portable smoke runner can combine `--stock-host-prop-observer` and `--stock-warehouse-switch` from Observatory through Tutorial Dock. Use the recorded results to rerun the affected check after a fix.
+
 Reserve the full automated suite for major releases or when the user explicitly requests it. Leave in-depth foreground and two-PC playtesting to the players. In release handoffs, identify the behaviors to try, the expected results, and which symptoms or details to report.

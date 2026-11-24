@@ -134,7 +134,6 @@ end
 local function project(entry, powered, angles, lights)
     local actor, lever = entry.actor, entry.lever
     if entry.radio then
-        if not valid(actor.MediaPlayer) or not valid(actor.MediaSound) then error("stock_switch_unavailable", 0) end
         if actor.Powered ~= powered then actor:Toggle_Power(powered) end
         if actor.Powered ~= powered then error("stock_switch_toggle_unverified", 0) end
         return

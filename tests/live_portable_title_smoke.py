@@ -1399,12 +1399,21 @@ async def verify_warehouse_switch(host: Seat, guest: Seat, pawn: str, *, radio: 
 
     async def playback(powered):
         expected = "playing" if powered else "silent"
-        async with asyncio.timeout(8):
-            while True:
-                reads = await asyncio.gather(*(seat.bridge.command(fixture, "playback") for seat in (host, guest)))
-                if all(reply["ack"]["message"] == expected for reply in reads):
-                    return expected
-                await asyncio.sleep(.12)
+        observed = {}
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            for name, seat in (("host", host), ("guest", guest)):
+                if observed.get(name) == expected:
+                    continue
+                try:
+                    reply = await seat.bridge.command(fixture, "playback", timeout=.8, update_status=False)
+                except TimeoutError:
+                    continue
+                observed[name] = reply["ack"]["message"]
+            if observed == {"host": expected, "guest": expected}:
+                break
+            await asyncio.sleep(.12)
+        return observed
 
     current = await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("native_zone", {}).get("state") == "ready")
     if current["game"].get("map") != dock:
@@ -1451,6 +1460,9 @@ async def verify_warehouse_switch(host: Seat, guest: Seat, pawn: str, *, radio: 
               "guest_returned_to_initial": True, "checkpoint_unchanged": True}
     if radio:
         result["media_both_seats"] = [host_media, guest_media]
+        result["media_verified"] = all(observed == dict.fromkeys(("host", "guest"), "playing" if active else "silent")
+                                       for observed, active in ((host_media, host_flip["powered"]),
+                                                                (guest_media, initial["powered"])))
     return {f"stock_warehouse_{device}": result}
 
 
@@ -4340,7 +4352,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     resident_campaigns = {}
     storm_trial = StockStormTrial(portable_probe_command) if stock_storm_ambience else None
     weapon_campaign = "tutorial_dock_combat" if tutorial_dock_combat else "observatory"
-    prop_campaign = "tutorial_dock" if stock_bandage_revisit or stock_warehouse_switch or stock_bottle else "observatory"
+    dock_world_checks = stock_bandage_revisit or stock_warehouse_switch or stock_warehouse_board or stock_bottle
+    prop_campaign = "tutorial_dock" if dock_world_checks else "observatory"
     if resident_held_queue:
         from portable_held_queue import verify_stock_held_queue
     else:
