@@ -1437,7 +1437,6 @@ namespace
 
     constexpr std::uint8_t visibility_trace = 1;
     constexpr std::uint8_t projectile_trace = 2; // Stock projectile MovementUpdate.
-    constexpr double contact_trace_range = 5000.0;
     constexpr std::size_t max_contact_barriers = 3;
 
     AimVector difference(const AimVector& left, const AimVector& right)
@@ -1455,12 +1454,25 @@ namespace
         return vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2];
     }
 
-    std::optional<AimContact> guest_aim_point(Unreal::UObject* pawn, Unreal::UObject* weapon,
-                                             const AimVector& eye, const AimVector& forward)
+    double stock_sight_range(Unreal::UObject* pawn)
     {
         auto* range = field<Unreal::FDoubleProperty>(pawn, STR("SightRange"));
         const double distance = range ? range->GetPropertyValueInContainer(pawn) : 0.0;
-        if (!std::isfinite(distance) || distance <= 0.0) return {};
+        return std::isfinite(distance) && distance > 0.0 ? distance : 0.0;
+    }
+
+    double projectile_real(Unreal::UObject* projectile, const Unreal::TCHAR* name)
+    {
+        auto* property = field<Unreal::FNumericProperty>(projectile, name);
+        return property && property->IsFloatingPoint()
+            ? property->GetFloatingPointPropertyValue(property->ContainerPtrToValuePtr<void>(projectile)) : 0.0;
+    }
+
+    std::optional<AimContact> guest_aim_point(Unreal::UObject* pawn, Unreal::UObject* weapon,
+                                             const AimVector& eye, const AimVector& forward)
+    {
+        const auto distance = stock_sight_range(pawn);
+        if (distance <= 0.0) return {};
         return trace_shot(pawn, eye, ahead(eye, forward, distance), visibility_trace, std::array{weapon});
     }
 
@@ -1484,7 +1496,14 @@ namespace
         if (!origin || !velocity) return;
         const double speed = std::sqrt(squared_length(*velocity));
         const double distance = std::sqrt(squared_length(difference(*view.contact, *origin)));
-        if (!std::isfinite(speed) || speed < 1 || distance < 1 || distance > contact_trace_range) return;
+        const auto remaining_life = projectile_real(projectile, STR("Life"));
+        const auto gravity = std::abs(projectile_real(projectile, STR("Gravity")));
+        // Bound the flight by the stock muzzle speed, acceleration and lifetime.
+        // The projectile still performs its own collision, drag and damage checks.
+        const auto sight = stock_sight_range(pawn);
+        const auto flight_range = (speed + .5 * gravity * remaining_life) * remaining_life;
+        if (speed < 1 || remaining_life <= 0.0 || !std::isfinite(flight_range) || !std::isfinite(distance) ||
+            sight <= 0.0 || distance < 1 || distance > std::min(sight, flight_range)) return;
         const AimVector direction{(*velocity)[0] / speed, (*velocity)[1] / speed, (*velocity)[2] / speed};
         if (squared_length(difference(ahead(*origin, direction, distance), *view.contact)) > 75 * 75) return;
 
@@ -3693,7 +3712,7 @@ silverfish::native_guest_item::ShotView silverfish::native_guest_item::capture_s
                 const auto ray = difference(aim->point, *view.muzzle);
                 const double span = std::sqrt(squared_length(ray));
                 // Reuse the stock aim point to trace from the actual muzzle on the projectile channel.
-                if (std::isfinite(span) && span > 1 && span <= contact_trace_range)
+                if (std::isfinite(span) && span > 1)
                 {
                     // Visibility can first hit the capsule, in front of the projectile's hit on the mesh.
                     const auto end = ahead(aim->point, ray, 100.0 / span);

@@ -2822,6 +2822,37 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         exclusions = witness.rsplit(";", 1)[-1].split(",")
         assert second_barrier in exclusions and host_collision in exclusions, (second_barrier, witness)
         evidence[key]["host_only_barriers"] = [host_collision, second_barrier]
+    if pellets == 1:
+        eye, target, barrier, distant_health = (await command(host, "dock-garage-long-stage")).split(";")
+        distant_health = float(distant_health)
+        aim = f"dock-garage-aim\t{eye};{target}"
+        assert await asyncio.gather(*(command(seat, f"dock-garage-long-block\t{barrier}") for seat in (host, guest))) == [
+            "blocked", "blocked",
+        ]
+        assert await command(host, aim) == await command(guest, aim) == "blocked"
+        blocked, after_blocked = await shoot(distant_health, should_hit=False)
+        assert not blocked["native_guest_trigger_view"].get("contact"), blocked
+        assert await command(guest, f"dock-garage-long-clear\t{barrier}") == "clear"
+        observed = "unavailable"
+        try:
+            async with asyncio.timeout(8):
+                while (observed := await command(guest, aim)) != "worker":
+                    await asyncio.sleep(.05)
+        except TimeoutError as error:
+            raise AssertionError(dict(distant_guest_trace=observed, firing_position=eye, worker_position=target)) from error
+        assert await command(host, aim) == "blocked"
+        assert await command(host, f"dock-garage-projectile-trace\t{eye};{target}") == host_collision
+        accepted, after_hit = await shoot(after_blocked, should_hit=True, contact_required=True)
+        geometry = accepted["native_guest_trigger_view"]
+        distance = math.dist(tuple(map(float, geometry["muzzle"].split(","))),
+                             tuple(map(float, geometry["contact"]["point"].split(","))))
+        assert distance > 5000 and after_hit > 0, (distance, after_hit, accepted)
+        witness = await command(host, "dock-garage-shot-witness")
+        assert host_collision in witness.rsplit(";", 1)[-1].split(","), witness
+        evidence["tutorial_dock_distant_contact"] = {
+            "meters": round(distance / 100, 2), "health": [distant_health, after_blocked, after_hit],
+            "blocked_shot": blocked, "accepted_shot": accepted, "host_only_barrier": host_collision,
+        }
     return evidence
 
 

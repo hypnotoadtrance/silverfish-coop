@@ -929,6 +929,12 @@ end
 
 local function restore_garage_fixture()
     if garage_view and valid(garage_view.extra_barrier) then garage_view.extra_barrier:K2_DestroyActor() end
+    if garage_view and garage_view.long_shot and valid(garage_view.worker) and garage_view.worker.Alive then
+        local worker, saved = garage_view.worker, garage_view.long_shot
+        worker.Health = saved.health
+        worker:K2_SetActorLocation(saved.position, false, {}, true)
+        worker:ForceNetUpdate()
+    end
     if garage_aim then
         local camera, muzzle = garage_aim.camera, garage_aim.muzzle
         if valid(camera) then camera:K2_SetRelativeLocation(garage_aim.camera_location, false, {}, true) end
@@ -940,6 +946,38 @@ local function restore_garage_fixture()
     end
     garage_view, garage_door, garage_aim = nil, nil, nil
     return "restored"
+end
+
+local function stage_long_garage_shot(world)
+    assert(garage_view and garage_door and valid(garage_view.worker) and not garage_view.long_shot)
+    local _, mesh = stock_garage(world)
+    local bounds, box = {}, {}
+    trace:GetComponentBounds(mesh, bounds, box, {})
+    local center, extent = bounds.Origin or bounds, box.BoxExtent or box
+    local origin = mesh:K2_GetComponentLocation()
+    local height = 4000
+    local blocker = {X=origin.X,Y=origin.Y,Z=origin.Z+height}
+    local axis = extent.X < extent.Y and "X" or "Y"
+    local low = {X=center.X,Y=center.Y,Z=center.Z+height}
+    local target = {X=low.X,Y=low.Y,Z=low.Z}
+    low[axis], target[axis] = center[axis] - 310, center[axis] + 5600
+    local worker = garage_view.worker
+    assert(worker.Alive and worker.Health > 0)
+    garage_view.long_shot = {position=worker:K2_GetActorLocation(), health=worker.Health}
+    worker.Health = 120
+    assert(worker:K2_SetActorLocation(target, false, {}, true), "could not stage a distant stock worker")
+    worker:ForceNetUpdate()
+    return table.concat({point_string(low), point_string(target), point_string(blocker), tostring(worker.Health)}, ";")
+end
+
+local function relocate_garage_barrier(world, destination, clear)
+    assert(garage_door)
+    local _, mesh = stock_garage(world)
+    local point = position(destination)
+    if clear then point.Z = point.Z + 1000 end
+    mesh:K2_SetWorldLocation(point, false, {}, true)
+    assert(math.abs(mesh:K2_GetComponentLocation().Z - point.Z) < 1)
+    return clear and "clear" or "blocked"
 end
 
 local function stage_second_garage_barrier(world, specification)
@@ -1566,6 +1604,11 @@ local function run(action, actor_path)
     elseif action == "dock-garage-second-barrier" then
         assert(host and garage_door)
         return stage_second_garage_barrier(world, actor_path)
+    elseif action == "dock-garage-long-stage" then
+        assert(host)
+        return stage_long_garage_shot(world)
+    elseif action == "dock-garage-long-block" or action == "dock-garage-long-clear" then
+        return relocate_garage_barrier(world, actor_path, action == "dock-garage-long-clear")
     elseif action == "dock-garage-restore" then
         return restore_garage_fixture()
     elseif action == "dock-garage-aim" then
