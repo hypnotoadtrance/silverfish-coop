@@ -1,4 +1,5 @@
 #include "guest_primary_input.hpp"
+#include "guest_item.hpp"
 #include "guest_melee.hpp"
 #include "guest_weapon_registry.hpp"
 
@@ -232,7 +233,7 @@ namespace
     };
 
     struct Receipt { std::uint64_t sequence{}; Clock::time_point expires{}; };
-    struct TapReceipt : Receipt { std::array<double, 3> direction{}; };
+    struct TapReceipt : Receipt { silverfish::native_guest_item::ShotView view{}; };
     enum class HeldEdge { press, release, cancel };
     enum class HeldProof { none, mapped_key, edge_window, stock_melee_edges, fixture };
     enum class FixtureDispatch { none, tap, held };
@@ -837,22 +838,6 @@ namespace
     static_assert(select_started_route(true, false) == StartedRoute::authorized);
     static_assert(select_started_route(true, true) == StartedRoute::authorized);
 
-    std::array<double, 3> tap_direction(U::UObject* pawn)
-    {
-        auto* camera = object_field(pawn, STR("Camera"));
-        auto* function = find<U::UFunction>(STR("/Script/Engine.SceneComponent:GetForwardVector"));
-        auto* value = function ? U::CastField<U::FStructProperty>(function->GetReturnProperty()) : nullptr;
-        std::array<double, 3> direction{};
-        if (!live(camera) || camera->GetOuterPrivate() != pawn ||
-            camera->GetClassPrivate() != find<U::UClass>(STR("/Script/Engine.CameraComponent")) ||
-            !function || !function->HasAnyFunctionFlags(U::FUNC_Native) || function->GetNumParms() != 1 ||
-            function->GetParmsSize() != sizeof(direction) || !value || value->GetOffset_Internal() != 0 ||
-            value->GetStruct().Get() != find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector"))) return {};
-        camera->ProcessEvent(function, direction.data());
-        const auto length = std::hypot(direction[0], direction[1], direction[2]);
-        return std::isfinite(length) && std::abs(length - 1.0) < .001 ? direction : std::array<double, 3>{};
-    }
-
     void queue_tap(Clock::time_point now)
     {
         if (sequence == max_sequence) return;
@@ -862,7 +847,7 @@ namespace
         receipt = {{++sequence, now + receipt_lifetime}, {}};
         if (std::ranges::find(silverfish::guest_weapon_profiles::firearms, scope.item->kind, &Equipment::kind)
             != silverfish::guest_weapon_profiles::firearms.end())
-            receipt.direction = tap_direction(scope.seat.pawn.Get());
+            receipt.view = silverfish::native_guest_item::capture_shot_view(scope.seat.pawn.Get(), scope.seat.held.Get());
         ++count;
     }
 
@@ -1003,10 +988,22 @@ namespace
         lua.set_string(scope.text);
         lua.set_string(scope.item->kind);
         int fields = 4;
-        if (receipt.direction != std::array<double, 3>{})
+        const auto& view = receipt.view;
+        if (view.direction != silverfish::native_guest_item::ShotVector{})
         {
-            for (const auto axis : receipt.direction) lua.set_number(axis);
+            for (const auto axis : view.direction) lua.set_number(axis);
             fields += 3;
+            if (view.eye && view.target)
+            {
+                for (const auto axis : *view.eye) lua.set_number(axis);
+                for (const auto axis : *view.target) lua.set_number(axis);
+                fields += 6;
+                if (view.muzzle)
+                {
+                    for (const auto axis : *view.muzzle) lua.set_number(axis);
+                    fields += 3;
+                }
+            }
         }
         if (!peek)
         {

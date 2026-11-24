@@ -41,7 +41,8 @@ namespace
     namespace Unreal = RC::Unreal;
     using Lua = RC::LuaMadeSimple::Lua;
     using Guid = std::array<std::uint32_t, 4>;
-    using AimVector = std::array<double, 3>;
+    using AimVector = silverfish::native_guest_item::ShotVector;
+    using ShotView = silverfish::native_guest_item::ShotView;
     namespace profiles = silverfish::guest_weapon_profiles;
     namespace Hook = Unreal::Hook;
 
@@ -335,30 +336,50 @@ namespace
 
     std::string_view resolve(const Lua& lua, Context& context, SeedSelection* seed_selection,
                              std::int64_t* hold_duration = nullptr, StackSplit* split = nullptr, bool full_split = false,
-                             int* requested_slot = nullptr, std::optional<AimVector>* shot_direction = nullptr)
+                             int* requested_slot = nullptr, ShotView* shot_view = nullptr)
     {
         if (!env("SILVERFISH_COOP_NATIVE_GUEST_SAVE")) return "native_guest_weapon_scope_disabled";
         const auto count = lua.get_stack_size();
         const bool split_fields = split && count == 6 && lua.is_string(4) && lua.is_integer(5) && lua.is_integer(6);
-        const bool direction_fields = shot_direction && count == 6 && lua.is_number(4) && lua.is_number(5) && lua.is_number(6);
+        const bool shot_fields = shot_view && (count == 6 || count == 12 || count == 15);
+        if (shot_fields)
+            for (int index = 4; index <= count; ++index)
+                if (!lua.is_number(index)) return "guest_weapon_view_unqualified";
         const bool legacy_fields = count == 3 || (count == 4 && ((seed_selection && lua.is_string(4)) ||
             ((hold_duration || requested_slot) && lua.is_integer(4))));
-        if (!Unreal::IsInGameThreadRaw() || (split ? !split_fields : !legacy_fields && !direction_fields) ||
+        if (!Unreal::IsInGameThreadRaw() || (split ? !split_fields : !legacy_fields && !shot_fields) ||
             (hold_duration && count != 4) ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3)) return "guest_pawn_save_and_guid_required";
         const auto pawn_address = lua.get_integer();
         const auto save_address = lua.get_integer();
         if (pawn_address <= 0 || save_address <= 0 || !parse_guid(lua.get_string(), context.guid))
             return "guest_pawn_save_and_guid_required";
-        if (direction_fields)
+        if (shot_fields)
         {
-            AimVector direction{};
+            auto& direction = shot_view->direction;
             for (auto& axis : direction) axis = lua.get_number();
             const auto length = std::hypot(direction[0], direction[1], direction[2]);
             if (!std::isfinite(length) || std::abs(length - 1.0) > .001)
                 return "guest_weapon_view_unqualified";
             for (auto& axis : direction) axis /= length;
-            *shot_direction = direction;
+            const auto position = [&]() -> std::optional<AimVector> {
+                AimVector axes{};
+                for (auto& axis : axes) axis = lua.get_number();
+                if (!std::ranges::all_of(axes, [](double value) { return std::isfinite(value) && std::abs(value) <= 2000000; }))
+                    return {};
+                return axes;
+            };
+            if (count >= 12)
+            {
+                shot_view->eye = position();
+                shot_view->target = position();
+                if (!shot_view->eye || !shot_view->target) return "guest_weapon_view_unqualified";
+            }
+            if (count == 15)
+            {
+                shot_view->muzzle = position();
+                if (!shot_view->muzzle) return "guest_weapon_view_unqualified";
+            }
         }
         else if (split)
         {
@@ -1136,6 +1157,18 @@ namespace
         return read_aim_vector(result, storage.data());
     }
 
+    Unreal::UObject* shot_component(Unreal::UObject* owner, const Unreal::TCHAR* name, const Unreal::TCHAR* type)
+    {
+        auto* component = object(owner, name);
+        return live(component) && component->GetOuterPrivate() == owner &&
+            component->GetClassPrivate() == find<Unreal::UClass>(type) ? component : nullptr;
+    }
+
+    constexpr auto component_location = STR("/Script/Engine.SceneComponent:K2_GetComponentLocation");
+    constexpr auto component_forward = STR("/Script/Engine.SceneComponent:GetForwardVector");
+    constexpr auto camera_component = STR("/Script/Engine.CameraComponent");
+    constexpr auto muzzle_component = STR("/Script/Engine.ArrowComponent");
+
     struct AimParameters
     {
         alignas(16) std::array<std::byte, 512> data{};
@@ -1188,7 +1221,7 @@ namespace
         arguments.initialize(hit);
         auto* data = arguments.data.data();
         Unreal::FScriptArrayHelper actors(ignored, ignored->ContainerPtrToValuePtr<void>(data));
-        actor->SetObjectPropertyValue(actors.GetRawPtr(actors.AddValue()), weapon);
+        if (weapon) actor->SetObjectPropertyValue(actors.GetRawPtr(actors.AddValue()), weapon);
         context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(data), pawn);
         std::memcpy(start->ContainerPtrToValuePtr<void>(data), eye.data(), sizeof(eye));
         std::memcpy(end->ContainerPtrToValuePtr<void>(data), destination.data(), sizeof(destination));
@@ -1204,24 +1237,34 @@ namespace
     {
         Unreal::FWeakObjectPtr component;
         AimVector previous{};
+        std::optional<AimVector> previous_location;
 
-        static bool set_rotation(Unreal::UObject* muzzle, const AimVector& rotation, bool relative)
+        static bool set_pose(Unreal::UObject* muzzle, const AimVector& rotation, bool relative,
+                             const std::optional<AimVector>& position)
         {
-            auto* fn = find<Unreal::UFunction>(relative ? STR("/Script/Engine.SceneComponent:K2_SetRelativeRotation")
-                                                        : STR("/Script/Engine.SceneComponent:K2_SetWorldRotation"));
-            auto* value = input<Unreal::FStructProperty>(fn, STR("NewRotation"), 0);
-            auto* sweep = input<Unreal::FBoolProperty>(fn, STR("bSweep"), 0x18);
+            const auto method = position
+                ? (relative ? STR("/Script/Engine.SceneComponent:K2_SetRelativeLocationAndRotation")
+                            : STR("/Script/Engine.SceneComponent:K2_SetWorldLocationAndRotation"))
+                : (relative ? STR("/Script/Engine.SceneComponent:K2_SetRelativeRotation")
+                            : STR("/Script/Engine.SceneComponent:K2_SetWorldRotation"));
+            const int offset = position ? sizeof(AimVector) : 0;
+            auto* fn = find<Unreal::UFunction>(method);
+            auto* location = position ? input<Unreal::FStructProperty>(fn, STR("NewLocation"), 0) : nullptr;
+            auto* value = input<Unreal::FStructProperty>(fn, STR("NewRotation"), offset);
+            auto* sweep = input<Unreal::FBoolProperty>(fn, STR("bSweep"), offset + 0x18);
             auto* hit = field<Unreal::FStructProperty>(fn, STR("SweepHitResult"));
-            auto* teleport = input<Unreal::FBoolProperty>(fn, STR("bTeleport"), 0x118);
+            auto* teleport = input<Unreal::FBoolProperty>(fn, STR("bTeleport"), offset + 0x118);
             if (!fn || fn->GetOuterPrivate() != find<Unreal::UClass>(scene_component_type) ||
-                !fn->HasAnyFunctionFlags(Unreal::FUNC_Native) || fn->GetNumParms() != 4 || fn->GetReturnProperty() ||
+                !fn->HasAnyFunctionFlags(Unreal::FUNC_Native) || fn->GetNumParms() != (position ? 5 : 4) ||
+                fn->GetReturnProperty() || (position && !aim_vector_field(location, aim_vector_type)) ||
                 fn->GetParmsSize() > sizeof(AimParameters::data) || !aim_vector_field(value, aim_rotator_type) ||
-                !sweep || !hit || hit->GetOffset_Internal() != 0x20 ||
+                !sweep || !hit || hit->GetOffset_Internal() != offset + 0x20 ||
                 hit->GetStruct().Get() != find<Unreal::UScriptStruct>(aim_hit_type) ||
                 !hit->HasAnyPropertyFlags(Unreal::CPF_OutParm) || !teleport) return false;
             AimParameters args;
             args.initialize(hit);
             auto* data = args.data.data();
+            if (position) std::memcpy(location->ContainerPtrToValuePtr<void>(data), position->data(), sizeof(AimVector));
             std::memcpy(value->ContainerPtrToValuePtr<void>(data), rotation.data(), sizeof(rotation));
             sweep->SetPropertyValueInContainer(data, false);
             teleport->SetPropertyValueInContainer(data, true);
@@ -1229,34 +1272,43 @@ namespace
             return true;
         }
 
-        bool apply(Unreal::UObject* pawn, Unreal::UObject* weapon, const std::optional<AimVector>& trigger_direction = {})
+        bool apply(Unreal::UObject* pawn, Unreal::UObject* weapon, const ShotView& view = {})
         {
-            auto* camera = object(pawn, STR("Camera"));
-            auto* muzzle = object(weapon, STR("Arrow_Muzzle"));
-            if (!live(camera) || camera->GetOuterPrivate() != pawn ||
-                camera->GetClassPrivate() != find<Unreal::UClass>(STR("/Script/Engine.CameraComponent")) ||
-                !live(muzzle) || muzzle->GetOuterPrivate() != weapon ||
-                muzzle->GetClassPrivate() != find<Unreal::UClass>(STR("/Script/Engine.ArrowComponent"))) return false;
+            auto* camera = shot_component(pawn, STR("Camera"), camera_component);
+            auto* muzzle = shot_component(weapon, STR("Arrow_Muzzle"), muzzle_component);
+            if (!camera || !muzzle) return false;
             auto* relative = field<Unreal::FStructProperty>(muzzle, STR("RelativeRotation"));
             if (!aim_vector_field(relative, aim_rotator_type)) return false;
             const auto old = read_aim_vector(relative, muzzle);
-            constexpr auto location = STR("/Script/Engine.SceneComponent:K2_GetComponentLocation");
-            const auto origin = component_aim_vector(muzzle, location);
-            const auto eye = component_aim_vector(camera, location);
-            const auto direction = trigger_direction ? trigger_direction
-                : component_aim_vector(camera, STR("/Script/Engine.SceneComponent:GetForwardVector"));
+            const auto origin = component_aim_vector(muzzle, component_location);
+            const auto eye = component_aim_vector(camera, component_location);
+            const auto direction = view.direction != AimVector{} ? std::optional{view.direction}
+                : component_aim_vector(camera, component_forward);
             if (!old || !origin || !eye || !direction ||
                 std::abs(std::hypot((*direction)[0], (*direction)[1], (*direction)[2]) - 1.0) > 0.001) return false;
-            const auto target = guest_aim_point(pawn, weapon, *eye, *direction);
+            const auto target = view.target ? view.target : guest_aim_point(pawn, weapon, *eye, *direction);
             if (!target) return false;
-            AimVector toward{(*target)[0] - (*origin)[0], (*target)[1] - (*origin)[1], (*target)[2] - (*origin)[2]};
+            std::optional<AimVector> position;
+            if (view.eye)
+            {
+                auto* relative_location = field<Unreal::FStructProperty>(muzzle, STR("RelativeLocation"));
+                if (!aim_vector_field(relative_location, aim_vector_type)) return false;
+                previous_location = read_aim_vector(relative_location, muzzle);
+                if (!previous_location) return false;
+                position = view.muzzle.value_or(AimVector{
+                    (*view.eye)[0] + (*origin)[0] - (*eye)[0],
+                    (*view.eye)[1] + (*origin)[1] - (*eye)[1],
+                    (*view.eye)[2] + (*origin)[2] - (*eye)[2]});
+            }
+            const auto& launch = position ? *position : *origin;
+            AimVector toward{(*target)[0] - launch[0], (*target)[1] - launch[1], (*target)[2] - launch[2]};
             // A surface can lie between the camera and muzzle. Keep the shot facing forward in that case.
             if (toward[0] * (*direction)[0] + toward[1] * (*direction)[1] + toward[2] * (*direction)[2] < 1.0)
                 toward = *direction;
             constexpr double degrees = 180.0 / std::numbers::pi;
             const AimVector rotation{std::atan2(toward[2], std::hypot(toward[0], toward[1])) * degrees,
                                      std::atan2(toward[1], toward[0]) * degrees, 0.0};
-            if (!set_rotation(muzzle, rotation, false)) return false;
+            if (!set_pose(muzzle, rotation, false, position)) return false;
             component = muzzle;
             previous = *old;
             return true;
@@ -1267,14 +1319,14 @@ namespace
             auto* muzzle = component.Get();
             if (!muzzle) return true;
             component.Reset();
-            return live(muzzle) && set_rotation(muzzle, previous, true);
+            return live(muzzle) && set_pose(muzzle, previous, true, previous_location);
         }
 
         ~GuestMuzzleAim() { restore(); }
     };
 
     int fire(const Lua& lua, const Context& context, const Inventory& inventory, bool disarm,
-             const std::optional<AimVector>& trigger_direction)
+             const ShotView& shot_view)
     {
         const auto report = [&](bool ok, std::string_view status, std::int32_t first = -1, std::int32_t second = -1,
                                 int projectiles = 0) {
@@ -1351,7 +1403,7 @@ namespace
         if (!disarm)
         {
             if (active_tap || !install_tap_birth_hook()) return report(false, "guest_weapon_projectile_scope_unavailable");
-            if (!aim.apply(context.pawn, actor, trigger_direction)) return report(false, "guest_weapon_aim_unavailable");
+            if (!aim.apply(context.pawn, actor, shot_view)) return report(false, "guest_weapon_aim_unavailable");
         }
         {
             TapObservation observation(disarm ? nullptr : &projectiles);
@@ -3100,9 +3152,9 @@ namespace
         }
         Context context;
         SeedSelection seed_selection;
-        std::optional<AimVector> trigger_direction;
+        ShotView shot_view;
         if (const auto error = resolve(lua, context, operation == Operation::Seed ? &seed_selection : nullptr,
-                                       nullptr, nullptr, false, nullptr, operation == Operation::Fire ? &trigger_direction : nullptr);
+                                       nullptr, nullptr, false, nullptr, operation == Operation::Fire ? &shot_view : nullptr);
             !error.empty()) return fail(error);
         if constexpr (operation != Operation::Inspect)
             if (std::ranges::any_of(smg_holds, [&](const SmgHold& hold) {
@@ -3153,8 +3205,30 @@ namespace
         if constexpr (operation == Operation::Equip) return equip(lua, context, inventory);
         if constexpr (operation == Operation::Inspect) return inspect(lua, context, inventory);
         if constexpr (operation == Operation::Reload) return reload(lua, context, inventory);
-        return fire(lua, context, inventory, operation == Operation::Disarm, trigger_direction);
+        return fire(lua, context, inventory, operation == Operation::Disarm, shot_view);
     }
+}
+
+silverfish::native_guest_item::ShotView silverfish::native_guest_item::capture_shot_view(Unreal::UObject* pawn, Unreal::UObject* held)
+{
+    ShotView view;
+    auto* camera = shot_component(pawn, STR("Camera"), camera_component);
+    if (!camera) return view;
+    const auto direction = component_aim_vector(camera, component_forward);
+    if (!direction || std::abs(std::hypot((*direction)[0], (*direction)[1], (*direction)[2]) - 1.0) > 0.001)
+        return view;
+    view.direction = *direction;
+    if (const auto eye = component_aim_vector(camera, component_location))
+    {
+        if (const auto target = guest_aim_point(pawn, held, *eye, view.direction))
+        {
+            view.eye = eye;
+            view.target = target;
+            if (auto* muzzle = shot_component(held, STR("Arrow_Muzzle"), muzzle_component))
+                view.muzzle = component_aim_vector(muzzle, component_location);
+        }
+    }
+    return view;
 }
 
 bool silverfish::native_guest_item::take_ammo_supported(Unreal::UObject* item_class, int rounds)

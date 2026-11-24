@@ -829,6 +829,95 @@ local function dock_combat(pawn, world, host, action, name)
         eyes, actor:GetFullName())
 end
 
+local garage_view
+local garage_path = dock .. ":PersistentLevel.StaticMeshActor_347"
+
+local function stock_garage(world)
+    local actor = StaticFindObject(garage_path)
+    local mesh = valid(actor) and actor.StaticMeshComponent
+    assert(valid(mesh) and same(actor:GetWorld(), world)
+        and mesh.StaticMesh:GetFName():ToString() == "SM_Bld_Door_Garage_02", "the stock garage door is unavailable")
+    return actor, mesh
+end
+
+local function line_hit(pawn, start, finish, ignored)
+    local hit = {}
+    if trace:LineTraceSingle(pawn, start, finish, 1, true, ignored, 0, hit, true, color, color, 0) then
+        return hit.OutHit or hit
+    end
+end
+
+local function point_string(point)
+    return ("%.3f,%.3f,%.3f"):format(point.X, point.Y, point.Z)
+end
+
+local function stage_garage_shot(host, world)
+    local _, mesh = stock_garage(world)
+    local worker = dock_worker(world, "NPC_Survivor_Worker_C_2")
+    local shooter = authoritative_guest(world)
+    assert(valid(worker) and worker:HasAuthority() and worker.Alive and worker.Health > 1)
+    local bounds, box = {}, {}
+    trace:GetComponentBounds(mesh, bounds, box, {})
+    local center, extent = bounds.Origin or bounds, box.BoxExtent or box
+    assert(center.X and extent.X and extent.Y and extent.Z)
+    local axis = extent.X < extent.Y and "X" or "Y"
+    local ignored = {host, shooter, worker, shooter.EquipedItem}
+    for _, sign in ipairs({1, -1}) do
+        for _, gap in ipairs({25, 45, 65, 15}) do
+            local low_z = center.Z - extent.Z - gap
+            local near, far = {X=center.X,Y=center.Y,Z=low_z}, {X=center.X,Y=center.Y,Z=low_z}
+            near[axis], far[axis] = center[axis] - 140*sign, center[axis] + 250*sign
+            local blocked = {X=near.X,Y=near.Y,Z=center.Z - extent.Z + 45}
+            local high_target = {X=far.X,Y=far.Y,Z=blocked.Z}
+            local obstruction = line_hit(shooter, blocked, high_target, ignored)
+            local surface = obstruction and obstruction.Component and obstruction.Component:Get()
+            if same(surface, mesh) and not line_hit(shooter, near, far, ignored) then
+                local floor = line_hit(shooter, near, {X=near.X,Y=near.Y,Z=near.Z-220}, ignored)
+                local at = floor and floor.ImpactPoint
+                if at and near.Z - at.Z > 25 then
+                    local half = shooter.CapsuleComponent:GetScaledCapsuleHalfHeight()
+                    local aim = heading(near, far)
+                    if shooter:K2_TeleportTo({X=near.X,Y=near.Y,Z=at.Z+half+2}, {Pitch=0,Yaw=aim.Yaw,Roll=0}) then
+                        shooter.CharacterMovement:StopMovementImmediately()
+                        shooter:ForceNetUpdate()
+                        assert(worker:K2_SetActorLocation(far, false, {}, true), "could not stage the stock worker beyond the door")
+                        worker.CharacterMovement:DisableMovement()
+                        worker:SetActorTickEnabled(false)
+                        if valid(worker.Controller) then worker.Controller:SetActorTickEnabled(false) end
+                        worker:ForceNetUpdate()
+                        garage_view = {shooter=shooter, worker=worker}
+                        return table.concat({point_string(near), point_string(far), point_string(blocked),
+                            point_string(high_target), tostring(worker.Health)}, ";")
+                    end
+                end
+            end
+        end
+    end
+    error(("the garage has no qualified low firing lane at %s (bounds %s)"):format(point_string(center), point_string(extent)), 0)
+end
+
+local function set_garage_aim(pawn, world, host, specification)
+    local from_text, to_text = specification:match("^([^;]+);([^;]+)$")
+    assert(from_text and to_text)
+    local from, to = position(from_text), position(to_text)
+    local _, mesh = stock_garage(world)
+    local shooter = host and authoritative_guest(world) or pawn
+    local weapon = shooter.EquipedItem
+    local worker = dock_worker(world, "NPC_Survivor_Worker_C_2")
+    assert(valid(worker) and valid(weapon) and valid(weapon.Arrow_Muzzle))
+    local aim = heading(from, to)
+    assert(not host or (garage_view and same(garage_view.shooter, shooter)))
+    shooter.Controller:SetControlRotation(aim)
+    shooter.Camera:K2_SetWorldLocation(from, false, {}, true)
+    shooter.Camera:K2_SetWorldRotation(aim, false, {}, true)
+    weapon.Arrow_Muzzle:K2_SetWorldLocation(from, false, {}, true)
+    local hit = line_hit(shooter, from, to, {shooter, weapon})
+    local component = hit and hit.Component and hit.Component:Get()
+    if same(component, mesh) then return "blocked" end
+    if valid(component) and same(component:GetOwner(), worker) then return "worker" end
+    return valid(component) and component:GetFullName() or "clear"
+end
+
 local attack_probe
 local attack_probe_hooked = false
 local dock_attacker = "NPC_Survivor_Worker_C_0"
@@ -1252,6 +1341,14 @@ local function run(action, actor_path)
         shooter.Controller:SetControlRotation(angle)
         if host then shooter.Camera:K2_SetWorldRotation(angle, false, {}, true) end
         return "ready"
+    elseif action == "dock-garage-stage" then
+        assert(host)
+        return stage_garage_shot(pawn, world)
+    elseif action == "dock-garage-aim" then
+        return set_garage_aim(pawn, world, host, actor_path)
+    elseif action == "dock-garage-health" then
+        assert(host and garage_view and valid(garage_view.worker))
+        return ("%.6f"):format(garage_view.worker.Health)
     elseif action == "dock-arm-swing" or action == "dock-play-swing" or action == "dock-read-swing" then
         return dock_swing(world, host, action)
     elseif action == "dock-disarm-swing" then

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <optional>
 #include <string_view>
 
@@ -16,6 +17,14 @@ namespace RC::Unreal
 
 namespace silverfish::native_guest_item
 {
+    using ShotVector = std::array<double, 3>;
+    struct ShotView
+    {
+        ShotVector direction{};
+        std::optional<ShotVector> eye, target, muzzle;
+    };
+
+    ShotView capture_shot_view(RC::Unreal::UObject* pawn, RC::Unreal::UObject* held);
     bool take_ammo_supported(RC::Unreal::UObject* item_class, int rounds);
     std::string_view finish_local_removal(RC::Unreal::UObject* pawn, RC::Unreal::UObject* save,
                                          RC::Unreal::UObject* prior_actor, int slot, std::string_view identity,

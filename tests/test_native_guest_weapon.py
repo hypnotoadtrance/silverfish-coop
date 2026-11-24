@@ -212,30 +212,34 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(host.party["receipts"], {})
                 host.checkpoint_native.assert_not_awaited()
 
-    async def test_trigger_direction_is_scoped_to_the_current_visit(self):
+    async def test_trigger_view_is_scoped_to_the_current_visit(self):
         host = self.host()
         host.zone_epoch = "current"
         guid, operation = "1" * 32, "a" * 32
         action = "native-guest-weapon-fire"
         direction = "0.600000,-0.800000,0.000000"
+        eye, target, muzzle = "7.000,9.000,1100.000", "607.000,-791.000,1100.000", "53.000,-32.000,1094.000"
+        shot = f"{direction};{eye};{target};{muzzle}"
         bridge = SimpleNamespace(command=AsyncMock(return_value={
             "state": "hosting", "map": "zone",
             "native_guest_weapon": {"map": "zone", "action": "fire", "pawn": "exact pawn", "guid": guid,
                                     "ok": True, "status": "equipped", "actor_ammo": 5, "stored_ammo": 5,
                                     "before": 6, "after": 5, "projectiles": 1},
         }))
-        for target in (f"{guid}@previous@{direction}", f"{guid}@current@0.000000,0.000000,0.000000"):
+        for invalid in (f"{guid}@previous@{shot}", f"{guid}@current@0.000000,0.000000,0.000000",
+                        f"{guid}@current@{direction};{eye}", f"{guid}@current@{direction};{eye};1e10,0,0"):
             with self.assertRaisesRegex(party.RuleError, "view_unqualified"):
-                await native_guest_weapon.perform(host, bridge, "character", operation, action, target)
+                await native_guest_weapon.perform(host, bridge, "character", operation, action, invalid)
         bridge.command.assert_not_awaited()
 
         result = await native_guest_weapon.perform(host, bridge, "character", operation, action,
-                                                   f"{guid}@current@{direction}")
-        bridge.command.assert_awaited_once_with(action, "exact pawn", guid, direction, timeout=5)
+                                                   f"{guid}@current@{shot}")
+        bridge.command.assert_awaited_once_with(action, "exact pawn", guid, shot, timeout=5)
         self.assertEqual(result["native_guest_trigger_direction"], direction)
+        self.assertEqual(result["native_guest_trigger_view"], {"eye": eye, "target": target, "muzzle": muzzle})
         with self.assertRaisesRegex(party.RuleError, "operation_id_conflict"):
             await native_guest_weapon.perform(host, bridge, "character", operation, action,
-                                              f"{guid}@current@1.000000,0.000000,0.000000")
+                                              f"{guid}@current@{direction};{eye};{target}")
 
     async def test_missing_acknowledgment_keeps_host_checkpoint_unsafe(self):
         host = self.host()

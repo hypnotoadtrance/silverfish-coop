@@ -10,6 +10,7 @@ GUEST_ACTIONS = ("native-guest-weapon-inspect", "native-guest-weapon-equip", "na
                  "native-guest-weapon-reload")
 GUID = re.compile(r"[0-9A-F]{32}\Z")
 SHOT_DIRECTION = re.compile(r"-?[01]\.[0-9]{6}(?:,-?[01]\.[0-9]{6}){2}")
+SHOT_POSITION = re.compile(r"-?[0-9]{1,7}\.[0-9]{3}(?:,-?[0-9]{1,7}\.[0-9]{3}){2}")
 SELECT_EQUIPMENT = "native-guest-weapon-select"
 SET_FIRE_MODE = "native-guest-weapon-mode-store"
 FIRE_MODES = ("auto", "semi")
@@ -40,6 +41,14 @@ PROJECTILES_PER_ROUND = {
 def valid_shot_direction(value: str) -> bool:
     return (isinstance(value, str) and SHOT_DIRECTION.fullmatch(value) is not None
             and abs(sum(float(axis) ** 2 for axis in value.split(",")) - 1.0) <= .002)
+
+def valid_shot_view(value: str) -> bool:
+    if not isinstance(value, str) or len(value) > 160:
+        return False
+    direction, *positions = value.split(";")
+    return (valid_shot_direction(direction) and len(positions) in (0, 2, 3)
+            and all(SHOT_POSITION.fullmatch(point)
+                    and all(abs(float(axis)) <= 2000000 for axis in point.split(",")) for point in positions))
 
 
 async def select_equipment(host, bridge, character: str, target: str | None) -> dict:
@@ -169,13 +178,13 @@ async def service_fire_modes(client, active: bool) -> None:
 
 async def perform(host, bridge, character: str, operation_id: str, action: str, guid: str, *, seed_kind=None,
                   bandit_fixture: str | None = None) -> dict:
-    direction = None
+    shot_view = None
     if action == "native-guest-weapon-fire" and isinstance(guid, str) and "@" in guid:
         parts = guid.split("@")
-        if (len(parts) != 3 or parts[1] != host.zone_epoch or not valid_shot_direction(parts[2])
+        if (len(parts) != 3 or parts[1] != host.zone_epoch or not valid_shot_view(parts[2])
                 or bandit_fixture is not None):
             raise party.RuleError("native_guest_weapon_view_unqualified")
-        guid, _, direction = parts
+        guid, _, shot_view = parts
     fixture = bandit_fixture is not None or action in ("native-guest-weapon-seed", "native-guest-weapon-seed-ammo")
     if (not host.native_guest or (fixture and not host.fixtures) or host.native_profile is None
             or host.transitioning or host.stopping or host.native_checkpoint_unsafe
@@ -193,7 +202,7 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
     if not scope or not scope["connected"]:
         raise party.RuleError("guest_not_active")
     operation = action.removeprefix("native-guest-weapon-")
-    extra = (seed_kind,) if seed_kind is not None else (direction,) if direction is not None else ()
+    extra = (seed_kind,) if seed_kind is not None else (shot_view,) if shot_view is not None else ()
     fingerprint = [action, guid, bandit_fixture or (extra[0] if extra else None)]
     mutates = operation != "inspect"
     if mutates:
@@ -312,8 +321,12 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
 
         host.last_game, host.last_seen = snapshot, time.monotonic()
         result = {"native_guest_weapon": dict(proof, kind="camera", class_path=CAMERA_PATH) if camera else proof}
-        if direction is not None:
+        if shot_view is not None:
+            direction, has_geometry, geometry = shot_view.partition(";")
             result["native_guest_trigger_direction"] = direction
+            if has_geometry:
+                eye, target, *muzzle = geometry.split(";")
+                result["native_guest_trigger_view"] = {"eye": eye, "target": target, **({"muzzle": muzzle[0]} if muzzle else {})}
         if old_pipe:
             result["native_guest_weapon"] = dict(proof, kind=native_guest_melee.KIND, class_path=OLD_PIPE)
         if blowtorch:

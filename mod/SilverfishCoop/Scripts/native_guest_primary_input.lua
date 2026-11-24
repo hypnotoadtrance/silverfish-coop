@@ -168,7 +168,7 @@ local function drain_taps(current, address)
     local take = embedded and SilverfishPeekNativeGuestPrimaryIntent or SilverfishTakeNativeGuestPrimaryIntent
     local emitted = 0
     for _ = 1, 8 do
-        local sequence, owner, guid, kind, x, y, z = take(address)
+        local sequence, owner, guid, kind, x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz = take(address)
         if not valid_sequence(sequence) or owner ~= address or guid ~= binding.guid or kind ~= binding.kind then break end
         if not can_use(current) then break end
         if kind == "blowtorch" or kind == "crowbar" then
@@ -188,9 +188,11 @@ local function drain_taps(current, address)
             shovel_intent = {sequence = sequence, expires = os.clock() + 1.5}
             commit("tap", address, sequence)
         else
-            local direction = x and ("%.6f,%.6f,%.6f"):format(x, y, z) or nil
+            local view = x and ("%.6f,%.6f,%.6f"):format(x, y, z) or nil
+            if ex then view = view .. (";%.3f,%.3f,%.3f;%.3f,%.3f,%.3f"):format(ex, ey, ez, tx, ty, tz) end
+            if mx then view = view .. (";%.3f,%.3f,%.3f"):format(mx, my, mz) end
             if not publish("tap", event_path, current, address, sequence,
-                {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind, direction}) then break end
+                {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind, view}) then break end
         end
         emitted = emitted + 1
     end

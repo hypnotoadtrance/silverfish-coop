@@ -2038,7 +2038,8 @@ async def verify_tutorial_dock_melee(host: Seat, guest: Seat, pawn: str) -> dict
 
 
 async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, retaliation: bool = False,
-                                     pursuit: bool = False, held_mask: bool = False, grounded_gait: bool = False) -> dict:
+                                     pursuit: bool = False, held_mask: bool = False, grounded_gait: bool = False,
+                                     shot_view: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     for seat in (host, guest):
         for probe in ("portable-dry-fire", "portable-footstep"):
@@ -2057,6 +2058,8 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
         and frame.get("gameplay_fresh") and frame.get("game", {}).get("map") == dock
         and frame["game"].get("native_guest_primary_scope", {}).get("kind") == "rusty-pistol"), timeout=12)
     presentation = {}
+    if shot_view:
+        return await verify_dock_garage_shots(host, guest, frame, command)
     if grounded_gait:
         from portable_gait import verify_stock_gait
 
@@ -2153,6 +2156,54 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
                                                      "retargeted_when_guest_downed": True,
                                                      "downed_aggro_and_queued_strike_denied": True},
                                      "stock_swing": {"host": source, "guest": observer, "received": received}}}
+
+async def verify_dock_garage_shots(host: Seat, guest: Seat, frame: dict, command) -> dict:
+    guest_run = guest.client / "run"
+    low, worker, high, obstruction, health = (await command(host, "dock-garage-stage")).split(";")
+    health = float(health)
+    above = f"dock-garage-aim\t{high};{obstruction}"
+    below = f"dock-garage-aim\t{low};{worker}"
+
+    async def shoot(expected_health, *, should_hit):
+        started = time.time()
+        tap = await submit(guest_run, "native-guest-primary-input-fixture")
+        assert tap["ok"], tap
+        sequence = tap["native_guest_primary_fixture"]["sequence"]
+        async with asyncio.timeout(8):
+            while not (events := [row for row in await resident_events(guest_run, frame)
+                                  if row.get("sequence") == sequence and row["time_unix"] >= started
+                                  and row["event"] in ("native_guest_primary_input", "native_guest_primary_input_rejected")]):
+                await asyncio.sleep(.05)
+        event, = events
+        assert event["event"] == "native_guest_primary_input", event
+        shot = event["native_guest_weapon"]
+        assert shot["after"] == shot["before"] - 1 and shot["projectiles"] == 1, event
+        async with asyncio.timeout(6):
+            while True:
+                observed = float(await command(host, "dock-garage-health"))
+                if not should_hit or observed < expected_health:
+                    break
+                await asyncio.sleep(.05)
+        if not should_hit:
+            await asyncio.sleep(.35)
+            observed = float(await command(host, "dock-garage-health"))
+            assert observed == expected_health, dict(roof_contact_damaged_worker=observed, event=event)
+        return event, observed
+
+    async with asyncio.timeout(7):
+        while await command(guest, below) != "worker":
+            await asyncio.sleep(.05)
+    assert await command(host, above) == "blocked"
+    assert await command(guest, above) == "blocked"
+    blocked, after_blocked = await shoot(health, should_hit=False)
+    assert await command(host, above) == "blocked"
+    assert await command(guest, below) == "worker"
+    clear, after_clear = await shoot(after_blocked, should_hit=True)
+    for event, expected in ((blocked, high), (clear, low)):
+        geometry = event["native_guest_trigger_view"]
+        assert math.dist(tuple(map(float, geometry["eye"].split(","))), tuple(map(float, expected.split(",")))) < 10, event
+    return {"tutorial_dock_shot_view": {"host_camera_line": "blocked", "clear_guest_line": "worker",
+            "health": [health, after_blocked, after_clear], "blocked": blocked, "clear": clear}}
 
 
 async def capture_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool,
@@ -4341,6 +4392,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  rusty_pistol: bool = False, tutorial_dock_combat: bool = False, tutorial_dock_retaliation: bool = False,
                  tutorial_dock_melee: bool = False, tutorial_dock_pursuit: bool = False,
                  tutorial_dock_held_mask: bool = False, tutorial_dock_gait: bool = False,
+                 tutorial_dock_shot_view: bool = False,
                  stock_bandage_revisit: bool = False, stock_shovel: bool = False, stock_shovel_loot: bool = False,
                  stock_shovel_quest: bool = False,
                  stock_take_ammo: bool = False, stock_light_ar: bool = False, stock_fire_mode_reopen: bool = False,
@@ -4402,6 +4454,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     else:
         verify_stock_held_queue = None
     dock_combat_check = ("stock_held_mask" if tutorial_dock_held_mask else
+                         "tutorial_dock_shot_view" if tutorial_dock_shot_view else
                          "tutorial_dock_pursuit" if tutorial_dock_pursuit else
                          "tutorial_dock_retaliation" if tutorial_dock_retaliation else
                          "stock_grounded_gait" if tutorial_dock_gait else "tutorial_dock_combat")
@@ -4461,7 +4514,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_tutorial_dock_combat(host, guest, pawn, retaliation=tutorial_dock_retaliation,
                                                                pursuit=tutorial_dock_pursuit,
                                                                held_mask=tutorial_dock_held_mask,
-                                                               grounded_gait=tutorial_dock_gait)),
+                                                               grounded_gait=tutorial_dock_gait,
+                                                               shot_view=tutorial_dock_shot_view)),
         (tutorial_dock_melee, "tutorial_dock_melee", "tutorial_dock_melee", verify_tutorial_dock_melee),
         (stock_eye_stacks, "shopkeep", "stock_eye_stacks", verify_stock_eye_stacks),
     ):
@@ -5048,6 +5102,8 @@ if __name__ == "__main__":
                         help="check observer-only masking of a late held mesh")
     parser.add_argument("--tutorial-dock-pursuit", action="store_true",
                         help="fight the live warehouse worker with local guest aiming and movement through death")
+    parser.add_argument("--tutorial-dock-shot-view", action="store_true",
+                        help="compare blocked and clear stock guest shots at the same warehouse door")
     parser.add_argument("--tutorial-dock-melee", action="store_true",
                         help="verify the stock guest melee input damages a live, full-health warehouse worker")
     parser.add_argument("--stock-bandage-revisit", action="store_true",
@@ -5181,6 +5237,7 @@ if __name__ == "__main__":
                               "stock_board_offers", "resident_weapon_cues", "resident_held_queue", "resident_stale_quick_slot",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "tutorial_dock_pursuit",
                               "tutorial_dock_held_mask", "tutorial_dock_gait",
+                              "tutorial_dock_shot_view",
                               "tutorial_dock_melee", "stock_npc_rivalry",
                               "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_shovel_quest", "stock_take_ammo",
                               "stock_host_corpse_carry", "stock_host_prop_observer", "stock_flashlights", "stock_simmi_jammers",
@@ -5210,6 +5267,9 @@ if __name__ == "__main__":
         parser.error("Use --tutorial-dock-held-mask with --tutorial-dock-combat and without another Dock fight")
     if args.tutorial_dock_pursuit and (not args.tutorial_dock_combat or args.tutorial_dock_retaliation):
         parser.error("Use --tutorial-dock-pursuit with --tutorial-dock-combat and without --tutorial-dock-retaliation")
+    if args.tutorial_dock_shot_view and (not args.tutorial_dock_combat or not args.stock_npc_override or any(
+            (args.tutorial_dock_retaliation, args.tutorial_dock_pursuit, args.tutorial_dock_gait, args.tutorial_dock_held_mask))):
+        parser.error("Use --tutorial-dock-shot-view with --tutorial-dock-combat and --stock-npc-override as the Dock trial")
     if args.stock_shovel_loot and not args.stock_shovel:
         parser.error("Use --stock-shovel-loot with --stock-shovel")
     if args.stock_shovel_quest and (not args.stock_shovel or args.stock_shovel_loot):
@@ -5285,6 +5345,7 @@ if __name__ == "__main__":
                        rusty_pistol=args.rusty_pistol, tutorial_dock_combat=args.tutorial_dock_combat,
                        tutorial_dock_melee=args.tutorial_dock_melee, tutorial_dock_pursuit=args.tutorial_dock_pursuit,
                        tutorial_dock_held_mask=args.tutorial_dock_held_mask, tutorial_dock_gait=args.tutorial_dock_gait,
+                       tutorial_dock_shot_view=args.tutorial_dock_shot_view,
                        tutorial_dock_retaliation=args.tutorial_dock_retaliation, stock_bandage_revisit=args.stock_bandage_revisit,
                        stock_shovel=args.stock_shovel,
                        stock_shovel_loot=args.stock_shovel_loot,

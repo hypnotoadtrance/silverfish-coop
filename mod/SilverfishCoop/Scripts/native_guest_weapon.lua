@@ -331,14 +331,22 @@ function guest_weapon.command(fields, state, phase)
     local fixture_kind = fields[5] == "smg-standard-full" and "smg-standard" or fields[5]
     local seed_profile = action == "seed" and #fields == 5 and fixtures and headless
         and (pry_tool_paths[fixture_kind] or weapon_profiles.seeds[fixture_kind] or flare_fixture_paths[fixture_kind])
-    local shot_direction
+    local shot_view
     if action == "fire" and #fields == 5 then
-        local x, y, z = fields[5]:match("^(%-?[01]%.%d%d%d%d%d%d),(%-?[01]%.%d%d%d%d%d%d),(%-?[01]%.%d%d%d%d%d%d)$")
-        if x then shot_direction = {tonumber(x), tonumber(y), tonumber(z)} end
+        local vectors, values = {}, {}
+        for vector in fields[5]:gmatch("[^;]+") do
+            local x, y, z = vector:match("^(%-?%d+%.%d+),(%-?%d+%.%d+),(%-?%d+%.%d+)$")
+            if not x or #vectors == 4 then break end
+            vectors[#vectors + 1] = vector
+            values[#values + 1], values[#values + 2], values[#values + 3] = tonumber(x), tonumber(y), tonumber(z)
+        end
+        if (#vectors == 1 or #vectors == 3 or #vectors == 4) and table.concat(vectors, ";") == fields[5] then
+            shot_view = values
+        end
     end
     local equipped_target = action == "reload" and guid == "equipped"
     observation = nil
-    if not enabled or (#fields ~= 4 and not seed_profile and not shot_direction) or phase ~= "hosting"
+    if not enabled or (#fields ~= 4 and not seed_profile and not shot_view) or phase ~= "hosting"
         or (not equipped_target and (not guid or #guid ~= 32 or guid:find("[^0-9A-F]"))) then
         error("A native weapon operation needs an exact guest and item GUID", 0)
     end
@@ -368,7 +376,7 @@ function guest_weapon.command(fields, state, phase)
     end
 
     local pawn_address, save_address = pawn:GetAddress(), detached:GetAddress()
-    local arguments = seed_profile and {fields[5]} or shot_direction or {}
+    local arguments = seed_profile and {fields[5]} or shot_view or {}
     local restore, refusal
     local spratt = spratt_fixture and state.map == spratt_fixture.map
     local shot_fixture = spratt and spratt_fixture or flayer_fixture
