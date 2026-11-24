@@ -732,6 +732,7 @@ namespace
     };
 
     Handles pending_dynamic_npcs;
+    bool dynamic_births_active{};
     bool hook_ready();
 
     bool dynamic_stock_npc(U::UObject* actor)
@@ -752,7 +753,7 @@ namespace
 
     bool local_client_npc(U::UObject* actor)
     {
-        return production_roster && dynamic_stock_npc(actor) &&
+        return dynamic_births_active && dynamic_stock_npc(actor) &&
             network(static_cast<U::AActor*>(actor)->GetWorld(), true, true).seat == Seat::Client;
     }
 
@@ -2749,7 +2750,7 @@ namespace silverfish::campaign_npc
         callbacks[6] = Hook::RegisterBeginPlayPreCallback(
             [](Iteration&, U::AActor* candidate) {
                 if (!hook_ready()) return;
-                if (production_roster && dynamic_stock_npc(candidate))
+                if (dynamic_births_active && dynamic_stock_npc(candidate))
                     pending_dynamic_npcs.emplace_back(candidate);
                 const auto family = npc_family(candidate);
                 if (family == NpcFamily::Unknown || (family == NpcFamily::NotDeer && !operate_not_deer) ||
@@ -2767,6 +2768,7 @@ namespace silverfish::campaign_npc
             callbacks[7] = Hook::RegisterEngineTickPreCallback(
                 [](Iteration&, U::UEngine*, float, bool) { settle_dynamic_npcs(); },
                 {false, false, STR("SilverfishCoopNative"), STR("Settle stock NPC births after role assignment")});
+        dynamic_births_active = callbacks[6] != Hook::ERROR_ID && callbacks[7] != Hook::ERROR_ID;
         if (callbacks[4] == Hook::ERROR_ID || callbacks[5] == Hook::ERROR_ID)
         {
             for (const int index : {4, 5})
@@ -2783,6 +2785,7 @@ namespace silverfish::campaign_npc
 
     void uninstall_hooks()
     {
+        dynamic_births_active = false;
         clear_scope();
         if (U::IsInGameThreadRaw())
         {
