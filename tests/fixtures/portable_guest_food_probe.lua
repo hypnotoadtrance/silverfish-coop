@@ -9,7 +9,8 @@ local factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_I
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
-local stock_cases = {"Leftovers", "HoneyEgg", "DirtyBandage", "Gauze", "MedSalve", "MedKit_Large", "StimPills", "Antibiotics"}
+local stock_cases = {"Leftovers", "HoneyEgg", "DirtyBandage", "Gauze", "MedSalve", "MedKit_Large", "StimPills",
+    "Antibiotics", "BrownMushroom"}
 local last
 
 local function valid(value) return value and value:IsValid() end

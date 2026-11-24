@@ -14,6 +14,7 @@ local animation_root = "/Game/Classes/NPCs/NPC_Assets/Animations/"
 local crouched_idle = "Crouching_Idle"
 local crouched_walk = "Crouched_Walking"
 local firearm_class = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
+local health_item_class = "/Game/Classes/Items/HealthItem_Master_BP.HealthItem_Master_BP_C"
 local gameplay_statics = "/Script/Engine.Default__GameplayStatics"
 local math_library = "/Script/Engine.Default__KismetMathLibrary"
 local max_lean = 40
@@ -435,8 +436,8 @@ function avatar.play_consumable(world, id, item_path, defaults, serial)
             local template = StaticFindObject(item_path .. ":DisplayMesh_GEN_VARIABLE")
             local mesh = valid(template) and template.StaticMesh
             local duration, transform = defaults.UseTime, defaults.Anim_Trans
-            local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
-            local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+            local statics = StaticFindObject(gameplay_statics)
+            local math_api = StaticFindObject(math_library)
             if not valid(mesh) or not transform or type(duration) ~= "number" or duration <= 0 or duration > 30
                 or not valid(statics) or not valid(math_api) then return false end
             local rotation = math_api:Quat_Rotator(transform.Rotation)
@@ -454,6 +455,12 @@ function avatar.play_consumable(world, id, item_path, defaults, serial)
             local use = {serial = serial, item = item_path, mesh = mesh:GetFullName(), duration = duration,
                 world = world:GetAddress(), start = statics:GetRealTimeSeconds(world), peak = 0,
                 position = position, rotation = {Pitch = rotation.Pitch, Yaw = rotation.Yaw, Roll = rotation.Roll}}
+            local food_class = StaticFindObject(health_item_class)
+            local head = FName("Head", EFindName.FNAME_Find)
+            if valid(food_class) and defaults:IsA(food_class) and type(defaults.Regen_Boost) == "number"
+                and defaults.Regen_Boost > 0 and entry.body:DoesSocketExist(head) then
+                use.food = {head = head, hand = FName("Weapon_Socket01", EFindName.FNAME_Find), math = math_api}
+            end
             uses[entry], entry.last_use, entry.hidden_for_use = use, use, {}
             hide_held_item(entry)
             return true
@@ -462,25 +469,56 @@ function avatar.play_consumable(world, id, item_path, defaults, serial)
     return false
 end
 
+local function animate_food(entry, use, lift, using, lower)
+    local food, body = use.food, entry.body
+    local head = body:GetSocketLocation(food.head)
+    local hand = body:GetSocketTransform(food.hand, 0)
+    local aim = valid(entry.head_pivot) and entry.head_pivot:K2_GetComponentRotation() or entry.pawn:GetBaseAimRotation()
+    local forward = food.math:GetForwardVector(aim)
+    local reach = 24 + 2 * math.sin(using * 2 * math.pi)
+    local blend = lift * (1 - lower)
+    blend = blend * blend * (3 - 2 * blend)
+    local hold = hand.Translation
+    local location = {
+        X = hold.X + (head.X + forward.X * reach - hold.X) * blend,
+        Y = hold.Y + (head.Y + forward.Y * reach - hold.Y) * blend,
+        Z = hold.Z + (head.Z + forward.Z * reach + 6 - hold.Z) * blend,
+    }
+    local rotation = food.math:ComposeRotators(use.rotation, aim)
+    local hand_rotation = food.math:Quat_Rotator(hand.Rotation)
+    entry.use_prop:K2_SetWorldLocationAndRotation(location, food.math:RLerp(hand_rotation, rotation, blend, true),
+        false, {}, true)
+    if blend == 1 and not use.mouth_reach then
+        local actual = entry.use_prop:K2_GetComponentLocation()
+        use.mouth_reach = (actual.X - head.X) * forward.X + (actual.Y - head.Y) * forward.Y
+            + (actual.Z - head.Z) * forward.Z
+    end
+end
+
 function avatar.animate_use(get_world)
     if not next(uses) then return end
     local world = get_world()
-    local clock = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+    local clock = StaticFindObject(gameplay_statics)
     if not valid(world) or not valid(clock) then return end
     local now, scope = clock:GetRealTimeSeconds(world), world:GetAddress()
     for entry, use in pairs(uses) do
         local elapsed = math.max(0, now - use.start)
-        if use.world ~= scope or not valid(entry.use_prop) or elapsed >= use.duration + .8 then
+        if use.world ~= scope or not valid(entry.pawn) or not valid(entry.body) or not valid(entry.use_prop)
+            or elapsed >= use.duration + .8 then
             stop_use(entry)
         else
             local lift = math.min(1, elapsed / .3)
             local using = math.min(1, math.max(0, elapsed - .3) / use.duration)
             local lower = math.max(0, elapsed - .3 - use.duration) / .5
-            local p, r = use.position, use.rotation
-            local z = (p.Z * lift + 10 * using) * (1 - lower) - 100 * lower
-            entry.use_prop:K2_SetRelativeLocationAndRotation(
-                {X = p.X * lift * (1 - lower), Y = p.Y * lift * (1 - lower), Z = z},
-                {Pitch = r.Pitch * lift, Yaw = r.Yaw * lift, Roll = r.Roll * lift}, false, {}, true)
+            if use.food then
+                animate_food(entry, use, lift, using, lower)
+            else
+                local p, r = use.position, use.rotation
+                local z = (p.Z * lift + 10 * using) * (1 - lower) - 100 * lower
+                entry.use_prop:K2_SetRelativeLocationAndRotation(
+                    {X = p.X * lift * (1 - lower), Y = p.Y * lift * (1 - lower), Z = z},
+                    {Pitch = r.Pitch * lift, Yaw = r.Yaw * lift, Roll = r.Roll * lift}, false, {}, true)
+            end
             use.peak = math.max(use.peak, math.abs(entry.use_prop.RelativeLocation.Z))
         end
     end
@@ -837,7 +875,7 @@ function avatar.rows(row)
         if entry.last_use then
             local use = entry.last_use
             rows[#rows + 1] = row("native-avatar-use", entry.name, use.serial, use.item, use.mesh,
-                use.peak, uses[entry] and 1 or 0)
+                use.peak, uses[entry] and 1 or 0, use.mouth_reach or "-")
         end
         local recoil = weapon_view.recoil_row(entry, row)
         if recoil then rows[#rows + 1] = recoil end
