@@ -7,6 +7,9 @@
         local held = pawn.EquipedItem
         local child = guest_weapon.loki_child(held, pawn, kind)
         if not child then return "waiting" end
+        if fields[4] == "reload-ready" then
+            return SilverfishReadNativeGuestReloadIntent() and "waiting" or "ready"
+        end
         if fields[4] == "semi-and-toggle" then
             assert(held.HasSelectFire == true and held.SemiAutoSelected == false)
             held:ToggleSemiAuto()

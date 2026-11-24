@@ -177,6 +177,9 @@ async def verify_guest_loki(host, guest, pawn):
     assert await loki_guest_read(guest, guid, "toggle") == "1,0,loki"
     seeded = await host.bridge.command("fixture-loki-reserve", pawn, "slug")
     assert seeded["ack"]["message"] == "seeded"
+    async with asyncio.timeout(8):
+        while await loki_guest_read(guest, guid, "reload-ready") != "ready":
+            await asyncio.sleep(.15)
     slug = await stock_input(guest_run, guest_frame, "reload")
     assert (slug["guid"], slug["after"], slug["ammo_class"]) == (guid, 1, TWELVE_GAUGE_SLUGS.item_path), slug
     await wait_loki_guest(guest, guid, "1,1,loki")

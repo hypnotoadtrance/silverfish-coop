@@ -319,7 +319,7 @@ function guest_weapon.loki_child(held, pawn, kind)
     end
 end
 
-local function project_underbarrel(fields, pawn, held, kind)
+local function project_underbarrel(fields, pawn, held, kind, guid)
     local rounds, path = math.tointeger(tonumber(fields[9])), fields[10]
     local child = guest_weapon.loki_child(held, pawn, kind)
     if not child or not valid_rounds(child, rounds) or not allowed_ammo("bolt-action-shotgun-loki", path) then
@@ -328,11 +328,11 @@ local function project_underbarrel(fields, pawn, held, kind)
     if mounted_ammo_path(child) ~= path then
         local class = StaticFindObject(path)
         if not class or not class:IsValid() then LoadAsset(path); class = StaticFindObject(path) end
-        local handle = class and class:IsValid() and class:GetCDO().AmmoType
-        local source, name = handle and handle.DataTable, handle and handle.RowName
-        local stock = same(source, StaticFindObject(ammo_table_path)) and name and source:FindRow(name:ToString())
-        if not stock or not same(stock[ammo_item_field], class) then error("The co-op shell data is unavailable", 0) end
-        child:ChangeAmmoType(handle)
+        if not class or not class:IsValid() or type(SilverfishProjectNativeLokiRound) ~= "function" then
+            error("The co-op shell data is unavailable", 0)
+        end
+        local ok, status = SilverfishProjectNativeLokiRound(pawn:GetAddress(), guid, path)
+        if ok ~= true then error(status, 0) end
     end
     if child.Ammo ~= rounds then
         child.Ammo = rounds
@@ -399,7 +399,7 @@ local function project_magazine(fields, state, phase)
         end
     end
     write_magazine(held, row, rounds)
-    if #fields >= 10 then project_underbarrel(fields, pawn, held, kind) end
+    if #fields >= 10 then project_underbarrel(fields, pawn, held, kind, guid) end
     if #fields == 11 then
         if mode_group(fields[11]) ~= "barrel" then error("The co-op barrel mode is unavailable", 0) end
         guest_weapon.project_fire_mode(state, phase, guid, fields[11])

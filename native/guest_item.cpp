@@ -1805,17 +1805,17 @@ namespace
         });
     }
 
-    bool select_stock_round(Unreal::UObject* actor, const Inventory& inventory, Unreal::UClass* ammo,
-                            const profiles::StockAmmo& selected, Unreal::UObject* receiver)
+    bool select_stock_round(Unreal::UObject* actor, Unreal::UClass* ammo,
+                            const profiles::StockAmmo& selected, bool underbarrel)
     {
-        auto* fn = find<Unreal::UFunction>(actor == receiver ? change_ammo_path : loki_change_ammo);
+        auto* fn = find<Unreal::UFunction>(underbarrel ? loki_change_ammo : change_ammo_path);
         auto* handle = input<Unreal::FStructProperty>(fn, STR("InputPin"), 0);
         auto* handle_type = find<Unreal::UScriptStruct>(STR("/Script/Engine.DataTableRowHandle"));
         const Unreal::FName change_name{STR("ChangeAmmoType")};
         if (!fn || actor->GetFunctionByNameInChain(change_name) != fn || fn->GetNumParms() != 1 || fn->GetReturnProperty() ||
             fn->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
             !handle || !handle_type || handle->GetStruct().Get() != handle_type || fn->GetParmsSize() != handle->GetSize() ||
-            !ammo_item_row_matches(ammo, selected) || !mounted_payload_matches(receiver, inventory)) return false;
+            !ammo_item_row_matches(ammo, selected)) return false;
         auto* defaults = ammo->GetClassDefaultObject().Get();
         auto* ammo_handle = field<Unreal::FStructProperty>(defaults, STR("AmmoType"));
         const auto* row = ammo_handle->ContainerPtrToValuePtr<void>(defaults);
@@ -1826,6 +1826,42 @@ namespace
         actor->ProcessEvent(fn, params);
         handle->DestroyAndFreeValue(params);
         return true;
+    }
+
+    int project_loki_round(const Lua& lua)
+    {
+        constexpr std::string_view refusal = "guest_underbarrel_round_projection_unavailable";
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 3 || !lua.is_integer(1) ||
+            !lua.is_string(2) || !lua.is_string(3)) return result(lua, false, refusal);
+        const auto address = lua.get_integer();
+        Context context;
+        if (address <= 0 || !parse_guid(lua.get_string(), context.guid)) return result(lua, false, refusal);
+        const auto path = lua.get_string();
+        const auto found = std::ranges::find_if(profiles::stock_ammo, [&](const auto* round) {
+            return round->caliber == loki_magazine.ammo->caliber && path == RC::to_utf8_string(round->item);
+        });
+        if (found == profiles::stock_ammo.end()) return result(lua, false, refusal);
+        const auto& round = **found;
+        context.pawn = silverfish::native_interaction_input::current_guest_pawn(static_cast<std::uintptr_t>(address));
+        if (!live(context.pawn)) return result(lua, false, refusal);
+        context.world = static_cast<Unreal::AActor*>(context.pawn)->GetWorld();
+        context.instance = object(context.world, STR("OwningGameInstance"));
+        context.save = object(context.pawn, STR("Save"));
+        if (!context.world || !live(context.save) || context.save->GetClassPrivate() != find<Unreal::UClass>(save_path) ||
+            object(context.instance, STR("SaveSlot_Ref")) != context.save) return result(lua, false, refusal);
+
+        auto* held = object(context.pawn, STR("EquipedItem"));
+        context.weapon = live(held) ? qualified_weapon(held->GetClassPrivate()) : nullptr;
+        Inventory inventory;
+        if (!context.weapon || !locate(context, inventory).empty() || equipped(context, inventory) != held)
+            return result(lua, false, refusal);
+        auto* child = mounted_loki(held, context.pawn);
+        auto* ammo = find<Unreal::UClass>(round.item);
+        if (!child || !ammo || !stock_magazine_shape(child, loki_magazine, true))
+            return result(lua, false, refusal);
+        if (!select_stock_round(child, ammo, round, true)) return result(lua, false, refusal);
+        const bool verified = stock_round_matches(child, mounted_ammo(child), stock_projectile(child, round.projectile_count), &round);
+        return result(lua, verified, verified ? "stock underbarrel round projected" : "guest_underbarrel_round_projection_unverified");
     }
 
     int reload(const Lua& lua, const Context& context, Inventory inventory, bool underbarrel)
@@ -1925,7 +1961,7 @@ namespace
         if (changed_round)
         {
             const Unreal::FWeakObjectPtr held_actor{actor};
-            if (!select_stock_round(actor, inventory, ammo_class, *changed_round, receiver))
+            if (!mounted_payload_matches(receiver, inventory) || !select_stock_round(actor, ammo_class, *changed_round, underbarrel))
                 return reload_proof(lua, false, "stock_guest_weapon_ammo_switch_unqualified", before, before, reserve_before);
             Inventory selected;
             std::vector<ReserveStack> selected_stacks;
@@ -3723,6 +3759,7 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
     if (env("SILVERFISH_COOP_NATIVE_INTERACT_INPUT"))
     {
+        lua.register_function("SilverfishProjectNativeLokiRound", project_loki_round);
         lua.register_function("SilverfishReadLocalGuestEquipmentSelection", read_local_selection);
         lua.register_function("SilverfishTakeLocalGuestFlare", take_flare);
         if (flare_hooks[0] == Hook::ERROR_ID)
