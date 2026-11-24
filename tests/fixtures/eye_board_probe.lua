@@ -91,22 +91,23 @@ local function prepare(state, host, operation)
     local rows = save.PlayerBackpack
     for index = 1, rows:GetArrayNum() do assert(not same(rows[index][class_field], item)) end
 
-    local function append_stack(units)
+    local function append_stack(pawn, inventory, units)
         local out = {}
-        factory:MakeItemStack(item, units, remote, out)
+        factory:MakeItemStack(item, units, pawn, out)
         local stock = out.Item or out
         local guid = identity(stock)
         assert(same(stock[class_field], item) and stock[amount_field] == units and guid:find("[^0]"))
-        local index = rows:GetArrayNum() + 1
-        rows[index] = stock
-        assert(rows:GetArrayNum() == index and identity(rows[index]) == guid and same(rows[index][class_field], item))
+        local index = inventory:GetArrayNum() + 1
+        inventory[index] = stock
+        assert(inventory:GetArrayNum() == index and identity(inventory[index]) == guid and same(inventory[index][class_field], item))
         return guid
     end
 
-    local guid, spare = append_stack(count), append_stack(1)
-    assert(guid ~= spare)
+    local guid, spare = append_stack(remote, rows, count), append_stack(remote, rows, 1)
+    local host_guid = append_stack(host, host.Save.PlayerBackpack, 3)
+    assert(guid ~= spare and guid ~= host_guid and spare ~= host_guid)
     seeded = true
-    return guid .. ";" .. spare
+    return table.concat({guid, spare, host_guid}, ";")
 end
 
 local function sync(state, phase)

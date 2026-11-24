@@ -49,6 +49,7 @@ local spare_stack = {[item_class] = class, [item_units] = 1, [item_guid] = {A = 
 local portion = {[item_class] = class, [item_units] = 1, [item_guid] = {A = 9, B = 8, C = 7, D = 6}}
 local want_guid = "00000001000000020000000300000004"
 local split_guid = "00000009000000080000000700000006"
+local host_stack = {[item_class] = class, [item_units] = 3, [item_guid] = {A = 4, B = 6, C = 8, D = 10}}
 
 local function quest(at, class_value, payout, flag_values, rep_values)
     return {
@@ -124,13 +125,19 @@ function StaticFindObject(path)
 end
 EFindName = {FNAME_Find = 1}
 function FName(text) return text end
-function SilverfishStageBoardObjective(pawn, source, dest, guid, quest_id, path, limit, payout, experience, units)
+function SilverfishRedeemBoardObjective(pawn, source, dest, guid, quest_id, path, limit, payout, experience, units)
     assert(pawn == guest:GetAddress() and source == bag:GetAddress() and dest == store:GetAddress())
     assert(guid == want_guid and quest_id == eye and path == item_path and limit == 2 and payout == 801 and experience == 1)
     assert(units == 2 and bag.PlayerBackpack[1] == row_item)
     row_item[item_units] = 1
-    store.PlayerBackpack[1] = portion
-    return true, "staged", split_guid
+    local host_pack = store.PlayerBackpack
+    assert(host_pack[1] == host_stack)
+    store.PlayerBackpack = array({portion})
+    local result = {}
+    stock_finalize(nil, quest_id, game_instance, true, player, result)
+    store.PlayerBackpack = host_pack
+    assert(result.Success)
+    return true, "redeemed", split_guid
 end
 
 local mod = require("native_board_contract")
@@ -172,7 +179,7 @@ assert(proof()[8] == "applied" and proof()[10] == 1)
 denied("missing_objective", "turnin", "inspect", eye)
 store.PlayerBackpack[1] = row_item
 denied("missing_objective", "turnin", "inspect", eye)
-store.PlayerBackpack = array({})
+store.PlayerBackpack = array({host_stack})
 bag.PlayerBackpack[1] = row_item
 bag.PlayerBackpack[2] = row_item
 assert(catalog()[8] == "-")
@@ -189,7 +196,8 @@ denied("objective_changed", "turnin", "apply", eye, "-")
 denied("objective_changed", "turnin", "apply", eye, want_guid, "1")
 denied("objective_changed", "turnin", "apply", eye, "00000005000000060000000700000008", "1")
 action("turnin", "apply", eye, want_guid, "2")
-assert(proof()[10] == -10 and proof()[13] == 818 and #store.PlayerBackpack == 0)
+assert(proof()[10] == -10 and proof()[13] == 818 and #store.PlayerBackpack == 1)
+assert(store.PlayerBackpack[1] == host_stack and host_stack[item_units] == 3)
 assert(proof()[18] == want_guid and proof()[19] == 2 and proof()[20] == 1 and proof()[21] == split_guid)
 assert(#bag.PlayerBackpack == 2 and bag.PlayerBackpack[1] == row_item and row_item[item_units] == 1)
 assert(bag.PlayerBackpack[2] == spare_stack and spare_stack[item_units] == 1)

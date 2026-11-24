@@ -113,13 +113,16 @@ async def verify_eye_board(run, remote, bridge, character, *, wait_status=wait):
     without_item = (await action(guest, dynamic.CATALOG))[dynamic.CATALOG_KEY]
     assert QUEST not in without_item["offers"] and QUEST not in without_item["turnins"], without_item
 
-    guid, spare_guid = (await probe(bridge, "eye")).split(";")
-    assert valid_guid(guid) and valid_guid(spare_guid) and guid != spare_guid
+    guid, spare_guid, host_guid = (await probe(bridge, "eye")).split(";")
+    assert len({guid, spare_guid, host_guid}) == 3 and all(map(valid_guid, (guid, spare_guid, host_guid)))
     before_pack = await inventory(guest)
     item, spare = before_pack[guid], before_pack[spare_guid]
     assert (item["class_path"], item["quantity"], item["source"], item["stackable"]) == (ITEM, 2, "backpack", True), item
     assert (spare["class_path"], spare["quantity"], spare["source"], spare["stackable"]) == (ITEM, 1, "backpack", True), spare
-    assert not {guid, spare_guid} & (await inventory(host)).keys()
+    original_host_pack = await inventory(host)
+    assert not {guid, spare_guid} & original_host_pack.keys() and host_guid not in before_pack
+    host_stack = original_host_pack[host_guid]
+    assert (host_stack["class_path"], host_stack["quantity"], host_stack["source"]) == (ITEM, 3, "backpack"), host_stack
     ready = (await action(guest, dynamic.CATALOG))[dynamic.CATALOG_KEY]
     assert QUEST in ready["turnins"] and QUEST not in ready["offers"], ready
     second_menu = await open_native_board()
@@ -131,7 +134,7 @@ async def verify_eye_board(run, remote, bridge, character, *, wait_status=wait):
     assert valid_guid(consumed) and consumed != guid, paid
     assert paid["wallet"] == wallet + 801 and set(paid["recipients"]) == {character, "host"}, paid
     host_pack, guest_pack = await inventory(host), await inventory(guest)
-    assert not {guid, spare_guid, consumed} & host_pack.keys() and consumed not in guest_pack
+    assert host_pack == original_host_pack and consumed not in guest_pack
     remaining = guest_pack[guid]
     assert remaining == {**item, "quantity": 1}, (item, remaining)
     assert guest_pack[spare_guid] == spare
@@ -141,7 +144,7 @@ async def verify_eye_board(run, remote, bridge, character, *, wait_status=wait):
     assert after_replay[guid] == remaining and after_replay[spare_guid] == spare
     assert campaign_save_hashes(run.parent) == before, "Board actions wrote campaign saves outside a checkpoint"
     evidence = {"verified": True, "menus": [first_menu, second_menu], "ready": ready,
-                "item": item, "remainder": remaining, "untouched_eye_stack": spare,
+                "item": item, "remainder": remaining, "untouched_eye_stack": spare, "untouched_host_stack": host_stack,
                 "receipt": paid, "replay": replay, "deferred_writes": True}
     return evidence
 
