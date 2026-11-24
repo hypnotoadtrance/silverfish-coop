@@ -4656,7 +4656,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                         "title-host-settings-" + uuid.uuid4().hex[:8]))
                 session = await run_resident_campaign(campaign, checks, host)
                 proof["sessions"].append(dict(session, resident_campaign=campaign))
-            assert len({row["campaign_id"] for row in proof["sessions"]}) == len(resident_campaigns)
+            assert len({row["campaign_id"] for row in proof["sessions"]}) == len(resident_campaigns) + int(stock_unequip)
             assert all(row["host_pid"] == first.bridge.process.pid and row["guest_pid"] == second.bridge.process.pid
                        for row in proof["sessions"])
             if resident_weapon_cues:
