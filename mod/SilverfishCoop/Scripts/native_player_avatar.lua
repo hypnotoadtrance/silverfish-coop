@@ -233,6 +233,10 @@ local function create_handgun_hardpoint(entry)
     return attach_component(entry, "handgun_hardpoint", entry.body, "Weapon_Socket01", scene_class)
 end
 
+local function create_weapon_pivot(entry, field, parent, socket)
+    return attach_component(entry, field, parent, socket, scene_class)
+end
+
 local function position_head(entry)
     -- The stock head meshes use HelmetSocket as their origin. Put the aim
     -- pivot on the Head bone itself so an animated socket offset cannot move
@@ -262,7 +266,7 @@ end
 local function restore_locomotion(entry)
     entry.gait_blend = nil
     if entry.pose_animation and valid(entry.body) then
-        entry.body:SetAnimationMode(entry.animation_mode, true)
+        entry.body:SetAnimationMode(entry.animation_mode, false)
         entry.pose_animation, entry.pose_mesh, entry.pose_asset, entry.pose_is_blend = nil, nil, nil, nil
     end
     if entry.pose_tick_option ~= nil and valid(entry.body) then
@@ -344,10 +348,10 @@ local function apply_locomotion(entry, aim, outfit)
     -- A single-node player's clock can advance while its socket bones retain
     -- the previous pose. The projected held items and head use those bones.
     refresh_pose_when_hidden(entry)
-    if entry.body.AnimationMode == 1 and not valid(instance) then
-        entry.body:SetAnimationMode(1, true)
+    if not gait.play(body, animation) then
+        restore_locomotion(entry)
+        return
     end
-    entry.body:PlayAnimation(animation, true)
     entry.pose_animation, entry.pose_mesh, entry.pose_asset = name, mesh:GetAddress(), animation:GetAddress()
     entry.pose_is_blend = nil
 end
@@ -658,7 +662,17 @@ function avatar.animate_head(get_world)
                 end
             end
             aim_head(entry, now, lean_changed, math_api)
+            character_view.align_tail(entry)
             if not uses[entry] and not swings[entry] then gait.advance(entry, now) end
+            if entry.weapon_stance == "rifle" and (entry.rifle_idle or entry.rifle_rotated) then
+                math_api = math_api or StaticFindObject(math_library)
+                local movement = entry.pawn.CharacterMovement
+                if valid(math_api) then
+                    weapon_view.rifle_idle(entry, entry.rifle_idle and not uses[entry] and not swings[entry]
+                        and not entry.pawn.Dead and valid(movement) and movement:IsMovingOnGround(),
+                        math_api, create_weapon_pivot)
+                end
+            end
             if entry.handgun_view and entry.handgun_view.requested then
                 math_api = math_api or StaticFindObject(math_library)
                 if valid(math_api) and not pcall(handgun_view.update, entry, math_api) then
@@ -823,6 +837,8 @@ function avatar.sync(state, phase)
                                 aim = outfit and host_aims[entry.id] == outfit.gun and outfit.gun or "-"
                             end
                             apply_locomotion(entry, aim, outfit)
+                            entry.rifle_idle = aim == "-" and entry.weapon_stance == "rifle"
+                                and entry.gait_blend ~= nil and entry.gait_blend.target == 0
                             if not pcall(handgun_view.sync, entry, aim == "pistol" and not uses[entry], create_handgun_hardpoint) then
                                 pcall(handgun_view.release, entry)
                             end

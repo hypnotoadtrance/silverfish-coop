@@ -10,6 +10,17 @@ local ramp_duration = .2
 
 local function valid(object) return object and object:IsValid() end
 
+function gait.play(body, animation)
+    if body.AnimationMode ~= 1 then body:SetAnimationMode(1, false) end
+    local instance = body.AnimScriptInstance
+    if not valid(instance) then return end
+    body:SetAnimation(animation)
+    local current = instance.CurrentAsset
+    if not valid(current) or current:GetAddress() ~= animation:GetAddress() then return end
+    body:Play(true)
+    return instance
+end
+
 local function is_current(instance, state)
     if not valid(instance) or instance:GetAddress() ~= state.instance then return false end
     local current = instance.CurrentAsset
@@ -34,12 +45,9 @@ function gait.apply(entry, mesh, pace, load_asset, prepare_body)
             or blend.Skeleton:GetAddress() ~= mesh.Skeleton:GetAddress() then return false end
 
         prepare_body(entry)
-        if body.AnimationMode == 1 and not valid(instance) then body:SetAnimationMode(1, true) end
-        body:PlayAnimation(blend, true)
-        instance = body.AnimScriptInstance
-        if not valid(instance) or not valid(instance.CurrentAsset)
-            or instance.CurrentAsset:GetAddress() ~= blend:GetAddress() then
-            body:SetAnimationMode(entry.animation_mode, true)
+        instance = gait.play(body, blend)
+        if not instance then
+            body:SetAnimationMode(entry.animation_mode, false)
             return false
         end
         state = {name = profile.name, asset = blend:GetAddress(), instance = instance:GetAddress(), target = pace}

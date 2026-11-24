@@ -27,6 +27,7 @@ local active_recoil = {}
 local kick_time = .05
 local stock_recheck_seconds = .2
 local max_stock_components = 24
+local zero_rotation = {Pitch = 0, Yaw = 0, Roll = 0}
 local identity = {
     Rotation = { X = 0, Y = 0, Z = 0, W = 1 },
     Translation = { X = 0, Y = 0, Z = 0 },
@@ -334,7 +335,9 @@ function view.clear(entry)
         if valid(component) and valid(entry.pawn) then component:K2_DestroyComponent(entry.pawn) end
     end
     if valid(entry.weapon_anchor) and valid(entry.pawn) then entry.weapon_anchor:K2_DestroyComponent(entry.pawn) end
+    if valid(entry.rifle_pivot) and valid(entry.pawn) then entry.rifle_pivot:K2_DestroyComponent(entry.pawn) end
     entry.weapon_parts, entry.weapon_model, entry.weapon_anchor, entry.weapon_rig = nil, nil, nil, nil
+    entry.rifle_pivot, entry.rifle_grip, entry.rifle_rotated = nil, nil, nil
     entry.weapon_shape, entry.weapon_meshes = nil, nil
     entry.weapon_stance = nil
     entry.weapon_slide = nil
@@ -458,6 +461,63 @@ function view.apply(entry, model, firearm)
     end
     if mode then lighter.apply(entry, mode) end
     entry.weapon_model, entry.weapon_shape = model, shape
+end
+
+function view.rifle_idle(entry, idle, api, add_pivot)
+    local pivot, grip = entry.rifle_pivot, entry.rifle_grip
+    local stock = entry.stock_weapon_actor
+    local anchor, body = entry.weapon_anchor, entry.body
+    if idle and valid(anchor) and valid(stock) and not stock:IsActorBeingDestroyed() then
+        if not grip or not same(stock, grip.actor) then
+            local foregrip, root = stock.Arrow_Forgrip, stock.RootComponent
+            if valid(foregrip) and valid(root) and same(foregrip:GetOwner(), stock) then
+                local offset = api:InverseTransformLocation(root:K2_GetComponentToWorld(), foregrip:K2_GetComponentLocation())
+                grip = {actor = stock, offset = offset, length = math.sqrt(offset.X^2 + offset.Y^2 + offset.Z^2)}
+                entry.rifle_grip = grip
+            else
+                grip = nil
+            end
+        end
+        local hand = FName("LeftHand", EFindName.FNAME_Find)
+        local socket = FName("Weapon_Socket01", EFindName.FNAME_Find)
+        if grip and grip.length >= 10 and grip.length <= 80 and body:DoesSocketExist(hand) then
+            local palm = body:GetSocketLocation(hand)
+            local index = FName("LeftHandIndex1", EFindName.FNAME_Find)
+            if body:DoesSocketExist(index) then
+                local knuckle = body:GetSocketLocation(index)
+                palm = {X = (palm.X + knuckle.X) * .5, Y = (palm.Y + knuckle.Y) * .5, Z = (palm.Z + knuckle.Z) * .5}
+            end
+            local target = api:InverseTransformLocation(body:GetSocketTransform(socket, 0), palm)
+            local source = grip.offset
+            local lengths = grip.length * math.sqrt(target.X^2 + target.Y^2 + target.Z^2)
+            local dot = source.X*target.X + source.Y*target.Y + source.Z*target.Z
+            -- Only adjust a genuine two-handed pose. A lowered arm or the
+            -- opposite side of the body should never swing the weapon around.
+            if lengths > 1 and dot > lengths * .5 then
+                if not valid(pivot) then
+                    pivot = add_pivot(entry, "rifle_pivot", body, "Weapon_Socket01")
+                    if not anchor:K2_AttachToComponent(pivot, FName("None", EFindName.FNAME_Find), 0, 0, 0, false) then
+                        pivot:K2_DestroyComponent(entry.pawn)
+                        entry.rifle_pivot = nil
+                        return
+                    end
+                end
+                local x = source.Y*target.Z - source.Z*target.Y
+                local y = source.Z*target.X - source.X*target.Z
+                local z = source.X*target.Y - source.Y*target.X
+                local w = lengths + dot
+                local norm = math.sqrt(x*x + y*y + z*z + w*w)
+                local rotation = api:Quat_Rotator({X = x / norm, Y = y / norm, Z = z / norm, W = w / norm})
+                pivot:K2_SetRelativeRotation(rotation, false, {}, true)
+                entry.rifle_rotated = true
+                return
+            end
+        end
+    end
+    if entry.rifle_rotated and valid(pivot) then
+        pivot:K2_SetRelativeRotation(zero_rotation, false, {}, true)
+        entry.rifle_rotated = nil
+    end
 end
 
 function view.recoil(entry, world, path, serial, values)

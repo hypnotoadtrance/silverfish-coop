@@ -83,7 +83,18 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
         assert await command(host, "clear") == "clear"
         assert await command(guest, "light-ar-semi") == "light-ar-semi"
         await persisted_mode(guid, "semi")
+        grip = None
         if re_equip:
+            async with asyncio.timeout(8):
+                while True:
+                    reading = await command(host, "rifle-grip")
+                    if reading != "waiting":
+                        baseline, adjusted = map(float, reading.split(","))
+                        grip = {"stock_gap_cm": baseline, "adjusted_gap_cm": adjusted}
+                        assert adjusted <= baseline + .1 and adjusted < 16, grip
+                        break
+                    await asyncio.sleep(.05)
+            await wait_readback(guest, "light-ar-aim", "aiming")
             assert await command(guest, "light-ar-put-away") == "changing"
             await wait_readback(guest, "light-ar-other-ready", "other")
             assert await command(guest, "equip") == "selected"
@@ -130,5 +141,6 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
                                "stock_muzzle_flashes": muzzle_flashes, "reload": reloaded,
                                "semi_hold_blocked": True, "automatic_burst": burst,
                                "host_stored_both_modes": True, "semi_after_re_equip": re_equip,
+                               "observer_idle_grip": grip, "stock_switch_while_aiming": re_equip,
                                "both_magazines_verified": True, "host_reserve_unchanged": True,
                                "campaign_unchanged": True, "observer_scopes_disarmed": True}}

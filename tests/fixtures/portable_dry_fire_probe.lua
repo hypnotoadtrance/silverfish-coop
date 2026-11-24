@@ -170,6 +170,43 @@ local function seed_reserve(extra)
     return read_reserve(peer)
 end
 
+local function rifle_grip()
+    assert(observing() and local_pawn:HasAuthority())
+    local weapon = peer.EquipedItem
+    if not valid(weapon) or not same(weapon:GetClass(), asset(weapon_path)) then return "waiting" end
+    local frame, root, marker = weapon.Mesh_Frame, weapon.RootComponent, weapon.Arrow_Forgrip
+    if not valid(frame) or not valid(root) or not valid(marker) then return "waiting" end
+    local hand_socket = FName("Weapon_Socket01", EFindName.FNAME_Find)
+    local left = FName("LeftHand", EFindName.FNAME_Find)
+    local index = FName("LeftHandIndex1", EFindName.FNAME_Find)
+    local math_api = asset("/Script/Engine.Default__KismetMathLibrary")
+    for _, part in ipairs(peer:K2_GetComponentsByClass(asset("/Script/Engine.StaticMeshComponent"))) do
+        if type(part) == "userdata" and part:type() == "RemoteUnrealParam" then part = part:get() end
+        if same(part.StaticMesh, frame.StaticMesh) and part:IsVisible() then
+            local anchor = part:GetAttachParent()
+            local pivot = valid(anchor) and anchor:GetAttachParent()
+            if valid(pivot) and pivot:GetAttachSocketName():ToString() == "Weapon_Socket01" then
+                local body = pivot:GetAttachParent()
+                local instance = valid(body) and body.AnimScriptInstance
+                local clip = valid(instance) and instance.CurrentAsset
+                if valid(clip) and clip:GetFullName():find("Rifle_Lowered_BlendSpace", 1, true) then
+                    local wrist, knuckle = body:GetSocketLocation(left), body:GetSocketLocation(index)
+                    local palm = {X = (wrist.X + knuckle.X) * .5, Y = (wrist.Y + knuckle.Y) * .5,
+                        Z = (wrist.Z + knuckle.Z) * .5}
+                    local grip = math_api:InverseTransformLocation(root:K2_GetComponentToWorld(), marker:K2_GetComponentLocation())
+                    local baseline = math_api:TransformLocation(body:GetSocketTransform(hand_socket, 0), grip)
+                    local actual = math_api:TransformLocation(anchor:K2_GetComponentToWorld(), grip)
+                    local function distance(a, b)
+                        return math.sqrt((a.X-b.X)^2 + (a.Y-b.Y)^2 + (a.Z-b.Z)^2)
+                    end
+                    return ("%.3f,%.3f"):format(distance(baseline, palm), distance(actual, palm))
+                end
+            end
+        end
+    end
+    return "waiting"
+end
+
 local function run(action)
     if arm_profiles[action] then
         weapon_path, reserve_path, reserve_units, slot = table.unpack(arm_profiles[action])
@@ -189,6 +226,14 @@ local function run(action)
     end
     if action == "ready" then return ready(local_pawn) end
     if action == "peer-ready" then return ready(peer) end
+    if action == "rifle-grip" then return rifle_grip() end
+    if action == "light-ar-aim" then
+        assert(observing() and not local_pawn:HasAuthority() and ready(local_pawn) ~= "waiting")
+        local input = asset("/Game/Classes/Player/Player_Inputs/IA_Use_Secondary.IA_Use_Secondary")
+        local value = asset("/Script/EnhancedInput.Default__EnhancedInputLibrary"):MakeInputActionValueOfType(1, 0, 0, 0)
+        local_pawn:InpActEvt_IA_Use_Secondary_K2Node_EnhancedInputActionEvent_33(value, 0, 0, input)
+        return local_pawn.Aiming and "aiming" or "waiting"
+    end
     if action == "light-ar-read-mode" then
         local held = local_pawn.EquipedItem
         if not valid(held) or not same(held:GetClass(), asset(weapon_path)) then return "waiting" end
