@@ -2,6 +2,7 @@ local pools = {}
 local pool_class = "/Game/Classes/Anomalies/AcidPool_BP.AcidPool_BP_C"
 pools.class_name = "BlueprintGeneratedClass " .. pool_class
 local max_pools = 64
+local max_dynamic_size = 4
 local visit
 local spawning = false
 
@@ -137,8 +138,9 @@ end
 
 local function transform(actor)
     local position, angles, scale = actor:K2_GetActorLocation(), actor:K2_GetActorRotation(), actor:GetActorScale3D()
-    return ("%.3f,%.3f,%.3f:%.3f,%.3f,%.3f:%.3f,%.3f,%.3f"):format(
-        position.X, position.Y, position.Z, angles.Pitch, angles.Yaw, angles.Roll, scale.X, scale.Y, scale.Z)
+    return ("%.3f,%.3f,%.3f:%.3f,%.3f,%.3f:%.3f,%.3f,%.3f:%.3f"):format(
+        position.X, position.Y, position.Z, angles.Pitch, angles.Yaw, angles.Roll, scale.X, scale.Y, scale.Z,
+        actor.SizeScaler)
 end
 
 function pools.rows(state, phase, row)
@@ -162,7 +164,10 @@ function pools.rows(state, phase, row)
     for _, id in ipairs(dynamic_ids) do
         if #states >= max_pools then break end
         local actor = current.dynamic[id].actor
-        states[#states + 1] = id .. ":" .. stock_phase(actor) .. ":" .. transform(actor)
+        local size = actor.SizeScaler
+        if type(size) == "number" and size >= .001 and size <= max_dynamic_size then
+            states[#states + 1] = id .. ":" .. stock_phase(actor) .. ":" .. transform(actor)
+        end
     end
     current.published = current.published or #current.ids > 0 or #states > 0
     if current.published then return row("native-acid-pool-roster", current.area, #states > 0 and table.concat(states, "|") or "-") end
@@ -209,17 +214,21 @@ local function decode(args)
         if not pool_id(id) or id <= previous then error("Invalid stock acid pool state", 0) end
         local target = {phase = phase}
         if id:match("^spawned_") then
-            local at, angles, size = tail:match("^:([^:]+):([^:]+):([^:]+)$")
+            local at, angles, scale, size = tail:match("^:([^:]+):([^:]+):([^:]+):(%d+%.%d%d%d)$")
+            if not at then at, angles, scale = tail:match("^:([^:]+):([^:]+):([^:]+)$") end
             local x, y, z, pitch, yaw, roll, sx, sy, sz
             if at then
                 x, y, z = triplet(at, -1e7, 1e7)
                 pitch, yaw, roll = triplet(angles, -360, 360)
-                sx, sy, sz = triplet(size, .001, 100)
+                sx, sy, sz = triplet(scale, .001, 100)
             end
-            if not x or not pitch or not sx then error("Invalid stock acid pool transform", 0) end
+            local scalar = tonumber(size)
+            if not x or not pitch or not sx or size and (not scalar or scalar < .001 or scalar > max_dynamic_size) then
+                error("Invalid stock acid pool transform", 0)
+            end
             target.position, target.angles, target.scale = {X=x, Y=y, Z=z}, {Pitch=pitch, Yaw=yaw, Roll=roll},
                 {X=sx, Y=sy, Z=sz}
-            target.pose = tail
+            target.pose, target.size = tail, scalar
         elseif tail ~= "" then
             error("Invalid authored acid pool state", 0)
         end
@@ -234,10 +243,25 @@ local function project_dynamic(current, id, target)
         local class = StaticFindObject(pool_class)
         if not valid(class) then LoadAsset(pool_class); class = StaticFindObject(pool_class) end
         if not valid(class) then error("The stock acid pool class is unavailable", 0) end
+        local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+        local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+        if not valid(statics) or not valid(math_api) then error("Stock acid pool spawning is unavailable", 0) end
+        local pose = math_api:MakeTransform(target.position, target.angles, target.scale)
+        local actor
         spawning = true
-        local ok, actor = pcall(function() return current.world:SpawnActor(class, target.position, target.angles) end)
+        local ok, finished = pcall(function()
+            actor = statics:BeginDeferredActorSpawnFromClass(current.world, class, pose, 1, nil, 0)
+            if not live(actor) or not same(actor:GetWorld(), current.world) or not same(actor:GetClass(), class) then return end
+            -- Construction sizes the stock effects. The host publishes the timer's phase changes.
+            if target.size then actor.SizeScaler = target.size end
+            actor.BurnTime = 0
+            return statics:FinishSpawningActor(actor, pose, 0)
+        end)
         spawning = false
-        if not ok or not live(actor) then error("The stock acid pool could not appear locally", 0) end
+        if not ok or not same(actor, finished) or not live(actor) then
+            if live(actor) and same(actor:GetWorld(), current.world) then actor:K2_DestroyActor() end
+            error("The stock acid pool could not appear locally", 0)
+        end
         actor:SetActorEnableCollision(false)
         local path = qualify(actor, current.world, true)
         if not path or not valid(actor.DotVolume) or actor.DotVolume.DotActive ~= false then
@@ -245,6 +269,7 @@ local function project_dynamic(current, id, target)
             error("The local acid pool was not passive", 0)
         end
         entry = track_dynamic(current, id, actor, path)
+        entry.pose = target.pose
     end
     if entry.pose ~= target.pose then
         entry.actor:K2_SetActorLocationAndRotation(target.position, target.angles, false, {}, true)

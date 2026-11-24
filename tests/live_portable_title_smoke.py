@@ -77,7 +77,7 @@ INDEPENDENT_RESIDENT_MAPS = {
     "stock_placed_item": {CROSSROADS}, "stock_weather_travel": {OBSERVATORY},
     "stock_warehouse_switch": {OBSERVATORY, WAREHOUSE_DOCK}, "stock_warehouse_radio": {OBSERVATORY, WAREHOUSE_DOCK},
     "stock_bottle": {OBSERVATORY, WAREHOUSE_DOCK},
-    "stock_prop_breaks": {WAREHOUSE_DOCK},
+    "stock_prop_breaks": {WAREHOUSE_DOCK}, "stock_acid_bottle": {WAREHOUSE_DOCK},
 }
 
 
@@ -1844,15 +1844,20 @@ async def verify_stock_bottle(host: Seat, guest: Seat, pawn: str) -> dict:
                              "checkpoint_unchanged": True}}
 
 
+async def stage_warehouse_prop(host, guest, stock_class):
+    path, position = (await warehouse_prop_probe(host, "spawn-prop", stock_class)).split(";")
+    async with asyncio.timeout(8):
+        while (replica := await warehouse_prop_probe(guest, "locate-prop", stock_class, position)) == "waiting":
+            await asyncio.sleep(.08)
+    return path, replica, position
+
+
 async def verify_stock_prop_breaks(host: Seat, guest: Seat, _pawn: str) -> dict:
     checkpoint = campaign_save_hashes(host.campaign)
     frame = await wait_resident_status(guest.client / "run", lambda row: row.get("game", {}).get("map") == WAREHOUSE_DOCK)
 
     async def check(kind, stock_class):
-        path, position = (await warehouse_prop_probe(host, "spawn-prop", stock_class)).split(";")
-        async with asyncio.timeout(8):
-            while (replica := await warehouse_prop_probe(guest, "locate-prop", stock_class, position)) == "waiting":
-                await asyncio.sleep(.08)
+        path, replica, _ = await stage_warehouse_prop(host, guest, stock_class)
         await warehouse_prop_probe(guest, "local-break", replica)
         assert await warehouse_prop_probe(guest, "inspect", replica) == "1,false", (kind, replica)
         started = time.time()
@@ -1872,6 +1877,50 @@ async def verify_stock_prop_breaks(host: Seat, guest: Seat, _pawn: str) -> dict:
     assert not failures, (list(results), failures)
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"stock_prop_breaks": results}
+
+
+async def verify_stock_acid_bottle(host: Seat, guest: Seat, _pawn: str) -> dict:
+    checkpoint = campaign_save_hashes(host.campaign)
+    frame = await wait_resident_status(guest.client / "run", lambda row: row.get("game", {}).get("map") == WAREHOUSE_DOCK)
+    path, replica, position = await stage_warehouse_prop(host, guest, "Prop_AcidBottle")
+    await warehouse_prop_probe(guest, "local-break", replica)
+    assert await warehouse_prop_probe(guest, "inspect", replica) == "1,false"
+    assert await warehouse_prop_probe(guest, "pool-near", position) == "absent"
+
+    started = time.time()
+    impact = await warehouse_prop_probe(host, "floor-impact", path)
+    location = list(map(float, impact.split(",")))
+    cue = await wait_stock_prop_break(host, guest, frame, path, started, location, guest_path=replica)
+
+    async def read_pool(seat, phase):
+        async with asyncio.timeout(14):
+            while True:
+                value = await warehouse_prop_probe(seat, "pool-near", impact)
+                if value == "absent" and phase == value:
+                    return None
+                if value.startswith(phase + ";"):
+                    found, position, size, burn, spheres, dot, collision, hidden = value.split(";")
+                    assert hidden == "false", value
+                    return {"phase": found, "position": list(map(float, position.split(","))), "size": float(size),
+                            "burn_time": float(burn), "spheres": int(spheres),
+                            "damage_active": dot == "true", "collision": collision == "true"}
+                await asyncio.sleep(.09)
+
+    authority, projected = await asyncio.gather(*(read_pool(seat, "active") for seat in (host, guest)))
+    assert math.dist(authority["position"], location) < .02, authority
+    assert math.dist(projected["position"], authority["position"]) < .02, (authority, projected)
+    assert authority["size"] == projected["size"] == .6 and authority["spheres"] == projected["spheres"] > 0
+    assert 6 <= authority["burn_time"] <= 8 and projected["burn_time"] == 0, (authority, projected)
+    assert authority["damage_active"] and authority["collision"] and not projected["damage_active"] and not projected["collision"]
+
+    expired = await asyncio.gather(*(read_pool(seat, "extinguished") for seat in (host, guest)))
+    assert all(not reading["damage_active"] and reading["spheres"] == 0 for reading in expired), expired
+    assert await warehouse_prop_probe(host, "pool-remove", impact) == "removed"
+    await asyncio.gather(*(read_pool(seat, "absent") for seat in (host, guest)))
+    assert campaign_save_hashes(host.campaign) == checkpoint
+    return {"stock_acid_bottle": {"cue": cue, "host_pool": authority, "guest_pool": projected, "extinguished": expired,
+                                  "guest_local_break_veto": True, "removed_on_both_seats": True,
+                                  "checkpoint_unchanged": True}}
 
 
 async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str) -> dict:
@@ -5098,6 +5147,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_warehouse_board, "tutorial_dock", "stock_warehouse_board", verify_warehouse_board),
         (stock_bottle, "tutorial_dock", "stock_bottle", verify_stock_bottle),
         (stock_bottle, "tutorial_dock", "stock_prop_breaks", verify_stock_prop_breaks),
+        (stock_bottle, "tutorial_dock", "stock_acid_bottle", verify_stock_acid_bottle),
         (tutorial_dock_combat and (not tutorial_dock_shot_view or tutorial_dock_pursuit),
          "tutorial_dock_combat", dock_combat_check,
          lambda host, guest, pawn: verify_tutorial_dock_combat(host, guest, pawn, retaliation=tutorial_dock_retaliation,
@@ -5746,7 +5796,7 @@ if __name__ == "__main__":
     parser.add_argument("--stock-warehouse-board", action="store_true",
                         help="verify both peers see the Tutorial Dock warehouse board break")
     parser.add_argument("--stock-bottle", action="store_true",
-                        help="verify stock bottle throws and representative prop break cues on both peers")
+                        help="verify stock bottle throws, prop break cues, and acid bottle pools on both peers")
     parser.add_argument("--stock-throwables", choices=("all", "pipebomb", "bolt", "ground"), nargs="?", const="all",
                         help="verify host and guest bolt flight, a stock host pipe bomb detonation, or both")
     parser.add_argument("--stock-roaming-barter", action="store_true",

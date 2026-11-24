@@ -58,6 +58,7 @@ namespace
     constexpr auto lingering_overlap = STR("BndEvt__Lingering_Teleport_BP1_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature");
     constexpr auto physics_prop = STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C");
     constexpr std::wstring_view stock_prop_package = STR("/Game/Assets/StaticMeshes/Mesh_Props/");
+    constexpr auto acid_bottle = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_AcidBottle.Prop_AcidBottle_C");
     constexpr auto fixed_prop = STR("/Game/Assets/StaticMeshes/Destructable/Explosive_Prop_Master_BP.Explosive_Prop_Master_BP_C");
     constexpr auto destructible = STR("/Game/Assets/StaticMeshes/Destructable/Static_DestructableObject_Master_BP.Static_DestructableObject_Master_BP_C");
     constexpr auto drum_fire_class = STR("/Game/Classes/Anomalies/Fire_Molotov.Fire_Molotov_C");
@@ -724,11 +725,16 @@ namespace
             !U::IsInGameThreadRaw() || call.OriginalFunctionCallPrevented()) return;
         auto* type = actor->GetClassPrivate();
         auto* binding = function->GetOuterPrivate();
-        if (!type || !binding || binding->GetPathName() != physics_prop || actor->IsUnreachable() ||
-            !type->IsChildOf(static_cast<U::UClass*>(binding)) || !type->GetPathName().starts_with(stock_prop_package) ||
-            actor->GetFunctionByNameInChain(prop_broken) != function ||
+        if (!type || !binding || actor->IsUnreachable() ||
             function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) || function->GetNumParms() != 2 ||
             function->GetParmsSize() != 32 || function->GetReturnProperty()) return;
+        const auto type_path = type->GetPathName();
+        if (!type_path.starts_with(stock_prop_package) || actor->GetFunctionByNameInChain(prop_broken) != function)
+            return;
+        const auto* parent = binding == type && type_path == acid_bottle ? type->GetSuperClass() : nullptr;
+        const bool acid_override = parent && parent->GetPathName() == physics_prop;
+        if (!acid_override &&
+            (binding->GetPathName() != physics_prop || !type->IsChildOf(static_cast<U::UClass*>(binding)))) return;
         auto* world = static_cast<U::AActor*>(actor)->GetWorld();
         auto* driver = object(world, STR("NetDriver"));
         if (!world || !driver || object(driver, STR("World")) != world || !property<U::FObjectProperty>(driver, STR("ServerConnection")))
@@ -750,9 +756,9 @@ namespace
         const auto local_role = role->GetPropertyValueInContainer(actor);
         if (guest_session)
         {
-            // A simulated or autonomous replica disappears through existing host replication.
-            // Skip a competing local destruction or replay of the same presentation.
-            if (server_connection(driver, server) && (local_role == 1 || local_role == 2))
+            // The acid override spawns its own pool after the inherited glass break.
+            // Stop the override before either side effect can run on a guest.
+            if (server_connection(driver, server) && (local_role == 1 || local_role == 2 || acid_override))
                 call.PreventOriginalFunctionCall();
             return;
         }

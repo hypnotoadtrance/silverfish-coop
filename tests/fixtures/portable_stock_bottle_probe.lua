@@ -8,6 +8,32 @@
             return valid(actor) and not actor:IsActorBeingDestroyed() and valid(actor:GetWorld())
                 and actor:GetWorld():GetAddress() == state.world:GetAddress()
         end
+        local function near(candidate, coordinates)
+            local x, y, z = coordinates:match("^([^,]+),([^,]+),([^,]+)$")
+            local point = candidate:K2_GetActorLocation()
+            return (point.X-tonumber(x))^2 + (point.Y-tonumber(y))^2 + (point.Z-tonumber(z))^2 < 40^2
+        end
+        if mode == "pool-near" or mode == "pool-remove" then
+            local found
+            for _, candidate in ipairs(FindAllOf("AcidPool_BP_C") or {}) do
+                if current(candidate) and near(candidate, assert(args[4])) then
+                    assert(not found, "two stock acid pools appeared at the same impact")
+                    found = candidate
+                end
+            end
+            if not found then return "absent" end
+            if mode == "pool-remove" then
+                assert(phase == "hosting" and found:HasAuthority() and found.FizzledOut)
+                found:K2_DestroyActor()
+                return "removed"
+            end
+            local shape = StaticFindObject("/Script/Engine.SphereComponent")
+            local point = found:K2_GetActorLocation()
+            local status = found.FizzledOut and "extinguished" or found.FizzleOut_Mat:IsPlaying() and "fizzling" or "active"
+            return ("%s;%.3f,%.3f,%.3f;%.3f;%.3f;%d;%s;%s;%s"):format(status,
+                point.X, point.Y, point.Z, found.SizeScaler, found.BurnTime, #found:K2_GetComponentsByClass(shape),
+                tostring(found.DotVolume.DotActive), tostring(found:GetActorEnableCollision()), tostring(found.bHidden))
+        end
         if mode == "spawn-prop" or mode == "locate-prop" then
             local stem = assert(args[4]:match("^(Prop_[%w_]+)$"))
             local base = "/Game/Assets/StaticMeshes/Mesh_Props/" .. stem .. "." .. stem .. "_C"
@@ -30,16 +56,11 @@
                 return ("%s;%.3f,%.3f,%.3f"):format(candidate:GetFullName():match("^%S+ (.+)$"), point.X, point.Y, point.Z)
             end
             assert(phase == "connected")
-            local x, y, z = assert(args[5]):match("^([^,]+),([^,]+),([^,]+)$")
-            x, y, z = tonumber(x), tonumber(y), tonumber(z)
             local found
             for _, candidate in ipairs(FindAllOf(stem .. "_C") or {}) do
-                if current(candidate) and candidate:GetLocalRole() == 1 and not candidate.Broken then
-                    local point = candidate:K2_GetActorLocation()
-                    if (point.X-x)^2 + (point.Y-y)^2 + (point.Z-z)^2 < 40^2 then
-                        assert(not found, "ambiguous replicated stock prop")
-                        found = candidate
-                    end
+                if current(candidate) and candidate:GetLocalRole() == 1 and not candidate.Broken and near(candidate, args[5]) then
+                    assert(not found, "ambiguous replicated stock prop")
+                    found = candidate
                 end
             end
             return found and found:GetFullName():match("^%S+ (.+)$") or "waiting"
@@ -198,7 +219,14 @@
             actor:PropBroken(point, pawn)
             return "guest tried local stock break"
         end
-        if mode == "impact" and phase == "hosting" and actor:HasAuthority() then
+        if (mode == "impact" or mode == "floor-impact") and phase == "hosting" and actor:HasAuthority() then
+            if mode == "floor-impact" then
+                local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+                local color, hit = {R=0,G=0,B=0,A=0}, {}
+                assert(trace:LineTraceSingle(pawn, point, {X=point.X,Y=point.Y,Z=point.Z-300},
+                    0, true, {pawn, actor}, 0, hit, true, color, color, 0), "could not locate warehouse floor")
+                point = (hit.OutHit or hit).ImpactPoint
+            end
             local total, lethal = {}, {}
             local before = actor.Health
             actor:DealDamage({BluntForce_6_6923B3964740DE281BD773BCCAAC2772 = 500},
