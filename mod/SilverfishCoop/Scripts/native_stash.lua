@@ -247,6 +247,8 @@ local function snapshot_page(state, phase, name, id, offset, token)
             pawn = pawn, save = save, site = id, actor = actor, combined = combined,
             expires = os.time() + snapshot_lifetime, items = items}
         remember_snapshot(address, snapshot)
+    else
+        snapshot.expires = os.time() + snapshot_lifetime
     end
     local items, total = {}, #snapshot.items
     for index = offset + 1, math.min(offset + page_size, total) do

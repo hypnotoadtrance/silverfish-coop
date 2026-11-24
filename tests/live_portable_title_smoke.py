@@ -327,7 +327,8 @@ def stash_memory_overlays(probes: ExitStack, game: Path, *, large: bool = False)
         seed = (Path(__file__).with_name("fixtures") / "portable_large_stash_authority.lua").read_text(encoding="utf-8")
         command = "function stash.command(fields, state, phase)"
         return replace(text, command, seed + "\n" + command + """
-    if fields[2] == "portable-large-stash-seed" or fields[2] == "portable-large-stash-clear" then
+    if fields[2] == "portable-large-stash-seed" or fields[2] == "portable-large-stash-clear"
+        or fields[2] == "portable-large-stash-census-reads" then
         return portable_large_stash(fields, state, phase)
     end""")
 
@@ -3354,6 +3355,13 @@ async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str, *, large
         payload_bytes = int(matched[1])
         visible_guids = matched[2].split(",")
         assert visible_guids == guids and 32 * 1024 < payload_bytes <= native_stash.LARGE_MEMORY_VIEW_MAX_BYTES
+        census_snapshot = home["game"].get(native_stash.CENSUS_SNAPSHOT) is True
+        census_reads = None
+        if census_snapshot:
+            metrics = await host.bridge.command("portable-large-stash-census-reads", pawn, site, joined["character_id"])
+            attempted = re.fullmatch(r"portable live stash census reads (\d+)", metrics["ack"]["message"])
+            assert attempted and int(attempted[1]) == 1, metrics["ack"]
+            census_reads = int(attempted[1])
         require_unchanged_saves(before)
         await close()
         cleared = await host.bridge.command("portable-large-stash-clear", pawn, site, joined["character_id"])
@@ -3362,7 +3370,7 @@ async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str, *, large
         return {"stash_actor": authored["actor"], "site": site, "stock_view": rendered, "large_native_ticket": True,
                 "memory_payload_bytes": payload_bytes, "stock_card_count": len(guids),
                 "stash_open_seconds": open_seconds,
-                "census_snapshot": home["game"].get(native_stash.CENSUS_SNAPSHOT) is True,
+                "census_snapshot": census_snapshot, "live_census_reads": census_reads,
                 "first_guid": guids[0], "last_guid": guids[-1], "ordered_card_guids": guids,
                 "local_bridge": {"host": home["local_bridge"], "guest": joined["local_bridge"]},
                 "stash_page_files_seen": False, "saves_unchanged_before_checkpoint": True,

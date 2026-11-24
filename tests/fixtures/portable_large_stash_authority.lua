@@ -9,6 +9,17 @@ local portable_item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local portable_item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local portable_rows = 384
 
+local portable_reader_calls = 0
+local portable_census_items = census_items
+if portable_census_items then
+    census_items = function(reader, ...)
+        if portable_seed and reader == SilverfishReadLiveNativeStashCensus then
+            portable_reader_calls = portable_reader_calls + 1
+        end
+        return portable_census_items(reader, ...)
+    end
+end
+
 local function portable_stash_array(stashes, combined, id)
     if combined and stashes:GetArrayNum() > 0 then return stashes[1][portable_contents] end
     for index = 1, stashes:GetArrayNum() do
@@ -42,6 +53,12 @@ local function portable_large_stash(fields, state, phase)
         "portable large stash fixture has no exact private guest save")
     local stashes = detached.Stashes
     local contents = portable_stash_array(stashes, combined, site)
+    if fields[2] == "portable-large-stash-census-reads" then
+        assert(portable_seed and same(portable_seed.save, detached) and same(portable_seed.pawn, pawn)
+            and same(portable_seed.world, state.world) and portable_seed.site == site
+            and portable_seed.owner == owner and portable_seed.combined == combined)
+        return ("portable live stash census reads %d"):format(portable_reader_calls)
+    end
     if fields[2] == "portable-large-stash-clear" then
         assert(portable_seed and same(pawn, portable_seed.pawn) and same(detached, portable_seed.save)
             and same(state.world, portable_seed.world) and site == portable_seed.site and owner == portable_seed.owner
