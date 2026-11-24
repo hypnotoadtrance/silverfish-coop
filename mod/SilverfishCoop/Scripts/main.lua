@@ -1141,6 +1141,7 @@ local function run_command(fields, state, current_phase)
         or native_datasilo_door.command(fields, state, current_phase)
         or native_stock_door.command(fields, state, current_phase)
         or native_stock_switch.command(fields, state, current_phase)
+        or players.critters.command(fields, state, current_phase)
         or native_lantern.command(fields, state, current_phase)
         or native_flashlight.command(fields, state, current_phase)
         or native_crate_props.command(fields, state, current_phase)
@@ -1437,6 +1438,7 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         for _, row in ipairs(native_datasilo_door.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_stock_door.rows(state, current_phase, status_row, fields)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_stock_switch.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        rows[#rows + 1] = players.critters.row(state, current_phase, status_row)
         local lantern = native_lantern.status(state, current_phase, status_row)
         if lantern then rows[#rows + 1] = lantern end
         for _, row in ipairs(native_crate_props.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1673,6 +1675,7 @@ local function tick(fields, pending, periodic)
     native_finite_shop.sync(state, current_phase)
     native_shop_view.sync(state, current_phase)
     native_npc_barter.sync(state, current_phase)
+    pcall(players.critters.sync, state, current_phase)
     native_loot_view.sync(state, current_phase)
     native_guest_primary_input.sync(state, current_phase)
     native_guest_clock.sync(state, current_phase)

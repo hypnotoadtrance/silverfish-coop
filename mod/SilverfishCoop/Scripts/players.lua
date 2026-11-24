@@ -6,6 +6,7 @@ local native_authored_pickup = require("native_authored_pickup")
 local native_enemy_shell_view = require("native_enemy_shell_view")
 local native_stock_door = require("native_stock_door")
 local native_stock_switch = require("native_stock_switch")
+players.critters = require("native_critters")
 
 local player_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
@@ -104,6 +105,7 @@ local function write_interaction(pawn, pickup_source, pressed_component)
         or not pawn:IsLocallyControlled() then return end
     local target = pickup_source or native_stock_door.focused_target(pawn, pressed_component)
         or native_stock_switch.focused_target(pawn, pressed_component)
+        or players.critters.focused_target(pawn, pressed_component)
         or native_bag_projection.focused_target(pawn) or native_enemy_shell_view.focused_target(pawn)
     input_sequence = input_sequence + 1
     local record = "interact\t" .. tostring(input_sequence) .. (target and "\t" .. target or "") .. "\n"

@@ -995,8 +995,33 @@ namespace
             call.PreventOriginalFunctionCall();
     }
 
+    void intercept_critter_pickup(Iteration& call, Unreal::UObject* actor, Unreal::UFunction* function, const void* args)
+    {
+        static const Unreal::FName interaction{STR("SendInteractionToActor")};
+        if (!function || function->GetFName() != interaction || !args || scope.host ||
+            call.OriginalFunctionCallPrevented() || !live(actor)) return;
+        auto* pawn = scope.pawn.Get();
+        auto* world = scope.world.Get();
+        if (!pawn || Clock::now() >= scope.expires || !live_scope(scope) ||
+            (!live_actor(actor, world, 1) && !live_actor(actor, world, 3))) return;
+        auto* klass = actor->GetClassPrivate();
+        const auto path = klass->GetPathName();
+        // These stock overrides create an inventory item and immediately invoke its pickup.
+        if (path != STR("/Game/Classes/Ambiant_FX/Critter_Frog_BP.Critter_Frog_BP_C") &&
+            path != STR("/Game/Classes/Ambiant_FX/Critter_Weta_BP.Critter_Weta_BP_C") &&
+            path != STR("/Game/Classes/Ambiant_FX/Critter_Beetle_BP.Critter_Beetle_BP_C")) return;
+        if (function->GetOuterPrivate() != klass || function->GetNumParms() != 2 ||
+            function->GetParmsSize() != 2 * sizeof(void*) || function->GetReturnProperty() ||
+            function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
+        auto* player = input<Unreal::FObjectProperty>(function, STR("Player"), 0);
+        if (player && player->GetPropertyClass().Get() == pawn->GetClassPrivate() &&
+            player->GetObjectPropertyValue(player->ContainerPtrToValuePtr<void>(args)) == pawn)
+            call.PreventOriginalFunctionCall();
+    }
+
     void route_interaction(Iteration& iteration, Unreal::UObject* actor, Unreal::UFunction* function, const void* parameters)
     {
+        intercept_critter_pickup(iteration, actor, function, parameters);
         intercept_stock_switch(iteration, actor, function, parameters);
         intercept_wire_board(iteration, actor, function, parameters);
         intercept_npc_barter(iteration, actor, function);

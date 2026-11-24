@@ -32,7 +32,7 @@ from . import native_inventory, native_sewer_barter, native_stash
 from . import native_guest_drop_projection, native_guest_drop_record, native_guest_stack_drop
 from . import native_loot, native_world_loot
 from . import native_loose_pickup
-from . import native_mushrooms
+from . import native_mushrooms, native_critters
 from . import native_prop_carry
 from . import native_flare
 from . import native_stock_enemy_drops
@@ -827,6 +827,7 @@ class Bridge:
                     and not native_world_loot.target_parts(decoded)
                     and not native_stock_door.target_actor(decoded) and not native_stock_switch.target_actor(decoded)
                     and not native_loose_pickup.target_path(decoded)
+                    and not native_critters.target_id(decoded)
                     and (len(target) != 32 or any(digit not in b"0123456789abcdef" for digit in target))):
                 continue
             identity = uuid.uuid5(self.input_namespace, fields[1].decode("ascii")).hex
@@ -2419,6 +2420,8 @@ class Bridge:
                     if mushroom["id"] in active or len(active) >= native_mushrooms.LIMIT:
                         raise ValueError("Repeated stock mushroom source or oversized patch roster")
                     active[mushroom["id"]] = mushroom
+                elif fields[0] == native_critters.ROW:
+                    data[native_critters.PROOF] = native_critters.parse(fields, data.get("state"), data.get("map"))
                 elif fields[0] == native_mushrooms.CLAIM:
                     data[native_mushrooms.PROOF] = native_mushrooms.parse_claim(fields, data.get("state"), data.get("map"))
                 elif fields[0] in (native_flare.ACTION, native_flare.INPUT):

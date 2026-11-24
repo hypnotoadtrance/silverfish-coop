@@ -1,12 +1,8 @@
 local identity = {}
 
-local marker_path = "/Script/Engine.TargetPoint"
+local reference = require("replicated_actor_reference")
 local trader_path = "/Game/Classes/Actors/Barter_BP.Barter_BP_C"
 local npc_path = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
--- An invisible TargetPoint uses its owner's relevancy. Reserve a height range
--- outside the playable maps for an exact integer in stock movement replication.
-local marker_height = 262144
-local max_number = 65535
 local prefix = "5346434F4F504241525445520000"
 
 local marker_class, trader_class, npc_class, world, phase
@@ -27,20 +23,10 @@ local function exact_npc(actor)
     return actor_in_world(actor) and valid(npc_class) and actor:IsA(npc_class)
 end
 
-local function number_on(marker)
-    local height = marker:K2_GetActorLocation().Z - marker_height
-    local value = math.floor(height + .5)
-    if value > 0 and value <= max_number and math.abs(height - value) < .25 then return value end
-end
-
-function identity.is_marker(marker)
-    return number_on(marker) ~= nil
-end
-
 local function remember(marker)
     if not actor_in_world(marker) or not same(marker:GetClass(), marker_class) or marker:HasAuthority() then return end
     local npc = marker:GetOwner()
-    local value = exact_npc(npc) and number_on(marker)
+    local value = exact_npc(npc) and reference.number(marker, "barter")
     if value then markers[npc:GetAddress()] = {marker = marker, number = value} end
 end
 
@@ -48,23 +34,14 @@ local function publish(npc, trader)
     if not exact_npc(npc) or placed(npc) or not npc:HasAuthority() or npc.bReplicates ~= true
         or not actor_in_world(trader) or not same(trader:GetClass(), trader_class) or not same(trader.LinkedNPC, npc)
         or not same(npc.BarterRef, trader) or valid(trader.LinkedShop) or npc.Alive ~= true or not valid(trader.MerchantData)
-        or number == max_number then return end
+        or number == reference.limit then return end
     local address = npc:GetAddress()
     local previous = markers[address]
     if previous and actor_in_world(previous.marker) then return end
 
     local next_number = number + 1
-    local point = npc:K2_GetActorLocation()
-    local marker = world:SpawnActor(marker_class, {X = point.X, Y = point.Y, Z = marker_height + next_number},
-        {Pitch = 0, Yaw = 0, Roll = 0})
+    local marker = reference.spawn(world, marker_class, "barter", npc, next_number)
     if not actor_in_world(marker) then return end
-    marker:SetOwner(npc)
-    marker.bAlwaysRelevant = false
-    marker.bNetUseOwnerRelevancy = true
-    marker.NetUpdateFrequency = 2
-    marker:SetReplicates(true)
-    marker:SetReplicateMovement(true)
-    marker:ForceNetUpdate()
     number = next_number
     markers[address] = {marker = marker, number = number}
 end
@@ -72,7 +49,7 @@ end
 local function install()
     if type(RegisterHook) ~= "function" or type(RegisterBeginPlayPostHook) ~= "function"
         or type(RegisterEndPlayPreHook) ~= "function" then return false end
-    marker_class = StaticFindObject(marker_path)
+    marker_class = StaticFindObject(reference.class)
     trader_class = StaticFindObject(trader_path)
     npc_class = StaticFindObject(npc_path)
     if not valid(marker_class) or not valid(trader_class) or not valid(npc_class) then return false end
