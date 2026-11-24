@@ -6,7 +6,7 @@ local stash_class = "/Game/Classes/Actors/Stash_Master_BP.Stash_Master_BP_C"
 local world, site_map, site_time, sites, report, moved
 local snapshots = {}
 local snapshot_lifetime, max_snapshots = 45, 5
-local page_size, max_items = 16, 4096
+local page_size, snapshot_page_size, max_items = 16, 32, 4096
 
 local function valid(object)
     return object and object:IsValid()
@@ -251,7 +251,7 @@ local function snapshot_page(state, phase, name, id, offset, token)
         snapshot.expires = os.time() + snapshot_lifetime
     end
     local items, total = {}, #snapshot.items
-    for index = offset + 1, math.min(offset + page_size, total) do
+    for index = offset + 1, math.min(offset + snapshot_page_size, total) do
         items[#items + 1] = snapshot.items[index]
     end
     return items, total, combined

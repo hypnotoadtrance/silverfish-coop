@@ -92,9 +92,9 @@ end
 refuses("native_stash_exact_site_unavailable", 0, string.rep("A", 32))
 refuses("native_stash_exact_site_unavailable", 0, token, "SFCoop_" .. token)
 refuses("native_stash_census_snapshot_unavailable", 16, token)
-for _, offset in ipairs({0, 0, 16, 32}) do
+for _, offset in ipairs({0, 0, 32}) do
     local total, items = read(offset, token)
-    assert(total == 34 and #items == math.min(16, total - offset))
+    assert(total == 34 and #items == math.min(32, total - offset))
     for index, item in ipairs(items) do assert(item == guid(index + offset)) end
 end
 assert(live_reads == 1)

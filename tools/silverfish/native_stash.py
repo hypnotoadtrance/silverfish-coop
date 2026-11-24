@@ -15,6 +15,7 @@ LIST = "native-stash-list"
 CENSUS = "native-stash-census"
 LIVE_CENSUS = "native_stash_live_census"
 CENSUS_SNAPSHOT = "native_stash_census_snapshot"
+SNAPSHOT_PAGE_SIZE = 32  # Fits the 32 KiB action body even with 512-byte class paths.
 LIVE_MOVE = "native_stash_live_move"
 LIVE_REORDER = "native_stash_live_reorder"
 LIVE_SPLIT = "native_stash_live_split"
@@ -149,7 +150,8 @@ async def inspect(host, bridge, character, target):
             (area, pawn, slot, site, offset, combined) or _scope(host, character, site) != scope):
         raise RuntimeError("The exact character and rest-site stash did not verify")
     items, total = report["items"], report["total"]
-    if (len(items) != report["count"] or len(items) != min(native_inventory.PAGE_SIZE, max(0, total - offset))
+    page_size = SNAPSHOT_PAGE_SIZE if token else native_inventory.PAGE_SIZE
+    if (len(items) != report["count"] or len(items) != min(page_size, max(0, total - offset))
             or len({item["guid"] for item in items}) != len(items)
             or any(item["source"] != "stash" or not valid_guid(item["guid"]) or item["quantity"] < 1
                    or not 0 <= item["index"] < 4096 or not item["class_path"].startswith("/Game/")
@@ -270,6 +272,7 @@ def parse_view(fields, area, phase):
 async def _stock_rows(client, site, operation):
     offset, contents, seen, identity = 0, [], set(), None
     token = operation.hex if client.gameplay.get(CENSUS_SNAPSHOT) is True else None
+    page_size = SNAPSHOT_PAGE_SIZE if token else native_inventory.PAGE_SIZE
     while True:
         target = f"{site}|{offset}"
         if token:
@@ -279,7 +282,7 @@ async def _stock_rows(client, site, operation):
         if (page["owner"] != client.invite["character_id"] or page["site"] != site or page["offset"] != offset
                 or page.get("snapshot") != token
                 or type(combined) is not bool or type(total) is not int or not 0 <= offset <= total <= 4096
-                or type(rows) is not list or len(rows) != min(native_inventory.PAGE_SIZE, total - offset)
+                or type(rows) is not list or len(rows) != min(page_size, total - offset)
                 or identity is not None and identity != (total, combined)):
             raise ValueError("The host did not return the guest's exact stash")
         identity = total, combined

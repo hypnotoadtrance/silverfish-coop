@@ -319,14 +319,16 @@ class NativeStashTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stock_screen_reads_every_page_for_the_same_character(self):
         stock = [dict(guid=f"{index + 1:032X}", source="stash", class_path="/Game/Classes/Weapons/Test.Test_C",
-                      ammo=7, value=29, weight=0.25, never_drop=False) for index in range(17)]
+                      ammo=7, value=29, weight=0.25, never_drop=False) for index in range(34)]
 
         def page(action, operation, target):
             site, raw_offset, *token = target.split("|")
             assert action == native_stash.LIST and site == SITE
             offset = int(raw_offset)
+            size = native_stash.SNAPSHOT_PAGE_SIZE if token else 16
+            end = offset + size
             result = dict(site=SITE, owner=GUEST, combined=False, offset=offset, total=len(stock),
-                          items=stock[offset:offset + 16], next_offset=16 if offset == 0 else None)
+                          items=stock[offset:end], next_offset=end if end < len(stock) else None)
             if token:
                 result["snapshot"], = token
             return {native_stash.RESULT: result}
@@ -334,7 +336,7 @@ class NativeStashTests(unittest.IsolatedAsyncioTestCase):
         client = SimpleNamespace(invite={"character_id": GUEST}, gameplay={},
                                  gameplay_action=AsyncMock(side_effect=page))
         rows = await native_stash._stock_rows(client, SITE, uuid.uuid4())
-        self.assertEqual(len(rows), 17)
+        self.assertEqual(len(rows), 34)
         self.assertEqual(rows[-1].split("\t"), [stock[-1]["guid"], stock[-1]["class_path"], "7", "0.25", "29", "0\n"])
 
         client.gameplay[native_stash.CENSUS_SNAPSHOT] = True
@@ -342,7 +344,7 @@ class NativeStashTests(unittest.IsolatedAsyncioTestCase):
         generation = uuid.uuid4()
         self.assertEqual(await native_stash._stock_rows(client, SITE, generation), rows)
         self.assertEqual([call.args[2] for call in client.gameplay_action.await_args_list],
-                         [f"{SITE}|{offset}|{generation.hex}" for offset in (0, 16)])
+                         [f"{SITE}|{offset}|{generation.hex}" for offset in (0, 32)])
 
         def wrong_token(*args):
             result = page(*args)
