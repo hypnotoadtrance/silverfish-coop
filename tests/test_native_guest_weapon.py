@@ -27,13 +27,13 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
         for kind, blueprint in {
             "army-pistol": "Wep_ArmyPistol", "pistol": "Wep_Pistol",
             "rusty-pistol": "Wep_RustyPistol",
+            "revolver-carbine-cult": "Wep_Revolver_Carbine_Cult", "revolver-9mm-silenced": "Wep_Revolver_9mm_Silenced",
             "pistol-02": "Wep_Pistol02", "tac-pistol": "Wep_TacPistol", "model-1931": "Wep_Pistol_Long",
         }.items():
             path = f"/Game/Classes/Weapons/{blueprint}.{blueprint}_C"
             self.assertEqual(native_guest_weapon.FIRE_CLASSES[kind], path)
             self.assertIn(path, native_guest_weapon.CLASS_PATHS)
             self.assertIn(kind, native_guest_weapon.SEED_KINDS)
-        self.assertNotIn("revolver-carbine-cult", native_guest_weapon.PRIMARY_KINDS)
 
     def test_45_ball_ammo_keeps_the_audited_item_and_projectile(self):
         ammo = guest_weapon_profiles.FORTY_FIVE_BALL
@@ -152,7 +152,7 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
             "sg-71-a", "sg-71-b", "sg-71-a-suppressed", "model-1931", "fennec-57", "black-fox", "break-action-50",
             "bolt-action-shotgun", "bolt-action-shotgun-suppressed", "sawn-off-shotgun",
             "revolver-9mm", "revolver-01", "revolver-02", "revolver-03",
-            *(kind for kind, *_ in guest_weapon_profiles.ORDINARY_WEAPONS),
+            *(kind for kind, *_ in (*guest_weapon_profiles.ORDINARY_WEAPONS, *guest_weapon_profiles.RELEASE_RIFLES)),
             *native_guest_weapon.LOKI_KINDS,
         })
         self.assertEqual(guest_weapon_profiles.MAX_TAKE_AMMO_ROUNDS, 100)
@@ -181,6 +181,17 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
                 self.assertTrue(profile.headless_seed)
                 self.assertEqual(profile.magazine, guest_weapon_profiles.Magazine(
                     24, 0, 0.1, require_default_payload=True, ammo=ammo, reload_first_stack=True))
+
+    def test_stock_338_rifles_keep_their_action_edges_and_ammo(self):
+        gp = guest_weapon_profiles
+        profiles = {weapon.kind: weapon.magazine for weapon in gp.FIREARMS}
+        ammo = frozenset(round_type.item_path for round_type in (gp.MAGNUM_338_FMJ, gp.MAGNUM_338_AP, gp.MAGNUM_338_FRAG, gp.MAGNUM_338_OP))
+        for kind, capacity, action_on_release in (("csr-02", 12, False), ("sniper-04", 10, True)):
+            self.assertEqual(gp.AMMO_BY_KIND[kind], ammo)
+            self.assertEqual(profiles[kind].capacity, capacity)
+            self.assertEqual(profiles[kind].action_on_release, action_on_release)
+            self.assertIn(kind, native_guest_weapon.PRIMARY_KINDS)
+            self.assertNotIn(kind, gp.STOCK_HELD_FIRE_MAGAZINES)
 
     def test_held_fire_registry_includes_large_automatic_and_burst_magazines(self):
         magazines = guest_weapon_profiles.STOCK_HELD_FIRE_MAGAZINES

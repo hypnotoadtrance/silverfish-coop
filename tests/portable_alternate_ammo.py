@@ -9,7 +9,7 @@ from tools.silverfish import native_inventory
 from tools.silverfish.control import submit
 from tools.silverfish.guest_weapon_profiles import (
     FIFTY_CAL_FMJ, FIFTY_CAL_HEIAP, FIVE_SIX_AP, FIVE_SIX_FMJ, FORTY_FIVE_BALL, FORTY_FIVE_HOLLOW_POINT,
-    NINE_MM_AP, NINE_MM_BALL, NINE_MM_VAMP,
+    NINE_MM_AP, NINE_MM_BALL, NINE_MM_VAMP, MAGNUM_338_AP, MAGNUM_338_FMJ, MAGNUM_338_OP,
 )
 
 
@@ -108,7 +108,9 @@ async def verify_alternate_ammo(host, guest, pawn, probe):
         ("arm-alternate", FORTY_FIVE_BALL, FORTY_FIVE_HOLLOW_POINT, 8),
         ("arm-ammo-order", NINE_MM_BALL, NINE_MM_VAMP, 12, NINE_MM_AP),
         ("arm-intermediate-alt", FIVE_SIX_FMJ, FIVE_SIX_AP, 16),
-        ("arm-fifty-alt", FIFTY_CAL_FMJ, FIFTY_CAL_HEIAP, 6),
+        ("arm-fifty-alt", FIFTY_CAL_FMJ, FIFTY_CAL_HEIAP, 4),
+        ("arm-csr-ap", MAGNUM_338_FMJ, MAGNUM_338_AP, 12),
+        ("arm-sniper-op", MAGNUM_338_FMJ, MAGNUM_338_OP, 10),
     )
     results = []
     for case in cases:

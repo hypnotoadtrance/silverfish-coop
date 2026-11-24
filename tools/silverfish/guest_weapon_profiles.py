@@ -81,11 +81,16 @@ THIRTY_06_MINE = StockAmmo("thirty_06_mine", 3, "30-06_Mine", "Ammo_30-06_Mine_B
 THIRTY_06_TANDEM = StockAmmo(
     "thirty_06_tandem", 3, "30-06_Tandem", "Ammo_30-06_Tandem_BP", "Projectile_30-06_Tandem", 14, projectile_count=3,
 )
+MAGNUM_338_FMJ = StockAmmo("magnum_338_fmj", 5, "338Magnum_FMJ", "Ammo_338Magnum_FMJ_BP", "Projectile_338Mag_FMJ", 8)
+MAGNUM_338_AP = StockAmmo("magnum_338_ap", 5, "338Magnum_AP", "Ammo_338Magnum_AP_BP", "Projectile_338Mag_AP", 12)
+MAGNUM_338_FRAG = StockAmmo("magnum_338_frag", 5, "338Magnum_Frag", "Ammo_338Magnum_Frag_BP", "Projectile_338Mag_Frag", 12)
+MAGNUM_338_OP = StockAmmo("magnum_338_op", 5, "338Magnum_OP", "Ammo_338Magnum_OP_BP", "Projectile_338Mag_OP", 12)
 STOCK_AMMO = (
     NINE_MM_BALL, NINE_MM_AP, NINE_MM_VAMP,
     FORTY_FIVE_BALL, FORTY_FIVE_HOLLOW_POINT, FORTY_FIVE_AIR_BURST, FORTY_FIVE_MICRO_FRAG,
     FIVE_SIX_FMJ, FIVE_SIX_AP, FIVE_SIX_INCENDIARY, FIVE_SIX_STUN,
     *SHOTGUN_AMMO, FIVE_SEVEN_AP, FIVE_SEVEN_HP, FIVE_SEVEN_INCENDIARY,
+    MAGNUM_338_FMJ, MAGNUM_338_AP, MAGNUM_338_FRAG, MAGNUM_338_OP,
     FIFTY_CAL_FMJ, FIFTY_CAL_HEIAP, THIRTY_06_FMJ, THIRTY_06_INCENDIARY, THIRTY_06_HE, THIRTY_06_MINE, THIRTY_06_TANDEM,
 )
 
@@ -121,6 +126,8 @@ ORDINARY_WEAPONS = (
     ("revolver-snub-02", "Wep_Revolver_SnubNose_02", 6, 1, 0.2, FORTY_FIVE_BALL),
     ("revolver-carbine", "Wep_Revolver_Carbine_01", 6, 1, 0.5, FORTY_FIVE_BALL),
     ("revolver-carbine-scoped", "Wep_Revolver_Carbine_Scoped", 6, 1, 0.5, FORTY_FIVE_BALL),
+    ("revolver-carbine-cult", "Wep_Revolver_Carbine_Cult", 6, 1, 0.5, FORTY_FIVE_AIR_BURST),
+    ("revolver-9mm-silenced", "Wep_Revolver_9mm_Silenced", 7, 1, 0.2, NINE_MM_BALL),
     ("carbine-45", "Wep_45Carbine", 12, 1, 0.1, FORTY_FIVE_BALL),
     ("carbine-45-scoped", "Wep_45Carbine_Scoped", 12, 1, 0.1, FORTY_FIVE_BALL),
     ("carbine-45-silenced", "Wep_45Carbine_Silenced", 12, 1, 0.1, FORTY_FIVE_BALL),
@@ -219,6 +226,9 @@ ORDINARY_WEAPONS = (
     ("scout-rifle-03", "Wep_ScoutRifle_03", 10, 1, 0.1, FIVE_SIX_FMJ),
     ("scout-rifle-scoped", "Wep_ScoutRifle_Scoped", 10, 1, 0.15, FIVE_SIX_FMJ),
     ("sniper-rifle", "Wep_SniperRifle_", 8, 1, 0.2, THIRTY_06_FMJ),
+    ("csr-01", "Wep_CSR_01", 8, 1, 0.2, MAGNUM_338_FMJ),
+    ("csr-02", "Wep_CSR_02", 12, 1, 0.2, MAGNUM_338_FMJ),
+    ("csr-03", "Wep_CSR_03", 8, 1, 0.2, MAGNUM_338_FMJ),
     ("burst-pistol", "Wep_Burst_Pistol", 18, 3, 0.06, NINE_MM_AP),
     ("pdw-01", "Wep_PDW_01", 30, 0, 0.06, NINE_MM_AP),
     ("model-1931-carbine", "Wep_Pistol_Long_Carbine", 18, 1, 0.1, NINE_MM_AP),
@@ -230,6 +240,15 @@ ORDINARY_WEAPONS = (
     ("stg-03", "Wep_STG_03", 20, 0, 0.12, FIVE_SEVEN_HP),
     ("drakv-cult", "Wep_DrakV_Cult", 24, 0, 0.1, FIVE_SIX_STUN),
     ("battle-rifle-cult", "Wep_BattleRifle_Cult", 20, 1, 0.08, THIRTY_06_MINE),
+)
+
+RELEASE_RIFLES = (
+    ("anti-materiel-rifle", "Wep_AntiMat_Rifle", 4, FIFTY_CAL_FMJ),
+    ("sniper-02", "Wep_Sniper_02", 10, MAGNUM_338_FMJ),
+    ("sniper-03", "Wep_Sniper_03", 10, MAGNUM_338_FMJ),
+    ("sniper-04", "Wep_Sniper_04", 10, MAGNUM_338_FMJ),
+    ("sniper-05", "Wep_Sniper_05", 10, MAGNUM_338_FMJ),
+    ("sniper-night-vision", "Wep_Sniper_NightVis", 10, MAGNUM_338_FMJ),
 )
 
 LOKI_RECEIVERS = (
@@ -292,6 +311,8 @@ FIREARMS = (
     *LOKI_RECEIVERS,
     *(Firearm(kind, blueprint, True, Magazine(capacity, burst, rate, True, ammo, reload_first_stack=True))
       for kind, blueprint, capacity, burst, rate, ammo in ORDINARY_WEAPONS),
+    *(Firearm(kind, blueprint, True, Magazine(capacity, 1, 1.4, True, ammo, reload_first_stack=True, action_on_release=True))
+      for kind, blueprint, capacity, ammo in RELEASE_RIFLES),
 )
 
 # Registered ordinary magazines use the stock primary-ammunition transaction.

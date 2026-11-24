@@ -18,10 +18,14 @@ local arm_profiles = {
         "/Game/Classes/Items/Ammo_Magnum_HollowPoint_BP.Ammo_Magnum_HollowPoint_BP_C", 18, 4},
     ["arm-ammo-order"] = {"/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C",
         "/Game/Classes/Items/Ammo_9mm_Vamp_BP.Ammo_9mm_Vamp_BP_C", 35, 4},
-    ["arm-fifty-alt"] = {"/Game/Classes/Weapons/Wep_50SemiAuto.Wep_50SemiAuto_C",
+    ["arm-fifty-alt"] = {"/Game/Classes/Weapons/Wep_AntiMat_Rifle.Wep_AntiMat_Rifle_C",
         "/Game/Classes/Items/Ammo_50Cal_HEIAP_BP.Ammo_50Cal_HEIAP_BP_C", 8, 4},
     ["arm-intermediate-alt"] = {"/Game/Classes/Weapons/Wep_ScoutRifle_02.Wep_ScoutRifle_02_C",
         "/Game/Classes/Items/Ammo_Intr_AP_BP.Ammo_Intr_AP_BP_C", 24, 4},
+    ["arm-csr-ap"] = {"/Game/Classes/Weapons/Wep_CSR_02.Wep_CSR_02_C",
+        "/Game/Classes/Items/Ammo_338Magnum_AP_BP.Ammo_338Magnum_AP_BP_C", 12, 4},
+    ["arm-sniper-op"] = {"/Game/Classes/Weapons/Wep_Sniper_04.Wep_Sniper_04_C",
+        "/Game/Classes/Items/Ammo_338Magnum_OP_BP.Ammo_338Magnum_OP_BP_C", 12, 4},
     ["arm-buckshot"] = {"/Game/Classes/Weapons/Wep_ShotGun_SemiAuto.Wep_ShotGun_SemiAuto_C",
         "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C", 5, 3},
     ["arm-nagant"] = {"/Game/Classes/Weapons/Wep_Nagant_01.Wep_Nagant_01_C", reserve_9mm, 0, 6},
@@ -325,7 +329,8 @@ local function run(action, argument)
     if action == "seed-alternate" then
         assert(observing() and (reserve_path == arm_profiles["arm-alternate"][2]
             or reserve_path == arm_profiles["arm-ammo-order"][2] or reserve_path == arm_profiles["arm-fifty-alt"][2]
-            or reserve_path == arm_profiles["arm-intermediate-alt"][2]))
+            or reserve_path == arm_profiles["arm-intermediate-alt"][2] or reserve_path == arm_profiles["arm-csr-ap"][2]
+            or reserve_path == arm_profiles["arm-sniper-op"][2]))
         local equipment = peer.Save.PlayerEquipment
         for index = 1, equipment:GetArrayNum() do
             if not valid(equipment[index][item_class]) then

@@ -58,6 +58,14 @@ namespace silverfish::guest_weapon_profiles
         STR("/Game/Classes/Items/Ammo_5-7_HP_BP.Ammo_5-7_HP_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_5-7_HP.Projectile_5-7_HP_C"), 12, 1};
     inline constexpr StockAmmo five_seven_incendiary{11, STR("5-7_Incin"),
         STR("/Game/Classes/Items/Ammo_5-7_Incin_BP.Ammo_5-7_Incin_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_5-7_Incin.Projectile_5-7_Incin_C"), 12, 1};
+    inline constexpr StockAmmo magnum_338_fmj{5, STR("338Magnum_FMJ"),
+        STR("/Game/Classes/Items/Ammo_338Magnum_FMJ_BP.Ammo_338Magnum_FMJ_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_338Mag_FMJ.Projectile_338Mag_FMJ_C"), 8, 1};
+    inline constexpr StockAmmo magnum_338_ap{5, STR("338Magnum_AP"),
+        STR("/Game/Classes/Items/Ammo_338Magnum_AP_BP.Ammo_338Magnum_AP_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_338Mag_AP.Projectile_338Mag_AP_C"), 12, 1};
+    inline constexpr StockAmmo magnum_338_frag{5, STR("338Magnum_Frag"),
+        STR("/Game/Classes/Items/Ammo_338Magnum_Frag_BP.Ammo_338Magnum_Frag_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_338Mag_Frag.Projectile_338Mag_Frag_C"), 12, 1};
+    inline constexpr StockAmmo magnum_338_op{5, STR("338Magnum_OP"),
+        STR("/Game/Classes/Items/Ammo_338Magnum_OP_BP.Ammo_338Magnum_OP_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_338Mag_OP.Projectile_338Mag_OP_C"), 12, 1};
     inline constexpr StockAmmo fifty_cal_fmj{6, STR("50Cal_FMJ"),
         STR("/Game/Classes/Items/Ammo_50Cal_BP.Ammo_50Cal_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_50Cal.Projectile_50Cal_C"), 8, 1};
     inline constexpr StockAmmo fifty_cal_heiap{6, STR("50Cal_HEIAP"),
@@ -93,6 +101,10 @@ namespace silverfish::guest_weapon_profiles
         &five_seven_ap,
         &five_seven_hp,
         &five_seven_incendiary,
+        &magnum_338_fmj,
+        &magnum_338_ap,
+        &magnum_338_frag,
+        &magnum_338_op,
         &fifty_cal_fmj,
         &fifty_cal_heiap,
         &thirty_06_fmj,
@@ -155,6 +167,8 @@ namespace silverfish::guest_weapon_profiles
         Profile{"revolver-snub-02", STR("/Game/Classes/Weapons/Wep_Revolver_SnubNose_02.Wep_Revolver_SnubNose_02_C"), true, 6, 1, 0.2, true, &forty_five_ball, true},
         Profile{"revolver-carbine", STR("/Game/Classes/Weapons/Wep_Revolver_Carbine_01.Wep_Revolver_Carbine_01_C"), true, 6, 1, 0.5, true, &forty_five_ball, true},
         Profile{"revolver-carbine-scoped", STR("/Game/Classes/Weapons/Wep_Revolver_Carbine_Scoped.Wep_Revolver_Carbine_Scoped_C"), true, 6, 1, 0.5, true, &forty_five_ball, true},
+        Profile{"revolver-carbine-cult", STR("/Game/Classes/Weapons/Wep_Revolver_Carbine_Cult.Wep_Revolver_Carbine_Cult_C"), true, 6, 1, 0.5, true, &forty_five_air_burst, true},
+        Profile{"revolver-9mm-silenced", STR("/Game/Classes/Weapons/Wep_Revolver_9mm_Silenced.Wep_Revolver_9mm_Silenced_C"), true, 7, 1, 0.2, true, &nine_mm_ball, true},
         Profile{"carbine-45", STR("/Game/Classes/Weapons/Wep_45Carbine.Wep_45Carbine_C"), true, 12, 1, 0.1, true, &forty_five_ball, true},
         Profile{"carbine-45-scoped", STR("/Game/Classes/Weapons/Wep_45Carbine_Scoped.Wep_45Carbine_Scoped_C"), true, 12, 1, 0.1, true, &forty_five_ball, true},
         Profile{"carbine-45-silenced", STR("/Game/Classes/Weapons/Wep_45Carbine_Silenced.Wep_45Carbine_Silenced_C"), true, 12, 1, 0.1, true, &forty_five_ball, true},
@@ -253,6 +267,9 @@ namespace silverfish::guest_weapon_profiles
         Profile{"scout-rifle-03", STR("/Game/Classes/Weapons/Wep_ScoutRifle_03.Wep_ScoutRifle_03_C"), true, 10, 1, 0.1, true, &five_six_fmj, true},
         Profile{"scout-rifle-scoped", STR("/Game/Classes/Weapons/Wep_ScoutRifle_Scoped.Wep_ScoutRifle_Scoped_C"), true, 10, 1, 0.15, true, &five_six_fmj, true},
         Profile{"sniper-rifle", STR("/Game/Classes/Weapons/Wep_SniperRifle_.Wep_SniperRifle__C"), true, 8, 1, 0.2, true, &thirty_06_fmj, true},
+        Profile{"csr-01", STR("/Game/Classes/Weapons/Wep_CSR_01.Wep_CSR_01_C"), true, 8, 1, 0.2, true, &magnum_338_fmj, true},
+        Profile{"csr-02", STR("/Game/Classes/Weapons/Wep_CSR_02.Wep_CSR_02_C"), true, 12, 1, 0.2, true, &magnum_338_fmj, true},
+        Profile{"csr-03", STR("/Game/Classes/Weapons/Wep_CSR_03.Wep_CSR_03_C"), true, 8, 1, 0.2, true, &magnum_338_fmj, true},
         Profile{"burst-pistol", STR("/Game/Classes/Weapons/Wep_Burst_Pistol.Wep_Burst_Pistol_C"), true, 18, 3, 0.06, true, &nine_mm_ap, true},
         Profile{"pdw-01", STR("/Game/Classes/Weapons/Wep_PDW_01.Wep_PDW_01_C"), true, 30, 0, 0.06, true, &nine_mm_ap, true},
         Profile{"model-1931-carbine", STR("/Game/Classes/Weapons/Wep_Pistol_Long_Carbine.Wep_Pistol_Long_Carbine_C"), true, 18, 1, 0.1, true, &nine_mm_ap, true},
@@ -264,6 +281,12 @@ namespace silverfish::guest_weapon_profiles
         Profile{"stg-03", STR("/Game/Classes/Weapons/Wep_STG_03.Wep_STG_03_C"), true, 20, 0, 0.12, true, &five_seven_hp, true},
         Profile{"drakv-cult", STR("/Game/Classes/Weapons/Wep_DrakV_Cult.Wep_DrakV_Cult_C"), true, 24, 0, 0.1, true, &five_six_stun, true},
         Profile{"battle-rifle-cult", STR("/Game/Classes/Weapons/Wep_BattleRifle_Cult.Wep_BattleRifle_Cult_C"), true, 20, 1, 0.08, true, &thirty_06_mine, true},
+        Profile{"anti-materiel-rifle", STR("/Game/Classes/Weapons/Wep_AntiMat_Rifle.Wep_AntiMat_Rifle_C"), true, 4, 1, 1.4, true, &fifty_cal_fmj, true, true},
+        Profile{"sniper-02", STR("/Game/Classes/Weapons/Wep_Sniper_02.Wep_Sniper_02_C"), true, 10, 1, 1.4, true, &magnum_338_fmj, true, true},
+        Profile{"sniper-03", STR("/Game/Classes/Weapons/Wep_Sniper_03.Wep_Sniper_03_C"), true, 10, 1, 1.4, true, &magnum_338_fmj, true, true},
+        Profile{"sniper-04", STR("/Game/Classes/Weapons/Wep_Sniper_04.Wep_Sniper_04_C"), true, 10, 1, 1.4, true, &magnum_338_fmj, true, true},
+        Profile{"sniper-05", STR("/Game/Classes/Weapons/Wep_Sniper_05.Wep_Sniper_05_C"), true, 10, 1, 1.4, true, &magnum_338_fmj, true, true},
+        Profile{"sniper-night-vision", STR("/Game/Classes/Weapons/Wep_Sniper_NightVis.Wep_Sniper_NightVis_C"), true, 10, 1, 1.4, true, &magnum_338_fmj, true, true},
     };
     inline constexpr std::array stock_held_fire_kinds{
         std::string_view{"smg-standard"},
