@@ -4358,8 +4358,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableHeldMaskProbe",
                                                      fixture="portable_held_mask_probe.lua"))
         if resident_held_queue:
-            probes.enter_context(installed_probe(first_game, mod="SilverfishPortableHeldQueueProbe",
-                                                 fixture="portable_held_queue_probe.lua"))
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableHeldQueueProbe",
+                                                     fixture="portable_held_queue_probe.lua"))
         if resident_weapon_cues:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableWeaponCueProbe",
                                                  fixture="avatar_presentation_probe.lua"))
