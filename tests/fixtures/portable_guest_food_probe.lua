@@ -7,13 +7,14 @@ local map = "World /Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P
 local camp = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.CampFire_02_BP_C_1"
 local meal_path = "/Game/Classes/Items/Item_MRE.Item_MRE_C"
 local weta_path = "/Game/Classes/Items/Item_LiveWeta.Item_LiveWeta_C"
+local health_effects = "/Game/Classes/Items/HealthItem_Master_BP.HealthItem_Master_BP_C:ApplyItemEffects"
 local factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local stock_cases = {"Leftovers", "HoneyEgg", "DirtyBandage", "Gauze", "MedSalve", "MedKit_Large", "StimPills",
     "Antibiotics", "BrownMushroom"}
-local last, original_weta
+local last, weta_fixture
 
 local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -172,18 +173,28 @@ local function run(action)
     end
     if action == "modded-weta" or action == "restore-weta" then
         assert(not pawn:HasAuthority(), "the modded recipe fixture needs the isolated guest")
-        local defaults = asset(weta_path):GetCDO()
         if action == "modded-weta" then
-            assert(not original_weta, "the recipe fixture was already active")
-            original_weta = {food = defaults.Regen_Boost, fatigue = defaults.Ammount_Fatigue}
-            defaults.Regen_Boost, defaults.Ammount_Fatigue = 21, 5
-            assert(defaults.Regen_Boost == 21 and defaults.Ammount_Fatigue == 5)
+            assert(not weta_fixture, "the recipe fixture was already active")
+            local class = asset(weta_path)
+            local fixture = {uses = 0}
+            -- Simulate a mod that adds two personal effects after the inherited stock use.
+            fixture.pre, fixture.post = RegisterHook(health_effects, function(context)
+                local item = context:get()
+                local scratch = pawn.Save
+                if not valid(item) or not same(item:GetClass(), class) or not same(item.Player_Ref, pawn)
+                    or not valid(scratch) or same(scratch, save) or not same(scratch, world.OwningGameInstance.SaveSlot_Ref) then return end
+                scratch.Flags:Add(FName("Player_Fatigue"), stock_flag(scratch, "Player_Fatigue") + 5)
+                scratch.Flags:Add(FName("Player_Intox"), stock_flag(scratch, "Player_Intox") - 2)
+                fixture.uses = fixture.uses + 1
+            end)
+            weta_fixture = fixture
             return "patched"
         end
-        assert(original_weta, "the recipe fixture was not active")
-        defaults.Regen_Boost, defaults.Ammount_Fatigue = original_weta.food, original_weta.fatigue
-        original_weta = nil
-        return "restored"
+        assert(weta_fixture, "the recipe fixture was not active")
+        local result = "restored:" .. weta_fixture.uses
+        UnregisterHook(health_effects, weta_fixture.pre, weta_fixture.post)
+        weta_fixture = nil
+        return result
     end
     if action == "cook" or action == "cook-empty" then return eat_all(pawn, save, action == "cook-empty") end
     if action == "guest-cooking-state" then return cooking_stats(save) end

@@ -105,12 +105,13 @@ async def verify_stock_personal_consumable(host, guest, pawn, probe):
     try:
         fallback = await use_stock_item(guest_run, frame, weta, FALLBACK_RECEIPT)
     finally:
-        assert await command(guest, "restore-weta") == "restored"
+        fixture = await command(guest, "restore-weta")
+    assert fixture == "restored:1", fixture
     assert (fallback["guid"], fallback["class_path"], fallback["quantity_before"], fallback["quantity_after"]) == (
         weta, LIVE_WETA, 1, 0), fallback
     food, regen = fallback["vitals"]["food"], fallback["vitals"]["regen"]
     fatigue, intox = fallback["vitals"]["fatigue"], fallback["vitals"]["intox"]
-    assert math.isclose(food - food_before, 21, abs_tol=1) and math.isclose(regen, expected_regen, abs_tol=.02), fallback
+    assert math.isclose(food - food_before, 7, abs_tol=1) and math.isclose(regen, expected_regen, abs_tol=.02), fallback
     assert (fatigue, intox) == (fatigue_before + 5, intox_before - 2), fallback
     canonical, detached = (await command(host, "host-medical-vitals")).split(";")
     assert canonical == baseline and math.isclose(float(detached.split(",")[1]), regen, abs_tol=.02), (canonical, detached)
