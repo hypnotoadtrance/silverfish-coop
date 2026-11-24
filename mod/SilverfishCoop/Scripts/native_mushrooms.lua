@@ -88,7 +88,10 @@ local function assign_patch_ids(state, patch, pending, used)
             local position = stored[saved_child_transform].Translation
             if kind and position then
                 local group = saved_by_class[kind]
-                if not group then group = {}; saved_by_class[kind] = group end
+                if not group then
+                    group = {}
+                    saved_by_class[kind] = group
+                end
                 group[#group + 1] = {index = index, X = position.X, Y = position.Y, Z = position.Z}
             end
         end

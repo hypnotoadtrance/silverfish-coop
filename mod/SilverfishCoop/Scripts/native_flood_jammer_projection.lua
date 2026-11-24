@@ -7,7 +7,6 @@ local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 local sound_path = "/Game/Assets/Sounds/WAVs/Ambiant_Wav/sw_Amb_PhoneBox_LP.sw_Amb_PhoneBox_LP"
 local binding, observed
-local metadata = {}
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -17,17 +16,12 @@ local function same(first, second)
     return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
 end
 
-local function fixed_asset(path)
-    local asset = metadata[path]
-    if not valid(asset) then
-        asset = StaticFindObject(path)
-        metadata[path] = asset
-    end
-    return asset
+local function asset_path(object, path)
+    return valid(object) and object:GetFullName():match("^%S+ (.+)$") == path
 end
 
 local function exact(object, path)
-    return valid(object) and same(object:GetClass(), fixed_asset(path))
+    return valid(object) and asset_path(object:GetClass(), path)
 end
 
 local function context(state, phase)
@@ -45,7 +39,7 @@ local function context(state, phase)
         or not same(pawn.Controller, controller) or not same(pawn:GetWorld(), world) or not same(controller:GetWorld(), world)
         or pawn:HasAuthority() ~= hosting or controller:HasAuthority() ~= hosting or not pawn:IsLocallyControlled()
         or not controller:IsLocalController() or pawn:IsActorBeingDestroyed() or controller:IsActorBeingDestroyed()
-        or controller.Loading ~= false or detail.name ~= pawn:GetFullName() then return end
+        or detail.name ~= pawn:GetFullName() then return end
     local driver = world.NetDriver
     local connection = valid(driver) and driver.ServerConnection
     if not valid(driver) or not same(driver.World, world) or (hosting and valid(connection))
@@ -59,8 +53,6 @@ local function same_context(first, second)
 end
 
 local function live_actor(current, immediate)
-    local class = fixed_asset(jammer_class)
-    if not valid(class) then return nil, "class_unavailable" end
     local profile = current.profile
     if not observed or observed.profile ~= profile or not same(observed.level, current.level) then
         observed = {profile = profile, level = current.level}
@@ -74,7 +66,7 @@ local function live_actor(current, immediate)
         if not valid(actor) then
             local reason = "absent"
             for _, candidate in ipairs(FindAllOf("SignalJammer_BP_C") or {}) do
-                if valid(candidate) and same(candidate:GetClass(), class) and same(candidate:GetWorld(), current.world)
+                if exact(candidate, jammer_class) and same(candidate:GetWorld(), current.world)
                     and candidate:GetFullName() == profile.jammer_name then
                     reason = "identity_unresolved"
                     break
@@ -83,7 +75,7 @@ local function live_actor(current, immediate)
             observed.retry, observed.reason = now + .75, reason
             return nil, reason
         end
-        if not same(actor:GetClass(), class) or actor:GetFullName() ~= profile.jammer_name
+        if not exact(actor, jammer_class) or actor:GetFullName() ~= profile.jammer_name
             or not same(actor:GetWorld(), current.world) or not same(actor:GetOuter(), current.level)
             or actor:IsActorBeingDestroyed() then return nil, "actor_unqualified" end
         observed.actor, observed.retry, observed.reason = actor, nil, nil
@@ -99,7 +91,7 @@ local function audio_component(profile, actor, root)
     if not valid(component) then return nil, "none" end
     if not exact(component, "/Script/Engine.AudioComponent") or not same(component:GetOwner(), actor)
         or component:GetFullName() ~= "AudioComponent " .. profile.jammer_path .. ".Audio"
-        or not same(component:GetAttachParent(), root) or not same(component.Sound, fixed_asset(sound_path)) then
+        or not same(component:GetAttachParent(), root) or not asset_path(component.Sound, sound_path) then
         return nil, "unqualified"
     end
     return component
@@ -154,7 +146,7 @@ function jammer.command(fields, state, phase)
     local profile = profiles.by_tag[tag]
     if not profile then return end
     local current = context(state, phase)
-    if phase ~= "connected" or not current or current.profile ~= profile then
+    if phase ~= "connected" or not current or current.profile ~= profile or current.controller.Loading ~= false then
         error("jammer_projection_exact_client_required", 0)
     end
     local actor, root = live_actor(current, true)
