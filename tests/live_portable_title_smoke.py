@@ -3576,6 +3576,7 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
         connected = await wait_resident_status(guest_run, lambda frame:
             prop(frame) and not prop(frame)["destroyed"]
             and frame.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
+        local_pawn = connected["game"]["native_guest_primary_scope"]["pawn"]
         blocked = connected["game"].get("native_canister_blocked", 0)
         await guest.bridge.command("native-fixed-explosive-guest-guard-fixture", target)
         guarded = await wait_resident_status(guest_run, lambda frame:
@@ -3590,7 +3591,7 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
             async with asyncio.timeout(7):
                 while True:
                     try:
-                        tap = await guest.bridge.command("native-guest-primary-input-fixture", pawn, target)
+                        tap = await guest.bridge.command("native-guest-primary-input-fixture", local_pawn, target)
                         break
                     except RuntimeError as exc:
                         if str(exc) != "Stock primary input is temporarily blocked by the equipped player's state":
