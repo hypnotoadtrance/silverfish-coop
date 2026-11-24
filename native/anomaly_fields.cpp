@@ -61,12 +61,14 @@ namespace
     constexpr auto acid_bottle = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_AcidBottle.Prop_AcidBottle_C");
     constexpr auto scrap_wood_post = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_ScrapWood_Post.Prop_ScrapWood_Post_C");
     constexpr auto fixed_prop = STR("/Game/Assets/StaticMeshes/Destructable/Explosive_Prop_Master_BP.Explosive_Prop_Master_BP_C");
+    constexpr auto standing_tank_class = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Standing_FuelTank.Prop_Standing_FuelTank_C");
     constexpr auto destructible = STR("/Game/Assets/StaticMeshes/Destructable/Static_DestructableObject_Master_BP.Static_DestructableObject_Master_BP_C");
     constexpr auto drum_fire_class = STR("/Game/Classes/Anomalies/Fire_Molotov.Fire_Molotov_C");
-    constexpr std::array<std::wstring_view, 3> canister_classes{
+    constexpr std::array<std::wstring_view, 4> canister_classes{
         STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_PropaneTank_Small.Prop_PropaneTank_Small_C"),
         STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_PropaneTank_Tall.Prop_PropaneTank_Tall_C"),
         STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_FuelDrum.Prop_FuelDrum_C"),
+        standing_tank_class,
     };
     constexpr std::array<std::wstring_view, 5> replicated_classes{
         STR("/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C"),
@@ -98,7 +100,7 @@ namespace
     U::FName lingering_teleport, artifact_spawner, spawn_anomalies, travel_pool;
     std::array<U::FName, canister_classes.size()> canister_names;
     std::array<U::FName, 16> canister_events;
-    U::FName fuel_drum, fuel_drum_graph, prop_broken, receive_tick, drum_fire_name;
+    U::FName fuel_drum, fuel_drum_graph, prop_broken, receive_tick, drum_fire_name, standing_tank_name;
     U::FName user_construction_script, scrap_wood_post_name;
     std::array<U::FName, 5> fixed_prop_events;
     U::FName destructible_name;
@@ -450,6 +452,7 @@ namespace
 
     bool fixed_prop_class(U::UObject* type)
     {
+        if (type && type->GetFName() == standing_tank_name) return type->GetPathName() == standing_tank_class;
         auto* base = U::UObjectGlobals::StaticFindObject<U::UClass*>(nullptr, nullptr, fixed_prop);
         return type && base && static_cast<U::UClass*>(type)->IsChildOf(base);
     }
@@ -927,7 +930,8 @@ namespace
             return;
         }
         const bool drum = class_name == fuel_drum;
-        const bool canister = prop_event && (name != receive_tick || drum) &&
+        const bool standing_tank = class_name == standing_tank_name;
+        const bool canister = prop_event && (name != receive_tick || drum || standing_tank) &&
             std::ranges::find(canister_names, class_name) != canister_names.end();
         const bool roaming = roaming_event &&
             ((class_name == roaming_teleport && type->GetPathName() == roaming_teleport_class) ||
@@ -958,7 +962,7 @@ namespace
         if (canister)
         {
             if (!canister_class(type) || !binding || (binding != type && binding->GetPathName() != physics_prop)) return;
-            if (drum && (!actor->HasAnyFlags(U::RF_WasLoaded) || !world ||
+            if ((drum || standing_tank) && (!actor->HasAnyFlags(U::RF_WasLoaded) || !world ||
                 object(world, STR("PersistentLevel")) != actor->GetOuterPrivate() || (name == receive_tick && binding != type))) return;
         }
         else if (!fixed && !pyrogeist_jet && binding != type) return;
@@ -1136,6 +1140,7 @@ namespace silverfish::native_anomaly_fields
             U::FName{lingering_overlap, U::FNAME_Add},
         };
         fuel_drum = U::FName{STR("Prop_FuelDrum_C"), U::FNAME_Add};
+        standing_tank_name = U::FName{STR("Prop_Standing_FuelTank_C"), U::FNAME_Add};
         fuel_drum_graph = U::FName{STR("ExecuteUbergraph_Prop_FuelDrum"), U::FNAME_Add};
         prop_broken = U::FName{STR("PropBroken"), U::FNAME_Add};
         user_construction_script = U::FName{STR("UserConstructionScript"), U::FNAME_Add};
@@ -1153,6 +1158,7 @@ namespace silverfish::native_anomaly_fields
             U::FName{STR("Prop_PropaneTank_Small_C"), U::FNAME_Add},
             U::FName{STR("Prop_PropaneTank_Tall_C"), U::FNAME_Add},
             fuel_drum,
+            standing_tank_name,
         };
         canister_events = {
             U::FName{STR("DealDamage"), U::FNAME_Add},

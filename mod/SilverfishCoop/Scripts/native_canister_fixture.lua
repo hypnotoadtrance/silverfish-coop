@@ -119,7 +119,8 @@ function fixture.command(args, state, phase, canister, component, center, cue)
     end
     if action == "native-fixed-explosive-guest-guard-fixture" and phase == "connected" then
         canister:IgniteOnFire(100)
-        canister:Hit_Dmg_Feedback(true, {}, pawn)
+        if cue == "standing" then canister:PropBroken(canister:K2_GetActorLocation(), pawn)
+        else canister:Hit_Dmg_Feedback(true, {}, pawn) end
         return "Invoked the stock explosive ignition and rupture calls on the guest"
     end
     if not host_enabled or phase ~= "hosting" or not canister:HasAuthority() then

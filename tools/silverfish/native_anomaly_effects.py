@@ -261,12 +261,24 @@ async def project_fixed_explosives(bridge, game, frame, epoch):
     props = frame.get("props")
     if (frame.get("map"), frame.get("epoch")) != (area, epoch) or not isinstance(props, dict) or len(props) > MAX_SENSORS:
         return game
+    burning = frame.get("burning", {})
+    if not isinstance(burning, dict) or len(burning) > len(props):
+        return game
     local = game.get(FIXED_EXPLOSIVES, {})
     arguments = []
     for path, destroyed in props.items():
         prop = local.get(path)
-        if prop and type(destroyed) is bool and (prop["destroyed"] != destroyed or prop["damaged_mesh"] != destroyed):
-            arguments.append(f"{path}|{int(destroyed)}")
+        if not prop or type(destroyed) is not bool:
+            continue
+        fire = burning.get(path) if "burning" in prop else None
+        if type(fire) is not bool or destroyed:
+            fire = None
+        if prop["destroyed"] != destroyed or prop["damaged_mesh"] != destroyed or (
+                fire is not None and prop["burning"] != fire):
+            command = f"{path}|{int(destroyed)}"
+            if fire is not None:
+                command += f"|{int(fire)}"
+            arguments.append(command)
             if len(arguments) == 32:
                 break
     if not arguments:

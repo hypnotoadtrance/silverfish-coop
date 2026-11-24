@@ -2025,12 +2025,15 @@ class Host:
                 gameplay[native_anomaly_effects.CANISTERS] = {
                     "map": self.last_game["map"], "epoch": self.zone_epoch, "props": props,
                 }
-            fixed = {path: row["destroyed"] for path, row in self.last_game.get(native_anomaly_effects.FIXED_EXPLOSIVES, {}).items()
-                     if row["destroyed"] == row["damaged_mesh"]}
+            fixed_rows = self.last_game.get(native_anomaly_effects.FIXED_EXPLOSIVES, {})
+            fixed = {path: row["destroyed"] for path, row in fixed_rows.items() if row["destroyed"] == row["damaged_mesh"]}
             if fixed:
-                gameplay[native_anomaly_effects.FIXED_EXPLOSIVES] = {
+                frame = gameplay[native_anomaly_effects.FIXED_EXPLOSIVES] = {
                     "map": self.last_game["map"], "epoch": self.zone_epoch, "props": fixed,
                 }
+                burning = {path: fixed_rows[path]["burning"] for path in fixed if "burning" in fixed_rows[path]}
+                if burning:
+                    frame["burning"] = burning
             if native_destructibles.KEY in self.last_game:
                 gameplay[native_destructibles.KEY] = {
                     "map": self.last_game["map"], "epoch": self.zone_epoch,

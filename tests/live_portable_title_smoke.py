@@ -3491,12 +3491,13 @@ async def verify_stock_cooked_meal(host: Seat, guest: Seat, _pawn: str) -> dict:
                                  "host_pot_unchanged": True, "empty_pot_had_no_effect": True, "receipt": receipt}}
 
 
-async def verify_resident_board_offers(host: Seat, guest: Seat, _pawn: str) -> dict:
-    from tools.silverfish import native_board_contract
+async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> dict:
+    from tools.silverfish import native_anomaly_effects, native_board_contract, native_inventory
+    from tools.silverfish.authored_routes import AUTHORED_ROUTES
     from tools.silverfish.native_flood_jammer import OBSERVATORY_BOUNTY_BOARD
     from tools.silverfish.native_quest import AUTHORED_BOARD_ACTIONS
     from tools.silverfish.native_wire_board import catalog_specialists
-    from tools.silverfish.travel import OBSERVATORY
+    from tools.silverfish.travel import CROSSROADS, FOREST, OBSERVATORY
 
     async def command(seat, action, quest=None):
         request = f"{action}\t{quest}" if quest is not None else action
@@ -3521,11 +3522,116 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, _pawn: str) -> d
         assert result["ok"], result
         return result[native_board_contract.CATALOG_KEY]
 
+    async def at_point(target):
+        await wait_resident_status(guest_run, lambda frame: (
+            (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
+            and math.dist(point, target) <= 25))
+
+    async def approach_board():
+        await at_point(tuple(map(float, (await command(host, "approach")).split(","))))
+
+    async def cross(source, destination):
+        nonlocal pawn
+        route, = (row for row in AUTHORED_ROUTES if (row.source, row.destination) == (source, destination))
+        assert route.kind == "overlap", route
+        await wait_resident_status(host_run, lambda frame: frame["game"]["map"] == source
+                                   and frame["game"].get("native_zone", {}).get("state") == "ready")
+        for participant, placement in ((pawn, "near"), ("local", "near"), ("local", "inside")):
+            await host.bridge.command("native-exit-position", participant, placement, route.entrance, route.actor)
+        arrived = await wait_resident_status(host_run, lambda frame: frame["game"]["map"] == destination
+            and not frame.get("awaiting_zone_guest") and frame["game"].get("native_guest_save", {}).get("state") == "bound",
+            timeout=55)
+        pawn = arrived["game"]["native_guest_save"]["pawn"]
+        await wait_resident_status(guest_run, lambda frame: frame.get("zone_epoch") == arrived["zone_epoch"]
+                                   and frame.get("game", {}).get("map") == destination, timeout=35)
+
+    async def shoot_forest_tank():
+        async def weapon_setup(seat, verb):
+            return await portable_probe_command(seat.bridge, "simmi-jobs", verb)
+
+        guid = await weapon_setup(host, "seedpistol")
+        stored = await submit(guest_run, native_inventory.STORE_EQUIPMENT, target=guid)
+        assert stored["ok"] and stored[native_inventory.STORE_KEY]["guid"] == guid, stored
+        async with asyncio.timeout(9):
+            while await weapon_setup(guest, "selectpistol") != "equipped":
+                await asyncio.sleep(.15)
+        await cross(OBSERVATORY, CROSSROADS)
+        await cross(CROSSROADS, FOREST)
+        target = FOREST + ".Forest_01_P:PersistentLevel.Prop_FuelTank_C_1"
+        save_hashes = campaign_save_hashes(host.campaign)
+
+        def prop(frame):
+            return frame.get("game", {}).get(native_anomaly_effects.FIXED_EXPLOSIVES, {}).get(target, {})
+
+        def wreck(frame):
+            entry = prop(frame)
+            return entry.get("destroyed") and entry.get("damaged_mesh") and not entry.get("burning")
+
+        async def flag():
+            response = await host.bridge.command("native-fixed-explosive-flag-fixture", target)
+            return response["ack"]["message"]
+
+        assert await flag() == "Kill_ForestTank|6"
+        await wait_resident_status(host_run, lambda frame: prop(frame) and not prop(frame)["destroyed"])
+        connected = await wait_resident_status(guest_run, lambda frame:
+            prop(frame) and not prop(frame)["destroyed"]
+            and frame.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
+        blocked = connected["game"].get("native_canister_blocked", 0)
+        await guest.bridge.command("native-fixed-explosive-guest-guard-fixture", target)
+        guarded = await wait_resident_status(guest_run, lambda frame:
+            frame.get("game", {}).get("native_canister_blocked", 0) >= blocked + 2)
+        assert not prop(guarded)["destroyed"] and not prop(guarded)["burning"]
+        assert await flag() == "Kill_ForestTank|6"
+        magazine = 7
+        fired = []
+        for _ in range(magazine):
+            aimed = await host.bridge.command("native-fixed-explosive-aim-fixture", target, pawn, guid, timeout=6)
+            await at_point(aimed["pawns"]["guest"]["location"])
+            async with asyncio.timeout(5):
+                while await weapon_setup(guest, "aimtank") != "the guest crosshair is on the tank":
+                    await asyncio.sleep(.1)
+            async with asyncio.timeout(7):
+                while True:
+                    tap = await submit(guest_run, "native-guest-primary-input-fixture")
+                    if tap["ok"]:
+                        break
+                    assert tap["error"] == "Stock primary input is temporarily blocked by the equipped player's state", tap
+                    await asyncio.sleep(.15)
+            sequence = tap["native_guest_primary_fixture"]["sequence"]
+            async with asyncio.timeout(6):
+                while True:
+                    shot = [row for row in await resident_events(guest_run, connected)
+                            if row.get("sequence") == sequence and row["event"].startswith("native_guest_primary_input")]
+                    if shot:
+                        break
+                    await asyncio.sleep(.1)
+            result, = shot
+            assert result["event"] == "native_guest_primary_input", result
+            debit = result["native_guest_weapon"]
+            assert (debit["guid"], debit["before"], debit["after"], debit["projectiles"]) == (guid, magazine, magazine - 1, 1)
+            magazine -= 1
+            fired.append(debit["after"])
+            try:
+                destroyed = await wait_resident_status(host_run, wreck, timeout=2.7)
+                break
+            except TimeoutError:
+                continue
+        else:
+            raise AssertionError("The guest did not destroy the original forest tank")
+
+        witness = await wait_resident_status(guest_run, wreck)
+        assert prop(witness)["mesh"] == prop(destroyed)["mesh"]
+        assert await flag() == "Kill_ForestTank|7"
+        assert campaign_save_hashes(host.campaign) == save_hashes, "Destroying the tank wrote a save"
+        await cross(FOREST, CROSSROADS)
+        await cross(CROSSROADS, OBSERVATORY)
+        await approach_board()
+        return {"actor": target, "guest_magazine": fired, "stock_counter": [6, 7],
+                "host_mesh": prop(destroyed)["mesh"], "guest_mesh": prop(witness)["mesh"],
+                "denied_guest_local_callbacks": True, "no_save_on_destruction": True}
+
     checkpoint = campaign_save_hashes(host.campaign)
-    target = tuple(map(float, (await command(host, "approach")).split(",")))
-    await wait_resident_status(guest_run, lambda frame: (
-        (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
-        and math.dist(point, target) <= 25))
+    await approach_board()
     catalog, extended = (await command(host, "catalog")).split(";")
     offered = set(filter(None, catalog.split(",")))
     advanced = set(filter(None, extended.split(","))) - AUTHORED_BOARD_ACTIONS
@@ -3550,7 +3656,9 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, _pawn: str) -> d
 
     assert await command(host, "qualify-tracked") == "10"
     tracked_quests = []
-    for tracked, progress, cash in (("Sab_Fuel_01", 8, 1600), ("Sab_Factory", 5, 1200)):
+    assert campaign_save_hashes(host.campaign) == checkpoint, "Accepting a stock board offer caused an early save"
+    for tracked, progress, cash in (("Sab_Fuel_01", 6, 1600), ("Sab_Factory", 5, 1200)):
+        checkpoint = campaign_save_hashes(host.campaign)
         offers = await board_catalog()
         assert tracked in offers["offers"] and tracked not in offers["turnins"], offers
         await board_menu()
@@ -3560,6 +3668,12 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, _pawn: str) -> d
 
         assert await command(host, "track-progress", tracked) == str(progress)
         assert await command(host, "journal", tracked) == "1"
+        objective = {}
+        if tracked == "Sab_Fuel_01":
+            assert tracked not in (await board_catalog())["turnins"]
+            assert campaign_save_hashes(host.campaign) == checkpoint
+            objective = await shoot_forest_tank()
+            checkpoint = campaign_save_hashes(host.campaign)
         ready = await board_catalog()
         assert tracked in ready["turnins"], ready
         current = await wait_resident_status(host_run,
@@ -3581,7 +3695,8 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, _pawn: str) -> d
                     break
                 await asyncio.sleep(.1)
         assert tracked not in (await board_catalog())["turnins"]
-        tracked_quests.append({"quest_id": tracked, "world_flag_progress": progress, "receipt": receipt})
+        tracked_quests.append({"quest_id": tracked, "world_flag_progress": progress, "receipt": receipt, **objective})
+        assert campaign_save_hashes(host.campaign) == checkpoint, "Redeeming a stock board quest caused an early save"
 
     assert campaign_save_hashes(host.campaign) == checkpoint, "Accepting a stock board offer caused an early save"
     return {"resident_board_offers": {"stock_offers": sorted(offered), "guest_offers": sorted(visible),
@@ -5621,7 +5736,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableStormProbe",
                                                      fixture="portable_storm_probe.lua"))
-        if stock_simmi_jammers:
+        if stock_simmi_jammers or stock_board_offers:
             proof["jammer_aim_overlays"] = [probes.enter_context(jammer_aim_overlay(game)) for game in games]
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableSimmiJobsProbe",
@@ -5713,7 +5828,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                      fixture="portable_npc_override_probe.lua"))
         if (tutorial_dock_combat or tutorial_dock_melee or stock_bandage_revisit or stock_shovel or stock_simmi_jammers or stock_weather_travel or stock_lightning
                 or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_critters or stock_placed_item
-                or stock_eye_stacks or stock_lingering_teleport or stock_acid_pool or stock_mushrooms):
+                or stock_board_offers or stock_eye_stacks or stock_lingering_teleport or stock_acid_pool or stock_mushrooms):
             overlay_key = ("weather_zone_overlays" if stock_weather_travel or stock_lightning else
                            "jammer_zone_overlays" if stock_simmi_jammers else
                            "acid_pool_zone_overlays" if stock_acid_pool else "dock_zone_overlays")
@@ -6176,7 +6291,7 @@ if __name__ == "__main__":
                         help="use an unlisted stock consumable through the guest inventory and recover it across reconnect")
     parser.add_argument("--stock-campfire", action="store_true", help="verify stock campfire damage and feedback, combinable with food and weapon cues")
     parser.add_argument("--stock-board-offers", action="store_true",
-                        help="compare the stock Observatory board on both seats and accept a complex contract")
+                        help="compare stock board offers and complete a Forest fuel tank bounty through guest gunfire")
     parser.add_argument("--stock-simmi-jammers", action="store_true",
                         help="Complete both stock Simmi jammer bounties through the installed title")
     parser.add_argument("--stock-eye-stacks", action="store_true",

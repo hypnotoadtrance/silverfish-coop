@@ -152,7 +152,7 @@ end
 
 function effects.observe_fixed_blast(cue, point, pfx, sfx, scale, volume, attenuation)
     if valid(attenuation) and attenuation:GetFullName() == "SoundAttenuation " .. assets[cue][3] then
-        stock_blast(cue, point, pfx, sfx, scale, volume)
+        return stock_blast(cue, point, pfx, sfx, scale, volume)
     end
 end
 

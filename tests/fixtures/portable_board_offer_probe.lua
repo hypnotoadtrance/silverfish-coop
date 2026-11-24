@@ -13,7 +13,7 @@ local chained = "Add_Quests_OnComplete_66_06ACA8C44193595C2DFAD8A85B7FC8B9"
 local track = "TrackFlag_ForStep_111_31112EA54B887C1D869E1291BC819774"
 local ping = "GlobalPing_OnTurnIn_108_68CA1968452BFC635A107EBB1EE3AA7F"
 local tracked = {
-    Sab_Fuel_01 = {flag = "Kill_ForestTank", threshold = 7, progress = 8},
+    Sab_Fuel_01 = {flag = "Kill_ForestTank", threshold = 7, progress = 6},
     Sab_Factory = {flag = "PB_Factory_Kill", threshold = 5, progress = 5},
 }
 local last

@@ -218,7 +218,7 @@ function fields.start(role)
         if not valid(actor) then return end
         local class = actor:GetClass():GetFullName()
         if seat == "host" then
-            if class == effects.blast_class and in_world(actor, world) then
+            if class == effects.blast_class and in_world(actor, world) and not fixed.observe_spawned_blast(actor) then
                 effects.observe_blast(actor, active, canisters.blast_source)
             end
         elseif class == pyrogeist.jet then

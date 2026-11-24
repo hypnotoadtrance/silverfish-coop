@@ -111,9 +111,11 @@ function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule
     if not enabled or phase ~= "hosting" or type(guid) ~= "string" or #guid ~= 32 or guid:find("[^A-F0-9]") then
         refuse("headless_fixture_and_guid_required")
     end
+    local fixed = tag == "native-fixed-explosive"
     if not valid(actor) or not same(actor:GetWorld(), state.world) or not actor:HasAuthority()
         or actor:IsActorBeingDestroyed() or not finite(actor.Health) or actor.Health <= 0
-        or not component(target_capsule, actor, "CapsuleComponent") then refuse("living_authored_target_required") end
+        or not component(fixed and target_mesh or target_capsule, actor,
+            fixed and "StaticMeshComponent" or "CapsuleComponent") then refuse("living_authored_target_required") end
     local assassination = tag == "native-lenny" or tag == "native-spratt"
     local mesh_class = assassination and "SkeletalMeshComponent" or "StaticMeshComponent"
     if not component(target_mesh, actor, mesh_class) then target_mesh = nil end
@@ -123,7 +125,14 @@ function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule
     context.ignored = {context.pawn, context.weapon, actor}
     local rooftop = tag == "native-crossroads-jammer"
     context.floor_depth, context.aim_range, context.aim_pitch = rooftop and 1800 or 330, rooftop and 1600 or 550, rooftop and 70 or 56
-    local center = target_capsule:K2_GetComponentLocation()
+    local center
+    if fixed then
+        local bounds = {}
+        context.trace:GetComponentBounds(target_mesh, bounds, {}, {})
+        center = bounds.Origin or bounds
+    else
+        center = target_capsule:K2_GetComponentLocation()
+    end
     local radius, height = context.capsule:GetScaledCapsuleRadius(), context.capsule:GetScaledCapsuleHalfHeight()
     local original = {point = context.pawn:K2_GetActorLocation(), actor = rotation(context.pawn:K2_GetActorRotation()),
         control = rotation(context.controller:GetControlRotation()), camera = rotation(context.camera.RelativeRotation),

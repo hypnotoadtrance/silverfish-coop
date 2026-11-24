@@ -2913,19 +2913,23 @@ class Bridge:
                     area, epoch = fields[1:]
                     if area == data.get("map") and (epoch == "-" or native_guest_drop_record.valid_id(epoch)):
                         data[native_anomaly_effects.ACID_POOL_VIEW] = {"map": area, "epoch": epoch}
-                elif fields[0] == "native-fixed-explosive" and len(fields) == 6 and data.get("state") in {"hosting", "connected"}:
+                elif fields[0] == "native-fixed-explosive" and len(fields) in {6, 7} and data.get("state") in {"hosting", "connected"}:
                     props = data.setdefault(native_anomaly_effects.FIXED_EXPLOSIVES, {})
                     area = data.get("map", "")
-                    path, destroyed, damaged, mesh, health = fields[1:]
+                    path, destroyed, damaged, mesh, health = fields[1:6]
+                    burning = fields[6] if len(fields) == 7 else "-"
                     prefix = f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel."
                     if (area.startswith("/Game/Classes/Maps/") and path.startswith(prefix) and len(path) <= 512
                             and len(props) < native_anomaly_effects.MAX_SENSORS
                             and all(bit in {"0", "1"} for bit in (destroyed, damaged))
-                            and re.fullmatch(r"(Prop_Explosive_PowerBox|Explosive_Prop_Master_BP|Z_TestExplosiveObject)_C(?:_[0-9]+)?",
+                            and burning in {"-", "0", "1"} and (destroyed != "1" or burning != "1")
+                            and re.fullmatch(r"(Prop_Explosive_PowerBox|Explosive_Prop_Master_BP|Z_TestExplosiveObject|Prop_FuelTank|Prop_Standing_FuelTank)_C(?:_[0-9]+)?",
                                              path[len(prefix):])
                             and len(mesh) <= 512 and (mesh == "-" or mesh.startswith("/Game/"))):
                         props[path] = {"destroyed": destroyed == "1", "damaged_mesh": damaged == "1",
                                        "mesh": mesh, "health": _finite(health)}
+                        if burning != "-":
+                            props[path]["burning"] = burning == "1"
                 elif fields[0] == "native-explosive-canister" and len(fields) == 9 and data.get("state") in {"hosting", "connected"}:
                     props = data.setdefault(native_anomaly_effects.CANISTERS, {})
                     area = data.get("map", "")

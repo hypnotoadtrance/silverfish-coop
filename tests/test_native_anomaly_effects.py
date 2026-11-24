@@ -363,3 +363,17 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
         await project_fixed_explosives(bridge, game, frame, epoch)
         bridge.command.assert_awaited_once_with(
             "native-fixed-explosives-apply", "Dry Dock", epoch, "Broken|1", "Reset|0", "WrongMesh|1", timeout=1.5)
+
+    async def test_fixed_tank_projects_flames_and_wreck_without_changing_other_props(self):
+        epoch = "a" * 32
+        game = {"state": "connected", "map": "Forest", FIXED_EXPLOSIVES: {
+            "Tank": {"destroyed": False, "damaged_mesh": False, "burning": False},
+            "Wreck": {"destroyed": False, "damaged_mesh": False, "burning": True},
+            "Box": {"destroyed": False, "damaged_mesh": False},
+        }}
+        frame = {"map": "Forest", "epoch": epoch, "props": {"Tank": False, "Wreck": True, "Box": False},
+                 "burning": {"Tank": True, "Wreck": False, "Box": True}}
+        bridge = Mock(command=AsyncMock(return_value=game))
+        await project_fixed_explosives(bridge, game, frame, epoch)
+        bridge.command.assert_awaited_once_with(
+            "native-fixed-explosives-apply", "Forest", epoch, "Tank|0|1", "Wreck|1", timeout=1.5)
