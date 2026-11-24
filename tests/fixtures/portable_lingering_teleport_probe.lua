@@ -1,10 +1,10 @@
-local lingering_test
+local lingering_test, lingering_ticket
+local lingering_mailbox = os.getenv("SILVERFISH_COOP_BRIDGE")
+local lingering_class = "Lingering_Teleport_BP1_C"
+local travel_spawner = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.Artifact_Spawner_BP_C_29"
 
-local function lingering_fixture(args, state, phase)
-    if args[2] ~= "fixture-lingering-teleport" or not headless
-        or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") ~= "1" then return end
+local function lingering_fixture(action, point, state, phase)
     assert(state.map == crossroads and same(world, state.world), "stock Travel probe requires Crossroads")
-    local action = args[3]
     local host = phase == "hosting"
     local pawn = host and #state.guests == 1 and state.guests[1].pawn
         or not host and state.local_pawn and state.local_pawn.pawn
@@ -12,8 +12,30 @@ local function lingering_fixture(args, state, phase)
     local function coords(point)
         return ("%.6f,%.6f,%.6f"):format(point.X, point.Y, point.Z)
     end
+    local function local_teleporters()
+        local count = 0
+        for _, actor in ipairs(FindAllOf(lingering_class) or {}) do
+            if in_world(actor, world) and not replica(actor) then count = count + 1 end
+        end
+        return count
+    end
+    if action == "prepare" or action == "guest-spawn-attempt" then
+        assert(host == (action == "prepare"), "wrong seat for stock Travel spawning")
+        local before = local_teleporters()
+        if host and before > 0 then return "natural" end
+        local source = StaticFindObject(travel_spawner)
+        assert(in_world(source, world) and source.Pool.RowName:ToString() == "Travel" and source.Center_Amomally,
+            "authored Crossroads Travel spawner unavailable")
+        source:SpawnAnomalies()
+        if host then
+            assert(local_teleporters() == before + 1, "The authored Travel spawner did not produce a stock Lingering teleporter")
+            return "stock-spawner"
+        end
+        assert(before == 0 and local_teleporters() == 0, "An independent Lingering teleporter spawned on the guest")
+        return "guest-spawn-suppressed"
+    end
     local function nearest()
-        local x, y, z = args[4]:match("^([%d.%-]+),([%d.%-]+),([%d.%-]+)$")
+        local x, y, z = point:match("^([%d.%-]+),([%d.%-]+),([%d.%-]+)$")
         assert(x and y and z, "missing authoritative teleporter point")
         x, y, z = tonumber(x), tonumber(y), tonumber(z)
         local best, distance = nil, 160^2
@@ -28,9 +50,7 @@ local function lingering_fixture(args, state, phase)
     end
     local callback = "BndEvt__Wandering_Teleport_BP_Capsule_K2Node_ComponentBoundEvent_1_ComponentBeginOverlapSignature__DelegateSignature"
     if not host then
-        for _, actor in ipairs(FindAllOf("Lingering_Teleport_BP1_C") or {}) do
-            assert(not in_world(actor, world) or replica(actor), "An independent Lingering teleporter spawned on the guest")
-        end
+        assert(local_teleporters() == 0, "An independent Lingering teleporter spawned on the guest")
         local actor = nearest()
         if not valid(actor) then return "waiting" end
         assert(not actor:GetActorEnableCollision() and not actor:IsActorTickEnabled(), "Lingering replica is active")
@@ -94,4 +114,23 @@ local function lingering_fixture(args, state, phase)
     end
     assert(action == "inspect")
     return coords(actor:K2_GetActorLocation())
+end
+
+local function poll_lingering_fixture(state, phase)
+    if not headless or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") ~= "1" or not lingering_mailbox
+        or not lingering_mailbox:match("[/\\]portable%-title%-%x+[/\\][%a]+[/\\]titles[/\\]local[/\\]run[/\\]game%-bridge[/\\]%x+$")
+        or state.map ~= crossroads or phase ~= "hosting" and phase ~= "connected" then return end
+    local prefix = lingering_mailbox .. "/portable-lingering-"
+    local request = io.open(prefix .. "command.tsv", "rb")
+    if not request then return end
+    local content = request:read(200)
+    request:close()
+    if not content then return end
+    local ticket, action, point = content:match("^(%x+)\t([a-z%-]+)\t([^\r\n\t]*)$")
+    if not ticket or #ticket ~= 32 or ticket == lingering_ticket then return end
+    lingering_ticket = ticket
+    local ok, response = pcall(lingering_fixture, action, point, state, phase)
+    local output = assert(io.open(prefix .. "reply.tsv", "wb"))
+    output:write(ticket, "\t", ok and "ok" or "error", "\t", (tostring(response):gsub("[\r\n\t]", " ")))
+    output:close()
 end

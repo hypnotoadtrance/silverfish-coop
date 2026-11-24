@@ -12,19 +12,19 @@ from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
 def lingering_overlay(game, portable_script_overlay):
     fixture = (Path(__file__).with_name("fixtures") / "portable_lingering_teleport_probe.lua").read_text(encoding="utf-8")
-    marker = "function fields.command(args, state, phase)\n"
+    definitions = "function fields.command(args, state, phase)\n"
+    publication = "    local rows, live = {}, 0\n"
 
     def add_fixture(script):
-        if script.count(marker) != 1:
-            raise ValueError("The replica lacks the stock anomaly field command")
-        return script.replace(marker, fixture + "\n" + marker
-                              + "    local test = lingering_fixture(args, state, phase)\n"
-                              + "    if test ~= nil then return test end\n", 1)
+        if script.count(definitions) != 1 or script.count(publication) != 1:
+            raise ValueError("The replica lacks the stock anomaly field publication")
+        return (script.replace(definitions, fixture + "\n" + definitions, 1)
+                .replace(publication, "    poll_lingering_fixture(state, phase)\n" + publication, 1))
 
     return portable_script_overlay(game, "native_anomaly_fields.lua", add_fixture)
 
 
-async def verify_stock_lingering_teleport(host, guest, pawn):
+async def verify_stock_lingering_teleport(host, guest, pawn, probe):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     ready = await wait_resident_status(host_run, lambda f: f.get("game", {}).get("native_zone", {}).get("state") == "ready")
     if ready["game"]["map"] != CROSSROADS:
@@ -37,9 +37,8 @@ async def verify_stock_lingering_teleport(host, guest, pawn):
     guest_frame = await wait_resident_status(guest_run, lambda f: f.get("state") == "connected"
                                             and f.get("game", {}).get("map") == CROSSROADS, timeout=35)
 
-    async def operate(seat, action, *args):
-        reply = await seat.bridge.command("fixture-lingering-teleport", action, *args)
-        return reply["ack"]["message"]
+    async def operate(seat, action, point=""):
+        return await probe(seat.bridge, "portable-lingering", f"{action}\t{point}")
 
     def location(value):
         return [float(axis) for axis in value.split(",")]
@@ -52,9 +51,15 @@ async def verify_stock_lingering_teleport(host, guest, pawn):
         return await wait_resident_status(run, arrived, timeout=12)
 
     checkpoint = campaign_save_hashes(host.campaign)
-    async with asyncio.timeout(15):
-        while (staged := await operate(host, "stage")) == "waiting":
-            await asyncio.sleep(.2)
+    assert await operate(guest, "guest-spawn-attempt") == "guest-spawn-suppressed"
+    spawned = await operate(host, "prepare")
+    assert spawned in {"natural", "stock-spawner"}, spawned
+    try:
+        async with asyncio.timeout(12):
+            while (staged := await operate(host, "stage")) == "waiting":
+                await asyncio.sleep(.2)
+    except TimeoutError as error:
+        raise AssertionError(f"The {spawned} Travel teleporter did not reach the native host roster") from error
     source, guest_start = staged.split(";")
     assert source.startswith(CROSSROADS + ".CrossRoads_P:PersistentLevel.Artifact_Spawner_BP_C_"), source
     guest_start = location(guest_start)
@@ -96,6 +101,6 @@ async def verify_stock_lingering_teleport(host, guest, pawn):
     finally:
         assert await operate(host, "restore") == "restored"
     assert campaign_save_hashes(host.campaign) == checkpoint, "A stock anomaly interaction caused an early checkpoint"
-    return {"stock_lingering_teleport": {"source": source, "host_motion_cm": host_move, "guest_motion_cm": guest_move,
+    return {"stock_lingering_teleport": {"source": source, "spawn": spawned, "host_motion_cm": host_move, "guest_motion_cm": guest_move,
                                        "guest_overlap_blocked": True, "guest_destination": destination,
                                        "arrival_and_departure": [departure[0], arrival[0]], "checkpoint_unchanged": True}}

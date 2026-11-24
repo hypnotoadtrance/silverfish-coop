@@ -71,7 +71,8 @@
 
         local weapon = pawn.EquipedItem
         if not valid(weapon) or not same(weapon:GetClass(), StaticFindObject(path)) then return "waiting for stock pipe" end
-        local attack = weapon.ComboAttacks[1]
+        local charged = mode == "aim-charged" or mode == "approach-charged"
+        local attack = charged and weapon.ChargedAttack or weapon.ComboAttacks[1]
         local range = attack.Range_7_1ABB464F45C04D4C4BDA07A41F83FF24
         local radius = attack.Radius_9_4CAB95D84DE379A3C49DFD9CE1A93643
         local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
@@ -112,10 +113,10 @@
             pawn.Camera:K2_SetWorldRotation(angle, false, {}, true)
             return true
         end
-        if mode == "aim" then
+        if mode == "aim" or mode == "aim-charged" then
             return aim() and "ready" or "stock sweep misses plank"
         end
-        if mode == "approach" and phase == "hosting" then
+        if (mode == "approach" or mode == "approach-charged") and phase == "hosting" then
             local original, facing = pawn:K2_GetActorLocation(), pawn.Controller:GetControlRotation()
             local half = pawn.CapsuleComponent:GetScaledCapsuleHalfHeight()
             for _, distance in ipairs({range * .7, range * .85, range * .55}) do

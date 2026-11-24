@@ -62,18 +62,20 @@ async def verify_stock_shovel_reconnect(host, guest, evidence):
 
     for source, destination in ((CROSSROADS, LAKE), (LAKE, BLACK_MARKET)):
         route, = [row for row in AUTHORED_ROUTES if (row.source, row.destination) == (source, destination)]
+        prior = await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == source
+            and frame["game"].get("native_zone", {}).get("state") == "ready"
+            and frame["game"].get("native_guest_save", {}).get("state") == "bound")
+        pawn = prior["game"]["native_guest_save"]["pawn"]
         if route.kind == "door":
-            for owner in ("host", "guest"):
-                await action(host_run, "native-door-position", target=owner,
-                             exit_position="near", entrance=route.entrance)
-            await action(host_run, "native-door-probe", target="host", entrance=route.entrance)
+            for actor in (pawn, "local"):
+                await host.bridge.command("native-door-position", actor, "near", route.entrance)
+            await host.bridge.command("native-door-probe", "local", route.entrance)
         else:
-            options = {"entrance": route.entrance, "exit_actor": route.actor}
-            for owner in ("host", "guest"):
-                await action(host_run, "native-exit-position", target=owner, exit_position="near", **options)
-            await action(host_run, "native-exit-position", target="host", exit_position="inside", **options)
-        await wait_resident_status(host_run, lambda frame:
+            for actor, placement in ((pawn, "near"), ("local", "near"), ("local", "inside")):
+                await host.bridge.command("native-exit-position", actor, placement, route.entrance, route.actor)
+        arrived = await wait_resident_status(host_run, lambda frame:
             frame.get("game", {}).get("map") == destination and not frame.get("awaiting_zone_guest")
+            and frame.get("zone_epoch") != prior["zone_epoch"]
             and frame["game"].get("native_guest_save", {}).get("state") == "bound", timeout=55)
         await wait_resident_status(guest_run, lambda frame: frame.get("state") == "connected"
             and frame.get("character_id") == character and frame.get("game", {}).get("map") == destination,
@@ -103,7 +105,7 @@ async def verify_stock_shovel_reconnect(host, guest, evidence):
     saves = campaign_save_hashes(host.campaign)
     before = await wait_resident_status(host_run, lambda frame: type(frame.get("game", {}).get("native_wallet")) is int)
     expected_wallet = before["game"]["native_wallet"] + contract.cash
-    await action(host_run, contract.command("approach"), target=character)
+    await host.bridge.command(contract.command("approach"), arrived["game"]["native_guest_save"]["pawn"])
     await open_board()
     await press("start", "starting")
     accepted = await step(1)

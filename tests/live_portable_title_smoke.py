@@ -210,6 +210,17 @@ def stock_shovel_overlay(game: Path):
     return portable_script_overlay(game, "native_host_dig_live.lua", add_shovel_fixture)
 
 
+def stock_board_approach_overlay(game: Path):
+    def allow_portable_approach(script):
+        gate = 'local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"'
+        if script.count(gate) != 1:
+            raise ValueError("The private replica lacks the authored board approach gate")
+        return script.replace(gate, 'local fixtures = (os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"'
+                              '\n    or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1")', 1)
+
+    return portable_script_overlay(game, "native_wire_quest.lua", allow_portable_approach)
+
+
 def stock_take_ammo_overlay(game: Path):
     fixture = (Path(__file__).with_name("fixtures") / "portable_take_ammo_probe.lua").read_text(encoding="utf-8")
 
@@ -1032,60 +1043,70 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
     return result
 
 
+async def stock_melee_edge(guest_run, guid, edge):
+    reply = await submit(guest_run, native_guest_melee.INPUT_FIXTURE, target=edge)
+    assert reply["ok"], reply
+    fixture = reply[native_guest_melee.INPUT_FIXTURE_KEY]
+    assert fixture["guid"] == guid and fixture["edge"] == ("release" if edge == "tap" else edge), fixture
+    return fixture
+
+
+async def stock_melee_edge_receipts(guest_run, guest_frame, *fixtures):
+    sequences = {fixture["sequence"] for fixture in fixtures}
+    async with asyncio.timeout(6):
+        while True:
+            rows = {event.get("sequence"): event for event in await resident_events(guest_run, guest_frame)
+                    if event["event"] in ("native_guest_melee_edge", "native_guest_melee_edge_rejected")
+                    and event.get("sequence") in sequences}
+            if sequences <= rows.keys():
+                break
+            await asyncio.sleep(.05)
+    for event in rows.values():
+        assert event["event"] == "native_guest_melee_edge", event
+    return [rows[fixture["sequence"]][native_guest_melee.INPUT_KEY] for fixture in fixtures]
+
+
+async def stock_melee_terminal(host_run, ack):
+    key = native_guest_melee.INPUT_KEY
+    frame = await wait_resident_status(host_run, lambda value: (
+        (proof := value.get("game", {}).get(key, {})).get("serial") == ack["serial"]
+        and proof.get("status") != "pending"), timeout=8)
+    proof = frame["game"][key]
+    assert proof["status"] == "settled" and proof["guid"] == ack["guid"], proof
+    return proof
+
+
+async def stock_melee_charge(host_run, guest_run, guest_frame, guid, *, before_release=None, hold=.95):
+    press, = await stock_melee_edge_receipts(guest_run, guest_frame, await stock_melee_edge(guest_run, guid, "press"))
+    assert (press["presses"], press["releases"]) == (1, 0), press
+    await asyncio.sleep(hold)
+    if before_release:
+        await before_release()
+    release, = await stock_melee_edge_receipts(guest_run, guest_frame, await stock_melee_edge(guest_run, guid, "release"))
+    assert release["serial"] == press["serial"], (press, release)
+    charged = await stock_melee_terminal(host_run, release)
+    assert (charged["presses"], charged["releases"], charged["contacts"], charged["charged"]) == (1, 1, 1, 1), charged
+    return charged
+
+
 async def verify_stock_melee_edges(host: Seat, guest: Seat) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     guest_frame = await current_status(guest_run)
     scope = guest_frame["game"]["native_guest_primary_scope"]
-    key = native_guest_melee.INPUT_KEY
     assert scope["kind"] == "old-pipe", scope
-
-    async def gesture(edge):
-        reply = await submit(guest_run, native_guest_melee.INPUT_FIXTURE, target=edge)
-        assert reply["ok"], reply
-        fixture = reply[native_guest_melee.INPUT_FIXTURE_KEY]
-        assert fixture["guid"] == scope["guid"] and fixture["edge"] == ("release" if edge == "tap" else edge), fixture
-        return fixture
-
-    async def edge_receipts(*fixtures):
-        sequences = {fixture["sequence"] for fixture in fixtures}
-        async with asyncio.timeout(6):
-            while True:
-                rows = {event.get("sequence"): event for event in await resident_events(guest_run, guest_frame)
-                        if event["event"] in ("native_guest_melee_edge", "native_guest_melee_edge_rejected")
-                        and event.get("sequence") in sequences}
-                if sequences <= rows.keys():
-                    break
-                await asyncio.sleep(.05)
-        for event in rows.values():
-            assert event["event"] == "native_guest_melee_edge", event
-        return [rows[fixture["sequence"]][key] for fixture in fixtures]
-
-    async def settled(ack):
-        frame = await wait_resident_status(host_run, lambda value: (
-            (proof := value.get("game", {}).get(key, {})).get("serial") == ack["serial"]
-            and proof.get("status") != "pending"), timeout=8)
-        proof = frame["game"][key]
-        assert proof["status"] == "settled" and proof["guid"] == scope["guid"], proof
-        return proof
-
-    tap, = await edge_receipts(await gesture("tap"))
-    tap = await settled(tap)
+    guid = scope["guid"]
+    tap, = await stock_melee_edge_receipts(guest_run, guest_frame, await stock_melee_edge(guest_run, guid, "tap"))
+    tap = await stock_melee_terminal(host_run, tap)
     assert (tap["presses"], tap["releases"], tap["contacts"], tap["charged"], tap["combo"]) == (1, 1, 1, 0, 0), tap
-    press, = await edge_receipts(await gesture("press"))
-    assert (press["presses"], press["releases"]) == (1, 0), press
-    await asyncio.sleep(.95)
-    release, = await edge_receipts(await gesture("release"))
-    assert release["serial"] == press["serial"], (press, release)
-    charged = await settled(release)
-    assert (charged["presses"], charged["releases"], charged["contacts"], charged["charged"]) == (1, 1, 1, 1), charged
+    charged = await stock_melee_charge(host_run, guest_run, guest_frame, guid)
 
     attempts = []
     for spacing in (.24, .36, .48, .60):
-        first = await gesture("tap")
+        first = await stock_melee_edge(guest_run, guid, "tap")
         await asyncio.sleep(spacing)
-        second = await gesture("tap")
-        one, two = await edge_receipts(first, second)
-        combo = await settled(two)
+        second = await stock_melee_edge(guest_run, guid, "tap")
+        one, two = await stock_melee_edge_receipts(guest_run, guest_frame, first, second)
+        combo = await stock_melee_terminal(host_run, two)
         if (one["serial"] == two["serial"] and
                 (combo["presses"], combo["releases"], combo["contacts"], combo["combo"]) == (2, 2, 2, 1)):
             return {"tap": tap, "charged": charged, "combo": combo, "spacing_seconds": spacing}
@@ -1373,16 +1394,19 @@ async def verify_warehouse_board(host: Seat, guest: Seat, pawn: str) -> dict:
     guest_frame = await wait_resident_status(guest_run, lambda frame:
         frame.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid, timeout=12)
     assert guest_frame["game"]["native_guest_primary_scope"]["kind"] == "melee"
-    async with asyncio.timeout(8):
-        while (placement := await operate(host, "approach", pawn)) == "waiting for stock pipe":
-            await asyncio.sleep(.08)
-    position = list(map(float, placement.split(",")))
-    await wait_resident_status(guest_run, lambda frame: math.dist(
-        frame.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), position) < 35)
 
-    receipts, misses = [], []
-    previous = before_host
-    for _ in range(8):
+    async def approach(action):
+        async with asyncio.timeout(8):
+            while (placement := await operate(host, action, pawn)) == "waiting for stock pipe":
+                await asyncio.sleep(.08)
+        position = list(map(float, placement.split(",")))
+        await wait_resident_status(guest_run, lambda frame: math.dist(
+            frame.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), position) < 35)
+
+    await approach("approach")
+    # This plank's stock threshold admits the Heavy Pipe's charged attack, but a
+    # plain tap must leave the actor intact and publish a readable terminal receipt.
+    for _ in range(3):
         assert await operate(guest, "aim") == "ready"
         assert await operate(host, "aim", pawn) == "ready"
         tap = await submit(guest_run, "native-guest-primary-input-fixture")
@@ -1397,21 +1421,39 @@ async def verify_warehouse_board(host: Seat, guest: Seat, pawn: str) -> dict:
                     break
                 await asyncio.sleep(.08)
         assert event["event"] == "native_guest_melee_input", event
-        proof = event[native_guest_melee.SWING_KEY]
+        ordinary_tap = event[native_guest_melee.SWING_KEY]
+        contact = await operate(host, "contact")
+        assert native_guest_melee.verified_miss(ordinary_tap) and await operate(host, "inspect") == before_host, (
+            ordinary_tap, contact)
+        if contact == "obstacle_damage_blocked":
+            break
+    else:
+        raise AssertionError(f"The stock Heavy Pipe tap did not authenticate the obstacle no-op: {contact}")
+
+    await approach("approach-charged")
+
+    async def aim_charged():
+        assert await operate(guest, "aim-charged") == "ready"
+        assert await operate(host, "aim-charged", pawn) == "ready"
+
+    receipts, misses = [], []
+    previous = before_host
+    for _ in range(5):
+        await aim_charged()
+        proof = await stock_melee_charge(host_run, guest_run, guest_frame, guid, before_release=aim_charged, hold=1.1)
         after = await operate(host, "inspect")
-        if native_guest_melee.verified_miss(proof) and after == previous:
-            misses.append(await operate(host, "contact"))
-            assert len(misses) < 3, (proof, misses, after)
+        assert proof["pawn"] == pawn and proof["map"] == dock, proof
+        if proof["hits"] == 0 and after == previous:
+            misses.append(proof)
             continue
-        assert native_guest_melee.verified_damage(proof), (proof, previous, after)
-        assert proof["pawn"] == pawn and proof["target"].endswith("." + name), proof
-        assert math.isclose(proof["enemy_health_before"], float(previous.rsplit(",", 1)[1]), abs_tol=1e-6), (proof, previous)
-        receipts.append(proof)
+        assert proof["hits"] == 1, (proof, previous, after)
+        receipts.append({"input": proof, "before": previous, "after": after})
         if after == "removed":
             break
-        assert after.startswith("false,true,") and proof["enemy_health_after"] < proof["enemy_health_before"], (after, proof)
+        assert after.startswith("false,true,") and float(after.rsplit(",", 1)[1]) < float(previous.rsplit(",", 1)[1]), (
+            previous, after, proof)
         previous = after
-    assert after == "removed" and receipts, (previous, receipts, misses)
+    assert after == "removed" and len(receipts) >= 2, (previous, receipts, misses)
     await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == dock
                                and native_destructibles.KEY in frame["game"] and not intact(frame), timeout=6)
     deadline = asyncio.get_running_loop().time() + 8
@@ -1424,7 +1466,8 @@ async def verify_warehouse_board(host: Seat, guest: Seat, pawn: str) -> dict:
     assert campaign_save_hashes(host.campaign) == checkpoint, "A broken obstacle caused an early checkpoint"
     return {"stock_warehouse_board": {"actor": name, "before": before_host, "guest_after": after_guest,
                                        "host_removed": True, "guest_damage_guarded": True,
-                                       "guest_stock_swings": receipts, "fixture_misses": misses,
+                                       "stock_tap_blocked": ordinary_tap, "guest_stock_swings": receipts,
+                                       "fixture_misses": misses,
                                        "checkpoint_unchanged": True}}
 
 
@@ -3963,9 +4006,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_weather_travel, "crossroads", "stock_weather_travel",
          lambda host, guest, pawn: verify_weather_travel(host, guest, pawn, portable_probe_command)),
         (stock_critters, "crossroads", "stock_critters", verify_stock_critters),
-        (stock_lingering_teleport, "crossroads", "stock_lingering_teleport", verify_stock_lingering_teleport),
         (stock_shovel, "crossroads", "stock_shovel", lambda host, guest, pawn: verify_stock_shovel(
             host, guest, pawn, loot=stock_shovel_loot, quest=stock_shovel_quest)),
+        (stock_lingering_teleport, "crossroads_anomaly", "stock_lingering_teleport",
+         lambda host, guest, pawn: verify_stock_lingering_teleport(host, guest, pawn, portable_probe_command)),
         (stock_bandage_revisit, "tutorial_dock", "stock_bandage_revisit", verify_tutorial_bandage_revisit),
         (stock_warehouse_switch, "tutorial_dock", "stock_warehouse_switch", verify_warehouse_switch),
         (stock_warehouse_board, "tutorial_dock", "stock_warehouse_board", verify_warehouse_board),
@@ -4020,6 +4064,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["bandage_revisit_overlays"] = [probes.enter_context(bandage_revisit_overlay(game)) for game in games]
         if stock_shovel:
             proof["stock_shovel_overlays"] = [probes.enter_context(stock_shovel_overlay(game)) for game in games]
+        if stock_shovel_quest:
+            for game in games:
+                probes.enter_context(stock_board_approach_overlay(game))
         if stock_take_ammo:
             proof["stock_take_ammo_overlays"] = [probes.enter_context(stock_take_ammo_overlay(game)) for game in games]
         if stock_warehouse_switch:
@@ -4244,7 +4291,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     else:
                         finish_check("stock_missing_contact_reconnect_and_turn_in", started)
 
-                exit_actions = ("prompt", "confirm") if campaign in {"tutorial_dock", "crossroads", "shopkeep"} else ("save_and_quit",)
+                exit_actions = ("prompt", "confirm") if campaign in {
+                    "tutorial_dock", "crossroads", "crossroads_anomaly", "shopkeep"
+                } else ("save_and_quit",)
                 requires_package_reconnect = campaign == "crossroads" and stock_shovel_quest
                 return await start_pair(host, second, "Gameplay scout", on_join=run_checks,
                                         wait_status=wait_resident_status, host_exit_actions=exit_actions,
