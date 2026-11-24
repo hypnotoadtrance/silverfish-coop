@@ -2711,10 +2711,12 @@ async def verify_dock_npc_population(host: Seat, guest: Seat, command) -> dict:
         authoritative_points = await command(host, "dock-population-spawn")
         await wait_for_population(host, authoritative_points, "bandit=3,state=3")
         await wait_for_population(guest, authoritative_points, "bandit=1,state=1")
+        paths = await asyncio.gather(*(command(seat, f"dock-population-paths\t{authoritative_points}")
+                                       for seat in (host, guest)))
         assert await command(host, "dock-population-cleanup") == "cleared"
         await wait_for_population(guest, authoritative_points, "empty")
         return {"tutorial_dock_npc_population": {"client_only_retired": 2, "host_authorities": 2,
-                "guest_replicas": 2, "host_removal_seen": True}}
+                "guest_replicas": 2, "host_removal_seen": True, "actor_names": dict(zip(("host", "guest"), paths))}}
     finally:
         assert await asyncio.gather(command(host, "dock-population-cleanup"), command(guest, "dock-population-cleanup")) == [
             "cleared", "cleared",
@@ -2864,6 +2866,7 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         exclusions = (await command(host, "dock-garage-shot-witness")).rsplit(";", 1)[-1].split(",")
         assert host_collision not in exclusions and board not in exclusions, (exclusions, refused)
         assert float(await command(host, "dock-garage-plank-health")) == float(board_health)
+        assert await command(host, "dock-garage-plank-impact") == "0;-"
 
         guest_camera, guest_muzzle, _, _ = (await command(guest, f"{stage};in")).split(";")
         assert (guest_camera, guest_muzzle) == ("worker", board), (guest_camera, guest_muzzle)
@@ -2873,11 +2876,20 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         assert contact.get("actor", "").endswith(f":PersistentLevel.{board}"), accepted
         exclusions = (await command(host, "dock-garage-shot-witness")).rsplit(";", 1)[-1].split(",")
         assert host_collision in exclusions and board not in exclusions, (exclusions, accepted)
-        await asyncio.sleep(.35)
+        async with asyncio.timeout(3):
+            while (impact := await command(host, "dock-garage-plank-impact")) == "0;-":
+                await asyncio.sleep(.05)
+        hits, kinetic, piercing, breacher, threshold, ballistic, armor = impact.split(";")
+        board_after = float(await command(host, "dock-garage-plank-health"))
+        stock_damage = (float(kinetic) if ballistic == "true" else 0) + (float(piercing) if armor == "true" else 0)
+        remaining = float(board_health) - stock_damage if breacher == "true" or stock_damage >= float(threshold) else float(board_health)
+        assert hits == "1" and math.isclose(board_after, remaining, abs_tol=1e-4), (impact, board_health, board_after)
         evidence["tutorial_dock_damageable_contact"] = {
             "camera_target": "NPC_Survivor_Worker_C_2", "muzzle_target": board,
             "blocked_shot": refused, "accepted_shot": accepted,
-            "board_health_before": board_health, "board_health_after": await command(host, "dock-garage-plank-health"),
+            "board_health_before": float(board_health), "board_health_after": board_after,
+            "stock_impact": {"hits": int(hits), "damage": stock_damage, "threshold": float(threshold),
+                             "breacher": breacher == "true"},
         }
     return evidence
 

@@ -826,7 +826,7 @@ local function dock_spawn_population(pawn, world, host)
     return table.concat(points, ";")
 end
 
-local function dock_population_at(world, points)
+local function dock_population_at(world, points, include_paths)
     local visible = {}
     for point in points:gmatch("[^;]+") do
         local kind, x, y, z = point:match("^(%w+),([^,]+),([^,]+),([^,]+)$")
@@ -836,7 +836,7 @@ local function dock_population_at(world, points)
             if valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed() then
                 local at = actor:K2_GetActorLocation()
                 if (at.X-x)^2 + (at.Y-y)^2 + (at.Z-z)^2 < 40^2 then
-                    visible[#visible + 1] = kind .. "=" .. actor:GetLocalRole()
+                    visible[#visible + 1] = kind .. "=" .. (include_paths and actor:GetFullName() or actor:GetLocalRole())
                 end
             end
         end
@@ -873,7 +873,7 @@ local function dock_combat(pawn, world, host, action, name)
 end
 
 local garage_view, garage_door, garage_aim, garage_plank, garage_worker_scale
-local garage_shot_hook
+local garage_shot_hook, garage_plank_hook
 local garage_path = dock .. ":PersistentLevel.StaticMeshActor_347"
 
 local function stock_garage(world)
@@ -1112,8 +1112,23 @@ local function stage_garage_plank(pawn, world, host, specification)
     assert(valid(mesh) and same(actor:GetWorld(), world) and actor.Health > 0)
     if not garage_plank then
         local scale = mesh.RelativeScale3D
-        garage_plank = {mesh=mesh, position=mesh:K2_GetComponentLocation(),
-            scale={X=scale.X,Y=scale.Y,Z=scale.Z}, mobility=mesh.Mobility}
+        garage_plank = {actor=actor, mesh=mesh, position=mesh:K2_GetComponentLocation(),
+            scale={X=scale.X,Y=scale.Y,Z=scale.Z}, mobility=mesh.Mobility, hits=0}
+    end
+    if host and not garage_plank_hook then
+        RegisterHook("/Game/Assets/StaticMeshes/Destructable/Static_DestructableObject_Master_BP." ..
+            "Static_DestructableObject_Master_BP_C:DealDamage", function(context, damage, _, instigator, _, breacher)
+                if not garage_view or not garage_plank or not same(context:get(), garage_plank.actor)
+                    or not same(instigator:get(), garage_view.shooter) then return end
+                garage_plank.hits = garage_plank.hits + 1
+                garage_plank.impact = table.concat({
+                    tostring(damage:get()[damage_key]),
+                    tostring(damage:get().ArmorPenitration_4_E48DD35840D3699D8F37E48678EF29E4),
+                    tostring(breacher:get()), tostring(garage_plank.actor["Dmg Threshold"]),
+                    tostring(garage_plank.actor["Ballistic Dmg"]), tostring(garage_plank.actor.APDmg),
+                }, ";")
+            end)
+        garage_plank_hook = true
     end
     local shooter = host and authoritative_guest(world) or pawn
     local weapon = shooter.EquipedItem
@@ -1121,8 +1136,8 @@ local function stage_garage_plank(pawn, world, host, specification)
     local muzzle = {X=eye.X,Y=eye.Y,Z=eye.Z-76}
     weapon.Arrow_Muzzle:K2_SetWorldLocation(muzzle, false, {}, true)
     -- Move the stock board to where the offset muzzle ray passes below the sight line.
-    local center = {X=muzzle.X+(target.X-muzzle.X)*.28,Y=muzzle.Y+(target.Y-muzzle.Y)*.28,
-        Z=muzzle.Z+(target.Z-muzzle.Z)*.28}
+    local center = {X=muzzle.X+(target.X-muzzle.X)*.16,Y=muzzle.Y+(target.Y-muzzle.Y)*.16,
+        Z=muzzle.Z+(target.Z-muzzle.Z)*.16}
     local scale = garage_plank.scale
     mesh:SetMobility(2)
     mesh:SetRelativeScale3D({X=scale.X*0.55,Y=scale.Y*0.55,Z=scale.Z*0.55})
@@ -1539,9 +1554,9 @@ local function run(action, actor_path)
     elseif action == "dock-population-spawn" then
         assert(world:GetFullName() == "World " .. dock)
         return dock_spawn_population(pawn, world, host)
-    elseif action == "dock-population-at" then
+    elseif action == "dock-population-at" or action == "dock-population-paths" then
         assert(world:GetFullName() == "World " .. dock)
-        return dock_population_at(world, actor_path)
+        return dock_population_at(world, actor_path, action == "dock-population-paths")
     elseif action == "dock-population-cleanup" then
         for _, actor in pairs(population_fixture) do
             if valid(actor) and not actor:IsActorBeingDestroyed() then actor:K2_DestroyActor() end
@@ -1669,6 +1684,9 @@ local function run(action, actor_path)
     elseif action == "dock-garage-plank-health" then
         assert(host and garage_plank)
         return valid(garage_plank.mesh) and tostring(garage_plank.mesh:GetOwner().Health) or "removed"
+    elseif action == "dock-garage-plank-impact" then
+        assert(host and garage_plank)
+        return ("%d;%s"):format(garage_plank.hits, garage_plank.impact or "-")
     elseif action == "dock-garage-health" then
         assert(host and garage_view and valid(garage_view.worker))
         return ("%.6f"):format(garage_view.worker.Health)
