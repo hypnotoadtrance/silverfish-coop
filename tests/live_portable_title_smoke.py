@@ -4020,7 +4020,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(lingering_overlay(game, portable_script_overlay)) for game in games
             ]
         if stock_eye_stacks:
-            probes.enter_context(eye_board_overlay(first_game))
+            for game in games:
+                probes.enter_context(eye_board_overlay(game))
         if stock_board_offers:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableBoardOfferProbe",
@@ -4085,6 +4086,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 or guest_stash_memory or nonmirrored_startup):
             for game in games:
                 probes.enter_context(installed_probe(game))
+        if not second_legacy_work:
+            assert len({runtime.staged_build(game) for game in games}) == 1, (
+                "The two portable fixtures produced different network build identities")
         boot_started = time.perf_counter()
         for game, workspace, release, port in zip(games, workspaces, qualified, choose_ports(), strict=True):
             title = workspace / release.title_directory
