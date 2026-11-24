@@ -600,9 +600,11 @@ local function fixture(fields, current, seat)
         if mode == "lamp-use" then
             aim(picked.PropMesh:K2_GetComponentLocation())
             local component = pawn.InteractionTarget_Component
-            if not valid(component) or not same(component:GetOwner(), picked)
+            local focused = pawn.ActorBeingLookedAt
+            local matches = valid(component) and same(component:GetOwner(), picked)
+                or not valid(component) and same(focused, picked)
+            if not matches
                 or type(SilverfishTakeNativeLanternPress) ~= "function" then
-                local focused = pawn.ActorBeingLookedAt
                 error("native_prop_carry_fixture_lamp_focus:" .. (valid(component) and component:GetFullName() or "none")
                     .. ":" .. (valid(focused) and focused:GetFullName() or "none")
                     .. ":interact=" .. tostring(picked.PropMesh:GetCollisionResponseToChannel(16)), 0)

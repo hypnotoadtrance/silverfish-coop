@@ -923,6 +923,36 @@ namespace
         stash_input.pending = {++stash_sequence, stash_input.expires};
     }
 
+    void remember_lantern_press(Unreal::UObject* pawn, Unreal::UObject* actor, Unreal::UObject* component)
+    {
+        const auto expires = Clock::now() + receipt_lifetime;
+        lantern_input.actor = actor;
+        lantern_input.component = component;
+        lantern_input.pawn = pawn;
+        lantern_input.accepting = true;
+        lantern_input.expires = expires;
+        lantern_input.pending = {++lantern_sequence, expires};
+    }
+
+    bool queue_visible_lantern_press(Unreal::UObject* pawn)
+    {
+        if (scope.host || lantern_sequence == max_sequence || Clock::now() >= scope.expires ||
+            live(object_field(pawn, STR("InteractionTarget_Component")))) return false;
+        auto* actor = object_field(pawn, STR("ActorBeingLookedAt"));
+        if (!live(actor) || actor->GetClassPrivate() != find<Unreal::UClass>(lantern_class) ||
+            actor != find<Unreal::UObject>(lantern_path) || !live_actor(actor, scope.world.Get(), 1) ||
+            !live_scope(scope) || !standing(pawn)) return false;
+        auto* lit = field<Unreal::FBoolProperty>(actor, STR("Lit"));
+        auto* mesh = object_field(actor, STR("PropMesh"));
+        if (!lit || !lit->GetPropertyValueInContainer(actor) || !live(mesh) ||
+            mesh->GetOuterPrivate() != actor || mesh != object_field(actor, STR("RootComponent")) ||
+            !interaction_in_reach(pawn, actor, mesh)) return false;
+        // The visibility trace can select the lantern at a frame where the
+        // stock interaction trace has no component at its clipped endpoint.
+        remember_lantern_press(pawn, actor, mesh);
+        return true;
+    }
+
     void intercept_lantern(Iteration& call, Unreal::UObject* actor, Unreal::UFunction* function, const void* parameters)
     {
         static const Unreal::FName interact{STR("SendInteractionToActor")};
@@ -958,13 +988,7 @@ namespace
             object_field(pawn, STR("InteractionTarget_Component")) != component ||
             !interaction_in_reach(pawn, actor, component) ||
             !silverfish::native_interaction_input::consume_current_press(pawn)) return;
-        const auto expires = Clock::now() + receipt_lifetime;
-        lantern_input.actor = actor;
-        lantern_input.component = component;
-        lantern_input.pawn = pawn;
-        lantern_input.accepting = true;
-        lantern_input.expires = expires;
-        lantern_input.pending = {++lantern_sequence, expires};
+        remember_lantern_press(pawn, actor, component);
     }
 
     void intercept_npc_barter(Iteration&, Unreal::UObject*, Unreal::UFunction*);
@@ -1120,7 +1144,8 @@ namespace
             event_source_matches = parameters && scope.started.source->GetObjectPropertyValue(
                 scope.started.source->ContainerPtrToValuePtr<void>(parameters)) == scope.action.Get();
             event_focus = event_source_matches ? pressed_focus(pawn) : Unreal::FWeakObjectPtr{};
-            if (sewer_answering && event_source_matches && !iteration.OriginalFunctionCallPrevented() && queue_sewer_dialogue(pawn))
+            if (event_source_matches && !iteration.OriginalFunctionCallPrevented() &&
+                ((sewer_answering && queue_sewer_dialogue(pawn)) || (!event_focus.Get() && queue_visible_lantern_press(pawn))))
             {
                 iteration.PreventOriginalFunctionCall();
                 event_consumed = iteration.OriginalFunctionCallPrevented();
