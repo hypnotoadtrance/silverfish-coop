@@ -14,6 +14,8 @@ from .native_gold import valid_guid
 LIST = "native-stash-list"
 CENSUS = "native-stash-census"
 LIVE_CENSUS = "native_stash_live_census"
+CENSUS_SNAPSHOT = "native_stash_census_snapshot"
+SNAPSHOT_PAGE_SIZE = 32  # Fits the 32 KiB action body even with 512-byte class paths.
 LIVE_MOVE = "native_stash_live_move"
 LIVE_REORDER = "native_stash_live_reorder"
 LIVE_SPLIT = "native_stash_live_split"
@@ -32,7 +34,7 @@ MEMORY_VIEW_MAX_BYTES = 20_000  # Leaves room for the scoped header in the 32 Ki
 LARGE_MEMORY_VIEW_MAX_BYTES = 2_500_000
 MEMORY_VIEW_HEADER_MAX_BYTES = 1_024
 VIEW_FIXTURES = {"native-stash-view-fixture", "native-stash-view-click-fixture"}
-_TARGET = re.compile(r"([0-9A-F]{32})(?:\|(0|[1-9][0-9]{0,3}))?\Z")
+_TARGET = re.compile(r"([0-9A-F]{32})(?:\|(0|[1-9][0-9]{0,3})(?:\|([0-9a-f]{32}))?)?\Z")
 _MOVE_TARGET = re.compile(r"([0-9A-F]{32})\|(deposit|withdraw|reorder)\|([0-9A-F]{32})(?:\|([0-9A-F]{32}|-))?\Z")
 _SPLIT_TARGET = re.compile(r"([0-9A-F]{32})\|(split-deposit|split-withdraw)\|([0-9A-F]{32})\|([1-9][0-9]{0,9})\|([1-9][0-9]{0,9})\Z")
 SPLIT_DIRECTIONS = {"split-deposit", "split-withdraw"}
@@ -133,27 +135,34 @@ async def inspect(host, bridge, character, target):
     selection = _TARGET.fullmatch(target) if isinstance(target, str) else None
     if not selection or not valid_guid(selection[1]) or int(selection[2] or 0) > 4096:
         raise party.RuleError("native_stash_exact_site_required")
-    site, offset = selection[1], int(selection[2] or 0)
+    site, offset, token = selection[1], int(selection[2] or 0), selection[3]
     scope = _scope(host, character, site)
     area, _, combined, pawn = scope
     live = host.last_game.get(LIVE_CENSUS) is True
+    if token and (not live or host.last_game.get(CENSUS_SNAPSHOT) is not True):
+        raise party.RuleError("native_stash_snapshot_unavailable")
     slot = "-" if live else (await _frame(host, bridge, character, site, scope))["slot"]
-    snapshot = await bridge.command(CENSUS, pawn, slot, site, str(offset), timeout=5)
+    cursor = (str(offset), token) if token else (str(offset),)
+    snapshot = await bridge.command(CENSUS, pawn, slot, site, *cursor, timeout=5)
     report = snapshot.get("native_stash_census", {})
     if ((snapshot.get("state"), snapshot.get("map"), snapshot.get(SETTING)) != ("hosting", area, combined)
             or tuple(report.get(key) for key in ("map", "pawn", "slot", "site", "offset", "combined")) !=
             (area, pawn, slot, site, offset, combined) or _scope(host, character, site) != scope):
         raise RuntimeError("The exact character and rest-site stash did not verify")
     items, total = report["items"], report["total"]
-    if (len(items) != report["count"] or len(items) != min(native_inventory.PAGE_SIZE, max(0, total - offset))
+    page_size = SNAPSHOT_PAGE_SIZE if token else native_inventory.PAGE_SIZE
+    if (len(items) != report["count"] or len(items) != min(page_size, max(0, total - offset))
             or len({item["guid"] for item in items}) != len(items)
             or any(item["source"] != "stash" or not valid_guid(item["guid"]) or item["quantity"] < 1
                    or not 0 <= item["index"] < 4096 or not item["class_path"].startswith("/Game/")
                    or live and (type(item.get("ammo")) is not int or not -2**31 <= item["ammo"] < 2**31
                                 or item.get("stackable") and item["ammo"] != item["quantity"]) for item in items)):
         raise RuntimeError("The isolated stock stash page is incomplete")
-    return {RESULT: dict(owner=character, site=site, combined=combined, offset=offset, total=total, items=items,
-                         next_offset=offset + len(items) if offset + len(items) < total else None)}
+    page = dict(owner=character, site=site, combined=combined, offset=offset, total=total, items=items,
+                next_offset=offset + len(items) if offset + len(items) < total else None)
+    if token:
+        page["snapshot"] = token
+    return {RESULT: page}
 
 
 async def move(host, bridge, character, target, operation):
@@ -262,12 +271,18 @@ def parse_view(fields, area, phase):
 
 async def _stock_rows(client, site, operation):
     offset, contents, seen, identity = 0, [], set(), None
+    token = operation.hex if client.gameplay.get(CENSUS_SNAPSHOT) is True else None
+    page_size = SNAPSHOT_PAGE_SIZE if token else native_inventory.PAGE_SIZE
     while True:
-        page = (await client.gameplay_action(LIST, uuid.uuid5(operation, str(offset)).hex, f"{site}|{offset}"))[RESULT]
+        target = f"{site}|{offset}"
+        if token:
+            target += f"|{token}"
+        page = (await client.gameplay_action(LIST, uuid.uuid5(operation, str(offset)).hex, target))[RESULT]
         rows, total, combined = page["items"], page["total"], page["combined"]
         if (page["owner"] != client.invite["character_id"] or page["site"] != site or page["offset"] != offset
+                or page.get("snapshot") != token
                 or type(combined) is not bool or type(total) is not int or not 0 <= offset <= total <= 4096
-                or type(rows) is not list or len(rows) != min(native_inventory.PAGE_SIZE, total - offset)
+                or type(rows) is not list or len(rows) != min(page_size, total - offset)
                 or identity is not None and identity != (total, combined)):
             raise ValueError("The host did not return the guest's exact stash")
         identity = total, combined

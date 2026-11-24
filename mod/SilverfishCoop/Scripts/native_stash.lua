@@ -3,7 +3,10 @@ local guest_save = require("guest_save")
 local host_save = require("native_host_save")
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local stash_class = "/Game/Classes/Actors/Stash_Master_BP.Stash_Master_BP_C"
-local world, site_time, sites, report, moved
+local world, site_map, site_time, sites, report, moved
+local snapshots = {}
+local snapshot_lifetime, max_snapshots = 45, 5
+local page_size, snapshot_page_size, max_items = 16, 32, 4096
 
 local function valid(object)
     return object and object:IsValid()
@@ -23,12 +26,26 @@ end
 
 local function selected_sites(state, phase)
     if phase ~= "hosting" or not state.listening or state.server ~= false
-        or type(SilverfishReadNativeStashCensus) ~= "function" then return end
+        or type(SilverfishReadNativeStashCensus) ~= "function" then
+        if next(snapshots) then snapshots = {} end
+        return
+    end
     local instance, pawn = host_save.canonical_host(state, phase)
     local save = valid(instance) and instance.SaveSlot_Ref
-    if not valid(pawn) or not valid(save) or not same(pawn.Save, save) or type(save.CombineStashes) ~= "boolean" then return end
+    if not valid(pawn) or not valid(save) or not same(pawn.Save, save) or type(save.CombineStashes) ~= "boolean" then
+        if next(snapshots) then snapshots = {} end
+        return
+    end
+    local combined = save.CombineStashes
+    local map_changed = not same(world, state.world) or site_map ~= state.map
+    if next(snapshots) then
+        local now = os.time()
+        for address, snapshot in pairs(snapshots) do
+            if map_changed or now >= snapshot.expires or snapshot.combined ~= combined then snapshots[address] = nil end
+        end
+    end
     local clock = os.clock()
-    if not same(world, state.world) or clock - site_time >= 2 then
+    if map_changed or clock - site_time >= 2 then
         local base = StaticFindObject(stash_class)
         local statics = StaticFindObject(statics_path)
         local leaf = state.map:match("([^/]+)$")
@@ -51,9 +68,9 @@ local function selected_sites(state, phase)
                 end
             end
         end
-        world, site_time = state.world, clock
+        world, site_map, site_time = state.world, state.map, clock
     end
-    return sites, pawn, save.CombineStashes
+    return sites, pawn, combined
 end
 
 local function close_to(pawn, actor)
@@ -64,7 +81,7 @@ local function close_to(pawn, actor)
 end
 
 local function participant(state, phase, host, name)
-    if host:GetFullName() == name then return host end
+    if host:GetFullName() == name then return host, host.Save, "host" end
     return guest_save.exact_item_context(state, phase, name)
 end
 
@@ -75,11 +92,11 @@ local function stash_context(state, phase, name, id)
         or identifier(site.actor.Stash_ID) ~= id or not same(site.actor:GetWorld(), state.world) then
         error("native_stash_exact_site_unavailable", 0)
     end
-    local pawn = participant(state, phase, host, name)
+    local pawn, save, owner = participant(state, phase, host, name)
     if not valid(pawn) or pawn.Dead ~= false or not close_to(pawn, site.actor) then
         error("native_stash_participant_out_of_reach", 0)
     end
-    return pawn, combined, host
+    return pawn, combined, host, save, owner, site.actor
 end
 
 local function census_context(state, phase, name, slot, id)
@@ -133,6 +150,7 @@ local function move(fields, state, phase)
     else ok, status, class, moved_quantity = transfer(pawn:GetAddress(), live and 0 or snapshot:GetAddress(),
         combined, site, item, deposit) end
     if ok ~= true then error(tostring(status), 0) end
+    snapshots[pawn:GetAddress()] = nil
     local merged = status == "merged"
     if (status ~= "moved" and not (split and merged)) or type(class) ~= "string" or not class:match("^/Game/[%w_./%-]+$")
         or math.type(moved_quantity) ~= "integer" or moved_quantity < 1
@@ -182,6 +200,63 @@ local function approach_fixture(state, phase, name, id)
     error("native_stash_approach_fixture_no_floor", 0)
 end
 
+local function census_items(reader, target, combined, id, live, offset, count)
+    if type(reader) ~= "function" then error("native_stash_census_unavailable", 0) end
+    local ok, status, source, total = reader(target:GetAddress(), combined, id)
+    if ok ~= true or status ~= "complete" or type(source) ~= "string" or math.type(total) ~= "integer"
+        or total < 0 or total > max_items then error(tostring(status), 0) end
+    local items, seen = {}, 0
+    for line in source:gmatch("[^\n]+") do
+        seen = seen + 1
+        if seen > offset and seen <= offset + count then
+            local item = {}
+            for value in line:gmatch("[^\t]+") do item[#item + 1] = value end
+            if #item ~= (live and 13 or 9) or item[2] ~= "stash" then error("native_stash_census_item_invalid", 0) end
+            items[#items + 1] = item
+        end
+    end
+    if seen ~= total then error("native_stash_census_count_changed", 0) end
+    return items, total
+end
+
+local function remember_snapshot(address, snapshot)
+    if not snapshots[address] then
+        local count, oldest = 0, nil
+        for candidate, previous in pairs(snapshots) do
+            count = count + 1
+            if not oldest or previous.expires < snapshots[oldest].expires then oldest = candidate end
+        end
+        if count >= max_snapshots then snapshots[oldest] = nil end
+    end
+    snapshots[address] = snapshot
+end
+
+local function snapshot_page(state, phase, name, id, offset, token)
+    local pawn, combined, _, save, owner, actor = stash_context(state, phase, name, id)
+    if type(owner) ~= "string" or not same(pawn.Save, save) then error("native_stash_census_save_unavailable", 0) end
+    local address = pawn:GetAddress()
+    local snapshot = snapshots[address]
+    if not snapshot or snapshot.token ~= token or snapshot.name ~= name or snapshot.owner ~= owner
+        or snapshot.map ~= state.map or not same(snapshot.world, state.world) or not same(snapshot.pawn, pawn)
+        or not same(snapshot.save, save) or snapshot.site ~= id or not same(snapshot.actor, actor)
+        or snapshot.combined ~= combined then
+        if offset ~= 0 then error("native_stash_census_snapshot_unavailable", 0) end
+        -- Freeze one verified stock census so that each page reads the same order and counts.
+        local items = census_items(SilverfishReadLiveNativeStashCensus, pawn, combined, id, true, 0, max_items)
+        snapshot = {token = token, name = name, owner = owner, world = state.world, map = state.map,
+            pawn = pawn, save = save, site = id, actor = actor, combined = combined,
+            expires = os.time() + snapshot_lifetime, items = items}
+        remember_snapshot(address, snapshot)
+    else
+        snapshot.expires = os.time() + snapshot_lifetime
+    end
+    local items, total = {}, #snapshot.items
+    for index = offset + 1, math.min(offset + snapshot_page_size, total) do
+        items[#items + 1] = snapshot.items[index]
+    end
+    return items, total, combined
+end
+
 function stash.command(fields, state, phase)
     if fields[2] == "native-stash-move" then return move(fields, state, phase) end
     if fields[2] == "native-stash-approach-fixture" or fields[2] == "native-stash-setting-fixture" then
@@ -201,35 +276,25 @@ function stash.command(fields, state, phase)
         return "stock stash setting set in isolated fixture"
     end
     if fields[2] ~= "native-stash-census" then return end
-    local name, slot, id, count = fields[3], fields[4], fields[5], fields[6]
+    local name, slot, id, count, token = fields[3], fields[4], fields[5], fields[6], fields[7]
     local offset = math.tointeger(tonumber(count))
-    if #fields ~= 6 or not offset or offset < 0 or offset > 4096 then
+    local live = slot == "-"
+    if (#fields ~= 6 and #fields ~= 7) or not offset or offset < 0 or offset > max_items
+        or (#fields == 7 and (not live or type(token) ~= "string" or #token ~= 32 or not token:match("^[0-9a-f]+$"))) then
         error("native_stash_exact_site_unavailable", 0)
     end
-    local live = slot == "-"
-    local reader, target, combined
-    if live then
-        target, combined = stash_context(state, phase, name, id)
-        reader = SilverfishReadLiveNativeStashCensus
+    local items, total, combined
+    if token then
+        items, total, combined = snapshot_page(state, phase, name, id, offset, token)
+    elseif live then
+        local pawn
+        pawn, combined = stash_context(state, phase, name, id)
+        items, total = census_items(SilverfishReadLiveNativeStashCensus, pawn, combined, id, true, offset, page_size)
     else
         local _, saved_combined, snapshot = census_context(state, phase, name, slot, id)
-        target, combined, reader = snapshot, saved_combined, SilverfishReadNativeStashCensus
+        combined = saved_combined
+        items, total = census_items(SilverfishReadNativeStashCensus, snapshot, combined, id, false, offset, page_size)
     end
-    if type(reader) ~= "function" then error("native_stash_census_unavailable", 0) end
-    local ok, status, source, total = reader(target:GetAddress(), combined, id)
-    if ok ~= true or status ~= "complete" or type(source) ~= "string" or math.type(total) ~= "integer"
-        or total < 0 or total > 4096 then error(tostring(status), 0) end
-    local items, seen = {}, 0
-    for line in source:gmatch("[^\n]+") do
-        seen = seen + 1
-        if seen > offset and seen <= offset + 16 then
-            local item = {}
-            for value in line:gmatch("[^\t]+") do item[#item + 1] = value end
-            if #item ~= (live and 13 or 9) or item[2] ~= "stash" then error("native_stash_census_item_invalid", 0) end
-            items[#items + 1] = item
-        end
-    end
-    if seen ~= total then error("native_stash_census_count_changed", 0) end
     report = {map = state.map, pawn = name, slot = slot, site = id, combined = combined,
         total = total, offset = offset, items = items}
     return "isolated stock stash census verified"
@@ -241,6 +306,7 @@ function stash.rows(state, phase, row)
     local rows = {row("native-stash-setting", state.map, combined and 1 or 0)}
     if type(SilverfishReadLiveNativeStashCensus) == "function" then
         rows[#rows + 1] = row("native-stash-live-census", 1)
+        rows[#rows + 1] = row("native-stash-census-snapshot", 1)
     end
     if type(SilverfishMoveLiveNativeStashItem) == "function" then
         rows[#rows + 1] = row("native-stash-live-move", 1)

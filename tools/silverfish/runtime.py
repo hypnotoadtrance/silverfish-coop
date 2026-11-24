@@ -2696,6 +2696,9 @@ class Bridge:
                     sites[fields[2]] = dict(map=fields[1], actor=fields[3], location=location)
                 elif fields == ["native-stash-live-census", "1"] and data.get("state") == "hosting":
                     data[native_stash.LIVE_CENSUS] = True
+                elif (fields == ["native-stash-census-snapshot", "1"] and data.get("state") == "hosting"
+                        and data.get(native_stash.LIVE_CENSUS) is True):
+                    data[native_stash.CENSUS_SNAPSHOT] = True
                 elif fields == ["native-stash-live-move", "1"] and data.get("state") == "hosting":
                     data[native_stash.LIVE_MOVE] = True
                 elif fields == ["native-stash-live-reorder", "1"] and data.get("state") == "hosting":
@@ -2706,9 +2709,11 @@ class Bridge:
                     data[native_stash.LIVE_SPLIT_MERGE] = True
                 elif fields[0] == native_stash.CENSUS and len(fields) == 9 and data.get("state") == "hosting":
                     live = fields[3] == "-" and data.get(native_stash.LIVE_CENSUS) is True
+                    page_size = (native_stash.SNAPSHOT_PAGE_SIZE if live and data.get(native_stash.CENSUS_SNAPSHOT)
+                                 else native_inventory.PAGE_SIZE)
                     if (fields[1] != data.get("map") or not (live or SLOT.fullmatch(fields[3])) or not valid_guid(fields[4])
                             or fields[5] not in {"0", "1"} or not 0 <= int(fields[6]) <= 4096
-                            or not 0 <= int(fields[7]) <= 4096 or not 0 <= int(fields[8]) <= 16):
+                            or not 0 <= int(fields[7]) <= 4096 or not 0 <= int(fields[8]) <= page_size):
                         raise ValueError("Invalid stash census")
                     data["native_stash_census"] = dict(map=fields[1], pawn=fields[2], slot=fields[3], site=fields[4],
                         combined=fields[5] == "1", total=int(fields[6]), offset=int(fields[7]), count=int(fields[8]), items=[])
