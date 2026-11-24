@@ -17,6 +17,7 @@ local classes = {
     vortex = "/Game/Classes/Anomalies/VortexTrap_BP.VortexTrap_BP_C",
     electrode = "/Game/Classes/Anomalies/Electrode_BP.Electrode_BP_C",
     ["wandering-teleport"] = "/Game/Classes/Anomalies/Wandering_Teleport_BP.Wandering_Teleport_BP_C",
+    ["lingering-teleport"] = "/Game/Classes/Anomalies/Lingering_Teleport_BP1.Lingering_Teleport_BP1_C",
 }
 local gravity = "BlueprintGeneratedClass /Game/Classes/Anomalies/GravityAnomaly_BP.GravityAnomaly_BP_C"
 local kinds = {}
@@ -30,7 +31,8 @@ local host_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") =
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local rook = "/Game/Classes/Maps/Dreams/TheRook_P"
 local pending, active, pending_fires, fires, fixtures = {}, {}, {}, {}, {}
-local world, world_map, fixture_kind, wandering_hook, wandering_probe
+local wandering_hooks = {}
+local world, world_map, fixture_kind, wandering_probe
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -44,21 +46,21 @@ local function in_world(actor, current)
     return valid(actor) and not actor:IsActorBeingDestroyed() and same(actor:GetWorld(), current)
 end
 
-local function bind_wandering_effect()
-    if wandering_hook or type(RegisterHook) ~= "function" then return end
-    local path = classes["wandering-teleport"] .. ":Tele_FX"
+local function bind_wandering_effect(kind)
+    if wandering_hooks[kind] or type(RegisterHook) ~= "function" then return end
+    local path = classes[kind] .. ":Tele_FX"
     if not valid(StaticFindObject(path)) then return end
     RegisterHook(path, function(context, position)
         local actor = context:get()
         if not in_world(actor, world) or not actor:HasAuthority() then return end
         local entry = active[actor:GetAddress()]
         local driver = actor:GetWorld().NetDriver
-        if entry and entry.kind == "wandering-teleport" and same(entry.actor, actor)
+        if entry and entry.kind == kind and same(entry.actor, actor)
             and valid(driver) and same(driver.World, world) and not valid(driver.ServerConnection) then
             effects.observe_wandering_teleport(position:get())
         end
     end)
-    wandering_hook = true
+    wandering_hooks[kind] = true
 end
 
 local function trap_kind(actor, class)
@@ -80,7 +82,8 @@ local function trap_kind(actor, class)
 end
 
 local function disables_replica_tick(kind)
-    return kind == "gravity" or kind == "pyrogeist" or kind == "shadow-sphere" or kind == "angler-lamp" or kind == "observer"
+    return kind == "gravity" or kind == "pyrogeist" or kind == "shadow-sphere" or kind == "angler-lamp"
+        or kind == "observer" or kind == "lingering-teleport"
 end
 
 local function replica(actor)
@@ -205,6 +208,7 @@ function fields.start(role)
         fixed.created(actor, class, seat)
         local kind = trap_kind(actor, class)
         if not kind and class ~= fire_jet then return end
+        if seat == "host" and kind == "lingering-teleport" then return end
         local placed, local_copy
         if kind then placed, local_copy = placement(actor) end
         if seat == "host" and not actor:HasAuthority() then return end
@@ -341,7 +345,7 @@ function fields.command(args, state, phase)
     end
     if args[2] ~= "native-anomaly-field-fixture" then return end
     local path = classes[args[3]]
-    if #args ~= 3 or not path or state.map ~= crossroads or not valid(state.world) or not headless
+    if #args ~= 3 or not path or args[3] == "lingering-teleport" or state.map ~= crossroads or not valid(state.world) or not headless
         or (phase ~= "connected" and (phase ~= "hosting" or not host_fixture)) then
         error("The stock trap probe requires a muted Crossroads session", 0)
     end
@@ -398,7 +402,7 @@ function fields.rows(state, phase, row)
                 end
             end
         elseif phase == "connected" and state.map == crossroads then
-            local names = {"GravityAnomaly_BP_C", "Pyrogeist_BP_C"}
+            local names = {"GravityAnomaly_BP_C", "Pyrogeist_BP_C", "Lingering_Teleport_BP1_C"}
             if shadows.enabled then names[#names + 1] = "ShadowSphere_BP_C" end
             if lamps.enabled then names[#names + 1] = "AnglerLamp_BP_C" end
             if observers.enabled then names[#names + 1] = "Observers_BP_C" end
@@ -413,6 +417,16 @@ function fields.rows(state, phase, row)
             pyrogeist.recover(world, replica)
         end
     end
+    if phase == "hosting" and type(SilverfishTakeNativeLingeringTeleport) == "function" then
+        while true do
+            local path, source = SilverfishTakeNativeLingeringTeleport(world:GetAddress())
+            if not path then break end
+            local actor = StaticFindObject(path)
+            if in_world(actor, world) and actor:HasAuthority() then
+                pending[actor:GetAddress()] = {actor = actor, kind = "lingering-teleport", travel_source = source}
+            end
+        end
+    end
     for address, entry in pairs(pending) do
         local actor = entry.actor
         if in_world(actor, world) then
@@ -422,7 +436,7 @@ function fields.rows(state, phase, row)
                     if disables_replica_tick(entry.kind) then actor:SetActorTickEnabled(false) end
                 end
                 if actor:GetActorEnableCollision() == false then active[address] = entry end
-            elseif entry.placed or actor:ActorHasTag(FName("Anomaly")) then
+            elseif entry.placed or entry.travel_source or actor:ActorHasTag(FName("Anomaly")) then
                 -- SpawnField applies its stock tag after finishing the spawned actor's BeginPlay.
                 actor.NetUpdateFrequency = math.min(actor.NetUpdateFrequency, 5)
                 actor:SetReplicates(true)
@@ -466,8 +480,9 @@ function fields.rows(state, phase, row)
         local actor = entry.actor
         if valid(actor) and not actor:IsActorBeingDestroyed() and valid(actor.RootComponent) then
             if phase == "hosting" and entry.kind == "starburst" then effects.observe_charge(entry) end
-            if phase == "hosting" and entry.kind == "wandering-teleport" and not wandering_hook then
-                bind_wandering_effect()
+            if phase == "hosting" and (entry.kind == "wandering-teleport" or entry.kind == "lingering-teleport")
+                and not wandering_hooks[entry.kind] then
+                bind_wandering_effect(entry.kind)
             end
             if phase == "connected" and entry.placed and actor:GetActorEnableCollision() then
                 actor:SetActorEnableCollision(false)

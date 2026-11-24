@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import time
+import traceback
 import uuid
 from zipfile import ZipFile
 
@@ -36,13 +37,16 @@ from live_installed_title_smoke import boot_states, native_mailbox
 from live_loose_pickup_smoke import DEFAULT_ACTOR
 from live_ai_smoke import wait
 from live_cold_cabinet_pickup_smoke import copy_resident_checkpoint, instrument, verify_resident_pickup, verify_saved_pickup
+from live_dynamic_board_smoke import staged_probe as eye_board_overlay
 from live_multi_smoke import campaign_save_hashes, saved_hashes
 from live_resident_host_smoke import stock_profile, stock_save_hashes
 from live_same_process_listener_smoke import choose_ports
 from live_stock_creator_smoke import creator_action, installed_probe
 from live_stock_pause_exit_smoke import stock_pause
 from live_unified_title_smoke import Seat, offered, start_pair
+from portable_eye_board import verify_stock_eye_stacks
 from portable_guest_world_start import GuestWorldStartProof, resident_events, wait_resident_status
+from portable_lingering_teleport import lingering_overlay, verify_stock_lingering_teleport
 from portable_simmi_jammer import verify_stock_simmi_jammers
 from portable_weather_travel import verify_weather_travel
 from portable_stock_shovel import verify_stock_shovel, verify_stock_shovel_reconnect
@@ -1028,14 +1032,77 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
     return result
 
 
+async def verify_stock_melee_edges(host: Seat, guest: Seat) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    guest_frame = await current_status(guest_run)
+    scope = guest_frame["game"]["native_guest_primary_scope"]
+    key = native_guest_melee.INPUT_KEY
+    assert scope["kind"] == "old-pipe", scope
+
+    async def gesture(edge):
+        reply = await submit(guest_run, native_guest_melee.INPUT_FIXTURE, target=edge)
+        assert reply["ok"], reply
+        fixture = reply[native_guest_melee.INPUT_FIXTURE_KEY]
+        assert fixture["guid"] == scope["guid"] and fixture["edge"] == ("release" if edge == "tap" else edge), fixture
+        return fixture
+
+    async def edge_receipts(*fixtures):
+        sequences = {fixture["sequence"] for fixture in fixtures}
+        async with asyncio.timeout(6):
+            while True:
+                rows = {event.get("sequence"): event for event in await resident_events(guest_run, guest_frame)
+                        if event["event"] in ("native_guest_melee_edge", "native_guest_melee_edge_rejected")
+                        and event.get("sequence") in sequences}
+                if sequences <= rows.keys():
+                    break
+                await asyncio.sleep(.05)
+        for event in rows.values():
+            assert event["event"] == "native_guest_melee_edge", event
+        return [rows[fixture["sequence"]][key] for fixture in fixtures]
+
+    async def settled(ack):
+        frame = await wait_resident_status(host_run, lambda value: (
+            (proof := value.get("game", {}).get(key, {})).get("serial") == ack["serial"]
+            and proof.get("status") != "pending"), timeout=8)
+        proof = frame["game"][key]
+        assert proof["status"] == "settled" and proof["guid"] == scope["guid"], proof
+        return proof
+
+    tap, = await edge_receipts(await gesture("tap"))
+    tap = await settled(tap)
+    assert (tap["presses"], tap["releases"], tap["contacts"], tap["charged"], tap["combo"]) == (1, 1, 1, 0, 0), tap
+    press, = await edge_receipts(await gesture("press"))
+    assert (press["presses"], press["releases"]) == (1, 0), press
+    await asyncio.sleep(.95)
+    release, = await edge_receipts(await gesture("release"))
+    assert release["serial"] == press["serial"], (press, release)
+    charged = await settled(release)
+    assert (charged["presses"], charged["releases"], charged["contacts"], charged["charged"]) == (1, 1, 1, 1), charged
+
+    attempts = []
+    for spacing in (.24, .36, .48, .60):
+        first = await gesture("tap")
+        await asyncio.sleep(spacing)
+        second = await gesture("tap")
+        one, two = await edge_receipts(first, second)
+        combo = await settled(two)
+        if (one["serial"] == two["serial"] and
+                (combo["presses"], combo["releases"], combo["contacts"], combo["combo"]) == (2, 2, 2, 1)):
+            return {"tap": tap, "charged": charged, "combo": combo, "spacing_seconds": spacing}
+        attempts.append((spacing, one, two, combo))
+    raise AssertionError(f"The original stock combo did not buffer a second attack: {attempts}")
+
+
 async def verify_stock_melee_family(host: Seat, guest: Seat, _pawn: str) -> dict:
     before = campaign_save_hashes(host.campaign)
     heavy_pipe = await verify_resident_guest_melee(host, guest, heavy=True, verify_observer=True)
     assert await portable_probe_command(host.bridge, "portable-npc-override", "clear-melee-target") == "cleared"
     old_pipe = await verify_resident_guest_melee(host, guest, verify_observer=True)
     assert heavy_pipe["host_damage"]["stock_damage"] > old_pipe["host_damage"]["stock_damage"]
+    assert await portable_probe_command(host.bridge, "portable-npc-override", "clear-melee-target") == "cleared"
+    edges = await verify_stock_melee_edges(host, guest)
     assert campaign_save_hashes(host.campaign) == before, "A regular melee attack wrote campaign saves"
-    return {"stock_melee_family": {"heavy_pipe": heavy_pipe, "old_pipe": old_pipe, "campaign_unchanged": True}}
+    return {"stock_melee_family": {"heavy_pipe": heavy_pipe, "old_pipe": old_pipe, "edges": edges, "campaign_unchanged": True}}
 
 
 async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict) -> dict:
@@ -1281,35 +1348,84 @@ async def verify_warehouse_board(host: Seat, guest: Seat, pawn: str) -> dict:
         for participant, placement in ((pawn, "near"), ("local", "near"), ("local", "inside")):
             await host.bridge.command("native-exit-position", participant, placement, "Obs_Dock", "Level_Exit_BP_C_213")
     arrival = await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == dock
-                                         and intact(frame) and not frame.get("awaiting_zone_guest"), timeout=60)
+                                         and intact(frame) and not frame.get("awaiting_zone_guest")
+                                         and frame["game"].get("native_guest_save", {}).get("state") == "bound", timeout=60)
+    pawn = arrival["game"]["native_guest_save"]["pawn"]
     epoch = arrival["zone_epoch"]
     await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_destructible_view") ==
                                {"map": dock, "epoch": epoch}, timeout=30)
 
-    async def inspect(seat):
-        reply = await seat.bridge.command("fixture-warehouse-board", "inspect")
+    async def operate(seat, action, *args):
+        reply = await seat.bridge.command("fixture-warehouse-board", action, *args)
         return reply["ack"]["message"]
 
-    before_host, before_guest = await inspect(host), await inspect(guest)
+    before_host, before_guest = await operate(host, "inspect"), await operate(guest, "inspect")
     assert before_host == before_guest and before_host.startswith("false,true,"), (before_host, before_guest)
     # A guest-only damage callback must not remove a stock obstacle while the host still sees it.
-    await guest.bridge.command("fixture-warehouse-board", "damage")
-    assert await inspect(guest) == before_guest
+    await operate(guest, "damage")
+    assert await operate(guest, "inspect") == before_guest
     checkpoint = campaign_save_hashes(host.campaign)
-    await host.bridge.command("fixture-warehouse-board", "impact")
+    guid = await operate(host, "seed", pawn)
+    assert re.fullmatch(r"[0-9A-F]{32}", guid), guid
+    async with asyncio.timeout(8):
+        while await operate(guest, "select", guid) != "selected":
+            await asyncio.sleep(.08)
+    guest_frame = await wait_resident_status(guest_run, lambda frame:
+        frame.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid, timeout=12)
+    assert guest_frame["game"]["native_guest_primary_scope"]["kind"] == "melee"
+    async with asyncio.timeout(8):
+        while (placement := await operate(host, "approach", pawn)) == "waiting for stock pipe":
+            await asyncio.sleep(.08)
+    position = list(map(float, placement.split(",")))
+    await wait_resident_status(guest_run, lambda frame: math.dist(
+        frame.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), position) < 35)
+
+    receipts, misses = [], []
+    previous = before_host
+    for _ in range(8):
+        assert await operate(guest, "aim") == "ready"
+        assert await operate(host, "aim", pawn) == "ready"
+        tap = await submit(guest_run, "native-guest-primary-input-fixture")
+        assert tap["ok"], tap
+        sequence = tap["native_guest_primary_fixture"]["sequence"]
+        async with asyncio.timeout(8):
+            while True:
+                events = await resident_events(guest_run, guest_frame)
+                event = next((row for row in events if row.get("sequence") == sequence
+                              and row["event"] in {"native_guest_melee_input", "native_guest_melee_input_rejected"}), None)
+                if event:
+                    break
+                await asyncio.sleep(.08)
+        assert event["event"] == "native_guest_melee_input", event
+        proof = event[native_guest_melee.SWING_KEY]
+        after = await operate(host, "inspect")
+        if native_guest_melee.verified_miss(proof) and after == previous:
+            misses.append(await operate(host, "contact"))
+            assert len(misses) < 3, (proof, misses, after)
+            continue
+        assert native_guest_melee.verified_damage(proof), (proof, previous, after)
+        assert proof["pawn"] == pawn and proof["target"].endswith("." + name), proof
+        assert math.isclose(proof["enemy_health_before"], float(previous.rsplit(",", 1)[1]), abs_tol=1e-6), (proof, previous)
+        receipts.append(proof)
+        if after == "removed":
+            break
+        assert after.startswith("false,true,") and proof["enemy_health_after"] < proof["enemy_health_before"], (after, proof)
+        previous = after
+    assert after == "removed" and receipts, (previous, receipts, misses)
     await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == dock
                                and native_destructibles.KEY in frame["game"] and not intact(frame), timeout=6)
     deadline = asyncio.get_running_loop().time() + 8
     while True:
-        after_guest = await inspect(guest)
+        after_guest = await operate(guest, "inspect")
         if after_guest.startswith("true,false,"):
             break
         assert asyncio.get_running_loop().time() < deadline, after_guest
         await asyncio.sleep(.08)
-    assert await inspect(host) == "removed"
     assert campaign_save_hashes(host.campaign) == checkpoint, "A broken obstacle caused an early checkpoint"
     return {"stock_warehouse_board": {"actor": name, "before": before_host, "guest_after": after_guest,
-                                       "host_removed": True, "guest_damage_guarded": True, "checkpoint_unchanged": True}}
+                                       "host_removed": True, "guest_damage_guarded": True,
+                                       "guest_stock_swings": receipts, "fixture_misses": misses,
+                                       "checkpoint_unchanged": True}}
 
 
 async def verify_stock_bottle(host: Seat, guest: Seat, pawn: str) -> dict:
@@ -3753,6 +3869,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_npc_override: bool = False, stock_board_offers: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
                  stock_weather_travel: bool = False, stock_melee_family: bool = False, stock_warehouse_switch: bool = False, stock_warehouse_board: bool = False, stock_bottle: bool = False, stock_roaming_barter: bool = False, stock_critters: bool = False,
+                 stock_eye_stacks: bool = False, stock_lingering_teleport: bool = False,
                  stock_npc_rivalry: bool = False, stock_throwables: str | None = None,
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
@@ -3829,6 +3946,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_weather_travel, "crossroads", "stock_weather_travel",
          lambda host, guest, pawn: verify_weather_travel(host, guest, pawn, portable_probe_command)),
         (stock_critters, "crossroads", "stock_critters", verify_stock_critters),
+        (stock_lingering_teleport, "crossroads", "stock_lingering_teleport", verify_stock_lingering_teleport),
         (stock_shovel, "crossroads", "stock_shovel", lambda host, guest, pawn: verify_stock_shovel(
             host, guest, pawn, loot=stock_shovel_loot, quest=stock_shovel_quest)),
         (stock_bandage_revisit, "tutorial_dock", "stock_bandage_revisit", verify_tutorial_bandage_revisit),
@@ -3837,6 +3955,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_bottle, "tutorial_dock", "stock_bottle", verify_stock_bottle),
         (tutorial_dock_combat, "tutorial_dock", "tutorial_dock_retaliation" if tutorial_dock_retaliation else "tutorial_dock_combat",
          lambda host, guest, pawn: verify_tutorial_dock_combat(host, guest, pawn, retaliation=tutorial_dock_retaliation)),
+        (stock_eye_stacks, "shopkeep", "stock_eye_stacks", verify_stock_eye_stacks),
     ):
         if enabled:
             resident_campaigns.setdefault(campaign, []).append((name, check))
@@ -3896,6 +4015,12 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["roaming_barter_overlays"] = [probes.enter_context(roaming_barter_overlay(game)) for game in games]
         if stock_critters:
             proof["stock_critter_overlays"] = [probes.enter_context(stock_critter_overlay(game)) for game in games]
+        if stock_lingering_teleport:
+            proof["lingering_teleport_overlays"] = [
+                probes.enter_context(lingering_overlay(game, portable_script_overlay)) for game in games
+            ]
+        if stock_eye_stacks:
+            probes.enter_context(eye_board_overlay(first_game))
         if stock_board_offers:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableBoardOfferProbe",
@@ -3906,7 +4031,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
                                                      fixture="portable_npc_override_probe.lua"))
-        if tutorial_dock_combat or stock_bandage_revisit or stock_shovel or stock_simmi_jammers or stock_weather_travel or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_critters:
+        if (tutorial_dock_combat or stock_bandage_revisit or stock_shovel or stock_simmi_jammers or stock_weather_travel
+                or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_critters
+                or stock_eye_stacks or stock_lingering_teleport):
             overlay_key = ("weather_zone_overlays" if stock_weather_travel else
                            "jammer_zone_overlays" if stock_simmi_jammers else "dock_zone_overlays")
             proof[overlay_key] = [probes.enter_context(tutorial_dock_zone_overlay(game)) for game in games]
@@ -4056,6 +4183,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 campaign_started = time.perf_counter()
                 gameplay = {}
 
+                def finish_check(name, started, error=None):
+                    row = {"passed": error is None, "seconds": round(time.perf_counter() - started, 3)}
+                    if error is not None:
+                        row.update(error=str(error) or type(error).__name__, traceback=traceback.format_exc())
+                        print(f"{name} failed: {row['error']}", flush=True)
+                    results[name] = row
+
                 async def run_checks(host, guest, pawn):
                     gameplay["join_seconds"] = round(time.perf_counter() - campaign_started, 3)
                     proof.setdefault("join_seconds", gameplay["join_seconds"])
@@ -4068,16 +4202,25 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                 and f.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
                             gameplay.update(await check(host, guest, frame["game"]["native_guest_save"]["pawn"]))
                         except Exception as error:
-                            results[name] = {"passed": False, "seconds": round(time.perf_counter() - started, 3),
-                                             "error": str(error) or type(error).__name__}
-                            raise
-                        results[name] = {"passed": True, "seconds": round(time.perf_counter() - started, 3)}
+                            finish_check(name, started, error)
+                            # Later checks in this campaign can depend on the failed check's map or inventory.
+                            break
+                        finish_check(name, started)
                     return gameplay
 
                 async def check_shovel_reconnect(guest, _started):
-                    await verify_stock_shovel_reconnect(guest, gameplay["stock_missing_contact_guest_dig"])
+                    evidence = gameplay.get("stock_missing_contact_guest_dig")
+                    if evidence is None:
+                        return
+                    started = time.perf_counter()
+                    try:
+                        await verify_stock_shovel_reconnect(host, guest, evidence)
+                    except Exception as error:
+                        finish_check("stock_missing_contact_reconnect_and_turn_in", started, error)
+                    else:
+                        finish_check("stock_missing_contact_reconnect_and_turn_in", started)
 
-                exit_actions = ("prompt", "confirm") if campaign in {"tutorial_dock", "crossroads"} else ("save_and_quit",)
+                exit_actions = ("prompt", "confirm") if campaign in {"tutorial_dock", "crossroads", "shopkeep"} else ("save_and_quit",)
                 requires_package_reconnect = campaign == "crossroads" and stock_shovel_quest
                 return await start_pair(host, second, "Gameplay scout", on_join=run_checks,
                                         wait_status=wait_resident_status, host_exit_actions=exit_actions,
@@ -4166,6 +4309,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             del observed["Config.sav"]
             assert observed == hashes and await stock_profile(seat.bridge) == preferences
             assert seat.bridge.process.poll() is None
+        failures = [name for name, result in proof.get("resident_check_results", {}).items() if not result["passed"]]
+        if failures:
+            raise AssertionError(f"Resident checks failed: {', '.join(failures)}")
         proof.update(verified=True, solo_slots_and_settings_preserved=True,
                      both_titles_reused=len(proof["sessions"]) > 1,
                      launched_without_coop_environment=True)
@@ -4228,6 +4374,10 @@ if __name__ == "__main__":
                         help="compare the stock Observatory board on both seats and accept a complex contract")
     parser.add_argument("--stock-simmi-jammers", action="store_true",
                         help="Complete both stock Simmi jammer bounties through the installed title")
+    parser.add_argument("--stock-eye-stacks", action="store_true",
+                        help="redeem ShopKeep's Eye contract from one of two stock guest inventory stacks")
+    parser.add_argument("--stock-lingering-teleport", action="store_true",
+                        help="verify authority and presentation of the moving Crossroads teleport anomaly")
     parser.add_argument("--stock-flashlights", action="store_true",
                         help="Observe stock handheld and offhand beams on the connected seat")
     parser.add_argument("--stock-host-corpse-carry", action="store_true",
@@ -4373,7 +4523,8 @@ if __name__ == "__main__":
                               "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_shovel_quest", "stock_take_ammo",
                               "stock_host_corpse_carry", "stock_flashlights", "stock_simmi_jammers", "stock_weather_travel",
                               "stock_melee_family", "stock_warehouse_switch", "stock_warehouse_board", "stock_bottle",
-                              "stock_roaming_barter", "stock_critters", "stock_throwables"}
+                              "stock_roaming_barter", "stock_critters", "stock_throwables", "stock_eye_stacks",
+                              "stock_lingering_teleport"}
     if args.rusty_pistol and not args.resident_weapon_cues:
         parser.error("Use --rusty-pistol with --resident-weapon-cues")
     if args.tutorial_dock_combat and not (args.rusty_pistol and args.stock_npc_override):
@@ -4388,7 +4539,8 @@ if __name__ == "__main__":
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
             args.stock_melee_family, args.stock_warehouse_switch, args.stock_warehouse_board, args.stock_bottle,
-            args.stock_roaming_barter, args.stock_critters, args.stock_throwables)) and (
+            args.stock_roaming_barter, args.stock_critters, args.stock_throwables, args.stock_eye_stacks,
+            args.stock_lingering_teleport)) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
         parser.error("Run the resident gameplay checks without other gameplay fixtures")
@@ -4437,6 +4589,7 @@ if __name__ == "__main__":
                        stock_warehouse_switch=args.stock_warehouse_switch,
                        stock_warehouse_board=args.stock_warehouse_board, stock_bottle=args.stock_bottle,
                        stock_roaming_barter=args.stock_roaming_barter, stock_critters=args.stock_critters,
+                       stock_eye_stacks=args.stock_eye_stacks, stock_lingering_teleport=args.stock_lingering_teleport,
                        stock_throwables=args.stock_throwables,
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,

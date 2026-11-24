@@ -7,6 +7,9 @@ local dead_bridge = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local npc_name = cqc[dead_bridge].names[1]
 local damage_start = "native-guest-melee-damage-canary-start"
 local swing_start = "native-guest-melee-swing-start"
+local input_start = "native-guest-melee-input-start"
+local input_edge = "native-guest-melee-input-edge"
+local input_state = "native-guest-melee-input-state"
 local fixture_aim = "native-guest-melee-aim-fixture"
 local fixture_contact = "native-guest-melee-contact-fixture"
 local actions = {
@@ -23,7 +26,7 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
 local fixtures = enabled and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
     and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
-local latest, equipment, staged_aim
+local latest, equipment, staged_aim, input_scope
 
 local function qualified_host(state, phase, testing)
     return enabled and phase == "hosting" and state.listening and state.server == false
@@ -41,6 +44,59 @@ local function exact_guest(state, phase, name, standing)
     if not called or not pawn or not pawn:IsValid() or not save or not save:IsValid() then return end
     local projected, ready = pcall(standing, pawn, name)
     if projected and ready == true and pawn:GetFullName() == name then return pawn, save end
+end
+
+local function valid_guid(guid)
+    return type(guid) == "string" and #guid == 32 and not guid:find("[^0-9A-F]") and guid:find("[^0]") ~= nil
+end
+
+local function melee_input_proof(ok, status, serial, presses, releases, contacts, hits, charged, combo)
+    if ok == false and serial == 0 and type(status) == "string" and status:match("^native_guest_melee_") then
+        error(status, 0)
+    end
+    local dirty = type(status) == "string" and status:match("^mutation_unverified_guest_melee_")
+    if (dirty and ok ~= false) or (not dirty and (ok ~= true or
+        (status ~= "pending" and status ~= "settled" and status ~= "cancelled")))
+        or not math.tointeger(serial) or serial < 1 or serial >= 2 ^ 53
+        or not math.tointeger(presses) or not math.tointeger(releases) or not math.tointeger(contacts)
+        or not math.tointeger(hits) or not math.tointeger(charged) or not math.tointeger(combo)
+        or presses < 1 or releases < 0 or presses - releases < 0 or presses - releases > 1
+        or hits < 0 or contacts < hits or contacts > presses or charged < 0 or combo < 0 or charged + combo > contacts
+        or ((status == "settled" or status == "cancelled") and releases ~= presses) then
+        error("mutation_unverified_guest_melee_input_abi", 0)
+    end
+    return {serial = serial, status = status, presses = presses, releases = releases, contacts = contacts,
+        hits = hits, charged = charged, combo = combo}
+end
+
+local function command_input(fields, state, phase, standing)
+    if not qualified_host(state, phase, false) or type(SilverfishStartNativeGuestMeleeInput) ~= "function"
+        or type(SilverfishApplyNativeGuestMeleeInputEdge) ~= "function"
+        or type(SilverfishReadNativeGuestMeleeInput) ~= "function" then
+        error("native_guest_melee_swing_unavailable", 0)
+    end
+    if fields[2] == input_start then
+        local name, guid = fields[3], fields[4]
+        if #fields ~= 4 or not valid_guid(guid) then error("native_guest_melee_exact_guid_required", 0) end
+        local pawn, save = exact_guest(state, phase, name, standing)
+        if not pawn then error("native_guest_melee_exact_owner_required", 0) end
+        local proof = melee_input_proof(SilverfishStartNativeGuestMeleeInput(pawn:GetAddress(), save:GetAddress(), guid))
+        latest = nil
+        input_scope = {map = state.map, pawn = name, guid = guid, proof = proof}
+    else
+        local serial, edge = math.tointeger(fields[3]), fields[4]
+        if #fields ~= 4 or not input_scope or input_scope.map ~= state.map or serial ~= input_scope.proof.serial
+            or (edge ~= "press" and edge ~= "release" and edge ~= "cancel") then
+            error("native_guest_melee_exact_edge_required", 0)
+        end
+        if edge == "press" and not exact_guest(state, phase, input_scope.pawn, standing) then
+            error("native_guest_melee_exact_owner_required", 0)
+        end
+        local proof = melee_input_proof(SilverfishApplyNativeGuestMeleeInputEdge(serial, edge))
+        if proof.serial ~= serial then error("mutation_unverified_guest_melee_input_owner", 0) end
+        input_scope.proof = proof
+    end
+    return "stock guest melee input observed"
 end
 
 local function finite(value)
@@ -262,6 +318,7 @@ end
 
 function melee.command(fields, state, phase, standing)
     local action = fields[2]
+    if action == input_start or action == input_edge then return command_input(fields, state, phase, standing) end
     if not actions[action] then return end
     local ordinary = action == swing_start
     if not qualified_host(state, phase, not ordinary) then error("native_guest_melee_fixture_unavailable", 0) end
@@ -273,8 +330,7 @@ function melee.command(fields, state, phase, standing)
             error("native_guest_melee_fixture_unavailable", 0)
         end
         local name, guid = fields[3], fields[4]
-        if #fields ~= (action == fixture_aim and 5 or 4) or type(guid) ~= "string" or #guid ~= 32
-            or guid:find("[^0-9A-F]") or not guid:find("[^0]") then
+        if #fields ~= (action == fixture_aim and 5 or 4) or not valid_guid(guid) then
             error("native_guest_melee_exact_guid_required", 0)
         end
         local pawn, save = exact_guest(state, phase, name, standing)
@@ -326,6 +382,7 @@ function melee.command(fields, state, phase, standing)
         end
         latest = {map = state.map, pawn = name, guid = guid, address = pawn:GetAddress(), damage = damage,
             ordinary = ordinary, pose = pose, proof = proof, fixture_target = fixture_bound and target}
+        input_scope = nil
         if latest.proof.status ~= "pending" and latest.pose then
             restore_pose(latest.pose)
             latest.pose = nil
@@ -352,6 +409,17 @@ function melee.rows(state, phase, status_row, standing)
     if equipment and equipment.map == state.map then
         rows[#rows + 1] = status_row("native-guest-melee-equip", state.map, equipment.pawn, equipment.guid,
             equipment.ok and 1 or 0, equipment.status)
+    end
+    if input_scope and input_scope.map == state.map then
+        local scope = input_scope
+        local proof = scope.proof
+        if proof.status == "pending" then
+            proof = melee_input_proof(SilverfishReadNativeGuestMeleeInput(proof.serial))
+            if proof.serial ~= scope.proof.serial then error("mutation_unverified_guest_melee_input_owner", 0) end
+            scope.proof = proof
+        end
+        rows[#rows + 1] = status_row(input_state, state.map, scope.pawn, scope.guid, proof.serial, proof.status,
+            proof.presses, proof.releases, proof.contacts, proof.hits, proof.charged, proof.combo)
     end
     if not latest or latest.map ~= state.map then return rows end
     local pawn = exact_guest(state, phase, latest.pawn, standing)

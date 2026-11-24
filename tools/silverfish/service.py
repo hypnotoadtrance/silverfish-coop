@@ -105,7 +105,8 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_prop_carry.ACTION, native_flare.ACTION,
                         native_lantern.EXTINGUISH,
                         *native_guest_weapon.GUEST_ACTIONS, native_guest_weapon.SELECT_EQUIPMENT,
-                        *native_guest_consumable.RESULT, native_guest_melee.SWING, native_host_dig_live.GUEST_ACTION,
+                        *native_guest_consumable.RESULT, native_guest_melee.SWING, native_guest_melee.INPUT,
+                        native_host_dig_live.GUEST_ACTION,
                         native_host_dig_live.COLLECT,
                         native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION)
 TRANSPORT_FIXTURES = ("stardust", "fruiting-stardust", "green", "blue", "red", "gold", "purple", "teleport-cube")
@@ -288,6 +289,7 @@ class Host:
         self.native_zones = native_zones
         self.native_guest_controls = native_guest_controls and native_guest and native_zones and native_backend == "cpp"
         self.smg_holds = native_smg_hold.Authority(self) if guest_held_fire and self.native_guest_controls else None
+        self.melee_input = native_guest_melee.AuthorityInput(self) if self.native_guest_controls else None
         self.mindcore_carry = (native_mindcore_carry.Authority(self)
                                if native_guest and native_zones and native_backend == "cpp" else None)
         self.stack_drop_projection = native_guest_drop_projection.Projection()
@@ -2202,6 +2204,9 @@ class Host:
                 guid = native_guest_melee.current_guid(target, self.zone_epoch)
                 async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                     result = await native_guest_melee.perform(self, bridge, action, character, guid, request["operation_id"])
+            elif action == native_guest_melee.INPUT and self.melee_input:
+                async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
+                    result = await self.melee_input.request(bridge, character, target, request["operation_id"])
             elif action == native_host_dig_live.GUEST_ACTION:
                 result = await native_host_dig_live.guest_dig(self, bridge, character, target, request["operation_id"])
             elif action == native_host_dig_live.COLLECT:
@@ -4258,6 +4263,8 @@ class Host:
                 self.deliver_native_deaths(bridge)
             if self.smg_holds:
                 await self.smg_holds.settle(bridge)
+            if self.melee_input:
+                self.melee_input.observe()
             if self.native_zones:
                 await self.service_native_zones(bridge, transport, now)
                 if not self.stopping:
@@ -5121,6 +5128,7 @@ class Client:
         self.last_flare_intent = 0
         self.guest_primary_input = guest_primary_input
         self.guest_held_input = native_smg_hold.GuestInput(self) if invite.get("native_guest_held_fire") else None
+        self.melee_input = native_guest_melee.GuestInput(self) if guest_primary_input else None
         self.mindcore_carry = native_mindcore_carry.GuestInput(self) if invite.get("native_zones") else None
         self.prop_carry = native_prop_carry.Guest(self)
         self.last_primary_intent = 0
@@ -5538,6 +5546,8 @@ class Client:
                         self.primary_magazine = magazine
                     except (OSError, RuntimeError) as error:
                         self.control.event("native_guest_magazine_projection_deferred", reason=str(error))
+        if self.melee_input:
+            await self.melee_input.service(self.primary_scope if eligible else None)
         inputs = self.bridge.native_primary_input_requests()
         if shovel := self.last_game.get(native_host_dig_live.GUEST_INTENT):
             inputs.append(shovel)
@@ -6178,6 +6188,13 @@ class Client:
                         fixture_arguments = (crate,)
                     self.last_game = await self.bridge.command(action, self.primary_scope[1], *fixture_arguments, timeout=5)
                     result = {"native_guest_primary_fixture": self.last_game.get("native_guest_primary_fixture", {})}
+                elif action == native_guest_melee.INPUT_FIXTURE and self.guest_primary_input:
+                    edge = request.get("target")
+                    if (not self.primary_scope or self.primary_scope[3] not in native_guest_melee.KINDS
+                            or self.last_game.get("state") != "connected" or edge not in ("press", "release", "tap")):
+                        raise ValueError("The melee input fixture requires a scoped stock weapon and a press, release or tap")
+                    self.last_game = await self.bridge.command(action, self.primary_scope[1], edge, timeout=4)
+                    result = {native_guest_melee.INPUT_FIXTURE_KEY: self.last_game[native_guest_melee.INPUT_FIXTURE_KEY]}
                 elif action == native_smg_hold.LOCAL_FIXTURE and self.guest_held_input:
                     edge, duration = request.get("target"), request.get("milliseconds")
                     if (edge not in ("press", "release") or duration is not None and

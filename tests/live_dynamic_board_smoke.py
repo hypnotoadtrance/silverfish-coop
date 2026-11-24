@@ -18,6 +18,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_board_contract as dynamic, native_computer_board, native_wire_board, runtime, travel
+from tools.silverfish.control import submit
 from tools.silverfish.native_gold import valid_guid
 
 
@@ -71,6 +72,80 @@ async def probe(bridge, operation, *, prefix="eye-board", timeout=8):
                 return response
 
 
+async def verify_eye_board(run, remote, bridge, character, *, wait_status=wait):
+    host, guest = run, remote
+
+    async def action(directory, verb, **fields):
+        reply = await submit(directory, verb, **fields)
+        assert reply["ok"], (verb, reply)
+        return reply
+
+    async def open_native_board():
+        pending = (await action(guest, native_wire_board.STOCK_F_FIXTURE))["native_wire_board_stock"]
+        assert pending["state"] == "loading" and pending["board"] == BOARD and pending["quest"] == "-", pending
+        seen = await wait_status(remote, lambda frame: (view := frame.get("game", {}).get("native_wire_board_stock", {}))
+                          and view["state"] == "visible" and view["sequence"] == pending["sequence"])
+        return seen["game"]["native_wire_board_stock"]
+
+    async def inventory(owner):
+        return {entry["guid"]: entry for entry in (await action(owner, "native-inventory-list"))["native_inventory"]["items"]}
+
+    async def progress(step):
+        authority = await wait_status(run, lambda frame: frame.get("gameplay", {}).get("native_quests", {})
+                               .get(QUEST, {}).get("step") == step)
+        return authority["gameplay"]["native_quests"][QUEST]
+
+    await action(host, native_computer_board.MOLASSES.command("approach"), target=character)
+    authority = await wait_status(run, lambda frame: frame.get("game", {}).get("pawns", {}).get("guest", {}).get("location"))
+    position = authority["game"]["pawns"]["guest"]["location"]
+    await wait_status(remote, lambda frame: (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
+               and math.dist(point, position) <= 25)
+    assert await probe(bridge, "xp") == "5"
+    before = campaign_save_hashes(run.parent)
+    current = await wait_status(run, lambda frame: type(frame.get("game", {}).get("native_wallet")) is int)
+    wallet = current["game"]["native_wallet"]
+    offer = (await action(guest, dynamic.CATALOG))[dynamic.CATALOG_KEY]
+    assert QUEST in offer["offers"] and QUEST not in offer["turnins"], offer
+    first_menu = await open_native_board()
+    await action(guest, native_wire_board.STOCK_FIXTURE, target=f"{QUEST}|start")
+    await progress(1)
+    await wait_status(remote, lambda frame: not frame.get("game", {}).get("native_wire_board_stock"))
+    without_item = (await action(guest, dynamic.CATALOG))[dynamic.CATALOG_KEY]
+    assert QUEST not in without_item["offers"] and QUEST not in without_item["turnins"], without_item
+
+    guid, spare_guid = (await probe(bridge, "eye")).split(";")
+    assert valid_guid(guid) and valid_guid(spare_guid) and guid != spare_guid
+    before_pack = await inventory(guest)
+    item, spare = before_pack[guid], before_pack[spare_guid]
+    assert (item["class_path"], item["quantity"], item["source"], item["stackable"]) == (ITEM, 2, "backpack", True), item
+    assert (spare["class_path"], spare["quantity"], spare["source"], spare["stackable"]) == (ITEM, 1, "backpack", True), spare
+    assert not {guid, spare_guid} & (await inventory(host)).keys()
+    ready = (await action(guest, dynamic.CATALOG))[dynamic.CATALOG_KEY]
+    assert QUEST in ready["turnins"] and QUEST not in ready["offers"], ready
+    second_menu = await open_native_board()
+    await action(guest, native_wire_board.STOCK_FIXTURE, target=f"{QUEST}|turnin")
+    paid = await progress(-10)
+    assert (paid["cash"], paid["xp"], paid["objective_guid"], paid["objective_owner"]) == (801, 1, guid, character), paid
+    assert (paid["objective_units_before"], paid["objective_units_consumed"], paid["objective_units_remaining"]) == (2, 1, 1), paid
+    consumed = paid["consumed_guid"]
+    assert valid_guid(consumed) and consumed != guid, paid
+    assert paid["wallet"] == wallet + 801 and set(paid["recipients"]) == {character, "host"}, paid
+    host_pack, guest_pack = await inventory(host), await inventory(guest)
+    assert not {guid, spare_guid, consumed} & host_pack.keys() and consumed not in guest_pack
+    remaining = guest_pack[guid]
+    assert remaining == {**item, "quantity": 1}, (item, remaining)
+    assert guest_pack[spare_guid] == spare
+    replay = await action(guest, "native-quest-turnin", target=QUEST)
+    assert replay["effect"] == "native_quest_already_settled" and replay["wallet"] == paid["wallet"], replay
+    after_replay = await inventory(guest)
+    assert after_replay[guid] == remaining and after_replay[spare_guid] == spare
+    assert campaign_save_hashes(run.parent) == before, "Board actions wrote campaign saves outside a checkpoint"
+    evidence = {"verified": True, "menus": [first_menu, second_menu], "ready": ready,
+                "item": item, "remainder": remaining, "untouched_eye_stack": spare,
+                "receipt": paid, "replay": replay, "deferred_writes": True}
+    return evidence
+
+
 async def verify(work, vanilla_saved):
     canaries = saved_hashes(vanilla_saved)
     if not canaries or not (work / "stage").is_dir() or work in Path(vanilla_saved).parents:
@@ -107,21 +182,6 @@ async def verify(work, vanilla_saved):
                 stdout=log, stderr=log, creationflags=subprocess.CREATE_NO_WINDOW)
         jobs.append((owner, process))
 
-    async def open_native_board():
-        pending = (await action(guest, native_wire_board.STOCK_F_FIXTURE))["native_wire_board_stock"]
-        assert pending["state"] == "loading" and pending["board"] == BOARD and pending["quest"] == "-", pending
-        seen = await wait(remote, lambda frame: (view := frame.get("game", {}).get("native_wire_board_stock", {}))
-                          and view["state"] == "visible" and view["sequence"] == pending["sequence"])
-        return seen["game"]["native_wire_board_stock"]
-
-    async def inventory(owner):
-        return {entry["guid"]: entry for entry in (await action(owner, "native-inventory-list"))["native_inventory"]["items"]}
-
-    async def progress(step):
-        authority = await wait(run, lambda frame: frame.get("gameplay", {}).get("native_quests", {})
-                               .get(QUEST, {}).get("step") == step)
-        return authority["gameplay"]["native_quests"][QUEST]
-
     with staged_probe(work / "stage"):
         try:
             await launch(host, "host", "host", *host, "--port", "0", "--start-zone", AREA,
@@ -135,53 +195,8 @@ async def verify(work, vanilla_saved):
                        and state.get("game", {}).get("native_guest_save", {}).get("state") == "bound", timeout=70)
             await wait(remote, lambda state: state.get("state") == "connected"
                        and state.get("character_id") == char and state.get("game", {}).get("map") == AREA, timeout=70)
-            await action(host, native_computer_board.MOLASSES.command("approach"), "--target", char)
-            authority = await wait(run, lambda frame: frame.get("game", {}).get("pawns", {}).get("guest", {}).get("location"))
-            position = authority["game"]["pawns"]["guest"]["location"]
-            await wait(remote, lambda frame: (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
-                       and math.dist(point, position) <= 25)
             bridge, = (run / "game-bridge").iterdir()
-            assert await probe(bridge, "xp") == "5"
-            before = campaign_save_hashes(root)
-            offer = (await action(guest, dynamic.CATALOG))[dynamic.CATALOG_KEY]
-            assert QUEST in offer["offers"] and QUEST not in offer["turnins"], offer
-            first_menu = await open_native_board()
-            await action(guest, native_wire_board.STOCK_FIXTURE, "--target", f"{QUEST}|start")
-            await progress(1)
-            await wait(remote, lambda frame: not frame.get("game", {}).get("native_wire_board_stock"))
-            without_item = (await action(guest, dynamic.CATALOG))[dynamic.CATALOG_KEY]
-            assert QUEST not in without_item["offers"] and QUEST not in without_item["turnins"], without_item
-
-            guid, spare_guid = (await probe(bridge, "eye")).split(";")
-            assert valid_guid(guid) and valid_guid(spare_guid) and guid != spare_guid
-            before_pack = await inventory(guest)
-            item, spare = before_pack[guid], before_pack[spare_guid]
-            assert (item["class_path"], item["quantity"], item["source"], item["stackable"]) == (ITEM, 2, "backpack", True), item
-            assert (spare["class_path"], spare["quantity"], spare["source"], spare["stackable"]) == (ITEM, 1, "backpack", True), spare
-            assert not {guid, spare_guid} & (await inventory(host)).keys()
-            ready = (await action(guest, dynamic.CATALOG))[dynamic.CATALOG_KEY]
-            assert QUEST in ready["turnins"] and QUEST not in ready["offers"], ready
-            second_menu = await open_native_board()
-            await action(guest, native_wire_board.STOCK_FIXTURE, "--target", f"{QUEST}|turnin")
-            paid = await progress(-10)
-            assert (paid["cash"], paid["xp"], paid["objective_guid"], paid["objective_owner"]) == (801, 1, guid, char), paid
-            assert (paid["objective_units_before"], paid["objective_units_consumed"], paid["objective_units_remaining"]) == (2, 1, 1), paid
-            consumed = paid["consumed_guid"]
-            assert valid_guid(consumed) and consumed != guid, paid
-            assert paid["wallet"] == 801 and set(paid["recipients"]) == {char, "host"}, paid
-            host_pack, guest_pack = await inventory(host), await inventory(guest)
-            assert not {guid, spare_guid, consumed} & host_pack.keys() and consumed not in guest_pack
-            remaining = guest_pack[guid]
-            assert remaining == {**item, "quantity": 1}, (item, remaining)
-            assert guest_pack[spare_guid] == spare
-            replay = await action(guest, "native-quest-turnin", "--target", QUEST)
-            assert replay["effect"] == "native_quest_already_settled" and replay["wallet"] == 801, replay
-            after_replay = await inventory(guest)
-            assert after_replay[guid] == remaining and after_replay[spare_guid] == spare
-            assert campaign_save_hashes(root) == before, "Board actions wrote campaign saves outside a checkpoint"
-            evidence = {"verified": True, "menus": [first_menu, second_menu], "ready": ready,
-                        "item": item, "remainder": remaining, "untouched_eye_stack": spare,
-                        "receipt": paid, "replay": replay, "deferred_writes": True}
+            evidence = await verify_eye_board(run, remote, bridge, char)
             (run / "dynamic-board-proof.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
         finally:
             for owner, process in reversed(jobs):

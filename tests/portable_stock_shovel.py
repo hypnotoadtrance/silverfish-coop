@@ -6,16 +6,19 @@ import math
 from live_multi_smoke import campaign_save_hashes
 from portable_guest_world_start import resident_events, wait_resident_status
 from tools.silverfish import (
+    native_computer_board as board,
     native_guest_weapon,
     native_host_dig,
     native_host_dig_live as dig,
     native_loose_pickup as loose,
     native_stock_enemy_drops,
+    native_wire_board,
     native_world_loot,
     runtime,
 )
+from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.control import submit
-from tools.silverfish.travel import CROSSROADS
+from tools.silverfish.travel import BLACK_MARKET, CROSSROADS, LAKE
 
 SPADE = CROSSROADS + ".CrossRoads_P:PersistentLevel.MeleeWep_Spade_C_3"
 NUGGET = "/Game/Classes/Items/Item_GoldNugget.Item_GoldNugget_C"
@@ -40,8 +43,8 @@ def sealed_packages(items):
     return [row for row in items if row["class_path"] == native_host_dig.PACKAGE_CLASS]
 
 
-async def verify_stock_shovel_reconnect(guest, evidence):
-    guest_run = guest.client / "run"
+async def verify_stock_shovel_reconnect(host, guest, evidence):
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
     await wait_resident_status(guest_run, lambda frame: frame.get("state") == "connected"
                                and frame.get("gameplay_fresh") is True
                                and frame.get("character_id") == evidence["collector"]
@@ -49,6 +52,77 @@ async def verify_stock_shovel_reconnect(guest, evidence):
     packages = sealed_packages(await stock_inventory(guest_run, guest=True))
     assert packages == [evidence["guest_inventory_item"]], packages
     evidence["same_guest_inventory_item_after_reconnect"] = True
+
+    character = evidence["collector"]
+
+    async def action(run, command, **fields):
+        reply = await submit(run, command, **fields)
+        assert reply["ok"], reply
+        return reply
+
+    for source, destination in ((CROSSROADS, LAKE), (LAKE, BLACK_MARKET)):
+        route, = [row for row in AUTHORED_ROUTES if (row.source, row.destination) == (source, destination)]
+        if route.kind == "door":
+            for owner in ("host", character):
+                await action(host_run, "native-door-position", target=owner,
+                             exit_position="near", entrance=route.entrance)
+            await action(host_run, "native-door-probe", target="host", entrance=route.entrance)
+        else:
+            options = {"entrance": route.entrance, "exit_actor": route.actor}
+            for owner in ("host", character):
+                await action(host_run, "native-exit-position", target=owner, exit_position="near", **options)
+            await action(host_run, "native-exit-position", target="host", exit_position="inside", **options)
+        await wait_resident_status(host_run, lambda frame:
+            frame.get("game", {}).get("map") == destination and not frame.get("awaiting_zone_guest")
+            and frame["game"].get("native_guest_save", {}).get("state") == "bound", timeout=55)
+        await wait_resident_status(guest_run, lambda frame: frame.get("state") == "connected"
+            and frame.get("character_id") == character and frame.get("game", {}).get("map") == destination,
+            timeout=35)
+
+    contract = board.MISSING_CONTACT
+    board_actor = board.BOARDS[BLACK_MARKET]
+
+    async def open_board():
+        await action(guest_run, native_wire_board.STOCK_F_FIXTURE, target=board_actor)
+        await wait_resident_status(guest_run, lambda frame:
+            (entry := frame.get("game", {}).get("native_wire_board_stock", {})).get("map") == BLACK_MARKET
+            and entry.get("board") == board_actor and entry.get("state") == "visible")
+
+    async def press(verb, state):
+        result = (await action(guest_run, native_wire_board.STOCK_FIXTURE,
+                               target=f"{contract.quest_id}|{verb}"))["native_wire_board_stock"]
+        assert (result["board"], result["quest"], result["state"]) == (board_actor, contract.quest_id, state), result
+
+    def quest(frame):
+        return frame.get("gameplay", {}).get("native_quests", {}).get(contract.quest_id, {})
+
+    async def step(value):
+        frame = await wait_resident_status(host_run, lambda frame: quest(frame).get("step") == value)
+        return quest(frame)
+
+    saves = campaign_save_hashes(host.campaign)
+    before = await wait_resident_status(host_run, lambda frame: type(frame.get("game", {}).get("native_wallet")) is int)
+    expected_wallet = before["game"]["native_wallet"] + contract.cash
+    await action(host_run, contract.command("approach"), target=character)
+    await open_board()
+    await press("start", "starting")
+    accepted = await step(1)
+    await wait_resident_status(guest_run, lambda frame: not frame.get("game", {}).get("native_wire_board_stock"))
+    await open_board()
+    await press("turnin", "redeeming")
+    completed = await step(-10)
+    assert (accepted["actor"], completed["actor"], completed["objective_owner"],
+            completed[contract.consumed_field], completed["cash"], completed["xp"]) == (
+                character, character, character, packages[0]["guid"], 450, 1), completed
+    assert set(completed["recipients"]) == {"host", character}, completed
+    assert completed["wallet"] == expected_wallet, completed
+    await wait_resident_status(guest_run, lambda frame: quest(frame) == completed
+                               and frame.get("game", {}).get("native_wallet") == expected_wallet)
+    assert not sealed_packages(await stock_inventory(guest_run, guest=True))
+    replay = await action(guest_run, "native-quest-turnin", target=contract.quest_id)
+    assert replay["effect"] == "native_quest_already_settled" and replay["wallet"] == expected_wallet, replay
+    assert campaign_save_hashes(host.campaign) == saves, "The board wrote a checkpoint during quest settlement"
+    evidence["stock_board_turn_in"] = completed
 
 
 async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False):

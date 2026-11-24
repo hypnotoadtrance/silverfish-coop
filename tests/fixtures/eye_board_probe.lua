@@ -1,6 +1,7 @@
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 local shopkeep = "/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P"
-if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not bridge or not bridge:find("eye%-board%-%x+")
+if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not bridge
+    or not (bridge:find("eye%-board%-%x+") or bridge:find("portable%-title%-%x+"))
     or (os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") ~= "1"
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") ~= "1") then return {sync = function() end} end
 

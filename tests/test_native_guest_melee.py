@@ -2,9 +2,10 @@ import time
 import unittest
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import native_authored_pickup as pickup, native_guest_melee as melee, party
+from tools.silverfish.runtime import Bridge
 from tools.silverfish.service import Client
 from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, OBSERVATORY, REFINERY
 
@@ -235,9 +236,82 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
                                                                       "kind": scope[-1]}},
                                  last_game={"map": DEAD_BRIDGE, "pawns": {"local": {"name": scope[1]}}},
                                  next_primary_renewal=time.monotonic() + 30, primary_scope=scope, last_primary_intent=0,
+                                 melee_input=None,
                                  bridge=Mock(input_namespace=uuid.uuid4(), native_primary_input_requests=Mock(return_value=pending)),
                                  control=Mock(), gameplay_action=AsyncMock(return_value={}))
         await Client.service_primary_input(client, True)
         operation_id = uuid.uuid5(client.bridge.input_namespace, "session:epoch:local pawn:primary:4").hex
         client.gameplay_action.assert_awaited_once_with(melee.SWING, operation_id, GUID)
         client.control.event.assert_called_once_with("native_guest_melee_input", operation_id=operation_id, sequence=4)
+
+    def test_stock_edges_are_consumed_once_from_the_resident_memory_queue(self):
+        pawn = f"Player_FP_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Player_FP_C_42"
+        valid_rows = [
+            ("12", "press", "12"),
+            ("13", "release", "12"),
+            ("18", "press", "18"),
+            ("19", "cancel", "18"),
+        ]
+        rows = valid_rows + [("20", "release", "20"), ("21", "press", "20"), ("9", "release", "14")]
+        records = ["\t".join((melee.INPUT_RECORD, sequence, CROSSROADS, pawn, GUID, "old-pipe", edge, stroke)).encode()
+                   for sequence, edge, stroke in rows]
+        bridge = Bridge(None, Mock())
+        bridge.local_bridge = Mock(input_ready=Mock(side_effect=[True, False]), read_input=Mock(return_value=records))
+        self.assertEqual(bridge.native_melee_input_requests(),
+                         [(int(sequence), CROSSROADS, pawn, GUID, "old-pipe", edge, int(stroke))
+                          for sequence, edge, stroke in valid_rows])
+        self.assertEqual(bridge.native_melee_input_requests(), [])
+
+    async def test_exact_stroke_remains_bound_across_stock_combo_edges_without_checkpoint(self):
+        host = self.host()
+        area, pawn = CROSSROADS, "exact pawn"
+        host.zone_epoch, host.control = "epoch", Mock()
+        equipped = {pawn: {"kind": "old-pipe", "guid": GUID}}
+        host.last_game["native_guest_equipped_weapons"] = equipped
+        handler = melee.AuthorityInput(host)
+
+        def frame(presses, releases, contacts=0, hits=0, charged=0, combo=0, status="pending"):
+            return dict(map=area, pawn=pawn, guid=GUID, serial=3, status=status, presses=presses, releases=releases,
+                        contacts=contacts, hits=hits, charged=charged, combo=combo)
+
+        resolved = [frame(1, 0), frame(1, 1), frame(2, 1, 1, 1), frame(2, 2, 1, 1)]
+        game = dict(host.last_game)
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[dict(game, **{melee.INPUT_KEY: item}) for item in resolved]))
+
+        async def edge(token, action, *, character="guest", epoch="epoch"):
+            return await handler.request(bridge, character, f"{epoch}@{GUID}@{token}@{action}", OPERATION)
+
+        old, new, stranger = "b" * 32, "c" * 32, "d" * 32
+        with patch.object(melee.native_inventory, "retain_guest_save", new=AsyncMock(return_value=True)) as retain:
+            first = await edge(old, "press")
+            self.assertEqual(await edge(old, "press"), first)
+            with self.assertRaisesRegex(party.RuleError, "exact_edge_required"):
+                await edge(stranger, "release")
+            with self.assertRaisesRegex(party.RuleError, "exact_edge_required"):
+                await edge(old, "release", epoch="superseded")
+            with self.assertRaisesRegex(party.RuleError, "combat_busy"):
+                await edge(old, "release", character="stranger")
+            await edge(old, "release")
+            await edge(new, "press")
+            await edge(new, "release")
+        self.assertEqual([call.args for call in bridge.command.await_args_list], [
+            (melee.INPUT + "-start", pawn, GUID), (melee.INPUT + "-edge", "3", "release"),
+            (melee.INPUT + "-edge", "3", "press"), (melee.INPUT + "-edge", "3", "release"),
+        ])
+        retain.assert_awaited_once_with(host, bridge, "guest", pawn)
+        settled = frame(2, 2, 2, 2, combo=1, status="settled")
+        host.last_game[melee.INPUT_KEY] = settled
+        handler.observe()
+        self.assertIsNone(handler.scope)
+        host.control.event.assert_called_once_with("native_guest_melee_input_settled", character_id="guest", **settled)
+        host.checkpoint_native.assert_not_awaited()
+
+    def test_stock_edge_state_rejects_impossible_combo_or_charge_evidence(self):
+        pawn = f"Player_FP_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Player_FP_C_42"
+        fields = [melee.INPUT_STATE, CROSSROADS, pawn, GUID, "3", "settled", "2", "2", "2", "1", "1", "1"]
+        self.assertEqual(melee.parse_input_state(fields)["combo"], 1)
+        for index, invalid in ((7, "1"), (8, "3"), (9, "3"), (10, "2"), (11, "-1")):
+            with self.subTest(index=index):
+                bad = list(fields)
+                bad[index] = invalid
+                self.assertIsNone(melee.parse_input_state(bad))

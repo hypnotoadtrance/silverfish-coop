@@ -1,8 +1,10 @@
 """Scope an authenticated guest's stock melee attacks and diagnostic fixtures."""
 
+from dataclasses import dataclass
 import math
 import re
 import time
+import uuid
 
 from . import native_authored_pickup, native_inventory, party
 from .enemy_loot_profiles import BY_ACTOR, BY_MAP
@@ -14,6 +16,12 @@ EQUIP = "native-guest-melee-canary-equip"
 CANARY = "native-guest-melee-canary"
 DAMAGE = "native-guest-melee-damage-canary"
 SWING = "native-guest-melee-swing"
+INPUT = "native-guest-melee-input"
+INPUT_RECORD = "native-guest-melee-edge"
+INPUT_STATE = "native-guest-melee-input-state"
+INPUT_KEY = "native_guest_melee_input_state"
+INPUT_FIXTURE = "native-guest-melee-input-fixture"
+INPUT_FIXTURE_KEY = "native_guest_melee_input_fixture"
 AIM_FIXTURE = "native-guest-melee-aim-fixture"
 CONTACT_FIXTURE = "native-guest-melee-contact-fixture"
 KIND = "old-pipe"
@@ -28,6 +36,9 @@ CONTACT_STAGES = frozenset({"awaiting_contact", "camera_identity", "camera_vecto
                             "line_call_abi", "sphere_call_abi", "trace_parameters_abi", "line_contact", "line_too_near",
                             "sphere_empty", "sphere_bounds", "sphere_contact", "sphere_other_actor",
                             "target_health", "target_identity", "selected_contact"})
+EDGES = frozenset({"press", "release", "cancel"})
+TERMINAL = frozenset({"settled", "cancelled"})
+DIRTY = "mutation_unverified_guest_melee_"
 
 
 def registered_target(area: str, target: str) -> bool:
@@ -45,6 +56,47 @@ def ordinary_target(area, target) -> bool:
     level = area.rsplit("/", 1)[1]
     prefix = re.escape(f"{area}.{level}:PersistentLevel.")
     return re.fullmatch(rf"\w+ {prefix}\w+", target, re.ASCII) is not None
+
+
+def pawn_in_map(area, pawn) -> bool:
+    return (ordinary_map(area) and isinstance(pawn, str) and len(pawn) <= 512
+            and pawn.startswith(f"Player_FP_C {area}.{area.rsplit('/', 1)[1]}:PersistentLevel.Player_FP_C_")
+            and ordinary_target(area, pawn))
+
+
+def input_record(raw: bytes):
+    try:
+        marker, sequence, area, pawn, guid, kind, edge, stroke = raw.decode("utf-8").split("\t")
+    except (UnicodeError, ValueError):
+        return None
+    if (marker != INPUT_RECORD or not pawn_in_map(area, pawn) or not valid_guid(guid) or kind not in KINDS
+            or edge not in EDGES or any(not (number.isascii() and number.isdecimal() and len(number) <= 16)
+                                       for number in (sequence, stroke))):
+        return None
+    sequence, stroke = int(sequence), int(stroke)
+    if not 0 < stroke <= sequence < 2**53 or (edge == "press") != (sequence == stroke):
+        return None
+    return sequence, area, pawn, guid, kind, edge, stroke
+
+
+def parse_input_state(fields):
+    if len(fields) != 12:
+        return None
+    _, area, pawn, guid, serial, status, presses, releases, contacts, hits, charged, combo = fields
+    if (not pawn_in_map(area, pawn) or not valid_guid(guid)
+            or (status not in {"pending", *TERMINAL} and not status.startswith(DIRTY))):
+        return None
+    try:
+        serial, presses, releases, contacts, hits, charged, combo = map(
+            int, (serial, presses, releases, contacts, hits, charged, combo))
+    except ValueError:
+        return None
+    if (not 0 < serial < 2**53 or not 0 < presses < 2**31 or not 0 <= hits <= contacts <= presses
+            or not 0 <= charged + combo <= contacts or min(charged, combo, releases) < 0
+            or presses - releases not in (0, 1) or status in TERMINAL and presses != releases):
+        return None
+    return dict(map=area, pawn=pawn, guid=guid, serial=serial, status=status, presses=presses, releases=releases,
+                contacts=contacts, hits=hits, charged=charged, combo=combo)
 
 
 def verified_damage(proof: dict, *, fixture=False) -> bool:
@@ -144,6 +196,142 @@ def current_guid(target: str | None, epoch: str) -> str:
     return guid
 
 
+@dataclass
+class InputScope:
+    character: str
+    epoch: str
+    area: str
+    pawn: str
+    guid: str
+    frame: dict
+    held: str | None = None
+
+    def observes(self, frame: dict) -> bool:
+        return (frame.get("map"), frame.get("pawn"), frame.get("guid"), frame.get("serial")) == (
+            self.area, self.pawn, self.guid, self.frame["serial"])
+
+
+class AuthorityInput:
+    """Match each physical input edge to the same authenticated stock weapon."""
+
+    def __init__(self, host):
+        self.host = host
+        self.scope: InputScope | None = None
+        self.receipts: dict[tuple[str, str, str, str, str], dict] = {}
+
+    def _fail(self, reason):
+        self.host.native_checkpoint_unsafe = self.host.stopping = True
+        raise RuntimeError(reason)
+
+    def _proof(self, snapshot, scope=None):
+        frame = snapshot.get(INPUT_KEY, {})
+        if (scope is None or scope.observes(frame)) and frame.get("status", "").startswith(DIRTY):
+            self._fail(frame["status"])
+        if scope is not None and scope.observes(frame):
+            if any(frame[key] < scope.frame[key] for key in ("presses", "releases", "contacts", "hits", "charged", "combo")):
+                self._fail("The stock melee edge counters regressed")
+            scope.frame = frame
+        return frame
+
+    def observe(self):
+        host = self.host
+        if not self.scope:
+            return
+        frame = self._proof(host.last_game, self.scope)
+        if self.scope.observes(frame) and frame["status"] in TERMINAL:
+            host.control.event("native_guest_melee_input_settled", character_id=self.scope.character, **frame)
+            self.scope = None
+        elif self.scope.epoch != host.zone_epoch or (host.last_game.get("map") or self.scope.area) != self.scope.area:
+            self.scope = None
+
+    async def request(self, bridge, character, target, operation):
+        parts = target.split("@") if isinstance(target, str) else []
+        if len(parts) != 4:
+            raise party.RuleError("native_guest_melee_exact_edge_required")
+        epoch, guid, stroke, edge = parts
+        host = self.host
+        if (not epoch or epoch != host.zone_epoch or not valid_guid(guid) or edge not in EDGES
+                or not party.REQUEST_ID.fullmatch(stroke)
+                or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation)):
+            raise party.RuleError("native_guest_melee_exact_edge_required")
+        receipt = character, epoch, guid, stroke, edge
+        if receipt in self.receipts:
+            return {INPUT_KEY: self.receipts[receipt]}
+
+        self.observe()
+        scope = self.scope
+        owner = host.native_recipients().get(character) or {}
+        area, pawn = host.last_game.get("map"), owner.get("pawn")
+        if scope and (character, epoch, area, pawn, guid) != (
+                scope.character, scope.epoch, scope.area, scope.pawn, scope.guid):
+            raise party.RuleError("native_guest_melee_combat_busy")
+        if not host.native_guest_controls or host.stopping or host.native_checkpoint_unsafe or not pawn:
+            raise party.RuleError("native_guest_melee_swing_unavailable")
+        if edge == "press":
+            equipped = host.last_game.get("native_guest_equipped_weapons", {}).get(pawn)
+            if (host.transitioning or host.party.get("wipe") is not None or not owner.get("connected")
+                    or host.party["players"].get(character, {}).get("downed")
+                    or character in host.party["pending_spawns"] or host.last_game.get("state") != "hosting"
+                    or time.monotonic() - host.last_seen > 3 or not is_equipped(equipped, area, guid)
+                    or scope and scope.held or host.smg_holds and host.smg_holds.strokes
+                    or any(receipt[:4] + (terminal,) in self.receipts for terminal in ("release", "cancel"))):
+                raise party.RuleError("native_guest_melee_combat_busy")
+            if scope is None and not await native_inventory.retain_guest_save(host, bridge, character, pawn):
+                raise party.RuleError("native_guest_melee_save_retention_unavailable")
+        elif not scope or scope.held != stroke:
+            raise party.RuleError("native_guest_melee_exact_edge_required")
+        prior_presses, prior_releases = (scope.frame["presses"], scope.frame["releases"]) if scope else (0, 0)
+        command = (INPUT + "-edge", str(scope.frame["serial"]), edge) if scope else (INPUT + "-start", pawn, guid)
+        try:
+            snapshot = await bridge.command(*command, timeout=3)
+        except RuntimeError as error:
+            if str(error).startswith("native_guest_melee_"):
+                raise party.RuleError(str(error)) from error
+            self._fail(str(error))
+        except (OSError, ValueError, TimeoutError) as error:
+            self._fail(str(error))
+        frame = self._proof(snapshot, scope)
+        if (snapshot.get("state"), snapshot.get("map"), frame.get("map"), frame.get("pawn"), frame.get("guid")) != (
+                "hosting", area, area, pawn, guid) or (scope is not None and not scope.observes(frame)):
+            self._fail("The stock melee edge did not report its exact owner")
+        if (frame.get("presses"), frame.get("releases")) != (prior_presses + (edge == "press"),
+                                                         prior_releases + (edge != "press")):
+            self._fail("The stock melee input did not execute the exact edge")
+        if scope is None:
+            scope = self.scope = InputScope(character, epoch, area, pawn, guid, frame)
+        scope.held = stroke if edge == "press" else None
+        host.last_game, host.last_seen = snapshot, time.monotonic()
+        self.receipts[receipt] = frame
+        if len(self.receipts) > 256:
+            self.receipts.pop(next(iter(self.receipts)))
+        return {INPUT_KEY: frame}
+
+
+class GuestInput:
+    def __init__(self, client):
+        self.client = client
+        self.sequence = 0
+
+    async def service(self, scope) -> None:
+        client = self.client
+        session, epoch = client.host_session, client.zone_epoch
+        for sequence, area, pawn, guid, kind, edge, number in client.bridge.native_melee_input_requests():
+            if sequence <= self.sequence:
+                continue
+            self.sequence = sequence
+            if not session or not epoch or (area, pawn, guid, kind) != scope or (
+                    client.host_session, client.zone_epoch) != (session, epoch):
+                continue
+            token = uuid.uuid5(client.bridge.input_namespace, f"{session}:{epoch}:melee:{number}").hex
+            operation = uuid.uuid5(client.bridge.input_namespace, f"{token}:{edge}:{sequence}").hex
+            try:
+                result = await client.gameplay_action(INPUT, operation, f"{epoch}@{guid}@{token}@{edge}")
+                client.control.event("native_guest_melee_edge", operation_id=operation, sequence=sequence, edge=edge, **result)
+            except (OSError, RuntimeError, ValueError) as error:
+                client.control.event("native_guest_melee_edge_rejected", operation_id=operation, sequence=sequence,
+                                     edge=edge, reason=str(error))
+
+
 async def perform(host, bridge, action: str, character: str, guid: str, operation_id: str, *, fixture_lane: int | None = None) -> dict:
     area = host.last_game.get("map")
     ordinary = action == SWING
@@ -176,7 +364,8 @@ async def perform(host, bridge, action: str, character: str, guid: str, operatio
         equipped = host.last_game.get("native_guest_equipped_weapons", {}).get(pawn, {})
         if not is_equipped(equipped, area, guid):
             raise party.RuleError("native_guest_melee_exact_equipment_required")
-        if ordinary and host.smg_holds is not None and host.smg_holds.strokes:
+        if ordinary and ((host.smg_holds is not None and host.smg_holds.strokes)
+                         or (input_scope := getattr(host, "melee_input", None)) and input_scope.scope):
             raise party.RuleError("native_guest_melee_combat_busy")
     else:
         claimed = host.party.get(native_authored_pickup.STATE_KEY, {}).get(native_authored_pickup.OLD_PIPE, {})
