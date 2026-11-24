@@ -299,8 +299,24 @@ namespace
     bool server_connection(U::UObject* connection, U::UObject* driver)
     {
         if (!live(driver) || !live(connection)) return false;
-        auto* type = find<U::UClass>(STR("/Script/Engine.NetConnection"));
-        return type && connection->IsA(type) && object(connection, STR("Driver")) == driver;
+        static const U::FName connection_name{STR("NetConnection")};
+        for (const U::UStruct* type = connection->GetClassPrivate(); type; type = type->GetSuperStruct())
+            if (type->GetFName() == connection_name && type->GetPathName() == STR("/Script/Engine.NetConnection"))
+                return object(connection, STR("Driver")) == driver;
+        return false;
+    }
+
+    U::UWorld* actor_world(U::UObject* receiver)
+    {
+        auto* actor = live(receiver) ? U::Cast<U::AActor>(receiver) : nullptr;
+        auto* world = actor ? actor->GetWorld() : nullptr;
+        return live(world) ? world : nullptr;
+    }
+
+    U::UObject* world_driver(U::UWorld* world)
+    {
+        auto* driver = object(world, STR("NetDriver"));
+        return live(driver) ? driver : nullptr;
     }
 
     const DirectorProfile* director_for(std::wstring_view path)
@@ -316,7 +332,7 @@ namespace
     Network network(U::UWorld* world, bool during_load = false, bool any_campaign_map = false)
     {
         if (!live(world)) return {};
-        auto* driver = object(world, STR("NetDriver"));
+        auto* driver = world_driver(world);
         if (!driver && (!during_load || !pending_client_load.context)) return {};
         const auto path = world->GetPathName();
         const auto* profile = director_for(path);
@@ -753,10 +769,10 @@ namespace
         return false;
     }
 
-    bool local_client_npc(U::UObject* actor)
+    bool local_client_npc(U::UObject* actor, U::UWorld* world)
     {
-        return dynamic_births_active && dynamic_stock_npc(actor) &&
-            network(static_cast<U::AActor*>(actor)->GetWorld(), true, true).seat == Seat::Client;
+        return dynamic_births_active && network(world, true, true).seat == Seat::Client &&
+            dynamic_stock_npc(actor);
     }
 
     void settle_dynamic_npcs()
@@ -1117,16 +1133,17 @@ namespace
     void inspect_saved_squad(Iteration& call, U::UObject* receiver, U::FFrame& frame)
     {
         auto* function = frame.Node();
-        if (!squad_spawner(receiver) || function != find<U::UFunction>(load_squad_path)) return;
+        if (function->GetPathName() != load_squad_path) return;
+        const auto active = network(actor_world(receiver), true);
+        if (active.director != &crossroads || !squad_spawner(receiver)) return;
         auto* caller = frame.PreviousFrame();
         if (!caller || !caller->Node()) return;
         auto* antfarm = caller->Object();
         if (!exact(antfarm, antfarm_class) || !std::ranges::any_of(saved_squad_sources, [caller](const auto path) {
-            return caller->Node() == find<U::UFunction>(path);
+            return caller->Node()->GetPathName() == path;
         })) return;
 
-        const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld(), true);
-        if (active.director != &crossroads || !placed_spawner(receiver, active.world) || !in_level(antfarm, active.world) ||
+        if (!placed_spawner(receiver, active.world) || !in_level(antfarm, active.world) ||
             object(antfarm, STR("GameInstance")) != active.instance ||
             (active.seat == Seat::Host && byte_field(receiver, STR("Role")) != 3)) return;
         update_scope(active);
@@ -1618,8 +1635,11 @@ namespace
             Action{U::FName{STR("Proscess_TargetPerception")}, perceive_path, STR("PercivedActor"), false},
         };
         const auto action = std::ranges::find(actions, function->GetFName(), &Action::name);
-        if (action == actions.end() || !live(receiver) || function->GetReturnProperty() ||
+        if (action == actions.end() || function->GetReturnProperty() ||
             function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return false;
+        auto* world = actor_world(receiver);
+        auto* driver = world_driver(world);
+        if (!driver) return false;
         // The stock parent also covers children that implement their own strike.
         auto* owner = U::Cast<U::UClass>(function->GetOuterPrivate());
         if (!owner || !receiver->GetClassPrivate()->IsChildOf(owner)) return false;
@@ -1627,9 +1647,7 @@ namespace
         while (ancestor && ancestor->GetPathName() != action->path) ancestor = ancestor->GetSuperStruct();
         if (!ancestor) return false;
 
-        auto* world = static_cast<U::AActor*>(receiver)->GetWorld();
-        auto* driver = object(world, STR("NetDriver"));
-        if (!driver || !in_level(receiver, world) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
+        if (!in_level(receiver, world) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
             object(driver, STR("World")) != world) return false;
         const auto role = byte_field(receiver, STR("Role"));
         auto* connection = object(driver, STR("ServerConnection"));
@@ -1656,12 +1674,13 @@ namespace
     {
         static const U::FName fire{STR("FireRound")};
         if (!production_roster || !receiver || !function || function->GetFName() != fire ||
-            call.OriginalFunctionCallPrevented() || !live(receiver)) return false;
+            call.OriginalFunctionCallPrevented()) return false;
+        auto* world = actor_world(receiver);
+        auto* driver = world_driver(world);
+        if (!driver) return false;
         auto* owner = U::Cast<U::UClass>(function->GetOuterPrivate());
         if (function->GetPathName() != turret_fire_path || !owner || !receiver->GetClassPrivate()->IsChildOf(owner)) return false;
-        auto* world = static_cast<U::AActor*>(receiver)->GetWorld();
-        auto* driver = object(world, STR("NetDriver"));
-        if (!driver || !in_level(receiver, world) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
+        if (!in_level(receiver, world) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
             object(driver, STR("World")) != world) return false;
         const auto role = byte_field(receiver, STR("Role"));
         auto* connection = object(driver, STR("ServerConnection"));
@@ -1699,11 +1718,19 @@ namespace
         static const U::FName damage_name{STR("DealDamage")}, death_name{STR("ResolveDeath")}, die_name{STR("Die")};
         const auto name = function->GetFName();
         const bool damage = name == damage_name;
-        if ((!damage && name != death_name && name != die_name)
-            || function->GetReturnProperty() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)
-            || !live(receiver) || (frame && frame->Object() != receiver)) return false;
+        if (!damage && name != death_name && name != die_name) return false;
+        if (frame && frame->Object() != receiver) return false;
+
+        // Reject standalone and listen-server damage before inspecting Blueprint ancestry.
+        // A joining guest can execute a local Blueprint before World.NetDriver is set.
+        auto* world = actor_world(receiver);
+        if (!world) return false;
+        auto* driver = world_driver(world);
+        auto* server = object(driver, STR("ServerConnection"));
+        if (!server && !pending_client_load.context) return false;
+        if (function->GetReturnProperty() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return false;
         const bool ghost = byte_field(receiver, STR("Role")) == 3;
-        if (!ghost && (byte_field(receiver, STR("Role")) != 1 ||
+        if (!ghost && (!server || byte_field(receiver, STR("Role")) != 1 ||
             !bool_field(receiver, STR("bReplicates"), true))) return false;
 
         const auto* owner = U::Cast<U::UClass>(function->GetOuterPrivate());
@@ -1722,12 +1749,8 @@ namespace
         }
         if (!inherited) return false;
 
-        auto* world = static_cast<U::AActor*>(receiver)->GetWorld();
-        auto* driver = object(world, STR("NetDriver"));
-        auto* server = object(driver, STR("ServerConnection"));
-        if (!server && (!ghost || !pending_client_load.context)) return false;
         // The game may call a fresh local actor before its queued removal.
-        if (ghost ? !local_client_npc(receiver)
+        if (ghost ? !local_client_npc(receiver, world)
             : !in_level(receiver, world) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
                 object(driver, STR("World")) != world || !server_connection(server, driver))
             return false;
@@ -1759,10 +1782,12 @@ namespace
         static const U::FName init_name{STR("InitializeAI")};
         static const U::FName perceive_name{STR("Proscess_TargetPerception")};
         const auto name = function->GetFName();
-        if ((name != init_name && name != perceive_name) ||
+        if (name != init_name && name != perceive_name) return;
+        auto* world = actor_world(receiver);
+        if (!world || (!world_driver(world) && !pending_client_load.context) ||
             function->GetPathName() != (name == init_name ? initialize_path : perceive_path) ||
             function->GetReturnProperty()) return;
-        if (local_client_npc(receiver))
+        if (local_client_npc(receiver, world))
         {
             call.PreventOriginalFunctionCall();
             return;
@@ -1770,7 +1795,7 @@ namespace
         if (byte_field(receiver, STR("Role")) != 1) return;
         const auto family = npc_family(receiver);
         if (!publishes(family) || (family == NpcFamily::NotDeer && byte_field(receiver, STR("Faction")) != 7)) return;
-        const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld());
+        const auto active = network(world);
         if (active.seat != Seat::Client || !roster_family(active, family) || !in_level(receiver, active.world)) return;
         update_scope(active);
         call.PreventOriginalFunctionCall();
@@ -1884,8 +1909,11 @@ namespace
         }
         if (name != spawn_name && name != load_name && name != init_name && name != perceive_name) return;
 
+        auto* world = actor_world(receiver);
+        if (!world || (!world_driver(world) && !pending_client_load.context)) return;
+
         if (name == init_name && attempt.frame && frame.PreviousFrame() == attempt.frame &&
-            frame.Node() == find<U::UFunction>(initialize_path))
+            frame.Node()->GetPathName() == initialize_path)
         {
             // The stock spawn frame identifies the particular newly finished leader or follower.
             observe_birth(receiver, *attempt.frame);
@@ -1897,12 +1925,12 @@ namespace
             inspect_saved_squad(call, receiver, frame);
             return;
         }
-        if (name == init_name && frame.Node() == find<U::UFunction>(initialize_path) && byte_field(receiver, STR("Role")) == 3)
+        if (name == init_name && frame.Node()->GetPathName() == initialize_path && byte_field(receiver, STR("Role")) == 3)
         {
             const auto family = npc_family(receiver);
             if (family != NpcFamily::Unknown && (family != NpcFamily::NotDeer || operate_not_deer))
             {
-                const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld(), true);
+                const auto active = network(world, true);
                 if (active.seat == Seat::Client && roster_family(active, family) && in_level(receiver, active.world))
                 {
                     update_scope(active);
@@ -1918,7 +1946,7 @@ namespace
         prevent_replica_brain(call, receiver, frame.Node());
 
         if (name != spawn_name || !squad_spawner(receiver)) return;
-        const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld(), true);
+        const auto active = network(world, true);
         if (active.seat == Seat::Client)
         {
             prevent_client_spawn(call, receiver, frame, active);
@@ -2713,9 +2741,9 @@ namespace silverfish::campaign_npc
                 static const U::FName spawn_name{STR("SpawnSquadFromData")};
                 static const U::FName load_name{STR("LoadSquad")};
                 const auto name = frame.Node()->GetFName();
-                if ((name != load_name && (name != spawn_name || (!operate && !operate_boars))) || !squad_spawner(receiver)) return;
-                const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld(), true);
-                if (active.seat != Seat::Client) return;
+                if (name != load_name && (name != spawn_name || (!operate && !operate_boars))) return;
+                const auto active = network(actor_world(receiver), true);
+                if (active.seat != Seat::Client || !squad_spawner(receiver)) return;
                 if (name == spawn_name) prevent_client_spawn(call, receiver, frame, active);
                 else inspect_saved_squad(call, receiver, frame);
             }, {false, false, STR("SilverfishCoopNative"), STR("Guard reflected CrossRoads client spawns")});
@@ -2743,13 +2771,15 @@ namespace silverfish::campaign_npc
             }, {false, true, STR("SilverfishCoopNative"), STR("Release early CrossRoads load binding")});
         callbacks[6] = Hook::RegisterBeginPlayPreCallback(
             [](Iteration&, U::AActor* candidate) {
-                if (!hook_ready()) return;
+                if (!hook_ready() || !live(candidate)) return;
+                auto* world = candidate->GetWorld();
+                if (!live(world) || (!world_driver(world) && !pending_client_load.context)) return;
                 if (dynamic_births_active && dynamic_stock_npc(candidate))
                     pending_dynamic_npcs.emplace_back(candidate);
                 const auto family = npc_family(candidate);
                 if (family == NpcFamily::Unknown || (family == NpcFamily::NotDeer && !operate_not_deer) ||
                     byte_field(candidate, STR("Role")) != 3) return;
-                const auto active = network(candidate->GetWorld(), true);
+                const auto active = network(world, true);
                 if (active.seat != Seat::Client || !roster_family(active, family) || !in_level(candidate, active.world)) return;
                 update_scope(active);
                 auto& births = births_for(family);
