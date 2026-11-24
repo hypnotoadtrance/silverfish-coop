@@ -113,6 +113,23 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
         self.assertEqual(guest_weapon_profiles.MAX_TAKE_AMMO_ROUNDS, 64)
         self.assertEqual(len(native_guest_weapon.FIRE_CLASSES), len(guest_weapon_profiles.FIREARMS))
 
+    def test_stock_light_ar_family_uses_the_audited_intermediate_fmj_magazine(self):
+        ammo = guest_weapon_profiles.FIVE_SIX_FMJ
+        self.assertEqual((ammo.caliber, ammo.row, ammo.item, ammo.projectile, ammo.fixture_units, ammo.projectile_count),
+                         (2, "5.6Intr_FMJ", "Ammo_IntrRifle_BP", "Projectile_Rifle_Inter", 7, 1))
+        family = {profile.kind: profile for profile in guest_weapon_profiles.FIREARMS
+                  if profile.blueprint.startswith("Wep_LightAR_")}
+        self.assertEqual({kind: profile.blueprint for kind, profile in family.items()}, {
+            "light-ar-01": "Wep_LightAR_01", "light-ar-02": "Wep_LightAR_02", "light-ar-03": "Wep_LightAR_03",
+            "light-ar-cqc": "Wep_LightAR_CQC", "light-ar-silenced": "Wep_LightAR_Silenced",
+        })
+        for kind, profile in family.items():
+            with self.subTest(kind=kind):
+                self.assertIn(kind, native_guest_weapon.PRIMARY_KINDS)
+                self.assertTrue(profile.headless_seed)
+                self.assertEqual(profile.magazine, guest_weapon_profiles.Magazine(
+                    24, 0, 0.1, require_default_payload=True, ammo=ammo, reload_first_stack=True))
+
 
 class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
     def host(self):

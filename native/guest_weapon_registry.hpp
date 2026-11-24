@@ -24,6 +24,8 @@ namespace silverfish::guest_weapon_profiles
         STR("/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Pistol_Magnum.Projectile_Pistol_Magnum_C"), 10, 1};
     inline constexpr StockAmmo forty_five_hollow_point{1, STR("45Cal_HollowPoint"),
         STR("/Game/Classes/Items/Ammo_Magnum_HollowPoint_BP.Ammo_Magnum_HollowPoint_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_45_HollowPoint.Projectile_45_HollowPoint_C"), 18, 1};
+    inline constexpr StockAmmo five_six_fmj{2, STR("5.6Intr_FMJ"),
+        STR("/Game/Classes/Items/Ammo_IntrRifle_BP.Ammo_IntrRifle_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Rifle_Inter.Projectile_Rifle_Inter_C"), 7, 1};
     inline constexpr StockAmmo twelve_gauge_buck{4, STR("12Gauge_Buck"),
         STR("/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_ShotGun_Pellet.Projectile_ShotGun_Pellet_C"), 5, 9};
     inline constexpr StockAmmo five_seven_ap{11, STR("5-7_AP"),
@@ -96,6 +98,11 @@ namespace silverfish::guest_weapon_profiles
         Profile{"grease-gun", STR("/Game/Classes/Weapons/Wep_GreaseGun.Wep_GreaseGun_C"), true, 28, 0, 0.133333, true, &forty_five_ball, true},
         Profile{"aek-01", STR("/Game/Classes/Weapons/Wep_AEK_01.Wep_AEK_01_C"), true, 30, 3, 0.04, true, &forty_five_ball, true},
         Profile{"aek-02", STR("/Game/Classes/Weapons/Wep_AEK_02.Wep_AEK_02_C"), true, 30, 3, 0.04, true, &forty_five_ball, true},
+        Profile{"light-ar-01", STR("/Game/Classes/Weapons/Wep_LightAR_01.Wep_LightAR_01_C"), true, 24, 0, 0.1, true, &five_six_fmj, true},
+        Profile{"light-ar-02", STR("/Game/Classes/Weapons/Wep_LightAR_02.Wep_LightAR_02_C"), true, 24, 0, 0.1, true, &five_six_fmj, true},
+        Profile{"light-ar-03", STR("/Game/Classes/Weapons/Wep_LightAR_03.Wep_LightAR_03_C"), true, 24, 0, 0.1, true, &five_six_fmj, true},
+        Profile{"light-ar-cqc", STR("/Game/Classes/Weapons/Wep_LightAR_CQC.Wep_LightAR_CQC_C"), true, 24, 0, 0.1, true, &five_six_fmj, true},
+        Profile{"light-ar-silenced", STR("/Game/Classes/Weapons/Wep_LightAR_Silenced.Wep_LightAR_Silenced_C"), true, 24, 0, 0.1, true, &five_six_fmj, true},
         Profile{"rifle-57-01", STR("/Game/Classes/Weapons/Wep_5-7AR_01.Wep_5-7AR_01_C"), true, 50, 4, 0.05, true, &five_seven_ap, true},
         Profile{"rifle-57-02", STR("/Game/Classes/Weapons/Wep_5-7AR_02.Wep_5-7AR_02_C"), true, 50, 4, 0.05, true, &five_seven_ap, true},
         Profile{"rifle-57-03", STR("/Game/Classes/Weapons/Wep_5-7AR_03.Wep_5-7AR_03_C"), true, 50, 4, 0.05, true, &five_seven_ap, true},
