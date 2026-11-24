@@ -36,7 +36,7 @@ class Playback:
         fingerprint = (area, epoch, tuple(ids))
         if view.get("epoch") == epoch and self.applied == fingerprint:
             return game
-        updated = await bridge.command("native-destructible-apply", area, epoch, "|".join(ids) or "-", timeout=1.5)
+        updated = await bridge.command("native-destructible-apply", area, epoch, *(ids or ["-"]), timeout=1.5)
         if updated.get("native_destructible_view") == {"map": area, "epoch": epoch}:
             self.applied = fingerprint
         return updated
