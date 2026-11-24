@@ -7,10 +7,12 @@ from live_multi_smoke import campaign_save_hashes
 from portable_guest_world_start import resident_events, wait_resident_status
 from tools.silverfish import (
     native_guest_weapon,
+    native_host_dig,
     native_host_dig_live as dig,
     native_loose_pickup as loose,
     native_stock_enemy_drops,
     native_world_loot,
+    runtime,
 )
 from tools.silverfish.control import submit
 from tools.silverfish.travel import CROSSROADS
@@ -19,7 +21,7 @@ SPADE = CROSSROADS + ".CrossRoads_P:PersistentLevel.MeleeWep_Spade_C_3"
 NUGGET = "/Game/Classes/Items/Item_GoldNugget.Item_GoldNugget_C"
 
 
-async def verify_stock_shovel(host, guest, pawn, *, loot=False):
+async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     await wait_resident_status(host_run, lambda f: f.get("game", {}).get("native_zone", {}).get("state") == "ready")
     for participant, placement in ((pawn, "near"), ("local", "near"), ("local", "inside")):
@@ -49,18 +51,24 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False):
         report = await seat.bridge.command("fixture-spade-" + action, *args, update_status=False)
         return report["ack"]["message"]
 
-    async def dig_once(stock_choice=None, *, advance=False, host_dig=False):
+    async def dig_once(stock_choice=None, *, advance=False, host_dig=False, quest_dig=False):
         previous = await asyncio.gather(observe(host, "holes"), observe(guest, "holes"))
         previous = [set(text.split(";")) - {"none"} for text in previous]
         digger = "local" if host_dig else pawn
-        staged = await observe(host, "aim", digger, "next" if advance else "find")
+        if quest_dig:
+            staged, site = (await observe(host, "quest-approach", digger)).split(";", 1)
+        else:
+            staged = await observe(host, "aim", digger, "next" if advance else "find")
         # Keep the observing guest inside the stock actor's replication range.
         if host_dig:
             staged = await observe(host, "aim", pawn, "watch-host")
         expected = tuple(map(float, staged.split(",")))
         await wait_resident_status(guest_run, lambda f: f.get("game", {}).get("pawns", {}).get("local", {}).get("location")
                                          and math.dist(f["game"]["pawns"]["local"]["location"], expected) <= 40, timeout=8)
-        if host_dig:
+        if quest_dig:
+            contacts = [await observe(guest, "quest-aim", site), await observe(host, "quest-aim", pawn, site)]
+            assert all(math.dist(tuple(map(float, point.split(","))), native_host_dig.SITE) <= 45 for point in contacts)
+        elif host_dig:
             contacts = [await observe(host, "aim", digger)]
         else:
             contacts = await asyncio.gather(observe(host, "aim", digger), observe(guest, "aim"))
@@ -108,6 +116,33 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False):
         result = await dig_once(advance=True, host_dig=True)
         assert checkpoint == campaign_save_hashes(host.campaign), "An ordinary host dig wrote a checkpoint"
         return result
+
+    if quest:
+        ordinary = await dig_once()
+        host_dig = await verify_host_dig()
+        result = await dig_once(quest_dig=True)
+        settled = await wait_resident_status(host_run, lambda f: f.get("game", {}).get(dig.KEY, {}).get("state") == "escrowed")
+        package = settled["game"][dig.KEY]
+        saved = runtime.read_json(host.campaign / "save" / "campaign.json")
+        custody = saved["world"]["party"][dig.CUSTODY]
+        assert (package["spade_guid"], custody["spade_guid"]) == (item["guid"], item["guid"])
+        assert (custody["source"], custody["flag_value"], custody["package_guid"]) == (
+            native_host_dig.SOURCE, 1, package["escrow_guid"])
+        raw_packages = await asyncio.gather(*(observe(seat, "quest-packages") for seat in (host, guest)))
+        assert raw_packages[0] == package["actor"], raw_packages
+        await observe(host, "quest-approach", "local")
+        assert await observe(host, "quest-collect", "local") == "stock_started"
+        collected = await wait_resident_status(host_run, lambda f: f.get("game", {}).get(dig.KEY, {}).get("state") == "owned")
+        owned = collected["game"][dig.KEY]
+        assert owned["escrow_guid"] == package["escrow_guid"] and owned["spade_guid"] == item["guid"], owned
+        saved = runtime.read_json(host.campaign / "save" / "campaign.json")
+        owner = saved["world"]["party"][dig.CUSTODY]
+        assert owner["state"] == "owned" and owner["package_guid"] == owned["package_guid"], owner
+        # The native owned receipt already verifies retirement. FindAllOf can
+        # enumerate the old UObject until Unreal garbage-collects it.
+        return {"stock_shovel": ordinary, "stock_host_shovel": host_dig,
+                "stock_missing_contact_guest_dig": {**result, "package": package, "custody": custody,
+                                                     "world_actors_before_pickup": raw_packages, "host_pickup": owned}}
 
     if not loot:
         return {"stock_shovel": await dig_once(), "stock_host_shovel": await verify_host_dig()}

@@ -77,6 +77,15 @@
             table.sort(holes)
             return table.concat(holes, ";") ~= "" and table.concat(holes, ";") or "none"
         end
+        if fields[2] == "fixture-spade-quest-packages" then
+            local packages = {}
+            for _, actor in ipairs(FindAllOf("Package_Item_FarmHouse_C") or {}) do
+                if valid(actor) and same(actor:GetWorld(), state.world) and not actor:IsActorBeingDestroyed() then
+                    packages[#packages + 1] = actor:GetFullName()
+                end
+            end
+            return table.concat(packages, ";") ~= "" and table.concat(packages, ";") or "none"
+        end
         local pawn = (phase == "connected" or fields[3] == "local") and state.local_pawn.pawn
             or guest_save.exact_item_context(state, phase, fields[3])
         if fields[2] == "fixture-spade-host-equip" or fields[2] == "fixture-spade-host-press" then
@@ -121,7 +130,6 @@
                 :format(presses, tostring(pawn.IsWeaponBlocked), tostring(pawn.UsingItem)))
             return "pressed and released"
         end
-        assert(fields[2] == "fixture-spade-aim", "Unknown stock shovel fixture command")
         local controller = pawn.Controller
         local observing = phase == "hosting" and fields[4] == "watch-host"
         local origin = (observing and state.local_pawn.pawn or pawn):K2_GetActorLocation()
@@ -139,6 +147,51 @@
             end
         end
         local aim = {Pitch=-86,Yaw=0,Roll=0}
+        local function point(location)
+            return ("%.3f,%.3f,%.3f"):format(location.X, location.Y, location.Z)
+        end
+        if fields[2] == "fixture-spade-quest-approach" then
+            assert(phase == "hosting")
+            local x, y, z = geometry.X, geometry.Y, geometry.Z
+            local target = assert(soil({X=x, Y=y, Z=z+55}, {X=x, Y=y, Z=z-46}), "Missing Contact stock soil was unavailable")
+            for bearing = 0, 315, 45 do
+                local angle = math.rad(bearing)
+                local sx, sy = x + 90 * math.cos(angle), y + 90 * math.sin(angle)
+                local floor = soil({X=sx, Y=sy, Z=z+150}, {X=sx, Y=sy, Z=z-170})
+                if floor and floor.ImpactNormal.Z >= .7 then
+                    local stand = {X=sx, Y=sy, Z=floor.ImpactPoint.Z + pawn.CapsuleComponent:GetScaledCapsuleHalfHeight()+2}
+                    if pawn:K2_TeleportTo(stand, facing) then
+                        pawn:ForceNetUpdate()
+                        return point(pawn:K2_GetActorLocation()) .. ";" .. point(target.ImpactPoint)
+                    end
+                end
+            end
+            error("No walkable approach to the Missing Contact dig site", 0)
+        elseif fields[2] == "fixture-spade-quest-collect" then
+            local ctx = assert(scope(state, phase))
+            assert(fields[3] == "local" and same(pawn, ctx.pawn))
+            local report = assert(read(ctx))
+            local path = report.actor:match("^Package_Item_FarmHouse_C (%S+)$")
+            local actor = assert(path and StaticFindObject(path))
+            assert(valid(actor) and same(actor:GetWorld(), state.world) and report.phase == "escrowed")
+            local box = actor.Box
+            local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+            aim = math_api:FindLookAtRotation(pawn.Camera:K2_GetComponentLocation(), box:K2_GetComponentLocation())
+            controller:SetControlRotation(aim)
+            pawn.Camera:K2_SetWorldRotation(aim, false, {}, true)
+            pawn:LookTrace()
+            assert(pawn.CanInteract and same(pawn.InteractionTarget_Component, box), "The host could not focus the stock package")
+            local accepted, status = SilverfishProbeNativeInteractInput(pawn:GetAddress(), false)
+            assert(accepted and status == "stock_started", status)
+            return status
+        elseif fields[2] == "fixture-spade-quest-aim" then
+            local encoded = phase == "hosting" and fields[4] or fields[3]
+            local x, y, z = encoded:match("^([%d%.%-]+),([%d%.%-]+),([%d%.%-]+)$")
+            local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+            aim = math_api:FindLookAtRotation(pawn.Camera:K2_GetComponentLocation(), {X=tonumber(x), Y=tonumber(y), Z=tonumber(z)})
+        else
+            assert(fields[2] == "fixture-spade-aim", "Unknown stock shovel fixture command")
+        end
         if phase == "hosting" then
             if fields[4] == "find" or fields[4] == "next" or observing then
                 local radii = fields[4] == "next" and {400, 550, 800, 1100} or {150, 250, 400, 550, 800, 1100}
@@ -154,7 +207,7 @@
                                 pawn.Camera:K2_SetWorldRotation(aim,false,{},true)
                                 pawn:ForceNetUpdate()
                                 local at = pawn:K2_GetActorLocation()
-                                return string.format("%0.3f,%0.3f,%0.3f", at.X, at.Y, at.Z)
+                                return point(at)
                             end
                         end
                     end
@@ -167,6 +220,5 @@
         local eye, forward = pawn.Camera:K2_GetComponentLocation(), pawn.Camera:GetForwardVector()
         local hit = soil(eye, {X=eye.X+forward.X*300,Y=eye.Y+forward.Y*300,Z=eye.Z+forward.Z*300})
         assert(hit, "Stock shovel camera cannot see diggable terrain")
-        local at = hit.ImpactPoint
-        return string.format("%0.3f,%0.3f,%0.3f", at.X, at.Y, at.Z)
+        return point(hit.ImpactPoint)
     end
