@@ -79,8 +79,13 @@
         end
         if mode == "impact" and phase == "hosting" and actor:HasAuthority() then
             local total, lethal = {}, {}
+            local before = actor.Health
             actor:DealDamage({BluntForce_6_6923B3964740DE281BD773BCCAAC2772 = 500},
                 {Location = point, ImpactPoint = point}, pawn, {X = 0, Y = 0, Z = 0}, true, total, lethal)
+            if current(actor) and not actor.Broken then
+                error(("Stock bottle survived the staged impact: %s health=%s->%s damage=%s lethal=%s"):format(path,
+                    tostring(before), tostring(actor.Health), tostring(total.TotalDamage), tostring(lethal.IsLethal)))
+            end
             return ("%f,%f,%f"):format(point.X, point.Y, point.Z)
         end
         error("invalid stock bottle fixture")

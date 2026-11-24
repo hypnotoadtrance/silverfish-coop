@@ -67,13 +67,16 @@ from tools.silverfish.title_session import STATUS_FILE as TITLE_STATUS_FILE
 
 
 CABINET_RELEASE_SHA256 = "e35f410f7231f2c510b4ec43c34fb59ff7e9574187e2cd32fe66a61b3e87c14c"
+WAREHOUSE_DOCK = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
 
 # Checks that reacquire their target on an already loaded map can still run
 # when an unrelated fixture on the same map has failed.
 INDEPENDENT_RESIDENT_MAPS = {
-    "stock_food": OBSERVATORY, "stock_cooked_meal": OBSERVATORY, "stock_melee_edges": OBSERVATORY,
-    "stock_critters": CROSSROADS, "stock_lingering_teleport": CROSSROADS, "stock_mushrooms": CROSSROADS,
-    "stock_placed_item": CROSSROADS, "stock_weather_travel": OBSERVATORY,
+    "stock_food": {OBSERVATORY}, "stock_cooked_meal": {OBSERVATORY}, "stock_melee_edges": {OBSERVATORY},
+    "stock_critters": {CROSSROADS}, "stock_lingering_teleport": {CROSSROADS}, "stock_mushrooms": {CROSSROADS},
+    "stock_placed_item": {CROSSROADS}, "stock_weather_travel": {OBSERVATORY},
+    "stock_warehouse_switch": {OBSERVATORY, WAREHOUSE_DOCK}, "stock_warehouse_radio": {OBSERVATORY, WAREHOUSE_DOCK},
+    "stock_bottle": {OBSERVATORY, WAREHOUSE_DOCK},
 }
 
 
@@ -90,7 +93,7 @@ async def run_resident_checks(checks, host, guest, finish_check, skip_check):
             frame = await wait_resident_status(host.campaign / "run", lambda f:
                 not f.get("awaiting_zone_guest")
                 and f.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
-            if blocking_failure and frame["game"].get("map") != INDEPENDENT_RESIDENT_MAPS[name]:
+            if blocking_failure and frame["game"].get("map") not in INDEPENDENT_RESIDENT_MAPS[name]:
                 skip_check(name, blocking_failure)
                 continue
             evidence = await check(host, guest, frame["game"]["native_guest_save"]["pawn"])
@@ -1470,7 +1473,6 @@ async def verify_tutorial_bandage_revisit(host: Seat, guest: Seat, pawn: str) ->
             "host_owned_unclaimed_source": {"actor": second_bandage, "visibility": [host_suppressed, guest_suppressed]}}}
 
 
-WAREHOUSE_DOCK = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
 WAREHOUSE_DEVICES = {
     device: f"{kind} {WAREHOUSE_DOCK}.Tut_Dock_P:PersistentLevel.{kind}_{number}"
     for device, kind, number in (("switch", "CircutBox_BP_C", 1), ("radio", "Prop_Radio01_C", 3))
