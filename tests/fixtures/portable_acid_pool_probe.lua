@@ -12,9 +12,9 @@ end
 
 local function acid_summary(entry)
     local actor = entry.actor
-    if entry.ended or not live(actor) then return "gone,0,1,0" end
+    if entry.ended or not live(actor) then return "gone,0,1,0,0" end
     return table.concat({entry.retired and "gone" or stock_phase(actor), actor.DotVolume.DotActive and 1 or 0,
-        actor.bHidden and 1 or 0, actor:GetActorEnableCollision() and 1 or 0}, ",")
+        actor.bHidden and 1 or 0, actor:GetActorEnableCollision() and 1 or 0, 1}, ",")
 end
 
 local function acid_capture()

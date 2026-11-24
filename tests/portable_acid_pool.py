@@ -80,9 +80,10 @@ async def cross_to_east_wing(host, guest, probe):
 
 def pool_readback(raw):
     def parse(value):
-        phase, dot, hidden, collision = value.split(",")
-        assert phase in {"a", "f", "e", "gone"} and {dot, hidden, collision} <= {"0", "1"}, value
-        return {"phase": phase, "dot_active": dot == "1", "hidden": hidden == "1", "collision": collision == "1"}
+        phase, dot, hidden, collision, present = value.split(",")
+        assert phase in {"a", "f", "e", "gone"} and {dot, hidden, collision, present} <= {"0", "1"}, value
+        return {"phase": phase, "dot_active": dot == "1", "hidden": hidden == "1", "collision": collision == "1",
+                "present": present == "1"}
 
     selected, control = raw.split(";")
     return parse(selected), parse(control)
@@ -132,26 +133,61 @@ async def verify_acid_pool(host, guest, probe):
     hits, host_hits, hp_before, hp_after, host_before, host_after = damage
     assert hits >= 1 and host_hits == 0 and 0 < hp_after < hp_before and host_after >= host_before, damage
 
+    loop = asyncio.get_running_loop()
+    extinguish_started = loop.time()
     assert await operate(host, "fizzle") == "f"
     phases = {"host": ["a", "f"], "guest": ["a"]}
-    async with asyncio.timeout(22):
+
+    async def read_pair():
+        readings = await asyncio.gather(*(operate(seat, "read") for seat in (host, guest)))
+        selected_pools = []
+        for raw, unchanged in zip(readings, (host_control, guest_control), strict=True):
+            selected, control = pool_readback(raw)
+            assert control == unchanged, (raw, unchanged)
+            selected_pools.append(selected)
+        assert not selected_pools[1]["dot_active"], readings
+        return selected_pools
+
+    async with asyncio.timeout(12):
         while True:
-            readings = await asyncio.gather(*(operate(seat, "read") for seat in (host, guest)))
-            for key, raw, unchanged in zip(phases, readings, (host_control, guest_control), strict=True):
-                selected, control = pool_readback(raw)
-                assert control == unchanged, (key, raw, unchanged)
-                if key == "guest":
-                    assert not selected["dot_active"], raw
-                if selected["phase"] == "gone":
-                    assert selected["hidden"] and not selected["collision"], raw
+            readings = await read_pair()
+            for key, selected in zip(phases, readings, strict=True):
                 if selected["phase"] != phases[key][-1]:
                     phases[key].append(selected["phase"])
-            if all(values[-1] == "gone" for values in phases.values()):
+            if all(selected["phase"] == "e" and not selected["dot_active"] for selected in readings):
                 break
             await asyncio.sleep(.12)
-    assert all(values == ["a", "f", "e", "gone"] for values in phases.values()), phases
+    assert all(values == ["a", "f", "e"] for values in phases.values()), phases
+
+    def roster_retired(frame):
+        game = frame.get("game", {})
+        roster = game.get(ACID_POOLS, ())
+        return (frame.get("zone_epoch") == epoch and game.get("map") == EAST_WING and _CONTROL + ":a" in roster
+                and not any(row.startswith(_POOL + ":") for row in roster))
+
+    def noninteractive(selected):
+        return (selected["phase"] == "gone" and selected["hidden"] and not selected["collision"]
+                and not selected["dot_active"])
+
+    # Stock waits 60 seconds at extinguished before its separate two-second fade and destruction.
+    host_removed_after = None
+    async with asyncio.timeout_at(extinguish_started + 80):
+        while True:
+            readings = await read_pair()
+            if not readings[0]["present"] and noninteractive(readings[0]):
+                if host_removed_after is None:
+                    host_removed_after = loop.time() - extinguish_started
+                if noninteractive(readings[1]) and (not readings[1]["present"]
+                        or loop.time() - extinguish_started >= host_removed_after + 4):
+                    break
+            await asyncio.sleep(.5)
+    await wait_resident_status(host_run, roster_retired, timeout=8)
     assert campaign_save_hashes(host.campaign) == before, "The stock pool trial unexpectedly changed the saved checkpoint"
     return {"stock_acid_pool": {"source": _POOL, "untouched": _CONTROL, "stock_route": visits,
                                 "sphere": center, "host_received_no_acid": host_hits == 0,
                                 "stock_damage_calls": int(hits), "guest_health": [hp_before, hp_after],
-                                "guest_extinguish_veto": True, "phases": phases, "checkpoint_unchanged": True}}
+                                "guest_extinguish_veto": True, "phases": phases,
+                                "retirement": {"trigger": "stock_timer", "host_roster_omitted_pool": True,
+                                               "host_removed_after_seconds": round(host_removed_after, 3),
+                                               "host": readings[0], "guest": readings[1]},
+                                "checkpoint_unchanged": True}}
