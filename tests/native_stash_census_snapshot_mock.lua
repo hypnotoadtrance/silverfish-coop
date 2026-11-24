@@ -20,13 +20,21 @@ local instance = object({SaveSlot_Ref = stock})
 local host = object({Save = stock, GetFullName = function() return "Host" end})
 local pawn = object({Save = object(), Dead = false, InteractionRange = 100,
     K2_GetActorLocation = function(self) return self.location or origin end})
-local actor = object({Stash_ID = {A = 1, B = 0, C = 0, D = 0}, GameInstanceFP = instance,
-    IsA = function(_, type) return type == base end,
-    GetWorld = function() return world end, HasAuthority = function() return true end,
-    K2_GetActorLocation = function() return origin end, IsActorBeingDestroyed = function() return false end,
-    GetFullName = function() return "Stash_Crate_BP_C " .. map .. ".Observitory_P:PersistentLevel.Stash_Crate_BP_C_0" end})
+local function site_actor(index, id)
+    return object({Stash_ID = {A = id, B = 0, C = 0, D = 0}, GameInstanceFP = instance,
+        IsA = function(_, type) return type == base end,
+        GetWorld = function() return world end, HasAuthority = function() return true end,
+        K2_GetActorLocation = function() return origin end,
+        IsActorBeingDestroyed = function(self) return self.destroying == true end,
+        GetFullName = function() return "Stash_Crate_BP_C " .. map .. ".Observitory_P:PersistentLevel.Stash_Crate_BP_C_" .. index end})
+end
+local actor, world_scans, class_loaded = site_actor(0, 1), 0, true
 local statics = object({
-    GetAllActorsOfClass = function(_, _, _, found) found[1] = actor end,
+    GetAllActorsOfClass = function(_, requested_world, type, found)
+        assert(requested_world == world and type == base)
+        world_scans = world_scans + 1
+        found[1] = actor
+    end,
     LoadGameFromSlot = function() return object() end,
 })
 local bound = pawn.Save
@@ -38,7 +46,7 @@ package.loaded.guest_save = {exact_item_context = function(_, _, name)
 end}
 
 function StaticFindObject(path)
-    if path == "/Game/Classes/Actors/Stash_Master_BP.Stash_Master_BP_C" then return base end
+    if path == "/Game/Classes/Actors/Stash_Master_BP.Stash_Master_BP_C" and class_loaded then return base end
     if path == "/Script/Engine.Default__GameplayStatics" then return statics end
 end
 
@@ -53,8 +61,14 @@ local function native_rows(count, live)
 end
 
 local live_reads, legacy_reads, count, clock = 0, 0, 34, 10
-local real_time = os.time
+local real_time, real_clock, census_clock = os.time, os.clock, 0
 os.time = function() return clock end
+os.clock = function() return census_clock end
+local constructed
+function NotifyOnNewObject(path, callback)
+    assert(path == "/Game/Classes/Actors/Stash_Master_BP.Stash_Master_BP_C" and not constructed)
+    constructed = callback
+end
 function SilverfishReadLiveNativeStashCensus(address, combined, target)
     assert(address == pawn:GetAddress() and combined == stock.CombineStashes and target == site)
     live_reads = live_reads + 1
@@ -124,6 +138,41 @@ assert(read(0, token) == 0 and live_reads == 6)
 world = object()
 state.world = world
 refuses("native_stash_census_snapshot_unavailable", 16, token)
-assert(live_reads == 6)
-os.time = real_time
-print("Stock stash snapshots reuse one census and preserve page and scope checks")
+assert(live_reads == 6 and world_scans == 2)
+
+local function visible_sites()
+    local names = {}
+    for _, fields in ipairs(stash.rows(state, "hosting", row)) do
+        if fields[1] == "native-stash-site" then names[fields[3]] = fields[4] end
+    end
+    return names
+end
+for _ = 1, 6 do
+    census_clock = census_clock + 2
+    assert(visible_sites()[site] == actor:GetFullName() and world_scans == 2)
+end
+local duplicate = site_actor(1, 1)
+duplicate.GameInstanceFP, duplicate.Stash_ID = nil, nil
+constructed(duplicate)
+assert(visible_sites()[site] == actor:GetFullName())
+census_clock = census_clock + 3
+duplicate.GameInstanceFP, duplicate.Stash_ID = instance, actor.Stash_ID
+assert(not visible_sites()[site])
+refuses("native_stash_exact_site_unavailable", 0, token)
+duplicate.destroying = true
+assert(visible_sites()[site] == actor:GetFullName())
+actor.destroying = true
+assert(not visible_sites()[site] and world_scans == 2)
+
+class_loaded = false
+world = object()
+state.world = world
+assert(not visible_sites()[site] and world_scans == 2)
+local late = site_actor(2, 1)
+class_loaded = true
+constructed(late)
+assert(visible_sites()[site] == late:GetFullName() and world_scans == 2)
+state.map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+assert(not visible_sites()[site] and world_scans == 3)
+os.time, os.clock = real_time, real_clock
+print("Stock stash snapshots and site discovery preserve ownership, pages, and world lifecycle")

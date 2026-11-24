@@ -3,7 +3,7 @@ local guest_save = require("guest_save")
 local host_save = require("native_host_save")
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local stash_class = "/Game/Classes/Actors/Stash_Master_BP.Stash_Master_BP_C"
-local world, site_map, site_time, sites, report, moved
+local site_cache, report, moved
 local snapshots = {}
 local snapshot_lifetime, max_snapshots = 45, 5
 local page_size, snapshot_page_size, max_items = 16, 32, 4096
@@ -24,10 +24,86 @@ local function identifier(value)
     if id:find("[^0]") then return id end
 end
 
+local function queue_site(cache, actor, now)
+    if valid(actor) then
+        cache.actors[actor:GetAddress()] = {actor = actor, expires = now + 2}
+    end
+end
+
+-- Construction is earlier than the stock BeginPlay that binds GameInstanceFP and initializes Stash_ID.
+local construction_notifications = type(NotifyOnNewObject) == "function" and pcall(NotifyOnNewObject, stash_class,
+    function(actor)
+        if site_cache then queue_site(site_cache, actor, os.clock()) end
+    end)
+
+local function seed_sites(cache, now)
+    if (cache.seeded and construction_notifications) or now < cache.retry_at then return end
+    cache.retry_at = now + 2
+    cache.base = StaticFindObject(stash_class)
+    if not valid(cache.base) then
+        -- A derived actor cannot exist before the base class loads. Its construction will wake discovery.
+        cache.seeded = construction_notifications
+        return
+    end
+    local statics = StaticFindObject(statics_path)
+    if not valid(statics) then return end
+    local found = {}
+    statics:GetAllActorsOfClass(cache.world, cache.base, found)
+    if not construction_notifications then cache.actors = {} end
+    for _, actor in ipairs(found.OutActors or found) do
+        if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
+        queue_site(cache, actor, now)
+    end
+    cache.seeded = true
+end
+
+local function qualify_site(cache, candidate)
+    local actor = candidate.actor
+    local actor_world = actor:GetWorld()
+    if not valid(actor_world) then return end
+    if not same(actor_world, cache.world) or not actor:IsA(cache.base) or not actor:HasAuthority() then return false end
+    local name = actor:GetFullName()
+    local path = name:match("^%S+ (/Game/%S+)$")
+    if not path or path:sub(1, #cache.prefix) ~= cache.prefix then return false end
+    candidate.placed = true
+    local id = identifier(actor.Stash_ID)
+    if id and same(actor.GameInstanceFP, cache.instance) then
+        local position = actor:K2_GetActorLocation()
+        if position then return {id = id, name = name, actor = actor, position = position} end
+    end
+end
+
+local function current_sites(cache)
+    local now = os.clock()
+    seed_sites(cache, now)
+    if next(cache.actors) and not valid(cache.base) then cache.base = StaticFindObject(stash_class) end
+    local sites = {}
+    for address, candidate in pairs(cache.actors) do
+        local actor = candidate.actor
+        if not valid(actor) or actor:IsActorBeingDestroyed() then
+            cache.actors[address] = nil
+        else
+            local site = candidate.site
+            if not site and valid(cache.base) then
+                site = qualify_site(cache, candidate)
+                candidate.site = site
+            end
+            if site then
+                -- Keep both actors enrolled so removing a duplicate can restore the remaining site.
+                sites[site.id] = sites[site.id] == nil and site or false
+            elseif site == false or not candidate.placed and now >= candidate.expires then
+                cache.actors[address] = nil
+            end
+        end
+    end
+    return sites
+end
+
 local function selected_sites(state, phase)
     if phase ~= "hosting" or not state.listening or state.server ~= false
         or type(SilverfishReadNativeStashCensus) ~= "function" then
         if next(snapshots) then snapshots = {} end
+        site_cache = nil
         return
     end
     local instance, pawn = host_save.canonical_host(state, phase)
@@ -37,40 +113,21 @@ local function selected_sites(state, phase)
         return
     end
     local combined = save.CombineStashes
-    local map_changed = not same(world, state.world) or site_map ~= state.map
+    local context_changed = not site_cache or not same(site_cache.world, state.world)
+        or site_cache.map ~= state.map or not same(site_cache.instance, instance)
     if next(snapshots) then
         local now = os.time()
         for address, snapshot in pairs(snapshots) do
-            if map_changed or now >= snapshot.expires or snapshot.combined ~= combined then snapshots[address] = nil end
+            if context_changed or now >= snapshot.expires or snapshot.combined ~= combined then snapshots[address] = nil end
         end
     end
-    local clock = os.clock()
-    if map_changed or clock - site_time >= 2 then
-        local base = StaticFindObject(stash_class)
-        local statics = StaticFindObject(statics_path)
+    if context_changed then
         local leaf = state.map:match("([^/]+)$")
-        sites = {}
-        if valid(base) and valid(statics) and leaf then
-            local prefix = state.map .. "." .. leaf .. ":PersistentLevel."
-            local found = {}
-            statics:GetAllActorsOfClass(state.world, base, found)
-            for _, actor in ipairs(found.OutActors or found) do
-                if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
-                if valid(actor) and actor:IsA(base) and same(actor:GetWorld(), state.world)
-                    and actor:HasAuthority() and not actor:IsActorBeingDestroyed() and same(actor.GameInstanceFP, instance) then
-                    local name = actor:GetFullName()
-                    local path = name:match("^%S+ (/Game/%S+)$")
-                    local id = identifier(actor.Stash_ID)
-                    if id and path and path:sub(1, #prefix) == prefix then
-                        sites[id] = sites[id] == nil
-                            and {name = name, actor = actor, position = actor:K2_GetActorLocation()} or false
-                    end
-                end
-            end
-        end
-        world, site_map, site_time = state.world, state.map, clock
+        if not leaf then return end
+        site_cache = {world = state.world, map = state.map, instance = instance, actors = {}, retry_at = 0,
+            prefix = state.map .. "." .. leaf .. ":PersistentLevel."}
     end
-    return sites, pawn, combined
+    return current_sites(site_cache), pawn, combined
 end
 
 local function close_to(pawn, actor)
@@ -89,7 +146,8 @@ local function stash_context(state, phase, name, id)
     local available, host, combined = selected_sites(state, phase)
     local site = available and available[id]
     if not site or not valid(site.actor) or site.actor:IsActorBeingDestroyed()
-        or identifier(site.actor.Stash_ID) ~= id or not same(site.actor:GetWorld(), state.world) then
+        or identifier(site.actor.Stash_ID) ~= id or not same(site.actor:GetWorld(), state.world)
+        or not site.actor:HasAuthority() or not same(site.actor.GameInstanceFP, site_cache.instance) then
         error("native_stash_exact_site_unavailable", 0)
     end
     local pawn, save, owner = participant(state, phase, host, name)
@@ -321,7 +379,7 @@ function stash.rows(state, phase, row)
         rows[#rows + 1] = row("native-stash-live-split-merge", 1)
     end
     for id, site in pairs(available) do
-        if site and site.position and valid(site.actor) and not site.actor:IsActorBeingDestroyed() then
+        if site then
             local position = site.position
             rows[#rows + 1] = row("native-stash-site", state.map, id, site.name, position.X, position.Y, position.Z)
         end
