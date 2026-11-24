@@ -26,20 +26,16 @@ local function qualified(actor, scope)
 end
 
 local function parts(actor, scope)
-    if not qualified(actor, scope) or type(actor.Powered) ~= "boolean" then return end
+    if not qualified(actor, scope) then return end
     local class = actor:GetClass()
-    local box = actor.Box
-    if not valid(box) or not same(box:GetOwner(), actor) then return end
-    if class:GetFullName() == radio_class then
-        if valid(actor.MediaPlayer) and valid(actor.MediaSound) and same(actor.MediaSound:GetOwner(), actor) then
-            return {actor = actor, box = box, radio = true, lights = {}}
-        end
-        return
-    end
     local kind = class:GetFName():ToString()
     local profile = profiles[kind]
-    local package = profile and kind:sub(1, -3)
-    if not package or class:GetFullName() ~= "BlueprintGeneratedClass " .. root .. package .. "." .. kind then return end
+    local radio = kind == "Prop_Radio01_C"
+    local expected = radio and radio_class or profile and "BlueprintGeneratedClass " .. root .. kind:sub(1, -3) .. "." .. kind
+    if not expected or class:GetFullName() ~= expected or type(actor.Powered) ~= "boolean" then return end
+    local box = actor.Box
+    if not valid(box) or not same(box:GetOwner(), actor) then return end
+    if radio then return {actor = actor, box = box, radio = true, lights = {}} end
     local lever, panel = actor[profile[1]], actor[profile[2]]
     if not valid(lever) or not valid(panel) then return end
     for _, component in ipairs({lever, panel}) do
@@ -106,7 +102,7 @@ function switches.rows(state, phase, row)
     local rows = {}
     for name, entry in pairs(census(state, phase)) do
         local actor = entry.actor
-        if entry.radio and valid(actor) and not actor:IsActorBeingDestroyed() and valid(actor.MediaSound) then
+        if entry.radio and valid(actor) and not actor:IsActorBeingDestroyed() and type(actor.Powered) == "boolean" then
             rows[#rows + 1] = row("native-stock-switch", state.map, name, bit(actor.Powered), 0, 0, 0, "-", "-")
         elseif valid(actor) and not actor:IsActorBeingDestroyed() and valid(entry.lever) then
             local angles = entry.lever.RelativeRotation
