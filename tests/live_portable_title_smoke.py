@@ -3963,7 +3963,7 @@ async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str, *, large
             "stash_page_files_seen": False, "saves_unchanged_before_checkpoint": True}
 
 
-async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_positions: bool = False) -> dict:
+async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_positions: bool = False, cold: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_state, guest_state = await asyncio.gather(
         wait(host_run, lambda state: state.get("local_bridge") == "memory"),
@@ -3986,7 +3986,7 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
     before = save_fingerprints()
     assert all(before)
     request_at = time.monotonic()
-    guest_actor = await portable_probe_command(guest.bridge, "portable-crate", "press")
+    guest_actor = await portable_probe_command(guest.bridge, "portable-crate", "coldpress" if cold else "press")
     pressed_at = time.monotonic()
     # The guest's stock actor can have a different Unreal instance suffix.
     prefix = crate.rsplit("_", 1)[0] + "_"
@@ -3996,19 +3996,19 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
     roll = opened["gameplay"][native_loot.STATE_KEY][crate]
     await asyncio.sleep(.65)  # Let the compatible status copies arrive after the ring receipt.
 
-    def events(run, name):
-        rows = (run / "events.jsonl").read_text(encoding="utf-8").splitlines()
-        return [row for line in rows if (row := json.loads(line))["event"] == name and row.get("crate") == crate]
+    async def events(run, state, name):
+        return [row for row in await resident_events(run, state) if row["event"] == name and row.get("crate") == crate]
 
-    received, = events(guest_run, "native_stock_crate_interaction")
-    applied, = events(host_run, "native_loot_roll_accepted")
+    received, = await events(guest_run, guest_state, "native_stock_crate_interaction")
+    applied, = await events(host_run, host_state, "native_loot_roll_accepted")
     assert received["input_source"] == "memory_input" and received["operation_id"] == applied["id"] == roll["id"]
     assert save_fingerprints() == before
     return {
         "local_bridge": {"host": host_state["local_bridge"], "guest": guest_state["local_bridge"]},
         "stock_crate": crate, "guest_actor": guest_actor,
         "input_source": received["input_source"], "sequence": received["sequence"],
-        "roll_id": roll["id"], "roll_count": 1, "saves_unchanged_after_open": True,
+        "roll_id": roll["id"], "roll_count": 1, "guest_scope_cleared_before_press": cold,
+        "saves_unchanged_after_open": True,
         "probe_request_to_press_reply_ms": round(1000 * (pressed_at - request_at), 2),
         "probe_request_to_visible_roll_ms": round(1000 * (visible_at - request_at), 2),
     }
@@ -4731,6 +4731,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_roaming_barter, "observatory", "stock_roaming_barter", verify_roaming_barter),
         (stock_simmi_jammers, "simmi", "stock_simmi_jammers",
          lambda host, guest, pawn: verify_stock_simmi_jammers(host, guest, pawn, portable_probe_command)),
+        (stock_crate_ring and crossroads_profile, "crossroads", "stock_crate_ring",
+         lambda host, guest, pawn: verify_stock_crate_ring(host, guest, pawn, memory_positions=True, cold=True)),
         (stock_weather_travel, "crossroads", "stock_weather_travel",
          lambda host, guest, pawn: verify_weather_travel(host, guest, pawn, portable_probe_command,
                                                         profile=crossroads_profile)),
@@ -5524,6 +5526,8 @@ if __name__ == "__main__":
         parser.error("Use --stock-shovel-quest with --stock-shovel alone")
     resident_check_options.add("stock_cooked_meal")
     resident_check_options.add("crossroads_profile")
+    if args.crossroads_profile:
+        resident_check_options.add("stock_crate_ring")
     if any((args.stock_food, args.stock_cooked_meal, args.stock_personal_consumable, args.stock_wipe_chooser,
             args.stock_campfire, args.stock_npc_override, args.stock_board_offers, args.tutorial_dock_melee,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo,

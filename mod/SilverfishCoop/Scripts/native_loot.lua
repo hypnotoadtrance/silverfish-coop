@@ -37,6 +37,11 @@ function loot.profiles(map)
     return maps[map] or {}
 end
 
+function loot.profile_at(map, index)
+    local profile = registry[index]
+    return profile and profile.map == map and profile or nil
+end
+
 function loot.profile(map, name)
     local profile = name == nil and loot.profiles(map)[1] or names[name]
     return profile and profile.map == map and profile or nil

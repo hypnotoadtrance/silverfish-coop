@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <string_view>
+#include <vector>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
@@ -236,6 +237,7 @@ namespace
         Clock::time_point tool_deadline{}, recheck_at{};
     };
     std::array<Scope, profiles.size()> scopes;
+    std::vector<std::size_t> pending_receipts;
     std::uint64_t sequence{};
     std::atomic<bool> installed{};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID};
@@ -252,6 +254,22 @@ namespace
     bool same_scope(const Scope& scope, U::UObject* crate, Local local)
     {
         return crate && crate == scope.crate.Get() && scope.host == local.host && local.pawn && local.pawn == scope.pawn.Get();
+    }
+
+    void arm_scope(Scope& scope, U::UObject* crate, U::UWorld* world, Local local, Clock::time_point now)
+    {
+        if (!same_scope(scope, crate, local)) scope = {crate, local.pawn, world, local.host};
+        scope.expires = now + lease;
+        scope.recheck_at = now + scene_recheck;
+    }
+
+    void record_interaction(Scope& scope, std::size_t index, Clock::time_point now, bool pried)
+    {
+        scope.observed = ++sequence;
+        scope.receipt = now + receipt_lifetime;
+        scope.pried = pried;
+        if (std::ranges::find(pending_receipts, index) == pending_receipts.end())
+            pending_receipts.push_back(index);
     }
 
     void intercept(Iteration& call, U::UObject* crate, U::UFunction* method, const void* args)
@@ -279,16 +297,16 @@ namespace
         auto& active = scopes[index];
         const auto now = Clock::now();
         const bool legacy = index == 0;
-        const bool scoped = same_scope(active, crate, local) && now < active.expires;
-        // The original exact crate keeps its existing live co-op guard. A new
-        // profile cannot suppress stock callbacks unless its actual scene armed.
-        if (!legacy && (!scoped || !ready_profile(crate, world))) return;
+        // Stock input qualifies the live target even before the background crate scan
+        // reaches it. Keep the older exact crate's existing scene qualification rules.
+        if (!legacy && !ready_profile(crate, world)) return;
 
         if (script)
         {
             auto* entry = parameter<U::FIntProperty>(method, STR("EntryPoint"), 0);
             if (!stock_function(crate, method, 1, sizeof(std::int32_t)) || !entry ||
                 silverfish::shared_loot::permits_stock_script(crate, method)) return;
+            arm_scope(active, crate, world, local, now);
             const auto point = entry->GetPropertyValueInContainer(args);
             const auto& stock = *profile->stock_class;
             if (silverfish::electronic_locker::is_electronic(*profile))
@@ -306,7 +324,7 @@ namespace
                     return;
                 }
             }
-            if (stock.pry_start_entry && point == stock.pry_start_entry && scoped && local.host &&
+            if (stock.pry_start_entry && point == stock.pry_start_entry && local.host &&
                 now < active.tool_deadline && active.pry_guest.Get() && boolean(crate, STR("Locked"), true))
                 active.pry_started = true;
             if (stock.pry_entry && point == stock.pry_entry)
@@ -314,12 +332,10 @@ namespace
                 // The stock pry delay ends in this independent roll entry.
                 // Capture it for the host before any stock items can spawn.
                 call.PreventOriginalFunctionCall();
-                if (call.OriginalFunctionCallPrevented() && scoped && local.host && sequence < max_sequence &&
+                if (call.OriginalFunctionCallPrevented() && local.host && sequence < max_sequence &&
                     boolean(crate, STR("Locked"), stock.pry_start_entry != 0) && boolean(crate, STR("Looted"), false))
                 {
-                    active.observed = ++sequence;
-                    active.receipt = now + receipt_lifetime;
-                    active.pried = true;
+                    record_interaction(active, index, now, true);
                     if (now >= active.tool_deadline)
                     {
                         active.pry_guest = U::FWeakObjectPtr{};
@@ -340,13 +356,12 @@ namespace
         if (local.host && silverfish::shared_loot::permits_stock_interaction(crate, pawn, hit, method)) return;
 
         call.PreventOriginalFunctionCall();
-        if (!call.OriginalFunctionCallPrevented() || pawn != local.pawn || !scoped || sequence == max_sequence ||
+        if (!call.OriginalFunctionCallPrevented() || pawn != local.pawn || sequence == max_sequence ||
             !boolean(crate, STR("Looted"), false) || !boolean(pawn, STR("Holding_Interact"), true) ||
             !hit || hit != stock_box(crate) || object(pawn, STR("InteractionTarget_Component")) != hit ||
             !silverfish::native_interaction_input::consume_current_press(pawn)) return;
-        active.observed = ++sequence;
-        active.receipt = now + receipt_lifetime;
-        active.pried = false;
+        arm_scope(active, crate, world, local, now);
+        record_interaction(active, index, now, false);
         if (!local.host && profile->stock_class->pry_entry)
             silverfish::shared_loot::jiggle_container_lock(crate);
     }
@@ -395,9 +410,7 @@ namespace
                         status = "crate_profile_shape";
                         if (index == 0 || ready_profile(crate, world, &status))
                         {
-                            if (!same_scope(scope, crate, local)) scope = {crate, local.pawn, world, host};
-                            scope.expires = now + lease;
-                            scope.recheck_at = now + scene_recheck;
+                            arm_scope(scope, crate, world, local, now);
                             status = "bound";
                         }
                     }
@@ -457,11 +470,14 @@ namespace
         const auto pawn = static_cast<std::uintptr_t>(lua.get_integer());
         const auto now = Clock::now();
         int values = 0;
-        for (std::size_t index = 0; index < scopes.size(); ++index)
+        std::erase_if(pending_receipts, [now](std::size_t index) {
+            const auto& scope = scopes[index];
+            return !scope.observed || now >= scope.receipt || !scope.pawn.Get() || !scope.crate.Get();
+        });
+        for (const auto index : pending_receipts)
         {
             const auto& scope = scopes[index];
-            if (!scope.observed || now >= scope.receipt || now >= scope.expires ||
-                reinterpret_cast<std::uintptr_t>(scope.pawn.Get()) != pawn || !scope.crate.Get()) continue;
+            if (reinterpret_cast<std::uintptr_t>(scope.pawn.Get()) != pawn) continue;
             const bool guest_pry = scope.pried && scope.tool_deadline != Clock::time_point{};
             auto* guest = guest_pry ? scope.pry_guest.Get() : nullptr;
             lua.set_integer(static_cast<std::int64_t>(index + 1));
@@ -606,6 +622,7 @@ namespace silverfish::native_loot_crate_input
         if (U::IsInGameThreadRaw())
         {
             scopes = {};
+            pending_receipts.clear();
             silverfish::electronic_locker::clear();
         }
     }

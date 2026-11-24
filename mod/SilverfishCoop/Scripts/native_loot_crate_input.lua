@@ -40,10 +40,14 @@ local function power_box_audio(crate)
     if exact_component(audio, "/Script/Engine.AudioComponent", crate) and type(crate.Powered) == "boolean" then return audio end
 end
 
-function input.clear()
-    bindings, fixture_sequences, active_world = {}, {}, nil
+local function reset_world(world)
+    bindings, fixture_sequences, active_world = {}, {}, world
     sampler, tool_report = nil, nil
     receipt_frame, published = nil, {}
+end
+
+function input.clear()
+    reset_world(nil)
     if enabled and type(SilverfishClearNativeLootCrateInput) == "function" then
         SilverfishClearNativeLootCrateInput()
     end
@@ -153,10 +157,7 @@ function input.update(state, phase, profile)
         or (not host and (phase ~= "connected" or state.server ~= true)) then
         return nil, "lua_scope"
     end
-    if not same(active_world, state.world) then
-        input.clear()
-        active_world = state.world
-    end
+    if not same(active_world, state.world) then reset_world(state.world) end
     if type(SilverfishSetNativeLootCrateInputScope) ~= "function"
         or type(SilverfishReadNativeLootCrateInput) ~= "function" then
         return nil, "lua_addon"
@@ -716,9 +717,9 @@ local function sample_slice()
     local started = os.clock()
     for _ = 1, math.ceil(#scan.profiles / 20) do
         local profile = scan.profiles[scan.next]
-        scan.readings[profile.index] = sample_profile(scan.state, scan.phase, scan.status_row, profile)
+        local ok, observed = pcall(sample_profile, scan.state, scan.phase, scan.status_row, profile)
+        scan.readings[profile.index] = ok and observed or nil
         scan.next = scan.next % #scan.profiles + 1
-        if scan.next == 1 then scan.last_pass = os.clock() end
         if os.clock() - started >= 0.002 then break end
     end
 end
@@ -730,10 +731,8 @@ local function visit_receipts(state, accept)
     local receipts = table.pack(SilverfishReadNativeLootCrateReceipts(detail.pawn:GetAddress()))
     for offset = 1, receipts.n, 4 do
         local index, sequence, pried, guest = table.unpack(receipts, offset, offset + 3)
-        local binding = bindings[index]
-        if binding and binding.profile.map == state.map and same(binding.pawn, detail.pawn) then
-            accept(index, binding.profile, detail.name, sequence, pried, guest)
-        end
+        local profile = loot.profile_at(state.map, index)
+        if profile then accept(index, profile, detail.name, sequence, pried, guest) end
     end
 end
 
@@ -771,7 +770,7 @@ function input.start()
     local fast = type(SilverfishEnqueueLocalBridgeInput) == "function"
     LoopInGameThreadWithDelay(16, function()
         if fast and receipt_frame and not pcall(publish_receipts, receipt_frame) then receipt_frame = nil end
-        if sampler and not pcall(sample_slice) then sampler = nil end
+        if sampler then pcall(sample_slice) end
     end)
     periodic_sampling = true
 end
@@ -785,24 +784,20 @@ function input.rows(state, phase, status_row, fields, separate_details, requeste
         if active_world then input.clear() end
         return {}
     end
+    if not same(active_world, state.world) then reset_world(state.world) end
     local readings
     if periodic_sampling and #profiles > 12 then
         local pawn = detail.pawn
-        local now = os.clock()
-        if not sampler or not same(sampler.state.world, state.world) or not same(sampler.pawn, pawn)
-            or sampler.phase ~= phase or now - sampler.last_pass > 1.0 then
-            readings = sample(state, phase, status_row, profiles)
-            sampler = {state = state, pawn = pawn, profiles = profiles, phase = phase, status_row = status_row,
-                readings = readings, next = 1, last_pass = now}
-        else
-            sampler.state = state
-            readings = sampler.readings
-            -- Command acknowledgements include immediate readback for affected containers.
-            if fields and fields[2] ~= "native-loot-crate-diagnostic" then
-                for index = 3, #fields do
-                    local profile = loot.profile(state.map, fields[index])
-                    if profile then readings[profile.index] = sample_profile(state, phase, status_row, profile) end
-                end
+        if not sampler or not same(sampler.pawn, pawn) or sampler.phase ~= phase then
+            sampler = {pawn = pawn, profiles = profiles, phase = phase, status_row = status_row, readings = {}, next = 1}
+        end
+        sampler.state = state
+        readings = sampler.readings
+        -- Command acknowledgements include immediate readback for affected containers.
+        if fields and fields[2] ~= "native-loot-crate-diagnostic" then
+            for index = 3, #fields do
+                local profile = loot.profile(state.map, fields[index])
+                if profile then readings[profile.index] = sample_profile(state, phase, status_row, profile) end
             end
         end
     else

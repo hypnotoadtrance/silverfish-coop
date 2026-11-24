@@ -13,7 +13,7 @@ local function same(first, second)
     return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
 end
 
-local function press()
+local function press(mode)
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
     local driver = valid(world) and world.NetDriver
@@ -41,6 +41,7 @@ local function press()
         assert(valid(input) and valid(action), "stock Interact is unavailable")
         local started = input:MakeInputActionValueOfType(1, 0, 0, 0)
         local completed = input:MakeInputActionValueOfType(0, 0, 0, 0)
+        if mode == "coldpress" then SilverfishClearNativeLootCrateInput() end
         pawn:InpActEvt_IA_Interact_K2Node_EnhancedInputActionEvent_19(started, 0, 0, action)
         pawn:InpActEvt_IA_Interact_K2Node_EnhancedInputActionEvent_21(completed, .05, .05, action)
         return crate:GetFullName()
@@ -56,10 +57,12 @@ LoopInGameThreadWithDelay(25, function()
     if not request then return end
     local line = request:read(64)
     request:close()
-    local ticket = line and line:match("^(%x+)\tpress$")
+    local ticket, mode
+    if line then ticket, mode = line:match("^(%x+)\t(%a+)$") end
+    if mode ~= "press" and mode ~= "coldpress" then return end
     if not ticket or #ticket ~= 32 or last == ticket then return end
     last = ticket
-    local ok, result = pcall(press)
+    local ok, result = pcall(press, mode)
     local output = io.open(reply, "wb")
     if output then
         output:write(ticket, "\t", ok and "ok" or "error", "\t", tostring(result):gsub("[\r\n\t]", " "))
