@@ -44,7 +44,8 @@ function gait.pose_name(entry, pace) return profile_for(entry)[pace] end
 
 local function transition_asset(mesh, from, to, load)
     local key = from .. "/" .. to
-    if transitions[key] ~= nil then return transitions[key] or nil end
+    local cached = transitions[key]
+    if cached ~= nil then return cached and same(cached.Skeleton, mesh.Skeleton) and cached or nil end
     local function construct()
         local source = load(root .. from .. "." .. from)
         local target = load(root .. to .. "." .. to)
@@ -91,22 +92,40 @@ function gait.transition(entry, mesh, group, name, load, prepare)
     local mesh_address = mesh:GetAddress()
     local request = entry.pose_request
     local active = entry.pose_transition
-    if active and active.group == group and active.name == name and active.mesh == mesh_address
-        and is_current(body.AnimScriptInstance, active) then return true end
-    entry.pose_transition = nil
     entry.pose_request = name and {group = group, name = name, mesh = mesh_address, stance = entry.weapon_stance} or nil
-    if not request or not name or request.mesh ~= mesh_address or request.stance ~= entry.weapon_stance
-        or request.name == name or request.group == group and not active then return end
-    local from = active and active.value < .5 and active.from or request.name
+    if not request or not name or request.mesh ~= mesh_address or request.stance ~= entry.weapon_stance then
+        entry.pose_transition = nil
+        return
+    end
+    local instance = body.AnimScriptInstance
+    if active and is_current(instance, active) then
+        local goal = name == active.source and 0 or name == active.destination and 1
+        if goal then
+            if active.goal ~= goal then
+                -- Keep the same evaluated pose and interpolation axis when the
+                -- player switches direction before reaching the destination.
+                active.start_value, active.goal, active.started = active.value, goal, nil
+            end
+            entry.pose_animation = name
+            return true
+        end
+    else
+        active = nil
+    end
+    entry.pose_transition = nil
+    if request.name == name or request.group == group and not active then return end
+    local played = valid(instance) and instance.CurrentAsset
+    if not valid(played) or played:GetAddress() ~= entry.pose_asset then return end
+    local from = active and (active.value < .5 and active.source or active.destination) or request.name
     if from == name then return end
     local blend = transition_asset(mesh, from, name, load)
     if not valid(blend) then return end
     prepare(entry)
-    local instance = gait.play(body, blend)
+    instance = gait.play(body, blend)
     if not valid(instance) then return end
     entry.gait_blend = nil
-    entry.pose_transition = {group = group, name = name, from = from, mesh = mesh_address,
-        asset = blend:GetAddress(), instance = instance:GetAddress(), value = 0, blend = blend}
+    entry.pose_transition = {source = from, destination = name, start_value = 0, goal = 1,
+        asset = blend:GetAddress(), instance = instance:GetAddress()}
     entry.pose_asset, entry.pose_mesh, entry.pose_animation, entry.pose_is_blend = blend:GetAddress(), mesh_address, name, true
     move_axis(instance, entry.pose_transition, 0)
     return true
@@ -158,8 +177,12 @@ function gait.advance(entry, now)
             return
         end
         transition.started = transition.started or now
-        local progress = math.min(1, math.max(0, (now - transition.started) / posture_duration))
-        move_axis(instance, transition, progress * progress * (3 - 2 * progress))
+        local distance = math.abs(transition.goal - transition.start_value)
+        local duration = math.max(.025, posture_duration * distance)
+        local progress = math.min(1, math.max(0, (now - transition.started) / duration))
+        local alpha = progress * progress * (3 - 2 * progress)
+        local value = transition.start_value + (transition.goal - transition.start_value) * alpha
+        if value ~= transition.value then move_axis(instance, transition, value) end
         if progress == 1 then entry.pose_transition = nil end
         return
     end

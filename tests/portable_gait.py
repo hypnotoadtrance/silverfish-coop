@@ -1,6 +1,7 @@
-"""Verify one stock observer BlendSpace survives the Dock guest's grounded gait."""
+"""Verify the Dock observer's grounded gait, aim, crouch, and jump transitions."""
 
 import asyncio
+from itertools import groupby
 import math
 
 from tools.silverfish.control import submit
@@ -23,27 +24,44 @@ def observed(response):
 
 async def verify_postures(command, host, guest, baseline):
     result = {}
-    body, instance = baseline["observer"]["identity"][3:5]
+    _, _, hand, body, instance, _ = baseline["observer"]["identity"]
+
+    async def observe(destination, crouched, falling, groups):
+        report = "pending"
+        try:
+            async with asyncio.timeout(6):
+                while True:
+                    report = await command(host, "posed")
+                    if report != "pending":
+                        b, i, h, asset, x, y, z, crouch, air, neck, tail, samples = report.split(";")
+                        if asset.endswith("." + destination) and (crouch == "1", air == "1") == (crouched, falling):
+                            assert (int(b), int(i), int(h)) == (body, instance, hand), report
+                            assert 0 <= float(neck) < .2 and 0 <= float(tail) < .2, report
+                            rows = [row.split(",") for row in samples.split("/") if row]
+                            observed = [[tuple(map(float, row[1:])) for row in series]
+                                        for _, series in groupby(rows, key=lambda row: row[0])]
+                            assert len(observed) == groups, (destination, report)
+                            recorded = observed[-1]
+                            assert len(recorded) >= 4 and recorded[0][0] == 0 and recorded[-1][0] == 1, report
+                            assert all(left[0] <= right[0] for left, right in zip(recorded, recorded[1:])), report
+                            assert any(math.dist(frame[1:], recorded[0][1:]) > .5 for frame in recorded[1:-1]), report
+                            return {"asset": asset, "socket": tuple(map(float, (x, y, z))), "samples": recorded,
+                                    "neck_gap_cm": float(neck), "tail_gap_cm": float(tail)}
+                    await asyncio.sleep(.045)
+        except TimeoutError as error:
+            raise AssertionError(("No settled observer pose", destination, report)) from error
+
     for action, destination, expected_crouch in (
         ("aim", "Rifle_Aiming_Low_Close1", False), ("lower", "HandGun_Lowered_BlendSpace", False),
         ("crouch", "Crouching_Idle", True), ("stand", "HandGun_Lowered_BlendSpace", False),
     ):
         assert await command(host, "posture") == "watching"
         assert await command(guest, action) == "acted"
-        async with asyncio.timeout(6):
-            while True:
-                report = await command(host, "posed")
-                if report != "pending":
-                    b, i, asset, x, y, z, crouched, samples = report.split(";")
-                    if asset.endswith("." + destination) and (crouched == "1") == expected_crouch:
-                        assert (int(b), int(i)) == (body, instance), report
-                        recorded = [tuple(map(float, row.split(","))) for row in samples.split("/") if row]
-                        assert len(recorded) >= 4 and recorded[0][0] == 0 and recorded[-1][0] == 1, (action, report)
-                        assert all(left[0] <= right[0] for left, right in zip(recorded, recorded[1:])), (action, report)
-                        assert any(math.dist(frame[1:], recorded[0][1:]) > .5 for frame in recorded[1:-1]), (action, report)
-                        result[action] = {"asset": asset, "socket": tuple(map(float, (x, y, z))), "samples": recorded}
-                        break
-                await asyncio.sleep(.07)
+        result[action] = await observe(destination, expected_crouch, False, 1)
+    assert await command(host, "posture") == "watching"
+    assert await command(guest, "jump") == "acted"
+    result["jump"] = await observe("Rifle_Falling", False, True, 1)
+    result["land"] = await observe("HandGun_Lowered_BlendSpace", False, False, 2)
     return result
 
 

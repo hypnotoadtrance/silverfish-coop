@@ -100,4 +100,60 @@ local missing, missing_mesh = seat("rifle")
 assert(not gait.apply(missing, missing_mesh, 0, function() end, prepared))
 assert(not gait.apply(missing, missing_mesh, 0, assets("Rifle_Lowered_BlendSpace", false), prepared))
 assert(missing.body.played == 0 and not missing.gait_blend and not missing.prepared)
-print("Stock grounded blends preserve their driver, interpolate, cancel on crouch, and refuse incompatible assets")
+
+local sequence, transient = object({}), object({})
+local stock = StaticFindObject
+StaticFindObject = function(path)
+    if path == "/Engine/Transient" then return transient end
+    if path == "/Script/Engine.AnimSequence" then return sequence end
+    return stock(path)
+end
+local function samples(seed)
+    local rows = {GetArrayNum = function() return 3 end}
+    for i = 1, 3 do rows[i] = {SampleValue = {X = i - 1}, Animation = seed} end
+    return rows
+end
+local template = object({Skeleton = skeleton, SampleData = samples(), GetClass = function() return blend_class end})
+local clips = {}
+local function load(path)
+    local name = assert(path:match("%.(%w[%w_]*)$"))
+    if name == "Unarmed_Walk_Blendspace" then return template end
+    clips[name] = clips[name] or object({Skeleton = skeleton, IsA = function(_, class) return class == sequence end})
+    return clips[name]
+end
+EObjectFlags = {RF_Transient = 1, RF_MarkAsRootSet = 2}
+local clones = 0
+StaticConstructObject = function(class, owner, _, flags, _, _, _, original)
+    assert(class == blend_class and owner == transient and flags == 3 and original == template)
+    clones = clones + 1
+    return object({Skeleton = skeleton, SampleData = samples()})
+end
+local blend_entry, blend_mesh = seat("pistol")
+local body = blend_entry.body
+local idle, raised = "HandGun_Idle_2", "Rifle_Aiming_Low_Close1"
+local function pose(group, name)
+    return gait.transition(blend_entry, blend_mesh, group, name, load, prepared)
+end
+assert(not pose("grounded", idle))
+body:SetAnimationMode(1, false)
+body:SetAnimation(load("." .. idle))
+blend_entry.pose_asset = body.AnimScriptInstance.CurrentAsset:GetAddress()
+assert(pose("aim", raised))
+gait.advance(blend_entry, 20)
+gait.advance(blend_entry, 20.09)
+local progress = body.inputs[#body.inputs]
+assert(math.abs(progress - .5) < .001 and clones == 1)
+local initial_asset = body.AnimScriptInstance.CurrentAsset
+assert(pose("grounded", idle))
+gait.advance(blend_entry, 20.1)
+assert(body.inputs[#body.inputs] == progress, "A reversal must keep the displayed mix")
+gait.advance(blend_entry, 20.145)
+local returning = body.inputs[#body.inputs]
+assert(returning > 0 and returning < progress)
+assert(pose("aim", raised))
+gait.advance(blend_entry, 20.155)
+assert(body.inputs[#body.inputs] == returning and body.AnimScriptInstance.CurrentAsset == initial_asset)
+gait.advance(blend_entry, 20.35)
+assert(body.inputs[#body.inputs] == 1 and not blend_entry.pose_transition and clones == 1)
+assert(template.SampleData[1].Animation == nil, "The stock blend space must stay intact")
+print("Grounded gait and pose reversals preserve their animation driver and refuse incompatible assets")

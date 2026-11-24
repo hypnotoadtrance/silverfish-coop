@@ -293,7 +293,7 @@ local function apply_locomotion(entry, aim, outfit)
         entry.gait_blend, entry.pose_request, entry.pose_transition = nil, nil, nil
         return
     end
-    if not valid(movement) or movement:IsFalling() then
+    if not valid(movement) then
         restore_locomotion(entry)
         return
     end
@@ -310,9 +310,13 @@ local function apply_locomotion(entry, aim, outfit)
         return
     end
     local pace = sprinting and 2 or moving and 1 or 0
-    local grounded_gait = not crouched and not profile and not uses[entry] and movement:IsMovingOnGround()
+    local falling = movement:IsFalling()
+    local grounded_gait = not falling and not crouched and not profile and not uses[entry] and movement:IsMovingOnGround()
     local name, group
-    if crouched then
+    if falling then
+        -- Both airborne states in the stock Player AnimBP use this pose.
+        name, group = "Rifle_Falling", "airborne"
+    elseif crouched then
         group = profile and "crouched_aim" or "crouched"
         if profile then
             name = moving and "Walk_Crouching_Forward" or "Idle_Crouching_Aiming"

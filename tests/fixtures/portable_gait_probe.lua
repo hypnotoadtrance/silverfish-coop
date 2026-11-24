@@ -88,7 +88,8 @@ local function record_blend()
             if asset:GetAddress() == observer.asset or not asset:GetFullName():match("^BlendSpace1D /Engine/Transient%.")
                 or axis.Y ~= 0 or axis.Z ~= 0 or #observer.posture >= 32 then return end
             local socket = body:GetSocketTransform(FName("Weapon_Socket01"), 2).Translation
-            observer.posture[#observer.posture + 1] = ("%.5f,%.3f,%.3f,%.3f"):format(axis.X, socket.X, socket.Y, socket.Z)
+            observer.posture[#observer.posture + 1] = ("%d,%.5f,%.3f,%.3f,%.3f"):format(
+                asset:GetAddress(), axis.X, socket.X, socket.Y, socket.Z)
             return
         end
         if asset:GetAddress() ~= observer.asset then return end
@@ -108,6 +109,34 @@ local function position_row(pawn)
         pawn.Save.PlayerFood}, ";")
 end
 
+local function attachment_gaps(pawn, body)
+    local head, tail
+    local components = pawn:K2_GetComponentsByClass(StaticFindObject("/Script/Engine.SceneComponent"))
+    for index = 1, #components do
+        local component = components[index]
+        if type(component) == "userdata" and type(component.type) == "function" and component:type() == "RemoteUnrealParam" then
+            component = component:get()
+        end
+        if valid(component) and same(component:GetAttachParent(), body) then
+            local socket = component:GetAttachSocketName():ToString()
+            if socket == "Head" then head = component end
+            if socket == "TailSocket_01" then tail = component end
+        end
+    end
+    if not valid(head) or not valid(tail) then return end
+    local origin = tail:K2_GetComponentLocation()
+    if tail:IsA(StaticFindObject("/Script/Engine.SkeletalMeshComponent")) then
+        local bone = FName("Tail_01", EFindName.FNAME_Find)
+        if tail:GetBoneIndex(bone) < 0 then bone = tail:GetBoneName(0) end
+        origin = tail:GetSocketLocation(bone)
+    end
+    local function distance(a, b)
+        return math.sqrt((a.X - b.X)^2 + (a.Y - b.Y)^2 + (a.Z - b.Z)^2)
+    end
+    return distance(head:K2_GetComponentLocation(), body:GetSocketLocation(FName("Head"))),
+        distance(origin, body:GetSocketLocation(FName("TailSocket_01")))
+end
+
 local function observe(action, world, pawn, weapon)
     if action == "posture" then
         assert(observer)
@@ -120,9 +149,13 @@ local function observe(action, world, pawn, weapon)
         local instance = body:GetAnimInstance()
         local asset = valid(instance) and instance.CurrentAsset
         if not valid(asset) then return "pending" end
+        local neck_gap, tail_gap = attachment_gaps(pawn, body)
+        if not neck_gap then return "pending" end
         local point = body:GetSocketTransform(socket, 2).Translation
-        return table.concat({body:GetAddress(), instance:GetAddress(), asset:GetFullName(), point.X, point.Y, point.Z,
-            bit(pawn.bIsCrouched), table.concat(observer.posture, "/")}, ";")
+        return table.concat({body:GetAddress(), instance:GetAddress(), hand:GetAddress(), asset:GetFullName(),
+            point.X, point.Y, point.Z, bit(pawn.bIsCrouched), bit(pawn.CharacterMovement:IsFalling()),
+            neck_gap, tail_gap,
+            table.concat(observer.posture, "/")}, ";")
     end
     assert(action == "arm" or action == "read")
     local hand, body, socket = hand_copy(pawn, weapon)
@@ -192,6 +225,11 @@ local function drive(action, world, pawn, weapon)
     end
     if action == "crouch" or action == "stand" then
         if action == "crouch" then pawn:Crouch(false) else pawn:UnCrouch(false) end
+        return "acted"
+    end
+    if action == "jump" then
+        assert(pawn.CharacterMovement:IsMovingOnGround() and not pawn.bIsCrouched and not pawn.Aiming)
+        pawn:Jump()
         return "acted"
     end
     assert(valid(pawn.Controller) and pawn.MoveInputs_Enabled and not pawn.Dead
