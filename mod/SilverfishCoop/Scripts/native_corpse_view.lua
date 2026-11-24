@@ -22,6 +22,12 @@ local grip_period = .05
 local byte_angle = 360 / 256
 local anchor_limit = 120
 local host_grip_bit = 0x8000
+local grip_class_path = "/Script/Engine.PhysicsHandleComponent"
+local grip_transform = {
+    Rotation = {X = 0, Y = 0, Z = 0, W = 1},
+    Translation = {X = 0, Y = 0, Z = 0},
+    Scale3D = {X = 1, Y = 1, Z = 1},
+}
 local blast_phase, smoke_phase = 32, 16
 local fire_flag = 4
 
@@ -312,18 +318,29 @@ local function restore_corpse_physics(mirror)
     local original = mirror.host_grip
     if not original then return end
     mirror.host_grip = nil
+    if valid(original.handle) then
+        original.handle:ReleaseComponent()
+        if valid(original.actor) then original.handle:K2_DestroyComponent(original.actor) end
+    end
     if valid(original.mesh) then
         for channel, response in pairs(original.responses) do
             original.mesh:SetCollisionResponseToChannel(channel, response)
         end
-        original.mesh:SetEnableGravity(original.gravity)
     end
 end
 
-local function project_host_grip(mirror, mesh)
-    if mirror.host_grip then return end
+local function project_host_grip(mirror, actor, mesh)
+    if mirror.host_grip then return mirror.host_grip end
+    local class = StaticFindObject(grip_class_path)
+    local point, index = corpses.position(actor)
+    if not valid(class) or not index then return end
+    local bone = mesh:GetBoneName(index)
+    if not mesh:IsSimulatingPhysics(bone) then return end
+    local handle = actor:AddComponentByClass(class, true, grip_transform, false)
+    if not valid(handle) then return end
     local responses = {}
-    mirror.host_grip = {mesh = mesh, responses = responses, gravity = mesh:IsGravityEnabled()}
+    local rotation = mesh:GetSocketRotation(bone)
+    mirror.host_grip = {actor = actor, mesh = mesh, responses = responses, handle = handle, rotation = rotation}
     -- Keep the skeletal bodies in the physics scene so the guest still sees the
     -- ragdoll pose. The host solves contacts while the guest follows its position.
     for channel = 0, 31 do
@@ -336,9 +353,15 @@ local function project_host_grip(mirror, mesh)
         end
     end
     local stopped = {X = 0, Y = 0, Z = 0}
-    mesh:SetEnableGravity(false)
     mesh:SetAllPhysicsLinearVelocity(stopped, false)
     mesh:SetAllPhysicsAngularVelocityInRadians(stopped, false)
+    handle:SetInterpolationSpeed(20)
+    handle:GrabComponentAtLocationWithRotation(mesh, bone, point, rotation)
+    if not same(handle:GetGrabbedComponent(), mesh) then
+        restore_corpse_physics(mirror)
+        return
+    end
+    return mirror.host_grip
 end
 
 local function follow_corpse(address, mirror, actor, pawn, now)
@@ -357,16 +380,19 @@ local function follow_corpse(address, mirror, actor, pawn, now)
         corrections[address] = nil
         return
     end
-    if host_grip then
-        project_host_grip(mirror, mesh)
-        mirror.host_released = nil
-        mirror.pawn = pawn
-        observed_grips[address] = mirror
-    end
     local period = host_grip and grip_period or sample_period
     if now < (mirror.next_pose or 0) then return end
     mirror.next_pose = now + period
     local target = mirror.marker:K2_GetActorLocation()
+    if host_grip then
+        mirror.host_released = nil
+        mirror.pawn = pawn
+        observed_grips[address] = mirror
+        corrections[address] = nil
+        local grip = project_host_grip(mirror, actor, mesh)
+        if grip then grip.handle:SetTargetLocationAndRotation(target, grip.rotation) end
+        return
+    end
     local offset, error_squared = between(corpses.position(actor), target)
     if mirror.host_released and mirror.target_z == target.Z and math.abs(offset.Z) < 100 then
         -- Once the host's height stops changing, let the locally simulated
@@ -378,9 +404,9 @@ local function follow_corpse(address, mirror, actor, pawn, now)
     if error_squared > 450^2 then
         corrections[address] = nil
         mesh:K2_AddWorldOffset(offset, false, {}, true)
-    elseif error_squared > (host_grip and 2 or 15)^2 then
+    elseif error_squared > 15^2 then
         corrections[address] = {actor = actor, mesh = mesh, pawn = pawn, start = now, offset = offset,
-            applied = 0, host_grip = host_grip, period = period}
+            applied = 0, period = period}
     end
 end
 
@@ -408,7 +434,7 @@ function corpses.animate(get_world)
     for address, correction in pairs(corrections) do
         local actor, mesh = correction.actor, correction.mesh
         if not valid(actor) or actor:IsActorBeingDestroyed() or not valid(mesh)
-            or not (correction.host_grip or mesh:IsAnySimulatingPhysics()) or locally_carried(correction.pawn, actor, mesh) then
+            or not mesh:IsAnySimulatingPhysics() or locally_carried(correction.pawn, actor, mesh) then
             corrections[address] = nil
         else
             local progress = math.min(1, math.max(0, (now - correction.start) / correction.period))
