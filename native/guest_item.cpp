@@ -695,7 +695,7 @@ namespace
     struct WeaponDataView
     {
         Unreal::UScriptStruct* type{};
-        const void* data{};
+        void* data{};
     };
 
     WeaponDataView weapon_data(Unreal::FStructProperty* property, const void* owner)
@@ -1857,9 +1857,31 @@ namespace
             return result(lua, false, refusal);
         auto* child = mounted_loki(held, context.pawn);
         auto* ammo = find<Unreal::UClass>(round.item);
-        if (!child || !ammo || !stock_magazine_shape(child, loki_magazine, true))
+        auto* table = stock_ammo_table();
+        const Unreal::FName name{round.row, Unreal::FNAME_Find};
+        const auto* stock_row = table && !name.IsNone() ? table->FindRowUnchecked(name) : nullptr;
+        auto* live_round = field<Unreal::FStructProperty>(child, STR("AmmoType"));
+        if (!child || !ammo || !stock_magazine_shape(child, loki_magazine, true) || !stock_row ||
+            !live_round || live_round->GetStruct().Get() != table->GetRowStruct().Get() ||
+            !ammo_item_row_matches(ammo, round))
             return result(lua, false, refusal);
-        if (!select_stock_round(child, ammo, round, true)) return result(lua, false, refusal);
+
+        // Use the resolved stock data for the local held actor. The stock child reads
+        // its ammo selector through its parent, which can lag the guest's inventory view.
+        auto* actor_payload = field<Unreal::FStructProperty>(held, STR("DataStruct"));
+        auto* row_payload = field<Unreal::FStructProperty>(inventory.type->GetStruct().Get(), payload_name);
+        const auto held_data = weapon_data(actor_payload, held);
+        const auto saved_data = weapon_data(row_payload, inventory.item);
+        auto* saved_handle = field<Unreal::FStructProperty>(held_data.type, loki_ammo_name);
+        auto* default_ammo = ammo->GetClassDefaultObject().Get();
+        auto* stock_handle = field<Unreal::FStructProperty>(default_ammo, STR("AmmoType"));
+        if (!saved_handle || held_data.type != saved_data.type || !stock_handle ||
+            saved_handle->GetStruct().Get() != stock_handle->GetStruct().Get()) return result(lua, false, refusal);
+        const auto* handle = stock_handle->ContainerPtrToValuePtr<void>(default_ammo);
+        saved_handle->CopyCompleteValue(saved_handle->ContainerPtrToValuePtr<void>(held_data.data), handle);
+        if (saved_data.data != held_data.data)
+            saved_handle->CopyCompleteValue(saved_handle->ContainerPtrToValuePtr<void>(saved_data.data), handle);
+        live_round->CopyCompleteValue(live_round->ContainerPtrToValuePtr<void>(child), stock_row);
         const bool verified = stock_round_matches(child, mounted_ammo(child), stock_projectile(child, round.projectile_count), &round);
         return result(lua, verified, verified ? "stock underbarrel round projected" : "guest_underbarrel_round_projection_unverified");
     }
