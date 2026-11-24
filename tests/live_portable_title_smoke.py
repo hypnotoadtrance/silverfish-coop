@@ -27,7 +27,7 @@ from tools.silverfish import (
     native_world_loot, runtime,
 )
 from tools.silverfish.authored_loot import GUARANTEED_CRATES
-from tools.silverfish.control import NAME, submit
+from tools.silverfish.control import NAME, current_status, submit
 from tools.silverfish.guest_weapon_profiles import FIREARMS, THIRTY_06_FMJ, THIRTY_06_INCENDIARY
 from tools.silverfish.service import PROTOCOL, menu_host_checkpoint
 from tools.silverfish.steam_cloud import FOLDER
@@ -935,7 +935,8 @@ async def verify_stock_npc_rivalry(host: Seat, guest: Seat, _pawn: str) -> dict:
         assert await ask(host, "rivalry-cleanup") == "cleared"
 
 
-async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = False) -> dict:
+async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = False,
+                                      verify_observer: bool = False) -> dict:
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-npc-override", action)
 
@@ -948,6 +949,15 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
     frame = await wait_resident_status(guest_run, lambda current: (
         current.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid), timeout=12)
     assert frame["game"]["native_guest_primary_scope"]["kind"] == ("melee" if heavy else "old-pipe")
+    host_run = host.campaign / "run"
+    if verify_observer:
+        host_frame = await current_status(host_run)
+        actor = host_frame["game"]["native_guest_save"]["pawn"]
+
+        def observer(state):
+            return state.get("game", {}).get("native_avatar_melee", {}).get(actor, {})
+
+        prior_serial = observer(host_frame).get("serial", 0)
     center, name = (await command(host, "stage-melee")).split(";", 1)
     async with asyncio.timeout(6):
         while not (await command(guest, f"melee-state\t{center}")).startswith("true;false;"):
@@ -972,22 +982,38 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
     proof = event[native_guest_melee.SWING_KEY]
     contact = await command(host, "melee-contact")
     after = await command(host, f"melee-state\t{center}")
+    result = {"stock_input": tap, "host_damage": proof}
+    if verify_observer:
+        assert proof["pawn"] == actor
+        try:
+            async with asyncio.timeout(5):
+                while True:
+                    host_frame = await current_status(host_run)
+                    pose = observer(host_frame)
+                    if pose.get("serial", 0) > prior_serial and not pose["active"] and pose["weapon_hand_motion_cm"] > 10:
+                        result["host_observer_swing"] = pose
+                        break
+                    await asyncio.sleep(.15)
+        except TimeoutError as error:
+            avatar = host_frame["game"].get("native_player_avatars", {}).get(actor)
+            raise AssertionError(f"Guest swing did not animate for host: {observer(host_frame)}, {avatar}, {proof}") from error
     assert proof["target"] == name and proof["enemy_health_after"] <= 0 and native_guest_melee.verified_damage(proof), (
-        proof, contact, before, after)
+        proof, contact, before, after, result.get("host_observer_swing"))
     async with asyncio.timeout(8):
         while True:
             states = await asyncio.gather(*(command(seat, f"melee-state\t{center}") for seat in (host, guest)))
             if all(state.startswith("false;true;") for state in states):
                 break
             await asyncio.sleep(.05)
-    return {"stock_input": tap, "host_damage": proof, "both_peers_dead_and_ragdolled": states}
+    result["both_peers_dead_and_ragdolled"] = states
+    return result
 
 
 async def verify_stock_melee_family(host: Seat, guest: Seat, _pawn: str) -> dict:
     before = campaign_save_hashes(host.campaign)
-    heavy_pipe = await verify_resident_guest_melee(host, guest, heavy=True)
+    heavy_pipe = await verify_resident_guest_melee(host, guest, heavy=True, verify_observer=True)
     assert await portable_probe_command(host.bridge, "portable-npc-override", "clear-melee-target") == "cleared"
-    old_pipe = await verify_resident_guest_melee(host, guest)
+    old_pipe = await verify_resident_guest_melee(host, guest, verify_observer=True)
     assert heavy_pipe["host_damage"]["stock_damage"] > old_pipe["host_damage"]["stock_damage"]
     assert campaign_save_hashes(host.campaign) == before, "A regular melee attack wrote campaign saves"
     return {"stock_melee_family": {"heavy_pipe": heavy_pipe, "old_pipe": old_pipe, "campaign_unchanged": True}}
