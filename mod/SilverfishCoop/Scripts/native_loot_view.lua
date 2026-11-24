@@ -223,10 +223,12 @@ function view.sync(state, phase)
 end
 
 function view.rows(state, phase, status_row)
+    local bindings = crate_input.bound_in_world(state.world)
+    if not next(bindings) then return {} end
     local observer = viewer(state, phase)
     if not observer then return {} end
     local rows = {}
-    for _, binding in pairs(crate_input.bound_in_world(state.world)) do
+    for _, binding in pairs(bindings) do
         local active = nearby(binding, observer)
         if active then
             rows[#rows + 1] = status_row("native-loot-view-nearby", state.map, active.crate, active.name, active.distance)

@@ -4613,6 +4613,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_npc_override: bool = False, stock_board_offers: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
                  stock_weather_travel: bool = False, stock_lightning: bool = False, stock_storm_ambience: bool = False,
+                 crossroads_profile: bool = False,
                  stock_melee_family: bool = False, stock_melee_edges: bool = False,
                  stock_warehouse_switch: bool = False, stock_warehouse_board: bool = False, stock_bottle: bool = False,
                  stock_roaming_barter: bool = False, stock_critters: bool = False, stock_placed_item: bool = False,
@@ -4637,6 +4638,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  resident_cabinet_checkpoint: Path | None = None,
                  resident_cabinet_candidate_sha256: str | None = None) -> None:
     guest_world_start = guest_world_start or guest_world_start_travel
+    stock_weather_travel = stock_weather_travel or crossroads_profile
     guest_stash_memory = guest_stash_memory or guest_stash_large_memory
     container_nearby = container_nearby or guest_ui_memory
     roots = (work, first_game, second_game, original)
@@ -4725,7 +4727,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_simmi_jammers, "simmi", "stock_simmi_jammers",
          lambda host, guest, pawn: verify_stock_simmi_jammers(host, guest, pawn, portable_probe_command)),
         (stock_weather_travel, "crossroads", "stock_weather_travel",
-         lambda host, guest, pawn: verify_weather_travel(host, guest, pawn, portable_probe_command)),
+         lambda host, guest, pawn: verify_weather_travel(host, guest, pawn, portable_probe_command,
+                                                        profile=crossroads_profile)),
         (stock_lightning, "crossroads", "stock_lightning",
          lambda host, guest, pawn: verify_stock_lightning(host, guest, pawn, portable_probe_command)),
         (storm_trial, "storm", "stock_storm_ambience",
@@ -4734,7 +4737,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_placed_item, "crossroads", "stock_placed_item", verify_stock_placed_item),
         (stock_shovel, "crossroads", "stock_shovel", lambda host, guest, pawn: verify_stock_shovel(
             host, guest, pawn, loot=stock_shovel_loot, quest=stock_shovel_quest)),
-        (stock_lingering_teleport, "crossroads_anomaly", "stock_lingering_teleport",
+        (stock_lingering_teleport, "crossroads" if crossroads_profile else "crossroads_anomaly", "stock_lingering_teleport",
          lambda host, guest, pawn: verify_stock_lingering_teleport(host, guest, pawn, portable_probe_command)),
         (stock_acid_pool, "lab_east_wing_acid", "stock_acid_pool",
          lambda host, guest, _pawn: verify_acid_pool(host, guest, portable_probe_command)),
@@ -4761,6 +4764,12 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                        or guest_stash_memory or nonmirrored_startup or stock_unequip or stock_fire_mode_reopen
                        or resident_cabinet_archive is not None)
     try:
+        if crossroads_profile:
+            from portable_crossroads_profile import instrument_profile
+
+            proof["crossroads_profile_overlays"] = [
+                probes.enter_context(portable_main_overlay(game, instrument_profile)) for game in games
+            ]
         if stock_weather_travel:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableWeatherTravelProbe",
@@ -5378,6 +5387,8 @@ if __name__ == "__main__":
                         help="verify one compact resident stock weather receipt in a private muted portable pair")
     parser.add_argument("--stock-weather-travel", action="store_true",
                         help="verify stock weather, rain, and sirens after opening Crossroads in one muted portable pair")
+    parser.add_argument("--crossroads-profile", action="store_true",
+                        help="measure co-op frame and subsystem times around the stock weather travel check")
     parser.add_argument("--stock-lightning", action="store_true",
                         help="verify one stock lightning strike and thunder across a private Crossroads pair")
     parser.add_argument("--stock-storm-ambience", action="store_true",
@@ -5504,10 +5515,12 @@ if __name__ == "__main__":
     if args.stock_shovel_quest and (not args.stock_shovel or args.stock_shovel_loot):
         parser.error("Use --stock-shovel-quest with --stock-shovel alone")
     resident_check_options.add("stock_cooked_meal")
+    resident_check_options.add("crossroads_profile")
     if any((args.stock_food, args.stock_cooked_meal, args.stock_personal_consumable, args.stock_wipe_chooser,
             args.stock_campfire, args.stock_npc_override, args.stock_board_offers, args.tutorial_dock_melee,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo,
-            args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel, args.stock_lightning,
+            args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
+            args.crossroads_profile, args.stock_lightning,
             args.stock_storm_ambience,
             args.stock_melee_family, args.stock_melee_edges, args.stock_warehouse_switch, args.stock_warehouse_board, args.stock_bottle,
             args.stock_roaming_barter, args.stock_critters, args.stock_placed_item, args.stock_throwables, args.stock_eye_stacks,
@@ -5559,6 +5572,7 @@ if __name__ == "__main__":
                        stock_flashlights=args.stock_flashlights,
                        stock_simmi_jammers=args.stock_simmi_jammers,
                        stock_weather_travel=args.stock_weather_travel,
+                       crossroads_profile=args.crossroads_profile,
                        stock_lightning=args.stock_lightning,
                        stock_storm_ambience=args.stock_storm_ambience,
                        stock_melee_family=args.stock_melee_family,

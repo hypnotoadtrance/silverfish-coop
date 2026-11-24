@@ -226,7 +226,8 @@ end
 
 function projection.rows(state, phase, row)
     local rows, pawn = {}, local_pawn(state, phase)
-    if pawn and type(SilverfishSyncNativeWorldLootItem) == "function" then
+    local shared_pickups = valid(pawn) and type(SilverfishSyncNativeWorldLootItem) == "function"
+    if shared_pickups then
         rows[#rows + 1] = row("native-world-loot-capability", 2)
         if phase == "hosting" then rows[#rows + 1] = row("native-world-loot-host-presentation", 1) end
     end
@@ -257,7 +258,7 @@ function projection.rows(state, phase, row)
             end
         end
     end
-    return rows
+    return rows, shared_pickups
 end
 
 local function item_frame(fields, state, phase)

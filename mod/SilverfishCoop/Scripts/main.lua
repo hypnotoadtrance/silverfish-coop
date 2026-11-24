@@ -1424,7 +1424,8 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         for _, row in ipairs(native_wipe_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_stack_drop.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_host_stack_drop.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
-        for _, row in ipairs(native_guest_drop_projection.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        local projections, shared_pickups = native_guest_drop_projection.rows(state, current_phase, status_row)
+        for _, row in ipairs(projections) do rows[#rows + 1] = row end
         for _, row in ipairs(native_pickup.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_shop.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_shop_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1453,7 +1454,11 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         crate_rows, crate_details = native_loot_crate_input.rows(
             state, current_phase, status_row, fields, compact_crates, crate_diagnostic)
         for _, row in ipairs(crate_rows) do rows[#rows + 1] = row end
-        for _, row in ipairs(native_loot_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        -- Shared pickups use the base game's world and inventory UI.
+        -- Only the legacy text panel needs a list of nearby opened crates.
+        if not shared_pickups then
+            for _, row in ipairs(native_loot_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        end
         for _, row in ipairs(native_wire_quest.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wire_quest_turn_in.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wire_board.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

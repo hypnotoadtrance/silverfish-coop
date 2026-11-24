@@ -32,8 +32,9 @@ local host_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") =
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local rook = "/Game/Classes/Maps/Dreams/TheRook_P"
 local pending, active, pending_fires, fires, fixtures = {}, {}, {}, {}, {}
-local wandering_hooks = {}
+local wandering_hooks, wandering_retry = {}, {}
 local world, world_map, fixture_kind, wandering_probe
+local recovery
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -49,8 +50,13 @@ end
 
 local function bind_wandering_effect(kind)
     if wandering_hooks[kind] or type(RegisterHook) ~= "function" then return end
+    local now = os.clock()
+    if now < (wandering_retry[kind] or 0) then return end
     local path = classes[kind] .. ":Tele_FX"
-    if not valid(StaticFindObject(path)) then return end
+    if not valid(StaticFindObject(path)) then
+        wandering_retry[kind] = now + .5
+        return
+    end
     RegisterHook(path, function(context, position)
         local actor = context:get()
         if not in_world(actor, world) or not actor:HasAuthority() then return end
@@ -93,6 +99,36 @@ local function replica(actor)
     local driver = valid(current) and current.NetDriver
     local server = valid(driver) and driver.ServerConnection
     return valid(server) and same(driver.World, current) and same(server.Driver, driver)
+end
+
+local function recover_family()
+    local job = recovery
+    if not job or not same(job.world, world) then
+        recovery = nil
+        return
+    end
+    local name = job.names[job.index]
+    if not name then
+        if job.pyrogeist then pyrogeist.recover(world, replica) end
+        recovery = nil
+        return
+    end
+    for _, actor in ipairs(FindAllOf(name) or {}) do
+        if in_world(actor, world) then
+            local address = actor:GetAddress()
+            if not active[address] and not pending[address] then
+                local host = job.phase == "hosting" and actor:HasAuthority() and actor:ActorHasTag(FName("Anomaly"))
+                local guest = job.phase == "connected" and replica(actor)
+                if host or guest then
+                    local kind = trap_kind(actor, actor:GetClass():GetFullName())
+                    if kind and (job.rook or disables_replica_tick(kind)) then
+                        pending[address] = {actor = actor, kind = kind}
+                    end
+                end
+            end
+        end
+    end
+    job.index = job.index + 1
 end
 
 local function placement(actor)
@@ -171,6 +207,9 @@ function fields.start(role)
         or type(RegisterBeginPlayPostHook) ~= "function" then return end
     lamps.start()
     observers.start()
+    LoopInGameThreadWithDelay(25, function()
+        if recovery and role() == (recovery.phase == "hosting" and "host" or "client") then recover_family() end
+    end)
     RegisterBeginPlayPreHook(function(context)
         local seat = role()
         if seat ~= "host" and seat ~= "client" then return end
@@ -382,6 +421,7 @@ end
 
 function fields.rows(state, phase, row)
     if phase ~= "hosting" and phase ~= "connected" or not valid(state.world) then
+        recovery = nil
         lamps.clear()
         observers.clear_visuals()
         drum_fire.clear()
@@ -391,36 +431,21 @@ function fields.rows(state, phase, row)
     end
     if not same(world, state.world) or world_map ~= state.map then
         active, fires, fixtures, world, world_map = {}, {}, {}, state.world, state.map
+        recovery, wandering_retry = nil, {}
         effects.clear()
         electrodes.clear()
         lamps.clear()
         observers.clear_visuals()
         -- Initial replicated actors can finish BeginPlay while the new driver is still pending.
         if state.map == rook then
-            -- The forced fields can finish before the listener or connection is ready.
-            for _, name in ipairs({"GravityAnomaly_BP_C", "VortexTrap_BP_C"}) do
-                for _, actor in ipairs(FindAllOf(name) or {}) do
-                    if in_world(actor, world) and (phase == "hosting" and actor:HasAuthority()
-                        and actor:ActorHasTag(FName("Anomaly")) or phase == "connected" and replica(actor)) then
-                        local kind = trap_kind(actor, actor:GetClass():GetFullName())
-                        if kind then pending[actor:GetAddress()] = {actor = actor, kind = kind} end
-                    end
-                end
-            end
+            recovery = {world = world, phase = phase, index = 1, rook = true,
+                names = {"GravityAnomaly_BP_C", "VortexTrap_BP_C"}}
         elseif phase == "connected" and state.map == crossroads then
             local names = {"GravityAnomaly_BP_C", "Pyrogeist_BP_C", "Lingering_Teleport_BP1_C"}
             if shadows.enabled then names[#names + 1] = "ShadowSphere_BP_C" end
             if lamps.enabled then names[#names + 1] = "AnglerLamp_BP_C" end
             if observers.enabled then names[#names + 1] = "Observers_BP_C" end
-            for _, name in ipairs(names) do
-                for _, actor in ipairs(FindAllOf(name) or {}) do
-                    if in_world(actor, world) and replica(actor) then
-                        local kind = trap_kind(actor, actor:GetClass():GetFullName())
-                        if disables_replica_tick(kind) then pending[actor:GetAddress()] = {actor = actor, kind = kind} end
-                    end
-                end
-            end
-            pyrogeist.recover(world, replica)
+            recovery = {world = world, phase = phase, index = 1, names = names, pyrogeist = true}
         end
     end
     if phase == "hosting" and type(SilverfishTakeNativeLingeringTeleport) == "function" then

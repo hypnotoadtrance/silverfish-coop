@@ -17,7 +17,7 @@ async def enter_crossroads(host, pawn):
         await host.bridge.command("native-exit-position", participant, position, route.entrance, route.actor)
 
 
-async def verify_weather_travel(host, guest, pawn, probe):
+async def verify_weather_travel(host, guest, pawn, probe, *, profile=False):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
 
     async def weather(seat, action):
@@ -25,6 +25,11 @@ async def verify_weather_travel(host, guest, pawn, probe):
 
     initial = await wait_resident_status(guest_run, lambda f: f["game"]["map"] == OBSERVATORY
                                          and f["game"].get("native_world_view", {}).get("weather_verified") is True)
+    performance = {}
+    if profile:
+        from portable_crossroads_profile import profile_world
+
+        performance["observatory"] = await profile_world(host, guest, OBSERVATORY, probe)
     await enter_crossroads(host, pawn)
 
     async def applied(intensity):
@@ -78,6 +83,11 @@ async def verify_weather_travel(host, guest, pawn, probe):
     assert len(local) == 5 and local[1:3] == ["false", "false"] and all(float(v) == 0 for v in local[3:]), local
     assert clear["epoch"] == wet["epoch"] == dry["epoch"] and clear["epoch"] != initial["zone_epoch"]
     assert campaign_save_hashes(host.campaign) == checkpoint, "Weather projection wrote a campaign save"
-    return {"stock_weather_travel": {"clear": clear, "wet": wet, "dry": dry,
-                                    "guest_local_rain_before": before, "guest_local_rain_suppressed": local,
-                                    "guest_stock_siren_callbacks": 1, "guest_wet_particle_count": int(wet_particles)}}
+    if profile:
+        performance["crossroads"] = await profile_world(host, guest, CROSSROADS, probe)
+    result = {"stock_weather_travel": {"clear": clear, "wet": wet, "dry": dry,
+                                      "guest_local_rain_before": before, "guest_local_rain_suppressed": local,
+                                      "guest_stock_siren_callbacks": 1, "guest_wet_particle_count": int(wet_particles)}}
+    if performance:
+        result["crossroads_profile"] = performance
+    return result
