@@ -1390,6 +1390,17 @@ async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str)
         shots = await asyncio.gather(observe(host, kind, 3, must_render=owner is guest),
                                      observe(guest, kind, 1, must_render=owner is host))
         record = {"projectiles": shots}
+        if kind == "bolt":
+            async with asyncio.timeout(5):
+                while (ground := await probe(host, "landed", kind)) == "absent":
+                    await asyncio.sleep(.05)
+            x, y, z, name = ground.split(",", 3)
+            deadline = asyncio.get_running_loop().time() + 3
+            derived = "absent"
+            while derived == "absent" and asyncio.get_running_loop().time() < deadline:
+                derived = await probe(guest, "nearby", kind, ",".join((x, y, z)))
+                await asyncio.sleep(.08)
+            record["ground_probe"] = {"location": list(map(float, (x, y, z))), "host": name, "guest": derived}
         if owner is guest:
             confirmation = await wait_resident_status(host_run, lambda frame: (
                 frame.get("game", {}).get("native_guest_flare_throw", {}).get("guid") == guid))

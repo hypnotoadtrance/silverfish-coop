@@ -13,7 +13,7 @@ local profiles = {
     bolt = {"Eqp_Bolt", "Bolt_Projectile_BP_C"},
     pipebomb = {"Gren_PipeBomb", "PipeBomb_Projectile_BP_C"},
 }
-local shots, blasts, last = {}, {}, nil
+local shots, blasts, last, landed = {}, {}, nil, nil
 local watch_pawn, short_bolt_samples
 
 local function valid(object) return object and object:IsValid() end
@@ -98,6 +98,14 @@ RegisterBeginPlayPostHook(function(context)
     local name = actor:GetClass():GetFullName()
     local world = actor:GetWorld()
     if not valid(world) or not valid(world.NetDriver) or world:GetFullName() ~= world_name then return end
+    if name == "BlueprintGeneratedClass /Game/Classes/Equipment/Eqp_Bolt.Eqp_Bolt_C" and actor:HasAuthority()
+        and shots.bolt and valid(shots.bolt.actor.RootComponent) then
+        local projectile, ground = shots.bolt.actor:K2_GetActorLocation(), actor:K2_GetActorLocation()
+        if (ground.X - projectile.X)^2 + (ground.Y - projectile.Y)^2 + (ground.Z - projectile.Z)^2 < 10^2 then
+            landed = actor
+        end
+        return
+    end
     if name == "BlueprintGeneratedClass /Game/Classes/Actors/ExplosionActor_BP.ExplosionActor_BP_C" then
         local sources = actor["Actors to Ignore"]
         local source = sources and sources[1]
@@ -148,12 +156,35 @@ local function run(action, kind, arg)
         "the local stock pawn is not ready")
     if action == "reset" then
         shots[kind] = nil
+        if kind == "bolt" then landed = nil end
         watch_pawn, short_bolt_samples = kind == "bolt" and pawn or nil, 0
         return "reset"
     end
     if action == "stage" then return stage_bolt(pawn, world, arg) end
     local name = profile[1]
     local class = asset(folder .. name .. "." .. name .. "_C")
+    if action == "landed" then
+        if not valid(landed) or not valid(landed.RootComponent) then return "absent" end
+        assert(landed.HeldByPlayer ~= true and landed.Item_RespawnMode == 0)
+        local p = landed:K2_GetActorLocation()
+        return ("%.3f,%.3f,%.3f,%s"):format(p.X, p.Y, p.Z, landed:GetFullName())
+    end
+    if action == "nearby" then
+        local x, y, z = arg:match("^([%d%.%-]+),([%d%.%-]+),([%d%.%-]+)$")
+        x, y, z = tonumber(x), tonumber(y), tonumber(z)
+        assert(x and y and z)
+        local result = {}
+        asset("/Script/Engine.Default__GameplayStatics"):GetAllActorsOfClass(world, class, result)
+        for _, item in ipairs(result.OutActors or result) do
+            if item and type(item.type) == "function" and item:type() == "RemoteUnrealParam" then item = item:get() end
+            if valid(item) and valid(item.RootComponent) and not item:IsActorBeingDestroyed()
+                and item.HeldByPlayer ~= true and item:GetActorEnableCollision() then
+                local p = item:K2_GetActorLocation()
+                if (p.X - x)^2 + (p.Y - y)^2 + (p.Z - z)^2 <= 100^2 then return item:GetFullName() end
+            end
+        end
+        return "absent"
+    end
     if action == "seed" then
         local owner = stock_owner(pawn, world, arg)
         local output = {}
@@ -223,7 +254,7 @@ LoopInGameThreadWithDelay(25, function()
     local data = request:read(128)
     request:close()
     if not data then return end
-    local ticket, action, kind, arg = data:match("^(%x+)\t([a-z]+)\t([a-z]+)\t?(%w*)$")
+    local ticket, action, kind, arg = data:match("^(%x+)\t([a-z]+)\t([a-z]+)\t?([%w.,%-]*)$")
     if not ticket or #ticket ~= 32 or ticket == last then return end
     last = ticket
     local ok, result = pcall(run, action, kind, arg)
