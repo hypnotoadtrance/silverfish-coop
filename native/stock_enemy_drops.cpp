@@ -46,6 +46,9 @@ namespace
     constexpr auto hole_path = STR("/Game/Assets/StaticMeshes/Mesh_Misc/DigHole_BP.DigHole_BP_C");
     constexpr auto hole_graph = STR("/Game/Assets/StaticMeshes/Mesh_Misc/DigHole_BP.DigHole_BP_C:ExecuteUbergraph_DigHole_BP");
     constexpr auto hole_begin = STR("/Game/Assets/StaticMeshes/Mesh_Misc/DigHole_BP.DigHole_BP_C:ReceiveBeginPlay");
+    constexpr auto bolt_path = STR("/Game/Classes/Equipment/Eqp_Bolt.Eqp_Bolt_C");
+    constexpr auto bolt_projectile = STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Bolt_Projectile_BP.Bolt_Projectile_BP_C");
+    constexpr auto bolt_graph = STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Bolt_Projectile_BP.Bolt_Projectile_BP_C:ExecuteUbergraph_Bolt_Projectile_BP");
     constexpr std::size_t max_roll = 48;
     constexpr std::size_t max_recent_drops = 128;
     constexpr auto max_sequence = (std::uint64_t{1} << 53) - 1;
@@ -69,6 +72,12 @@ namespace
     };
 
     Observation observing;
+    struct BoltObservation
+    {
+        U::FFrame* frame{};
+        U::FWeakObjectPtr projectile, world;
+        U::FObjectProperty* deferred{};
+    } bolt_observing;
     U::FWeakObjectPtr reported_world;
     std::deque<Drop> recent;
     std::uint64_t sequence{}, roll{};
@@ -219,15 +228,10 @@ namespace
             RC::to_utf8_string(actor->GetClassPrivate()->GetPathName()), physics_prop});
     }
 
-    void record_unearthed(U::UObject* receiver, U::FFrame& frame)
+    U::UObject* finished_stock_spawn(U::FFrame& frame)
     {
         auto* function = frame.Node();
-        if (!stock_dig_frame(receiver, frame) || !frame.Locals()) return;
-
-        auto* world = static_cast<U::AActor*>(receiver)->GetWorld();
-        if (!listen_instance(world) || !authority_in_level(static_cast<U::AActor*>(receiver), world)) return;
-
-        // Read the exact actor that survived the stock weighted roll and FinishSpawningActor.
+        if (!function || !frame.Locals()) return nullptr;
         const auto spawn_local = [&](const U::TCHAR* name) -> U::UObject* {
             auto* local = field<U::FObjectProperty>(function, name);
             if (!local || local->HasAnyPropertyFlags(U::CPF_Parm | U::CPF_OutParm | U::CPF_ReturnParm)) return nullptr;
@@ -235,13 +239,60 @@ namespace
         };
         auto* actor = spawn_local(STR("CallFunc_FinishSpawningActor_ReturnValue"));
         if (!live(actor) || actor != spawn_local(STR("CallFunc_BeginDeferredActorSpawnFromClass_ReturnValue")) ||
-            actor->HasAnyFlags(U::RF_WasLoaded)) return;
+            actor->HasAnyFlags(U::RF_WasLoaded)) return nullptr;
+        return actor;
+    }
+
+    bool already_observed(U::UWorld* world, U::UObject* actor)
+    {
+        return reported_world.Get() == world &&
+            std::ranges::any_of(recent, [actor](const auto& row) { return row.actor.Get() == actor; });
+    }
+
+    void record_unearthed(U::UObject* receiver, U::FFrame& frame)
+    {
+        if (!stock_dig_frame(receiver, frame)) return;
+        auto* world = static_cast<U::AActor*>(receiver)->GetWorld();
+        if (!listen_instance(world) || !authority_in_level(static_cast<U::AActor*>(receiver), world)) return;
+
+        auto* actor = finished_stock_spawn(frame);
+        if (!actor) return;
         auto* prop = find<U::UClass>(prop_path);
         const bool physics_prop = prop && actor->IsA(prop);
         if (physics_prop ? !authority_in_level(static_cast<U::AActor*>(actor), world) : !item_in_world(actor, world)) return;
-        if (reported_world.Get() == world &&
-            std::ranges::any_of(recent, [actor](const auto& row) { return row.actor.Get() == actor; })) return;
-        if (begin_roll(world)) record_drop(actor, RC::to_utf8_string(receiver->GetFullName()), {}, physics_prop);
+        if (!already_observed(world, actor) && begin_roll(world))
+            record_drop(actor, RC::to_utf8_string(receiver->GetFullName()), {}, physics_prop);
+    }
+
+    void observe_landing_bolt(U::UObject* receiver, U::FFrame& frame)
+    {
+        if (bolt_observing.frame || !frame.Locals() || !live(receiver) ||
+            receiver->GetClassPrivate() != find<U::UClass>(bolt_projectile) ||
+            frame.Object() != receiver || frame.Node() != find<U::UFunction>(bolt_graph)) return;
+        auto* projectile = static_cast<U::AActor*>(receiver);
+        auto* world = projectile->GetWorld();
+        auto* deferred = field<U::FObjectProperty>(frame.Node(), STR("CallFunc_BeginDeferredActorSpawnFromClass_ReturnValue"));
+        if (deferred && !deferred->HasAnyPropertyFlags(U::CPF_Parm | U::CPF_OutParm | U::CPF_ReturnParm)
+            && listen_instance(world) && authority_in_level(projectile, world))
+            bolt_observing = {&frame, projectile, world, deferred};
+    }
+
+    void record_landed_bolt(U::AActor* actor)
+    {
+        const auto& scope = bolt_observing;
+        auto* projectile = scope.projectile.Get();
+        auto* world = static_cast<U::UWorld*>(scope.world.Get());
+        if (!scope.frame || !live(projectile) || !live(actor) || actor->GetClassPrivate() != find<U::UClass>(bolt_path) ||
+            actor->HasAnyFlags(U::RF_WasLoaded) || !item_in_world(actor, world)) return;
+        auto* locals = scope.frame->Locals();
+        if (!locals || scope.deferred->GetObjectPropertyValue(scope.deferred->ContainerPtrToValuePtr<void>(locals)) != actor)
+            return;
+        auto* held = field<U::FBoolProperty>(actor, STR("HeldByPlayer"));
+        auto* respawn = field<U::FByteProperty>(actor, STR("Item_RespawnMode"));
+        if (!held || held->GetPropertyValueInContainer(actor) || !respawn || respawn->GetPropertyValueInContainer(actor) != 0)
+            return;
+        if (!already_observed(world, actor) && begin_roll(world))
+            record_drop(actor, RC::to_utf8_string(projectile->GetFullName()), {});
     }
 
     void collect(U::UObject* value)
@@ -254,7 +305,9 @@ namespace
 
     void capture_begin(Iteration& call, U::AActor* actor)
     {
-        if (!available() || !observing.frame || call.OriginalFunctionCallPrevented()) return;
+        if (!available() || call.OriginalFunctionCallPrevented()) return;
+        if (bolt_observing.frame) record_landed_bolt(actor);
+        if (!observing.frame) return;
         auto* locals = observing.frame->Locals();
         if (locals && std::ranges::any_of(observing.deferred, [=](auto* property) {
                 return property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(locals)) == actor;
@@ -265,9 +318,11 @@ namespace
     {
         static const U::FName spawn_name{STR("SpawnLoot")};
         static const U::FName dig_graph{STR("ExecuteUbergraph_DigHole_BP")};
+        static const U::FName thrown_bolt_graph{STR("ExecuteUbergraph_Bolt_Projectile_BP")};
         auto* function = frame.Node();
         if (!available() || !function || call.OriginalFunctionCallPrevented()) return;
         if (function->GetFName() == dig_graph) force_fixture_roll(receiver, frame);
+        if (function->GetFName() == thrown_bolt_graph) observe_landing_bolt(receiver, frame);
         if (observing.frame || function->GetFName() != spawn_name || frame.Object() != receiver || !live(receiver)) return;
         auto* base = find<U::UClass>(npc_path);
         auto* caller = frame.PreviousFrame();
@@ -328,6 +383,7 @@ namespace
     void after_spawn(Iteration& call, U::UObject* receiver, U::FFrame& frame, void*)
     {
         if (!available()) return;
+        if (&frame == bolt_observing.frame) bolt_observing = {};
         restore_fixture_roll(frame);
         static const U::FName dig_graph{STR("ExecuteUbergraph_DigHole_BP")};
         if (frame.Node() && frame.Node()->GetFName() == dig_graph && !call.OriginalFunctionCallPrevented())
