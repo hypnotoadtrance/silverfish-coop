@@ -559,8 +559,9 @@ namespace
         const auto count = lua.get_stack_size();
         if (!U::IsInGameThreadRaw() || (count != 2 && count != 3) ||
             !lua.is_string(1) || !lua.is_integer(2) || (count == 3 && !lua.is_string(3))) return 0;
-        const auto path = RC::to_generic_string(lua.get_string(1));
-        const auto address = static_cast<std::uintptr_t>(lua.get_integer(2));
+        // LuaMadeSimple removes each value as it is read.
+        const auto path = RC::to_generic_string(lua.get_string());
+        const auto address = static_cast<std::uintptr_t>(lua.get_integer());
         auto* actor = path.size() <= 512 && path.starts_with(STR("/Game/Classes/Maps/")) ?
             U::UObjectGlobals::StaticFindObject<U::UObject*>(nullptr, nullptr, path.c_str()) : nullptr;
         auto* world = authored_acid_pool(actor);
@@ -572,7 +573,7 @@ namespace
             lua.set_bool(guest);
             return 2;
         }
-        const auto phase = lua.get_string(3);
+        const auto phase = lua.get_string();
         if (!guest || (phase != "f" && phase != "e"))
         {
             lua.set_bool(false);
