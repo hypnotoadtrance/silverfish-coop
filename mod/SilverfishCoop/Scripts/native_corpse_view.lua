@@ -313,20 +313,32 @@ local function restore_corpse_physics(mirror)
     if not original then return end
     mirror.host_grip = nil
     if valid(original.mesh) then
-        original.mesh:SetCollisionEnabled(original.collision)
+        for channel, response in pairs(original.responses) do
+            original.mesh:SetCollisionResponseToChannel(channel, response)
+        end
         original.mesh:SetEnableGravity(original.gravity)
     end
 end
 
 local function project_host_grip(mirror, mesh)
     if mirror.host_grip then return end
-    mirror.host_grip = {mesh = mesh, collision = mesh:GetCollisionEnabled(), gravity = mesh:IsGravityEnabled()}
-    -- The host already solves contact while holding this corpse. Collision
-    -- impulses and gravity on the observer fight the incoming grip position.
-    -- Keep queries available for the corpse interaction after release.
+    local responses = {}
+    mirror.host_grip = {mesh = mesh, responses = responses, gravity = mesh:IsGravityEnabled()}
+    -- Keep the skeletal bodies in the physics scene so the guest still sees the
+    -- ragdoll pose. The host solves contacts while the guest follows its position.
+    for channel = 0, 31 do
+        if channel ~= 3 then -- Preserve the stock visibility trace.
+            local response = mesh:GetCollisionResponseToChannel(channel)
+            if response ~= 0 then
+                responses[channel] = response
+                mesh:SetCollisionResponseToChannel(channel, 0)
+            end
+        end
+    end
+    local stopped = {X = 0, Y = 0, Z = 0}
     mesh:SetEnableGravity(false)
-    mesh:SetAllPhysicsLinearVelocity({X = 0, Y = 0, Z = 0}, false)
-    mesh:SetCollisionEnabled(1)
+    mesh:SetAllPhysicsLinearVelocity(stopped, false)
+    mesh:SetAllPhysicsAngularVelocityInRadians(stopped, false)
 end
 
 local function follow_corpse(address, mirror, actor, pawn, now)

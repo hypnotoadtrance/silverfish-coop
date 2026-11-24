@@ -2576,9 +2576,11 @@ async def verify_stock_host_corpse_carry(host: Seat, guest: Seat, _pawn: str) ->
     assert host_view["number"] == guest_view["number"] > 0
     host_held = host_view["samples"][:host_view["held_samples"]]
     guest_held = guest_view["samples"][:guest_view["held_samples"]]
-    assert len(host_held) >= 12 and all(row[-3:] == (1, 3, 1) for row in host_held), host_held[::10]
-    assert len(guest_held) >= 12 and all(row[-3:] == (1, 1, 0) for row in guest_held), guest_held[::10]
-    assert guest_view["samples"][-1][-3:] == (0, 3, 0), guest_view["samples"][-1]
+    assert len(host_held) >= 12 and all(row[7:11] == (1, 3, 1, 1) for row in host_held), host_held[::10]
+    assert len(guest_held) >= 12 and all(row[7:11] == (1, 3, 0, 1) for row in guest_held), guest_held[::10]
+    guest_spin = max(row[14] for row in guest_held)
+    assert guest_spin < 180, (guest_spin, guest_held[::10])
+    assert guest_view["samples"][-1][7:11] == (0, 3, 0, 1), guest_view["samples"][-1]
     origin, end = host_held[0][1:4], host_held[-1][1:4]
     distance = math.dist(origin, end)
     guest_distance = math.dist(guest_held[0][1:4], guest_held[-1][1:4])
@@ -2595,6 +2597,7 @@ async def verify_stock_host_corpse_carry(host: Seat, guest: Seat, _pawn: str) ->
     assert await carry(guest, "focus") == "focused", "stock guest LookTrace could not select the released body"
     assert campaign_save_hashes(host.campaign) == checkpoint, "Carrying a corpse caused an early checkpoint"
     return {"stock_host_corpse_carry": {"host_displacement_cm": distance, "guest_displacement_cm": guest_distance,
+                                      "guest_peak_anchor_spin_deg_per_sec": guest_spin,
                                       "guest_max_backstep_cm": reverse, "end_gap_cm": end_gap,
                                       "settled_gap_cm": settled_gap, "guest_stock_focus_restored": True,
                                       "campaign_checkpoint_unchanged": True, **views}}
