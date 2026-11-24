@@ -24,20 +24,21 @@ def view_frame(fields):
 
 
 def combat_frame(fields):
-    alive, credited, initial, health, target, guest_hits, host_hits, before, after = fields.split(";")
+    alive, credited, initial, health, target, guest_hits, host_hits, before, after, observer, separation = fields.split(";")
     return {"alive": alive == "true", "credited": credited == "true", "initial_health": float(initial),
             "health": float(health), "target": target, "guest_hits": int(guest_hits), "host_hits": int(host_hits),
-            "guest_health_at_start": float(before), "guest_health": float(after)}
+            "guest_health_at_start": float(before), "guest_health": float(after),
+            "host_observer": coordinates(observer), "worker_observer_distance_cm": float(separation)}
 
 
 async def verify_dock_pursuit(host, guest, frame, command):
     guest_run = guest.client / "run"
-    origin, guest_spawn = (await command(host, "dock-natural-stage")).split(";")
+    origin, guest_spawn = (await command(host, "dock-pursuit-stage")).split(";")
     history = []
     last_view = None
 
     async def observe():
-        return combat_frame(await command(host, "dock-natural-sample"))
+        return combat_frame(await command(host, "dock-pursuit-sample"))
 
     async def wait_for(check, description, seconds):
         reading = None
@@ -94,7 +95,7 @@ async def verify_dock_pursuit(host, guest, frame, command):
         assert baseline["alive"] and baseline["health"] == baseline["initial_health"] == 120, baseline
         assert baseline["target"] == "-" and not baseline["credited"], baseline
 
-        # Stage each representation once. The host never sets the guest's view or movement after this.
+        # Leave the host at the stock Dock arrival. Stage the guest once and then use guest input only.
         assert await command(guest, f"dock-natural-arrive\t{guest_spawn}") == "ready"
 
         async def arrived():
@@ -135,7 +136,7 @@ async def verify_dock_pursuit(host, guest, frame, command):
                     break
                 await asyncio.sleep(.05)
             view["combat"] = current
-            assert current["host_hits"] == 0 and current["guest_health"] > 0, history
+            assert current["host_hits"] == 0 and current["guest_health"] > 0, (baseline, history)
             pursued_while_moving = pursued_while_moving or (moved and current["alive"] and current["target"] == "guest")
             if not current["alive"]:
                 break

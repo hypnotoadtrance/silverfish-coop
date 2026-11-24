@@ -857,14 +857,20 @@ local function dock_fight_position(pawn, actor, ignored, distance, shot_lane, co
     end
 end
 
-local function stage_live_worker(pawn, world, distance)
+local function stage_live_worker(pawn, world, distance, keep_host_at_arrival)
     local actor = dock_worker(world, live_worker)
     assert(valid(actor) and actor.Alive and not valid(actor.CombatTarget) and actor.Health > 1
         and actor:HasAuthority() and valid(actor.Controller), "expected an untouched warehouse worker with its stock brain")
     local guest = authoritative_guest(world)
     local original = actor:K2_GetActorLocation()
     local ignored = {pawn, guest, actor}
-    assert(dock_fight_position(pawn, actor, ignored, 1800, false), "no host position away from the warehouse fight")
+    if keep_host_at_arrival then
+        local arrival = pawn:K2_GetActorLocation()
+        local x, y = arrival.X - original.X, arrival.Y - original.Y
+        assert(x*x + y*y >= 5000*5000, "the authored Dock arrival is too close to observe this warehouse fight")
+    else
+        assert(dock_fight_position(pawn, actor, ignored, 1800, false), "no host position away from the warehouse fight")
+    end
     local contact = distance and function()
         return melee_lane(guest, actor, heading(guest.Camera:K2_GetComponentLocation(), actor:K2_GetActorLocation()))
     end
@@ -893,16 +899,20 @@ local function stage_live_worker(pawn, world, distance)
         guest_point.X, guest_point.Y, guest_point.Z)
 end
 
-local function sample_live_worker()
+local function sample_live_worker(pursuit)
     local probe = assert(live_probe, "the warehouse fight has not started")
     local actor, guest = probe.actor, probe.guest
     assert(valid(actor) and valid(guest), "the warehouse participant disappeared")
     local target = actor.CombatTarget
     local chosen = same(target, guest) and "guest" or same(target, probe.host) and "host"
         or valid(target) and target:GetFullName() or "-"
-    return ("%s;%s;%.3f;%.3f;%s;%d;%d;%.3f;%.3f"):format(
+    local sample = ("%s;%s;%.3f;%.3f;%s;%d;%d;%.3f;%.3f"):format(
         tostring(actor.Alive), tostring(same(actor.LastDamagedMe, guest)), probe.enemy_health, actor.Health,
         chosen, probe.guest_attacks, probe.host_attacks, probe.guest_health, guest.Save.PlayerHealth)
+    if not pursuit then return sample end
+    local point, host = actor:K2_GetActorLocation(), probe.host:K2_GetActorLocation()
+    local x, y = point.X - host.X, point.Y - host.Y
+    return ("%s;%.3f,%.3f,%.3f;%.3f"):format(sample, host.X, host.Y, host.Z, math.sqrt(x*x + y*y))
 end
 
 local function live_worker_position(world)
@@ -1121,6 +1131,9 @@ local function run(action, actor_path)
     elseif action == "dock-natural-stage" then
         assert(host, "the test stages the stock host NPC")
         return stage_live_worker(pawn, world)
+    elseif action == "dock-pursuit-stage" then
+        assert(host, "the host observes the original warehouse worker")
+        return stage_live_worker(pawn, world, nil, true)
     elseif action == "dock-melee-stage" then
         assert(host, "the original worker is owned by the host")
         return stage_live_worker(pawn, world, 135)
@@ -1151,9 +1164,9 @@ local function run(action, actor_path)
     elseif action == "dock-natural-seat" then
         local point = pawn:K2_GetActorLocation()
         return ("%.7f,%.7f,%.7f"):format(point.X, point.Y, point.Z)
-    elseif action == "dock-natural-sample" then
+    elseif action == "dock-natural-sample" or action == "dock-pursuit-sample" then
         assert(host, "the host owns the fight")
-        return sample_live_worker()
+        return sample_live_worker(action == "dock-pursuit-sample")
     elseif action == "dock-natural-state" then
         return dock_combat(pawn, world, host, action, live_worker)
     elseif action == "dock-natural-retreat" then
