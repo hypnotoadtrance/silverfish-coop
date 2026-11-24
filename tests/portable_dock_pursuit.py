@@ -4,7 +4,7 @@ import asyncio
 import math
 import time
 
-from tools.silverfish.control import submit
+from tools.silverfish.control import current_status, submit
 from portable_guest_world_start import resident_events
 
 
@@ -37,25 +37,22 @@ def combat_frame(fields):
             "host_observer": coordinates(observer), "worker_observer_distance_cm": float(separation)}
 
 
-def tap_publication(path, captured, kind):
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
+def tap_publication(game, captured, kind):
+    scope = game.get("native_guest_primary_scope", {})
+    identity = ("map", "pawn", "guid")
+    if scope.get("kind") != kind or any(scope.get(key) != captured[key] for key in identity):
         return None
-    if text and not text.endswith("\n"):
+    previous = game.get("native_guest_primary_publication", {}).get("tap")
+    if not previous or previous["sequence"] < captured["sequence"]:
+        return False
+    if previous["sequence"] != captured["sequence"]:
         return None
-    prefix = ["native-guest-primary-intent", str(captured["sequence"])]
-    for line in text.splitlines():
-        fields = line.split("\t")
-        if fields[:2] == prefix:
-            assert fields[2:] == [captured["map"], captured["pawn"], captured["guid"], kind], fields
-            return True
-    return False
+    assert previous["lane"] == "memory" and all(previous[key] == captured[key] for key in identity), previous
+    return True
 
 
 async def verify_dock_pursuit(host, guest, frame, command):
     guest_run = guest.client / "run"
-    tap_path = guest.bridge.directory / "native-guest-primary-events"
     weapon_kind = frame["game"]["native_guest_primary_scope"]["kind"]
     origin, guest_spawn = (await command(host, "dock-pursuit-stage")).split(";")
     history = []
@@ -87,16 +84,21 @@ async def verify_dock_pursuit(host, guest, frame, command):
         captured = command_result["native_guest_primary_fixture"]
         sequence = captured["sequence"]
         attempt.update(sequence=sequence, outcome="captured")
-        published = tap_publication(tap_path, captured, weapon_kind)
+        async def published_in_status():
+            status = await current_status(guest_run)
+            return tap_publication(status.get("game", {}), captured, weapon_kind)
+
+        published = await published_in_status()
         deadline = time.monotonic() + NATIVE_TAP_LIFETIME
         while published is not True and time.monotonic() < deadline:
             await asyncio.sleep(.04)
-            published = tap_publication(tap_path, captured, weapon_kind)
+            published = await published_in_status()
         if published is not True:
-            # The game-thread read fences an emit already in progress when the tap expired.
-            await command(guest, "dock-pursuit-view")
-            published = tap_publication(tap_path, captured, weapon_kind)
-            assert published is not None, ("Could not read the guest's complete outbound tap log", history)
+            # Sample on the game thread after the native tap lifetime has elapsed.
+            observed = await submit(guest_run, "native-guest-primary-publication-fixture")
+            assert observed["ok"], (observed, history)
+            published = tap_publication(observed, captured, weapon_kind)
+            assert published is not None, ("Could not verify the stock tap's publication state", history)
             if not published:
                 attempt["outcome"] = "expired_before_publication"
                 return None

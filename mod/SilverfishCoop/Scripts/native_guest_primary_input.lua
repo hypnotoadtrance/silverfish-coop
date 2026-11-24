@@ -227,11 +227,18 @@ function primary.command(fields, state, phase)
         return "stock guest primary scope cleared"
     end
     if action ~= "native-guest-primary-scope" and action ~= "native-guest-primary-input-fixture"
+        and action ~= "native-guest-primary-publication-fixture"
         and action ~= "native-guest-held-fire-fixture" and action ~= "native-guest-melee-input-fixture" then return end
     local current = context(state, phase)
     if not standing(current) then
         primary.reset()
         error("Stock primary input requires the exact standing connected guest", 0)
+    end
+    if action == "native-guest-primary-publication-fixture" then
+        if not fixtures or #fields ~= 3 or fields[3] ~= current.name or not same_context(current, binding) then
+            error("The stock primary publication readback requires the exact scoped headless guest", 0)
+        end
+        return "stock primary publication read"
     end
     -- A stock weapon lock can outlast a scope renewal. Keep the same
     -- authenticated equipment bound so input resumes when the lock clears.
