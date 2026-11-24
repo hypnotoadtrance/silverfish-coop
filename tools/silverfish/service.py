@@ -6235,6 +6235,12 @@ class Client:
                         fixture_arguments = (crate,)
                     self.last_game = await self.bridge.command(action, self.primary_scope[1], *fixture_arguments, timeout=5)
                     result = {"native_guest_primary_fixture": self.last_game.get("native_guest_primary_fixture", {})}
+                elif action == "native-guest-primary-publication-fixture" and self.guest_primary_input:
+                    if not self.primary_scope or self.last_game.get("state") != "connected":
+                        raise ValueError("Connect the staged primary input guest before reading its publication")
+                    self.last_game = await self.bridge.command(action, self.primary_scope[1], timeout=4)
+                    result = {key: self.last_game.get(key, {}) for key in
+                              ("native_guest_primary_scope", "native_guest_primary_publication")}
                 elif action == native_guest_melee.INPUT_FIXTURE and self.guest_primary_input:
                     edge = request.get("target")
                     if (not self.primary_scope or self.primary_scope[3] not in native_guest_melee.KINDS

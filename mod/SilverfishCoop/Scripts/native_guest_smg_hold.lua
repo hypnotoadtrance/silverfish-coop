@@ -4,8 +4,9 @@ local guest_save = require("guest_save")
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local native_scope = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
-local fast_enabled = native_scope and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_HELD_FIRE") == "1"
-local enabled = native_scope and (fixtures or fast_enabled)
+local held_fire_enabled = native_scope and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_HELD_FIRE") == "1"
+local enabled = native_scope and (fixtures or held_fire_enabled)
+local fast_enabled = held_fire_enabled and os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") ~= "1"
 local scopes = {}
 local actions = {
     ["native-guest-smg-hold-start"] = true,

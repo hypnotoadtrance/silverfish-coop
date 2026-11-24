@@ -18,7 +18,8 @@ namespace
     using Lua = RC::LuaMadeSimple::Lua;
     constexpr std::uint32_t command_limit = 32 * 1024;
     constexpr std::uint32_t reply_limit = 2 * 1024 * 1024;
-    constexpr std::uint32_t input_limit = 1024;
+    // Match the ctypes reader buffer in tools/silverfish/local_bridge.py.
+    constexpr std::uint32_t input_limit = 1536;
     constexpr std::size_t input_capacity = 64;
     constexpr std::uint32_t prop_poses_limit = 4 * 257;
     constexpr std::uint32_t avatar_poses_limit = 512;

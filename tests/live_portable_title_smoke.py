@@ -680,7 +680,8 @@ async def verify_resident_footsteps(host: Seat, guest: Seat) -> list[dict]:
     return receipts
 
 
-async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool = False, rusty: bool = False) -> dict:
+async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool = False,
+                                 rusty: bool = False, memory_queue: bool = False) -> dict:
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-dry-fire", action)
 
@@ -740,8 +741,16 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
         assert await command(seat, "clear") == "clear"
     loaded_press = await submit(guest_run, "native-guest-primary-input-fixture")
     assert loaded_press["ok"], loaded_press
-    shot = await input_result("native_guest_primary_input", loaded_press["native_guest_primary_fixture"]["sequence"])
+    capture = loaded_press["native_guest_primary_fixture"]
+    shot = await input_result("native_guest_primary_input", capture["sequence"])
     assert (shot["guid"], shot["before"], shot["after"], shot["projectiles"]) == (guest_guid, 1, 0, 1), shot
+    expected_publication = None
+    if memory_queue:
+        expected_publication = {key: capture[key] for key in ("map", "pawn", "guid", "sequence")}
+        expected_publication["lane"] = "memory"
+        await wait_resident_status(guest_run, lambda frame:
+            frame.get("game", {}).get("native_guest_primary_publication", {}).get("tap") == expected_publication,
+            timeout=5)
     await wait_for(host, "peer-ready", f"{guest_guid},0,0")
     await wait_for(guest, "ready", f"{guest_guid},0,0")
     host_shot = tuple(map(int, (await command(host, "shot-read")).split(",")))
@@ -807,7 +816,11 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
         return result
 
     combat = await verify_resident_npc_override(host, guest, fire_guest=fire_at_drone) if guest_combat else {}
+    if memory_queue:
+        for filename in ("native-guest-primary-events", "native-guest-held-fire-events"):
+            assert not (guest.bridge.directory / filename).exists(), filename
     return {**combat, "weapon_kind": kind, "host_stock_click": host_click, "guest_heard_host": guest_heard, "guest_primary_input": press,
+            "guest_primary_publication": expected_publication,
             "host_heard_guest": host_heard, "guest_click": guest_click, "guest_cue_receipts": events,
             "guest_live_round": shot, "host_guest_shot_dispatch": {"projectile_calls": host_shot[0],
                 "shot_sounds": host_shot[1], "muzzle_flashes": host_shot[2]},
@@ -2061,6 +2074,7 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
 
 
 async def capture_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool,
+                                       memory_queue: bool,
                                       rusty: bool, npc_rivalry: bool) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_frame, guest_frame = await asyncio.gather(
@@ -2114,7 +2128,7 @@ async def capture_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gu
     assert visual["player_id"] == player_id, visual
     guest_melee = await verify_resident_guest_melee(host, guest) if guest_combat and not rusty else {}
     footsteps = await verify_resident_footsteps(host, guest)
-    pistol = await verify_resident_pistol(host, guest, guest_combat=guest_combat, rusty=rusty)
+    pistol = await verify_resident_pistol(host, guest, guest_combat=guest_combat, rusty=rusty, memory_queue=memory_queue)
     npc_shots = await verify_resident_npc_shots(host, guest_run, guest_frame) if guest_combat else []
     npc_kill = await verify_resident_npc_kill(host, guest) if guest_combat and not npc_rivalry else {}
     turret_death = await verify_resident_turret_combat(host, guest, guest_frame) if guest_combat else {}
@@ -2139,13 +2153,13 @@ async def capture_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gu
 
 
 async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool = False,
-                                      rusty: bool = False, npc_rivalry: bool = False) -> dict:
+                                      rusty: bool = False, npc_rivalry: bool = False, memory_queue: bool = False) -> dict:
     probes = [("portable-dry-fire", "disarm"), ("portable-footstep", "disarm")]
     if guest_combat:
         probes.append(("portable-npc-override", "disarm-weapon-observers"))
     try:
         evidence = await capture_resident_weapon_cues(host, guest, pawn, guest_combat=guest_combat,
-                                                      rusty=rusty, npc_rivalry=npc_rivalry)
+                                                      rusty=rusty, npc_rivalry=npc_rivalry, memory_queue=memory_queue)
     finally:
         # The installed probes stay registered when the same process loads another map.
         replies = await asyncio.gather(*(portable_probe_command(seat.bridge, probe, action)
@@ -4117,6 +4131,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_npc_rivalry: bool = False, stock_throwables: str | None = None,
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
+                 resident_held_queue: bool = False,
                  rusty_pistol: bool = False, tutorial_dock_combat: bool = False, tutorial_dock_retaliation: bool = False,
                  tutorial_dock_melee: bool = False, tutorial_dock_pursuit: bool = False,
                  tutorial_dock_held_mask: bool = False, tutorial_dock_gait: bool = False,
@@ -4172,6 +4187,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     resident_campaigns = {}
     storm_trial = StockStormTrial(portable_probe_command) if stock_storm_ambience else None
     weapon_campaign = "tutorial_dock_combat" if tutorial_dock_combat else "observatory"
+    if resident_held_queue:
+        from portable_held_queue import verify_stock_held_queue
+    else:
+        verify_stock_held_queue = None
     dock_combat_check = ("stock_held_mask" if tutorial_dock_held_mask else
                          "tutorial_dock_pursuit" if tutorial_dock_pursuit else
                          "tutorial_dock_retaliation" if tutorial_dock_retaliation else "tutorial_dock_combat")
@@ -4188,7 +4207,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_npc_rivalry, weapon_campaign, "stock_npc_rivalry", verify_stock_npc_rivalry),
         (resident_weapon_cues, weapon_campaign, "resident_weapon_cues",
          lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, guest_combat=stock_npc_override,
-                                                               rusty=rusty_pistol, npc_rivalry=stock_npc_rivalry)),
+                                                               rusty=rusty_pistol, npc_rivalry=stock_npc_rivalry,
+                                                               memory_queue=resident_held_queue)),
+        (resident_held_queue, weapon_campaign, "stock_held_queue",
+         lambda host, guest, pawn: verify_stock_held_queue(host, guest, pawn, portable_probe_command)),
         (stock_food, "observatory", "stock_food", verify_resident_guest_food),
         (stock_personal_consumable, "personal_consumable", "stock_personal_consumable",
          lambda host, guest, pawn: verify_stock_personal_consumable(host, guest, pawn, portable_probe_command)),
@@ -4335,6 +4357,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableHeldMaskProbe",
                                                      fixture="portable_held_mask_probe.lua"))
+        if resident_held_queue:
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableHeldQueueProbe",
+                                                     fixture="portable_held_queue_probe.lua"))
         if resident_weapon_cues:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableWeaponCueProbe",
                                                  fixture="avatar_presentation_probe.lua"))
@@ -4733,6 +4759,8 @@ if __name__ == "__main__":
     parser.add_argument("--memory-status", action="store_true", help="verify both workers consume live frames through memory")
     parser.add_argument("--resident-weapon-cues", action="store_true",
                         help="verify Bandage, footsteps, firing and reload, combinable with campfire and food")
+    parser.add_argument("--resident-held-queue", action="store_true",
+                        help="verify a stock SMG hold through the resident in-memory input queue")
     parser.add_argument("--rusty-pistol", action="store_true",
                         help="exercise the stock Rusty Pistol during the resident weapon checks")
     parser.add_argument("--tutorial-dock-combat", action="store_true",
@@ -4874,7 +4902,7 @@ if __name__ == "__main__":
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
     resident_check_options = {"stock_food", "stock_personal_consumable", "stock_wipe_chooser", "stock_campfire", "stock_npc_override",
-                              "stock_board_offers", "resident_weapon_cues",
+                              "stock_board_offers", "resident_weapon_cues", "resident_held_queue",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "tutorial_dock_pursuit",
                               "tutorial_dock_held_mask", "tutorial_dock_gait",
                               "tutorial_dock_melee", "stock_npc_rivalry",
@@ -4884,6 +4912,8 @@ if __name__ == "__main__":
                               "stock_melee_family", "stock_melee_edges", "stock_warehouse_switch", "stock_warehouse_board", "stock_bottle",
                               "stock_roaming_barter", "stock_critters", "stock_placed_item", "stock_throwables", "stock_eye_stacks",
                               "stock_lingering_teleport"}
+    if args.resident_held_queue and not args.resident_weapon_cues:
+        parser.error("Use --resident-held-queue with --resident-weapon-cues")
     if args.rusty_pistol and not args.resident_weapon_cues:
         parser.error("Use --rusty-pistol with --resident-weapon-cues")
     if args.tutorial_dock_combat and not (args.rusty_pistol and args.stock_npc_override):
@@ -4967,6 +4997,7 @@ if __name__ == "__main__":
                        stock_throwables=args.stock_throwables,
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
+                       resident_held_queue=args.resident_held_queue,
                        rusty_pistol=args.rusty_pistol, tutorial_dock_combat=args.tutorial_dock_combat,
                        tutorial_dock_melee=args.tutorial_dock_melee, tutorial_dock_pursuit=args.tutorial_dock_pursuit,
                        tutorial_dock_held_mask=args.tutorial_dock_held_mask, tutorial_dock_gait=args.tutorial_dock_gait,

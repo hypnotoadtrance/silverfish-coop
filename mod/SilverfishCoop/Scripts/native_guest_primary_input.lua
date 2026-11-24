@@ -5,6 +5,7 @@ local weapon_profiles = require("guest_weapon_registry")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_INPUT") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
+local embedded = os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") == "1"
 local held_enabled = enabled and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_HELD_FIRE") == "1"
 local fixtures = enabled and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_FIXTURES") == "1"
@@ -14,6 +15,8 @@ local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local camera_quest = "Photo_DB_Turrets"
 local event_path, held_event_path, is_downed, binding, fixture_proof, held_fixture_proof, melee_fixture_proof, shovel_intent
+local pending_pry
+local publications = {}
 local held_edges = {press = true, release = true, cancel = true}
 local held_proofs = {["mapped-key"] = true, ["edge-window"] = true, ["headless-fixture"] = true}
 local melee_kinds = {["old-pipe"] = true, melee = true}
@@ -40,7 +43,7 @@ end
 
 local function context(state, phase)
     if not enabled or not event_path or phase ~= "connected" or not state.listening or state.server ~= true
-        or not valid(state.world) or type(state.map) ~= "string"
+        or not valid(state.world) or type(state.map) ~= "string" or #state.map > 256
         or not state.map:match("^/Game/Classes/Maps/[%w_/]+$")
         or state.world:GetFullName():match("^World (/[^%.:]+)%.") ~= state.map then return end
     local detail, controller = state.local_pawn, state.controller
@@ -70,24 +73,41 @@ local function can_use(current)
 end
 
 local function emit(path, fields)
+    local record = table.concat(fields, "\t") .. "\n"
+    if embedded then return SilverfishEnqueueLocalBridgeInput(record) == true end
     local file = io.open(path, "ab")
     if not file then return false end
-    local written = file:write(table.concat(fields, "\t"), "\n")
+    local written = file:write(record)
     local closed = file:close()
     return written and closed
 end
 
+local function commit(channel, address, sequence)
+    if embedded and SilverfishCommitNativeGuestPrimaryInput(address, sequence, channel) ~= true then
+        error("The queued stock primary sequence no longer matches the native input head", 0)
+    end
+end
+
+local function publish(channel, path, current, address, sequence, fields)
+    if not emit(path, fields) then return false end
+    commit(channel, address, sequence)
+    if fixtures then publications[channel] = {context = current, sequence = sequence, guid = binding.guid} end
+    return true
+end
+
 local function drain_held(current, address)
-    if not held_event_path or binding.kind ~= "smg-standard" or type(SilverfishTakeNativeGuestHeldFireIntent) ~= "function" then
+    local take = embedded and SilverfishPeekNativeGuestHeldFireIntent or SilverfishTakeNativeGuestHeldFireIntent
+    if not held_event_path or binding.kind ~= "smg-standard" or type(take) ~= "function" then
         return 0
     end
     local emitted, last = 0, nil
     for _ = 1, 8 do
-        local sequence, owner, guid, edge, stroke = SilverfishTakeNativeGuestHeldFireIntent(address)
+        local sequence, owner, guid, edge, stroke = take(address)
         if not valid_sequence(sequence) or not valid_sequence(stroke) or owner ~= address or guid ~= binding.guid
             or not held_edges[edge] or (edge == "press" and stroke ~= sequence)
             or (edge ~= "press" and stroke >= sequence) then break end
-        if not emit(held_event_path, {"native-guest-held-fire-intent", sequence, current.map, current.name,
+        if not publish("held", held_event_path, current, address, sequence,
+            {"native-guest-held-fire-intent", sequence, current.map, current.name,
             guid, edge, stroke}) then break end
         emitted, last = emitted + 1, sequence
     end
@@ -117,6 +137,27 @@ function primary.reset()
         SilverfishClearNativeGuestPrimaryScope()
     end
     binding, fixture_proof, held_fixture_proof, melee_fixture_proof, shovel_intent = nil, nil, nil, nil, nil
+    pending_pry = nil
+    if fixtures then publications = {} end
+end
+
+local function pry_name(current, kind)
+    local pawn = current.pawn
+    local actor = pawn.ActorBeingLookedAt
+    local name = valid(actor) and actor:GetFullName()
+    local profile = name and loot.profile(current.map, name)
+    if not profile or not profile.lockable or actor.Locked ~= true then
+        local component = pawn.InteractionTarget_Component
+        local owner = valid(component) and component:GetOwner()
+        local focused = valid(owner) and loot.profile(current.map, owner:GetFullName())
+        if pawn.CanInteract == true and focused and focused.lockable
+            and owner.Locked == true and same(component, owner.Box) then
+            actor, name = owner, focused.name
+        else
+            name = native_stock_door.pry_target(pawn, kind)
+        end
+    end
+    if name and actor.Locked == true and (kind ~= "crowbar" or pawn.CanInteract == true) then return name end
 end
 
 local function drain_taps(current, address)
@@ -124,31 +165,30 @@ local function drain_taps(current, address)
         primary.reset()
         return 0
     end
+    local take = embedded and SilverfishPeekNativeGuestPrimaryIntent or SilverfishTakeNativeGuestPrimaryIntent
     local emitted = 0
     for _ = 1, 8 do
-        local sequence, owner, guid, kind = SilverfishTakeNativeGuestPrimaryIntent(address)
+        local sequence, owner, guid, kind = take(address)
         if not valid_sequence(sequence) or owner ~= address or guid ~= binding.guid or kind ~= binding.kind then break end
         if not can_use(current) then break end
         if kind == "blowtorch" or kind == "crowbar" then
-            local actor = current.pawn.ActorBeingLookedAt
-            local name = valid(actor) and actor:GetFullName()
-            local profile = name and loot.profile(current.map, name)
-            if not profile or not profile.lockable or actor.Locked ~= true then
-                local component = current.pawn.InteractionTarget_Component
-                local owner = valid(component) and component:GetOwner()
-                local focused = valid(owner) and loot.profile(current.map, owner:GetFullName())
-                if current.pawn.CanInteract == true and focused and focused.lockable
-                    and owner.Locked == true and same(component, owner.Box) then
-                    actor, name = owner, focused.name
-                else
-                    name = native_stock_door.pry_target(current.pawn, kind)
-                end
+            local name = pending_pry and pending_pry.sequence == sequence and pending_pry.name or pry_name(current, kind)
+            if not name then
+                pending_pry = nil
+                commit("tap", address, sequence)
+                break
             end
-            if not name or actor.Locked ~= true or (kind == "crowbar" and current.pawn.CanInteract ~= true)
-                or not emit(event_path, {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind, name}) then break end
+            if not publish("tap", event_path, current, address, sequence,
+                {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind, name}) then
+                if embedded then pending_pry = {sequence = sequence, name = name} end
+                break
+            end
+            pending_pry = nil
         elseif kind == "spade" then
             shovel_intent = {sequence = sequence, expires = os.clock() + 1.5}
-        elseif not emit(event_path, {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind}) then break end
+            commit("tap", address, sequence)
+        elseif not publish("tap", event_path, current, address, sequence,
+            {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind}) then break end
         emitted = emitted + 1
     end
     return emitted
@@ -187,11 +227,18 @@ function primary.command(fields, state, phase)
         return "stock guest primary scope cleared"
     end
     if action ~= "native-guest-primary-scope" and action ~= "native-guest-primary-input-fixture"
+        and action ~= "native-guest-primary-publication-fixture"
         and action ~= "native-guest-held-fire-fixture" and action ~= "native-guest-melee-input-fixture" then return end
     local current = context(state, phase)
     if not standing(current) then
         primary.reset()
         error("Stock primary input requires the exact standing connected guest", 0)
+    end
+    if action == "native-guest-primary-publication-fixture" then
+        if not fixtures or #fields ~= 3 or fields[3] ~= current.name or not same_context(current, binding) then
+            error("The stock primary publication readback requires the exact scoped headless guest", 0)
+        end
+        return "stock primary publication read"
     end
     -- A stock weapon lock can outlast a scope renewal. Keep the same
     -- authenticated equipment bound so input resumes when the lock clears.
@@ -289,6 +336,9 @@ function primary.command(fields, state, phase)
         or (held_enabled and kind == "smg-standard" and (type(SilverfishTakeNativeGuestHeldFireIntent) ~= "function"
             or type(SilverfishReadNativeGuestHeldFire) ~= "function"))
         or type(SilverfishSetNativeGuestPrimaryScope) ~= "function"
+        or (embedded and (type(SilverfishEnqueueLocalBridgeInput) ~= "function"
+            or type(SilverfishPeekNativeGuestPrimaryIntent) ~= "function" or type(SilverfishCommitNativeGuestPrimaryInput) ~= "function"
+            or (held_enabled and kind == "smg-standard" and type(SilverfishPeekNativeGuestHeldFireIntent) ~= "function")))
         or type(SilverfishTakeNativeGuestPrimaryIntent) ~= "function" then
         primary.reset()
         error("The authenticated stock equipment selection is unavailable", 0)
@@ -342,6 +392,14 @@ function primary.rows(state, phase, status_row)
     if melee_fixture_proof and same_context(current, melee_fixture_proof.context) and melee_fixture_proof.guid == binding.guid then
         rows[#rows + 1] = status_row("native-guest-melee-input-fixture", current.map, current.name, melee_fixture_proof.guid,
             melee_fixture_proof.sequence, melee_fixture_proof.stroke, melee_fixture_proof.edge)
+    end
+    if fixtures then
+        for channel, published in pairs(publications) do
+            if same_context(current, published.context) and published.guid == binding.guid then
+                rows[#rows + 1] = status_row("native-guest-primary-publication", current.map, current.name,
+                    binding.guid, channel, published.sequence, embedded and "memory" or "file")
+            end
+        end
     end
     return rows
 end
