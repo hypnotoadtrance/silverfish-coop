@@ -381,13 +381,15 @@ namespace
                 (profile.vox ? !exact(voice, chain_type) || voice->GetPathName() != profile.vox : voice != nullptr))
                 return nullptr;
             U::FScriptArrayHelper list(factions, factions->ContainerPtrToValuePtr<void>(cdo));
-            if (list.Num() != (profile.disguise_faction ? 1 : 0) ||
-                reputation->ContainerPtrToValuePtr<U::FScriptMap>(cdo)->Num()) return nullptr;
-            if (profile.disguise_faction)
+            if (list.Num() < 0 || list.Num() > 256 || reputation->ContainerPtrToValuePtr<U::FScriptMap>(cdo)->Num())
+                return nullptr;
+            if (profile.disguise_faction || list.Num())
             {
                 auto* faction = U::CastField<U::FByteProperty>(factions->GetInner());
-                if (!faction_property(faction) || faction->GetArrayDim() != 1 || faction->GetOffset_Internal() != 0 ||
-                    faction->GetPropertyValueInContainer(list.GetRawPtr()) != profile.disguise_faction) return nullptr;
+                if (!faction_property(faction) || faction->GetArrayDim() != 1 || faction->GetOffset_Internal() != 0)
+                    return nullptr;
+                if (profile.disguise_faction && (list.Num() != 1 ||
+                    faction->GetPropertyValueInContainer(list.GetRawPtr()) != profile.disguise_faction)) return nullptr;
             }
         }
         U::FScriptArrayHelper passives(effects, effects->ContainerPtrToValuePtr<void>(cdo));
@@ -852,8 +854,9 @@ namespace
             const auto* profile = qualify_profile(inventory.item_class(row), is_helmet, storage);
             if (!profile ||
                 inventory.weight->GetPropertyValueInContainer(row) != profile->weight) return nullptr;
-            auto* cdo = armor_defaults(*profile);
-            return cdo && (!is_helmet || stock_gear_row(inventory, row, cdo, *profile)) ? profile : nullptr;
+            // The host already owns this exact typed row. Its visual payload can
+            // differ from the defaults, while the class defines the worn stats.
+            return armor_defaults(*profile) ? profile : nullptr;
         };
         const auto empty = [&](U::FStructProperty* property, const void* row) {
             return !inventory.item_class(row) && inventory.item_guid(row) == Guid{} &&
@@ -897,7 +900,19 @@ namespace
             return profile && profile->disguise_faction == state_faction;
         };
         const bool state_torso = state_gear(torso);
-        const bool state_helmet = state_gear(helmet);
+        bool state_helmet = state_gear(helmet);
+        if (state_torso && helmet && !state_helmet)
+        {
+            auto* defaults = armor_defaults(*helmet);
+            auto* factions = field<U::FArrayProperty>(defaults, STR("DisguisableFactions"));
+            auto* faction = factions ? U::CastField<U::FByteProperty>(factions->GetInner()) : nullptr;
+            if (faction_property(faction))
+            {
+                U::FScriptArrayHelper list(factions, factions->ContainerPtrToValuePtr<void>(defaults));
+                for (int i = 0; i < list.Num(); ++i)
+                    state_helmet |= faction->GetPropertyValueInContainer(list.GetRawPtr(i)) == state_faction;
+            }
+        }
         DisguiseProjection disguise;
         if ((state_torso || state_helmet || state_gear(previous) || (remove && state_gear(selected))) && !disguise.bind(scope.pawn))
             return report(lua, false, "native_guest_armor_disguise_schema_unqualified");

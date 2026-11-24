@@ -152,6 +152,14 @@ local function rig(pawn)
     end
     local base, location = pawn:GetBaseTranslationOffset(), pawn.Mesh.RelativeLocation
     local tail_at, tail_rot = tail.RelativeLocation, tail.RelativeRotation
+    local skeletal_tail = tail:IsA(asset("/Script/Engine.SkeletalMeshComponent"))
+    local tail_base = tail:K2_GetComponentLocation()
+    if skeletal_tail then
+        local bone = FName("Tail_01", EFindName.FNAME_Find)
+        if tail:GetBoneIndex(bone) < 0 then bone = tail:GetBoneName(0) end
+        tail_base = tail:GetSocketLocation(bone)
+    end
+    local tail_gap = distance(tail_base, body:GetSocketLocation(FName("TailSocket_01", EFindName.FNAME_Find)))
     local neck = body:GetSocketLocation(head_bone)
     local helmet = body:GetSocketTransform(helmet_socket, 0)
     local math_library = asset("/Script/Engine.Default__KismetMathLibrary")
@@ -160,10 +168,11 @@ local function rig(pawn)
     local expected_location = { X = -expected.X, Y = -expected.Y, Z = -expected.Z }
     local aim = head:K2_GetComponentRotation()
     return string.format(
-        "%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%d",
+        "%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%d	%d	%.5f",
         math.sqrt(base.X^2 + base.Y^2), math.sqrt(location.X^2 + location.Y^2),
         distance(pivot:K2_GetComponentLocation(), neck), distance(actual, expected_location), aim.Roll, aim.Yaw,
-        tail_at.X, tail_at.Z, tail_rot.Yaw, pawn:K2_GetActorRotation().Yaw, pawn.CharacterMovement:IsFalling() and 1 or 0)
+        tail_at.X, tail_at.Z, tail_rot.Yaw, pawn:K2_GetActorRotation().Yaw, pawn.CharacterMovement:IsFalling() and 1 or 0,
+        skeletal_tail and 1 or 0, tail_gap)
 end
 
 local clips = {"HandGun_Idle", "HandGun_Idle_2", "HandGun_Idle_3", "Rifle_Aiming_Idle"}

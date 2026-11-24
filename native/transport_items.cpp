@@ -1425,7 +1425,8 @@ namespace
         auto* panel = object_field(screen, STR("BackpackPanel"));
         auto* floor = object_field(screen, STR("FloorPanel"));
         auto* origin = object_field(manager, STR("ActiveReturnLocation"));
-        const auto equipped_index = drop_equipment_index(manager, origin);
+        const auto worn_index = unequip_worn_slot(manager, screen, origin);
+        const auto equipped_index = worn_index ? worn_index : drop_equipment_index(manager, origin);
         if (!exact_drop_screen(manager, screen, panel) ||
             object_value(field<Unreal::FObjectProperty>(function, STR("InventoryWidget")), parameters) != floor) return;
         const bool tracked_split = host_split_drag.manager.Get() == manager &&
@@ -1641,7 +1642,7 @@ namespace
         const auto candidate = card_item(card);
         const bool unequipping = action == "unequip";
         const bool unload = action == "take-ammo";
-        const auto worn_drop = !scope.host && action.empty() && host_drop_scope.stock_inventory
+        const auto worn_drop = action.empty() && (scope.host || host_drop_scope.stock_inventory)
             ? unequip_worn_slot(manager, screen, candidate.panel) : std::nullopt;
         const auto equipped_index = worn_drop ? worn_drop : unequipping
             ? unequip_source_slot(manager, screen, candidate.panel) : drop_equipment_index(manager, candidate.panel);
@@ -1690,7 +1691,7 @@ namespace
                                       !using_item && action != "equip" && !unequipping && !unload)) return;
         Unreal::UObject* prior_held{};
         if (unequipping) prior_held = selected_unequip_actor(save, item_class, *equipped_index);
-        else if (!unload && equipped_index && !worn_drop)
+        else if (!unload && equipped_index && (!worn_drop || scope.host))
         {
             auto* hover = field<Unreal::FObjectProperty>(manager, STR("HoveredCard"));
             auto* begin = stock_no_args(manager, Unreal::FName(STR("InitiateItemTake")));
@@ -1704,7 +1705,7 @@ namespace
         }
         const auto count = (stack || unload) ? saved_ammo : 1;
         const auto entry = !action.empty() ? action :
-            worn_drop ? (from_menu ? "worn_drop_context_menu" : "worn_drop_ctrl_click") :
+            worn_drop && !scope.host ? (from_menu ? "worn_drop_context_menu" : "worn_drop_ctrl_click") :
             equipped_index ? (from_menu ? "equipped_context_menu" : "equipped_ctrl_click") :
                              (from_menu ? "context_menu" : "ctrl_click");
         const auto worn = action == "equip" ? worn_destination(item_class) : std::optional<int>{};

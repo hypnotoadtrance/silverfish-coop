@@ -181,6 +181,7 @@ function view.clear_body(entry)
 end
 
 function view.clear(entry)
+    entry.tail_pending = nil
     for _, key in ipairs({"plumage", "tail_static", "tail_skeletal"}) do
         local component = entry[key]
         if valid(component) and valid(entry.pawn) then component:K2_DestroyComponent(entry.pawn) end
@@ -190,6 +191,25 @@ end
 
 function view.body(cosmetics, asset)
     return checked_asset(cosmetics.assets[3], 3, asset)
+end
+
+function view.align_tail(entry)
+    local component = entry.tail_skeletal
+    if not entry.tail_pending or not valid(component) then return end
+    local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+    if not valid(math_api) or component:GetNumBones() < 1 then return end
+    local base = FName("Tail_01", EFindName.FNAME_Find)
+    if component:GetBoneIndex(base) < 0 then base = component:GetBoneName(0) end
+    local source = component:GetSocketTransform(base, 2).Translation
+    local scale = component.RelativeScale3D
+    local rotation = {Pitch = 0, Yaw = -10, Roll = 0}
+    local offset = math_api:GreaterGreater_VectorRotator(
+        {X = source.X * scale.X, Y = source.Y * scale.Y, Z = source.Z * scale.Z}, rotation)
+    -- Keep the first deforming tail bone on the actual body socket. The
+    -- character preview's component offset includes its separate display rig.
+    component:K2_SetRelativeLocationAndRotation({X = -offset.X, Y = -offset.Y, Z = -offset.Z},
+        rotation, false, {}, true)
+    entry.tail_pending = nil
 end
 
 function view.apply(entry, cosmetics, model, asset, add_component)
@@ -234,10 +254,7 @@ function view.apply(entry, cosmetics, model, asset, add_component)
         elseif tail_skeletal then
             local component = add_component(entry, "tail_skeletal", entry.body, "TailSocket_01", true)
             set_mesh(component, tail_skeletal, true)
-            -- PlayerCharacter_ViewModel's skeletal tail root is offset from the
-            -- socket. The stock static tail already has its origin at the socket.
-            component:K2_SetRelativeLocationAndRotation({X = 21.374724, Y = 0, Z = -7.291765},
-                {Pitch = 0, Yaw = -10, Roll = 0}, false, {}, true)
+            entry.tail_pending = true
             tint(component, colors)
         end
     end

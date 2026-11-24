@@ -30,6 +30,10 @@ local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local ammo_field = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local weight_field = "Weight_12_11AB9ED547504E78A849A692A36DC938"
+local stock_selector = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:ToggleSemiAuto"
+local mode_watch, mode_hook, mode_projection, projecting_mode
+local mode_sequence = 0
+local mode_pending, local_modes = {}, {}
 
 local function same(left, right)
     return left and right and left:IsValid() and right:IsValid() and left:GetAddress() == right:GetAddress()
@@ -107,6 +111,121 @@ local function equipped_guid(pawn, save, world, area)
         end
     end
     return guid, weapon_profiles.kinds[class_name], row
+end
+
+local function automatic_weapon(pawn)
+    local save, held = pawn.Save, pawn.EquipedItem
+    if not same(save, save) or not owned_hold(pawn, save, held) or held.HasSelectFire ~= true
+        or type(held.SemiAutoSelected) ~= "boolean" then return end
+    local guid, kind = equipped_guid(pawn, save)
+    if guid and weapon_profiles.automatic[kind] then return guid, kind, held end
+end
+
+local function mode_key(guid, add)
+    return FName("SFCoopFireMode_" .. guid, add and EFindName.FNAME_Add or EFindName.FNAME_Find)
+end
+
+local function saved_mode(save, guid, class)
+    local key = mode_key(guid, false)
+    if key:GetComparisonIndex() ~= 0 and save.Flags:Contains(key) then
+        return save.Flags:Find(key):get() == 1 and "semi" or "auto"
+    end
+    return class:GetCDO().SemiAutoSelected == true and "semi" or "auto"
+end
+
+local function remember_mode(fields, state, phase)
+    local name, guid, mode = fields[3], fields[4], fields[5]
+    if not enabled or phase ~= "hosting" or #fields ~= 5 or #guid ~= 32 or guid:find("[^0-9A-F]")
+        or (mode ~= "semi" and mode ~= "auto") then error("guest_fire_mode_unavailable", 0) end
+    local pawn, save = guest_save.exact_item_context(state, phase, name)
+    if not pawn or not save then error("guest_fire_mode_unavailable", 0) end
+    local matched
+    -- A mode change can arrive just after the guest switches slots. Keep it with the owned GUID.
+    for _, array in ipairs({save.PlayerEquipment, save.PlayerBackpack}) do
+        local size = array:GetArrayNum()
+        if size > 4096 then error("guest_fire_mode_unavailable", 0) end
+        for index = 1, size do
+            local row = array[index]
+            if item_identity(row) == guid then
+                local class = row[class_field]
+                local path = class and class:IsValid() and class:GetFullName():match("^%S+ (%S+)$")
+                if matched or not path or not weapon_profiles.automatic[weapon_profiles.kinds[path]] then
+                    error("guest_fire_mode_unavailable", 0)
+                end
+                matched = class
+            end
+        end
+    end
+    if not matched then error("guest_fire_mode_item_missing", 0) end
+    if saved_mode(save, guid, matched) == mode then return mode end
+    local stock = matched:GetCDO().SemiAutoSelected == true and "semi" or "auto"
+    if mode ~= stock then
+        local key, value = mode_key(guid, true), mode == "semi" and 1 or 0
+        if save.Flags:Contains(key) then save.Flags:Find(key):Set(value) else save.Flags:Add(key, value) end
+    else
+        local key = mode_key(guid, false)
+        if key:GetComparisonIndex() ~= 0 and save.Flags:Contains(key) then save.Flags:Remove(key) end
+    end
+    if saved_mode(save, guid, matched) ~= mode then error("guest_fire_mode_write_unverified", 0) end
+    return mode
+end
+
+local function update_mode_watch(state, phase)
+    local detail = phase == "connected" and state.server == true and state.local_pawn
+    local pawn = detail and detail.pawn
+    if not pawn or not pawn:IsValid() or pawn:HasAuthority() or not pawn:IsLocallyControlled() then
+        pawn = nil
+    end
+    if not pawn or not mode_watch or not same(mode_watch.pawn, pawn) or not same(mode_watch.world, state.world) then
+        mode_watch = pawn and {pawn = pawn, world = state.world, name = detail.name, area = state.map} or nil
+        mode_projection, mode_pending, local_modes = nil, {}, {}
+    end
+    if mode_watch and not mode_hook and automatic_weapon(pawn) then
+        local selector = StaticFindObject(stock_selector)
+        if selector and selector:IsValid() then
+            RegisterHook(stock_selector, function(context)
+                if projecting_mode or not mode_watch then return end
+                local owner = mode_watch.pawn
+                if not owner:IsValid() or owner.Dead or not same(owner:GetWorld(), mode_watch.world) then return end
+                local guid, _, held = automatic_weapon(owner)
+                if not guid or not same(held, context:get()) then return end
+                local mode = held.SemiAutoSelected and "semi" or "auto"
+                mode_sequence = mode_sequence + 1
+                mode_pending[guid] = {sequence = mode_sequence, mode = mode}
+                local_modes[guid] = mode
+                mode_projection = held
+            end)
+            mode_hook = true
+        end
+    end
+end
+
+function guest_weapon.project_fire_mode(state, phase, guid, mode)
+    update_mode_watch(state, phase)
+    if not mode_watch then error("guest_fire_mode_view_unavailable", 0) end
+    local selected, _, held = automatic_weapon(mode_watch.pawn)
+    if selected ~= guid or not held then error("guest_fire_mode_view_unavailable", 0) end
+    -- A late host frame must not overwrite a local selector change on the current item.
+    if same(mode_projection, held) then return "stock fire mode projected" end
+    local semi = (local_modes[guid] or mode) == "semi"
+    if held.SemiAutoSelected ~= semi then
+        projecting_mode = true
+        local changed = pcall(function() held:ToggleSemiAuto() end)
+        projecting_mode = false
+        if not changed or held.SemiAutoSelected ~= semi then error("guest_fire_mode_view_unverified", 0) end
+    end
+    mode_projection = held
+    return "stock fire mode projected"
+end
+
+local function acknowledge_mode(fields, state, phase)
+    update_mode_watch(state, phase)
+    if #fields ~= 6 or not mode_watch or mode_watch.area ~= fields[3] or mode_watch.name ~= fields[4] then
+        error("guest_fire_mode_view_unavailable", 0)
+    end
+    local pending = mode_pending[fields[5]]
+    if pending and pending.sequence == tonumber(fields[6]) then mode_pending[fields[5]] = nil end
+    return "stock fire mode acknowledged"
 end
 
 function guest_weapon.clear_empty_slot_hold(pawn, save)
@@ -190,6 +309,8 @@ function guest_weapon.preserve_magazine(pawn, save, projected, selected_slot)
 end
 
 function guest_weapon.command(fields, state, phase)
+    if fields[2] == "native-guest-weapon-mode-store" then return remember_mode(fields, state, phase) end
+    if fields[2] == "native-guest-weapon-mode-ack" then return acknowledge_mode(fields, state, phase) end
     if fields[2] == "native-guest-weapon-magazine" then return project_magazine(fields, state, phase) end
     if fields[2] == "native-guest-weapon-reload-view" then return play_reload(fields, state, phase) end
     local action = fields[2]:match("^native%-guest%-weapon%-([a-z%-]+)$")
@@ -306,6 +427,7 @@ end
 
 function guest_weapon.rows(state, phase, status_row)
     local rows = {}
+    update_mode_watch(state, phase)
     if not state.listening then return rows end
     if phase == "connected" and state.server == true and type(SilverfishReadLocalGuestEquipmentSelection) == "function" then
         local local_pawn = state.local_pawn
@@ -316,23 +438,27 @@ function guest_weapon.rows(state, phase, status_row)
                 rows[1] = status_row("native-guest-equipment-selection", state.map, local_pawn.name, sequence, guid)
             end
         end
+        for guid, pending in pairs(mode_pending) do
+            rows[#rows + 1] = status_row("native-guest-fire-mode", state.map, local_pawn.name, pending.sequence, guid, pending.mode)
+        end
         return rows
     end
     if not enabled or phase ~= "hosting" then return rows end
     for _, detail in ipairs(state.guests) do
-        local ok, guid, kind, rounds = pcall(function()
+        local ok, guid, kind, rounds, mode = pcall(function()
             local pawn, save = guest_save.exact_item_context(state, phase, detail.name)
             if not pawn or not save then return end
             local id, profile, row = equipped_guid(pawn, save, state.world, state.map)
             local held = row and pawn.EquipedItem
             local amount = row and row[ammo_field]
             if held and weapon_profiles.paths[profile] and amount == held.Ammo and valid_rounds(held, amount) then
-                return id, profile, amount
+                local mode = weapon_profiles.automatic[profile] and saved_mode(save, id, row[class_field])
+                return id, profile, amount, mode
             end
             return id, profile
         end)
         if ok and guid and kind then
-            rows[#rows + 1] = status_row("native-guest-equipped-weapon", detail.name, guid, kind, rounds or "-")
+            rows[#rows + 1] = status_row("native-guest-equipped-weapon", detail.name, guid, kind, rounds or "-", mode or "-")
         end
     end
     local row = observation

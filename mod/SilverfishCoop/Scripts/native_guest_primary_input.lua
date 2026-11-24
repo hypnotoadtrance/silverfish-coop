@@ -326,11 +326,13 @@ function primary.command(fields, state, phase)
         return "stock guest primary input verified"
     end
 
-    local guid, kind, quest = fields[5], fields[6], fields[7]
+    local guid, kind, extra = fields[5], fields[6], fields[7]
     local camera = kind == "camera"
+    local mode = weapon_profiles.automatic[kind] and extra
     local melee = melee_kinds[kind]
-    if #fields ~= (camera and 7 or 6) or fields[3] ~= current.map or fields[4] ~= current.name or not valid_guid(guid)
-        or (camera and (current.map ~= camera_map or quest ~= camera_quest))
+    if #fields ~= ((camera or mode) and 7 or 6) or fields[3] ~= current.map or fields[4] ~= current.name or not valid_guid(guid)
+        or (camera and (current.map ~= camera_map or extra ~= camera_quest))
+        or (mode and mode ~= "semi" and mode ~= "auto")
         or (not camera and not melee and kind ~= "blowtorch" and kind ~= "crowbar" and kind ~= "spade"
             and not weapon_profiles.paths[kind])
         or (held_enabled and weapon_profiles.automatic[kind] and (type(SilverfishTakeNativeGuestHeldFireIntent) ~= "function"
@@ -346,11 +348,12 @@ function primary.command(fields, state, phase)
     if binding and (not same_context(current, binding) or binding.guid ~= guid or binding.kind ~= kind) then
         primary.reset()
     end
+    if mode then require("native_guest_weapon").project_fire_mode(state, phase, guid, mode) end
     local accepted, status
     if camera then
         if not valid(StaticFindObject(camera_path)) then LoadAsset(camera_path) end
         accepted, status = SilverfishSetNativeGuestPrimaryScope(current.pawn:GetAddress(),
-            current.controller:GetAddress(), current.world:GetAddress(), guid, kind, quest)
+            current.controller:GetAddress(), current.world:GetAddress(), guid, kind, extra)
     else
         accepted, status = SilverfishSetNativeGuestPrimaryScope(current.pawn:GetAddress(),
             current.controller:GetAddress(), current.world:GetAddress(), guid, kind)

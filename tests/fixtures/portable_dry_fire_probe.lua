@@ -12,12 +12,15 @@ local arm_profiles = {
     ["arm-rusty"] = {"/Game/Classes/Weapons/Wep_RustyPistol.Wep_RustyPistol_C", reserve_9mm, 9, 2},
     ["arm-light-ar"] = {"/Game/Classes/Weapons/Wep_LightAR_01.Wep_LightAR_01_C",
         "/Game/Classes/Items/Ammo_IntrRifle_BP.Ammo_IntrRifle_BP_C", 7, 3},
+    ["arm-nagant"] = {"/Game/Classes/Weapons/Wep_Nagant_01.Wep_Nagant_01_C", reserve_9mm, 0, 6},
+    ["arm-obrez"] = {"/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C", reserve_9mm, 0, 7},
 }
 local weapon_path, reserve_path, reserve_units, slot
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local payload = "DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"
+local skeletal_tail = "/Game/Classes/NPCs/NPC_Assets/NPC_Tails/SK_Tail_01.SK_Tail_01"
 local last, local_pawn, peer, failure, world_address
 local hooked = false
 local clicks, projectiles, shot_sounds, muzzle_flashes = {}, 0, 0, 0
@@ -62,6 +65,7 @@ local function arm()
     local statics = asset("/Script/Engine.Default__GameplayStatics")
     local_pawn = statics:GetPlayerPawn(world, 0)
     assert(valid(local_pawn) and local_pawn:IsLocallyControlled() and same(local_pawn:GetWorld(), world), "expected local stock pawn")
+    peer = nil
     for _, pawn in ipairs(FindAllOf("Player_FP_C") or {}) do
         if valid(pawn) and same(pawn:GetWorld(), world) and not pawn:IsActorBeingDestroyed() and not pawn:IsLocallyControlled() then
             assert(not peer, "duplicate remote stock pawn")
@@ -170,7 +174,78 @@ local function seed_reserve(extra)
     return read_reserve(peer)
 end
 
-local function run(action)
+local function meshes(actor)
+    local items = {}
+    local static = asset("/Script/Engine.StaticMeshComponent")
+    local skeletal = asset("/Script/Engine.SkeletalMeshComponent")
+    for _, part in ipairs(actor:K2_GetComponentsByClass(asset("/Script/Engine.MeshComponent"))) do
+        if type(part) == "userdata" and part:type() == "RemoteUnrealParam" then part = part:get() end
+        if valid(part) and part:IsVisible() and not part.bHiddenInGame then
+            local mesh = part:IsA(static) and part.StaticMesh or part:IsA(skeletal) and part.SkinnedAsset
+            if valid(mesh) then items[#items + 1] = {component = part, path = mesh:GetFullName()} end
+        end
+    end
+    return items
+end
+
+local function rifle_grip(argument)
+    assert(observing())
+    local weapon = peer.EquipedItem
+    local hand_socket = FName("Weapon_Socket01", EFindName.FNAME_Find)
+    local left = FName("LeftHand", EFindName.FNAME_Find)
+    local index = FName("LeftHandIndex1", EFindName.FNAME_Find)
+    local math_api = asset("/Script/Engine.Default__KismetMathLibrary")
+    local stock_mesh, grip
+    if argument and argument ~= "" then
+        local path, x, y, z = argument:match("^(%a+ /Game/[%w_./%-]+);([%-%.%d]+),([%-%.%d]+),([%-%.%d]+)$")
+        assert(path and tonumber(x) and tonumber(y) and tonumber(z))
+        stock_mesh, grip = path, {X = tonumber(x), Y = tonumber(y), Z = tonumber(z)}
+    else
+        if not valid(weapon) or not same(weapon:GetClass(), asset(weapon_path)) then return "waiting:weapon" end
+        local frame, root, marker = weapon.Mesh_Frame, weapon.RootComponent, weapon.Arrow_Forgrip
+        if not valid(frame) or not valid(root) or not valid(marker) or not valid(frame.StaticMesh) then return "waiting:marker" end
+        stock_mesh = frame.StaticMesh:GetFullName()
+        grip = math_api:InverseTransformLocation(root:K2_GetComponentToWorld(), marker:K2_GetComponentLocation())
+    end
+    local witness = "waiting:frame"
+    for _, item in ipairs(meshes(peer)) do
+        if item.path == stock_mesh then
+            local part = item.component
+            local anchor = part:GetAttachParent()
+            local pivot = valid(anchor) and anchor:GetAttachParent()
+            for _ = 1, 3 do
+                if not valid(pivot) or pivot:GetAttachSocketName():ToString() == "Weapon_Socket01" then break end
+                anchor, pivot = pivot, pivot:GetAttachParent()
+            end
+            witness = "waiting:foregrip-pivot"
+            if valid(pivot) and pivot:GetAttachSocketName():ToString() == "Weapon_Socket01" then
+                local body = pivot:GetAttachParent()
+                local instance = valid(body) and body.AnimScriptInstance
+                local clip = valid(instance) and instance.CurrentAsset
+                witness = "waiting:" .. (valid(clip) and clip:GetFullName() or "animation")
+                if valid(clip) and clip:GetFullName():find("Rifle_Lowered_BlendSpace", 1, true) then
+                    local wrist, knuckle = body:GetSocketLocation(left), body:GetSocketLocation(index)
+                    local palm = {X = (wrist.X + knuckle.X) * .5, Y = (wrist.Y + knuckle.Y) * .5,
+                        Z = (wrist.Z + knuckle.Z) * .5}
+                    local baseline = math_api:TransformLocation(body:GetSocketTransform(hand_socket, 0), grip)
+                    local actual = math_api:TransformLocation(anchor:K2_GetComponentToWorld(), grip)
+                    local function distance(a, b)
+                        return math.sqrt((a.X-b.X)^2 + (a.Y-b.Y)^2 + (a.Z-b.Z)^2)
+                    end
+                    local angle = pivot.RelativeRotation
+                    local from_pivot = math_api:TransformLocation(pivot:K2_GetComponentToWorld(), grip)
+                    local from_root = math_api:InverseTransformLocation(body:GetSocketTransform(hand_socket, 0), palm)
+                    return ("%.3f,%.3f,%.3f;%.3f,%.3f,%.3f;%.3f,%.3f,%.3f;%.3f,%.3f,%.3f"):format(
+                        distance(baseline, palm), distance(actual, palm), distance(from_pivot, palm),
+                        angle.Pitch, angle.Yaw, angle.Roll, grip.X, grip.Y, grip.Z, from_root.X, from_root.Y, from_root.Z)
+                end
+            end
+        end
+    end
+    return witness
+end
+
+local function run(action, argument)
     if arm_profiles[action] then
         weapon_path, reserve_path, reserve_units, slot = table.unpack(arm_profiles[action])
         return arm()
@@ -189,6 +264,70 @@ local function run(action)
     end
     if action == "ready" then return ready(local_pawn) end
     if action == "peer-ready" then return ready(peer) end
+    if action == "rifle-grip" then return rifle_grip(argument) end
+    if action == "rifle-witness" then
+        assert(observing() and ready(local_pawn) ~= "waiting")
+        local weapon = local_pawn.EquipedItem
+        local math_api = asset("/Script/Engine.Default__KismetMathLibrary")
+        local grip = math_api:InverseTransformLocation(weapon.RootComponent:K2_GetComponentToWorld(),
+            weapon.Arrow_Forgrip:K2_GetComponentLocation())
+        local parts = meshes(weapon)
+        assert(parts[1], "the rifle has no visible stock mesh")
+        return ("%s;%.4f,%.4f,%.4f"):format(parts[1].path, grip.X, grip.Y, grip.Z)
+    end
+    if action == "host-tail" then
+        assert(observing() and local_pawn:HasAuthority()
+            and same(local_pawn.Save, local_pawn:GetWorld().OwningGameInstance.SaveSlot_Ref))
+        local appearance = local_pawn.Save.Character
+        appearance.Mesh_Tail_SM_74_4FD875FB4D8D71A94E98888810B6EA64 = nil
+        appearance.Mesh_Tail_SK_77_F2B7A1A441682020D88D3AA95D84A47E = asset(skeletal_tail)
+        return "styled"
+    end
+    if action == "tail-witness" then
+        assert(observing())
+        local socket, root = FName("TailSocket_01", EFindName.FNAME_Find), FName("Tail_01", EFindName.FNAME_Find)
+        for _, part in ipairs(peer:K2_GetComponentsByClass(asset("/Script/Engine.SkeletalMeshComponent"))) do
+            if type(part) == "userdata" and part:type() == "RemoteUnrealParam" then part = part:get() end
+            if same(part.SkinnedAsset, asset(skeletal_tail)) and part:GetAttachSocketName():ToString() == "TailSocket_01"
+                and part:GetBoneIndex(root) >= 0 and part.RelativeRotation.Yaw < -9 then
+                local source = part:GetSocketLocation(root)
+                local target = part:GetAttachParent():GetSocketLocation(socket)
+                return ("%.4f"):format(math.sqrt((source.X-target.X)^2 + (source.Y-target.Y)^2 + (source.Z-target.Z)^2))
+            end
+        end
+        return "waiting"
+    end
+    if action == "stand" then
+        local_pawn:UnCrouch(false)
+        return "standing"
+    end
+    if action == "aim" then
+        assert(observing() and not local_pawn:HasAuthority() and ready(local_pawn) ~= "waiting")
+        local input = asset("/Game/Classes/Player/Player_Inputs/IA_Use_Secondary.IA_Use_Secondary")
+        local value = asset("/Script/EnhancedInput.Default__EnhancedInputLibrary"):MakeInputActionValueOfType(1, 0, 0, 0)
+        local_pawn:InpActEvt_IA_Use_Secondary_K2Node_EnhancedInputActionEvent_33(value, 0, 0, input)
+        return local_pawn.Aiming and "aiming" or "waiting"
+    end
+    if action == "light-ar-read-mode" then
+        local held = local_pawn.EquipedItem
+        if not valid(held) or not same(held:GetClass(), asset(weapon_path)) then return "waiting" end
+        return held.SemiAutoSelected and "semi" or "auto"
+    end
+    if action == "put-away" or action == "other-ready" then
+        local other_slot = arm_profiles["arm-rusty"][4]
+        local row = local_pawn.Save.PlayerEquipment[other_slot]
+        local class = asset(arm_profiles["arm-rusty"][1])
+        assert(observing() and not local_pawn:HasAuthority() and same(row[item_class], class),
+            "the paired Rusty Pistol slot is required")
+        if action == "put-away" then
+            local_pawn:Equip_NextItem(other_slot - 1, false)
+            return "changing"
+        end
+        local held = local_pawn.EquipedItem
+        if local_pawn.Save.PlayerEquipIndex == other_slot - 1 and valid(held) and same(held:GetClass(), class)
+            and same(held:GetOwner(), local_pawn) then return "other" end
+        return "waiting"
+    end
     if action == "light-ar-semi" or action == "light-ar-auto" then
         assert(observing() and not local_pawn:HasAuthority() and weapon_path == arm_profiles["arm-light-ar"][1]
             and ready(local_pawn) ~= "waiting", "the guest LightAR must be selected")
@@ -242,13 +381,13 @@ end
 LoopInGameThreadWithDelay(40, function()
     local request = io.open(prefix .. "command.tsv", "rb")
     if not request then return end
-    local data = request:read(96)
+    local data = request:read(384)
     request:close()
     if not data then return end
-    local ticket, action = data:match("^(%x+)\t([a-z%-]+)$")
+    local ticket, action, argument = data:match("^(%x+)\t([a-z%-]+)\t?(.*)$")
     if not ticket or #ticket ~= 32 or ticket == last then return end
     last = ticket
-    local ok, response = pcall(run, action)
+    local ok, response = pcall(run, action, argument)
     local output = assert(io.open(prefix .. "reply.tsv", "wb"))
     local message = tostring(response):gsub("[\r\n\t]", " ")
     output:write(ticket, "\t", ok and "ok" or "error", "\t", message)

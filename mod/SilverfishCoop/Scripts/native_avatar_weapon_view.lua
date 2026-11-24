@@ -27,6 +27,7 @@ local active_recoil = {}
 local kick_time = .05
 local stock_recheck_seconds = .2
 local max_stock_components = 24
+local zero_rotation = {Pitch = 0, Yaw = 0, Roll = 0}
 local identity = {
     Rotation = { X = 0, Y = 0, Z = 0, W = 1 },
     Translation = { X = 0, Y = 0, Z = 0 },
@@ -73,6 +74,14 @@ function view.decode(model)
     if model == "-" then return {} end
     if type(model) ~= "string" or #model > 4096 or model == "" then return end
     local shape, mode = lighter.split(model)
+    local grip
+    local mesh_shape, x, y, z = shape:match("^(.-)%^(%-?%d%d?%.%d%d),(%-?%d%d?%.%d%d),(%-?%d%d?%.%d%d)$")
+    if mesh_shape then
+        x, y, z = tonumber(x), tonumber(y), tonumber(z)
+        local length = math.sqrt(x*x + y*y + z*z)
+        if mode or length < 10 or length > 80 then return end
+        shape, grip = mesh_shape, {offset = {X = x, Y = y, Z = z}, length = length}
+    end
     local parts, has_rig, needs_rig = {}, false, false
     for encoded in (shape .. "|"):gmatch("([^|]*)|") do
         local fields = {}
@@ -97,7 +106,7 @@ function view.decode(model)
     if needs_rig and not has_rig then return end
     if mode and (#parts ~= 2 or parts[1].kind ~= "s" or parts[2].kind ~= "s"
         or parts[1].socket or parts[2].socket or parts[1].path ~= lighter.body_path or parts[2].path ~= lighter.lid_path) then return end
-    return parts, mode, shape
+    return parts, mode, shape, grip
 end
 
 local function encode_pose(location, rotation, scale)
@@ -224,6 +233,15 @@ function view.observe(pawn, save, cached)
     if #parts == 0 or #parts == 1 and rig_description and rig_description:sub(1, 1) == "h" then return "-", nil end
     table.sort(parts)
     local model = table.concat(parts, "|")
+    local gun, foregrip = StaticFindObject(firearm_type), equipment.Arrow_Forgrip
+    if valid(gun) and equipment:IsA(gun) and equipment.ItemType ~= 3
+        and valid(foregrip) and same(foregrip:GetOwner(), equipment) then
+        local offset = math_api:InverseTransformLocation(root_transform, foregrip:K2_GetComponentLocation())
+        local length = math.sqrt(offset.X^2 + offset.Y^2 + offset.Z^2)
+        if length >= 10.02 and length <= 79.98 then
+            model = model .. ("^%.2f,%.2f,%.2f"):format(offset.X, offset.Y, offset.Z)
+        end
+    end
     return model, { actor = equipment, model = model }
 end
 
@@ -330,11 +348,15 @@ function view.clear(entry)
     entry.stock_weapon_check_at = nil
     active_recoil[entry] = nil
     active_cycle[entry] = nil
-    for _, component in ipairs(entry.weapon_parts or {}) do
+    local parts = entry.weapon_parts
+    for index = parts and #parts or 0, 1, -1 do
+        local component = parts[index]
         if valid(component) and valid(entry.pawn) then component:K2_DestroyComponent(entry.pawn) end
     end
     if valid(entry.weapon_anchor) and valid(entry.pawn) then entry.weapon_anchor:K2_DestroyComponent(entry.pawn) end
+    if valid(entry.rifle_pivot) and valid(entry.pawn) then entry.rifle_pivot:K2_DestroyComponent(entry.pawn) end
     entry.weapon_parts, entry.weapon_model, entry.weapon_anchor, entry.weapon_rig = nil, nil, nil, nil
+    entry.rifle_pivot, entry.rifle_grip, entry.rifle_rotated = nil, nil, nil
     entry.weapon_shape, entry.weapon_meshes = nil, nil
     entry.weapon_stance = nil
     entry.weapon_slide = nil
@@ -427,7 +449,7 @@ end
 function view.apply(entry, model, firearm)
     firearm = firearm or "-"
     if entry.weapon_model == model and entry.firearm_class == firearm then return end
-    local parts, mode, shape = view.decode(model)
+    local parts, mode, shape, grip = view.decode(model)
     if not parts or mode and firearm ~= "-" then error("Invalid stock held weapon model") end
     if mode and entry.lighter and entry.weapon_shape == shape and entry.firearm_class == firearm then
         lighter.apply(entry, mode)
@@ -453,11 +475,58 @@ function view.apply(entry, model, firearm)
             local base = StaticFindObject(firearm_type)
             if valid(defaults) and valid(base) and defaults:IsA(base) then
                 entry.weapon_stance = defaults.ItemType == 3 and "pistol" or "rifle"
+                if entry.weapon_stance == "rifle" then entry.rifle_grip = grip end
             end
         end
     end
     if mode then lighter.apply(entry, mode) end
     entry.weapon_model, entry.weapon_shape = model, shape
+end
+
+function view.rifle_idle(entry, idle, api, add_pivot)
+    local pivot, grip = entry.rifle_pivot, entry.rifle_grip
+    local anchor, body = entry.weapon_anchor, entry.body
+    if idle and grip and valid(anchor) then
+        local hand = FName("LeftHand", EFindName.FNAME_Find)
+        local socket = FName("Weapon_Socket01", EFindName.FNAME_Find)
+        if body:DoesSocketExist(hand) then
+            local palm = body:GetSocketLocation(hand)
+            local index = FName("LeftHandIndex1", EFindName.FNAME_Find)
+            if body:DoesSocketExist(index) then
+                local knuckle = body:GetSocketLocation(index)
+                palm = {X = (palm.X + knuckle.X) * .5, Y = (palm.Y + knuckle.Y) * .5, Z = (palm.Z + knuckle.Z) * .5}
+            end
+            local target = api:InverseTransformLocation(body:GetSocketTransform(socket, 0), palm)
+            local source = grip.offset
+            local lengths = grip.length * math.sqrt(target.X^2 + target.Y^2 + target.Z^2)
+            local dot = source.X*target.X + source.Y*target.Y + source.Z*target.Z
+            -- Only adjust a genuine two-handed pose. A lowered arm or the
+            -- opposite side of the body should never swing the weapon around.
+            if lengths > 1 and dot > lengths * .5 then
+                if not valid(pivot) then
+                    pivot = add_pivot(entry, "rifle_pivot", body, "Weapon_Socket01")
+                    if not anchor:K2_AttachToComponent(pivot, FName("None", EFindName.FNAME_Find), 0, 0, 0, false) then
+                        pivot:K2_DestroyComponent(entry.pawn)
+                        entry.rifle_pivot = nil
+                        return
+                    end
+                end
+                local x = source.Y*target.Z - source.Z*target.Y
+                local y = source.Z*target.X - source.X*target.Z
+                local z = source.X*target.Y - source.Y*target.X
+                local w = lengths + dot
+                local norm = math.sqrt(x*x + y*y + z*z + w*w)
+                local rotation = api:Quat_Rotator({X = x / norm, Y = y / norm, Z = z / norm, W = w / norm})
+                pivot:K2_SetRelativeRotation(rotation, false, {}, true)
+                entry.rifle_rotated = true
+                return
+            end
+        end
+    end
+    if entry.rifle_rotated and valid(pivot) then
+        pivot:K2_SetRelativeRotation(zero_rotation, false, {}, true)
+        entry.rifle_rotated = nil
+    end
 end
 
 function view.recoil(entry, world, path, serial, values)

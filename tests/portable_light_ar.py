@@ -11,7 +11,7 @@ from tools.silverfish.guest_weapon_profiles import FIREARMS, FIVE_SIX_FMJ
 from tools.silverfish.travel import OBSERVATORY
 
 
-async def verify_stock_light_ar(host, guest, pawn, probe):
+async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
     profile = next(weapon for weapon in FIREARMS if weapon.kind == "light-ar-01")
     assert profile.magazine.ammo == FIVE_SIX_FMJ
     units = FIVE_SIX_FMJ.fixture_units
@@ -60,6 +60,33 @@ async def verify_stock_light_ar(host, guest, pawn, probe):
                     return terminal
                 await asyncio.sleep(.06)
 
+    async def persisted_mode(guid, mode):
+        await wait_resident_status(
+            host_run, lambda status: (weapon := status.get("game", {}).get("native_guest_equipped_weapons", {}).get(pawn, {}))
+            and (weapon.get("guid"), weapon.get("fire_mode")) == (guid, mode))
+
+    async def measured_grip(observer, stock_readback=None):
+        action = "rifle-grip" + (f"\t{stock_readback}" if stock_readback else "")
+        reading = None
+        try:
+            async with asyncio.timeout(8):
+                while True:
+                    reading = await command(observer, action)
+                    if not reading.startswith("waiting:"):
+                        baseline, anchor_gap, adjusted = map(float, reading.split(";")[0].split(","))
+                        if adjusted <= baseline + .1 and adjusted < 16 and abs(adjusted - anchor_gap) < .5:
+                            return {"stock_gap_cm": baseline, "adjusted_gap_cm": adjusted}
+                    await asyncio.sleep(.05)
+        except TimeoutError as error:
+            raise AssertionError(f"The observer had no settled stock foregrip: {reading}") from error
+
+    async def observing_pose(kind, *clips, previous_meshes=None):
+        return await wait_resident_status(
+            host_run, lambda frame: (avatar := frame.get("game", {}).get("native_player_avatars", {}).get(pawn, {}))
+            and avatar.get("pose_clip") in clips and (avatar.get("weapon_socket_height") or 0) > 0
+            and avatar.get("weapon_meshes") and avatar["weapon_meshes"] != previous_meshes
+            and frame["game"].get("native_guest_equipped_weapons", {}).get(pawn, {}).get("kind") == kind, timeout=12)
+
     try:
         host_armed, guest_armed = await asyncio.gather(command(host, "arm-light-ar"), command(guest, "arm-light-ar"))
         assert host_armed == guest_armed == "armed", (host_armed, guest_armed)
@@ -77,6 +104,17 @@ async def verify_stock_light_ar(host, guest, pawn, probe):
         assert await command(guest, "face-away") == "turned"
         assert await command(host, "clear") == "clear"
         assert await command(guest, "light-ar-semi") == "light-ar-semi"
+        await persisted_mode(guid, "semi")
+        grip, nagant_grip, tail_gap, obrez_switch = None, None, None, False
+        if re_equip:
+            assert await command(guest, "stand") == "standing"
+            grip = await measured_grip(host)
+            await wait_readback(guest, "aim", "aiming")
+            assert await command(guest, "put-away") == "changing"
+            await wait_readback(guest, "other-ready", "other")
+            assert await command(guest, "equip") == "selected"
+            await persisted_mode(guid, "semi")
+            await wait_readback(guest, "light-ar-read-mode", "semi")
         denied = await submit(guest_run, native_smg_hold.LOCAL_FIXTURE, target="press")
         if denied["ok"]:
             await submit(guest_run, native_smg_hold.LOCAL_FIXTURE, target="release")
@@ -99,6 +137,7 @@ async def verify_stock_light_ar(host, guest, pawn, probe):
         await wait_readback(guest, "reserve", "")
         assert await command(host, "peer-reserve") == "" and await command(host, "reserve") == host_reserve
         assert await command(guest, "light-ar-auto") == "light-ar-auto"
+        await persisted_mode(guid, "auto")
         assert await command(host, "clear") == "clear"
         burst = await stock_burst(guest_frame, guid)
         assert (burst["status"], burst["before"], burst["pawn"]) == ("released", units, pawn), burst
@@ -108,6 +147,34 @@ async def verify_stock_light_ar(host, guest, pawn, probe):
         await asyncio.sleep(.35)
         calls, *_ = (await command(host, "shot-read")).split(",")
         assert int(calls) == burst["projectiles"], (calls, burst)
+        if re_equip:
+            assert await command(host, "arm-nagant") == await command(guest, "arm-nagant") == "armed"
+            long_rifle = await command(host, "seed-local")
+            assert await command(host, "stand") == "standing"
+            assert await command(host, "equip") == "selected"
+            await wait_readback(host, "ready", f"{long_rifle},0,0")
+            nagant_grip = await measured_grip(guest, await command(host, "rifle-witness"))
+            assert await command(host, "host-tail") == "styled"
+            async with asyncio.timeout(8):
+                while tail_gap is None:
+                    witness = await command(guest, "tail-witness")
+                    if witness == "waiting":
+                        await asyncio.sleep(.05)
+                    else:
+                        tail_gap = float(witness)
+            assert tail_gap < .15, tail_gap
+            assert await command(host, "arm-obrez") == await command(guest, "arm-obrez") == "armed"
+            obrez = await command(host, "seed-peer")
+            await wait_readback(guest, "projected", obrez)
+            assert await command(guest, "equip") == "selected"
+            await wait_readback(host, "peer-ready", f"{obrez},1,1")
+            await wait_readback(guest, "aim", "aiming")
+            aimed = await observing_pose("obrez", "Rifle_Aiming_Idle", "Rifle_Aiming_Low_Close1")
+            obrez_meshes = aimed["game"]["native_player_avatars"][pawn]["weapon_meshes"]
+            assert await command(guest, "put-away") == "changing"
+            await wait_readback(guest, "other-ready", "other")
+            await observing_pose("rusty-pistol", "HandGun_Idle_2", "Rifle_Aiming_Low_Close1", previous_meshes=obrez_meshes)
+            obrez_switch = True
         assert campaign_save_hashes(host.campaign) == before
     finally:
         disarmed = await asyncio.gather(command(host, "disarm"), command(guest, "disarm"))
@@ -116,5 +183,9 @@ async def verify_stock_light_ar(host, guest, pawn, probe):
                                "stock_projectile_calls": projectile_calls, "stock_fire_sounds": shot_sounds,
                                "stock_muzzle_flashes": muzzle_flashes, "reload": reloaded,
                                "semi_hold_blocked": True, "automatic_burst": burst,
+                               "host_stored_both_modes": True, "semi_after_re_equip": re_equip,
+                               "observer_idle_grip": grip, "stock_switch_while_aiming": re_equip,
+                               "guest_observes_host_nagant_grip": nagant_grip, "obrez_to_pistol_while_aiming": obrez_switch,
+                               "skeletal_tail_gap_cm": tail_gap,
                                "both_magazines_verified": True, "host_reserve_unchanged": True,
                                "campaign_unchanged": True, "observer_scopes_disarmed": True}}

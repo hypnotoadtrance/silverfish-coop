@@ -2995,7 +2995,7 @@ async def verify_stock_unequip(first, second, evidence):
             assert receipt["stock_inventory_proof"] == f"verified stock equipment slot {slot}", receipt
             proof = receipt[key]
             if slot == 8:
-                assert proof["class_path"].endswith("/Helm_Demo.Helm_Demo_C") and proof["voice_filter"], proof
+                assert proof["class_path"].endswith("/Helm_FaceMask.Helm_FaceMask_C"), proof
             else:
                 assert proof["class_path"].endswith("/Armor_LabCoat.Armor_LabCoat_C") and proof["minimum"] == 22, proof
             current_worn[index] = guid
@@ -3051,6 +3051,27 @@ async def verify_stock_unequip(first, second, evidence):
                 "backpack", receipt["class_path"], 1), recovered
             evidence["guest_worn_world_drop"].append({"receipt": receipt, "host_pickup": recovered})
         assert saves() == before, "The guest worn drop or host pickup wrote a save before a checkpoint"
+        mask = worn_guids[0]
+        await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("native_host_stack_drop_scope"))
+        assert await portable_probe_command(host.bridge, probe, f"host-wear-mask\t{mask}") == mask
+        host_frame = await wait_resident_status(host_run, lambda frame: frame.get("state") == "hosting")
+        await portable_probe_command(host.bridge, probe, f"host-drop-mask\t{mask}")
+        async with asyncio.timeout(10):
+            while True:
+                drops = [row for row in await resident_events(host_run, host_frame)
+                         if row.get("event") == "native_host_stock_drop" and row.get("entry") == "equipped_context_menu"]
+                if drops:
+                    assert len(drops) == 1 and not drops[0].get("error"), drops
+                    dropped = drops[0][native_guest_drop.RESULT]
+                    assert dropped["guid"] == mask, dropped
+                    break
+                await asyncio.sleep(.08)
+        marker = native_world_loot.player_drop_identity(dropped["drop_id"])
+        for run in (host_run, guest_run):
+            await wait_resident_status(run, lambda frame: marker in frame.get("game", {}).get(native_world_loot.KEY, {}))
+        evidence["host_face_mask_drop"] = dropped
+        assert saves() == before, "The worn Face Mask drop wrote a save before a checkpoint"
+        assert await portable_probe_command(host.bridge, probe, "host-close-inventory") == "closed"
         await leaves_stock_open()
         await close_stock()
         return {"selected_and_inactive_slots_checked": True, "guest_duplicate_clicks_rejected": True,
@@ -4216,7 +4237,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                                rusty=rusty_pistol, npc_rivalry=stock_npc_rivalry,
                                                                memory_queue=resident_held_queue, pursuit=tutorial_dock_pursuit)),
         (stock_light_ar, "observatory", "stock_light_ar",
-         lambda host, guest, pawn: verify_stock_light_ar(host, guest, pawn, portable_probe_command)),
+         lambda host, guest, pawn: verify_stock_light_ar(host, guest, pawn, portable_probe_command,
+                                                        re_equip=resident_weapon_cues and rusty_pistol)),
         (resident_held_queue, weapon_campaign, "stock_held_queue",
          lambda host, guest, pawn: verify_stock_held_queue(host, guest, pawn, portable_probe_command,
                                                            stale_quick_slot=resident_stale_quick_slot)),
@@ -4522,7 +4544,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                       before_join=startup.arm, on_join=startup.joined,
                                                       after_reconnect=check_reconnect,
                                                       wait_status=wait_resident_status, **exit_options))
-        elif stock_unequip:
+        elif stock_unequip and not resident_campaigns:
             proof["sessions"].append(await verify_stock_unequip(first, second, proof.setdefault("stock_unequip", {})))
         elif stock_prop_grip:
             proof["sessions"].append(await start_pair(first, second, "Lantern scout", on_join=verify_stock_prop_grip))
@@ -4538,6 +4560,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["resident_campaigns"] = {campaign: [name for name, _ in checks]
                                            for campaign, checks in resident_campaigns.items()}
             used_ports = {first.port, second.port}
+            if stock_unequip:
+                proof["sessions"].append(await verify_stock_unequip(first, second, proof.setdefault("stock_unequip", {})))
 
             async def run_resident_campaign(campaign, checks, host):
                 campaign_started = time.perf_counter()
@@ -4632,7 +4656,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                         "title-host-settings-" + uuid.uuid4().hex[:8]))
                 session = await run_resident_campaign(campaign, checks, host)
                 proof["sessions"].append(dict(session, resident_campaign=campaign))
-            assert len({row["campaign_id"] for row in proof["sessions"]}) == len(resident_campaigns)
+            assert len({row["campaign_id"] for row in proof["sessions"]}) == len(resident_campaigns) + int(stock_unequip)
             assert all(row["host_pid"] == first.bridge.process.pid and row["guest_pid"] == second.bridge.process.pid
                        for row in proof["sessions"])
             if resident_weapon_cues:

@@ -27,17 +27,20 @@ local function seat(stance)
     local movement = object({grounded = true, IsMovingOnGround = function(self) return self.grounded end})
     local pawn = object({CharacterMovement = movement, Dead = false, bIsCrouched = false})
     local body = object({AnimationMode = 0, played = 0, inputs = {}, IsAnySimulatingPhysics = function() return false end})
-    body.PlayAnimation = function(self, asset, loop)
-        assert(loop)
-        self.played = self.played + 1
-        self.AnimationMode = 1
+    body.SetAnimationMode = function(self, mode, force)
+        assert(mode == 1 and not force)
+        self.AnimationMode = mode
         self.AnimScriptInstance = object({
-            CurrentAsset = asset,
             SetBlendSpacePosition = function(_, axis)
                 assert(axis.Y == 0 and axis.Z == 0 and axis.X >= 0 and axis.X <= 2, axis.X)
                 self.inputs[#self.inputs + 1] = axis.X
             end,
         })
+    end
+    body.SetAnimation = function(self, asset) self.AnimScriptInstance.CurrentAsset = asset end
+    body.Play = function(self, loop)
+        assert(loop)
+        self.played = self.played + 1
     end
     return {body = body, pawn = pawn, weapon_stance = stance}, mesh
 end
@@ -59,10 +62,11 @@ for _, profile in ipairs({
     end
     assert(entry.body.played == 1 and entry.prepared == 1)
     assert(table.concat(entry.body.inputs, ",") == "0,1,2,1,0")
-    -- A stock action or mesh change may replace the node; do not reuse the old driver.
-    entry.body:PlayAnimation(object({}), true)
+    -- Resume the active node after a temporary stock action replaces its asset.
+    local node = entry.body.AnimScriptInstance
+    entry.body:SetAnimation(object({}))
     assert(gait.apply(entry, mesh, 1, load, prepared))
-    assert(entry.body.played == 3 and entry.body.inputs[#entry.body.inputs] == 1)
+    assert(entry.body.played == 2 and entry.body.AnimScriptInstance == node and entry.body.inputs[#entry.body.inputs] == 1)
 end
 
 local entry, mesh = seat()

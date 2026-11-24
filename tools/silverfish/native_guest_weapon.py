@@ -10,6 +10,8 @@ GUEST_ACTIONS = ("native-guest-weapon-inspect", "native-guest-weapon-equip", "na
                  "native-guest-weapon-reload")
 GUID = re.compile(r"[0-9A-F]{32}\Z")
 SELECT_EQUIPMENT = "native-guest-weapon-select"
+SET_FIRE_MODE = "native-guest-weapon-mode-store"
+FIRE_MODES = ("auto", "semi")
 READBACK_STATES = {"backpack", "equipped", "stored_equipment"}
 CAMERA_READBACK_STATES = {"camera_backpack", "camera_stored_equipment", "camera_equipped"}
 CAMERA_PATH = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
@@ -106,6 +108,58 @@ async def service_equipment_selection(client, active: bool) -> None:
         client.control.event("native_guest_equipment_selected", sequence=sequence, **result)
     client.last_equipment_selection = selection
     client.equipment_selection_retry = None, 0.0
+
+
+async def store_fire_mode(host, bridge, character: str, target: str | None) -> dict:
+    fields = target.split("@") if isinstance(target, str) else ()
+    if len(fields) != 3 or fields[0] != host.zone_epoch or not GUID.fullmatch(fields[1]) or fields[2] not in FIRE_MODES:
+        raise party.RuleError("native_guest_fire_mode_expired")
+    _, guid, mode = fields
+    area = host.last_game.get("map")
+    if (not host.native_guest or not host.native_zones or host.native_profile is None or host.stopping
+            or host.transitioning or host.native_checkpoint_unsafe or host.last_game.get("state") != "hosting"
+            or time.monotonic() - host.last_seen > 3 or host.party["wipe"]
+            or character in host.party["pending_spawns"]
+            or host.party["players"].get(character, {}).get("downed", True)):
+        raise party.RuleError("native_guest_fire_mode_unavailable")
+    recipient = host.native_recipients().get(character, {})
+    if not recipient.get("connected") or not (pawn := recipient.get("pawn")):
+        raise party.RuleError("native_guest_fire_mode_unavailable")
+    await native_inventory.retain_guest_save(host, bridge, character, pawn)
+    snapshot = await bridge.command(SET_FIRE_MODE, pawn, guid, mode, timeout=3)
+    if (snapshot.get("state"), snapshot.get("map"), snapshot.get("ack", {}).get("message")) != ("hosting", area, mode):
+        raise RuntimeError("Guest fire mode did not verify on the enrolled player's save")
+    host.last_game, host.last_seen = snapshot, time.monotonic()
+    return {"guid": guid, "fire_mode": mode}
+
+
+async def service_fire_modes(client, active: bool) -> None:
+    if not active or client.stopping or not client.host_session or not client.zone_epoch:
+        return
+    game = client.last_game
+    area, epoch = game.get("map"), client.zone_epoch
+    pawn = game.get("pawns", {}).get("local", {}).get("name")
+    pending = game.get("native_guest_fire_modes", ())
+    for sequence, event_area, event_pawn, guid, mode in sorted(pending):
+        if (area, pawn) != (event_area, event_pawn) or area != client.expected_zone:
+            continue
+        operation = uuid.uuid5(client.bridge.input_namespace, f"stock-fire-mode:{epoch}:{sequence}").hex
+        try:
+            reply = await client.gameplay_action(SET_FIRE_MODE, operation, f"{epoch}@{guid}@{mode}")
+        except (OSError, RuntimeError, ValueError) as error:
+            if str(error) != "guest_fire_mode_item_missing":
+                return
+        else:
+            if (reply.get("guid"), reply.get("fire_mode")) != (guid, mode):
+                return
+            client.control.event("native_guest_fire_mode_saved", sequence=sequence, guid=guid, mode=mode)
+        if client.zone_epoch != epoch:
+            return
+        try:
+            client.last_game = await client.bridge.command(
+                "native-guest-weapon-mode-ack", area, pawn, guid, str(sequence), timeout=2)
+        except (OSError, RuntimeError):
+            return
 
 
 async def perform(host, bridge, character: str, operation_id: str, action: str, guid: str, *, seed_kind=None,
