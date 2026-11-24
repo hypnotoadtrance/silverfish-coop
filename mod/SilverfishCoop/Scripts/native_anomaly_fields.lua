@@ -9,6 +9,7 @@ local pyrogeist = require("native_pyrogeist_view")
 local shadows = require("native_shadow_sphere_view")
 local lamps = require("native_angler_lamp_view")
 local observers = require("native_observer_target")
+local flare = require("native_flare")
 
 local classes = {
     starburst = "/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C",
@@ -192,6 +193,10 @@ function fields.start(role)
         local actor = context:get()
         if not valid(actor) or actor:IsActorBeingDestroyed() then return end
         local class = actor:GetClass():GetFullName()
+        if seat == "host" and class == effects.blast_class and in_world(actor, world) then
+            local source = effects.observe_pipe_bomb_blast(actor)
+            if source then flare.retire_detonated_bomb(source) end
+        end
         if class == pyrogeist.jet then
             pyrogeist.created(actor, seat, replica)
             return

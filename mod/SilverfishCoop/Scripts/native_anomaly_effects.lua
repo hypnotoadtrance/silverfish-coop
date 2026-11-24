@@ -137,6 +137,22 @@ function effects.observe_fixed_blast(cue, point, pfx, sfx, scale, volume, attenu
     end
 end
 
+function effects.observe_pipe_bomb_blast(actor)
+    if not actor:HasAuthority() then return end
+    local sources = actor["Actors to Ignore"]
+    local count = sources and sources:GetArrayNum() or 0
+    if count < 1 or count > 8 then return end
+    for index = 1, count do
+        local source = sources[index]
+        if valid(source) and source:HasAuthority() and source:GetClass():GetFullName() == pipe_bomb
+            and valid(source:GetWorld()) and source:GetWorld():GetAddress() == actor:GetWorld():GetAddress() then
+            effects.observe_fixed_blast("pipebomb", actor:K2_GetActorLocation(), actor.PFX, actor.SFX, actor["PFX Scale"],
+                actor["SFX Vol"], actor["Attenuation Settings"])
+            return source
+        end
+    end
+end
+
 local function observe_canister(actor, registered_source)
     local sound = actor.SFX
     local cue = valid(sound) and canister_sounds[sound:GetFullName():match("^%S+ (.+)$")]
@@ -159,12 +175,6 @@ function effects.observe_blast(actor, active, registered_canister)
     if count < 1 or count > 8 then return end
     for index = 1, count do
         local source = ignored[index]
-        if count == 1 and valid(source) and source:HasAuthority() and source:GetClass():GetFullName() == pipe_bomb
-            and valid(source:GetWorld()) and source:GetWorld():GetAddress() == actor:GetWorld():GetAddress() then
-            effects.observe_fixed_blast("pipebomb", actor:K2_GetActorLocation(), actor.PFX, actor.SFX, actor["PFX Scale"],
-                actor["SFX Vol"], actor["Attenuation Settings"])
-            return
-        end
         local entry = valid(source) and active[source:GetAddress()]
         local cue = entry and blasts[entry.kind]
         if entry and entry.kind == "observer" then

@@ -1336,6 +1336,81 @@ async def verify_stock_bottle(host: Seat, guest: Seat, pawn: str) -> dict:
                              "checkpoint_unchanged": True}}
 
 
+async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    checkpoint = campaign_save_hashes(host.campaign)
+    guest_frame = await wait_resident_status(guest_run, lambda frame: frame.get("local_bridge") == "memory")
+
+    async def probe(seat, action, kind, arg=""):
+        return await portable_probe_command(seat.bridge, "portable-stock-throwables", "\t".join((action, kind, arg)))
+
+    async def observe(seat, kind, role, *, retired=False, must_render=False):
+        deadline = asyncio.get_running_loop().time() + 8
+        while asyncio.get_running_loop().time() < deadline:
+            status = await probe(seat, "shot", kind)
+            if status != "absent":
+                name, actual_role, active, peak, fuse, visible, game_seconds, display = status.split(",")
+                assert int(actual_role) == role, status
+                if (active == "false" if retired else float(peak) > 8 and (not must_render or int(visible) > 0)):
+                    return {"actor": name, "role": role, "active": active == "true", "travel_cm": float(peak),
+                            "fuse_seconds": float(fuse), "visible_samples": int(visible),
+                            "game_seconds": float(game_seconds), "display": display}
+            await asyncio.sleep(.04)
+        raise AssertionError((kind, role, "retired" if retired else "in flight", status))
+
+    verified = {}
+    for owner, kind in ((host, "pipebomb"), (host, "bolt"), (guest, "bolt")):
+        if case not in ("all", kind):
+            continue
+        side = "host" if owner is host else "guest"
+        await asyncio.gather(*(probe(seat, "reset", kind) for seat in (host, guest)))
+        guid = await probe(host, "seed", kind, side)
+        assert re.fullmatch(r"[A-F0-9]{32}", guid), guid
+        if owner is guest:
+            stored = await submit(guest_run, native_inventory.STORE_EQUIPMENT, target=guid)
+            assert stored["ok"], stored
+            slot = str(stored[native_inventory.STORE_KEY]["slot"])
+            async with asyncio.timeout(8):
+                while await probe(guest, "equip", kind, slot) != "ready":
+                    await asyncio.sleep(.05)
+            await wait_resident_status(guest_run, lambda frame: (
+                frame.get("game", {}).get("native_guest_equipment_selection", {}).get("guid") == guid))
+        if kind == "bolt":
+            target = list(map(float, (await probe(host, "stage", kind, side)).split(",")))
+            position_run = guest_run if owner is guest else host_run
+            await wait_resident_status(position_run, lambda frame: math.dist(frame.get("game", {}).get("pawns", {})
+                                       .get("local", {}).get("location", [0, 0, 0]), target) < 20, timeout=8)
+        assert await probe(owner, "press", kind) == "press"
+        await asyncio.sleep(.2)
+        started = time.time()
+        assert await probe(owner, "release", kind) == "release"
+        shots = await asyncio.gather(observe(host, kind, 3, must_render=owner is guest),
+                                     observe(guest, kind, 1, must_render=owner is host))
+        record = {"projectiles": shots}
+        if owner is guest:
+            confirmation = await wait_resident_status(host_run, lambda frame: (
+                frame.get("game", {}).get("native_guest_flare_throw", {}).get("guid") == guid))
+            receipt = confirmation["game"]["native_guest_flare_throw"]
+            assert (receipt["pawn"], receipt["before"], receipt["after"]) == (pawn, 1, 0), receipt
+            record["consumed"] = receipt
+        if kind == "pipebomb":
+            record["retired"] = await asyncio.gather(observe(host, kind, 3, retired=True),
+                                                      observe(guest, kind, 1, retired=True))
+            record["stock_blast"] = await probe(host, "blasts", kind)
+            assert record["stock_blast"].startswith("1:"), record
+            async with asyncio.timeout(8):
+                while True:
+                    cues = [row for row in await resident_events(guest_run, guest_frame)
+                            if row["event"] == "native_pipe_bomb_effect_played" and row["time_unix"] >= started]
+                    if cues:
+                        record["detonation_cue"], = cues
+                        break
+                    await asyncio.sleep(.05)
+        verified[f"{side}_{kind}"] = record
+    assert campaign_save_hashes(host.campaign) == checkpoint
+    return {"stock_throwables": verified}
+
+
 async def verify_roaming_barter(host: Seat, guest: Seat, _pawn: str) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
 
@@ -3563,7 +3638,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_npc_override: bool = False, stock_board_offers: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
                  stock_weather_travel: bool = False, stock_melee_family: bool = False, stock_warehouse_switch: bool = False, stock_warehouse_board: bool = False, stock_bottle: bool = False, stock_roaming_barter: bool = False, stock_critters: bool = False,
-                 stock_npc_rivalry: bool = False,
+                 stock_npc_rivalry: bool = False, stock_throwables: str | None = None,
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
                  rusty_pistol: bool = False, tutorial_dock_combat: bool = False, tutorial_dock_retaliation: bool = False,
@@ -3626,6 +3701,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_weather_travel, "stock_weather_travel",
          lambda host, guest, pawn: verify_weather_travel(host, guest, pawn, portable_probe_command)),
         (stock_melee_family, "stock_melee_family", verify_stock_melee_family),
+        (stock_throwables, "stock_throwables",
+         lambda host, guest, pawn: verify_stock_throwables(host, guest, pawn, stock_throwables)),
         (stock_npc_rivalry, "stock_npc_rivalry", verify_stock_npc_rivalry),
         (resident_weapon_cues, "resident_weapon_cues",
          lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, guest_combat=stock_npc_override,
@@ -3672,6 +3749,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if guest_world_start_travel:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableRuinExitProbe",
                                                  fixture="portable_ruin_exit_probe.lua"))
+        if stock_throwables:
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableStockThrowablesProbe",
+                                                     fixture="portable_stock_throwables_probe.lua"))
         if stock_food:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableGuestFoodProbe",
@@ -4030,6 +4111,8 @@ if __name__ == "__main__":
                         help="verify both peers see the Tutorial Dock warehouse board break")
     parser.add_argument("--stock-bottle", action="store_true",
                         help="verify a stock Tutorial Dock bottle breaks once on both peers")
+    parser.add_argument("--stock-throwables", choices=("all", "pipebomb", "bolt"), nargs="?", const="all",
+                        help="verify host and guest bolt flight, a stock host pipe bomb detonation, or both")
     parser.add_argument("--stock-roaming-barter", action="store_true",
                         help="compare the stock identity of a replicated dynamically spawned NPC trader")
     parser.add_argument("--stock-critters", action="store_true",
@@ -4138,7 +4221,8 @@ if __name__ == "__main__":
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "stock_npc_rivalry",
                               "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_take_ammo",
                               "stock_host_corpse_carry", "stock_flashlights", "stock_simmi_jammers", "stock_weather_travel",
-                              "stock_melee_family", "stock_warehouse_switch", "stock_warehouse_board", "stock_bottle", "stock_roaming_barter", "stock_critters"}
+                              "stock_melee_family", "stock_warehouse_switch", "stock_warehouse_board", "stock_bottle",
+                              "stock_roaming_barter", "stock_critters", "stock_throwables"}
     if args.rusty_pistol and not args.resident_weapon_cues:
         parser.error("Use --rusty-pistol with --resident-weapon-cues")
     if args.tutorial_dock_combat and not (args.rusty_pistol and args.stock_npc_override):
@@ -4152,7 +4236,8 @@ if __name__ == "__main__":
     if any((args.stock_food, args.stock_campfire, args.stock_npc_override, args.stock_board_offers,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
-            args.stock_melee_family, args.stock_warehouse_switch, args.stock_warehouse_board, args.stock_bottle, args.stock_roaming_barter, args.stock_critters)) and (
+            args.stock_melee_family, args.stock_warehouse_switch, args.stock_warehouse_board, args.stock_bottle,
+            args.stock_roaming_barter, args.stock_critters, args.stock_throwables)) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
         parser.error("Run the resident gameplay checks without other gameplay fixtures")
@@ -4201,6 +4286,7 @@ if __name__ == "__main__":
                        stock_warehouse_switch=args.stock_warehouse_switch,
                        stock_warehouse_board=args.stock_warehouse_board, stock_bottle=args.stock_bottle,
                        stock_roaming_barter=args.stock_roaming_barter, stock_critters=args.stock_critters,
+                       stock_throwables=args.stock_throwables,
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
                        rusty_pistol=args.rusty_pistol, tutorial_dock_combat=args.tutorial_dock_combat,
