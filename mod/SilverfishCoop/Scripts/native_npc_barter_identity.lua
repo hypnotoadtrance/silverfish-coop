@@ -3,9 +3,9 @@ local identity = {}
 local marker_path = "/Script/Engine.TargetPoint"
 local trader_path = "/Game/Classes/Actors/Barter_BP.Barter_BP_C"
 local npc_path = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
-local step = 360 / 256
--- Use a pitch outside the range used by the stock co-op corpse markers.
-local marker_code = 62
+-- An invisible TargetPoint uses its owner's relevancy. Reserve a height range
+-- outside the playable maps for an exact integer in stock movement replication.
+local marker_height = 262144
 local max_number = 65535
 local prefix = "5346434F4F504241525445520000"
 
@@ -19,10 +19,6 @@ local function placed(npc)
     return npc:HasAnyFlags(EObjectFlags.RF_WasLoaded)
 end
 
-local function byte(angle)
-    return math.floor(angle / step + .5) % 256
-end
-
 local function actor_in_world(actor)
     return valid(actor) and not actor:IsActorBeingDestroyed() and same(actor:GetWorld(), world)
 end
@@ -31,16 +27,14 @@ local function exact_npc(actor)
     return actor_in_world(actor) and valid(npc_class) and actor:IsA(npc_class)
 end
 
-function identity.is_marker(rotation)
-    -- UE4SS can reverse the pitch sign when it spawns the native actor.
-    return byte(math.abs(rotation.Pitch)) == marker_code
+local function number_on(marker)
+    local height = marker:K2_GetActorLocation().Z - marker_height
+    local value = math.floor(height + .5)
+    if value > 0 and value <= max_number and math.abs(height - value) < .25 then return value end
 end
 
-local function number_on(marker)
-    local rotation = marker:K2_GetActorRotation()
-    if not identity.is_marker(rotation) then return end
-    local value = byte(rotation.Yaw) + 256 * byte(rotation.Roll)
-    if value > 0 then return value end
+function identity.is_marker(marker)
+    return number_on(marker) ~= nil
 end
 
 local function remember(marker)
@@ -60,9 +54,9 @@ local function publish(npc, trader)
     if previous and actor_in_world(previous.marker) then return end
 
     local next_number = number + 1
-    local marker = world:SpawnActor(marker_class, npc:K2_GetActorLocation(), {
-        Pitch = marker_code * step, Yaw = (next_number % 256) * step, Roll = (next_number // 256) * step,
-    })
+    local point = npc:K2_GetActorLocation()
+    local marker = world:SpawnActor(marker_class, {X = point.X, Y = point.Y, Z = marker_height + next_number},
+        {Pitch = 0, Yaw = 0, Roll = 0})
     if not actor_in_world(marker) then return end
     marker:SetOwner(npc)
     marker.bAlwaysRelevant = false

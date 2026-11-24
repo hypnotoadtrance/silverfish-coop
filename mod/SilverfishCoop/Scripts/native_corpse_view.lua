@@ -254,7 +254,7 @@ end
 
 local function apply(marker, world)
     if not valid(marker) or not same(marker:GetWorld(), world) then return true end
-    if barter_identity.is_marker(marker:K2_GetActorRotation()) then return true end
+    if barter_identity.is_marker(marker) then return true end
     local actor = marker:GetOwner()
     if not valid(actor) or not same(actor:GetWorld(), world) or actor:IsActorBeingDestroyed() then return true end
     local body = supported_corpse(actor)
