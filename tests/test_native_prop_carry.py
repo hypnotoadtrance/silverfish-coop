@@ -135,6 +135,19 @@ class CorpseCarryPayloadTests(unittest.TestCase):
 
 
 class ReleaseHandoffTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_refused_dynamic_prop_grab_clears_the_predicted_local_grip(self):
+        bridge = SimpleNamespace(command=AsyncMock(), input_namespace=uuid.NAMESPACE_URL)
+        gameplay_action = AsyncMock(side_effect=RuntimeError("native_prop_carry_stock_target_unavailable"))
+        guest = carry.Guest(SimpleNamespace(bridge=bridge, gameplay_action=gameplay_action, control=Mock()))
+        guest.epoch = "a" * 32
+        await guest._operate({
+            "edge": "grab", "sequence": 3, "pose": (100, 200, 300, 10, 20),
+            "class_path": "/Game/Assets/StaticMeshes/Mesh_Props/Prop_ScrapWood.Prop_ScrapWood_C",
+        })
+        bridge.command.assert_awaited_once_with("native-prop-carry-refuse", "3", timeout=2)
+        self.assertIsNone(guest.lease)
+        self.assertFalse(guest.local_pose_ready.is_set())
+
     async def test_reliable_release_keeps_its_solved_pose_when_transient_sample_is_missing(self):
         epoch, lease, character = "a" * 32, "b" * 32, "c" * 32
         area = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"

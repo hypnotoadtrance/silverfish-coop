@@ -1929,9 +1929,9 @@ async def verify_stock_acid_bottle(host: Seat, guest: Seat, _pawn: str) -> dict:
                                   "checkpoint_unchanged": True}}
 
 
-async def verify_stock_wood_debris(host: Seat, guest: Seat, _pawn: str) -> dict:
+async def verify_stock_wood_debris(host: Seat, guest: Seat, pawn: str) -> dict:
     checkpoint = campaign_save_hashes(host.campaign)
-    guest_run = guest.client / "run"
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
     frame = await wait_resident_status(guest_run, lambda row: row.get("game", {}).get("map") == WAREHOUSE_DOCK)
 
     async def pieces(seat, position):
@@ -1945,6 +1945,91 @@ async def verify_stock_wood_debris(host: Seat, guest: Seat, _pawn: str) -> dict:
 
     def meshes(parts):
         return sorted((row["kind"], row["mesh"]) for row in parts.values())
+
+    async def guest_carry(source, selected, authority, guest_replica):
+        scope = source.partition(":PersistentLevel.")[0] + ":PersistentLevel."
+        host_path, guest_path = scope + selected, scope + guest_replica
+        actor_name = f"{authority['kind']} {host_path}"
+        remote_name = f"{authority['kind']} {guest_path}"
+        stem = authority["kind"].removesuffix("_C")
+        asset = f"/Game/Assets/StaticMeshes/Mesh_Props/{stem}.{authority['kind']}"
+
+        async def body(seat, path):
+            location, held = (await warehouse_prop_probe(seat, "prop-motion", path)).split(";")
+            return list(map(float, location.split(","))), held == "true"
+
+        async def motion():
+            return await asyncio.gather(body(host, host_path), body(guest, guest_path))
+
+        async def proof(edge):
+            result = await wait_resident_status(host_run, lambda row: (
+                noted := row.get("game", {}).get(native_prop_carry.PROOF, {}))
+                and (noted["edge"], noted["pawn"], noted["actor"]) == (edge, pawn, actor_name), timeout=6)
+            return result["game"][native_prop_carry.PROOF]
+
+        async def stage():
+            placement = await warehouse_prop_probe(host, "approach", host_path, pawn)
+            position = list(map(float, placement.split(",")))
+            await wait_resident_status(guest_run, lambda row: math.dist(
+                row.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), position) < 45)
+            async with asyncio.timeout(4):
+                while True:
+                    starting = await motion()
+                    if math.dist(starting[0][0], starting[1][0]) < 30:
+                        return starting
+                    await asyncio.sleep(.06)
+
+        request = f"grab@{asset}|{remote_name}"
+        await stage()
+        assert await warehouse_prop_probe(host, "wood-deny-grip", host_path) == "reserved"
+        try:
+            started = time.time()
+            predicted = await submit(guest_run, native_prop_carry.FIXTURE, target=request)
+            assert predicted["ok"], predicted
+            async with asyncio.timeout(6):
+                while True:
+                    refusals = [row for row in await resident_events(guest_run, frame)
+                                if row["time_unix"] >= started and row["event"] == "native_prop_carry_refused"
+                                and row["edge"] == "grab"]
+                    held = await warehouse_prop_probe(guest, "guest-grip", guest_path)
+                    if refusals and held.endswith("held=false"):
+                        break
+                    await asyncio.sleep(.07)
+            assert (await body(host, host_path))[1], "the host reservation was cleared by a guest grab"
+        finally:
+            assert await warehouse_prop_probe(host, "wood-release-grip", host_path) == "released"
+
+        starting = await stage()
+        grabbed = await submit(guest_run, native_prop_carry.FIXTURE, target=request)
+        assert grabbed["ok"], grabbed
+        grabbed_proof = await proof("grab")
+        assert await warehouse_prop_probe(guest, "lift", guest_path) == "guest lifted the bottle"
+        lifted = None
+        try:
+            async with asyncio.timeout(5):
+                while True:
+                    lifted = await motion()
+                    if all(held and center[2] > base[0][2] + 40 for (center, held), base in zip(lifted, starting, strict=True)):
+                        break
+                    await asyncio.sleep(.06)
+        except TimeoutError as error:
+            raise AssertionError({"staged": starting, "last_lift": lifted}) from error
+        assert await warehouse_prop_probe(guest, "throw-up", guest_path) == "guest threw upward"
+        thrown_proof = await proof("throw")
+        assert thrown_proof["lease"] == grabbed_proof["lease"] and thrown_proof.get("release_pose_applied"), thrown_proof
+        final = None
+        try:
+            async with asyncio.timeout(7):
+                while True:
+                    final = await motion()
+                    if (not any(held for _, held in final) and math.dist(final[0][0], final[1][0]) < 40
+                            and math.dist(final[0][0][:2], lifted[0][0][:2]) > 60):
+                        break
+                    await asyncio.sleep(.06)
+        except TimeoutError as error:
+            raise AssertionError({"lifted": lifted, "last_throw": final}) from error
+        return {"contested_grab": refusals[0], "guest_released_refused_grip": True,
+                "grab": grabbed_proof, "held": lifted, "throw": thrown_proof, "released": final}
 
     async def check(stock_class, kind, count):
         path, replica, position = await stage_warehouse_prop(host, guest, stock_class, "floor-physics")
@@ -1988,8 +2073,9 @@ async def verify_stock_wood_debris(host: Seat, guest: Seat, _pawn: str) -> dict:
                     target = actual.get(selected, {}).get("center")
                     if target and math.dist(target[:2], original["center"][:2]) > 80:
                         displaced = target
-                    if displaced and any(row["mesh"] == original["mesh"] and row["kind"] == original["kind"]
-                                         and math.dist(row["center"][:2], displaced[:2]) < 35 for row in view.values()):
+                    matches = sorted((math.dist(row["center"], displaced), name) for name, row in view.items()
+                                     if displaced and row["mesh"] == original["mesh"] and row["kind"] == original["kind"])
+                    if matches and matches[0][0] < 30 and (len(matches) == 1 or matches[1][0] - matches[0][0] > 10):
                         break
                     await asyncio.sleep(.05)
         except TimeoutError as error:
@@ -1999,6 +2085,7 @@ async def verify_stock_wood_debris(host: Seat, guest: Seat, _pawn: str) -> dict:
                 if row["time_unix"] >= started and row["event"] == "native_prop_break_played"
                 and row["cue"] == "woodsplinters"]
         assert len(cues) == 1 and math.dist(cues[0]["location"], hit) < 150, cues
+        interaction = await guest_carry(path, selected, original, matches[0][1]) if stock_class == "Prop_Chair_Wood" else None
         assert await warehouse_prop_probe(host, "wood-remove", selected) == "removed"
         try:
             async with asyncio.timeout(8):
@@ -2006,7 +2093,7 @@ async def verify_stock_wood_debris(host: Seat, guest: Seat, _pawn: str) -> dict:
                     await asyncio.sleep(.09)
         except TimeoutError as error:
             raise AssertionError("destroyed stock debris remained visible") from error
-        return {"host_pieces": authority, "guest_pieces": remote, "nudge": displaced,
+        return {"host_pieces": authority, "guest_pieces": remote, "nudge": displaced, "guest_interaction": interaction,
                 "impact": impact, "splinters": cues[0], "removed_on_both": True}
 
     results, failures = {}, {}

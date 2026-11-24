@@ -169,6 +169,17 @@ local function stock_prop_fixture(args, state, phase)
         end
         assert(current(actor) and not actor.Broken and valid(actor.PropMesh))
         local point = actor.PropMesh:K2_GetComponentLocation()
+        if (mode == "wood-deny-grip" or mode == "wood-release-grip") and phase == "hosting" then
+            local name = actor:GetClass():GetFName():ToString()
+            assert(actor:HasAuthority() and (name == "Prop_ScrapWood_C" or name == "Prop_ScrapWood_Post_C"))
+            local reserve = mode == "wood-deny-grip"
+            actor:PickUp_Object(reserve, reserve and pawn or nil)
+            assert(actor.BeingHeld == reserve)
+            return reserve and "reserved" or "released"
+        end
+        if mode == "prop-motion" then
+            return ("%.3f,%.3f,%.3f;%s"):format(point.X, point.Y, point.Z, tostring(actor.BeingHeld))
+        end
         if mode == "height" and phase == "hosting" then return tostring(point.Z) end
         if mode == "guest-grip" and phase == "connected" then
             local eye, aim = pawn.Camera:K2_GetComponentLocation(), pawn.Camera:GetForwardVector()
@@ -243,7 +254,7 @@ local function stock_prop_fixture(args, state, phase)
                 end
             end
             assert(lane and actor:K2_SetActorLocation({X=lane.X,Y=lane.Y,Z=lane.Z+24}, false, {}, true),
-                "could not place the stock bottle on clear warehouse floor")
+                "could not place the stock prop on clear warehouse floor")
             actor:ForceNetUpdate()
             point = actor.PropMesh:K2_GetComponentLocation()
             local original, facing = remote:K2_GetActorLocation(), remote.Controller:GetControlRotation()
@@ -267,18 +278,18 @@ local function stock_prop_fixture(args, state, phase)
                 end
             end
             remote:K2_TeleportTo(original, facing)
-            error("could not focus the stock bottle from a nearby placement")
+            error("could not focus the stock prop from a nearby placement")
         end
-        if (mode == "lift" or mode == "throw-down") and phase == "connected" and valid(pawn.HeldObject)
+        if (mode == "lift" or mode == "throw-down" or mode == "throw-up") and phase == "connected" and valid(pawn.HeldObject)
             and pawn.HeldObject:GetAddress() == actor:GetAddress() then
             local aim = pawn.Controller:GetControlRotation()
-            aim = {Pitch = mode == "lift" and 35 or -67, Yaw = aim.Yaw, Roll = 0}
+            aim = {Pitch = mode == "lift" and 35 or mode == "throw-up" and 20 or -67, Yaw = aim.Yaw, Roll = 0}
             pawn.Controller:SetControlRotation(aim)
             pawn.Camera:K2_SetWorldRotation(aim, false, {}, true)
             if mode == "lift" then return "guest lifted the bottle" end
             pawn:Grab_Release_Object(true, false, false)
-            assert(not valid(pawn.HeldObject), "stock throw did not release the bottle")
-            return "guest threw at the floor"
+            assert(not valid(pawn.HeldObject), "stock throw did not release the prop")
+            return mode == "throw-up" and "guest threw upward" or "guest threw at the floor"
         end
         if mode == "local-break" and phase == "connected" then
             actor:PropBroken(point, pawn)

@@ -364,7 +364,7 @@ class Guest:
             self.local_pose_ready.clear()
             self.filter_actor = None
             service.control.event("native_prop_carry_refused", edge=edge, reason=str(error))
-            if edge == "grab" and any(key in row for key in ("corpse", "placement", "loot_id")):
+            if edge == "grab":
                 try:
                     await service.bridge.command("native-prop-carry-refuse", str(number), timeout=2)
                 except (OSError, ValueError, RuntimeError) as failure:
