@@ -51,6 +51,11 @@ local function portable_large_stash(fields, state, phase)
     assert(same(pawn, bound) and not same(pawn, host) and same(pawn.Save, detached)
         and not same(host.Save, detached) and owner == character and type(combined) == "boolean",
         "portable large stash fixture has no exact private guest save")
+    if fields[2] == "portable-stash-site-scan-reads" then
+        assert(construction_notifications == true and portable_site_scan and portable_site_scan.map == state.map
+            and same(portable_site_scan.world, state.world), "portable stash discovery did not cover the active host world")
+        return ("portable stash site scans %d"):format(portable_site_scan.count)
+    end
     local stashes = detached.Stashes
     local contents = portable_stash_array(stashes, combined, site)
     if fields[2] == "portable-large-stash-census-reads" then

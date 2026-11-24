@@ -313,12 +313,15 @@ def stock_critter_overlay(game: Path):
 
 
 def stash_memory_overlays(probes: ExitStack, game: Path, *, large: bool = False) -> dict:
+    site_scan_probe = False
+
     def replace(text, original, updated):
         if text.count(original) != 1:
             raise ValueError("The replica lacks the exact released stash fixture")
         return text.replace(original, updated, 1)
 
     def approach(text):
+        nonlocal site_scan_probe
         original = '            or os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") ~= "1" then'
         text = replace(text, original,
             '            or (os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") ~= "1"\n'
@@ -326,11 +329,21 @@ def stash_memory_overlays(probes: ExitStack, game: Path, *, large: bool = False)
             '                    or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") ~= "1")) then')
         if not large:
             return text
+        seed_sites = "local function seed_sites(cache, now)"
+        if seed_sites in text:
+            site_scan_probe = True
+            text = replace(text, seed_sites, "local portable_site_scan\n" + seed_sites)
+            scan = "    statics:GetAllActorsOfClass(cache.world, cache.base, found)"
+            text = replace(text, scan, scan + """
+    if not portable_site_scan or not same(portable_site_scan.world, cache.world) or portable_site_scan.map ~= cache.map then
+        portable_site_scan = {world = cache.world, map = cache.map, count = 0}
+    end
+    portable_site_scan.count = portable_site_scan.count + 1""")
         seed = (Path(__file__).with_name("fixtures") / "portable_large_stash_authority.lua").read_text(encoding="utf-8")
         command = "function stash.command(fields, state, phase)"
         return replace(text, command, seed + "\n" + command + """
     if fields[2] == "portable-large-stash-seed" or fields[2] == "portable-large-stash-clear"
-        or fields[2] == "portable-large-stash-census-reads" then
+        or fields[2] == "portable-large-stash-census-reads" or fields[2] == "portable-stash-site-scan-reads" then
         return portable_large_stash(fields, state, phase)
     end""")
 
@@ -394,8 +407,10 @@ def stash_memory_overlays(probes: ExitStack, game: Path, *, large: bool = False)
         end
         local first = count > 0 and entry(cards, 1)""".lstrip("\n"))
 
-    return {name: probes.enter_context(portable_script_overlay(game, name, patch_script)) for name, patch_script in (
-        ("native_stash.lua", approach), ("native_stash_view.lua", stock_view))}
+    overlays = {name: probes.enter_context(portable_script_overlay(game, name, patch_script))
+                for name, patch_script in (("native_stash.lua", approach), ("native_stash_view.lua", stock_view))}
+    overlays["native_stash.lua"]["site_scan_probe"] = site_scan_probe
+    return overlays
 
 
 def compact_crate_status_overlay(game: Path):
@@ -3257,7 +3272,8 @@ async def verify_guest_shop_lease(host: Seat, guest: Seat, pawn: str) -> dict:
     }
 
 
-async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str, *, large: bool = False) -> dict:
+async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str, *, large: bool = False,
+                                    site_scan_probe: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     area = native_finite_shop.OBSERVATORY
     home, joined = await asyncio.gather(
@@ -3333,6 +3349,25 @@ async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str, *, large
         await wait_resident_status(guest_run, lambda row: native_stash.VIEW not in row.get("game", {}))
         require_no_page_file()
 
+    async def verify_site_scans():
+        def same_box(frame):
+            game = frame.get("game", {})
+            return (game.get("state") == "hosting" and game.get("map") == area
+                    and frame.get("zone_epoch") == home["zone_epoch"]
+                    and game.get(native_stash.SITES, {}).get(site) == authored)
+
+        first_frame = await wait_resident_status(host_run, same_box)
+        first_sequence = first_frame["game"]["sequence"]
+        started = time.monotonic()
+        later_frame = await wait_resident_status(
+            host_run, lambda frame: time.monotonic() - started >= 2.3 and same_box(frame)
+            and frame["game"]["sequence"] >= first_sequence + 3, timeout=8)
+        observed_seconds = round(time.monotonic() - started, 3)
+        readback = await host.bridge.command("portable-stash-site-scan-reads", pawn, site, joined["character_id"])
+        assert readback["ack"]["message"] == "portable stash site scans 1", readback["ack"]
+        return {"world_scans": 1, "idle_observation_seconds": observed_seconds,
+                "status_sequence_before": first_sequence, "status_sequence_after": later_frame["game"]["sequence"]}
+
     def require_unchanged_saves(before):
         changed = [(group, path) for group, (start, end) in enumerate(zip(before, saves(), strict=True))
                    for path in sorted(start.keys() | end.keys()) if start.get(path) != end.get(path)]
@@ -3385,10 +3420,12 @@ async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str, *, large
         await close()
         cleared = await host.bridge.command("portable-large-stash-clear", pawn, site, joined["character_id"])
         assert cleared["ack"]["message"] == "portable large stash cleared without save", cleared["ack"]
+        site_discovery = await verify_site_scans() if site_scan_probe else None
         require_unchanged_saves(before)
         return {"stash_actor": authored["actor"], "site": site, "stock_view": rendered, "large_native_ticket": True,
                 "memory_payload_bytes": payload_bytes, "stock_card_count": len(guids),
                 "stash_open_seconds": open_seconds,
+                "site_discovery": site_discovery,
                 "census_snapshot": census_snapshot, "live_census_reads": census_reads,
                 "first_guid": guids[0], "last_guid": guids[-1], "ordered_card_guids": guids,
                 "local_bridge": {"host": home["local_bridge"], "guest": joined["local_bridge"]},
@@ -4331,6 +4368,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for name in overlays[0]:
                 for key in ("script_source_overlay", "manifest_overlay_sha256"):
                     assert overlays[0][name][key] == overlays[1][name][key], "Stash overlays differ between seats"
+            site_scan_probe = overlays[0]["native_stash.lua"]["site_scan_probe"]
+            assert site_scan_probe == overlays[1]["native_stash.lua"]["site_scan_probe"]
         if compact_world_view:
             proof["world_view_overlay"] = {
                 str(game): probes.enter_context(portable_main_overlay(game, patch_world_view_receipts)) for game in games
@@ -4561,7 +4600,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["sessions"].append(await start_pair(first, second, "Merchant scout", on_join=verify_guest_shop_lease))
         elif guest_stash_memory:
             async def check_stash(host, guest, pawn):
-                return await verify_guest_stash_memory(host, guest, pawn, large=guest_stash_large_memory)
+                return await verify_guest_stash_memory(host, guest, pawn, large=guest_stash_large_memory,
+                                                       site_scan_probe=site_scan_probe)
 
             proof["sessions"].append(await start_pair(first, second, "Stash scout", on_join=check_stash,
                                                       create_character=create_stock_bag_character,
