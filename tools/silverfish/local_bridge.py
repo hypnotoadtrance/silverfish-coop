@@ -62,6 +62,12 @@ class LocalBridge:
                                                       ctypes.c_char_p, ctypes.c_uint32,
                                                       ctypes.c_char_p, ctypes.c_uint32]
             self._guest_interaction_lease.restype = ctypes.c_int
+        self._pause_offer = getattr(library, "SilverfishPauseOfferV1", None)
+        self._pause_take = getattr(library, "SilverfishPauseTakeV1", None)
+        if self._pause_offer is not None and self._pause_take is not None:
+            self._pause_offer.argtypes, self._pause_offer.restype = [ctypes.c_char_p, ctypes.c_uint], ctypes.c_int
+            self._pause_take.argtypes = [ctypes.c_char_p, ctypes.c_uint, ctypes.POINTER(ctypes.c_uint64)]
+            self._pause_take.restype = ctypes.c_int
         self._prop_poses = getattr(library, "SilverfishBridgePublishPropPosesV1", None)
         if self._prop_poses is not None:
             self._prop_poses.argtypes = [ctypes.c_char_p, ctypes.c_uint32]
@@ -134,6 +140,20 @@ class LocalBridge:
             return
         if self._enable_status():
             self._status_buffer = ctypes.create_string_buffer(STATUS_LIMIT)
+
+    @property
+    def has_pause_exit(self) -> bool:
+        return self._pause_offer is not None and self._pause_take is not None
+
+    def offer_pause_exit(self, token: bytes | None, role: int) -> bool:
+        return bool(self.has_pause_exit and self._pause_offer(token, role))
+
+    def take_pause_exit(self, token: bytes, role: int) -> tuple[int, str] | None:
+        if not self.has_pause_exit:
+            return None
+        press = ctypes.c_uint64()
+        reason = {1: "quit_to_menu", 2: "save_and_quit"}.get(self._pause_take(token, role, ctypes.byref(press)))
+        return (press.value, reason) if reason and press.value else None
 
     def status_ready(self) -> bool:
         return self._status_buffer is not None and self._latest_status() != self._status_revision

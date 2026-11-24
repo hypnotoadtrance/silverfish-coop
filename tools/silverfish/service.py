@@ -4149,7 +4149,7 @@ class Host:
                 with contextlib.suppress(OSError):
                     _set_host_dig_heartbeat(bridge, 0)
 
-    async def run(self, bridge: Bridge, transport) -> None:
+    async def run(self, bridge: Bridge, transport, *, pause_exit=None) -> None:
         self.relay = transport
         if self.mindcore_carry:
             self.mindcore_carry.bridge = bridge
@@ -4161,8 +4161,6 @@ class Host:
         invites = (native_host_invitation.HostInvitationMailbox(
             bridge.directory, self.control.run, self.invite, engine=engine)
                    if self.fixtures and self.native_events and self.native_zones else None)
-        pause_exit = (native_session_exit.PauseExit(bridge.directory, self.control, "host", engine=engine)
-                      if engine is not None and self.native_zones else None)
         heartbeat = asyncio.create_task(self.renew_native_scope(bridge)) if self.native_events else None
         footstep_io = (native_footsteps.HostFootsteps(self, bridge, transport)
                        if pose_link and self.native_guest and native_footsteps.enabled(bridge) else None)
@@ -4978,10 +4976,14 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             controller.port = transport.address[1]
             control.event("listening", address=bind, port=controller.port)
             async with contextlib.AsyncExitStack() as scope:
+                pause_exit = (native_session_exit.PauseExit(bridge, control, "host", engine=process)
+                              if embedded and controller.native_zones and bridge.local_bridge is not None
+                              and bridge.local_bridge.has_pause_exit else None)
                 if steam_session is not None:
                     await scope.enter_async_context(steam_session.host_panel(
-                        bridge.directory, bind, controller.port, identity.certificate_pem, control, access=steam_access))
-                await controller.run(bridge, transport)
+                        bridge.directory, bind, controller.port, identity.certificate_pem, control, access=steam_access,
+                        pause_token=pause_exit.active_token if pause_exit is not None else lambda: None))
+                await controller.run(bridge, transport, pause_exit=pause_exit)
         except (Exception, asyncio.CancelledError) as error:
             result = "stopped" if isinstance(error, asyncio.CancelledError) else "failed"
             stop_reason = "host_cancelled" if result == "stopped" else "host_session_failed"
@@ -6512,8 +6514,9 @@ class Client:
 
     async def run(self) -> None:
         engine = self.bridge.process if isinstance(self.bridge.process, EmbeddedEngine) else None
-        pause_exit = (native_session_exit.PauseExit(self.bridge.directory, self.control, "guest", engine=engine)
-                      if engine is not None and self.invite.get("native_zones") else None)
+        pause_exit = (native_session_exit.PauseExit(self.bridge, self.control, "guest", engine=engine)
+                      if engine is not None and self.invite.get("native_zones") and self.bridge.local_bridge is not None
+                      and self.bridge.local_bridge.has_pause_exit else None)
         held = asyncio.create_task(self.guest_held_input.run()) if self.guest_held_input else None
         lean = (asyncio.create_task(native_avatar_lean.follow(self))
                 if native_avatar_lean.enabled(self.bridge) else None)

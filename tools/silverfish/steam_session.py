@@ -5,7 +5,6 @@ from contextlib import asynccontextmanager, suppress
 from hashlib import sha256
 from ipaddress import ip_address
 from pathlib import Path
-import re
 import shlex
 import time
 import uuid
@@ -24,7 +23,6 @@ AVAILABLE = "steam-coop-available"
 JOIN_OFFER = "steam-coop-join.tsv"
 JOIN_CANCEL = "steam-coop-join-cancel.tsv"
 JOIN_OPENED = "steam-coop-join-opened.tsv"
-_PAUSE_OFFER = re.compile(rb"1\t([0-9a-f]{32})\thost\t([1-9][0-9]{0,14})\n")
 
 
 def _status(bridge: Path, state: str, **details):
@@ -77,8 +75,6 @@ class SteamSession:
             self.transport.leave()
 
     async def receive_invites(self):
-        from .native_session_exit import SESSION
-
         while not self.pump.done():
             if self._nonce is not None and not self._role:
                 opened = _read(self.title_bridge, JOIN_OPENED, take=True)
@@ -95,7 +91,7 @@ class SteamSession:
                 lobby = await asyncio.wait_for(self.transport.pending_invites.get(), .2)
             except TimeoutError:
                 continue
-            if self._role or self._nonce or _PAUSE_OFFER.fullmatch(_read(self.title_bridge, SESSION)):
+            if self._role or self._nonce:
                 continue
             await self.open_lobby(lobby)
 
@@ -137,14 +133,15 @@ class SteamSession:
             _status(self.title_bridge, "ready" if not self.pump.done() else "unavailable")
 
     @asynccontextmanager
-    async def host_panel(self, bridge: Path, bind: str, port: int, certificate: str, control, *, access: str):
+    async def host_panel(self, bridge: Path, bind: str, port: int, certificate: str, control, *, access: str,
+                         pause_token):
         address = ip_address(bind)
         if address != ip_address("127.0.0.1") or self.pump.done():
             _status(bridge, "unavailable", reason="loopback_required" if not address.is_loopback else "steam_offline")
             yield
             return
         fingerprint = sha256(certificate.encode("utf-8")).hexdigest()
-        panel = asyncio.create_task(self._host_panel(bridge, str(address), port, fingerprint, control, access))
+        panel = asyncio.create_task(self._host_panel(bridge, str(address), port, fingerprint, control, access, pause_token))
         try:
             yield
         finally:
@@ -153,9 +150,7 @@ class SteamSession:
                 await panel
             _remove(bridge, HOST_OFFER, HOST_INVITE)
 
-    async def _host_panel(self, bridge, address, port, fingerprint, control, access):
-        from .native_session_exit import SESSION
-
+    async def _host_panel(self, bridge, address, port, fingerprint, control, access, pause_token):
         async def open_lobby():
             try:
                 await self.transport.host(port, address=address, fingerprint=fingerprint, access=access)
@@ -172,8 +167,7 @@ class SteamSession:
         _status(bridge, "opening_lobby", access=access)
         offer_state = await open_lobby()
         while not self.pump.done():
-            match = _PAUSE_OFFER.fullmatch(_read(bridge, SESSION))
-            token = match[1].decode("ascii") if match and int(match[2]) > time.time() else None
+            token = pause_token()
             if token != last_token:
                 last_token = token
                 if token is None:

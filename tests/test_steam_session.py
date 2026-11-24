@@ -10,7 +10,6 @@ from unittest.mock import Mock, patch
 from tools.silverfish import direct_ip, link, native_title_entry, runtime, service, steam_browser, steam_session
 from tools.silverfish.campaign import CampaignStore
 from tools.silverfish.control import Control, status as control_status
-from tools.silverfish.native_session_exit import SESSION
 from tools.silverfish.steam_transport import SteamTransport, _CALLBACK_FRIEND_JOIN, _CALLBACK_INVITE
 from tools.silverfish.title_handoff import DESCRIPTOR_FILE, REQUEST_FILE
 from tools.silverfish.title_session import STATUS_FILE, SessionPlan, TitleSession
@@ -59,10 +58,10 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
                                        lambda _: {"accepted": False}, lambda _: None, enroll=enrollment)
         self.addAsyncCleanup(server.close)
         pause_token = "a" * 32
-        runtime.write_text(host_bridge / SESSION, f"1\t{pause_token}\thost\t{int(time.time()) + 5}\n", newline="\n")
         host_api.overlay = False
         async with host.playing(role="host"), host.host_panel(
             host_bridge, "127.0.0.1", server.address[1], identity.certificate_pem, Mock(), access="friends",
+            pause_token=lambda: pause_token,
         ):
             offer = host_bridge / steam_session.HOST_OFFER
             await self.ready(offer.exists)
@@ -127,9 +126,9 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
                                        admit, authority.disconnected, on_request=authority.guest_request, enroll=enrollment)
         self.addAsyncCleanup(server.close)
         token = "a" * 32
-        runtime.write_text(host_mailbox / SESSION, f"1\t{token}\thost\t{int(time.time()) + 10}\n", newline="\n")
         async with host.playing(role="host"), host.host_panel(
             host_mailbox, "127.0.0.1", server.address[1], identity.certificate_pem, host_control, access="invite",
+            pause_token=lambda: token,
         ):
             await self.ready((host_mailbox / steam_session.HOST_OFFER).exists)
             runtime.write_text(host_mailbox / steam_session.HOST_INVITE, f"1\t{token}\tinvite\n", newline="\n")

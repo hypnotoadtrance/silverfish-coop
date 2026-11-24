@@ -43,7 +43,7 @@ async def offered(seat):
 async def start_pair(host, guest, character_name, *, on_join=None, create_character=None,
                      before_join=None, after_reconnect=None, wait_status=wait,
                      host_exit_actions=("save_and_quit",), after_exit=None, load_existing=False,
-                     wait_for_host_pause=None, resume_character=None):
+                     wait_for_host_pause=None, resume_character=None, guest_stock_exit=False):
     if resume_character is not None and (not load_existing or create_character is not None):
         raise ValueError("Rejoining a saved character requires an existing campaign")
     host_run, guest_run = host.campaign / "run", guest.client / "run"
@@ -114,14 +114,42 @@ async def start_pair(host, guest, character_name, *, on_join=None, create_charac
     # A scenario can cross a zone boundary and bind the guest to a new pawn.
     current = await wait_status(host_run, lambda frame: frame.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
     pawn = current["game"]["native_guest_save"]["pawn"]
-    assert (await submit(guest_run, "drop-link"))["ok"]
-    await wait_status(host_run, lambda frame: any(row["character_id"] == character and row["state"] == "reserved"
-                                                for row in frame.get("campaign", {}).get("leases", ())))
-    reconnect_started = time.time()
-    assert (await submit(guest_run, "reconnect"))["resumed"]
+    if guest_stock_exit:
+        await guest.bridge.wait_for(lambda game: game.get("stock_pause_exit", {}).get("state") == "armed")
+        for action in ("open", "running", "prompt", "cancel"):
+            await stock_pause(guest.bridge, action)
+        await wait_status(guest_run, lambda frame: frame.get("state") == "connected")
+        for action in ("prompt", "confirm"):
+            await stock_pause(guest.bridge, action)
+        left = await wait_status(guest_run, lambda frame: frame.get("state") == "stopped")
+        assert left["stop_reason"] == "guest_left", left
+        await offered(guest)
+        assert not owns_udp_port(guest_pid, joined["unreal_local_port"])
+        assert (await wait_status(host_run, lambda frame: frame.get("state") == "hosting"))["pid"] == host_pid
+        reconnect_started = time.time()
+        await join("open")
+        await join("address", "127.0.0.1")
+        await join("port", str(host.port))
+        await join("no_password")
+        if await screen("catalog;count=1", "trust_host") == "trust_host":
+            await guest.bridge.command("native-title-button-fixture", "trust")
+            await screen("catalog;count=1")
+        await join("select", character)
+        await join("submit")
+        joined = await wait_status(guest_run, lambda frame: frame.get("state") == "connected"
+                                   and frame.get("generation") != left.get("generation"))
+        assert joined["pid"] == guest_pid and joined["character_id"] == character
+        gameplay["guest_stock_leave_rejoined_same_character"] = True
+    else:
+        assert (await submit(guest_run, "drop-link"))["ok"]
+        await wait_status(host_run, lambda frame: any(row["character_id"] == character and row["state"] == "reserved"
+                                                    for row in frame.get("campaign", {}).get("leases", ())))
+        reconnect_started = time.time()
+        assert (await submit(guest_run, "reconnect"))["resumed"]
     recovered = await wait_status(host_run, lambda frame: any(row["character_id"] == character and row["state"] == "active"
                                                              for row in frame.get("campaign", {}).get("leases", ())))
-    assert recovered["game"]["native_guest_save"]["pawn"] == pawn
+    if not guest_stock_exit:
+        assert recovered["game"]["native_guest_save"]["pawn"] == pawn
     if after_reconnect:
         await after_reconnect(guest, reconnect_started)
 
@@ -146,8 +174,16 @@ async def start_pair(host, guest, character_name, *, on_join=None, create_charac
     assert saved["characters"][character]["state"]["native_guest_save"]
     if after_exit:
         await after_exit(host, stopped[host_run], saved, character)
+    if guest_stock_exit:
+        removed_mailboxes = (
+            "native-coop-pause-session.tsv", "native-coop-pause-request.tsv", "native-coop-pause-response.tsv",
+            "native-session-exit-eligibility.state", "native-session-exit-input.state",
+        )
+        assert not any((seat.bridge.directory / name).exists() for seat in (host, guest) for name in removed_mailboxes)
+        gameplay["stock_pause_file_mailboxes_absent"] = True
+    reconnect_evidence = {} if guest_stock_exit else {"same_pawn_after_reconnect": True}
     return {"host_pid": host_pid, "guest_pid": guest_pid, "campaign_id": saved["campaign_id"],
-            "revision": saved["revision"], "character_id": character, "same_pawn_after_reconnect": True,
+            "revision": saved["revision"], "character_id": character, **reconnect_evidence,
             "title_return_and_sockets_closed": True, **gameplay}
 
 

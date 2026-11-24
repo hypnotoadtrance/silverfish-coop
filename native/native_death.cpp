@@ -1735,6 +1735,7 @@ namespace
             silverfish::native_host_dig::register_lua(lua);
             silverfish::host_invitation_clipboard::register_lua(lua);
             silverfish::native_stock_rest::register_lua(lua);
+            silverfish::native_session_exit_input::register_lua(lua);
             silverfish::shared_loot::register_lua(lua);
             silverfish::loot_escrow::register_lua(lua);
             silverfish::inventory_census::register_lua(lua);

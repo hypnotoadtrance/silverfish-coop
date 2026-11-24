@@ -2,15 +2,15 @@
 
 #include <array>
 #include <atomic>
-#include <charconv>
 #include <chrono>
 #include <cstdint>
-#include <filesystem>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 
+#include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
@@ -26,7 +26,7 @@ namespace
 {
     namespace U = RC::Unreal;
     namespace Hooks = U::Hook;
-    namespace fs = std::filesystem;
+    using Lua = RC::LuaMadeSimple::Lua;
     using Iteration = Hooks::TCallbackIterationData<void>;
     using Clock = std::chrono::steady_clock;
     using Address = std::uintptr_t;
@@ -40,13 +40,13 @@ namespace
     constexpr auto quit_name = STR("QuitToMenu");
     constexpr auto save_name =
         STR("BndEvt__Menu_Pause_Widget_Button_SaveAndQuit_K2Node_ComponentBoundEvent_5_Pressed__DelegateSignature");
-    constexpr auto lease_limit = 5;
+    constexpr auto lease_limit = std::chrono::seconds(5);
     constexpr auto pending_limit = std::chrono::seconds(3);
     constexpr auto repeat_limit = std::chrono::seconds(15);
     constexpr auto max_serial = (std::uint64_t{1} << 53) - 1;
 
-    enum class Role { host, client };
-    enum class Intent { quit_to_menu, save_and_quit };
+    enum class Role : unsigned { host = 1, client = 2 };
+    enum class Intent : int { quit_to_menu = 1, save_and_quit = 2 };
 
     struct Lease
     {
@@ -77,105 +77,72 @@ namespace
         return GetEnvironmentVariableW(name, value, 2) == 1 && value[0] == L'1';
     }
 
-    fs::path bridge, eligibility, intent_file;
-
-    bool bind_mailbox()
+    struct Offer
     {
-        std::array<wchar_t, 4096> environment{}, final_path{};
-        const auto count = GetEnvironmentVariableW(L"SILVERFISH_COOP_BRIDGE", environment.data(),
-            static_cast<DWORD>(environment.size()));
-        if (!count || count >= environment.size()) return false;
-        auto directory = fs::path{environment.data()}.lexically_normal().make_preferred();
-        if (!directory.is_absolute() || directory.root_name().native().size() != 2 ||
-            directory.root_name().native()[1] != L':' || !exact_token(std::wstring_view{directory.filename().native()}) ||
-            directory.parent_path().filename() != L"game-bridge" ||
-            directory.parent_path().parent_path().filename() != L"run") return false;
-        std::array<wchar_t, 4> volume{directory.native()[0], L':', L'\\'};
-        if (GetDriveTypeW(volume.data()) != DRIVE_FIXED) return false;
-        const HANDLE handle = CreateFileW(directory.c_str(), FILE_READ_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
-        if (handle == INVALID_HANDLE_VALUE) return false;
-        BY_HANDLE_FILE_INFORMATION info{};
-        const bool ordinary = GetFileInformationByHandle(handle, &info) &&
-            (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT);
-        const auto final_count = GetFinalPathNameByHandleW(handle, final_path.data(),
-            static_cast<DWORD>(final_path.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-        CloseHandle(handle);
-        if (!ordinary || !final_count || final_count >= final_path.size() ||
-            !std::wstring_view{final_path.data(), final_count}.starts_with(L"\\\\?\\")) return false;
-        // Reject redirected ancestors too. The drive and case spelling may differ on Windows.
-        if (CompareStringOrdinal(final_path.data() + 4, static_cast<int>(final_count - 4),
-            directory.c_str(), static_cast<int>(directory.native().size()), TRUE) != CSTR_EQUAL) return false;
-        bridge = std::move(directory);
-        eligibility = bridge / L"native-session-exit-eligibility.state";
-        intent_file = bridge / L"native-session-exit-input.state";
-        return true;
+        std::string token;
+        Role role{};
+        Clock::time_point expires{};
+        std::uint64_t press{};
+        Intent intent{};
+        bool taken{};
+    };
+
+    std::mutex offer_mutex;
+    Offer offer;
+    std::atomic<bool> installed{};
+    // The scene binds on the game thread. A role token cannot move to a different world or pawn.
+    std::optional<Lease> binding;
+    bool bound{};
+
+    bool active_offer()
+    {
+        return !offer.token.empty() && Clock::now() < offer.expires;
     }
 
-    template <typename UInt>
-    bool positive(std::string_view input, UInt& result, int base)
+    int bind_scene(const Lua& lua)
     {
-        const auto alphabet = base == 16 ? "0123456789abcdef" : "0123456789";
-        if (input.empty() || input.front() == '0' || input.find_first_not_of(alphabet) != input.npos) return false;
-        const auto parsed = std::from_chars(input.data(), input.data() + input.size(), result, base);
-        return parsed.ec == std::errc{} && parsed.ptr == input.data() + input.size() && result > 0;
+        if (!installed.load(std::memory_order_acquire) || !U::IsInGameThreadRaw()) return 0;
+        bound = false;
+        if (lua.get_stack_size() != 4 || !lua.is_integer(1) || !lua.is_integer(2) ||
+            !lua.is_integer(3) || !lua.is_integer(4)) return 0;
+        const auto role = static_cast<Role>(lua.get_integer());
+        const auto world = lua.get_integer();
+        const auto controller = lua.get_integer();
+        const auto pawn = lua.get_integer();
+        if (world <= 0 || controller <= 0 || pawn <= 0) return 0;
+
+        std::string token;
+        std::uint64_t press{};
+        {
+            std::lock_guard lock(offer_mutex);
+            if (!active_offer() || offer.role != role) return 0;
+            token = offer.token;
+            press = offer.press;
+        }
+        auto lease = Lease{token, role, static_cast<Address>(world), static_cast<Address>(controller),
+            static_cast<Address>(pawn)};
+        if (binding && binding->token == token && *binding != lease) return 0;
+        binding = std::move(lease);
+        bound = true;
+        lua.set_string(token);
+        lua.set_integer(static_cast<std::int64_t>(press));
+        return 2;
     }
 
     std::optional<Lease> read_lease()
     {
-        std::array<char, 160> bytes{};
-        const HANDLE handle = CreateFileW(eligibility.c_str(), GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
-        if (handle == INVALID_HANDLE_VALUE) return {};
-        BY_HANDLE_FILE_INFORMATION info{};
-        DWORD count{};
-        const bool read = GetFileType(handle) == FILE_TYPE_DISK && GetFileInformationByHandle(handle, &info) &&
-            !(info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) &&
-            !info.nFileSizeHigh && info.nFileSizeLow > 0 && info.nFileSizeLow < bytes.size() &&
-            ReadFile(handle, bytes.data(), static_cast<DWORD>(bytes.size()), &count, nullptr) &&
-            count == info.nFileSizeLow;
-        CloseHandle(handle);
-        if (!read) return {};
-        std::string_view row{bytes.data(), count};
-        if (!row.ends_with('\n')) return {};
-        row.remove_suffix(1);
-        std::array<std::string_view, 7> parts{};
-        for (std::size_t index = 0; index + 1 < parts.size(); ++index)
-        {
-            const auto tab = row.find('\t');
-            if (tab == row.npos) return {};
-            parts[index] = row.substr(0, tab);
-            row.remove_prefix(tab + 1);
-        }
-        parts.back() = row;
-        if (parts[0] != "1" || !exact_token(parts[1]) || (parts[2] != "host" && parts[2] != "client")) return {};
-        Lease lease{std::string{parts[1]}, parts[2] == "host" ? Role::host : Role::client, 0, 0, 0};
-        std::int64_t expires{};
-        if (!positive(parts[3], lease.world, 16) || !positive(parts[4], lease.controller, 16) ||
-            !positive(parts[5], lease.pawn, 16) || !positive(parts[6], expires, 10)) return {};
-        const auto now = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-        if (expires < now || expires - now > lease_limit) return {};
-        return lease;
+        if (!bound || !binding) return {};
+        std::lock_guard lock(offer_mutex);
+        return active_offer() && offer.token == binding->token && offer.role == binding->role ? binding : std::nullopt;
     }
 
     bool publish(const Lease& lease, std::uint64_t serial, Intent intent)
     {
-        const auto temporary = bridge / (L"native-session-exit-input." + std::to_wstring(serial) + L".tmp");
-        const auto contents = "1\t" + lease.token + "\t" + std::to_string(serial) + "\t" +
-            (intent == Intent::quit_to_menu ? "quit_to_menu\n" : "save_and_quit\n");
-        const HANDLE handle = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr,
-            CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (handle == INVALID_HANDLE_VALUE) return false;
-        DWORD written{};
-        const bool complete = WriteFile(handle, contents.data(), static_cast<DWORD>(contents.size()),
-            &written, nullptr) && written == contents.size();
-        const bool closed = CloseHandle(handle);
-        if (complete && closed && MoveFileExW(temporary.c_str(), intent_file.c_str(), 0)) return true;
-        DeleteFileW(temporary.c_str());
-        return false;
+        std::lock_guard lock(offer_mutex);
+        if (!active_offer() || offer.token != lease.token || offer.role != lease.role || offer.press) return false;
+        offer.press = serial;
+        offer.intent = intent;
+        return true;
     }
 
     template <typename T>
@@ -432,7 +399,6 @@ namespace
 
     std::optional<Exit> pending, published;
     std::uint64_t serial{};
-    std::atomic<bool> installed{};
     std::array<Hooks::GlobalCallbackId, 3> hooks{Hooks::ERROR_ID, Hooks::ERROR_ID, Hooks::ERROR_ID};
     U::FName quit_event{}, save_event{};
 
@@ -441,12 +407,13 @@ namespace
         if (!installed.load(std::memory_order_acquire) || !U::IsInGameThreadRaw() ||
             !function || call.OriginalFunctionCallPrevented()) return;
         const auto name = function->GetFName();
-        if ((name != quit_event && name != save_event) || !exact(widget, pause_path)) return;
+        if (name != quit_event && name != save_event) return;
+        auto lease = read_lease();
+        if ((!lease && !published) || !exact(widget, pause_path)) return;
         const auto intent = name == quit_event ? Intent::quit_to_menu : Intent::save_and_quit;
         if (function != script(pause_path, intent == Intent::quit_to_menu ? quit_name : save_name) ||
             function->GetNumParms() != 0 || function->GetParmsSize() != 0 || function->GetReturnProperty()) return;
 
-        auto lease = read_lease();
         const auto now = Clock::now();
         const bool repeat = published && published->expires > now &&
             (!lease || published->lease == *lease) &&
@@ -487,8 +454,7 @@ namespace
             return;
         }
         const bool repeat_cleanup = exit.cleanup_only && published && published->expires > now;
-        // The Lua publisher can briefly replace the eligibility file as a seat lease refreshes.
-        if (!lease && !repeat_cleanup) return;
+        if (!lease && !repeat_cleanup) { pending.reset(); return; }
         auto* controller = exit.seat.controller.Get();
         auto* menu = exit.pause.Get();
         ObjectArray stack(controller, STR("MenuStack"));
@@ -525,12 +491,45 @@ namespace
     }
 }
 
+extern "C" __declspec(dllexport) int SilverfishPauseOfferV1(const char* token, unsigned role)
+{
+    std::lock_guard lock(offer_mutex);
+    if (!role)
+    {
+        offer = {};
+        return 1;
+    }
+    if (!installed.load(std::memory_order_acquire) ||
+        (role != static_cast<unsigned>(Role::host) && role != static_cast<unsigned>(Role::client)) ||
+        !token || strnlen_s(token, 33) != 32 || !exact_token(std::string_view{token, 32})) return 0;
+    const auto seat = static_cast<Role>(role);
+    if (offer.token != token || offer.role != seat) offer = Offer{token, seat};
+    offer.expires = Clock::now() + lease_limit;
+    return 1;
+}
+
+extern "C" __declspec(dllexport) int SilverfishPauseTakeV1(const char* token, unsigned role, std::uint64_t* press)
+{
+    std::lock_guard lock(offer_mutex);
+    // The serialized worker may have been waiting for a normal save when the native press arrived.
+    if (!token || !press || offer.token.empty() || offer.token != token || role != static_cast<unsigned>(offer.role) ||
+        !offer.press || offer.taken || Clock::now() >= offer.expires + 2 * lease_limit) return 0;
+    offer.taken = true;
+    *press = offer.press;
+    return static_cast<int>(offer.intent);
+}
+
 namespace silverfish::native_session_exit_input
 {
+    void register_lua(Lua& lua)
+    {
+        lua.register_function("SilverfishBindStockPauseExit", bind_scene);
+    }
+
     void install_hooks()
     {
         if (installed.load(std::memory_order_acquire) || !enabled(L"SILVERFISH_COOP_EMBEDDED_ENGINE") ||
-            !enabled(L"SILVERFISH_COOP_NATIVE_ZONE") || !bind_mailbox()) return;
+            !enabled(L"SILVERFISH_COOP_NATIVE_ZONE")) return;
         quit_event = U::FName{quit_name, U::FNAME_Add};
         save_event = U::FName{save_name, U::FNAME_Add};
         hooks[0] = Hooks::RegisterProcessEventPreCallback(
@@ -565,6 +564,10 @@ namespace silverfish::native_session_exit_input
         {
             pending.reset();
             published.reset();
+            binding.reset();
+            bound = false;
         }
+        std::lock_guard lock(offer_mutex);
+        offer = {};
     }
 }

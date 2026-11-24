@@ -1,14 +1,18 @@
 local prefix = "private"
-local offer = prefix .. "/native-coop-pause-session.tsv"
-local eligible = prefix .. "/native-session-exit-eligibility.state"
-local input = prefix .. "/native-session-exit-input.state"
-local request = prefix .. "/native-coop-pause-request.tsv"
 local steam_host = prefix .. "/steam-coop-host.tsv"
 local steam_request = prefix .. "/steam-coop-invite-request.tsv"
 local first = string.rep("a", 32)
 local second = string.rep("b", 32)
 local third = string.rep("c", 32)
 local fs, now = {}, 100
+local lease, bound
+local function bind(role, world, controller, pawn)
+    if not role or not lease or lease.role ~= role or lease.expiration <= now then return end
+    local key = table.concat({world, controller, pawn}, ":")
+    if bound and bound.generation == lease.generation and bound.key ~= key then return end
+    bound = {generation = lease.generation, key = key}
+    return lease.generation, lease.press
+end
 
 local function object(address, class)
     return {
@@ -81,6 +85,7 @@ local controls = {
 }
 local env = setmetatable({
     io = {open = fake_open},
+    SilverfishBindStockPauseExit = bind,
     os = {
         time = function() return now end,
         getenv = function(key)
@@ -112,10 +117,7 @@ local env = setmetatable({
 local script = "mod/SilverfishCoop/Scripts/native_coop_pause.lua"
 local bridge = assert(loadfile(script, "t", env))()
 local function descriptor(generation, role, expiration)
-    fs[offer] = table.concat({1, generation, role, expiration}, "\t") .. "\n"
-end
-local function capture(generation, sequence, reason)
-    fs[input] = table.concat({1, generation, sequence, reason}, "\t") .. "\n"
+    lease = {generation = generation, role = role == "host" and 1 or 2, expiration = expiration, press = 0}
 end
 local function row(...)
     return table.concat({...}, "\t")
@@ -132,12 +134,11 @@ end
 bridge.start(prefix)
 descriptor(first, "host", 104)
 bridge.sync(state, "ready")
-assert(fs[eligible] == nil and fs[request] == nil)
+assert(#bridge.rows(state, "ready", row) == 0)
 assert(requests_pause(menu), "A title or solo session must keep stock pause")
 local allowed, error_text = pcall(bridge.command, {"1", "native-coop-pause-fixture", "open"}, state, "hosting")
 assert(not allowed and error_text == "native_coop_pause_fixture_unavailable")
 bridge.sync(state, "hosting")
-assert(fs[eligible] == table.concat({1, first, "host", "a", "14", "1e", 104}, "\t") .. "\n")
 assert(bridge.rows(state, "hosting", row)[1] == row("native-coop-pause", "host", first, "armed", 0))
 assert(not requests_pause(menu), "The host's exact stock pause menu keeps the world running")
 already_paused = true
@@ -192,43 +193,24 @@ bridge.sync(state, "hosting")
 assert(invite_button and invite_button.widget.enabled)
 fs[steam_host] = nil
 
-capture(second, 1, "quit_to_menu")
+lease.press = 2
 bridge.sync(state, "hosting")
-assert(fs[input] == nil and fs[request] == nil)
-capture(first, "01", "quit_to_menu")
-bridge.sync(state, "hosting")
-assert(fs[input] == nil and fs[request] == nil)
-capture(first, 2, "save_and_quit")
-fs[request] = "existing"
-bridge.sync(state, "hosting")
-assert(fs[request] == "existing" and fs[input] ~= nil)
-fs[request] = nil
-bridge.sync(state, "hosting")
-assert(fs[request] == table.concat({1, first, 2, "host", "save_and_quit"}, "\t") .. "\n")
-assert(fs[input] == nil and fs[eligible] ~= nil)
 assert(bridge.rows(state, "hosting", row)[1] == row("native-coop-pause", "host", first, "requested", 2))
-fs[request] = nil
-capture(first, 3, "quit_to_menu")
-bridge.sync(state, "hosting")
-assert(fs[request] == nil and fs[input] == nil)
 
 now = 105
 bridge.sync(state, "hosting")
-assert(fs[eligible] == nil)
-descriptor(second, "host", 111)
-bridge.sync(state, "hosting")
-assert(fs[eligible] == nil, "offer may not extend farther than five seconds")
+assert(#bridge.rows(state, "hosting", row) == 0, "an expired offer leaves no armed exit")
 descriptor(second, "host", 109)
 controller.Loading = true
 bridge.sync(state, "hosting")
-assert(fs[eligible] == nil)
+assert(#bridge.rows(state, "hosting", row) == 0)
 controller.Loading = false
 bridge.sync(state, "hosting")
-assert(fs[eligible] ~= nil)
+assert(bridge.rows(state, "hosting", row)[1] == row("native-coop-pause", "host", second, "armed", 0))
 local method = pawn.GetAddress
 pawn.GetAddress = function() return 31 end
 bridge.sync(state, "hosting")
-assert(fs[eligible] == nil, "same generation cannot be reused after a pawn change")
+assert(#bridge.rows(state, "hosting", row) == 0, "same generation cannot be reused after a pawn change")
 pawn.GetAddress = method
 
 authority, state.server, world.NetDriver.ServerConnection = false, true, object(12)
@@ -237,20 +219,20 @@ fs[steam_host] = row(1, third, "ready") .. "\n"
 bridge.sync(state, "connected")
 assert(not invite_button and fs[steam_request] == nil, "A connected guest cannot open a Steam host invite")
 fs[steam_host] = nil
-assert(fs[eligible] == table.concat({1, third, "client", "a", "14", "1e", 109}, "\t") .. "\n")
+assert(bridge.rows(state, "connected", row)[1] == row("native-coop-pause", "guest", third, "armed", 0))
 assert(not requests_pause(menu), "The client's exact stock pause menu keeps the world running")
-capture(third, 4, "quit_to_menu")
+lease.press = 4
 bridge.sync(state, "connected")
-assert(fs[request] == table.concat({1, third, 4, "guest", "quit_to_menu"}, "\t") .. "\n")
+assert(bridge.rows(state, "connected", row)[1] == row("native-coop-pause", "guest", third, "requested", 4))
 bridge.clear()
-assert(fs[eligible] == nil and fs[request] ~= nil, "revocation never removes an already-published worker request")
+assert(#bridge.rows(state, "connected", row) == 0 and lease.press == 4, "revocation keeps an already-published press")
 assert(requests_pause(menu), "Session exit restores the stock pause request")
 
 embedded = false
 local standalone = assert(loadfile(script, "t", env))()
 standalone.start(prefix)
 standalone.sync(state, "connected")
-assert(fs[eligible] == nil and #standalone.rows(state, "connected", row) == 0)
+assert(#standalone.rows(state, "connected", row) == 0)
 
 local command_path = prefix .. "/native-coop-pause-fixture-command.tsv"
 local reply_path = prefix .. "/native-coop-pause-fixture-reply.tsv"

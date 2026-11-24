@@ -14,13 +14,10 @@ local confirm_press = "BndEvt__ConfirmationScreen_Button_Confirm_K2Node_Componen
 local cancel_press = "BndEvt__ConfirmationScreen_Button_Cancel_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature"
 local fixture_command = "native-coop-pause-fixture"
 local fixture_actions = {open = true, running = true, prompt = true, cancel = true, confirm = true, save_and_quit = true}
-local reasons = {quit_to_menu = true, save_and_quit = true}
-
-local offer_path, eligibility_path, input_path, request_path
 local steam_host_path, steam_request_path, steam_invite
 local fixture_command_path, fixture_reply_path, fixture_previous, fixture_pending
 local fixture_seen, fixture_count = {}, 0
-local bound, written_eligibility, requested, fixture_menu, fixture_confirmation, fixture_status, fixture_diagnostic
+local generation, fixture_menu, fixture_confirmation, fixture_status, fixture_diagnostic
 local active_scene
 
 local function valid(object) return object and object:IsValid() end
@@ -29,8 +26,7 @@ local function exact(object, class) return valid(object) and same(object:GetClas
 local function token(value) return value and #value == 32 and value:match("^[0-9a-f]+$") and value:find("[^0]") end
 
 local function pointer(object)
-    local address = valid(object) and math.tointeger(object:GetAddress())
-    return address and address > 0 and string.format("%x", address) or nil
+    return valid(object) and math.tointeger(object:GetAddress()) or nil
 end
 
 local function context(state, phase)
@@ -53,7 +49,7 @@ local function context(state, phase)
     local world_id, controller_id, pawn_id = pointer(world), pointer(controller), pointer(pawn)
     if not world_id or not controller_id or not pawn_id then return end
     return {world = world, driver = driver, controller = controller, pawn = pawn, role = role,
-        address = table.concat({world_id, controller_id, pawn_id}, "\t")}
+        world_id = world_id, controller_id = controller_id, pawn_id = pawn_id}
 end
 
 local function keep_world_running(_, world_context, paused)
@@ -92,27 +88,11 @@ local function publish(path, record, replace)
     local written = file:write(record)
     local closed = file:close()
     if written and closed then
-        -- The eligibility reader is another game-thread callback in this process.
         if replace then os.remove(path) end
         if (replace or not exists(path)) and os.rename(temporary, path) then return true end
     end
     os.remove(temporary)
     return false
-end
-
-local function lease(role)
-    local data = read(offer_path, 110)
-    if not data then return end
-    local generation, offered, raw = data:match("^1\t([0-9a-f]+)\t([a-z]+)\t([0-9]+)\r?\n$")
-    local expires, now = raw and #raw <= 10 and math.tointeger(tonumber(raw)), os.time()
-    if token(generation) and offered == role and expires and now <= expires and expires <= now + 5 then
-        return generation, expires
-    end
-end
-
-local function revoke()
-    if written_eligibility then os.remove(eligibility_path) end
-    written_eligibility = nil
 end
 
 local function clear_invite()
@@ -124,28 +104,21 @@ end
 
 function pause.clear()
     active_scene = nil
-    revoke()
+    if embedded and type(SilverfishBindStockPauseExit) == "function" then SilverfishBindStockPauseExit() end
     clear_invite()
     fixture_menu, fixture_confirmation, fixture_status, fixture_diagnostic = nil, nil, nil, nil
 end
 
 local function qualified(scene)
-    if not offer_path then return end
-    local generation, expires
-    if scene then generation, expires = lease(scene.role) end
-    if not generation or bound and bound.generation == generation
-        and (bound.role ~= scene.role or bound.address ~= scene.address) then return end
-    if not bound or bound.generation ~= generation then
-        bound = {generation = generation, role = scene.role, address = scene.address}
-        requested, fixture_menu, fixture_confirmation, fixture_status, fixture_diagnostic = nil, nil, nil, nil, nil
+    if not scene or not embedded or type(SilverfishBindStockPauseExit) ~= "function" then return end
+    local current, press = SilverfishBindStockPauseExit(scene.role == "host" and 1 or 2,
+        scene.world_id, scene.controller_id, scene.pawn_id)
+    if not current then return end
+    if generation ~= current then
+        generation = current
+        fixture_menu, fixture_confirmation, fixture_status, fixture_diagnostic = nil, nil, nil, nil
     end
-    scene.generation = generation
-    local role = scene.role == "guest" and "client" or "host"
-    local record = table.concat({"1", generation, role, scene.address, expires}, "\t") .. "\n"
-    if record ~= written_eligibility then
-        if not publish(eligibility_path, record, true) then revoke(); return end
-        written_eligibility = record
-    end
+    scene.generation, scene.press = current, press
     return scene
 end
 
@@ -181,7 +154,7 @@ local function top_pause(scene)
 end
 
 local function sync_steam_invite(scene)
-    local menu = scene.role == "host" and not requested and top_pause(scene)
+    local menu = scene.role == "host" and scene.press == 0 and top_pause(scene)
     local status = menu and steam_status(scene)
     if not status then clear_invite(); return end
     if steam_invite and (not same(steam_invite.menu, menu) or steam_invite.generation ~= scene.generation) then
@@ -195,9 +168,8 @@ local function sync_steam_invite(scene)
         local record = {controls = controls, menu = menu, generation = scene.generation}
         steam_invite = record
         local added, button = pcall(controls.create, scene, parent, steam_views[status].label, function()
-            local latest = active_scene
-            if steam_invite ~= record or requested or lease("host") ~= record.generation
-                or not latest or latest.generation ~= record.generation
+            local latest = qualified(active_scene)
+            if steam_invite ~= record or not latest or latest.press ~= 0 or latest.generation ~= record.generation
                 or not can_invite(steam_status(latest)) or not same(top_pause(latest), menu) then return end
             publish(steam_request_path, "1\t" .. record.generation .. "\tinvite\n", false)
         end)
@@ -210,23 +182,6 @@ local function sync_steam_invite(scene)
         widget:SetToolTipText(FText(view.hint))
         widget:SetIsEnabled(can_invite(status))
         steam_invite.status = status
-    end
-end
-
-local function consume(scene)
-    local data = read(input_path, 120)
-    if not data then return end
-    local generation, raw, reason = data:match("^1\t([0-9a-f]+)\t([0-9]+)\t([a-z_]+)\n$")
-    local serial = raw and #raw <= 16 and math.tointeger(tonumber(raw))
-    if not token(generation) or not serial or serial < 1 or serial >= 2^53 or tostring(serial) ~= raw or not reasons[reason] then
-        os.remove(input_path)
-        return
-    end
-    if generation ~= scene.generation or requested then os.remove(input_path); return end
-    local message = table.concat({"1", generation, serial, scene.role, reason}, "\t") .. "\n"
-    if publish(request_path, message, false) then
-        requested = serial
-        os.remove(input_path)
     end
 end
 
@@ -268,17 +223,14 @@ end
 
 function pause.sync(state, phase)
     local scene = context(state, phase)
-    if offer_path then
-        local managed = qualified(scene)
-        if managed then
-            consume(managed)
-            sync_steam_invite(managed)
-        else
-            pause.clear()
-        end
+    local managed = qualified(scene)
+    if managed then
+        sync_steam_invite(managed)
+    elseif embedded then
+        pause.clear()
     end
     active_scene = scene
-    if offer_path then service_fixture(state, phase) end
+    service_fixture(state, phase)
 end
 
 local function reject(reason) error("native_coop_pause_fixture_" .. reason, 0) end
@@ -321,7 +273,7 @@ function pause.command(fields, state, phase)
     local action = fields[3]
     if #fields ~= 3 or not fixture_actions[action] then reject("arguments") end
     local scene = qualified(context(state, phase))
-    if not scene or requested then reject("scope_unavailable") end
+    if not scene or scene.press ~= 0 then reject("scope_unavailable") end
     local stack = scene.controller.MenuStack
     local count = stack and stack:GetArrayNum()
     if action == "open" then
@@ -352,7 +304,6 @@ function pause.command(fields, state, phase)
             or not fixture_menu.Button_SaveAndQuit:IsVisible()
             or fixture_menu:Get_Button_SaveAndQuit_bIsEnabled() ~= true then reject("stock_save_and_quit_unavailable") end
         fixture_menu[save_press](fixture_menu)
-        consume(scene)
     else
         local confirm = confirmation(stack, scene)
         if not same(confirm, fixture_confirmation) or confirm.Dismissed ~= false then
@@ -361,17 +312,19 @@ function pause.command(fields, state, phase)
         local press = action == "confirm" and confirm_press or cancel_press
         confirm[press](confirm)
         fixture_confirmation = nil
-        consume(scene)
     end
     fixture_status = action
     return "exact stock co-op pause " .. action
 end
 
 function pause.rows(state, phase, row)
-    if not offer_path or not written_eligibility or not bound then return {} end
-    local scene = context(state, phase)
-    if not scene or scene.address ~= bound.address or scene.role ~= bound.role then return {} end
-    local lines = {row("native-coop-pause", bound.role, bound.generation, requested and "requested" or "armed", requested or 0)}
+    local scene = active_scene
+    local role = phase == "hosting" and "host" or phase == "connected" and "guest"
+    if not scene or not scene.generation or scene.role ~= role or not same(scene.world, state.world)
+        or not same(scene.controller, state.controller) or not same(scene.pawn, state.local_pawn and state.local_pawn.pawn) then
+        return {}
+    end
+    local lines = {row("native-coop-pause", scene.role, scene.generation, scene.press ~= 0 and "requested" or "armed", scene.press)}
     if fixture_status then lines[#lines + 1] = row("native-coop-pause-fixture", bound.role, fixture_status) end
     if fixture_diagnostic then lines[#lines + 1] = row("native-coop-pause-fixture-diagnostic", bound.role, fixture_diagnostic) end
     return lines
@@ -380,14 +333,8 @@ end
 function pause.start(bridge)
     RegisterHook(set_paused, keep_world_running)
     if not embedded then return end
-    offer_path = bridge .. "/native-coop-pause-session.tsv"
-    eligibility_path = bridge .. "/native-session-exit-eligibility.state"
-    input_path = bridge .. "/native-session-exit-input.state"
-    request_path = bridge .. "/native-coop-pause-request.tsv"
     steam_host_path = bridge .. "/steam-coop-host.tsv"
     steam_request_path = bridge .. "/steam-coop-invite-request.tsv"
-    os.remove(eligibility_path)
-    os.remove(input_path)
     if fixtures then
         fixture_command_path = bridge .. "/native-coop-pause-fixture-command.tsv"
         fixture_reply_path = bridge .. "/native-coop-pause-fixture-reply.tsv"

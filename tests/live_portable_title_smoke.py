@@ -4722,6 +4722,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False, nonmirrored_startup: bool = False,
                  compact_crate_status: bool = False, compact_world_view: bool = False,
                  guest_shop_lease: bool = False, guest_stash_memory: bool = False, guest_stash_large_memory: bool = False,
+                 stock_pause_exit: bool = False,
                  zone_lease_preflight: bool = False,
                  resident_cabinet_archive: Path | None = None,
                  resident_cabinet_checkpoint: Path | None = None,
@@ -5317,7 +5318,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         else:
             create = create_stock_split_character if stock_split or stock_equip else create_stock_drop_character if stock_drop else None
             proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=check_gameplay,
-                                                      create_character=create_stock_bag_character if stock_use else create))
+                                                      create_character=create_stock_bag_character if stock_use else create,
+                                                      guest_stock_exit=stock_pause_exit))
             proof["sessions"].append(await start_pair(second, first, "First portable scout", on_join=check_gameplay,
                                                       create_character=create_stock_drop_character if stock_use else create))
             assert proof["sessions"][0]["host_pid"] == proof["sessions"][1]["guest_pid"]
@@ -5398,6 +5400,8 @@ if __name__ == "__main__":
     parser.add_argument("--first-game", type=Path, required=True, help="Clean replica with the release ZIP applied and no mods.txt")
     parser.add_argument("--second-game", type=Path, required=True, help="Separate replica with the same release ZIP applied")
     parser.add_argument("--vanilla-saved", type=Path, required=True)
+    parser.add_argument("--stock-pause-exit", action="store_true",
+                        help="exercise guest stock Quit to Menu and host Save and Quit in the same resident pair")
     parser.add_argument("--stock-drop", action="store_true", help="test stock guest backpack Sort, Drop, and Use actions")
     parser.add_argument("--stock-use", action="store_true", help="open a starter bag by stock drag and use a Bandage by stock click")
     parser.add_argument("--stock-food", action="store_true", help="verify the guest's Food stat after a meal, combinable with campfire and weapon cues")
@@ -5680,6 +5684,7 @@ if __name__ == "__main__":
                        stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby,
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
                        stock_use=args.stock_use, stock_food=args.stock_food, stock_campfire=args.stock_campfire,
+                       stock_pause_exit=args.stock_pause_exit,
                        stock_cooked_meal=args.stock_cooked_meal,
                        stock_personal_consumable=args.stock_personal_consumable,
                        stock_wipe_chooser=args.stock_wipe_chooser,
