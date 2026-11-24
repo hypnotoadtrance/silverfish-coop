@@ -370,6 +370,16 @@ local function run(action, argument)
     end
     if action == "ready" then return ready(local_pawn) end
     if action == "peer-ready" then return ready(peer) end
+    if action == "peer-cycle-complete" then
+        local counts = ready(peer)
+        if counts == "waiting" then return counts end
+        local weapon = peer.EquipedItem
+        if weapon.IsCycling ~= false or weapon.Reloading ~= false or weapon.Holding_Primary ~= false then
+            return ("cycling=%s,reloading=%s,held=%s"):format(tostring(weapon.IsCycling),
+                tostring(weapon.Reloading), tostring(weapon.Holding_Primary))
+        end
+        return counts
+    end
     if action == "round" or action == "peer-round" then
         local pawn = action == "round" and local_pawn or peer
         if ready(pawn) == "waiting" then return "waiting" end

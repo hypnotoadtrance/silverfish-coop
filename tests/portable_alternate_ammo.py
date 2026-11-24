@@ -75,7 +75,7 @@ async def verify_alternate_ammo(host, guest, pawn, probe):
         shot = await stock_input("primary", frame, guid)
         remaining = rounds - 1
         assert (shot["before"], shot["after"], shot["projectiles"]) == (rounds, remaining, 1), shot
-        await asyncio.gather(read(host, "peer-ready", f"{guid},{remaining},{remaining}"),
+        await asyncio.gather(read(host, "peer-cycle-complete", f"{guid},{remaining},{remaining}"),
                              read(guest, "ready", f"{guid},{remaining},{remaining}"))
 
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
