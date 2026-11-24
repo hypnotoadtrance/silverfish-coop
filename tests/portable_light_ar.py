@@ -3,9 +3,10 @@
 import asyncio
 import re
 
-from live_multi_smoke import campaign_save_hashes
+from live_multi_smoke import campaign_save_hashes, saved_hashes
+from live_unified_title_smoke import start_pair
 from portable_guest_world_start import resident_events, wait_resident_status
-from tools.silverfish import native_smg_hold
+from tools.silverfish import native_host_save, native_smg_hold
 from tools.silverfish.control import submit
 from tools.silverfish.guest_weapon_profiles import FIREARMS, FIVE_SIX_FMJ
 from tools.silverfish.travel import OBSERVATORY
@@ -189,3 +190,85 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
                                "skeletal_tail_gap_cm": tail_gap,
                                "both_magazines_verified": True, "host_reserve_unchanged": True,
                                "campaign_unchanged": True, "observer_scopes_disarmed": True}}
+
+
+async def verify_fire_mode_reopen(first, second, probe, evidence):
+    async def command(seat, action):
+        return await probe(seat.bridge, "portable-dry-fire", action)
+
+    async def wait_value(seat, action, expected):
+        async with asyncio.timeout(10):
+            while await command(seat, action) != expected:
+                await asyncio.sleep(.05)
+
+    async def armed(host, guest, pawn, *, reopen=False):
+        host_run, guest_run = host.campaign / "run", guest.client / "run"
+        assert await command(host, "arm-light-ar") == await command(guest, "arm-light-ar") == "armed"
+        try:
+            active = await wait_resident_status(host_run, lambda status: status.get("game", {}).get("save_scope"))
+            save_scope = native_host_save.SaveScope(host.profile, active["game"]["save_scope"])
+            native_before = saved_hashes(native_host_save.directory(save_scope))
+            before = campaign_save_hashes(host.campaign)
+            if reopen:
+                guid = evidence["guid"]
+                assert pawn != evidence["initial_pawn"], "Expected a newly loaded authoritative guest pawn"
+            else:
+                guid = await command(host, "seed-peer")
+                assert re.fullmatch(r"[0-9A-F]{32}", guid), guid
+                evidence.update(guid=guid, initial_pawn=pawn)
+            await wait_value(guest, "projected", guid)
+            if await command(guest, "ready") == "waiting":
+                assert await command(guest, "equip") == "selected"
+            await wait_value(guest, "ready", f"{guid},1,1")
+            await wait_value(host, "peer-ready", f"{guid},1,1")
+            if not reopen:
+                await wait_value(guest, "light-ar-read-mode", "auto")
+                assert await command(guest, "light-ar-semi") == "light-ar-semi"
+            host_frame = await wait_resident_status(host_run, lambda status: (
+                (weapon := status.get("game", {}).get("native_guest_equipped_weapons", {}).get(pawn, {}))
+                and (weapon.get("guid"), weapon.get("rounds"), weapon.get("fire_mode")) == (guid, 1, "semi")), timeout=10)
+            guest_frame = await wait_resident_status(guest_run, lambda status: (
+                (scope := status.get("game", {}).get("native_guest_primary_scope", {})) and scope.get("guid") == guid), timeout=10)
+            await wait_value(guest, "light-ar-read-mode", "semi")
+            evidence["reopened" if reopen else "initial"] = {
+                "host_generation": host_frame["generation"], "guest_generation": guest_frame["generation"],
+                "pawn": pawn, "guid": guid, "rounds": 1, "mode": "semi",
+            }
+            if reopen:
+                assert all(evidence["reopened"][key] != evidence["initial"][key]
+                           for key in ("host_generation", "guest_generation"))
+                result = await submit(guest_run, native_smg_hold.LOCAL_FIXTURE, target="press")
+                if result["ok"]:
+                    await submit(guest_run, native_smg_hold.LOCAL_FIXTURE, target="release")
+                assert not result["ok"] and "requires_automatic_mode" in result["error"], result
+                evidence["reopened"]["automatic_hold_denied"] = True
+            assert campaign_save_hashes(host.campaign) == before, "Checking or changing the selector wrote a campaign save"
+            assert saved_hashes(native_host_save.directory(save_scope)) == native_before, (
+                "Checking or changing the selector wrote a native Unreal save")
+        finally:
+            assert await command(host, "disarm") == await command(guest, "disarm") == "disarmed"
+
+    async def check_saved(host, _stopped, checkpoint, character):
+        frame = checkpoint["characters"][character]["state"]["native_guest_save"]
+        profile = native_host_save.checkpoint_profile(host.profile, checkpoint)
+        save = native_host_save.slot_path(profile, frame["slot"])
+        payload = save.read_bytes()
+        marker = "SFCoopFireMode_" + evidence["guid"]
+        assert marker.encode("ascii") in payload or marker.encode("utf-16-le") in payload, frame
+        evidence["saved"] = {"character": character, "revision": checkpoint["revision"], "sha256": frame["sha256"]}
+
+    async def seed(host, guest, pawn):
+        await armed(host, guest, pawn)
+        return {}
+
+    async def rejoin(host, guest, pawn):
+        await armed(host, guest, pawn, reopen=True)
+        return {}
+
+    saved = await start_pair(first, second, "Selector scout", on_join=seed, after_exit=check_saved,
+                             wait_status=wait_resident_status)
+    reopened = await start_pair(first, second, "Selector scout", load_existing=True,
+                                resume_character=saved["character_id"], on_join=rejoin, wait_status=wait_resident_status)
+    assert all(reopened[key] == saved[key] for key in ("campaign_id", "character_id", "host_pid", "guest_pid"))
+    assert reopened["revision"] > saved["revision"] == evidence["saved"]["revision"]
+    return [saved, reopened]

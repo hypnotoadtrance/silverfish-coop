@@ -43,7 +43,9 @@ async def offered(seat):
 async def start_pair(host, guest, character_name, *, on_join=None, create_character=None,
                      before_join=None, after_reconnect=None, wait_status=wait,
                      host_exit_actions=("save_and_quit",), after_exit=None, load_existing=False,
-                     wait_for_host_pause=None):
+                     wait_for_host_pause=None, resume_character=None):
+    if resume_character is not None and (not load_existing or create_character is not None):
+        raise ValueError("Rejoining a saved character requires an existing campaign")
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_pid, guest_pid = host.bridge.process.pid, guest.bridge.process.pid
     host_form = "native-title-host-form-fixture"
@@ -69,25 +71,34 @@ async def start_pair(host, guest, character_name, *, on_join=None, create_charac
     async def join(*args):
         return await guest.bridge.command("native-title-join-form-fixture", *args)
 
-    async def screen(expected):
+    async def screen(*expected):
         async with asyncio.timeout(22):
-            while (await join("observe"))["ack"]["message"] != "title_join_form_state=" + expected:
+            while True:
+                state = (await join("observe"))["ack"]["message"].removeprefix("title_join_form_state=")
+                if state in expected:
+                    return state
                 await asyncio.sleep(.1)
 
     await join("open")
     await join("address", "127.0.0.1")
     await join("port", str(host.port))
     await join("no_password")
-    await screen("trust_host")
-    await guest.bridge.command("native-title-button-fixture", "trust")
-    await screen("catalog;count=0")
-    if create_character is None:
-        await join("create", character_name)
+    if resume_character is not None:
+        if await screen("catalog;count=1", "trust_host") == "trust_host":
+            await guest.bridge.command("native-title-button-fixture", "trust")
     else:
-        await create_character(guest, join, character_name)
+        await screen("trust_host")
+        await guest.bridge.command("native-title-button-fixture", "trust")
+        await screen("catalog;count=0")
+        if create_character is None:
+            await join("create", character_name)
+        else:
+            await create_character(guest, join, character_name)
     await screen("catalog;count=1")
     checkpoint = CampaignStore.read_existing(host.campaign / "save", verify_world=service.verify_travel_checkpoint)
     character, = checkpoint["characters"]
+    if resume_character is not None:
+        assert character == resume_character, (character, resume_character)
     await join("select", character)
     if before_join:
         await before_join(host, guest, character)

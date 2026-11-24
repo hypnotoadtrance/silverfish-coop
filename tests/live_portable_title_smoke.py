@@ -49,7 +49,7 @@ from portable_held_mask import verify_stock_held_mask
 from portable_eye_board import verify_stock_eye_stacks
 from portable_guest_world_start import GuestWorldStartProof, resident_events, wait_resident_status
 from portable_acid_pool import acid_pool_overlay, verify_acid_pool
-from portable_light_ar import verify_stock_light_ar
+from portable_light_ar import verify_fire_mode_reopen, verify_stock_light_ar
 from portable_lingering_teleport import lingering_overlay, verify_stock_lingering_teleport
 from portable_personal_consumable import verify_personal_consumable_reconnect, verify_stock_personal_consumable
 from portable_wipe_chooser import verify_stock_wipe_chooser
@@ -4164,7 +4164,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  tutorial_dock_held_mask: bool = False, tutorial_dock_gait: bool = False,
                  stock_bandage_revisit: bool = False, stock_shovel: bool = False, stock_shovel_loot: bool = False,
                  stock_shovel_quest: bool = False,
-                 stock_take_ammo: bool = False, stock_light_ar: bool = False,
+                 stock_take_ammo: bool = False, stock_light_ar: bool = False, stock_fire_mode_reopen: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False, nonmirrored_startup: bool = False,
                  compact_crate_status: bool = False, compact_world_view: bool = False,
@@ -4282,7 +4282,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     single_scenario = (bool(resident_campaigns) or stock_prop_grip or stock_host_prop_observer
                        or stock_crate_ring or guest_world_start
                        or guest_ui_memory or compact_crate_status or compact_world_view or guest_shop_lease
-                       or guest_stash_memory or nonmirrored_startup or stock_unequip or resident_cabinet_archive is not None)
+                       or guest_stash_memory or nonmirrored_startup or stock_unequip or stock_fire_mode_reopen
+                       or resident_cabinet_archive is not None)
     try:
         if stock_weather_travel:
             for game in games:
@@ -4419,7 +4420,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableFootstepProbe",
                                                      fixture="portable_footstep_probe.lua"))
-        if resident_weapon_cues or stock_light_ar:
+        if resident_weapon_cues or stock_light_ar or stock_fire_mode_reopen:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableDryFireProbe",
                                                      fixture="portable_dry_fire_probe.lua"))
@@ -4544,6 +4545,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                       before_join=startup.arm, on_join=startup.joined,
                                                       after_reconnect=check_reconnect,
                                                       wait_status=wait_resident_status, **exit_options))
+        elif stock_fire_mode_reopen:
+            proof["sessions"].extend(await verify_fire_mode_reopen(
+                first, second, portable_probe_command, proof.setdefault("stock_fire_mode_reopen", {})))
         elif stock_unequip and not resident_campaigns:
             proof["sessions"].append(await verify_stock_unequip(first, second, proof.setdefault("stock_unequip", {})))
         elif stock_prop_grip:
@@ -4829,6 +4833,8 @@ if __name__ == "__main__":
                         help="exercise the stock Rusty Pistol during the resident weapon checks")
     parser.add_argument("--stock-light-ar", action="store_true",
                         help="verify one guest stock LightAR tap and R reload with rifle FMJ")
+    parser.add_argument("--stock-fire-mode-reopen", action="store_true",
+                        help="save a guest's stock LightAR selector choice and reopen the same campaign")
     parser.add_argument("--tutorial-dock-combat", action="store_true",
                         help="follow the stock exit to Tutorial Dock and dispatch a shot at a placed worker")
     parser.add_argument("--tutorial-dock-retaliation", action="store_true",
@@ -4980,6 +4986,9 @@ if __name__ == "__main__":
                               "stock_lingering_teleport", "stock_light_ar", "stock_acid_pool"}
     if args.resident_held_queue and not args.resident_weapon_cues:
         parser.error("Use --resident-held-queue with --resident-weapon-cues")
+    if args.stock_fire_mode_reopen and (args.second_legacy_work or args.resident_cabinet_archive
+            or any(value is True for key, value in vars(args).items() if key != "stock_fire_mode_reopen")):
+        parser.error("Use --stock-fire-mode-reopen with a fresh private pair and no other gameplay fixtures")
     if args.resident_stale_quick_slot and not args.resident_held_queue:
         parser.error("Use --resident-stale-quick-slot with --resident-held-queue")
     if args.rusty_pistol and not args.resident_weapon_cues:
@@ -5075,6 +5084,7 @@ if __name__ == "__main__":
                        stock_shovel_loot=args.stock_shovel_loot,
                        stock_shovel_quest=args.stock_shovel_quest,
                        stock_take_ammo=args.stock_take_ammo, stock_light_ar=args.stock_light_ar,
+                       stock_fire_mode_reopen=args.stock_fire_mode_reopen,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
                        guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory,
                        nonmirrored_startup=args.nonmirrored_startup,
