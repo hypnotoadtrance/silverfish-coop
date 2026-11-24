@@ -8,7 +8,7 @@ local statics = "/Script/Engine.GameplayStatics:"
 local footsteps_library = "/Game/Classes/Libraries/Fuctions_Lib/FL_Characters.FL_Characters_C:PlayFootStep"
 local concurrency_path = "/Game/Assets/Sounds/SoundClasses/SoundCon_FootSteps.SoundCon_FootSteps"
 local attenuation_path = "/Game/Assets/Sounds/SoundClasses/Player_FootStep_Attenuation.Player_FootStep_Attenuation"
-local local_pawn, peer, attenuation, concurrency, last, hook_failure
+local local_pawn, peer, attenuation, concurrency, last, hook_failure, world_address
 local originals, replays = {}, {}
 local hooked = false
 local stepping, stock_calls, spawn_calls
@@ -33,7 +33,7 @@ local function select_players()
         end
     end
     assert(local_owner and remote_owner, "both stock players must be present")
-    return local_owner, remote_owner
+    return local_owner, remote_owner, world:GetAddress()
 end
 
 local function capture_original(_, sound, component, _, _, _, _, _stop_with_owner, volume, pitch, _, radius, group)
@@ -63,7 +63,11 @@ end
 
 local function guard(callback)
     return function(...)
-        if not local_pawn then return end
+        if not world_address then return end
+        local viewport = FindFirstOf("GameViewportClient")
+        local world = valid(viewport) and viewport.World
+        if not valid(world) or world:GetAddress() ~= world_address or not valid(local_pawn) or not valid(peer)
+            or local_pawn:IsActorBeingDestroyed() or peer:IsActorBeingDestroyed() then return end
         local ok, error_message = pcall(callback, ...)
         if not ok then hook_failure = error_message end
     end
@@ -71,7 +75,7 @@ end
 
 local function run(action)
     if action == "arm" then
-        local_pawn, peer = select_players()
+        local_pawn, peer, world_address = select_players()
         attenuation, concurrency = StaticFindObject(attenuation_path), StaticFindObject(concurrency_path)
         assert(valid(attenuation) and valid(concurrency), "stock footstep sound settings unavailable")
         if not hooked then
@@ -83,7 +87,7 @@ local function run(action)
         local_pawn:Crouch(false)
         return "armed"
     elseif action == "disarm" then
-        local_pawn, peer, stepping = nil, nil, false
+        local_pawn, peer, world_address, stepping = nil, nil, nil, false
         return "disarmed"
     elseif action == "ready" then
         return tostring(local_pawn.bIsCrouched == true)

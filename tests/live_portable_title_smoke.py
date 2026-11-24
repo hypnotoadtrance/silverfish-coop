@@ -1871,8 +1871,8 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
                                      "stock_swing": {"host": source, "guest": observer, "received": received}}}
 
 
-async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool = False,
-                                      rusty: bool = False, npc_rivalry: bool = False) -> dict:
+async def capture_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool,
+                                      rusty: bool, npc_rivalry: bool) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_frame, guest_frame = await asyncio.gather(
         wait_resident_status(host_run, lambda frame: frame.get("local_bridge") == "memory"),
@@ -1947,6 +1947,23 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gue
                                      "previous_checkpoint_cloud_copies": backup_revisions,
                                      "stock_footsteps": footsteps, "stock_pistol": pistol, "npc_shots": npc_shots, "npc_kill": npc_kill,
                                      "turret_death": turret_death, "guest_melee": guest_melee}}
+
+
+async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool = False,
+                                      rusty: bool = False, npc_rivalry: bool = False) -> dict:
+    probes = [("portable-dry-fire", "disarm"), ("portable-footstep", "disarm")]
+    if guest_combat:
+        probes.append(("portable-npc-override", "disarm-weapon-observers"))
+    try:
+        evidence = await capture_resident_weapon_cues(host, guest, pawn, guest_combat=guest_combat,
+                                                      rusty=rusty, npc_rivalry=npc_rivalry)
+    finally:
+        # The installed probes stay registered when the same process loads another map.
+        replies = await asyncio.gather(*(portable_probe_command(seat.bridge, probe, action)
+                                         for seat in (host, guest) for probe, action in probes))
+        assert all(reply == "disarmed" for reply in replies), replies
+    evidence["resident_weapon_cues"]["observer_scopes_disarmed"] = True
+    return evidence
 
 
 async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str) -> dict:

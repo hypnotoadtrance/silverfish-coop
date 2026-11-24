@@ -13,13 +13,21 @@ local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local payload = "DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"
 local slot = 2
-local last, local_pawn, peer, failure
-local active = false
+local last, local_pawn, peer, failure, world_address
+local hooked = false
 local clicks, projectiles, shot_sounds, muzzle_flashes = {}, 0, 0, 0
 local local_flashes, local_reload = 0, nil
 
 local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
+
+local function observing()
+    if not world_address then return false end
+    local viewport = FindFirstOf("GameViewportClient")
+    local world = valid(viewport) and viewport.World
+    return valid(world) and world:GetAddress() == world_address and valid(local_pawn) and valid(peer)
+        and not local_pawn:IsActorBeingDestroyed() and not peer:IsActorBeingDestroyed()
+end
 
 local function asset(path)
     local object = StaticFindObject(path)
@@ -56,9 +64,10 @@ local function arm()
         end
     end
     assert(valid(peer), "expected a remote stock pawn")
-    active = true
+    world_address = world:GetAddress()
+    if hooked then return "armed" end
     RegisterHook("/Script/Engine.GameplayStatics:PlaySoundAtLocation", function(_, context, sound, location)
-        if not active then return end
+        if not observing() then return end
         local ok, message = pcall(function()
             local cue = sound:get()
             if not valid(cue) or cue:GetFullName() ~= click then return end
@@ -70,17 +79,17 @@ local function arm()
         if not ok then failure = message end
     end)
     RegisterHook("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:SpawnProjectile", function(context)
-        if not active then return end
+        if not observing() then return end
         local weapon = context:get()
         if same(weapon, local_pawn.EquipedItem) or same(weapon, peer.EquipedItem) then projectiles = projectiles + 1 end
     end)
     RegisterHook("/Script/Engine.GameplayStatics:SpawnSoundAttached", function(_, sound, attached)
-        if not active then return end
+        if not observing() then return end
         local weapon = peer_muzzle(attached:get())
         if weapon and same(sound:get(), weapon.FireSound) then shot_sounds = shot_sounds + 1 end
     end)
     RegisterHook("/Script/Niagara.NiagaraFunctionLibrary:SpawnSystemAttached", function(_, effect, attached, _, location)
-        if not active then return end
+        if not observing() then return end
         local weapon = peer_muzzle(attached:get())
         if weapon and same(effect:get(), weapon.MuzzleFlash) then muzzle_flashes = muzzle_flashes + 1 end
         local held = local_pawn.EquipedItem
@@ -91,13 +100,14 @@ local function arm()
         end
     end)
     RegisterHook("/Script/Engine.SkeletalMeshComponent:PlayAnimation", function(context, animation, looping)
-        if not active or local_pawn:HasAuthority() or looping:get() then return end
+        if not observing() or local_pawn:HasAuthority() or looping:get() then return end
         local held, clip = local_pawn.EquipedItem, animation:get()
         if valid(held) and same(context:get(), held.Wep_Skeli)
             and (same(clip, held.Reload_Dry_Anim) or same(clip, held.Reload_Wet_Anim)) then
             local_reload = clip
         end
     end)
+    hooked = true
     return "armed"
 end
 
@@ -157,7 +167,7 @@ local function run(action)
         return arm()
     end
     if action == "disarm" then
-        active, local_pawn, peer = false, nil, nil
+        world_address, local_pawn, peer, local_reload = nil, nil, nil, nil
         return "disarmed"
     end
     if action == "seed-local" then return seed(local_pawn, 0) end

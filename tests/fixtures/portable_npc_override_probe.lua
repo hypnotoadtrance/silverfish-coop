@@ -573,12 +573,14 @@ local function arm_turret_effects(turret)
         return target and (point.X-target.X)^2 + (point.Y-target.Y)^2 + (point.Z-target.Z)^2 < 10^2
     end
     RegisterHook("/Script/Niagara.NiagaraFunctionLibrary:SpawnSystemAtLocation", function(_, _, asset, position)
+        if not turret_effects then return end
         local particle = asset:get()
         if valid(particle) and particle:GetFName():ToString() == "FX_Blast_FragGrenade_Converted"
             and at_turret(position:get()) then turret_effects.blasts = turret_effects.blasts + 1 end
     end)
     RegisterHook("/Script/Niagara.NiagaraFunctionLibrary:SpawnSystemAttached", function(_, asset, parent)
-        local turret, particle, mount = turret_effects and turret_effects.turret, asset:get(), parent:get()
+        if not turret_effects then return end
+        local turret, particle, mount = turret_effects.turret, asset:get(), parent:get()
         if not valid(turret) or not valid(particle) then return end
         local name = particle:GetFName():ToString()
         if name == "NI_SmokeStack_Large" and same(mount, turret.Turret_Gun) then
@@ -588,12 +590,14 @@ local function arm_turret_effects(turret)
         end
     end)
     RegisterHook("/Script/Engine.GameplayStatics:SpawnSoundAttached", function(_, sound, parent)
-        local turret, cue = turret_effects and turret_effects.turret, sound:get()
+        if not turret_effects then return end
+        local turret, cue = turret_effects.turret, sound:get()
         if valid(turret) and valid(cue) and cue:GetFName():ToString() == "Fireplace_Low_02_Loop"
             and same(parent:get(), turret.RootComponent) then turret_effects.loops = turret_effects.loops + 1 end
     end)
     RegisterHook("/Script/Engine.GameplayStatics:SpawnSoundAtLocation",
         function(_, _, sound, position, _, _, _, _, attenuation)
+            if not turret_effects then return end
             local cue, radius = sound:get(), attenuation:get()
             if valid(cue) and cue:GetFName():ToString() == "MS_Blast_Pop"
                 and valid(radius) and radius:GetFName():ToString() == "Blast_Attenuation"
@@ -983,6 +987,10 @@ local function dock_strike(pawn, world, host)
 end
 
 local function run(action, actor_path)
+    if action == "disarm-weapon-observers" then
+        shot_turret, turret_effects = nil, nil
+        return "disarmed"
+    end
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
     local at_dock = action:match("^dock%-") ~= nil
