@@ -393,7 +393,7 @@ async def verify_resident_pickup(host, guest, guest_pawn: str, source: tuple[dic
                  if Path(name).name.startswith("SFCoop_")}
         return campaign_save_hashes(host.campaign), stock
 
-    async def pick_up(crate, current_roll, current_item):
+    async def pick_up(crate, current_roll, current_item, *, move_guest=True):
         guid = current_item["guid"]
         identity = native_world_loot.crate_identity(current_roll["id"], guid)
 
@@ -405,8 +405,16 @@ async def verify_resident_pickup(host, guest, guest_pawn: str, source: tuple[dic
                     and frame.get(native_world_loot.KEY, {}).get(identity, {}).get("class_path") == current_item["class_path"])
 
         await wait_resident_status(host_run, lambda state: visible(state, 350))
-        for pawn in (guest_pawn, host_pawn):
-            approached = await host.bridge.command(native_world_loot.APPROACH, identity, pawn, timeout=5)
+        for pawn in ((guest_pawn, host_pawn) if move_guest else (host_pawn,)):
+            # The fixture uses the compatibility status file. A resident command
+            # can replace its acknowledgment before the test reads it.
+            for attempt in range(3):
+                try:
+                    approached = await host.bridge.command(native_world_loot.APPROACH, identity, pawn, timeout=1.5)
+                    break
+                except TimeoutError:
+                    if attempt == 2:
+                        raise
             assert approached["ack"]["message"] == "stock loot height and line of sight verified"
         await asyncio.gather(wait_resident_status(host_run, lambda state: visible(state, 250)),
                              wait_resident_status(guest_run, lambda state: visible(state, 250)))
@@ -429,14 +437,27 @@ async def verify_resident_pickup(host, guest, guest_pawn: str, source: tuple[dic
         receipt = claim["operation_id"]
         played, = [row for row in records if row["event"] == "native_pickup_sound_played" and row.get("operation_id") == receipt]
         inventory = (await submit_ok(host_run, "native-inventory-list"))["native_inventory"]
-        received, = [row for row in inventory["items"] if row["guid"] == claim.get("inventory_guid", guid)]
-        assert received["class_path"] == current_item["class_path"]
-        if received["stackable"]:
-            assert received["quantity"] == claim.get("stack_merge", {}).get("after", current_item["ammo"])
+        if current_item["class_path"] in native_loot.CASH_RANGES:
+            credit = claim["wallet_credit"]
+            assert credit["after"] - credit["before"] == credit["amount"] > 0
+            assert all(row["guid"] != guid for row in inventory["items"])
+
+            def wallet_credited(state):
+                return (state.get("game") or {}).get("native_wallet") == credit["after"]
+
+            await asyncio.gather(wait_resident_status(host_run, wallet_credited),
+                                 wait_resident_status(guest_run, wallet_credited))
+            received = {"wallet_credit": credit}
+        else:
+            row, = [row for row in inventory["items"] if row["guid"] == claim.get("inventory_guid", guid)]
+            assert row["class_path"] == current_item["class_path"]
+            if row["stackable"]:
+                assert row["quantity"] == claim.get("stack_merge", {}).get("after", current_item["ammo"])
+            received = {"inventory": row}
         assert save_fingerprints() == before
         timings = summarize(trace, resident=True, combined_operation=receipt if combined else None)
         return {"cabinet": crate, "stock_class": current_item["class_path"], "guid": guid, "projection": identity,
-                "operation": receipt, "inventory": received, "native_claim_unix": claim["time_unix"],
+                "operation": receipt, **received, "native_claim_unix": claim["time_unix"],
                 "sound_receipt_unix": played["time_unix"], "timings": timings, "trace": str(trace),
                 "both_projected_views_retired": True, "saves_unchanged_after_pickup": True}
 
@@ -472,7 +493,7 @@ async def verify_resident_pickup(host, guest, guest_pawn: str, source: tuple[dic
         await host.bridge.command("native-loot-approach", host_pawn, crate, timeout=5)
         before_open = save_fingerprints()
         opened = (await submit_ok(host_run, "native-loot-open", target=crate))["native_loot_roll"]
-        candidates = [row for row in opened["items"] if row["class_path"] not in native_loot.CASH_RANGES]
+        candidates = opened["items"]
         assert len(candidates) == 2 and save_fingerprints() == before_open, opened
         checkpoint = await submit_ok(host_run, "checkpoint")
         committed = menu_host_checkpoint(host.campaign, profile=host.profile, require_scoped=True)
@@ -481,8 +502,8 @@ async def verify_resident_pickup(host, guest, guest_pawn: str, source: tuple[dic
         assert durable["id"] == opened["id"] and durable["escrow"].get("pending") is not True, durable
         assert all(row in durable["items"] for row in candidates), durable
         await collect_probe_garbage(host.bridge.directory)
-        for candidate in candidates:
-            checkpoint_pickup = await pick_up(crate, durable, candidate)
+        for index, candidate in enumerate(candidates):
+            checkpoint_pickup = await pick_up(crate, durable, candidate, move_guest=index == 0)
             assert checkpoint_pickup["timings"]["escrow_load_ms"] is None, checkpoint_pickup
             checkpoint_pickup.update(checkpoint_revision=checkpoint["revision"], engine_gc_verified=True)
             after_checkpoint.append(checkpoint_pickup)
