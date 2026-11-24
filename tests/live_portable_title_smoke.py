@@ -1834,7 +1834,8 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
     assert campaign_save_hashes(host.campaign) == checkpoint_hashes, "A stock meal caused an early campaign checkpoint"
     assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
     await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
-    cases = ("leftovers", "honey-egg", "dirty-bandage", "gauze", "medical-salve", "large-medkit", "stim-pills", "antibiotics")
+    cases = ("leftovers", "honey-egg", "dirty-bandage", "gauze", "medical-salve", "large-medkit", "stim-pills",
+             "antibiotics", "brown-mushroom")
     seeded_at = time.time()
     seeded = (await command(host, "seed-use-cases")).split(",")
     assert len(seeded) == len(set(seeded)) == len(cases) and all(re.fullmatch(r"[0-9A-F]{32}", value) for value in seeded)
@@ -1888,6 +1889,14 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
         verified[label] = receipt
     remaining = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
     assert [(row["guid"], row["quantity"]) for row in remaining if row["guid"] in seeded] == [(seeded[3], 1)], remaining
+
+    def mushroom_prop(frame):
+        use = frame.get("game", {}).get("native_avatar_use", {}).get(pawn, {})
+        return use if use.get("item") == native_guest_consumable.BROWN_MUSHROOM_CLASS and use["active"] is False else None
+
+    observer = mushroom_prop(await wait_resident_status(host_run, mushroom_prop, timeout=8))
+    assert 18 <= observer.get("food_forward_of_head_cm", 0) <= 30, observer
+    assert observer["hand_motion_cm"] > 20 and "Mushroom" in observer["mesh"], observer
     host_vitals, _ = (await command(host, "host-medical-vitals")).split(";")
     assert host_vitals == canonical, (canonical, host_vitals)
     assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == grouped
@@ -1897,7 +1906,8 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
     return {"resident_guest_food": {"receipt": used, "before": before, "after": after,
                                     "host_food_before": host_before[0], "host_food_after": host_after[0],
                                     "host_regen_unchanged": True, "campaign_checkpoint_unchanged": True,
-                                    "stock_widget_tick_invoked_in_muted_fixture": True, "additional_stock_uses": verified}}
+                                    "stock_widget_tick_invoked_in_muted_fixture": True, "additional_stock_uses": verified,
+                                    "host_observed_mushroom_use": observer}}
 
 
 async def verify_resident_board_offers(host: Seat, guest: Seat, _pawn: str) -> dict:
