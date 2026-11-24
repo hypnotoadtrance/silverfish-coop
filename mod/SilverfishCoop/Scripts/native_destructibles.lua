@@ -69,42 +69,46 @@ end
 
 function props.ended(address, destroyed)
     local entry = destroyed and visit and visit.addresses[address]
-    if entry then entry.ended = true end
+    if entry then
+        entry.ended = true
+        visit.roster = nil
+    end
 end
 
 function props.rows(state, phase, row)
     local current = census(state, phase)
     if not current then return end
     if phase == "connected" then return row("native-destructible-view", current.map, current.epoch or "-") end
-    local ids = {}
-    for _, id in ipairs(current.ids) do
-        local entry = current.actors[id]
-        if not entry.ended and live(entry.actor) then ids[#ids + 1] = id end
+    if current.roster == nil then
+        local ids = {}
+        for _, id in ipairs(current.ids) do
+            local entry = current.actors[id]
+            if not entry.ended and live(entry.actor) then ids[#ids + 1] = id end
+        end
+        local roster = #ids > 0 and table.concat(ids, "|") or "-"
+        current.roster = #roster <= max_roster_bytes and roster or false
     end
-    local roster = #ids > 0 and table.concat(ids, "|") or "-"
-    if #roster <= max_roster_bytes then return row("native-destructible-roster", current.map, roster) end
+    if current.roster then return row("native-destructible-roster", current.map, current.roster) end
 end
 
 function props.command(args, state, phase)
     if args[2] ~= "native-destructible-apply" then return end
-    local epoch, roster = args[4], args[5]
-    if #args ~= 5 or phase ~= "connected" or args[3] ~= state.map or not epoch or #epoch ~= 32
-        or not epoch:match("^[0-9a-f]+$") or not roster or #roster > max_roster_bytes then
+    local epoch = args[4]
+    if #args < 5 or #args > 4 + max_actors or phase ~= "connected" or args[3] ~= state.map
+        or not epoch or #epoch ~= 32 or not epoch:match("^[0-9a-f]+$") then
         error("Invalid placed destructible roster", 0)
     end
     local current = census(state, phase)
     if not current then error("Placed destructibles are not ready", 0) end
     local intact = {}
-    if roster ~= "-" then
-        if roster == "" or roster:match("^|") or roster:match("|$") or roster:find("||", 1, true) then
-            error("Invalid placed destructible actor list", 0)
-        end
-        local previous, count = "", 0
-        for id in roster:gmatch("[^|]+") do
-            if not actor_id(id) or id <= previous or count == max_actors then
-                error("Invalid placed destructible actor", 0)
-            end
-            intact[id], previous, count = true, id, count + 1
+    if #args ~= 5 or args[5] ~= "-" then
+        local previous, size = "", 0
+        for index = 5, #args do
+            local id = args[index]
+            if not actor_id(id) or id <= previous then error("Invalid placed destructible actor", 0) end
+            size = size + #id + 1
+            if size > max_roster_bytes + 1 then error("Placed destructible roster exceeds the bridge limit", 0) end
+            intact[id], previous = true, id
         end
     end
     for _, id in ipairs(current.ids) do

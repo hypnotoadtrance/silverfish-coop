@@ -1,5 +1,6 @@
 local corpses = {}
 local effects = require("native_anomaly_effects")
+local barter_identity = require("native_npc_barter_identity")
 local turret_fire = require("native_turret_fire_view")
 
 local npc_path = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
@@ -253,6 +254,7 @@ end
 
 local function apply(marker, world)
     if not valid(marker) or not same(marker:GetWorld(), world) then return true end
+    if barter_identity.is_marker(marker) then return true end
     local actor = marker:GetOwner()
     if not valid(actor) or not same(actor:GetWorld(), world) or actor:IsActorBeingDestroyed() then return true end
     local body = supported_corpse(actor)
