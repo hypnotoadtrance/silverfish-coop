@@ -95,6 +95,8 @@ def outputs() -> dict[str, str]:
         lua.append(f'profiles.held_fire["{kind}"] = true')
     lua.append("profiles.ammo_options = {")
     for kind, options in AMMO_BY_KIND.items():
+        if len(options) < 2:
+            continue
         choices = ", ".join(f'["{path}"] = true' for path in sorted(options))
         lua.append(f'    ["{kind}"] = {{ {choices} }},')
     lua.extend(("}", "return profiles", ""))

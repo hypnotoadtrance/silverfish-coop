@@ -47,13 +47,14 @@ async def verify_alternate_ammo(host, guest, pawn, probe):
         seats = host, guest
         assert await asyncio.gather(*(command(seat, "arm-alternate") for seat in seats)) == ["armed", "armed"]
         host_reserve = await command(host, "reserve")
-        guid = await command(host, "seed-peer-empty")
+        slot, guid = (await command(host, "seed-alternate")).split(",")
+        assert await command(guest, f"select-probe-slot\t{slot}") == "scoped"
         assert re.fullmatch(r"[0-9A-F]{32}", guid), guid
         await read(guest, "projected", guid)
         assert await command(guest, "equip") == "selected"
         await read(host, "peer-round", FORTY_FIVE_BALL.item_path)
         await read(guest, "round", FORTY_FIVE_BALL.item_path)
-        frame = await wait_resident_status(guest_run, lambda view: view["state"] == "connected"
+        frame = await wait_resident_status(guest_run, lambda view: view.get("state") == "connected"
             and view.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
         reserve = await command(host, "seed-reserve")
         assert re.fullmatch(r"[0-9A-F]{32},18", reserve), reserve

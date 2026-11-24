@@ -244,6 +244,7 @@ local function valid_rounds(weapon, amount)
         and 0 <= amount and amount <= weapon.MagSize and weapon.MagSize <= 4096
 end
 
+local ammo_table_path = "/Game/Classes/Libraries/DataTables/AmmoTypes_DT.AmmoTypes_DT"
 local ammo_item_field = "Ammo_Item_9_DC1291D94AB26C3244B369B14FA38582"
 
 local function mounted_ammo_path(held)
@@ -299,11 +300,14 @@ local function project_magazine(fields, state, phase)
                 class = StaticFindObject(ammo_path)
             end
             if not class or not class:IsValid() then error("The co-op round is not loaded", 0) end
-            held:ChangeAmmoType(class:GetCDO().AmmoType)
-            row = selected_row(save)
-            if not same(pawn.EquipedItem, held) or item_identity(row) ~= guid or mounted_ammo_path(held) ~= ammo_path then
-                error("The stock co-op ammo change failed readback", 0)
-            end
+            local handle = class:GetCDO().AmmoType
+            local source = handle and handle.DataTable
+            local name = handle and handle.RowName
+            local stock = same(source, StaticFindObject(ammo_table_path)) and name and source:FindRow(name:ToString())
+            if not stock or not same(stock[ammo_item_field], class) then error("The co-op round data is unavailable", 0) end
+            -- The guest presents the host's stock row. The reload itself runs on the host.
+            held.AmmoType = stock
+            if mounted_ammo_path(held) ~= ammo_path then error("The stock co-op ammo projection failed readback", 0) end
         end
     end
     write_magazine(held, row, rounds)
@@ -484,7 +488,7 @@ function guest_weapon.rows(state, phase, status_row)
             if held and weapon_profiles.paths[profile] and amount == held.Ammo and valid_rounds(held, amount) then
                 local mode = weapon_profiles.held_fire[profile] and held.HasSelectFire == true
                     and saved_mode(save, id, row[class_field])
-                local path = mounted_ammo_path(held)
+                local path = weapon_profiles.ammo_options[profile] and mounted_ammo_path(held)
                 return id, profile, amount, mode, allowed_ammo(profile, path) and path or nil
             end
             return id, profile

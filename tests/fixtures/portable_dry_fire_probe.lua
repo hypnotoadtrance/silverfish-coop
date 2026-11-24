@@ -316,7 +316,24 @@ local function run(action, argument)
     end
     if action == "seed-local" then return seed(local_pawn, 0) end
     if action == "seed-peer" then return seed(peer, 1) end
-    if action == "seed-peer-empty" then return seed(peer, 0) end
+    if action == "seed-alternate" then
+        assert(observing() and weapon_path == arm_profiles["arm-alternate"][1])
+        local equipment = peer.Save.PlayerEquipment
+        for index = 1, equipment:GetArrayNum() do
+            if not valid(equipment[index][item_class]) then
+                slot = index
+                return ("%d,%s"):format(slot, seed(peer, 0))
+            end
+        end
+        error("fixture requires a free guest quick slot")
+    end
+    if action == "select-probe-slot" then
+        local index = tonumber(argument)
+        assert(observing() and math.type(index) == "integer"
+            and index >= 1 and index <= local_pawn.Save.PlayerEquipment:GetArrayNum())
+        slot = index
+        return "scoped"
+    end
     if action == "seed-dock-light-ar" then
         assert(observing() and local_pawn:GetWorld():GetFullName() == dock_map
             and weapon_path == arm_profiles["arm-light-ar"][1])
