@@ -19,6 +19,7 @@ local flare_fixture_paths = {
     ["stock-flare-blue"] = "/Game/Classes/Equipment/Eqp_Flare_Blue.Eqp_Flare_Blue_C",
     ["stock-flare-yellow"] = "/Game/Classes/Equipment/Eqp_Flare_Yellow.Eqp_Flare_Yellow_C",
     ["stock-bolt"] = "/Game/Classes/Equipment/Eqp_Bolt.Eqp_Bolt_C",
+    ["stock-pipe-bomb"] = "/Game/Classes/Equipment/Gren_PipeBomb.Gren_PipeBomb_C",
 }
 local old_pipe_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
 local melee_folder = "/Game/Classes/Weapons/MeleeWeapons/"

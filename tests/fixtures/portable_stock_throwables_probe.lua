@@ -9,6 +9,7 @@ local projectile_folder = folder .. "Equipment_Assets/Equimpents_Projectiles/"
 local inventory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
+local item_ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local profiles = {
     bolt = {"Eqp_Bolt", "Bolt_Projectile_BP_C"},
     pipebomb = {"Gren_PipeBomb", "PipeBomb_Projectile_BP_C"},
@@ -157,12 +158,22 @@ local function run(action, kind, arg)
     if action == "reset" then
         shots[kind] = nil
         if kind == "bolt" then landed = nil end
+        if kind == "pipebomb" then blasts = {} end
         watch_pawn, short_bolt_samples = kind == "bolt" and pawn or nil, 0
         return "reset"
     end
     if action == "stage" then return stage_bolt(pawn, world, arg) end
     local name = profile[1]
     local class = asset(folder .. name .. "." .. name .. "_C")
+    if action == "charges" then
+        local held = pawn.EquipedItem
+        local amount = valid(held) and same(held:GetClass(), class) and held.Ammo or -1
+        local slots, total = pawn.Save.PlayerEquipment, 0
+        for index = 1, slots:GetArrayNum() do
+            if same(slots[index][item_class], class) then total = total + slots[index][item_ammo] end
+        end
+        return ("%d,%d"):format(total, amount)
+    end
     if action == "landed" then
         if not valid(landed) or not valid(landed.RootComponent) then return "absent" end
         assert(landed.HeldByPlayer ~= true and landed.Item_RespawnMode == 0)
@@ -232,9 +243,12 @@ local function run(action, kind, arg)
         assert(valid(pawn.EquipedItem) and same(pawn.EquipedItem:GetClass(), class), "guest equip failed")
         return "ready"
     end
-    assert(action == "press" or action == "release", "unknown throw action")
     local held = pawn.EquipedItem
     assert(valid(held) and same(held:GetClass(), class), "the stock item is no longer held")
+    if action == "cook" then
+        return held.Cooking and held.CookTime or 0
+    end
+    assert(action == "press" or action == "release", "unknown throw action")
     if action == "press" then face_open_space(pawn, held, kind) end
     held:Use_Item_Primary(action == "press", 1.0)
     return action
