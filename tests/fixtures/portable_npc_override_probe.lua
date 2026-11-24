@@ -967,7 +967,7 @@ local function pursuit_frame(pawn, world, host, aim)
         if shooter[field] ~= false then blockers[#blockers + 1] = field end
     end
     return table.concat({vector(point), vector(target), angles(desired), angles(controller:GetControlRotation()),
-        angles(camera:K2_GetComponentRotation()), angles(barrel), table.concat(blockers, ",")}, ";")
+        angles(camera:K2_GetComponentRotation()), angles(barrel), weapon.Ammo, table.concat(blockers, ",")}, ";")
 end
 
 local function dock_swing(world, host, action)

@@ -4956,8 +4956,8 @@ if __name__ == "__main__":
         parser.error("Use --resident-stale-quick-slot with --resident-held-queue")
     if args.rusty_pistol and not args.resident_weapon_cues:
         parser.error("Use --rusty-pistol with --resident-weapon-cues")
-    if args.tutorial_dock_combat and not args.rusty_pistol:
-        parser.error("Use --tutorial-dock-combat with --rusty-pistol")
+    if args.tutorial_dock_combat and not (args.rusty_pistol and (args.tutorial_dock_pursuit or args.stock_npc_override)):
+        parser.error("Use --tutorial-dock-combat with --rusty-pistol and select --tutorial-dock-pursuit or --stock-npc-override")
     if args.tutorial_dock_retaliation and not args.tutorial_dock_combat:
         parser.error("Use --tutorial-dock-retaliation with --tutorial-dock-combat")
     if args.tutorial_dock_gait and not (args.tutorial_dock_held_mask or args.tutorial_dock_pursuit):

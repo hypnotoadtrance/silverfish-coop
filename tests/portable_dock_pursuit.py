@@ -23,11 +23,11 @@ def aim_error(current, desired):
 
 
 def view_frame(fields):
-    seat, target, desired, control, camera, muzzle, blockers = fields.split(";")
+    seat, target, desired, control, camera, muzzle, rounds, blockers = fields.split(";")
     seat, target = coordinates(seat), coordinates(target)
     return {"seat": seat, "target": target, "clearance_cm": math.dist(seat[:2], target[:2]), "desired": coordinates(desired),
             "controller": coordinates(control), "camera": coordinates(camera), "muzzle": coordinates(muzzle),
-            "blockers": blockers.split(",") if blockers else []}
+            "rounds": int(rounds), "blockers": blockers.split(",") if blockers else []}
 
 
 def combat_frame(fields):
@@ -155,6 +155,9 @@ async def verify_dock_pursuit(host, guest, frame, command):
         for attempt_index in range(2):
             view = await firing_window(side or attempt_index)
             record["guest"] = view
+            if remaining is None:
+                remaining = view["rounds"]
+                assert remaining > 0, ("The stock pistol must be loaded before the fight", view)
             attempt = {"clearance_cm": round(view["clearance_cm"], 1)}
             record["attempts"].append(attempt)
             # Read the other seat without spending the guest's firing window waiting for its result.
@@ -181,7 +184,7 @@ async def verify_dock_pursuit(host, guest, frame, command):
                     and math.dist(coordinates(seat), coordinates(guest_spawn)) < 100)
 
         await wait_for(arrived, "The guest did not reach the initial warehouse firing lane", 6)
-        initial_view = await fire_round(7, 0)
+        initial_view = await fire_round(None, 0)
 
         async def under_attack():
             result = await observe()
@@ -195,7 +198,7 @@ async def verify_dock_pursuit(host, guest, frame, command):
         current = retaliation
         moved = False
         pursued_while_moving = False
-        for remaining in range(6, 0, -1):
+        for remaining in range(initial_view["round"]["after"], 0, -1):
             view = await fire_round(remaining, 1 if remaining % 2 == 0 else -1)
             moved = moved or all(math.dist(history[0][seat]["seat"], view[seat]["seat"]) > 45 for seat in ("host", "guest"))
             before = current["health"]
