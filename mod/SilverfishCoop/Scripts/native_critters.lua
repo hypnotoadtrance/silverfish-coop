@@ -24,12 +24,12 @@ local installed, censused
 local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
 local function live(actor)
-    return valid(actor) and not actor:IsActorBeingDestroyed() and actor:GetLocalRole() ~= 0
-        and same(actor:GetWorld(), world)
+    return valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed()
+        and actor:GetLocalRole() ~= 0
 end
 
 local function exact_critter(actor)
-    return live(actor) and valid(critter_class) and actor:IsA(critter_class) and actor.Health > 0
+    return valid(critter_class) and valid(actor) and actor:IsA(critter_class) and live(actor) and actor.Health > 0
 end
 
 local function cargo(actor)
@@ -72,7 +72,7 @@ local function install()
     RegisterHook("/Script/Engine.Actor:OnRep_Owner", function(context)
         if phase ~= "connected" then return end
         local actor = context:get()
-        if live(actor) and same(actor:GetClass(), marker_class) then pending[actor:GetAddress()] = actor end
+        if valid(actor) and same(actor:GetClass(), marker_class) and live(actor) then pending[actor:GetAddress()] = actor end
     end)
     RegisterEndPlayPreHook(function(context, reason)
         local actor = context:get()

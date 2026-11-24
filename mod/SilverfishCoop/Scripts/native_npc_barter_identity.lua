@@ -6,6 +6,7 @@ local npc_path = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local prefix = "5346434F4F504241525445520000"
 
 local marker_class, trader_class, npc_class, world, phase
+local active = false
 local number, markers, pending = 0, {}, {}
 local retry_interval = 1
 local registration_window = 30
@@ -18,11 +19,11 @@ local function placed(npc)
 end
 
 local function actor_in_world(actor)
-    return valid(actor) and not actor:IsActorBeingDestroyed() and same(actor:GetWorld(), world)
+    return active and valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed()
 end
 
 local function exact_npc(actor)
-    return actor_in_world(actor) and valid(npc_class) and actor:IsA(npc_class)
+    return active and valid(npc_class) and valid(actor) and actor:IsA(npc_class) and actor_in_world(actor)
 end
 
 local function remember(marker)
@@ -72,19 +73,20 @@ local function install()
     npc_class = StaticFindObject(npc_path)
     if not valid(marker_class) or not valid(trader_class) or not valid(npc_class) then return false end
     RegisterHook("/Script/Engine.Actor:OnRep_Owner", function(context)
-        if phase ~= "connected" then return end
+        if not active or phase ~= "connected" then return end
         local marker = context:get()
-        if actor_in_world(marker) and same(marker:GetClass(), marker_class) then
+        if valid(marker) and same(marker:GetClass(), marker_class) and actor_in_world(marker) then
             enqueue(marker)
         end
     end)
     RegisterBeginPlayPostHook(function(context)
-        if phase ~= "hosting" then return end
+        if not active or phase ~= "hosting" then return end
         local actor = context:get()
         if exact_npc(actor) and not placed(actor) then
             enqueue(actor)
-        elseif actor_in_world(actor) and same(actor:GetClass(), trader_class) and exact_npc(actor.LinkedNPC) then
-            enqueue(actor.LinkedNPC)
+        elseif valid(actor) and same(actor:GetClass(), trader_class) and actor_in_world(actor) then
+            local npc = actor.LinkedNPC
+            if exact_npc(npc) then enqueue(npc) end
         end
     end)
     RegisterEndPlayPreHook(function(context, reason)
@@ -94,7 +96,7 @@ local function install()
         local address = actor:GetAddress()
         local entry = markers[address]
         markers[address], pending[address] = nil, nil
-        if phase == "hosting" and reason:get() == 0 and entry and valid(entry.marker) then
+        if active and phase == "hosting" and reason:get() == 0 and entry and valid(entry.marker) then
             entry.marker:K2_DestroyActor()
         end
     end)
@@ -104,7 +106,10 @@ end
 local installed = false
 
 function identity.sync(state, current)
-    if (current ~= "hosting" and current ~= "connected") or not valid(state.world) then return end
+    active = (current == "hosting" or current == "connected") and valid(state.world)
+    -- The BeginPlay hooks persist across title returns. Suspend reflection
+    -- while loading, then rebind to the new world once co-op is active.
+    if not active then return end
     if not installed then
         installed = install()
         if not installed then return end
