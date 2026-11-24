@@ -43,7 +43,8 @@ async def profile_world(host, guest, area, probe):
     seats = {"host": host, "guest": guest}
 
     async def command(seat, action):
-        return await probe(seat.bridge, "crossroads-profile", action)
+        response = await probe(seat.bridge, "crossroads-profile", action, reply_end="|end")
+        return response.removesuffix("|end")
 
     async def arm():
         assert await asyncio.gather(*(command(seat, "arm") for seat in seats.values())) == ["armed", "armed"]

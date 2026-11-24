@@ -4734,11 +4734,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (storm_trial, "storm", "stock_storm_ambience",
          storm_trial.joined if storm_trial else None),
         (stock_critters, "crossroads", "stock_critters", verify_stock_critters),
-        (stock_placed_item, "crossroads", "stock_placed_item", verify_stock_placed_item),
         (stock_shovel, "crossroads", "stock_shovel", lambda host, guest, pawn: verify_stock_shovel(
             host, guest, pawn, loot=stock_shovel_loot, quest=stock_shovel_quest)),
         (stock_lingering_teleport, "crossroads" if crossroads_profile else "crossroads_anomaly", "stock_lingering_teleport",
          lambda host, guest, pawn: verify_stock_lingering_teleport(host, guest, pawn, portable_probe_command)),
+        (stock_placed_item, "crossroads", "stock_placed_item", verify_stock_placed_item),
         (stock_acid_pool, "lab_east_wing_acid", "stock_acid_pool",
          lambda host, guest, _pawn: verify_acid_pool(host, guest, portable_probe_command)),
         (stock_warehouse_switch, "tutorial_dock", "stock_warehouse_switch", verify_warehouse_switch),

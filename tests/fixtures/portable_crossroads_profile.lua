@@ -63,7 +63,7 @@ LoopInGameThreadWithDelay(50, function()
         message = complete and result() or "sampling"
     end
     local output = assert(io.open(prefix .. "reply.tsv", "wb"))
-    output:write(ticket, message and "\tok\t" or "\terror\t", message or "unexpected sampling request")
+    output:write(ticket, message and "\tok\t" or "\terror\t", message or "unexpected sampling request", "|end")
     output:close()
 end)
 
