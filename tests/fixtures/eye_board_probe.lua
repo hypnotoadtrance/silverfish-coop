@@ -12,6 +12,7 @@ local amount_field = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local previous, leveled, seeded
 local discovered_path = shopkeep .. ".Shop_ShopKeep_P:PersistentLevel.BountyBoard_BP_C_2"
+local turnin_path = shopkeep .. ".Shop_ShopKeep_P:PersistentLevel.BountyBoard_BP_C_1"
 
 local function valid(a) return a and a:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -21,13 +22,13 @@ local function identity(item)
     return ("%08X%08X%08X%08X"):format(id.A & 0xffffffff, id.B & 0xffffffff, id.C & 0xffffffff, id.D & 0xffffffff)
 end
 
-local function approach_discovered(state, guest)
+local function approach_board(state, guest, path)
     local world = state.world
-    local board = StaticFindObject(discovered_path)
+    local board = StaticFindObject(path)
     local stock = require("native_wire_quest")
     local box = stock.qualified_stock_board(world, world.OwningGameInstance, board)
-    assert(box and board:GetFullName() == "BountyBoard_BP_C " .. discovered_path and board:HasAuthority())
-    assert(board.TurnIn_ID == 0 and board.Display_GlobalContracts == true)
+    assert(box and board:GetFullName() == "BountyBoard_BP_C " .. path and board:HasAuthority())
+    if path == discovered_path then assert(board.TurnIn_ID == 0 and board.Display_GlobalContracts == true) end
     local anchor, origin = box:K2_GetComponentLocation(), board:K2_GetActorLocation()
     local reach, capsule = guest.InteractionRange, guest.CapsuleComponent:GetScaledCapsuleHalfHeight()
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
@@ -52,7 +53,7 @@ local function approach_discovered(state, guest)
             end
         end
     end
-    error("The discovered board has no reachable stock collision floor", 0)
+    error("The stock board has no reachable collision floor", 0)
 end
 
 local function prepare(state, host, operation)
@@ -77,7 +78,8 @@ local function prepare(state, host, operation)
     assert(valid(remote) and not same(remote, host) and same(remote:GetWorld(), world) and remote:HasAuthority())
     local owner, save = require("guest_save").exact_item_context(state, "hosting", remote:GetFullName())
     assert(same(owner, remote) and same(save, remote.Save) and not same(save, instance.SaveSlot_Ref))
-    if operation == "approach" then return approach_discovered(state, remote) end
+    if operation == "approach" then return approach_board(state, remote, discovered_path) end
+    if operation == "approachturnin" then return approach_board(state, remote, turnin_path) end
     assert(operation == "eye" and not seeded)
     local item = StaticFindObject(class_path)
     if not valid(item) then LoadAsset(class_path); item = StaticFindObject(class_path) end

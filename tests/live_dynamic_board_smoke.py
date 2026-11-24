@@ -81,7 +81,7 @@ async def verify_eye_board(run, remote, bridge, character, *, wait_status=wait):
         return reply
 
     async def open_native_board():
-        pending = (await action(guest, native_wire_board.STOCK_F_FIXTURE))["native_wire_board_stock"]
+        pending = (await action(guest, native_wire_board.STOCK_F_FIXTURE, target=BOARD))["native_wire_board_stock"]
         assert pending["state"] == "loading" and pending["board"] == BOARD and pending["quest"] == "-", pending
         seen = await wait_status(remote, lambda frame: (view := frame.get("game", {}).get("native_wire_board_stock", {}))
                           and view["state"] == "visible" and view["sequence"] == pending["sequence"])
@@ -95,9 +95,9 @@ async def verify_eye_board(run, remote, bridge, character, *, wait_status=wait):
                                .get(QUEST, {}).get("step") == step)
         return authority["gameplay"]["native_quests"][QUEST]
 
-    await action(host, native_computer_board.MOLASSES.command("approach"), target=character)
-    authority = await wait_status(run, lambda frame: frame.get("game", {}).get("pawns", {}).get("guest", {}).get("location"))
-    position = authority["game"]["pawns"]["guest"]["location"]
+    selected_board, *coordinates = (await probe(bridge, "approachturnin")).split(";")
+    assert selected_board == BOARD and len(coordinates) == 3, (selected_board, coordinates)
+    position = tuple(map(float, coordinates))
     await wait_status(remote, lambda frame: (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
                and math.dist(point, position) <= 25)
     assert await probe(bridge, "xp") == "5"
