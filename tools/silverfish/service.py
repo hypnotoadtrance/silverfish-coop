@@ -5703,7 +5703,8 @@ class Client:
                     native_inventory.SORT_CAPABILITY, native_inventory.SPLIT_CAPABILITY,
                 ))):
             try:
-                if self.guest_ui.identity != (self.host_session, self.zone_epoch, area) or self.guest_ui.digest == "-":
+                if (self.guest_ui.identity != (self.host_session, self.zone_epoch, area)
+                        or self.guest_ui.digest == "-" or self.guest_ui.inventory_needs_refresh(self)):
                     await self.guest_ui.refresh(self)
                 snapshot = await self.bridge.command("native-inventory-stock-open", str(sequence), self.zone_epoch, timeout=5)
                 proof = snapshot.get("native_inventory_view", {})
@@ -6604,6 +6605,7 @@ class Client:
                         stack_drop = native_guest_drop_projection.target_parts(target)
                         if stack_drop:
                             result = await self.stack_drop_projection.reclaim(self, operation_id, stack_drop)
+                            self.guest_ui.queue_stock_inventory(self)
                             self.control.event("local_interaction", operation_id=operation_id, **result)
                             continue
                         if door := native_stock_door.target_actor(target):

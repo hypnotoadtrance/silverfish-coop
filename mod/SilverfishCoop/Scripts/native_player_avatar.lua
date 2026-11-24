@@ -489,7 +489,13 @@ function avatar.play_consumable(world, id, item_path, defaults, serial)
             local head = FName("Head", EFindName.FNAME_Find)
             if valid(food_class) and defaults:IsA(food_class) and type(defaults.Regen_Boost) == "number"
                 and defaults.Regen_Boost > 0 and entry.body:DoesSocketExist(head) then
-                use.food = {head = head, hand = FName("Weapon_Socket01", EFindName.FNAME_Find), math = math_api}
+                local bounds = {}
+                local system = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+                if valid(system) then system:GetComponentBounds(prop, {}, bounds, {}) end
+                local extent = bounds.BoxExtent or bounds
+                local size = extent.X and math.min(16, math.sqrt(extent.X^2 + extent.Y^2 + extent.Z^2)) or 0
+                use.food = {head = head, hand = FName("Weapon_Socket01", EFindName.FNAME_Find), math = math_api,
+                    reach = 24 + size * .75, side = 7 + size * .25, height = 4 - size * .5}
             end
             uses[entry], entry.last_use, entry.hidden_for_use = use, use, {}
             hide_held_item(entry)
@@ -505,14 +511,15 @@ local function animate_food(entry, use, lift, using, lower)
     local hand = body:GetSocketTransform(food.hand, 0)
     local aim = valid(entry.head_pivot) and entry.head_pivot:K2_GetComponentRotation() or entry.pawn:GetBaseAimRotation()
     local forward = food.math:GetForwardVector(aim)
-    local reach = 24 + 2 * math.sin(using * 2 * math.pi)
+    local right = food.math:GetRightVector(aim)
+    local reach = food.reach + 2 * math.sin(using * 2 * math.pi)
     local blend = lift * (1 - lower)
     blend = blend * blend * (3 - 2 * blend)
     local hold = hand.Translation
     local location = {
-        X = hold.X + (head.X + forward.X * reach - hold.X) * blend,
-        Y = hold.Y + (head.Y + forward.Y * reach - hold.Y) * blend,
-        Z = hold.Z + (head.Z + forward.Z * reach + 6 - hold.Z) * blend,
+        X = hold.X + (head.X + forward.X * reach + right.X * food.side - hold.X) * blend,
+        Y = hold.Y + (head.Y + forward.Y * reach + right.Y * food.side - hold.Y) * blend,
+        Z = hold.Z + (head.Z + forward.Z * reach + right.Z * food.side + food.height - hold.Z) * blend,
     }
     local rotation = food.math:ComposeRotators(use.rotation, aim)
     local hand_rotation = food.math:Quat_Rotator(hand.Rotation)

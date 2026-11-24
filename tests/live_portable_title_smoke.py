@@ -2382,6 +2382,12 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
     await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
     canonical, _ = (await command(host, "host-medical-vitals")).split(";")
     verified = {}
+    observed_food = {}
+
+    def observed_use(frame, class_path):
+        use = frame.get("game", {}).get("native_avatar_use", {}).get(pawn, {})
+        return use if use.get("item") == class_path and use["active"] is False else None
+
     for label, item in zip(cases, seeded, strict=True):
         verb = f"native-guest-{label}"
         profile = native_guest_consumable.STOCK_CONSUMABLES[verb]
@@ -2420,17 +2426,19 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
                             and stim >= receipt["stim_after"] - .35):
                         break
                     await asyncio.sleep(.1)
+        if label in ("leftovers", "brown-mushroom"):
+            def finished(frame):
+                return observed_use(frame, profile.class_path)
+
+            use = finished(await wait_resident_status(host_run, finished, timeout=8))
+            assert 23 <= use.get("food_forward_of_head_cm", 0) <= 38 and use["hand_motion_cm"] > 20, use
+            observed_food[label] = use
         verified[label] = receipt
     remaining = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
     assert [(row["guid"], row["quantity"]) for row in remaining if row["guid"] in seeded] == [(seeded[3], 1)], remaining
 
-    def mushroom_prop(frame):
-        use = frame.get("game", {}).get("native_avatar_use", {}).get(pawn, {})
-        return use if use.get("item") == native_guest_consumable.BROWN_MUSHROOM_CLASS and use["active"] is False else None
-
-    observer = mushroom_prop(await wait_resident_status(host_run, mushroom_prop, timeout=8))
-    assert 18 <= observer.get("food_forward_of_head_cm", 0) <= 30, observer
-    assert observer["hand_motion_cm"] > 20 and "Mushroom" in observer["mesh"], observer
+    assert "Mushroom" in observed_food["brown-mushroom"]["mesh"], observed_food
+    assert observed_food["leftovers"]["food_forward_of_head_cm"] > 24, observed_food
     host_vitals, _ = (await command(host, "host-medical-vitals")).split(";")
     assert host_vitals == canonical, (canonical, host_vitals)
     assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == grouped
@@ -2441,7 +2449,7 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
                                     "host_food_before": host_before[0], "host_food_after": host_after[0],
                                     "host_regen_unchanged": True, "campaign_checkpoint_unchanged": True,
                                     "stock_widget_tick_invoked_in_muted_fixture": True, "additional_stock_uses": verified,
-                                    "host_observed_mushroom_use": observer}}
+                                    "host_observed_food_use": observed_food}}
 
 
 async def verify_resident_board_offers(host: Seat, guest: Seat, _pawn: str) -> dict:
@@ -3053,6 +3061,7 @@ async def verify_stock_unequip(first, second, evidence):
                 "backpack", receipt["class_path"], 1), recovered
             evidence["guest_worn_world_drop"].append({"receipt": receipt, "host_pickup": recovered})
         assert saves() == before, "The guest worn drop or host pickup wrote a save before a checkpoint"
+        await close_stock()
         mask = worn_guids[0]
         await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("native_host_stack_drop_scope"))
         assert await portable_probe_command(host.bridge, probe, f"host-wear-mask\t{mask}") == mask
@@ -3074,10 +3083,32 @@ async def verify_stock_unequip(first, second, evidence):
         evidence["host_face_mask_drop"] = dropped
         assert saves() == before, "The worn Face Mask drop wrote a save before a checkpoint"
         assert await portable_probe_command(host.bridge, probe, "host-close-inventory") == "closed"
+        approached = await host.bridge.command(native_world_loot.APPROACH, marker, pawn, timeout=5)
+        assert approached["ack"]["message"] == "stock loot height and line of sight verified", approached["ack"]
+        await wait_resident_status(guest_run, lambda frame: math.dist(
+            frame.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]),
+            dropped["location"]) < 225, timeout=8)
+        picked = await guest.bridge.command(native_world_loot.FIXTURE, marker, timeout=5)
+        assert picked["ack"]["message"] == "stock world loot interaction intercepted", picked["ack"]
+        for run in (host_run, guest_run):
+            await wait_resident_status(run, lambda frame: marker not in frame.get("game", {}).get(native_world_loot.KEY, {}))
+        authoritative = await submit(guest_run, "native-inventory-list")
+        restored, = [row for row in authoritative["native_inventory"]["items"] if row["guid"] == mask]
+        assert (restored["source"], restored["class_path"], restored["quantity"]) == ("backpack", dropped["class_path"], 1)
+        evidence["guest_reclaimed_face_mask"] = restored
+        assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
         await leaves_stock_open()
+        started = time.time()
+        assert await portable_probe_command(guest.bridge, probe, f"guest-equip-helmet	{mask}") == "-,-"
+        equip = await witness("native_stock_inventory_action", "native_guest_helmet", mask, since=started)
+        assert equip["stock_inventory_proof"] == "verified stock equipment slot 8", equip
+        assert await portable_probe_command(guest.bridge, probe, "guest-worn-state") == f"{mask},-"
+        evidence["guest_equipped_reclaimed_face_mask"] = equip
+        assert saves() == before, "The Face Mask pickup and equip wrote a save before a checkpoint"
         await close_stock()
         return {"selected_and_inactive_slots_checked": True, "guest_duplicate_clicks_rejected": True,
-                "guest_worn_slots_checked": True, "saves_unchanged_before_checkpoint": True}
+                "guest_worn_slots_checked": True, "guest_equipped_host_drop": True,
+                "saves_unchanged_before_checkpoint": True}
 
     return await start_pair(first, second, "Unequip probe scout", before_join=solo_baseline, on_join=guest_stock_actions)
 

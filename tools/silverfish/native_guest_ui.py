@@ -120,19 +120,27 @@ class GuestView:
         self.pending_stock_refresh = None
 
     @staticmethod
-    def stock_view(client):
+    def inventory_scope(client):
         game = client.last_game
         pawn = game.get("pawns", {}).get("local", {}).get("name")
         identity = (client.host_session, client.zone_epoch, game.get("map"), pawn)
-        if (game.get("state") == "connected" and game.get("native_inventory_view", {}).get("state") == "stock"
-                and all(identity) and identity[2] == client.expected_zone
+        if (game.get("state") == "connected" and all(identity) and identity[2] == client.expected_zone
                 and game.get("save_scope") == uuid.UUID(client.invite["character_id"]).hex):
             return identity
         return None
 
+    def stock_view(self, client):
+        if client.last_game.get("native_inventory_view", {}).get("state") == "stock":
+            return self.inventory_scope(client)
+        return None
+
+    def inventory_needs_refresh(self, client):
+        scope = self.inventory_scope(client)
+        return scope is not None and scope in (self.pending_stock_refresh, self.request_for_stock)
+
     def queue_stock_inventory(self, client):
-        """Coalesce committed pickups without waiting for another host request."""
-        if scope := self.stock_view(client):
+        """Coalesce committed pickups, including those made before the inventory opens."""
+        if scope := self.inventory_scope(client):
             self.pending_stock_refresh = scope
             self.next_poll = 0.0
 
@@ -201,8 +209,8 @@ class GuestView:
             return
         area, epoch = game["map"], client.zone_epoch
         identity = (client.host_session, epoch, area)
-        current_stock = self.stock_view(client)
-        pending = self.pending_stock_refresh if self.pending_stock_refresh == current_stock else None
+        scope = self.inventory_scope(client)
+        pending = self.pending_stock_refresh if self.pending_stock_refresh == scope else None
         if self.identity != identity:
             await self.close()
             self.identity, self.digest, self.next_poll = identity, "-", 0.0
@@ -213,13 +221,13 @@ class GuestView:
             try:
                 reply = request.result()
                 # A pickup arrived after this request started. Use one fresh view for all resulting changes.
-                if not pending and (requested_stock is None or requested_stock == current_stock):
+                if not pending and (requested_stock is None or requested_stock == scope):
                     await self.receive(client, reply["native_guest_ui"], area, epoch, character)
                     if requested_stock is not None and requested_stock == self.stock_view(client):
                         client.last_game = await client.bridge.command("native-inventory-stock-refresh", epoch, timeout=4)
                     self.last_error = None
             except (KeyError, TypeError, OSError, RuntimeError, ValueError, zlib.error) as error:
-                if requested_stock is not None and requested_stock == self.stock_view(client):
+                if requested_stock is not None and requested_stock == self.inventory_scope(client):
                     self.pending_stock_refresh = requested_stock
                 description = str(error)
                 if description != self.last_error:
@@ -257,8 +265,12 @@ class GuestView:
         await self.close()
         area, epoch = client.last_game.get("map"), client.zone_epoch
         character = client.invite["character_id"]
-        reply = await client.gameplay_action(ACTION, uuid.uuid4().hex, "-")
-        await self.receive(client, reply["native_guest_ui"], area, epoch, character)
+        try:
+            reply = await client.gameplay_action(ACTION, uuid.uuid4().hex, "-")
+            await self.receive(client, reply["native_guest_ui"], area, epoch, character)
+        except (KeyError, TypeError, OSError, RuntimeError, ValueError, zlib.error):
+            self.queue_stock_inventory(client)
+            raise
         self.identity = (client.host_session, epoch, area)
         self.next_poll = time.monotonic() + 3
 

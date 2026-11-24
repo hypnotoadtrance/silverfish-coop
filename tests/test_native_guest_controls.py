@@ -294,6 +294,23 @@ class NativeGuestStockPickupViewTests(unittest.IsolatedAsyncioTestCase):
         self.view.receive.assert_awaited_once_with(self.client, {"capture": 2}, self.area, self.epoch, str(self.character))
         self.client.bridge.command.assert_awaited_once_with("native-inventory-stock-refresh", self.epoch, timeout=4)
 
+    async def test_pickup_invalidates_inventory_before_stock_screen_opens(self):
+        self.game["native_inventory_view"]["state"] = "closed"
+        self.view.identity = (self.session, self.epoch, self.area)
+        self.view.digest = "a" * 64
+        self.view.queue_stock_inventory(self.client)
+        self.assertTrue(self.view.inventory_needs_refresh(self.client))
+        await self.view.sync(self.client, True)
+        self.assertTrue(self.view.inventory_needs_refresh(self.client))
+
+        self.release.set()
+        await self.view.request
+        await self.view.sync(self.client, True)
+        self.assertFalse(self.view.inventory_needs_refresh(self.client))
+        self.view.receive.assert_awaited_once_with(
+            self.client, {"capture": 1}, self.area, self.epoch, str(self.character))
+        self.client.bridge.command.assert_not_awaited()
+
     async def test_refresh_does_not_rebuild_closed_or_replaced_stock_view(self):
         self.view.queue_stock_inventory(self.client)
         await self.view.sync(self.client, True)
