@@ -4768,6 +4768,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     resident_campaigns = {}
     storm_trial = StockStormTrial(portable_probe_command) if stock_storm_ambience else None
     weapon_campaign = "tutorial_dock_combat" if tutorial_dock_combat else "observatory"
+    shot_view_campaign = "tutorial_dock_shot_view" if tutorial_dock_pursuit else weapon_campaign
     dock_world_checks = stock_bandage_revisit or stock_warehouse_switch or stock_warehouse_board or stock_bottle
     prop_campaign = "tutorial_dock" if dock_world_checks else "observatory"
     stock_radio_media = stock_warehouse_switch and all(
@@ -4844,7 +4845,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                                pursuit=tutorial_dock_pursuit,
                                                                held_mask=tutorial_dock_held_mask,
                                                                grounded_gait=tutorial_dock_gait)),
-        (tutorial_dock_shot_view, "tutorial_dock_shot_view", "tutorial_dock_shot_view",
+        (tutorial_dock_shot_view and tutorial_dock_pursuit, shot_view_campaign, "shot_view_weapon_setup",
+         lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, rusty=True, npc_rivalry=False)),
+        (tutorial_dock_shot_view, shot_view_campaign, "tutorial_dock_shot_view",
          lambda host, guest, pawn: verify_tutorial_dock_combat(host, guest, pawn, shot_view=True)),
         (tutorial_dock_melee, "tutorial_dock_melee", "tutorial_dock_melee", verify_tutorial_dock_melee),
         (stock_eye_stacks, "shopkeep", "stock_eye_stacks", verify_stock_eye_stacks),
