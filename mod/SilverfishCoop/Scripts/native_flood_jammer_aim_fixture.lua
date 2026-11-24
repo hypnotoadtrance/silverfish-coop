@@ -5,6 +5,8 @@ local fixture = {}
 local trace_path = "/Script/Engine.Default__KismetSystemLibrary"
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1" and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local color = {R = 0, G = 0, B = 0, A = 0}
+-- The stock blast can reach 1,200 cm. Leave room for the pawn capsule and the tank's Arrow offset.
+local fixed_ranges = {1400, 1550, 1750, 1950, 2250}
 local last
 
 local function valid(object) return object ~= nil and object ~= false and object:IsValid() end
@@ -76,7 +78,7 @@ local function fixed_contact(pawn, weapon, camera, mesh, center)
     for _, height in ipairs({0, 8, -8, 16, -16, 25, 45, 65, -35, -55, 90}) do
         local target = {X = center.X, Y = center.Y, Z = center.Z + height}
         local view, range = look(eye, target)
-        if range > 1 and range <= 550 then
+        if range >= fixed_ranges[1] - 40 and range <= 2400 then
             local reach = (range + 100) / range
             local finish = {X = eye.X + (target.X - eye.X) * reach, Y = eye.Y + (target.Y - eye.Y) * reach,
                 Z = eye.Z + (target.Z - eye.Z) * reach}
@@ -85,7 +87,7 @@ local function fixed_contact(pawn, weapon, camera, mesh, center)
                 local muzzle = muzzle_component:K2_GetComponentLocation()
                 local point = sight.ImpactPoint
                 local angle, distance = look(muzzle, point)
-                if distance >= 75 and math.abs(angle.Pitch) < 56 then
+                if math.abs(angle.Pitch) < 56 then
                     local span = (distance + 100) / distance
                     local end_point = {X = muzzle.X + (point.X - muzzle.X) * span,
                         Y = muzzle.Y + (point.Y - muzzle.Y) * span, Z = muzzle.Z + (point.Z - muzzle.Z) * span}
@@ -191,7 +193,8 @@ function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule
     context.fixed = fixed
     context.ignored = {context.pawn, context.weapon, actor}
     local rooftop = tag == "native-crossroads-jammer"
-    context.floor_depth, context.aim_range, context.aim_pitch = rooftop and 1800 or 330, rooftop and 1600 or 550, rooftop and 70 or 56
+    context.floor_depth, context.aim_range, context.aim_pitch = (rooftop or fixed) and 1800 or 330,
+        rooftop and 1600 or 550, rooftop and 70 or 56
     local center
     if fixed then
         center = mesh_center(target_mesh)
@@ -226,7 +229,9 @@ function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule
         local current_distance, exact_hit = align(context, center)
         if exact_hit then return current_distance, exact_hit end
         local bearing = math.atan(original.point.Y - center.Y, original.point.X - center.X)
-        for _, range in ipairs(rooftop and {175, 245, 320, 410, 540, 670, 800, 1000, 1220} or {175, 245, 320, 410}) do
+        local ranges = fixed and fixed_ranges
+            or rooftop and {175, 245, 320, 410, 540, 670, 800, 1000, 1220} or {175, 245, 320, 410}
+        for _, range in ipairs(ranges) do
             for _, offset in ipairs({0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180}) do
                 local direction = bearing + math.rad(offset)
                 local point = floor_at(context, center, center.X + math.cos(direction) * range,

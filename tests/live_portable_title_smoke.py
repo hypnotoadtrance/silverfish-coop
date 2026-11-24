@@ -3623,6 +3623,10 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
 
         witness = await wait_resident_status(guest_run, wreck)
         assert prop(witness)["mesh"] == prop(destroyed)["mesh"]
+        assert destroyed["game"]["pawns"]["guest"]["health"] > 0
+        cues = [r for r in await resident_events(guest_run, witness)
+                if r["event"] == "native_fixed_explosive_effect_played" and r.get("cue") == "fixedtank"]
+        assert len(cues) == 1 and cues[0]["map"] == FOREST, cues
         assert await flag() == "Kill_ForestTank|7"
         assert campaign_save_hashes(host.campaign) == save_hashes, "Destroying the tank wrote a save"
         await cross(FOREST, CROSSROADS)
@@ -3630,7 +3634,7 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
         await approach_board()
         return {"actor": target, "guest_magazine": fired, "stock_counter": [6, 7],
                 "host_mesh": prop(destroyed)["mesh"], "guest_mesh": prop(witness)["mesh"],
-                "denied_guest_local_callbacks": True, "no_save_on_destruction": True}
+                "denied_guest_local_callbacks": True, "no_save_on_destruction": True, "guest_blast_relay": cues[0]}
 
     checkpoint = campaign_save_hashes(host.campaign)
     await approach_board()
