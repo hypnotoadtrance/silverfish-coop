@@ -2,6 +2,7 @@
 #include "guest_melee.hpp"
 #include "guest_weapon_registry.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <charconv>
@@ -234,12 +235,12 @@ namespace
     enum class HeldEdge { press, release, cancel };
     enum class HeldProof { none, mapped_key, edge_window, stock_melee_edges, fixture };
     enum class FixtureDispatch { none, tap, held };
-    struct HeldReceipt { Receipt receipt{}; std::uint64_t stroke{}; HeldEdge edge{}; };
+    struct HeldReceipt { Receipt receipt{}; std::uint64_t stroke{}; HeldEdge edge{}; std::int64_t duration_ms{}; };
     struct HeldStroke
     {
         std::uint64_t id{};
         HeldProof proof{};
-        Clock::time_point expires{}, next_probe{};
+        Clock::time_point started{}, expires{}, next_probe{};
     };
     Scope scope;
     CapturedPress press;
@@ -720,11 +721,12 @@ namespace
         }
     }
 
-    bool queue_held(HeldEdge edge, std::uint64_t stroke, Clock::time_point now)
+    bool queue_held(HeldEdge edge, std::uint64_t stroke, Clock::time_point now, std::int64_t duration_ms = 0)
     {
         discard_held(now);
         if (held_count == receipt_limit || held_sequence == max_sequence) return false;
-        held_receipts[(held_head + held_count) % receipt_limit] = {{++held_sequence, now + receipt_lifetime}, stroke, edge};
+        held_receipts[(held_head + held_count) % receipt_limit] = {{++held_sequence, now + receipt_lifetime},
+                                                                  stroke, edge, duration_ms};
         ++held_count;
         return true;
     }
@@ -732,7 +734,9 @@ namespace
     void stop_held(HeldEdge edge, Clock::time_point now)
     {
         if (!held.id) return;
-        queue_held(edge, held.id, now);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - held.started);
+        const auto duration = std::clamp(elapsed, std::chrono::milliseconds{0}, std::chrono::milliseconds{9000});
+        queue_held(edge, held.id, now, duration.count());
         if (edge == HeldEdge::cancel && press.stroke == held.id && press.expires > now + held_probe_period)
             press.expires = now + held_probe_period;
         held = {};
@@ -762,7 +766,7 @@ namespace
         }
         if (held.id || held_sequence == max_sequence || !queue_held(HeldEdge::press, held_sequence + 1, now))
             return false;
-        held = {held_sequence, proof, until, now + held_probe_period};
+        held = {held_sequence, proof, now, until, now + held_probe_period};
         press.stroke = held.id;
         return true;
     }
@@ -994,9 +998,10 @@ namespace
         lua.set_string(scope.text);
         lua.set_string(event.edge == HeldEdge::press ? "press" : event.edge == HeldEdge::release ? "release" : "cancel");
         lua.set_integer(static_cast<std::int64_t>(event.stroke));
+        if (melee_edges) lua.set_integer(event.duration_ms);
         held_head = (held_head + 1) % receipt_limit;
         --held_count;
-        return 5;
+        return melee_edges ? 6 : 5;
     }
 
     int read_held(const Lua& lua)

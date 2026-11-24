@@ -904,6 +904,16 @@ namespace
             boolean(current.animation.Get(), STR("PrimaryInput"), down);
     }
 
+    void apply_input_edge(bool down)
+    {
+        swing.input.held = down;
+        if (down) ++swing.presses;
+        else ++swing.releases;
+        swing.deadline = Clock::now() + (down ? hold_timeout : attack_timeout);
+        if (!apply_primary_edge(swing, down)) finish(down ? "mutation_unverified_guest_melee_press_readback" :
+            "mutation_unverified_guest_melee_release_readback");
+    }
+
     bool harvest_input_contact()
     {
         if (!swing.contacts) return true;
@@ -1375,7 +1385,8 @@ namespace
         constexpr bool ordinary = mode == SwingMode::ordinary;
         const auto argc = lua.get_stack_size();
         const bool fixture = ordinary && !input && argc == 4 && fixture_enabled() && lua.is_integer(4);
-        if (!(ordinary ? enabled() : fixture_enabled()) || !U::IsInGameThreadRaw() || (argc != 3 && !fixture) ||
+        const bool tap = input && argc == 4 && lua.is_string(4);
+        if (!(ordinary ? enabled() : fixture_enabled()) || !U::IsInGameThreadRaw() || (argc != 3 && !fixture && !tap) ||
             !lua.is_integer(1) || !lua.is_integer(2) ||
             !lua.is_string(3)) return proof(lua, false, "native_guest_melee_arguments_unqualified");
         if (swing.pending || (swing.input.active && swing.status.starts_with("mutation_unverified_")) ||
@@ -1385,6 +1396,7 @@ namespace
         const auto save_address = lua.get_integer();
         const auto guid = lua.get_string();
         const auto target_address = fixture ? lua.get_integer() : 0;
+        if (tap && lua.get_string() != "tap") return proof(lua, false, "native_guest_melee_exact_edge_required");
         Swing candidate;
         candidate.mode = mode;
         candidate.input.active = input;
@@ -1516,9 +1528,8 @@ namespace
         swing = std::move(candidate);
         if constexpr (input)
         {
-            swing.input.held = true;
-            ++swing.presses;
-            if (!apply_primary_edge(swing, true)) finish("mutation_unverified_guest_melee_press_readback");
+            apply_input_edge(true);
+            if (tap && swing.pending) apply_input_edge(false);
             return input_report(lua);
         }
         Primary press{};
@@ -1549,23 +1560,19 @@ namespace
             !lua.is_integer(1) || !lua.is_string(2) || !swing.input.active || swing.serial != lua.get_integer())
             return proof(lua, false, "native_guest_melee_exact_serial_required");
         const auto edge = lua.get_string();
-        if (edge != "press" && edge != "release" && edge != "cancel")
+        if (edge != "press" && edge != "release" && edge != "cancel" && edge != "tap")
             return proof(lua, false, "native_guest_melee_exact_edge_required");
-        if (!swing.pending || swing.input.held == (edge == "press"))
+        const bool starting = edge == "press" || edge == "tap";
+        if (!swing.pending || swing.input.held == starting)
             return proof(lua, false, "native_guest_melee_stock_edge_inactive");
         if (edge == "cancel" || (edge == "release" && !owner_current(swing)))
         {
             cancel_input();
             return input_report(lua);
         }
-        const bool down = edge == "press";
-        if (down && !owner_current(swing)) return proof(lua, false, "native_guest_melee_exact_owner_unqualified");
-        swing.input.held = down;
-        if (down) ++swing.presses;
-        else ++swing.releases;
-        swing.deadline = Clock::now() + (down ? hold_timeout : attack_timeout);
-        if (!apply_primary_edge(swing, down)) finish(down ? "mutation_unverified_guest_melee_press_readback" :
-            "mutation_unverified_guest_melee_release_readback");
+        if (starting && !owner_current(swing)) return proof(lua, false, "native_guest_melee_exact_owner_unqualified");
+        if (starting) apply_input_edge(true);
+        if (edge != "press" && swing.pending) apply_input_edge(false);
         return input_report(lua);
     }
 
