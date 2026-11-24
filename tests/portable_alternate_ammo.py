@@ -45,7 +45,8 @@ async def verify_alternate_ammo(host, guest, pawn, probe):
                         return row["native_guest_weapon"]
                 await asyncio.sleep(.08)
 
-    async def verify_round(arm, base, alternate, rounds, second=None):
+    async def verify_round(arm, base, alternate, rounds, second=None, earlier=None):
+        selected, reserve_before = earlier or (alternate, alternate.fixture_units)
         seats = host, guest
         assert await asyncio.gather(*(command(seat, arm) for seat in seats)) == ["armed", "armed"]
         host_reserve = await command(host, "reserve")
@@ -66,8 +67,8 @@ async def verify_alternate_ammo(host, guest, pawn, probe):
             await read(guest, "second-reserve", following)
         reloaded = await stock_input("reload", frame, guid)
         assert (reloaded["before"], reloaded["after"], reloaded["reserve_before"], reloaded["reserve_after"]) == (
-            0, rounds, alternate.fixture_units, alternate.fixture_units - rounds), reloaded
-        await asyncio.gather(read(host, "peer-round", alternate.item_path), read(guest, "round", alternate.item_path))
+            0, rounds, reserve_before, reserve_before - rounds), reloaded
+        await asyncio.gather(read(host, "peer-round", selected.item_path), read(guest, "round", selected.item_path))
         await asyncio.gather(read(host, "peer-ready", f"{guid},{rounds},{rounds}"),
                              read(guest, "ready", f"{guid},{rounds},{rounds}"))
 
@@ -93,16 +94,19 @@ async def verify_alternate_ammo(host, guest, pawn, probe):
                         break
                 await asyncio.sleep(.08)
         assert (unloaded["class_path"], unloaded["split"], unloaded["remaining"]) == (
-            alternate.item_path, remaining, 0), unloaded
+            selected.item_path, remaining, 0), unloaded
         await asyncio.gather(read(host, "peer-ready", f"{guid},0,0"), read(guest, "ready", f"{guid},0,0"))
         if second:
             await read(guest, "second-reserve", following)
+        if earlier:
+            await read(guest, "reserve", reserve)
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
         await wait_resident_status(guest_run, lambda view: view.get("game", {}).get(
             "native_inventory_view", {}).get("state") == "closed")
         assert await command(host, "reserve") == host_reserve and campaign_save_hashes(host.campaign) == checkpoint
-        return {"class_path": alternate.item_path, "reload": reloaded, "shot": shot, "take_ammo": unloaded,
-                **({"untouched_following_reserve": second.item_path} if second else {})}
+        untouched = alternate if earlier else second
+        return {"class_path": selected.item_path, "reload": reloaded, "shot": shot, "take_ammo": unloaded,
+                **({"untouched_following_reserve": untouched.item_path} if untouched else {})}
 
     cases = (
         ("arm-alternate", FORTY_FIVE_BALL, FORTY_FIVE_HOLLOW_POINT, 8),
@@ -110,12 +114,16 @@ async def verify_alternate_ammo(host, guest, pawn, probe):
         ("arm-intermediate-alt", FIVE_SIX_FMJ, FIVE_SIX_AP, 16),
         ("arm-fifty-alt", FIFTY_CAL_FMJ, FIFTY_CAL_HEIAP, 4),
         ("arm-csr-ap", MAGNUM_338_FMJ, MAGNUM_338_AP, 12),
-        ("arm-sniper-op", MAGNUM_338_FMJ, MAGNUM_338_OP, 10),
     )
-    results = []
-    for case in cases:
+
+    async def run_case(*case, **options):
         try:
-            results.append(await verify_round(*case))
+            return await verify_round(*case, **options)
         finally:
             await asyncio.gather(command(host, "disarm"), command(guest, "disarm"), return_exceptions=True)
+
+    results = [await run_case(*case) for case in cases]
+    # The CSR's unloaded AP stack occupies an earlier Backpack slot than the new OP reserve.
+    results.append(await run_case("arm-sniper-op", MAGNUM_338_FMJ, MAGNUM_338_OP, 10,
+                                  earlier=(MAGNUM_338_AP, results[-1]["take_ammo"]["split"])))
     return {"stock_alternate_ammo": {"pawn": pawn, "rounds": results}}
