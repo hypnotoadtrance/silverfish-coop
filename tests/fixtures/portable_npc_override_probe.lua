@@ -24,6 +24,15 @@ local payload = "DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
 
+local function corpse_marker(marker, actor, role)
+    if not valid(marker) or not same(marker:GetOwner(), actor) or (role and marker:GetLocalRole() ~= role) then
+        return false
+    end
+    -- Corpse replication carries a non-zero ID in yaw and roll. Trader references use neutral rotation.
+    local angle = marker:K2_GetActorRotation()
+    return math.abs(angle.Yaw) > .5 or math.abs(angle.Roll) > .5
+end
+
 local function heading(from, target)
     local x, y, z = target.X - from.X, target.Y - from.Y, target.Z - from.Z
     return {Pitch = math.deg(math.atan(z, math.sqrt(x*x + y*y))), Yaw = math.deg(math.atan(y, x)), Roll = 0}
@@ -459,7 +468,7 @@ local function observe_rivalry(world, host)
         local markers = 0
         if not actor.Alive then
             for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
-                if valid(marker) and same(marker:GetOwner(), actor) and marker:GetLocalRole() == role then markers = markers + 1 end
+                if corpse_marker(marker, actor, role) then markers = markers + 1 end
             end
         end
         local weapon = actor.Weapon_Ranged
@@ -540,7 +549,7 @@ local function npc_combat_state(world, host)
     assert(valid(mesh) and same(mesh:GetOwner(), actor), "missing combatant mesh")
     local markers = 0
     for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
-        if valid(marker) and same(marker:GetOwner(), actor) and marker:GetLocalRole() == (host and 3 or 1) then
+        if corpse_marker(marker, actor, host and 3 or 1) then
             markers = markers + 1
         end
     end
@@ -768,7 +777,7 @@ local function dock_combat(pawn, world, host, action, name)
     end
     local markers = 0
     for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
-        if valid(marker) and same(marker:GetOwner(), actor) and marker:GetLocalRole() == (host and 3 or 1) then
+        if corpse_marker(marker, actor, host and 3 or 1) then
             markers = markers + 1
         end
     end
@@ -1002,7 +1011,7 @@ local function run(action, actor_path)
         if action == "corpse-ready" then
             if not valid(actor) or actor.Alive or not actor.Mesh:IsAnySimulatingPhysics() then return "waiting" end
             for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
-                if valid(marker) and same(marker:GetOwner(), actor) then return "ready" end
+                if corpse_marker(marker, actor) then return "ready" end
             end
             return "waiting"
         end
@@ -1227,7 +1236,7 @@ local function run(action, actor_path)
         assert(valid(mesh) and same(mesh:GetOwner(), actor), "stock drone mesh unavailable")
         local markers = 0
         for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
-            if valid(marker) and same(marker:GetOwner(), actor) and marker:GetLocalRole() == (host and 3 or 1) then
+            if corpse_marker(marker, actor, host and 3 or 1) then
                 markers = markers + 1
             end
         end
