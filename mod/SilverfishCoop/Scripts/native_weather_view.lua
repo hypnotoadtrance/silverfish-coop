@@ -82,10 +82,10 @@ end
 function view.read_rain(current_world)
     local rain = stock_rain_actor(current_world)
     if not rain or rain.Intensity == 0 then return {rain_intensity = 0, rain_x = 0, rain_y = 0, rain_z = 1} end
-    local particles, direction, amount = rain.NI_Rain_01, rain.RainVector, rain.Intensity
-    if not exact(particles, niagara_class) or not same(particles:GetOwner(), rain)
-        or not same(particles.Asset, StaticFindObject(particle_path)) or not bounded(amount, 0, 20) then return nil end
-    local report = {rain_intensity = amount, rain_x = direction.X, rain_y = direction.Y, rain_z = direction.Z}
+    -- The scoped DayCycle owns the rain state. Its Niagara component can be
+    -- unavailable while the stock rain controller still has valid weather.
+    local direction = rain.RainVector
+    local report = {rain_intensity = rain.Intensity, rain_x = direction.X, rain_y = direction.Y, rain_z = direction.Z}
     return view.valid_rain(report) and report or nil
 end
 
