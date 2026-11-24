@@ -20,6 +20,7 @@ local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local payload = "DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"
+local skeletal_tail = "/Game/Classes/NPCs/NPC_Assets/NPC_Tails/SK_Tail_01.SK_Tail_01"
 local last, local_pawn, peer, failure, world_address
 local hooked = false
 local clicks, projectiles, shot_sounds, muzzle_flashes = {}, 0, 0, 0
@@ -257,6 +258,28 @@ local function run(action, argument)
         local grip = math_api:InverseTransformLocation(weapon.RootComponent:K2_GetComponentToWorld(),
             weapon.Arrow_Forgrip:K2_GetComponentLocation())
         return ("%s;%.4f,%.4f,%.4f"):format(weapon.Mesh_Frame.StaticMesh:GetFullName(), grip.X, grip.Y, grip.Z)
+    end
+    if action == "host-tail" then
+        assert(observing() and local_pawn:HasAuthority()
+            and same(local_pawn.Save, local_pawn:GetWorld().OwningGameInstance.SaveSlot_Ref))
+        local appearance = local_pawn.Save.Character
+        appearance.Mesh_Tail_SM_74_4FD875FB4D8D71A94E98888810B6EA64 = nil
+        appearance.Mesh_Tail_SK_77_F2B7A1A441682020D88D3AA95D84A47E = asset(skeletal_tail)
+        return "styled"
+    end
+    if action == "tail-witness" then
+        assert(observing())
+        local socket, root = FName("TailSocket_01", EFindName.FNAME_Find), FName("Tail_01", EFindName.FNAME_Find)
+        for _, part in ipairs(peer:K2_GetComponentsByClass(asset("/Script/Engine.SkeletalMeshComponent"))) do
+            if type(part) == "userdata" and part:type() == "RemoteUnrealParam" then part = part:get() end
+            if same(part.SkinnedAsset, asset(skeletal_tail)) and part:GetAttachSocketName():ToString() == "TailSocket_01"
+                and part:GetBoneIndex(root) >= 0 and part.RelativeRotation.Yaw < -9 then
+                local source = part:GetSocketLocation(root)
+                local target = part:GetAttachParent():GetSocketLocation(socket)
+                return ("%.4f"):format(math.sqrt((source.X-target.X)^2 + (source.Y-target.Y)^2 + (source.Z-target.Z)^2))
+            end
+        end
+        return "waiting"
     end
     if action == "stand" then
         local_pawn:UnCrouch(false)

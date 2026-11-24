@@ -1425,7 +1425,8 @@ namespace
         auto* panel = object_field(screen, STR("BackpackPanel"));
         auto* floor = object_field(screen, STR("FloorPanel"));
         auto* origin = object_field(manager, STR("ActiveReturnLocation"));
-        const auto equipped_index = drop_equipment_index(manager, origin);
+        const auto worn_index = unequip_worn_slot(manager, screen, origin);
+        const auto equipped_index = worn_index ? worn_index : drop_equipment_index(manager, origin);
         if (!exact_drop_screen(manager, screen, panel) ||
             object_value(field<Unreal::FObjectProperty>(function, STR("InventoryWidget")), parameters) != floor) return;
         const bool tracked_split = host_split_drag.manager.Get() == manager &&
@@ -1474,29 +1475,30 @@ namespace
             restore->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
             !item_struct(item, held.structure) || item->GetOffset_Internal() != 0 || item->GetSize() != 0x50 ||
             !success || success->GetOffset_Internal() != 0x50) return;
-        if (equipped_index && !*stacks && pack_equipment_drop(manager, panel, origin, guid, item_class))
+        if (equipped_index && !worn_index && !*stacks && pack_equipment_drop(manager, panel, origin, guid, item_class))
         {
             if (exact_canonical_drop_row(save, held, guid, saved_ammo, item_class))
                 host_drop_request = HostDropRequest{guid, 1, ++host_drop_sequence, false,
                     now + request_lease, manager, screen, panel, "equipped_drag_to_floor"};
             return;
         }
-        if (equipped_index) return;
-        // Stock drag has already taken the item from the backpack. Restore that
-        // stock row before the coordinator captures and debits its exact GUID.
+        if (equipped_index && !worn_index) return;
+        // Stock drag has already taken the item. Restore its exact source row
+        // before the coordinator captures and debits it.
         alignas(std::max_align_t) std::array<std::byte, 96> arguments{};
         item->InitializeValue(arguments.data());
         item->CopyCompleteValue(arguments.data(), held.value);
         manager->ProcessEvent(restore, arguments.data());
         const bool returned = success->GetPropertyValueInContainer(arguments.data());
         const ItemView original{held.artifact, held.structure, arguments.data()};
-        const bool exact_return = returned && exact_canonical_drop_row(save, original, guid, saved_ammo, item_class);
+        const bool exact_return = returned && exact_canonical_drop_row(save, original, guid, saved_ammo, item_class, worn_index);
         item->DestroyValue(arguments.data());
         if (!returned) return;
         manager->ProcessEvent(clear, nullptr);
         if (!exact_return) return;
         host_drop_request = HostDropRequest{guid, *stacks ? saved_ammo : 1, ++host_drop_sequence, false,
-                                           now + request_lease, manager, screen, panel, "drag_to_floor"};
+                                           now + request_lease, manager, screen, panel,
+                                           worn_index ? "equipped_drag_to_floor" : "drag_to_floor"};
     }
 
     [[nodiscard]] std::string_view stock_backpack_use(Unreal::UObject* item_class)
@@ -1641,7 +1643,7 @@ namespace
         const auto candidate = card_item(card);
         const bool unequipping = action == "unequip";
         const bool unload = action == "take-ammo";
-        const auto worn_drop = !scope.host && action.empty() && host_drop_scope.stock_inventory
+        const auto worn_drop = action.empty() && (scope.host || host_drop_scope.stock_inventory)
             ? unequip_worn_slot(manager, screen, candidate.panel) : std::nullopt;
         const auto equipped_index = worn_drop ? worn_drop : unequipping
             ? unequip_source_slot(manager, screen, candidate.panel) : drop_equipment_index(manager, candidate.panel);
@@ -1704,7 +1706,7 @@ namespace
         }
         const auto count = (stack || unload) ? saved_ammo : 1;
         const auto entry = !action.empty() ? action :
-            worn_drop ? (from_menu ? "worn_drop_context_menu" : "worn_drop_ctrl_click") :
+            worn_drop && !scope.host ? (from_menu ? "worn_drop_context_menu" : "worn_drop_ctrl_click") :
             equipped_index ? (from_menu ? "equipped_context_menu" : "equipped_ctrl_click") :
                              (from_menu ? "context_menu" : "ctrl_click");
         const auto worn = action == "equip" ? worn_destination(item_class) : std::optional<int>{};

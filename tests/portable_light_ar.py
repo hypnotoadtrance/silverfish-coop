@@ -103,7 +103,7 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
         assert await command(host, "clear") == "clear"
         assert await command(guest, "light-ar-semi") == "light-ar-semi"
         await persisted_mode(guid, "semi")
-        grip, nagant_grip, obrez_switch = None, None, False
+        grip, nagant_grip, tail_gap, obrez_switch = None, None, None, False
         if re_equip:
             assert await command(guest, "stand") == "standing"
             grip = await measured_grip(host)
@@ -152,6 +152,15 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
             assert await command(host, "equip") == "selected"
             await wait_readback(host, "ready", f"{long_rifle},0,0")
             nagant_grip = await measured_grip(guest, await command(host, "rifle-witness"))
+            assert await command(host, "host-tail") == "styled"
+            async with asyncio.timeout(8):
+                while tail_gap is None:
+                    witness = await command(guest, "tail-witness")
+                    if witness == "waiting":
+                        await asyncio.sleep(.05)
+                    else:
+                        tail_gap = float(witness)
+            assert tail_gap < .15, tail_gap
             assert await command(host, "arm-obrez") == await command(guest, "arm-obrez") == "armed"
             obrez = await command(host, "seed-peer")
             await wait_readback(guest, "projected", obrez)
@@ -174,5 +183,6 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
                                "host_stored_both_modes": True, "semi_after_re_equip": re_equip,
                                "observer_idle_grip": grip, "stock_switch_while_aiming": re_equip,
                                "guest_observes_host_nagant_grip": nagant_grip, "obrez_to_pistol_while_aiming": obrez_switch,
+                               "skeletal_tail_gap_cm": tail_gap,
                                "both_magazines_verified": True, "host_reserve_unchanged": True,
                                "campaign_unchanged": True, "observer_scopes_disarmed": True}}
