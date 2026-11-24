@@ -39,7 +39,7 @@ from . import native_stock_enemy_drops
 from . import native_flashlight, native_lantern, native_stock_door, native_stock_switch
 from . import native_player_avatar
 from . import native_weapon_fire_view
-from . import native_damage_feedback, native_guest_clock, native_weather_view
+from . import native_damage_feedback, native_guest_clock, native_storm_ambience, native_weather_view
 from . import native_voice
 from . import native_anomaly_effects
 from . import native_destructibles
@@ -2549,6 +2549,23 @@ class Bridge:
                     cues = data.setdefault(native_weather_view.KEY, [])
                     if len(cues) < native_weather_view.MAX_SIRENS:
                         cues.append(native_weather_view.parse_siren(fields))
+                elif fields[0] == native_storm_ambience.HOST_TAG and data.get("state") == "hosting":
+                    if native_storm_ambience.KEY in data:
+                        raise ValueError("Repeated stock storm report")
+                    data[native_storm_ambience.KEY] = native_storm_ambience.parse_host(fields)
+                elif fields[0] == native_storm_ambience.HOST_FOG_TAG and native_storm_ambience.KEY in data:
+                    native_storm_ambience.add_fog(data[native_storm_ambience.KEY], fields)
+                elif fields[0] == native_storm_ambience.GUEST_TAG and data.get("state") == "connected":
+                    if native_storm_ambience.GUEST in data:
+                        raise ValueError("Repeated stock storm projection")
+                    data[native_storm_ambience.GUEST] = native_storm_ambience.parse_guest(fields)
+                elif fields[0] == native_storm_ambience.GUEST_FOG_TAG and native_storm_ambience.GUEST in data:
+                    native_storm_ambience.add_fog(data[native_storm_ambience.GUEST], fields, guest=True)
+                elif fields[0] == native_storm_ambience.GUARD_TAG and len(fields) == 2 and data.get("state") == "connected":
+                    blocked = int(fields[1])
+                    if blocked < 1:
+                        raise ValueError("Invalid stock storm guard count")
+                    data[native_storm_ambience.GUARD] = blocked
                 elif fields[0] == native_weather_view.LIGHTNING_TAG and len(fields) == 9 and data.get("state") == "hosting":
                     strikes = data.setdefault(native_weather_view.LIGHTNING, [])
                     if len(strikes) < native_weather_view.MAX_LIGHTNING:
