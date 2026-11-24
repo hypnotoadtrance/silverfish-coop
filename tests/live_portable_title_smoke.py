@@ -47,6 +47,7 @@ from live_unified_title_smoke import Seat, offered, start_pair
 from portable_eye_board import verify_stock_eye_stacks
 from portable_guest_world_start import GuestWorldStartProof, resident_events, wait_resident_status
 from portable_lingering_teleport import lingering_overlay, verify_stock_lingering_teleport
+from portable_personal_consumable import verify_personal_consumable_reconnect, verify_stock_personal_consumable
 from portable_simmi_jammer import verify_stock_simmi_jammers
 from portable_weather_travel import verify_weather_travel
 from portable_stock_shovel import verify_stock_shovel, verify_stock_shovel_reconnect
@@ -3952,6 +3953,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False,
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
                  stock_use: bool = False, stock_food: bool = False, stock_campfire: bool = False,
+                 stock_personal_consumable: bool = False,
                  stock_npc_override: bool = False, stock_board_offers: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
                  stock_weather_travel: bool = False, stock_melee_family: bool = False, stock_melee_edges: bool = False,
@@ -4028,6 +4030,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, guest_combat=stock_npc_override,
                                                                rusty=rusty_pistol, npc_rivalry=stock_npc_rivalry)),
         (stock_food, "observatory", "stock_food", verify_resident_guest_food),
+        (stock_personal_consumable, "personal_consumable", "stock_personal_consumable",
+         lambda host, guest, pawn: verify_stock_personal_consumable(host, guest, pawn, portable_probe_command)),
         (stock_take_ammo, "observatory", "stock_take_ammo", verify_stock_take_ammo),
         (stock_roaming_barter, "observatory", "stock_roaming_barter", verify_roaming_barter),
         (stock_simmi_jammers, "simmi", "stock_simmi_jammers",
@@ -4083,7 +4087,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableStockThrowablesProbe",
                                                      fixture="portable_stock_throwables_probe.lua"))
-        if stock_food:
+        if stock_food or stock_personal_consumable:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableGuestFoodProbe",
                                                      fixture="portable_guest_food_probe.lua"))
@@ -4320,13 +4324,29 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     else:
                         finish_check("stock_missing_contact_reconnect_and_turn_in", started)
 
+                async def check_personal_reconnect(guest, _started):
+                    evidence = gameplay.get("stock_personal_consumable")
+                    if evidence is None:
+                        return
+                    started = time.perf_counter()
+                    try:
+                        await verify_personal_consumable_reconnect(host, guest, evidence, portable_probe_command)
+                    except Exception as error:
+                        finish_check("stock_personal_consumable_reconnect", started, error)
+                    else:
+                        finish_check("stock_personal_consumable_reconnect", started)
+
                 exit_actions = ("prompt", "confirm") if campaign in {
                     "tutorial_dock", "tutorial_dock_combat", "crossroads", "crossroads_anomaly", "shopkeep"
                 } else ("save_and_quit",)
-                requires_package_reconnect = campaign == "crossroads" and stock_shovel_quest
+                after_reconnect = None
+                if campaign == "crossroads" and stock_shovel_quest:
+                    after_reconnect = check_shovel_reconnect
+                if campaign == "personal_consumable":
+                    after_reconnect = check_personal_reconnect
                 return await start_pair(host, second, "Gameplay scout", on_join=run_checks,
                                         wait_status=wait_resident_status, host_exit_actions=exit_actions,
-                                        after_reconnect=check_shovel_reconnect if requires_package_reconnect else None)
+                                        after_reconnect=after_reconnect)
 
             host = first
             for campaign, checks in resident_campaigns.items():
@@ -4471,6 +4491,8 @@ if __name__ == "__main__":
     parser.add_argument("--stock-drop", action="store_true", help="test stock guest backpack Sort, Drop, and Use actions")
     parser.add_argument("--stock-use", action="store_true", help="open a starter bag by stock drag and use a Bandage by stock click")
     parser.add_argument("--stock-food", action="store_true", help="verify the guest's Food stat after a meal, combinable with campfire and weapon cues")
+    parser.add_argument("--stock-personal-consumable", action="store_true",
+                        help="use an unlisted stock consumable through the guest inventory and recover it across reconnect")
     parser.add_argument("--stock-campfire", action="store_true", help="verify stock campfire damage and feedback, combinable with food and weapon cues")
     parser.add_argument("--stock-board-offers", action="store_true",
                         help="compare the stock Observatory board on both seats and accept a complex contract")
@@ -4622,7 +4644,8 @@ if __name__ == "__main__":
             args.guest_world_start, args.guest_world_start_travel, args.guest_ui_memory, args.compact_crate_status,
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
-    resident_check_options = {"stock_food", "stock_campfire", "stock_npc_override", "stock_board_offers", "resident_weapon_cues",
+    resident_check_options = {"stock_food", "stock_personal_consumable", "stock_campfire", "stock_npc_override",
+                              "stock_board_offers", "resident_weapon_cues",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "stock_npc_rivalry",
                               "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_shovel_quest", "stock_take_ammo",
                               "stock_host_corpse_carry", "stock_flashlights", "stock_simmi_jammers", "stock_weather_travel",
@@ -4639,7 +4662,7 @@ if __name__ == "__main__":
         parser.error("Use --stock-shovel-loot with --stock-shovel")
     if args.stock_shovel_quest and (not args.stock_shovel or args.stock_shovel_loot):
         parser.error("Use --stock-shovel-quest with --stock-shovel alone")
-    if any((args.stock_food, args.stock_campfire, args.stock_npc_override, args.stock_board_offers,
+    if any((args.stock_food, args.stock_personal_consumable, args.stock_campfire, args.stock_npc_override, args.stock_board_offers,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
             args.stock_melee_family, args.stock_melee_edges, args.stock_warehouse_switch, args.stock_warehouse_board, args.stock_bottle,
@@ -4683,6 +4706,7 @@ if __name__ == "__main__":
                        stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby,
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
                        stock_use=args.stock_use, stock_food=args.stock_food, stock_campfire=args.stock_campfire,
+                       stock_personal_consumable=args.stock_personal_consumable,
                        stock_npc_override=args.stock_npc_override, stock_board_offers=args.stock_board_offers,
                        stock_npc_rivalry=args.stock_npc_rivalry,
                        stock_host_corpse_carry=args.stock_host_corpse_carry,

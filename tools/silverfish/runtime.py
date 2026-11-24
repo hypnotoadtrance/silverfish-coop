@@ -52,6 +52,7 @@ from . import native_spratt_fixture
 from . import native_subway_valve
 from . import native_prototype_drill
 from . import native_kill_volume
+from . import native_guest_consumable
 from .native_guest_consumable import STOCK_CONSUMABLES, RESULT as CONSUMABLE_RESULT, STARTER_BAG, parse_meal, parse_starter_bag
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
@@ -2128,6 +2129,15 @@ class Bridge:
                     key = CONSUMABLE_RESULT[fields[0]]
                     if key in data or data.get("state") != "hosting" or data.get("map") != proof["map"]:
                         raise ValueError("Invalid stock item use report scope")
+                    data[key] = proof
+                elif fields[0] in (native_guest_consumable.PERSONAL, native_guest_consumable.PERSONAL_PREVIEW):
+                    preview = fields[0] == native_guest_consumable.PERSONAL_PREVIEW
+                    proof = native_guest_consumable.parse_personal(fields, preview=preview)
+                    key = native_guest_consumable.PERSONAL_PREVIEW_KEY if preview else native_guest_consumable.PERSONAL_KEY
+                    if (key in data or data.get("state") != ("connected" if preview else "hosting")
+                            or data.get("map") != proof["map"]
+                            or preview and data.get("pawns", {}).get("local", {}).get("name") != proof["pawn"]):
+                        raise ValueError("Invalid personal consumable receipt scope")
                     data[key] = proof
                 elif fields[0] == "native-guest-mre-fixture" and len(fields) in (6, 10, 11):
                     area, pawn, food, intox, host_intox = fields[1:6]

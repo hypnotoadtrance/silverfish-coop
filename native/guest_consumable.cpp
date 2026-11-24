@@ -112,6 +112,50 @@ namespace
         return type && live(object) && object->GetClassPrivate() == type;
     }
 
+    Unreal::UObject* personal_consumable_defaults(Unreal::UClass* type)
+    {
+        auto* base = find<Unreal::UClass>(health_item_path);
+        if (!live(type) || !base || type == base || !type->IsChildOf(base)) return nullptr;
+        const auto path = type->GetPathName();
+        if (path == bandage_path || std::ranges::any_of(silverfish::native_guest_consumable::consumables,
+                [&](const auto& profile) { return profile.path == path; })) return nullptr;
+
+        constexpr std::array inherited{
+            STR("Use_Item_Primary"), STR("ApplyItemEffects"), STR("ApplyTempEffects"),
+            STR("GetFoodAmmount"),
+        };
+        for (const auto* name : inherited)
+        {
+            const Unreal::FName entry{name, Unreal::FNAME_Find};
+            auto* stock = base->GetFunctionByNameInChain(entry);
+            if (!stock || type->GetFunctionByNameInChain(entry) != stock) return nullptr;
+        }
+        for (const auto* name : {STR("UserConstructionScript"), STR("ReceiveTick"), STR("ReceiveEndPlay")})
+        {
+            const Unreal::FName entry{name, Unreal::FNAME_Find};
+            if (!entry.IsNone() && type->GetFunctionByNameInChain(entry) != base->GetFunctionByNameInChain(entry))
+                return nullptr;
+        }
+        const Unreal::FName begin_play{STR("ReceiveBeginPlay"), Unreal::FNAME_Find};
+        const auto valid_begin = [](Unreal::UFunction* function) {
+            return function && function->GetNumParms() == 0 && function->GetParmsSize() == 0 &&
+                !function->GetReturnProperty() && !function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net);
+        };
+        // The guest preview runs the inherited initializer when a derived
+        // consumable overrides BeginPlay. The host never spawns this actor.
+        if (!valid_begin(base->GetFunctionByNameInChain(begin_play)) ||
+            !valid_begin(type->GetFunctionByNameInChain(begin_play))) return nullptr;
+
+        auto* defaults = type->GetClassDefaultObject().Get();
+        auto* timed = field<Unreal::FMapProperty>(defaults, STR("TempEffects/Hours"));
+        if (!defaults || !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) ||
+            defaults->GetClassPrivate() != type || !timed ||
+            timed->ContainerPtrToValuePtr<Unreal::FScriptMap>(defaults)->Num() != 0 ||
+            !number_is<Unreal::FIntProperty>(defaults, STR("Infection"), 0))
+            return nullptr;
+        return defaults;
+    }
+
     bool authority(Unreal::UObject* actor, Unreal::UWorld* world)
     {
         return live(actor) && number_is<Unreal::FByteProperty>(actor, STR("Role"), 3) &&
@@ -317,12 +361,17 @@ namespace
             return property && property->GetStruct().Get() == data->GetStruct().Get();
         }
 
-        void set_remaining(void* row, int remaining, const Consumable& profile) const
+        void set_remaining(void* row, int remaining, double unit_weight, int unit_value) const
         {
             // Stock FL_Items.StackItem_Stats applies the quantity difference and recomputes both totals.
             quantity->SetPropertyValueInContainer(row, remaining);
-            weight->SetPropertyValueInContainer(row, remaining * profile.weight);
-            value->SetPropertyValueInContainer(row, remaining * profile.value);
+            weight->SetPropertyValueInContainer(row, remaining * unit_weight);
+            value->SetPropertyValueInContainer(row, remaining * unit_value);
+        }
+
+        void set_remaining(void* row, int remaining, const Consumable& profile) const
+        {
+            set_remaining(row, remaining, profile.weight, profile.value);
         }
     };
 
@@ -333,7 +382,8 @@ namespace
         int selected{-1};
         int units{};
 
-        std::string_view locate(const Scope& scope, const Guid& requested, const Consumable& profile)
+        template <typename Qualify>
+        std::string_view locate_row(const Scope& scope, const Guid& requested, Qualify qualify)
         {
             backpack = field<Unreal::FArrayProperty>(scope.guest, STR("PlayerBackpack"));
             auto* equipment = field<Unreal::FArrayProperty>(scope.guest, STR("PlayerEquipment"));
@@ -366,10 +416,17 @@ namespace
                 if (selected != -1) return "guest_bandage_refused_guid_conflict";
                 selected = index;
                 units = row.quantity->GetPropertyValueInContainer(item);
-                if (&profile != &bandage && units == 0) units = 1;
-                if (!row.stock_consumable(item, units, profile)) return "guest_bandage_refused_stock_stack";
+                if (!qualify(item, units)) return "guest_bandage_refused_stock_stack";
             }
             return selected >= 0 ? "" : "guest_bandage_refused_owned_guid";
+        }
+
+        std::string_view locate(const Scope& scope, const Guid& requested, const Consumable& profile)
+        {
+            return locate_row(scope, requested, [&](const void* item, int& count) {
+                if (&profile != &bandage && count == 0) count = 1;
+                return row.stock_consumable(item, count, profile);
+            });
         }
 
         void* bag_data(Unreal::UObject* save) const { return backpack->ContainerPtrToValuePtr<void>(save); }
@@ -410,7 +467,7 @@ namespace
             };
         }
 
-        std::string_view bind(const Scope& scope)
+        std::string_view bind(const Scope& scope, bool stock_effects = true)
         {
             health = field<Unreal::FDoubleProperty>(scope.guest, STR("PlayerHealth"));
             regen = field<Unreal::FDoubleProperty>(scope.guest, STR("PlayerRegen"));
@@ -419,18 +476,21 @@ namespace
             maximum = field<Unreal::FDoubleProperty>(scope.pawn, STR("MaxHealth"));
             cache = field<Unreal::FArrayProperty>(scope.instance, STR("PassiveEffects"));
             auto* names = cache ? Unreal::CastField<Unreal::FNameProperty>(cache->GetInner()) : nullptr;
-            if (!health || !regen || !food || !stim || !maximum || !names || names->GetArrayDim() != 1 ||
-                names->GetOffset_Internal() != 0) return "guest_bandage_refused_health_schema";
+            if (!health || !regen || !food || !stim || !maximum ||
+                (stock_effects && (!names || names->GetArrayDim() != 1 || names->GetOffset_Internal() != 0)))
+                return "guest_bandage_refused_health_schema";
 
             before = read(scope.guest);
             max_health = maximum->GetPropertyValueInContainer(scope.pawn);
-            if (!before.finite() || !std::isfinite(max_health) || max_health < 25.0 ||
+            if (!before.finite() || !std::isfinite(max_health) || max_health < (stock_effects ? 25.0 : 1.0) ||
                 before.health <= 0.0 || before.health > max_health || before.regen < 0.0 || before.regen > max_health ||
                 before.food < 0.0 || before.food > 200.0 || before.stim < 0.0 ||
-                !read_bool(scope.pawn, STR("Dead"), false) || !read_bool(scope.pawn, STR("UsingItem"), false) ||
-                !read_bool(scope.pawn, STR("IsWeaponBlocked"), false) ||
-                !read_bool(scope.pawn, STR("HeadUnderWater"), false))
+                !read_bool(scope.pawn, STR("Dead"), false) ||
+                (stock_effects && (!read_bool(scope.pawn, STR("UsingItem"), false) ||
+                    !read_bool(scope.pawn, STR("IsWeaponBlocked"), false) ||
+                    !read_bool(scope.pawn, STR("HeadUnderWater"), false))))
                 return "guest_bandage_refused_guest_vitals";
+            if (!stock_effects) return {};
 
             std::int32_t count{};
             if (!silverfish::native_enemy_loot::count_save_passive(
@@ -458,6 +518,12 @@ namespace
             stim->SetPropertyValueInContainer(save, vitals.stim);
         }
 
+        void write(Unreal::UObject* save, const Vitals& vitals) const
+        {
+            food->SetPropertyValueInContainer(save, vitals.food);
+            write_healing(save, vitals);
+        }
+
         bool unchanged_except_regen(Unreal::UObject* save) const
         {
             auto current = read(save);
@@ -479,6 +545,141 @@ namespace
         Value value(property->AllocateAndInitializeValue(), {property});
         if (value) property->CopyCompleteValue(value.get(), current);
         return value;
+    }
+
+    int settle_personal_consumable(const Lua& lua)
+    {
+        const auto refuse = [&](std::string_view reason) {
+            return result(lua, false, std::string("guest_personal_consumable_refused_").append(reason));
+        };
+        if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 10 ||
+            !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3) ||
+            !lua.is_string(4) || !lua.is_string(5) || !lua.is_integer(6))
+            return refuse("arguments");
+        for (int index = 7; index <= 10; ++index)
+            if (!lua.is_number(index)) return refuse("arguments");
+
+        const auto pawn = lua.get_integer(), detached = lua.get_integer(), canonical = lua.get_integer();
+        Guid guid{};
+        if (pawn <= 0 || detached <= 0 || canonical <= 0 || detached == canonical || !parse_guid(lua.get_string(), guid))
+            return refuse("identity");
+        const std::string path{lua.get_string()};
+        const auto observed_count = lua.get_integer();
+        Vitals delta;
+        delta.food = lua.get_number();
+        delta.health = lua.get_number();
+        delta.regen = lua.get_number();
+        delta.stim = lua.get_number();
+        if (!path.starts_with('/') || !path.ends_with("_C") || path.size() > 512 ||
+            observed_count < 1 || observed_count > INT32_MAX || !delta.finite())
+            return refuse("observation");
+
+        Scope scope;
+        if (!scope.bind(pawn, detached, canonical)) return refuse("exact_detached_save");
+        Inventory inventory;
+        Unreal::UObject* defaults{};
+        const std::wstring requested_class(path.begin(), path.end());
+        const auto locate = inventory.locate_row(scope, guid, [&](const void* item, int& count) {
+            auto* type = Unreal::Cast<Unreal::UClass>(inventory.row.read_class(item));
+            if (!live(type) || type->GetPathName() != requested_class) return false;
+            defaults = personal_consumable_defaults(type);
+            auto* stacks = field<Unreal::FBoolProperty>(defaults, STR("Stacks"));
+            if (!stacks) return false;
+            const bool stackable = stacks->GetPropertyValueInContainer(defaults);
+            if (count == 0 || (count == -1 && !stackable)) count = 1;
+            return count == observed_count && (stackable || count == 1);
+        });
+        if (!locate.empty()) return refuse("owned_consumable_stack");
+
+        Health health;
+        constexpr double max_resource = 1'000'000.0;
+        if (!health.bind(scope, false).empty() || health.max_health > max_resource ||
+            health.before.stim > max_resource || std::abs(delta.food) > 200.0 ||
+            std::abs(delta.health) > health.max_health || std::abs(delta.regen) > health.max_health ||
+            std::abs(delta.stim) > max_resource || health.before.health + delta.health <= 0.0)
+            return refuse("vitals");
+
+        // The host may advance its own simulation before the receipt arrives.
+        // Apply the observed personal change to the host's live guest values.
+        const Vitals after{
+            std::min(health.before.health + delta.health, health.max_health),
+            std::clamp(health.before.regen + delta.regen, 0.0, health.max_health),
+            std::clamp(health.before.food + delta.food, 0.0, 200.0),
+            std::clamp(health.before.stim + delta.stim, 0.0, max_resource),
+        };
+        auto* bag = inventory.backpack;
+        auto* rows = inventory.bag_data(scope.guest);
+        auto* stock_rows = inventory.bag_data(scope.stock);
+        auto* flags = field<Unreal::FMapProperty>(scope.guest, STR("Flags"));
+        const Vitals stock_vitals = health.read(scope.stock);
+        if (!flags || !stock_vitals.finite()) return refuse("protected_state");
+        auto* guest_flags = flags->ContainerPtrToValuePtr<void>(scope.guest);
+        auto* stock_flags = flags->ContainerPtrToValuePtr<void>(scope.stock);
+        const auto before_rows = copy_value(bag, rows);
+        const auto next_rows = copy_value(bag, rows);
+        const auto stock_before = copy_value(bag, stock_rows);
+        const auto guest_flags_before = copy_value(flags, guest_flags);
+        const auto stock_flags_before = copy_value(flags, stock_flags);
+        if (!before_rows || !next_rows || !stock_before || !guest_flags_before || !stock_flags_before)
+            return refuse("snapshot");
+        const auto protected_unchanged = [&] {
+            return scope.current() && health.read(scope.stock) == stock_vitals &&
+                health.maximum->GetPropertyValueInContainer(scope.pawn) == health.max_health &&
+                bag->Identical(stock_rows, stock_before.get()) &&
+                flags->Identical(guest_flags, guest_flags_before.get()) &&
+                flags->Identical(stock_flags, stock_flags_before.get());
+        };
+        const auto verified = [&](const Vitals& expected, const void* expected_rows) {
+            return protected_unchanged() && health.read(scope.guest) == expected &&
+                bag->Identical(rows, expected_rows);
+        };
+
+        const int remaining = inventory.units - 1;
+        Unreal::FScriptArrayHelper prepared(bag, next_rows.get());
+        if (remaining == 0)
+            prepared.RemoveValues(inventory.selected);
+        else
+        {
+            auto* value = field<Unreal::FIntProperty>(defaults, STR("Value"));
+            auto* weight = field<Unreal::FDoubleProperty>(defaults, STR("Weight"));
+            if (!value || !weight) return refuse("stack_schema");
+            const auto unit_value = value->GetPropertyValueInContainer(defaults);
+            const auto unit_weight = weight->GetPropertyValueInContainer(defaults);
+            if (unit_value < 0 || (unit_value && remaining > INT32_MAX / unit_value) ||
+                unit_weight < 0.0 || !std::isfinite(remaining * unit_weight))
+                return refuse("stack_totals");
+            auto* item = prepared.GetRawPtr(inventory.selected);
+            auto* row_property = Unreal::CastField<Unreal::FStructProperty>(bag->GetInner());
+            Unreal::FScriptArrayHelper original(bag, before_rows.get());
+            inventory.row.set_remaining(item, remaining, unit_weight, unit_value);
+            const bool stock_math = silverfish::loot_escrow::stock_stack_matches(
+                scope.pawn, row_property, original.GetRawPtr(inventory.selected), item, -1);
+            if (!verified(health.before, before_rows.get()))
+                return result(lua, false, "mutation_unverified_guest_personal_consumable_stack_calculation");
+            if (!stock_math) return refuse("stock_stack_calculation");
+        }
+
+        health.write(scope.guest, after);
+        bag->CopyCompleteValue(rows, next_rows.get());
+        if (!verified(after, next_rows.get()))
+        {
+            if (protected_unchanged())
+            {
+                health.write(scope.guest, health.before);
+                bag->CopyCompleteValue(rows, before_rows.get());
+                if (verified(health.before, before_rows.get())) return refuse("commit_rolled_back");
+            }
+            return result(lua, false, "mutation_unverified_guest_personal_consumable_commit");
+        }
+
+        result(lua, true, "used");
+        lua.set_integer(inventory.units);
+        lua.set_integer(remaining);
+        lua.set_number(after.food);
+        lua.set_number(after.health);
+        lua.set_number(after.regen);
+        lua.set_number(after.stim);
+        return 8;
     }
 
     int use(const Lua& lua)
@@ -1260,6 +1461,11 @@ namespace
 
 }
 
+bool silverfish::native_guest_consumable::qualifies_personal_consumable(Unreal::UClass* type)
+{
+    return Unreal::IsInGameThreadRaw() && personal_consumable_defaults(type);
+}
+
 void silverfish::native_guest_consumable::install_hooks()
 {
     if (!mre_enabled() || intox_hook != Hook::ERROR_ID) return;
@@ -1280,6 +1486,7 @@ void silverfish::native_guest_consumable::register_lua(RC::LuaMadeSimple::Lua& l
     {
         lua.register_function("SilverfishUseNativeGuestBandage", use);
         lua.register_function("SilverfishOpenNativeGuestStarterBag", open_starter_bag);
+        lua.register_function("SilverfishSettleNativeGuestPersonalConsumable", settle_personal_consumable);
     }
     if (mre_enabled())
     {

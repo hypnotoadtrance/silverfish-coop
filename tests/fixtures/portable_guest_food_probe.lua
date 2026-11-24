@@ -71,6 +71,15 @@ local function host_read(pawn, save, world, action)
         return ("%.6f,%.6f,%.6f,%.6f"):format(save.PlayerFood, save.PlayerRegen, detached.PlayerFood, detached.PlayerRegen)
     end
     if action == "host-medical-vitals" then return medical_vitals(save) .. ";" .. medical_vitals(detached) end
+    if action == "seed-personal-compatibility" then
+        local weta = asset("/Game/Classes/Items/Item_LiveWeta.Item_LiveWeta_C")
+        local unsupported = stock_item(remote, weta, 1)
+        local spare = stock_item(remote, weta, 1)
+        local known = stock_item(remote, asset(meal_path), 1)
+        detached.PlayerHealth, detached.PlayerRegen, detached.PlayerStim = 100, 110, 0
+        detached.PlayerFood = 40
+        return unsupported .. ";" .. spare .. ";" .. known
+    end
     if action == "seed-use-cases" then
         local ids = {}
         for index, name in ipairs(stock_cases) do
@@ -112,6 +121,10 @@ local function run(action)
     if action == "guest-medical-vitals" then
         assert(not pawn:HasAuthority(), "the health readback needs an enrolled guest")
         return medical_vitals(save)
+    end
+    if action == "guest-personal-vitals" then
+        assert(not pawn:HasAuthority(), "the personal stat readback needs an enrolled guest")
+        return ("%.6f,%.6f"):format(save.PlayerFood, save.PlayerRegen)
     end
     assert(pawn:HasAuthority(), "the meal fixture must seed the detached save on the host")
     return host_read(pawn, save, world, action)

@@ -716,6 +716,45 @@ sync_stock = function(current, state, phase, allowed)
         unload = entry == "take-ammo", equip = entry == "equip", worn_drop = entry:match("^worn_drop_") ~= nil, live = true}
 end
 
+local function preview_personal_consumable(fields, current, state, phase)
+    local pending, session = stock_drop, stock_session
+    local stack = current.controller.MenuStack
+    if #fields ~= 4 or not pending or pending.entry ~= "use-personal-consumable" or pending.preview
+        or pending.epoch ~= fields[3] or pending.sequence ~= integer(fields[4], 9007199254740991)
+        or not same_context(current, pending.context) or not session or not same(session.screen, pending.screen)
+        or stack:GetArrayNum() ~= 1 or not same(widget_at(stack, 1), pending.screen)
+        or type(SilverfishPreviewNativeGuestPersonalConsumable) ~= "function" then
+        error("The personal consumable no longer matches the current backpack action", 0)
+    end
+    local save = save_scope.bind_guest(state, phase)
+    local pawn = current.pawn:GetAddress()
+    if not same(save, pending.save) or not SilverfishSetNativeGuestDropScope(pawn, pending.epoch, save:GetAddress(), true) then
+        error("The personal consumable lost its isolated guest backpack", 0)
+    end
+    local cards, manager = pending.screen.BackpackPanel.Cards, pending.screen.ItemManager
+    local card
+    for index = 1, cards:GetArrayNum() do
+        local candidate = widget_at(cards, index)
+        if stock_card_guid(candidate) == pending.guid then
+            card = candidate
+            break
+        end
+    end
+    local class = card and card.Item[item_class]
+    if not valid(class) then error("The personal consumable is no longer in the backpack", 0) end
+    local class_path = class:GetFullName():match(" (%S+)$")
+    local menu = manager.ItemContextMenu
+    if not valid(menu) or not same(menu["Item Card"], card) then manager:OpenContextMenu(card) end
+    local ok, status, preview_class, before, after, food, health, regen, stim =
+        SilverfishPreviewNativeGuestPersonalConsumable(pawn, pending.epoch, pending.sequence)
+    if not ok or not class_path or preview_class ~= class_path or not same(current.pawn.Save, save) then
+        error("The game could not preview the personal consumable: " .. tostring(status), 0)
+    end
+    pending.preview = {class_path, before, after, string.format("%.17g", food), string.format("%.17g", health),
+        string.format("%.17g", regen), string.format("%.17g", stim)}
+    return "measured personal consumable use"
+end
+
 local function finish_stock_drop(fields, current, state, phase)
     local pending = stock_drop
     local remaining = integer(fields[5], 2147483647)
@@ -880,6 +919,7 @@ function inventory_view.command(fields, state, phase)
         and operation ~= "native-inventory-stock-refresh"
         and operation ~= "native-inventory-stock-nearby-fixture"
         and operation ~= "native-inventory-stock-use-click-fixture"
+        and operation ~= "native-inventory-stock-personal-preview"
         and operation ~= "native-inventory-view-equip-result"
         and operation ~= "native-inventory-view-use-result"
         and operation ~= "native-inventory-view-split-result"
@@ -899,6 +939,9 @@ function inventory_view.command(fields, state, phase)
         error("Stock inventory view requires the exact standing connected guest", 0)
     end
     if operation == "native-inventory-stock-open" then return open_stock_inventory(fields, current, state, phase) end
+    if operation == "native-inventory-stock-personal-preview" then
+        return preview_personal_consumable(fields, current, state, phase)
+    end
     if operation == "native-inventory-stock-refresh" and #fields == 3 then
         local live = stock_session
         local stack = current.controller.MenuStack
@@ -1088,6 +1131,10 @@ function inventory_view.rows(state, phase, status_row)
     if stock_drop and stock_drop.live and same_context(current, stock_drop.context) then
         rows[#rows + 1] = status_row("native-inventory-stock-action", current.map, current.name, stock_drop.epoch,
             stock_drop.sequence, stock_drop.entry, stock_drop.guid, stock_drop.quantity, stock_drop.expected or 0)
+        if stock_drop.preview then
+            rows[#rows + 1] = status_row("native-guest-personal-consumable-preview", current.map, current.name,
+                stock_drop.guid, table.unpack(stock_drop.preview))
+        end
     end
     if not observation or not same_context(current, observation.context) then return rows end
     rows[#rows + 1] = status_row("native-inventory-view", observation.state, observation.sequence, current.map, current.name,
