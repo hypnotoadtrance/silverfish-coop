@@ -37,6 +37,7 @@ local native_mindcore = require("native_mindcore")
 local native_datasilo_lift = require("native_datasilo_lift")
 local native_datasilo_door = require("native_datasilo_door")
 local native_stock_door = require("native_stock_door")
+local native_stock_switch = require("native_stock_switch")
 local native_lantern = require("native_lantern")
 local native_flashlight = require("native_flashlight")
 local native_stock_enemy_drops = require("native_stock_enemy_drops")
@@ -1139,6 +1140,7 @@ local function run_command(fields, state, current_phase)
         or native_datasilo_lift.command(fields, state, current_phase)
         or native_datasilo_door.command(fields, state, current_phase)
         or native_stock_door.command(fields, state, current_phase)
+        or native_stock_switch.command(fields, state, current_phase)
         or native_lantern.command(fields, state, current_phase)
         or native_flashlight.command(fields, state, current_phase)
         or native_crate_props.command(fields, state, current_phase)
@@ -1434,6 +1436,7 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         for _, row in ipairs(native_datasilo_lift.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_datasilo_door.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_stock_door.rows(state, current_phase, status_row, fields)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_stock_switch.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         local lantern = native_lantern.status(state, current_phase, status_row)
         if lantern then rows[#rows + 1] = lantern end
         for _, row in ipairs(native_crate_props.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1843,7 +1846,7 @@ native_zone.start(bridge)
 native_guest_smg_hold.start_fast(bridge, status_row, function(state)
     return phase(state) == "hosting" and same_object(state.world, current_world())
 end)
-local next_snapshot = 0
+status_publication.next_snapshot = 0
 LoopInGameThreadWithDelay(25, function()
     pcall(native_zone_loading.refresh, current_world)
     if not leaving then pcall(native_prop_carry.update) end
@@ -1860,10 +1863,10 @@ LoopInGameThreadWithDelay(25, function()
     if not leaving then pcall(native_player_avatar.animate_cycle, current_world) end
     if not leaving then pcall(native_player_avatar.animate_use, current_world) end
     local now = os.clock()
-    local periodic = now >= next_snapshot or now >= status_publication.next_frame
+    local periodic = now >= status_publication.next_snapshot or now >= status_publication.next_frame
     local fields, pending = read_command(periodic)
     if not fields and not periodic then return end
     local ok, result = pcall(tick, fields, pending, periodic)
-    if not ok or result ~= true then next_snapshot = now + 0.25 end
+    if not ok or result ~= true then status_publication.next_snapshot = now + 0.25 end
     if not ok then print("[SilverfishCoop] " .. tostring(result) .. "\n") end
 end)

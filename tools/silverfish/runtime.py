@@ -36,7 +36,7 @@ from . import native_mushrooms
 from . import native_prop_carry
 from . import native_flare
 from . import native_stock_enemy_drops
-from . import native_flashlight, native_lantern, native_stock_door
+from . import native_flashlight, native_lantern, native_stock_door, native_stock_switch
 from . import native_player_avatar
 from . import native_weapon_fire_view
 from . import native_damage_feedback, native_guest_clock, native_weather_view
@@ -824,7 +824,8 @@ class Bridge:
                     and target not in AUTHORED_PICKUP_TARGETS and not native_enemy_shells.target_parts(decoded)
                     and not native_guest_drop_projection.target_parts(decoded)
                     and not native_world_loot.target_parts(decoded)
-                    and not native_stock_door.target_actor(decoded) and not native_loose_pickup.target_path(decoded)
+                    and not native_stock_door.target_actor(decoded) and not native_stock_switch.target_actor(decoded)
+                    and not native_loose_pickup.target_path(decoded)
                     and (len(target) != 32 or any(digit not in b"0123456789abcdef" for digit in target))):
                 continue
             identity = uuid.uuid5(self.input_namespace, fields[1].decode("ascii")).hex
@@ -1611,6 +1612,9 @@ class Bridge:
                     if player in entries or len(entries) >= native_flashlight.MAX_GUEST_SOURCES:
                         raise ValueError("Repeated or oversized guest flashlight view")
                     entries[player] = report
+                elif fields[0] == native_stock_switch.TAG:
+                    data.setdefault(native_stock_switch.KEY, {})[fields[2]] = native_stock_switch.parse(
+                        fields, data.get("state"), data.get("map"))
                 elif fields[0] == native_stock_door.TAG:
                     report = native_stock_door.parse(fields, data.get("state"), data.get("map"))
                     doors = data.setdefault(native_stock_door.KEY, {})
