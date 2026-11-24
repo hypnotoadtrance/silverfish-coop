@@ -176,6 +176,28 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.party["receipts"], {})
         host.checkpoint_native.assert_not_awaited()
 
+    async def test_selector_choice_retains_the_enrolled_guest_save_without_a_checkpoint(self):
+        host = self.host()
+        host.native_zones, host.zone_epoch = True, "current"
+        host.last_game["native_guest_save_retention"] = True
+        host.pending_guest_saves = {}
+        host.queue_guest_save = Mock()
+        guid = "1" * 32
+        current = {"state": "hosting", "map": "zone"}
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[current, {**current, "ack": {"message": "semi"}}]))
+        for target in (f"previous@{guid}@semi", f"current@{guid}@burst"):
+            with self.assertRaisesRegex(party.RuleError, "fire_mode_expired"):
+                await native_guest_weapon.store_fire_mode(host, bridge, "character", target)
+        bridge.command.assert_not_awaited()
+
+        result = await native_guest_weapon.store_fire_mode(host, bridge, "character", f"current@{guid}@semi")
+        self.assertEqual(result, {"guid": guid, "fire_mode": "semi"})
+        self.assertEqual(bridge.command.await_args_list[0].args, ("native-guest-save-retain", "exact pawn", "character"))
+        self.assertEqual(bridge.command.await_args_list[1].args,
+                         (native_guest_weapon.SET_FIRE_MODE, "exact pawn", guid, "semi"))
+        host.queue_guest_save.assert_called_once_with("character", "exact pawn")
+        host.checkpoint_native.assert_not_awaited()
+
     async def test_stale_binding_denies_weapon_request_without_stopping_host(self):
         for action, target in (("fire", "1" * 32), ("equip", "1" * 32), ("reload", "equipped")):
             with self.subTest(action=action):
