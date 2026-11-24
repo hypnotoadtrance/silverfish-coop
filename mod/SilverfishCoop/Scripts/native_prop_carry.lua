@@ -310,6 +310,15 @@ local function trace(pawn, pitch, yaw, number, expected_bone, claimed, expected_
     end
     if not number then
         local selected = placement and StaticFindObject(placement)
+        if valid(selected) and same(selected, enrolled[selected:GetAddress()]) and selected:HasAuthority()
+            and actor_class(selected) == expected_class and mesh(selected) and point(claimed) then
+            local center = selected:K2_GetActorLocation()
+            if point(center) and dist2(center, claimed) <= 35^2 and dist2(origin, center) < range^2 then
+                -- The stock guest grip already selected this placed actor. Use its
+                -- enrolled identity when the authority camera is on a different frame.
+                return selected, math.sqrt(dist2(origin, center))
+            end
+        end
         local part, collision = impact(along(range))
         local actor = valid(part) and part:GetOwner()
         if valid(actor) and (not placement or same(actor, selected)) and point(collision) then

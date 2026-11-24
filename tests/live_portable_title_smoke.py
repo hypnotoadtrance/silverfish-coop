@@ -1387,7 +1387,8 @@ async def verify_tutorial_bandage_revisit(host: Seat, guest: Seat, pawn: str) ->
             "host_visibility": host_visibility, "guest_visibility": guest_visibility}}
 
 
-async def verify_warehouse_switch(host: Seat, guest: Seat, pawn: str, *, radio: bool = False) -> dict:
+async def verify_warehouse_switch(host: Seat, guest: Seat, pawn: str, *, radio: bool = False,
+                                  require_media: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
     kind, number, device = ("Prop_Radio01_C", 3, "radio") if radio else ("CircutBox_BP_C", 1, "switch")
@@ -1463,6 +1464,8 @@ async def verify_warehouse_switch(host: Seat, guest: Seat, pawn: str, *, radio: 
         result["media_verified"] = all(observed == dict.fromkeys(("host", "guest"), "playing" if active else "silent")
                                        for observed, active in ((host_media, host_flip["powered"]),
                                                                 (guest_media, initial["powered"])))
+        if require_media:
+            assert result["media_verified"], result
     return {f"stock_warehouse_{device}": result}
 
 
@@ -4354,6 +4357,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     weapon_campaign = "tutorial_dock_combat" if tutorial_dock_combat else "observatory"
     dock_world_checks = stock_bandage_revisit or stock_warehouse_switch or stock_warehouse_board or stock_bottle
     prop_campaign = "tutorial_dock" if dock_world_checks else "observatory"
+    stock_radio_media = stock_warehouse_switch and all(
+        next((game / "SilverFish/Content/Music/Radio").glob("*.wav"), None) for game in games)
     if resident_held_queue:
         from portable_held_queue import verify_stock_held_queue
     else:
@@ -4409,7 +4414,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_acid_pool, "lab_east_wing_acid", "stock_acid_pool",
          lambda host, guest, _pawn: verify_acid_pool(host, guest, portable_probe_command)),
         (stock_warehouse_switch, "tutorial_dock", "stock_warehouse_radio",
-         lambda host, guest, pawn: verify_warehouse_switch(host, guest, pawn, radio=True)),
+         lambda host, guest, pawn: verify_warehouse_switch(host, guest, pawn, radio=True, require_media=stock_radio_media)),
         (stock_warehouse_switch, "tutorial_dock", "stock_warehouse_switch", verify_warehouse_switch),
         (stock_bandage_revisit, "tutorial_dock", "stock_bandage_revisit", verify_tutorial_bandage_revisit),
         (stock_warehouse_board, "tutorial_dock", "stock_warehouse_board", verify_warehouse_board),
@@ -4786,10 +4791,29 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     after_reconnect = check_personal_reconnect
                 if campaign == "storm":
                     after_reconnect = check_storm_reconnect
-                return await start_pair(host, second, "Gameplay scout", on_join=run_checks,
-                                        before_join=storm_trial.prepare if campaign == "storm" else None,
-                                        wait_status=wait_resident_status, host_exit_actions=exit_actions,
-                                        after_reconnect=after_reconnect)
+
+                async def unexpected_process_exit():
+                    while True:
+                        for role, seat in (("host", host), ("guest", second)):
+                            code = seat.bridge.process.poll()
+                            if code is not None:
+                                raise RuntimeError(f"The staged {role} exited during {campaign} with code {code}")
+                        await asyncio.sleep(.2)
+
+                session = asyncio.create_task(start_pair(
+                    host, second, "Gameplay scout", on_join=run_checks,
+                    before_join=storm_trial.prepare if campaign == "storm" else None,
+                    wait_status=wait_resident_status, host_exit_actions=exit_actions,
+                    after_reconnect=after_reconnect))
+                watcher = asyncio.create_task(unexpected_process_exit())
+                try:
+                    done, _ = await asyncio.wait((session, watcher), return_when=asyncio.FIRST_COMPLETED)
+                    return await (watcher if watcher in done else session)
+                finally:
+                    for task in (session, watcher):
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(session, watcher, return_exceptions=True)
 
             host = first
             for campaign, checks in resident_campaigns.items():
