@@ -308,15 +308,22 @@ class OrdinaryDeadBridgeLootTests(unittest.IsolatedAsyncioTestCase):
                     killer=self.second, claimed_by=None, escrow=self.frame)
         self.party[native_enemy_loot.STATE_KEY] = {self.guid: roll}
         snapshot = dict(self.initial, native_enemy_loot_escrow=dict(self.captured, state="claimed", pawn=self.first_pawn))
-        bridge = SimpleNamespace(command=AsyncMock(return_value=snapshot))
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+            RuntimeError("native_enemy_loot_claimant_unavailable"), snapshot,
+        ]))
         with patch.object(native_host_save, "verify_record"):
+            with self.assertRaisesRegex(party.RuleError, "native_enemy_loot_claimant_unavailable"):
+                await native_enemy_loot.claim(self.host, bridge, self.first, self.guid, "b" * 32)
+            self.assertFalse(self.host.stopping)
+            self.assertFalse(self.host.native_checkpoint_unsafe)
+            self.assertIsNone(roll["claimed_by"])
             result = await native_enemy_loot.claim(self.host, bridge, self.first, self.guid, "b" * 32)
             repeated = await native_enemy_loot.claim(self.host, bridge, self.first, self.guid, "b" * 32)
             with self.assertRaisesRegex(party.RuleError, "already_claimed"):
                 await native_enemy_loot.claim(self.host, bridge, "host", self.guid, "a" * 32)
         self.assertEqual(result, repeated)
         self.assertEqual(result["native_enemy_loot_claim"]["claimed_by"], self.first)
-        self.assertEqual(bridge.command.await_count, 1)
+        self.assertEqual(bridge.command.await_count, 2)
         self.assertEqual(self.host.checkpoint_native.await_args.kwargs["require_guest_frames"], frozenset({self.first}))
         with self.assertRaisesRegex(party.RuleError, "unavailable"):
             await native_enemy_loot.approach(self.host, bridge, f"host|{self.guid}")

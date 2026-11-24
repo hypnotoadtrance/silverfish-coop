@@ -961,7 +961,8 @@ function inventory_view.command(fields, state, phase)
         for index = 1, screen.FloorActors:GetArrayNum() do
             if same(screen.FloorActors[index], actor) then guid = stock_item_guid(screen.FloorItems[index]); break end
         end
-        if #fields == 4 then
+        local drag = fields[4] == "drag"
+        if #fields == 4 and not drag then
             local probe = stock_session.floor_probe
             local displayed = probe and stock_cards(screen, stock_session.save, fields[4])
             local removed = probe and probe.path == fields[3]
@@ -981,8 +982,20 @@ function inventory_view.command(fields, state, phase)
                 if label and card.Count:GetText():ToString() ~= label then
                     error("The stock Nearby Items stack label does not match the item card", 0)
                 end
-                screen.ItemManager:OpenContextMenu(card)
-                screen.ItemManager:ActionPickup()
+                local manager = screen.ItemManager
+                if drag then
+                    manager.HoveredCard = card
+                    manager:InitiateItemTake()
+                    manager:FinalTakeItem()
+                    if not manager.HoldingItem or stock_item_guid(manager.HeldItem) ~= guid then
+                        error("The stock cursor did not hold the Nearby Items card", 0)
+                    end
+                    manager:InsertItem(screen.BackpackPanel, -1)
+                    if manager.HoldingItem then error("The stock cursor kept the Nearby Items card", 0) end
+                else
+                    manager:OpenContextMenu(card)
+                    manager:ActionPickup()
+                end
                 if valid(actor) and actor.bHidden == false then
                     stock_session.floor_probe = {path = fields[3], guid = guid}
                     return "stock Nearby Items card requested" .. (label and " " .. label or "")

@@ -7,6 +7,8 @@ local prefix = "5346434F4F504241525445520000"
 
 local marker_class, trader_class, npc_class, world, phase
 local number, markers, pending = 0, {}, {}
+local retry_interval = 1
+local registration_window = 30
 
 local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -24,26 +26,42 @@ local function exact_npc(actor)
 end
 
 local function remember(marker)
-    if not actor_in_world(marker) or not same(marker:GetClass(), marker_class) or marker:HasAuthority() then return end
+    if not actor_in_world(marker) or not same(marker:GetClass(), marker_class) or marker:HasAuthority() then return true end
     local npc = marker:GetOwner()
-    local value = exact_npc(npc) and reference.number(marker, "barter")
-    if value then markers[npc:GetAddress()] = {marker = marker, number = value} end
+    local value = reference.number(marker, "barter")
+    local owner_known = exact_npc(npc)
+    if not value and not owner_known then return true end
+    if not value or not owner_known then return false end
+    markers[npc:GetAddress()] = {marker = marker, number = value}
+    return true
 end
 
 local function publish(npc, trader)
-    if not exact_npc(npc) or placed(npc) or not npc:HasAuthority() or npc.bReplicates ~= true
+    if not exact_npc(npc) or placed(npc) or not npc:HasAuthority() or number == reference.limit then return true end
+    if actor_in_world(trader) and valid(trader.LinkedShop) then return true end
+    if npc.bReplicates ~= true
         or not actor_in_world(trader) or not same(trader:GetClass(), trader_class) or not same(trader.LinkedNPC, npc)
-        or not same(npc.BarterRef, trader) or valid(trader.LinkedShop) or npc.Alive ~= true or not valid(trader.MerchantData)
-        or number == reference.limit then return end
+        or not same(npc.BarterRef, trader) or npc.Alive ~= true or not valid(trader.MerchantData) then return false end
     local address = npc:GetAddress()
     local previous = markers[address]
-    if previous and actor_in_world(previous.marker) then return end
+    if previous and actor_in_world(previous.marker) then return true end
 
     local next_number = number + 1
     local marker = reference.spawn(world, marker_class, "barter", npc, next_number)
-    if not actor_in_world(marker) then return end
+    if not actor_in_world(marker) then return false end
     number = next_number
     markers[address] = {marker = marker, number = number}
+    return true
+end
+
+local function enqueue(actor)
+    local address, now = actor:GetAddress(), os.time()
+    local existing = pending[address]
+    if existing and same(existing.actor, actor) then
+        existing.next_attempt = now
+    else
+        pending[address] = {actor = actor, next_attempt = now, expires = now + registration_window}
+    end
 end
 
 local function install()
@@ -57,16 +75,16 @@ local function install()
         if phase ~= "connected" then return end
         local marker = context:get()
         if actor_in_world(marker) and same(marker:GetClass(), marker_class) then
-            pending[marker:GetAddress()] = marker
+            enqueue(marker)
         end
     end)
     RegisterBeginPlayPostHook(function(context)
         if phase ~= "hosting" then return end
         local actor = context:get()
         if exact_npc(actor) and not placed(actor) then
-            pending[actor:GetAddress()] = actor
+            enqueue(actor)
         elseif actor_in_world(actor) and same(actor:GetClass(), trader_class) and exact_npc(actor.LinkedNPC) then
-            pending[actor.LinkedNPC:GetAddress()] = actor.LinkedNPC
+            enqueue(actor.LinkedNPC)
         end
     end)
     RegisterEndPlayPreHook(function(context, reason)
@@ -95,20 +113,29 @@ function identity.sync(state, current)
         world, phase, number, markers, pending = state.world, current, 0, {}, {}
         if phase == "hosting" then
             for _, trader in ipairs(FindAllOf("Barter_BP_C") or {}) do
-                if actor_in_world(trader) then publish(trader.LinkedNPC, trader) end
+                if actor_in_world(trader) and not publish(trader.LinkedNPC, trader) then enqueue(trader.LinkedNPC) end
             end
         else
             -- A marker may have arrived before the guest entered the active session.
-            for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do remember(marker) end
+            for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
+                if not remember(marker) then enqueue(marker) end
+            end
         end
     end
-    for address, actor in pairs(pending) do
-        if phase == "connected" then
-            remember(actor)
-        elseif exact_npc(actor) then
-            publish(actor, actor.BarterRef)
+    local now = os.time()
+    for address, entry in pairs(pending) do
+        if now >= entry.expires or not actor_in_world(entry.actor) then
+            pending[address] = nil
+        elseif now >= entry.next_attempt then
+            local actor = entry.actor
+            local complete
+            if phase == "connected" then
+                complete = remember(actor)
+            else
+                complete = publish(actor, actor.BarterRef)
+            end
+            if complete then pending[address] = nil else entry.next_attempt = now + retry_interval end
         end
-        pending[address] = nil
     end
 end
 

@@ -423,10 +423,15 @@ async def claim(host, bridge, character: str, target: str | None, operation: str
             snapshot = await bridge.command(CLAIM, pawn, frame["slot"], guid,
                                             *(str(axis) for axis in roll["position"]), *check, timeout=7)
         except RuntimeError as error:
-            if str(error) in {"native_enemy_loot_out_of_reach", "native_enemy_loot_focus_obstructed",
-                              "native_enemy_loot_raw_actor_present"}:
+            reason = str(error)
+            # These checks run before the game's inventory transaction mutates anything.
+            if reason in {"native_enemy_loot_out_of_reach", "native_enemy_loot_focus_obstructed",
+                          "native_enemy_loot_raw_actor_present", "native_enemy_loot_claim_unavailable",
+                          "native_enemy_loot_claimant_unavailable", "native_loot_exact_claimant_unavailable",
+                          "native_loot_escrow_item_unavailable", "native_loot_claimant_backpack_full"}:
                 host.native_checkpoint_unsafe = False
-                raise party.RuleError(str(error)) from error
+                host.control.event("native_enemy_loot_claim_refused", operation_id=operation, reason=reason)
+                raise party.RuleError(reason) from error
             raise
         proof = snapshot.get("native_enemy_loot_escrow", {})
         if ((snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("pawn"), proof.get("slot"), proof.get("guid"))

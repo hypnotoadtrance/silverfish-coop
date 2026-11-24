@@ -1904,6 +1904,10 @@ async def verify_roaming_barter(host: Seat, guest: Seat, _pawn: str) -> dict:
         return {}
 
     point = await operate(host, "spawn")
+    await asyncio.sleep(1.2)
+    before_registration = await inspect(host, point)
+    assert before_registration.get("mod_identity") == "-", before_registration
+    assert await operate(host, "register", point) == "stock merchant data restored"
     host_before, guest_before = {}, {}
     deadline = asyncio.get_running_loop().time() + 8
     while asyncio.get_running_loop().time() < deadline:
@@ -1945,6 +1949,7 @@ async def verify_roaming_barter(host: Seat, guest: Seat, _pawn: str) -> dict:
     assert await operate(guest, "close", point) == "0"
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"stock_roaming_barter": {"stock_ids": [host_before["stock_trader_id"], guest_before["stock_trader_id"]],
+                                     "late_merchant_registration": True,
                                      "shared_identity": identity, "committed_trade": trade, "stock_view": scope(new_view),
                                      "native_checkpoint_unchanged": True}}
 
@@ -3362,10 +3367,12 @@ async def verify_stock_unequip(first, second, evidence):
 
         worn = (("native_guest_helmet", 8, "guest-equip-helmet", "guest-remove-helmet"),
                 ("native_guest_armor", 9, "guest-equip-armor", "guest-drag-armor"))
-        worn_guids = (await portable_probe_command(host.bridge, probe, f"remote-worn-seed\t{pawn}")).split(",")
-        assert len(worn_guids) == len(set(worn_guids)) == 2 and all(re.fullmatch(r"[0-9A-F]{32}", guid) for guid in worn_guids)
+        seeded_worn = (await portable_probe_command(host.bridge, probe, f"remote-worn-seed\t{pawn}")).split(",")
+        assert len(seeded_worn) == len(set(seeded_worn)) == 4
+        assert all(re.fullmatch(r"[0-9A-F]{32}", guid) for guid in seeded_worn)
+        worn_guids, replacements = seeded_worn[:2], seeded_worn[2:]
         async with asyncio.timeout(15):
-            while not set(worn_guids).issubset(
+            while not set(seeded_worn).issubset(
                     (await portable_probe_command(guest.bridge, probe, "guest-worn-backpack")).split(",")):
                 await asyncio.sleep(.25)
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
@@ -3388,8 +3395,21 @@ async def verify_stock_unequip(first, second, evidence):
             source = "helmet" if slot == 8 else "armor"
             assert len(rows) == 1 and rows[0]["source"] == source, authoritative
             evidence["guest_worn_equip"].append({"receipt": receipt, "worn_row": rows[0]})
+        evidence["guest_worn_swap"] = []
+        for index, ((key, slot, equip, _), guid) in enumerate(zip(worn, replacements, strict=True)):
+            displaced = current_worn[index]
+            assert (await portable_probe_command(guest.bridge, probe, f"{equip}\t{guid}")).split(",") == current_worn
+            receipt = await witness("native_stock_inventory_action", key, guid)
+            assert receipt["stock_inventory_proof"] == f"verified stock equipment slot {slot}", receipt
+            assert receipt[key]["replaced_guid"] == displaced, receipt
+            current_worn[index] = guid
+            assert (await portable_probe_command(guest.bridge, probe, "guest-worn-state")).split(",") == current_worn
+            inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
+            sources = {row["guid"]: row["source"] for row in inventory}
+            assert (sources.get(displaced), sources.get(guid)) == ("backpack", "helmet" if slot == 8 else "armor")
+            evidence["guest_worn_swap"].append(receipt)
         evidence["guest_worn"] = []
-        for index, ((_, slot, _, action), guid) in enumerate(zip(worn, worn_guids, strict=True)):
+        for index, ((_, slot, _, action), guid) in enumerate(zip(worn, replacements, strict=True)):
             assert (await portable_probe_command(guest.bridge, probe, f"{action}\t{guid}")).split(",") == current_worn
             receipt = await witness("native_stock_inventory_action", "native_inventory_unequip", guid)
             assert (receipt["native_inventory_unequip"]["slot"], receipt["stock_inventory_proof"]) == (
@@ -3461,16 +3481,20 @@ async def verify_stock_unequip(first, second, evidence):
         await wait_resident_status(guest_run, lambda frame: math.dist(
             frame.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]),
             dropped["location"]) < 225, timeout=8)
-        picked = await guest.bridge.command(native_world_loot.FIXTURE, marker, timeout=5)
-        assert picked["ack"]["message"] == "stock world loot interaction intercepted", picked["ack"]
+        frame = await guest.bridge.wait_for(lambda state: marker in state.get(native_world_loot.KEY, {}))
+        actor = frame[native_world_loot.KEY][marker]["actor"].split(" ", 1)[1]
+        assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+        await leaves_stock_open()
+        picked = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, target=f"{actor}@drag")
+        assert picked["ok"] and picked["proof"] == "stock Nearby Items card requested", picked
         for run in (host_run, guest_run):
             await wait_resident_status(run, lambda frame: marker not in frame.get("game", {}).get(native_world_loot.KEY, {}))
         authoritative = await submit(guest_run, "native-inventory-list")
         restored, = [row for row in authoritative["native_inventory"]["items"] if row["guid"] == mask]
         assert (restored["source"], restored["class_path"], restored["quantity"]) == ("backpack", dropped["class_path"], 1)
-        evidence["guest_reclaimed_face_mask"] = restored
-        assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
-        await leaves_stock_open()
+        displayed = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, target=f"{actor}@{mask}")
+        assert displayed["ok"] and displayed["proof"] == "verified stock Nearby Items transfer", displayed
+        evidence["guest_reclaimed_face_mask"] = {"item": restored, "stock_drag": displayed["proof"]}
         started = time.time()
         assert await portable_probe_command(guest.bridge, probe, f"guest-equip-helmet	{mask}") == "-,-"
         equip = await witness("native_stock_inventory_action", "native_guest_helmet", mask, since=started)

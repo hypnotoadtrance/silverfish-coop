@@ -6324,7 +6324,7 @@ class Client:
                 elif action == native_loose_pickup.STOCK_CARD_FIXTURE:
                     target, separator, guid = (request.get("target") or "").partition("@")
                     actor = target.removeprefix("loose:")
-                    if (not actor or (separator and not native_gold.valid_guid(guid))
+                    if (not actor or (separator and guid != "drag" and not native_gold.valid_guid(guid))
                             or native_loose_pickup.actor_map(actor) != self.last_game.get("map")
                             or self.last_game.get("native_inventory_view", {}).get("state") != "stock"):
                         raise ValueError("Select an actor on the mounted stock Nearby Items panel")

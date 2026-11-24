@@ -162,7 +162,7 @@ def _weight_debit(proof, profile, profiles, *, head=False):
     status = proof.get("status")
     if status == "swapped":
         prior = _profile(previous, profiles, head=head)
-        if (not prior or prior.class_path == profile.class_path or not valid_guid(proof.get("replaced_guid"))
+        if (not prior or not valid_guid(proof.get("replaced_guid"))
                 or proof.get("replaced_guid") == proof.get("guid")
                 or proof.get("replaced_class_path", prior.class_path) != prior.class_path):
             return None

@@ -259,7 +259,9 @@ local function run(action, argument)
             assert(not remote_seed.worn, "fixture worn items already seeded")
             local save, ids = remote.Save, {}
             assert(worn_state(remote) == "-,-", "fixture expected unoccupied worn slots")
-            for index, name in ipairs(worn_classes) do
+            local classes = {worn_classes[1], worn_classes[2], worn_classes[1],
+                "/Game/Classes/Armor_Items/Armor_HunterJacket.Armor_HunterJacket_C"}
+            for index, name in ipairs(classes) do
                 local class, out = asset(name), {}
                 asset(factory):MakeDefaultItem(class, remote, out)
                 local row = out.Item or out

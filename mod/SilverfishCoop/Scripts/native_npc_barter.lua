@@ -33,13 +33,19 @@ local function close_to(pawn, target)
         and (point.X - location.X)^2 + (point.Y - location.Y)^2 + (point.Z - location.Z)^2 <= max^2
 end
 
-local function trader_identity(actor, state)
+local function trader_owner(actor, state)
     local npc = exact(actor, trader_class) and actor.LinkedNPC
     local base = StaticFindObject(npc_class)
     if not valid(npc) or not valid(base) or npc:IsA(base) ~= true or not same(npc.BarterRef, actor)
         or valid(actor.LinkedShop) or not exact(actor.MerchantData, merchant_class)
         or npc.Alive ~= true or npc:IsActorBeingDestroyed() or actor:IsActorBeingDestroyed()
         or not same(npc:GetWorld(), state.world) or not same(actor:GetWorld(), state.world) then return end
+    return npc
+end
+
+local function trader_identity(actor, state)
+    local npc = trader_owner(actor, state)
+    if not npc then return end
     local id = identity.key(npc)
     if not id and not identity.is_dynamic(npc) then id = guid(actor.TraderID) end
     if id and id:find("[^0]") then return id, npc end
@@ -154,7 +160,7 @@ end
 
 
 local guest_scope = require("native_save_scope")
-local session
+local session, waiting_screen
 local menu_hook, observed_state, observed_phase
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_SHOP_VIEW") == "1"
 local confirmation_screen = "/Game/Classes/GUI/New/ConfirmationScreen.ConfirmationScreen_C"
@@ -187,8 +193,15 @@ local function hide_provisional_screen(controller)
     if not observed_state or not same(controller, observed_state.controller) or controller.Loading ~= false then return end
     local stack = controller.MenuStack
     local screen = stack:GetArrayNum() == 1 and stack[1]
-    if not exact(screen, barter_screen) or session and same(screen, session.screen)
-        or not local_context(observed_state, observed_phase, screen) then return end
+    if observed_phase ~= "connected" or not exact(screen, barter_screen) or session and same(screen, session.screen) then return end
+    if not local_context(observed_state, observed_phase, screen) then
+        local trader = screen.Trader
+        local npc = trader_owner(trader, observed_state)
+        if not npc or not identity.is_dynamic(npc) or trader.Save ~= true then return end
+    end
+    if not waiting_screen or not same(waiting_screen.screen, screen) then
+        waiting_screen = {screen = screen, controller = controller, expires = os.time() + 12}
+    end
     -- A replacement stock screen can open before the previous view has finished closing.
     screen:SetRenderOpacity(0)
     screen:SetIsEnabled(false)
@@ -247,7 +260,7 @@ end
 
 function barter.clear()
     close_stock()
-    latest, observed_state, observed_phase = nil, nil, nil
+    latest, observed_state, observed_phase, waiting_screen = nil, nil, nil, nil
 end
 
 local function read_item(text)
@@ -417,6 +430,16 @@ function barter.sync(state, phase)
         end)
     end
     local current = local_context(state, phase)
+    if waiting_screen then
+        local waiting = waiting_screen
+        if phase ~= "connected" or not same(waiting.controller, state.controller) or not top(waiting, waiting.screen) then
+            waiting_screen = nil
+        elseif os.time() >= waiting.expires then
+            waiting_screen = nil
+            waiting.controller:CloseMenu({})
+            print("[SilverfishCoop] NPC trade closed while waiting for the co-op trade session. Reopen the trade to retry.")
+        end
+    end
     if not current then close_stock(); return end
     if session and (session.expires and session.expires < os.time() or not same(current.pawn, session.pawn)
         or not same(current.actor, session.actor) or session.screen and not top(current, session.screen)
@@ -430,6 +453,7 @@ function barter.sync(state, phase)
     if accepting then
         local sequence = SilverfishCaptureNativeNpcBarterMenu(opened:GetAddress())
         if sequence then
+            waiting_screen = nil
             opened:SetRenderOpacity(0)
             opened:SetIsEnabled(false)
             session = current

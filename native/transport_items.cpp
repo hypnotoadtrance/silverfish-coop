@@ -324,6 +324,7 @@ namespace
         Guid held{};
         Unreal::FWeakObjectPtr source;
         std::optional<int> source_slot;
+        bool nearby{};
     };
 
     std::optional<Entries> entries;
@@ -2335,15 +2336,20 @@ namespace
             auto* card = object_field(manager, STR("HoveredCard"));
             const auto item = card_item(card);
             const auto source_slot = unequip_source_slot(manager, screen, item.panel);
+            const bool nearby = card && selected_floor_card(manager, false) == card;
             Guid guid{};
             const bool source_card = source_slot ? object_field(item.panel, STR("ItemCard")) == card
                 : item.panel == panel && array_has_widget(panel, STR("Cards"), card, false);
-            const bool selectable = !held_here && ready() && source_card && same_widget_player(card) &&
-                object_field(card, STR("ItemManager")) == manager &&
-                exact_guest_cursor_item(save, item, guid, source_slot);
+            const GuidFields fields(item.structure);
+            if (nearby && fields.valid() &&
+                live(object_value(field<Unreal::FClassProperty>(item.structure, item_class_name), item.value)))
+                guid = fields.read(item.value);
+            const bool selectable = !held_here && ready() && (nearby ? guid != Guid{} :
+                source_card && same_widget_player(card) && object_field(card, STR("ItemManager")) == manager &&
+                    exact_guest_cursor_item(save, item, guid, source_slot));
             if (begin && selectable)
             {
-                guest_use_cursor = {manager, guid, {}, item.panel, source_slot};
+                guest_use_cursor = {manager, guid, {}, item.panel, source_slot, nearby};
                 return true; // The stock hold timer is UI-only until FinalTakeItem.
             }
             iteration.PreventOriginalFunctionCall();
@@ -2367,6 +2373,16 @@ namespace
         const auto item = inventory_item(manager, STR("HeldItem"));
         auto* target_field = insert ? field<Unreal::FObjectProperty>(function, STR("InventoryWidget")) : nullptr;
         auto* target = object_value(target_field, parameters);
+        if (guest_use_cursor.nearby)
+        {
+            const auto guid = guest_use_cursor.held;
+            const GuidFields fields(item.structure);
+            if (ready() && target == panel && fields.valid() && fields.read(item.value) == guid)
+                silverfish::native_authored_pickup::queue_nearby_pickup(screen, pawn, guid);
+            guest_use_cursor = {};
+            clear_stash_cursor(manager);
+            return true;
+        }
         if (const auto source_slot = guest_use_cursor.source_slot)
         {
             const auto parm = [](auto* property, int offset) {

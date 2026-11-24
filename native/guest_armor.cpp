@@ -883,7 +883,7 @@ namespace
         {
             previous = qualify(active, head, previous_gear);
             replaced = inventory.item_guid(active);
-            if (!previous || inventory.item_class(active) == inventory.item_class(approved) || !exact_worn(replaced, head))
+            if (!previous || !exact_worn(replaced, head))
                 return report(lua, false, "native_guest_armor_slot_occupied");
         }
 

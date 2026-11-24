@@ -298,8 +298,9 @@ namespace
 
     bool server_connection(U::UObject* connection, U::UObject* driver)
     {
+        if (!live(driver) || !live(connection)) return false;
         auto* type = find<U::UClass>(STR("/Script/Engine.NetConnection"));
-        return live(driver) && live(connection) && type && connection->IsA(type) && object(connection, STR("Driver")) == driver;
+        return type && connection->IsA(type) && object(connection, STR("Driver")) == driver;
     }
 
     const DirectorProfile* director_for(std::wstring_view path)
@@ -315,12 +316,13 @@ namespace
     Network network(U::UWorld* world, bool during_load = false, bool any_campaign_map = false)
     {
         if (!live(world)) return {};
+        auto* driver = object(world, STR("NetDriver"));
+        if (!driver && (!during_load || !pending_client_load.context)) return {};
         const auto path = world->GetPathName();
         const auto* profile = director_for(path);
         if (!profile && (!any_campaign_map || !path.starts_with(STR("/Game/Classes/Maps/")))) return {};
         auto* instance = object(world, STR("OwningGameInstance"));
         if (!exact(instance, instance_class)) return {};
-        auto* driver = object(world, STR("NetDriver"));
         auto* connection = field<U::FObjectProperty>(driver, STR("ServerConnection"));
         if (live(driver) && object(driver, STR("World")) == world && connection)
         {
@@ -1619,18 +1621,15 @@ namespace
         if (action == actions.end() || !live(receiver) || function->GetReturnProperty() ||
             function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return false;
         // The stock parent also covers children that implement their own strike.
-        auto* base = find<U::UClass>(npc_base);
-        auto* declared = find<U::UFunction>(action->path);
         auto* owner = U::Cast<U::UClass>(function->GetOuterPrivate());
-        if (!base || !declared || !owner || !owner->IsChildOf(base) ||
-            !receiver->GetClassPrivate()->IsChildOf(owner)) return false;
+        if (!owner || !receiver->GetClassPrivate()->IsChildOf(owner)) return false;
         auto* ancestor = static_cast<U::UStruct*>(function);
-        while (ancestor && ancestor != declared) ancestor = ancestor->GetSuperStruct();
+        while (ancestor && ancestor->GetPathName() != action->path) ancestor = ancestor->GetSuperStruct();
         if (!ancestor) return false;
 
         auto* world = static_cast<U::AActor*>(receiver)->GetWorld();
         auto* driver = object(world, STR("NetDriver"));
-        if (!in_level(receiver, world) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
+        if (!driver || !in_level(receiver, world) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
             object(driver, STR("World")) != world) return false;
         const auto role = byte_field(receiver, STR("Role"));
         auto* connection = object(driver, STR("ServerConnection"));
@@ -1658,12 +1657,11 @@ namespace
         static const U::FName fire{STR("FireRound")};
         if (!production_roster || !receiver || !function || function->GetFName() != fire ||
             call.OriginalFunctionCallPrevented() || !live(receiver)) return false;
-        auto* base = find<U::UClass>(turret_base);
-        if (!base || !receiver->GetClassPrivate()->IsChildOf(base) || function != find<U::UFunction>(turret_fire_path))
-            return false;
+        auto* owner = U::Cast<U::UClass>(function->GetOuterPrivate());
+        if (function->GetPathName() != turret_fire_path || !owner || !receiver->GetClassPrivate()->IsChildOf(owner)) return false;
         auto* world = static_cast<U::AActor*>(receiver)->GetWorld();
         auto* driver = object(world, STR("NetDriver"));
-        if (!in_level(receiver, world) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
+        if (!driver || !in_level(receiver, world) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
             object(driver, STR("World")) != world) return false;
         const auto role = byte_field(receiver, STR("Role"));
         auto* connection = object(driver, STR("ServerConnection"));
@@ -1712,34 +1710,30 @@ namespace
         const auto* type = receiver->GetClassPrivate();
         if (!owner || !type || !type->IsChildOf(owner)) return false;
 
-        const U::UFunction* declaration{};
-        if (const auto* base = find<U::UClass>(npc_base); base && owner->IsChildOf(base))
-            declaration = find<U::UFunction>(damage ? npc_damage_path : name == die_name ? npc_die_path : npc_death_path);
-        else if (name != death_name)
-        {
-            // The flying stock drone and turret families have separate Blueprint roots.
-            if (const auto* drone = find<U::UClass>(drone_base); drone && owner->IsChildOf(drone))
-                declaration = find<U::UFunction>(damage ? drone_damage_path : drone_die_path);
-            else if (const auto* turret = find<U::UClass>(turret_base); turret && owner->IsChildOf(turret))
-                declaration = find<U::UFunction>(damage ? turret_damage_path : turret_die_path);
-        }
-        if (!declaration) return false;
-        // Some stock NPCs override the damage or death graph. Follow its
-        // reflected parent function so an unrelated Blueprint event stays unaffected.
+        // Inspect loaded ancestry. Looking up an unloaded NPC class from inside
+        // a nested stock Blueprint call can reenter UE4SS's global object search.
         const U::UStruct* inherited = function;
-        while (inherited && inherited != declaration) inherited = inherited->GetSuperStruct();
+        for (; inherited; inherited = inherited->GetSuperStruct())
+        {
+            const auto path = inherited->GetPathName();
+            if (damage ? path == npc_damage_path || path == drone_damage_path || path == turret_damage_path
+                : path == npc_death_path || path == npc_die_path || path == drone_die_path || path == turret_die_path)
+                break;
+        }
         if (!inherited) return false;
 
-        auto* total = damage ? hit_field<U::FDoubleProperty>(function, STR("TotalDamage"), 0x178, true) : nullptr;
-        auto* lethal = damage ? hit_field<U::FBoolProperty>(function, STR("IsLethal"), 0x180, true) : nullptr;
-        if (damage && (!total || !lethal)) return false;
         auto* world = static_cast<U::AActor*>(receiver)->GetWorld();
         auto* driver = object(world, STR("NetDriver"));
+        auto* server = object(driver, STR("ServerConnection"));
+        if (!server && (!ghost || !pending_client_load.context)) return false;
         // The game may call a fresh local actor before its queued removal.
         if (ghost ? !local_client_npc(receiver)
             : !in_level(receiver, world) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
-                object(driver, STR("World")) != world || !server_connection(object(driver, STR("ServerConnection")), driver))
+                object(driver, STR("World")) != world || !server_connection(server, driver))
             return false;
+        auto* total = damage ? hit_field<U::FDoubleProperty>(function, STR("TotalDamage"), 0x178, true) : nullptr;
+        auto* lethal = damage ? hit_field<U::FBoolProperty>(function, STR("IsLethal"), 0x180, true) : nullptr;
+        if (damage && (!total || !lethal)) return false;
         call.PreventOriginalFunctionCall();
         if (!call.OriginalFunctionCallPrevented()) return false;
         if (!damage) return true;
@@ -1766,7 +1760,7 @@ namespace
         static const U::FName perceive_name{STR("Proscess_TargetPerception")};
         const auto name = function->GetFName();
         if ((name != init_name && name != perceive_name) ||
-            function != find<U::UFunction>(name == init_name ? initialize_path : perceive_path) ||
+            function->GetPathName() != (name == init_name ? initialize_path : perceive_path) ||
             function->GetReturnProperty()) return;
         if (local_client_npc(receiver))
         {

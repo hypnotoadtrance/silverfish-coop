@@ -1,3 +1,4 @@
+local delayed_trader
 local function roaming_probe(fields, state, phase)
         local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
         local pawn = assert(state.local_pawn.pawn)
@@ -10,6 +11,10 @@ local function roaming_probe(fields, state, phase)
             local facing = original:K2_GetActorRotation()
             local actor = state.world:SpawnActor(original:GetClass(), {X=origin.X+120, Y=origin.Y+50, Z=origin.Z+15}, facing)
             assert(valid(actor) and actor:HasAuthority() and not actor:HasAnyFlags(EObjectFlags.RF_WasLoaded))
+            local trader = actor.BarterRef
+            assert(valid(trader) and valid(trader.MerchantData), "spawned NPC did not initialize its stock trader")
+            delayed_trader = {trader = trader, data = trader.MerchantData}
+            trader.MerchantData = nil
             actor:SetReplicates(true)
             actor:SetReplicateMovement(true)
             actor.CharacterMovement:DisableMovement()
@@ -50,6 +55,11 @@ local function roaming_probe(fields, state, phase)
                         table.sort(ids)
                         return table.concat({tostring(npc:GetLocalRole()), guid(npc.NpcId) or "-", tostring(actor.Save),
                             guid(actor.TraderID) or "-", key or "-", #ids > 0 and table.concat(ids, '|') or "-"}, ",")
+                    elseif mode == "register" and phase == "hosting" then
+                        assert(delayed_trader and same(delayed_trader.trader, actor) and not valid(actor.MerchantData))
+                        actor.MerchantData = delayed_trader.data
+                        delayed_trader = nil
+                        return "stock merchant data restored"
                     elseif mode == "prepare" and phase == "hosting" then
                         local guest = assert(state.guests[1]).pawn
                         local angle = pawn:K2_GetActorRotation()
