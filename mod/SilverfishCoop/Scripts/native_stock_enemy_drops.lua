@@ -220,7 +220,7 @@ local function transfer(fields, state, phase)
     if phase ~= "hosting" or (#fields ~= 9 and not ground) or not fresh or not stock or not stock:IsValid()
         or not valid_slot(slot) or type(guid) ~= "string" or #guid ~= 32 or not guid:match("^[0-9A-F]+$")
         or not finite(x, 1e7) or not finite(y, 1e7) or not finite(z, 1e7)
-        or #identity ~= 32 or not identity:match("^[0-9a-f]+$")
+        or type(identity) ~= "string" or #identity ~= 32 or not identity:match("^[0-9a-f]+$")
         or type(SilverfishClaimNativeLootEscrow) ~= "function" then
         error("stock_enemy_loot_claim_scope_unavailable", 0)
     end

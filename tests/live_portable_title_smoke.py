@@ -25,7 +25,7 @@ from tools.silverfish import (
     direct_ip, embedded_startup, native_finite_shop, native_guest_consumable, native_guest_drop, native_guest_melee,
     native_host_save, native_inventory, native_loose_pickup, native_smg_hold,
     native_anomaly_effects, native_critters, native_destructibles, native_lantern, native_npc_barter, native_loot, native_prop_carry, native_stash, native_stock_switch, native_weapon_fire_view,
-    native_world_loot, runtime,
+    native_stock_enemy_drops, native_world_loot, runtime,
 )
 from tools.silverfish.authored_loot import GUARANTEED_CRATES
 from tools.silverfish.control import NAME, current_status, submit
@@ -2095,6 +2095,41 @@ async def verify_tutorial_dock_melee(host: Seat, guest: Seat, pawn: str) -> dict
         assert await command(host, "dock-natural-stop") == "stopped"
 
 
+async def verify_dock_enemy_drop(host: Seat, guest: Seat, arrival: dict) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    scope = native_stock_enemy_drops
+    checkpoint = campaign_save_hashes(host.campaign)
+    owner = arrival["character_id"]
+
+    def exact_drops(frame):
+        return [row for row in frame.get("gameplay", {}).get(scope.STATE, {}).values()
+                if row.get("source", "").endswith(".NPC_Survivor_Worker_C_2")
+                and row.get("killer") == owner and row.get("claimed_by") is None]
+
+    authority = await wait_resident_status(host_run, lambda frame: any(row.get("settled") for row in exact_drops(frame)))
+    item = next(row for row in exact_drops(authority) if row.get("settled"))
+    guid = item["guid"]
+    identity = native_world_loot.stock_enemy_identity(guid, item.get("visual_id"))
+    pawn = authority["game"]["native_guest_save"]["pawn"]
+    await wait_resident_status(host_run, lambda frame: identity in frame["game"].get(native_world_loot.KEY, {}))
+    approached = await host.bridge.command(native_world_loot.APPROACH, identity, pawn, timeout=5)
+    assert approached["ack"]["message"] == "stock loot height and line of sight verified", approached["ack"]
+    await wait_resident_status(guest_run, lambda frame: identity in frame["game"].get(native_world_loot.KEY, {})
+                               and math.dist(frame["game"]["pawns"]["local"]["location"], item["transform"]["position"]) < 225)
+    picked = await guest.bridge.command(native_world_loot.FIXTURE, identity, timeout=5)
+    assert picked["ack"]["message"] == "stock world loot interaction intercepted", picked["ack"]
+    for run in (host_run, guest_run):
+        await wait_resident_status(run, lambda frame: frame["gameplay"].get(scope.STATE, {}).get(guid, {}).get("claimed_by") == owner
+                                   and identity not in frame["game"].get(native_world_loot.KEY, {}))
+    inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
+    assert any(row["guid"] == guid and row["class_path"] == item["class_path"] for row in inventory), inventory
+    refused = await submit(host_run, scope.CLAIM, target=guid)
+    assert refused.get("error") == "stock_enemy_loot_already_claimed", refused
+    assert campaign_save_hashes(host.campaign) == checkpoint, "Stock enemy drop pickup wrote the campaign before a save"
+    return {"item": item["class_path"], "stock_source": item["source"], "inventory_guid": guid,
+            "duplicate": refused["error"], "checkpoint_unchanged": True}
+
+
 async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, retaliation: bool = False,
                                      pursuit: bool = False, held_mask: bool = False, grounded_gait: bool = False,
                                      shot_view: bool = False) -> dict:
@@ -2137,7 +2172,8 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
             print(f"stock held mask failed: {presentation['stock_held_mask_error']}", flush=True)
         combat = await verify_dock_pursuit(host, guest, frame, command)
         assert "stock_held_mask_error" not in presentation, (presentation, combat)
-        return {**presentation, "tutorial_dock_pursuit": combat}
+        stock_pickup = await verify_dock_enemy_drop(host, guest, frame)
+        return {**presentation, "tutorial_dock_pursuit": combat, "stock_enemy_pickup": stock_pickup}
     if retaliation:
         return {**presentation, "tutorial_dock_retaliation": await verify_tutorial_dock_retaliation(host, guest, frame)}
     seen = await asyncio.gather(*(command(seat, "dock-worker") for seat in (host, guest)))
@@ -5279,6 +5315,18 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     if result["status"] == "failed"]
         if failures:
             raise AssertionError(f"Resident checks failed: {', '.join(failures)}")
+        if tutorial_dock_pursuit:
+            slot = max((source for source in stock_slots if source.stem != "Config"),
+                       key=lambda source: source.stat().st_mtime).stem
+            assert await portable_probe_command(first.bridge, "portable-npc-override", f"solo-load\t{slot}") == "loading stock save"
+            await first.bridge.wait_for(lambda frame: frame["state"] == "ready"
+                                        and frame.get("pawns", {}).get("local"), timeout=30)
+            async with asyncio.timeout(12):
+                while (solo := await portable_probe_command(first.bridge, "portable-npc-override",
+                                                             f"solo-combat\t{slot}")) == "loading":
+                    await asyncio.sleep(.1)
+            assert solo.startswith("stock inventory and lethal drone damage "), solo
+            proof["singleplayer_after_coop"] = {"save_slot": slot, "stock_result": solo, "pid": first.bridge.process.pid}
         proof.update(verified=True, solo_slots_and_settings_preserved=True,
                      both_titles_reused=len(proof["sessions"]) > 1,
                      launched_without_coop_environment=True)

@@ -1317,6 +1317,45 @@ local function observe_local_melee(action, pawn)
     return "watching"
 end
 
+local function solo_combat(world, action, slot)
+    assert(valid(world) and not valid(world.NetDriver), "the singleplayer check requires a standalone world")
+    local instance = world.OwningGameInstance
+    local controller = statics:GetPlayerController(world, 0)
+    if action == "solo-load" then
+        assert(world:GetFullName() == "World /Game/Classes/Maps/MainMenu_P.MainMenu_P"
+            and valid(instance) and slot:match("^%d+%-%d+$") and statics:DoesSaveGameExist(slot, 0),
+            "the singleplayer check needs its copied stock save")
+        instance:Load_GameState(slot)
+        return "loading stock save"
+    end
+    local pawn = statics:GetPlayerPawn(world, 0)
+    if not valid(pawn) or not valid(controller) or controller.Loading ~= false then return "loading" end
+    local active_slot = instance.CurrentSaveSlot
+    if type(active_slot) == "userdata" then active_slot = active_slot:ToString() end
+    assert(pawn:IsLocallyControlled() and pawn:HasAuthority() and same(pawn.Save, instance.SaveSlot_Ref)
+        and active_slot == slot, "the stock singleplayer save is not active")
+    local inventory_input = "/Game/Classes/Player/Player_Inputs/IA_Inventory.IA_Inventory"
+    local input = StaticFindObject(inventory_input)
+    if not valid(input) then LoadAsset(inventory_input); input = StaticFindObject(inventory_input) end
+    assert(valid(input) and controller.MenuStack:GetArrayNum() == 0 and pawn.Dead == false)
+    controller:InpActEvt_IA_Inventory_K2Node_EnhancedInputActionEvent_0({}, 0, 0, input)
+    local menu = controller.MenuStack[1]
+    assert(valid(menu) and menu:GetClass():GetFName():ToString() == "InventoryScreen_C", "stock Tab did not open inventory")
+    controller:CloseMenu({})
+
+    local class = StaticFindObject(class_path)
+    if not valid(class) then LoadAsset(class_path); class = StaticFindObject(class_path) end
+    assert(valid(class), "stock singleplayer drone class unavailable")
+    local origin = pawn:K2_GetActorLocation()
+    local actor = world:SpawnActor(class, {X=origin.X+180, Y=origin.Y, Z=origin.Z+180}, {Pitch=0, Yaw=0, Roll=0})
+    assert(valid(actor) and actor.Alive and actor.Health > 0)
+    local total, lethal = {}, {}
+    actor:DealDamage({[damage_key]=1000}, {}, pawn, {X=0,Y=0,Z=0}, false, total, lethal)
+    assert(total.TotalDamage > 0 and lethal.IsLethal == true and actor.Alive == false,
+        "Singleplayer drone damage did not resolve through the stock function")
+    return ("stock inventory and lethal drone damage %.3f"):format(total.TotalDamage)
+end
+
 local function run(action, actor_path)
     if action == "disarm-weapon-observers" then
         shot_turret, turret_effects = nil, nil
@@ -1327,6 +1366,7 @@ local function run(action, actor_path)
     end
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
+    if action == "solo-load" or action == "solo-combat" then return solo_combat(world, action, actor_path) end
     local at_dock = action:match("^dock%-") ~= nil
     if action == "dock-natural-stop" and (not valid(world) or world:GetFullName() ~= "World " .. dock) then
         live_probe = nil

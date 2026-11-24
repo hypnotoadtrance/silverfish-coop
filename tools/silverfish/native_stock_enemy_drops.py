@@ -350,10 +350,12 @@ async def observe(host, bridge):
             except RuntimeError as error:
                 reason = str(error)
                 if reason not in {"stock_enemy_escrow_actor_unavailable", "stock_enemy_escrow_actor_unverified",
-                                  "stock_enemy_escrow_host_not_ready", "stock_enemy_escrow_drop_settling"}:
+                                  "stock_enemy_escrow_host_not_ready", "stock_enemy_escrow_drop_settling",
+                                  "stock_enemy_escrow_scope_unavailable", "stock_enemy_escrow_transform_unavailable",
+                                  "stock_enemy_escrow_fixture_save_unavailable", "stock_enemy_escrow_capture_unavailable"}:
                     raise
                 host.native_checkpoint_unsafe = bool(committed)
-                if reason == "stock_enemy_escrow_host_not_ready":
+                if reason in {"stock_enemy_escrow_host_not_ready", "stock_enemy_escrow_scope_unavailable"}:
                     break
                 if reason == "stock_enemy_escrow_drop_settling":
                     continue
@@ -437,10 +439,15 @@ async def claim(host, bridge, character, guid, operation):
                                             *(() if roll.get("settled") else ("legacy-ground",)),
                                             timeout=7)
         except RuntimeError as error:
-            if str(error) in {"stock_enemy_loot_out_of_reach_or_obstructed", "stock_enemy_loot_claimant_unavailable",
-                              "native_loot_claimant_backpack_full", "native_loot_cash_wallet_out_of_range"}:
+            reason = str(error)
+            # Refusals before mutation leave the actor and the authoritative item available.
+            if reason in {"stock_enemy_loot_out_of_reach_or_obstructed", "stock_enemy_loot_claimant_unavailable",
+                          "stock_enemy_loot_claim_scope_unavailable", "stock_enemy_loot_escrow_unavailable",
+                          "native_loot_exact_claimant_unavailable", "native_loot_escrow_item_unavailable",
+                          "native_loot_claimant_backpack_full", "native_loot_cash_wallet_out_of_range"}:
                 host.native_checkpoint_unsafe = False
-                raise party.RuleError(str(error)) from error
+                host.control.event("native_stock_enemy_loot_claim_refused", operation_id=operation, guid=guid, reason=reason)
+                raise party.RuleError(reason) from error
             raise
         proof = snapshot.get(CLAIM_KEY, {})
         if tuple(proof.get(key) for key in ("map", "pawn", "slot", "guid")) != (roll["map"], pawn, frame["slot"], guid):

@@ -617,9 +617,17 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         host.party[enemy.STATE] = {guid: item}
         host.last_game.update({enemy.MEMORY_CAPABILITY: True, "native_world_loot_version": 1})
         proof = dict(map=CROSSROADS, pawn=PAWN, slot=frame["slot"], guid=guid, status="claimed")
-        bridge = SimpleNamespace(command=AsyncMock(return_value=self.game(CROSSROADS, **{enemy.CLAIM_KEY: proof})))
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+            RuntimeError("stock_enemy_loot_claim_scope_unavailable"),
+            self.game(CROSSROADS, **{enemy.CLAIM_KEY: proof}),
+        ]))
 
         with patch.object(native_host_save, "verify_record") as verify:
+            with self.assertRaisesRegex(party.RuleError, "stock_enemy_loot_claim_scope_unavailable"):
+                await enemy.claim(host, bridge, "host", guid, OPERATION)
+            self.assertFalse(host.stopping)
+            self.assertFalse(host.native_checkpoint_unsafe)
+            self.assertEqual(host.party[enemy.STATE][guid]["escrow"], frame)
             result = await enemy.claim(host, bridge, "host", guid, OPERATION)
             verify.assert_not_called()
         self.assertEqual(result[enemy.CLAIM_KEY]["claimed_by"], "host")
