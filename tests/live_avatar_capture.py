@@ -897,7 +897,7 @@ async def verify_aim_movement(host_run, guest_run, command, host, guest, project
         return {"crouched": crouched == "1", "grounded": grounded == "1", "position": [float(x), float(y)],
                 "yaw": float(yaw), "clip": clip, "clip_time": float(position), "socket_height": float(height)}
 
-    async def observe(run, clip, weapon_mesh, crouched=False):
+    async def observe(run, clip, weapon_mesh, crouched=False, *, blend_space=None):
         def projected(state):
             return next((row for row in (projections(state) or {}).values()
                          if not row.get("diagnostic") and row.get("pose_clip") == clip
@@ -908,7 +908,7 @@ async def verify_aim_movement(host_run, guest_run, command, host, guest, project
         async with asyncio.timeout(3):
             while True:
                 observed = await stance(run, "remotestance")
-                if (observed["clip"] == clip and observed["grounded"] and observed["crouched"] == crouched
+                if (observed["clip"] == (blend_space or clip) and observed["grounded"] and observed["crouched"] == crouched
                         and observed["clip_time"] > 0 and observed["socket_height"] > 0):
                     return {"avatar": projection, "rig": observed}
                 await asyncio.sleep(.05)
@@ -936,12 +936,14 @@ async def verify_aim_movement(host_run, guest_run, command, host, guest, project
     await avatar_probe(guest_run, "preparemovement")
     evidence = {}
     guest_mesh = "BoltShotgun_Frame_Suppressed" if shotgun else "BreakAction_BMG_Frame"
-    for role, runner, observer, target, idle, moving, lowered, mesh in (
-        ("host", host_run, guest_run, host, "Rifle_Aiming_Low_Close1", "Walk_Forward", "HandGun_Idle_2", "9mmAuto_Frame"),
-        ("guest", guest_run, host_run, guest, "Rifle_Aiming_Idle", "Rifle_Walk", "Rifle_Idle_1_", guest_mesh),
+    for role, runner, observer, target, idle, moving, lowered, blend, mesh in (
+        ("host", host_run, guest_run, host, "Rifle_Aiming_Low_Close1", "Walk_Forward", "HandGun_Idle_2",
+         "HandGun_Lowered_BlendSpace", "9mmAuto_Frame"),
+        ("guest", guest_run, host_run, guest, "Rifle_Aiming_Idle", "Rifle_Walk", "Rifle_Idle_3",
+         "Rifle_Lowered_BlendSpace", guest_mesh),
     ):
         await avatar_probe(host_run, "resetlane")
-        await observe(observer, lowered, mesh)
+        await observe(observer, lowered, mesh, blend_space=blend)
         await avatar_probe(runner, "aim")
         try:
             aimed = await observe(observer, idle, mesh)
@@ -965,7 +967,7 @@ async def verify_aim_movement(host_run, guest_run, command, host, guest, project
             await avatar_probe(runner, "lower")
             await avatar_probe(runner, "stand")
         evidence[role] = {"aimed": aimed, "strafing": strafing, "crouched": crouched,
-            "crouched_walking": crouched_walking, "released": await observe(observer, lowered, mesh)}
+            "crouched_walking": crouched_walking, "released": await observe(observer, lowered, mesh, blend_space=blend)}
     return evidence
 
 
@@ -1130,7 +1132,7 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
                 "stock_profile": dict(zip(fields, authority_profile, strict=True))}
             if movement and rifle:
                 evidence["stock_movement"] = await capture_movement(host_run, guest_run, command, host, guest, movement_traits,
-                    {"host": "Running_Unarmed", "guest": "Rifle_Run_Forward"})
+                    {"host": "Running_Unarmed", "guest": "Rifle_Run"})
             if aim_movement:
                 evidence["stock_moving_aim"] = await verify_aim_movement(
                     host_run, guest_run, command, host, guest, projections, stock_shotgun_aim)

@@ -2,6 +2,7 @@ local guest_save = require("guest_save")
 local weapon_view = require("native_avatar_weapon_view")
 local handgun_view = require("native_avatar_handgun")
 local character_view = require("native_avatar_character_view")
+local gait = require("native_avatar_gait")
 local avatar = {}
 
 local body_path = "/Game/Classes/NPCs/NPC_Assets/CharacterModels/Player_NoArmor.Player_NoArmor"
@@ -259,9 +260,10 @@ local function offset_body(entry, x, y)
 end
 
 local function restore_locomotion(entry)
+    entry.gait_blend = nil
     if entry.pose_animation and valid(entry.body) then
         entry.body:SetAnimationMode(entry.animation_mode, true)
-        entry.pose_animation, entry.pose_mesh, entry.pose_asset = nil, nil, nil
+        entry.pose_animation, entry.pose_mesh, entry.pose_asset, entry.pose_is_blend = nil, nil, nil, nil
     end
     if entry.pose_tick_option ~= nil and valid(entry.body) then
         entry.body.VisibilityBasedAnimTickOption = entry.pose_tick_option
@@ -278,16 +280,37 @@ end
 
 local function apply_locomotion(entry, aim, outfit)
     if swings[entry] then return end
-    local crouched = entry.pawn.bIsCrouched == true
+    local pawn, body = entry.pawn, entry.body
+    local movement = pawn.CharacterMovement
+    local crouched = pawn.bIsCrouched == true
     local profile = aimed[aim]
-    if entry.pawn.CharacterMovement:IsFalling() then
+    if pawn.Dead or body:IsAnySimulatingPhysics()
+        or valid(entry.movement_mesh) and entry.movement_mesh:IsAnySimulatingPhysics() then
+        entry.gait_blend = nil
+        return
+    end
+    if not valid(movement) or movement:IsFalling() then
         restore_locomotion(entry)
         return
     end
     -- A simulated first-person pawn can receive a changing position with zero
     -- velocity. Its owner's authoritative movement sample drives the pose.
     local moving = outfit and outfit.moving
-    if moving == nil then moving = has_horizontal_motion(entry.pawn) end
+    if moving == nil then moving = has_horizontal_motion(pawn) end
+    local sprinting = moving and outfit and outfit.sprinting
+    local mesh = body.SkinnedAsset
+    if not valid(mesh) then return end
+    local instance = body.AnimScriptInstance
+    if valid(instance) and instance:IsAnyMontagePlaying() then
+        entry.gait_blend = nil
+        return
+    end
+    if not crouched and not profile and not uses[entry] and movement:IsMovingOnGround() then
+        if gait.apply(entry, mesh, sprinting and 2 or moving and 1 or 0, asset, refresh_pose_when_hidden) then return end
+        instance = body.AnimScriptInstance
+    end
+    entry.gait_blend = nil
+
     local name
     if crouched then
         if profile then
@@ -295,7 +318,7 @@ local function apply_locomotion(entry, aim, outfit)
         else
             name = moving and crouched_walk or crouched_idle
         end
-    elseif outfit and outfit.sprinting and moving then
+    elseif sprinting then
         name = running[entry.weapon_stance] or "Running_Unarmed"
     elseif profile then
         name = profile[moving and 2 or 1]
@@ -306,11 +329,8 @@ local function apply_locomotion(entry, aim, outfit)
         restore_locomotion(entry)
         return
     end
-    local mesh = entry.body.SkinnedAsset
-    if not valid(mesh) then return end
-    local instance = entry.body.AnimScriptInstance
     local playing = valid(instance) and instance.CurrentAsset or nil
-    if entry.pose_animation == name and entry.pose_mesh == mesh:GetAddress() and valid(playing)
+    if not entry.pose_is_blend and entry.pose_animation == name and entry.pose_mesh == mesh:GetAddress() and valid(playing)
         and playing:GetAddress() == entry.pose_asset then return end
     local animation = asset(animation_root .. name .. "." .. name)
     if not valid(animation) or not valid(animation.Skeleton) or not valid(mesh.Skeleton)
@@ -329,6 +349,7 @@ local function apply_locomotion(entry, aim, outfit)
     end
     entry.body:PlayAnimation(animation, true)
     entry.pose_animation, entry.pose_mesh, entry.pose_asset = name, mesh:GetAddress(), animation:GetAddress()
+    entry.pose_is_blend = nil
 end
 
 local function stop_use(entry)
@@ -637,6 +658,7 @@ function avatar.animate_head(get_world)
                 end
             end
             aim_head(entry, now, lean_changed, math_api)
+            if not uses[entry] and not swings[entry] then gait.advance(entry, now) end
             if entry.handgun_view and entry.handgun_view.requested then
                 math_api = math_api or StaticFindObject(math_library)
                 if valid(math_api) and not pcall(handgun_view.update, entry, math_api) then
