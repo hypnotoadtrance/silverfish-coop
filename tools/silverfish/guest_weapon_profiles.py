@@ -173,6 +173,11 @@ FIREARMS = (
 
 # Registered ordinary magazines use the stock primary-ammunition transaction.
 TAKE_AMMO_MAGAZINES = {weapon.path: weapon.magazine for weapon in FIREARMS if weapon.magazine}
+# These exact receivers have stock selectable automatic fire. This records their
+# cooked capability and does not authorize the multiplayer hold path.
+STOCK_SELECTABLE_AUTOMATIC_KINDS = (
+    "smg-standard", "light-ar-01", "light-ar-02", "light-ar-03", "light-ar-cqc", "light-ar-silenced",
+)
 BOLT_ACTION_UNLOAD_CAPACITY = 5
 BOLT_ACTION_UNLOADS = frozenset(weapon.path for weapon in FIREARMS if weapon.kind in {"nagant-scoped", "obrez"})
 BOLT_ACTION_AMMO = frozenset(ammo.item_path for ammo in (THIRTY_06_FMJ, THIRTY_06_INCENDIARY))

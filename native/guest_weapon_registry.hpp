@@ -137,5 +137,13 @@ namespace silverfish::guest_weapon_profiles
         Profile{"dmr-night-vision", STR("/Game/Classes/Weapons/Wep_NightVis_DMR.Wep_NightVis_DMR_C"), true, 8, 1, 0.2, true, &thirty_06_fmj, true},
         Profile{"dmr-suppressed", STR("/Game/Classes/Weapons/Wep_Suppressed_DMR.Wep_Suppressed_DMR_C"), true, 16, 1, 0.2, true, &thirty_06_fmj, true},
     };
+    inline constexpr std::array stock_selectable_automatic_kinds{
+        std::string_view{"smg-standard"},
+        std::string_view{"light-ar-01"},
+        std::string_view{"light-ar-02"},
+        std::string_view{"light-ar-03"},
+        std::string_view{"light-ar-cqc"},
+        std::string_view{"light-ar-silenced"},
+    };
     inline constexpr int bolt_action_magazine = 5;
 }

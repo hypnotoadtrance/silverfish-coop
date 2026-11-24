@@ -120,6 +120,16 @@ async def verify_stock_held_queue(host, guest, pawn, probe, *, stale_quick_slot=
         equipped = await accepted_selection(guid)
         assert (equipped["guid"], equipped["pawn"], equipped["actor_ammo"], equipped["stored_ammo"]) == (guid, pawn, ROUNDS, ROUNDS), equipped
         await scoped(guid, KIND)
+        selector = f"\t{previous['pawn']}\t{guid}"
+        assert await probe(guest.bridge, "portable-held-queue", "semi" + selector) == "semi"
+        try:
+            denied = await submit(guest_run, native_smg_hold.LOCAL_FIXTURE, target="press")
+            if denied["ok"]:
+                await submit(guest_run, native_smg_hold.LOCAL_FIXTURE, target="release")
+            assert denied["ok"] is False and "native_guest_held_fire_fixture_requires_automatic_mode" in denied["error"], denied
+        finally:
+            mode = await probe(guest.bridge, "portable-held-queue", "auto" + selector)
+            assert mode == "auto", mode
         pressed = (await control(guest_run, native_smg_hold.LOCAL_FIXTURE, target="press", milliseconds=400))[FIXTURE]
         assert (pressed["map"], pressed["pawn"], pressed["guid"], pressed["edge"], pressed["sequence"]) == (
             OBSERVATORY, previous["pawn"], guid, "press", pressed["stroke"]), pressed
@@ -150,7 +160,7 @@ async def verify_stock_held_queue(host, guest, pawn, probe, *, stale_quick_slot=
         # absent mailbox files prove that press used the same in-process bridge as the release receipt.
         proof = {"press": pressed, "release": released, "release_publication": expected,
                  "guest_selection": selected, "host_selection": equipped, "guest_edges": edges,
-                 "host_terminal": terminal}
+                 "fire_mode": {"semi_hold_blocked": True, "restored": mode}, "host_terminal": terminal}
         if stale_reply:
             proof["stale_quick_slot_reply"] = stale_reply
         return {"stock_held_queue": proof}

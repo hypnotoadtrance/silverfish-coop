@@ -938,6 +938,21 @@ local function live_worker_position(world)
     return ("%.7f,%.7f,%.7f"):format(point.X, point.Y, point.Z)
 end
 
+local pursuit_tracker
+
+local function track_pursuit()
+    local view = pursuit_tracker
+    if not view then return end
+    if not valid(view.actor) or not view.actor.Alive or not valid(view.pawn) or view.pawn.Dead
+        or not valid(view.camera) or not valid(view.controller) or not same(view.controller.Pawn, view.pawn)
+        or not same(view.pawn:GetWorld(), view.world) or not same(view.actor:GetWorld(), view.world)
+        or not view.pawn:IsLocallyControlled() or view.pawn:HasAuthority() then
+        pursuit_tracker = nil
+        return
+    end
+    view.controller:SetControlRotation(heading(view.camera:K2_GetComponentLocation(), view.actor:K2_GetActorLocation()))
+end
+
 local function pursuit_frame(pawn, world, host, aim)
     local actor = dock_worker(world, live_worker)
     if not valid(actor) or not actor.Alive then return "absent" end
@@ -950,7 +965,8 @@ local function pursuit_frame(pawn, world, host, aim)
     local desired = heading(camera:K2_GetComponentLocation(), target)
     if aim then
         assert(not host and shooter:IsLocallyControlled(), "only the guest controls aim in the pursuit proof")
-        controller:SetControlRotation(desired)
+        pursuit_tracker = {pawn = shooter, controller = controller, camera = camera, actor = actor, world = world}
+        track_pursuit()
     end
     local point = shooter:K2_GetActorLocation()
     local barrel = weapon.Arrow_Muzzle:K2_GetComponentRotation()
@@ -967,7 +983,7 @@ local function pursuit_frame(pawn, world, host, aim)
         if shooter[field] ~= false then blockers[#blockers + 1] = field end
     end
     return table.concat({vector(point), vector(target), angles(desired), angles(controller:GetControlRotation()),
-        angles(camera:K2_GetComponentRotation()), angles(barrel), table.concat(blockers, ",")}, ";")
+        angles(camera:K2_GetComponentRotation()), angles(barrel), weapon.Ammo, table.concat(blockers, ",")}, ";")
 end
 
 local function dock_swing(world, host, action)
@@ -1179,6 +1195,10 @@ local function run(action, actor_path)
     elseif action == "dock-pursuit-launches" then
         local launches = host and live_probe and live_probe.launches
         return launches and #launches > 0 and table.concat(launches, "|") or "absent"
+    elseif action == "dock-pursuit-guest-stop" then
+        assert(not host, "only the guest owns the stock aim fixture")
+        pursuit_tracker = nil
+        return "stopped"
     elseif action == "dock-pursuit-stop" then
         assert(host, "only the host owns the combat observer")
         live_probe = nil
@@ -1440,6 +1460,7 @@ local function run(action, actor_path)
 end
 
 LoopInGameThreadWithDelay(40, function()
+    track_pursuit()
     local request = io.open(prefix .. "command.tsv", "rb")
     if not request then return end
     local data = request:read(400)

@@ -104,6 +104,23 @@ local function select_stock(name, guid)
     return "waiting;" .. label
 end
 
+local function set_stock_mode(name, guid, semi)
+    local world, pawn = current_player()
+    assert(seat == "second" and not pawn:HasAuthority() and pawn:GetFullName() == name,
+        "only the exact connected guest may check the stock fire selector")
+    local save, held = pawn.Save, pawn.EquipedItem
+    local rows, selected = save.PlayerEquipment, save.PlayerEquipIndex
+    local row = selected >= 0 and selected < rows:GetArrayNum() and rows[selected + 1] or nil
+    local class = asset(weapon)
+    assert(identity(row) == guid and same(row[item_class], class) and valid(held)
+        and same(held:GetClass(), class) and same(held:GetOwner(), pawn) and same(held.Instigator, pawn)
+        and same(held:GetWorld(), world) and held.HasSelectFire == true
+        and type(held.SemiAutoSelected) == "boolean", "the exact selected SMG must have a stock fire selector")
+    if held.SemiAutoSelected ~= semi then held:ItemFireSelect(true) end
+    assert(same(pawn.EquipedItem, held) and held.SemiAutoSelected == semi, "stock selection did not switch fire mode")
+    return semi and "semi" or "auto"
+end
+
 LoopInGameThreadWithDelay(40, function()
     local request = io.open(prefix .. "command.tsv", "rb")
     if not request then return end
@@ -112,9 +129,11 @@ LoopInGameThreadWithDelay(40, function()
     if not input then return end
     local ticket, action, pawn, guid = input:match("^(%x+)\t([a-z]+)\t(Player_FP_C [^%c]+)\t(%x*)$")
     if not ticket or #ticket ~= 32 or ticket == last or #pawn > 512
-        or (action ~= "seed" or guid ~= "") and (action ~= "select" or #guid ~= 32) then return end
+        or (action ~= "seed" or guid ~= "")
+        and ((action ~= "select" and action ~= "semi" and action ~= "auto") or #guid ~= 32) then return end
     last = ticket
-    local ok, response = pcall(action == "seed" and seed or select_stock, pawn, guid)
+    local handler = action == "seed" and seed or action == "select" and select_stock or set_stock_mode
+    local ok, response = pcall(handler, pawn, guid, action == "semi")
     local reply = assert(io.open(prefix .. "reply.tsv", "wb"))
     local message = tostring(response):gsub("[%c]", " ")
     reply:write(ticket, "\t", ok and "ok" or "error", "\t", message)

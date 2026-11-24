@@ -4346,7 +4346,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                      fixture="portable_board_offer_probe.lua"))
         if (stock_npc_override and resident_weapon_cues) or stock_melee_family:
             proof["npc_combat_overlays"] = [probes.enter_context(host_npc_combat_overlay(game)) for game in games]
-        elif stock_host_corpse_carry or stock_npc_rivalry or stock_npc_override or stock_melee_edges or tutorial_dock_melee:
+        elif (stock_host_corpse_carry or stock_npc_rivalry or stock_npc_override or stock_melee_edges
+              or tutorial_dock_combat or tutorial_dock_melee):
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
                                                      fixture="portable_npc_override_probe.lua"))
@@ -4955,8 +4956,8 @@ if __name__ == "__main__":
         parser.error("Use --resident-stale-quick-slot with --resident-held-queue")
     if args.rusty_pistol and not args.resident_weapon_cues:
         parser.error("Use --rusty-pistol with --resident-weapon-cues")
-    if args.tutorial_dock_combat and not (args.rusty_pistol and args.stock_npc_override):
-        parser.error("Use --tutorial-dock-combat with --rusty-pistol and --stock-npc-override")
+    if args.tutorial_dock_combat and not (args.rusty_pistol and (args.tutorial_dock_pursuit or args.stock_npc_override)):
+        parser.error("Use --tutorial-dock-combat with --rusty-pistol and select --tutorial-dock-pursuit or --stock-npc-override")
     if args.tutorial_dock_retaliation and not args.tutorial_dock_combat:
         parser.error("Use --tutorial-dock-retaliation with --tutorial-dock-combat")
     if args.tutorial_dock_gait and not (args.tutorial_dock_held_mask or args.tutorial_dock_pursuit):
