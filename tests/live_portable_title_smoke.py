@@ -4220,7 +4220,7 @@ if __name__ == "__main__":
     parser.add_argument("--stock-critters", action="store_true",
                         help="verify a Crossroads frog hops and can be picked up by the guest")
     parser.add_argument("--stock-shovel", action="store_true",
-                        help="collect a stock shovel as the guest and verify its dig on both peers")
+                        help="verify stock shovel digs from both co-op seats")
     parser.add_argument("--stock-shovel-loot", action="store_true",
                         help="also verify stock unearthed loot and props during the shovel check")
     parser.add_argument("--stock-take-ammo", action="store_true",
