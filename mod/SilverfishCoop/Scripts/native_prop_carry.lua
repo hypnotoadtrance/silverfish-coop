@@ -400,10 +400,11 @@ local function stock(pawn, kind, actor, range, pitch, yaw, corpse)
         end
     end)
     if invoked and kind == "throw" and not corpse and valid(actor) and actor:HasAuthority()
-        and not same(pawn.HeldObject, actor) and actor.BeingHeld == false and actor.IgnorePawn_WhenAsleep == true then
+        and not same(pawn.HeldObject, actor) and not unflagged_body(actor) then
         -- The host grip can already have woken the body before stock release.
         -- An already awake body may still carry the pawn-ignore response from sleep.
         pcall(function()
+            if actor.BeingHeld ~= false or actor.IgnorePawn_WhenAsleep ~= true then return end
             local root = mesh(actor)
             local bone = FName("None", EFindName.FNAME_Find)
             if valid(root) and root:IsSimulatingPhysics(bone)
