@@ -97,7 +97,7 @@ end
 
 local function drain_held(current, address)
     local take = embedded and SilverfishPeekNativeGuestHeldFireIntent or SilverfishTakeNativeGuestHeldFireIntent
-    if not held_event_path or binding.kind ~= "smg-standard" or type(take) ~= "function" then
+    if not held_event_path or not weapon_profiles.automatic[binding.kind] or type(take) ~= "function" then
         return 0
     end
     local emitted, last = 0, nil
@@ -212,10 +212,10 @@ end
 local function fixture_edge(state, phase, current, edge)
     local ok, status, sequence, stroke = SilverfishProbeNativeGuestHeldFire(current.pawn:GetAddress(), edge)
     if ok ~= true or status ~= "stock_" .. edge or not valid_sequence(sequence) or not valid_sequence(stroke) then
-        error("The stock SMG fixture edge was unverified (" .. tostring(status) .. ")", 0)
+        error("The stock automatic fixture edge was unverified (" .. tostring(status) .. ")", 0)
     end
     local held, last = primary.sync(state, phase)
-    if held ~= 1 or last ~= sequence then error("The stock SMG fixture edge could not be published", 0) end
+    if held ~= 1 or last ~= sequence then error("The stock automatic fixture edge could not be published", 0) end
     held_fixture_proof = {context = current, guid = binding.guid, sequence = sequence, stroke = stroke, edge = edge}
     return held_fixture_proof
 end
@@ -273,11 +273,11 @@ function primary.command(fields, state, phase)
     if action == "native-guest-held-fire-fixture" then
         local edge, duration = fields[4], math.tointeger(fields[5])
         if not held_enabled or not fixtures or (#fields ~= 4 and #fields ~= 5) or fields[3] ~= current.name
-            or not same_context(current, binding) or binding.kind ~= "smg-standard" or (edge ~= "press" and edge ~= "release")
+            or not same_context(current, binding) or not weapon_profiles.automatic[binding.kind] or (edge ~= "press" and edge ~= "release")
             or (#fields == 5 and (edge ~= "press" or not duration or duration < 300 or duration > 1800
                 or type(ExecuteInGameThreadWithDelay) ~= "function"))
             or type(SilverfishProbeNativeGuestHeldFire) ~= "function" then
-            error("The stock held input fixture requires the exact scoped headless SMG guest", 0)
+            error("The stock held input fixture requires the exact scoped headless guest with a stock automatic weapon", 0)
         end
         local press = fixture_edge(state, phase, current, edge)
         if duration then
@@ -290,7 +290,7 @@ function primary.command(fields, state, phase)
                 fixture_edge(state, phase, current, "release")
             end)
         end
-        return "stock guest SMG " .. edge .. " verified"
+        return "stock guest automatic " .. edge .. " verified"
     end
     if action == "native-guest-primary-input-fixture" then
         local pry_tool = binding and (binding.kind == "blowtorch" or binding.kind == "crowbar")
@@ -333,12 +333,12 @@ function primary.command(fields, state, phase)
         or (camera and (current.map ~= camera_map or quest ~= camera_quest))
         or (not camera and not melee and kind ~= "blowtorch" and kind ~= "crowbar" and kind ~= "spade"
             and not weapon_profiles.paths[kind])
-        or (held_enabled and kind == "smg-standard" and (type(SilverfishTakeNativeGuestHeldFireIntent) ~= "function"
+        or (held_enabled and weapon_profiles.automatic[kind] and (type(SilverfishTakeNativeGuestHeldFireIntent) ~= "function"
             or type(SilverfishReadNativeGuestHeldFire) ~= "function"))
         or type(SilverfishSetNativeGuestPrimaryScope) ~= "function"
         or (embedded and (type(SilverfishEnqueueLocalBridgeInput) ~= "function"
             or type(SilverfishPeekNativeGuestPrimaryIntent) ~= "function" or type(SilverfishCommitNativeGuestPrimaryInput) ~= "function"
-            or (held_enabled and kind == "smg-standard" and type(SilverfishPeekNativeGuestHeldFireIntent) ~= "function")))
+            or (held_enabled and weapon_profiles.automatic[kind] and type(SilverfishPeekNativeGuestHeldFireIntent) ~= "function")))
         or type(SilverfishTakeNativeGuestPrimaryIntent) ~= "function" then
         primary.reset()
         error("The authenticated stock equipment selection is unavailable", 0)
@@ -376,7 +376,7 @@ function primary.rows(state, phase, status_row)
         rows[#rows + 1] = status_row("native-guest-primary-fixture", current.map, current.name, fixture_proof.guid,
             fixture_proof.sequence, fixture_proof.wrappers)
     end
-    if held_enabled and binding.kind == "smg-standard" and can_use(current)
+    if held_enabled and weapon_profiles.automatic[binding.kind] and can_use(current)
         and type(SilverfishReadNativeGuestHeldFire) == "function" then
         local address = current.pawn:GetAddress()
         local stroke, owner, guid, proof = SilverfishReadNativeGuestHeldFire(address)

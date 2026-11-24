@@ -1626,7 +1626,6 @@ namespace
 
     using HoldClock = std::chrono::steady_clock;
     using HoldHook = Hook::TCallbackIterationData<void>;
-    constexpr auto smg_hold_class = STR("/Game/Classes/Weapons/Wep_SMG_01.Wep_SMG_01_C");
     constexpr auto fire_weapon_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:FireWeapon");
     constexpr auto end_cycle_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:EndCycle");
 
@@ -1909,10 +1908,12 @@ namespace
 
         Inventory inventory;
         if (const auto error = locate(context, inventory); !error.empty()) return hold_result(lua, false, error);
-        if (!inventory.item || inventory.row_class(inventory.item) != find<Unreal::UClass>(smg_hold_class))
-            return hold_result(lua, false, "native_guest_smg_hold_exact_weapon_required");
+        if (!inventory.item) return hold_result(lua, false, "native_guest_smg_hold_exact_weapon_required");
         context.weapon = qualified_weapon(inventory.row_class(inventory.item));
         const auto* profile = stock_magazine(context.weapon);
+        if (!profile || !profiles::stock_selectable_automatic(profile->kind) || profile->burst_length != 0 ||
+            profile->capacity > 30 || !profile->ammo || profile->ammo->projectile_count != 1)
+            return hold_result(lua, false, "native_guest_smg_hold_exact_weapon_required");
         auto* actor = equipped(context, inventory);
         auto* action = find<Unreal::UFunction>(primary_path);
         auto* fire = find<Unreal::UFunction>(fire_weapon_path);
@@ -1926,11 +1927,12 @@ namespace
                 !function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) &&
                 function->GetNumParms() == 0 && function->GetParmsSize() == 0 && !function->GetReturnProperty();
         };
-        if (!profile || !actor || !hold_primary_shape(actor, action) || !exact_signal(fire) || !exact_signal(end) ||
+        if (!actor || !hold_primary_shape(actor, action) || !exact_signal(fire) || !exact_signal(end) ||
             !ready_pawn(context) || !boolean(context.pawn, STR("Wep_HeldAside"), false) ||
             !boolean(actor, STR("Holding_Primary"), false) || !boolean(actor, STR("IsSeerOpen"), false) ||
             !boolean(actor, STR("IsCycling"), false) || !boolean(actor, STR("Reloading"), false) ||
-            !boolean(actor, STR("SemiAutoSelected"), false) || !stock_magazine_shape(actor, *profile) ||
+            !boolean(actor, STR("HasSelectFire"), true) || !boolean(actor, STR("SemiAutoSelected"), false) ||
+            !stock_magazine_shape(actor, *profile) ||
             !stock_round_matches(actor, mounted_ammo(actor), projectile, profile->ammo) ||
             loaded < 1 || loaded > profile->capacity || loaded != inventory.ammo->GetPropertyValueInContainer(inventory.item))
             return hold_result(lua, false, "native_guest_smg_hold_ineligible");

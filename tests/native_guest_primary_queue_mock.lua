@@ -3,12 +3,14 @@ local area = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local pawn_type = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_type = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 local pawn_name = "Player_FP_C " .. area .. ".Observitory_P:PersistentLevel.Player_FP_C_1"
+local registry = dofile("mod/SilverfishCoop/Scripts/guest_weapon_registry.lua")
 
 local function object(address)
     return {IsValid = function() return true end, GetAddress = function() return address end}
 end
 
 for _, memory in ipairs({true, false}) do
+    local kind = memory and "light-ar-01" or "smg-standard"
     local world, pawn, controller = object(1), object(2), object(3)
     local pawn_class, controller_class = object(4), object(5)
     world.GetFullName = function() return "World " .. area .. ".Observitory_P" end
@@ -25,10 +27,10 @@ for _, memory in ipairs({true, false}) do
     local settings = {SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_INPUT = "1", SILVERFISH_COOP_NATIVE_ZONE = "1",
         SILVERFISH_COOP_HEADLESS = "1", SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_FIXTURES = "1",
         SILVERFISH_COOP_NATIVE_GUEST_HELD_FIRE = "1", SILVERFISH_COOP_EMBEDDED_ENGINE = memory and "1" or nil}
-    local writes, taps, held = {}, {{11, 2, guid, "smg-standard"}}, {{4, 2, guid, "press", 4}, {5, 2, guid, "release", 4}}
+    local writes, taps, held = {}, {{11, 2, guid, kind}}, {{4, 2, guid, "press", 4}, {5, 2, guid, "release", 4}}
     local drain, commits, full = nil, 0, memory
     local env = setmetatable({os = {getenv = function(key) return settings[key] end}}, {__index = _G})
-    env.require = function(name) return name == "guest_weapon_registry" and {paths = {["smg-standard"] = true}} or {} end
+    env.require = function(name) return name == "guest_weapon_registry" and registry or {} end
     env.StaticFindObject = function(name) return ({[pawn_type] = pawn_class, [controller_type] = controller_class})[name] end
     env.LoopInGameThreadWithDelay = function(_, callback) drain = callback end
     env.SilverfishSetNativeGuestPrimaryScope = function() return true, "stock_held" end
@@ -58,7 +60,7 @@ for _, memory in ipairs({true, false}) do
 
     local input = assert(loadfile("mod/SilverfishCoop/Scripts/native_guest_primary_input.lua", "t", env))()
     input.start("isolated", function() return false end)
-    assert(input.command({"1", "native-guest-primary-scope", area, pawn_name, guid, "smg-standard"}, state, "connected"))
+    assert(input.command({"1", "native-guest-primary-scope", area, pawn_name, guid, kind}, state, "connected"))
     if memory then
         drain()
         input.sync(state, "connected")

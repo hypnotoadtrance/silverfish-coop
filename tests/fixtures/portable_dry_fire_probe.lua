@@ -189,6 +189,17 @@ local function run(action)
     end
     if action == "ready" then return ready(local_pawn) end
     if action == "peer-ready" then return ready(peer) end
+    if action == "light-ar-semi" or action == "light-ar-auto" then
+        assert(observing() and not local_pawn:HasAuthority() and weapon_path == arm_profiles["arm-light-ar"][1]
+            and ready(local_pawn) ~= "waiting", "the guest LightAR must be selected")
+        local held = local_pawn.EquipedItem
+        assert(same(held:GetOwner(), local_pawn) and held.HasSelectFire == true
+            and type(held.SemiAutoSelected) == "boolean", "the stock LightAR selector is unavailable")
+        local semi = action == "light-ar-semi"
+        if held.SemiAutoSelected ~= semi then held:ItemFireSelect(true) end
+        assert(same(local_pawn.EquipedItem, held) and held.SemiAutoSelected == semi, "LightAR mode did not change")
+        return action
+    end
     if action == "seed-reserve" or action == "seed-pursuit-reserve" then
         return seed_reserve(action == "seed-pursuit-reserve")
     end

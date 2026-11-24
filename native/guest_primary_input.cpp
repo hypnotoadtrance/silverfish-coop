@@ -674,7 +674,8 @@ namespace
                     next.aim_wrappers[2].function.Get()) next.aim_action = aim;
             }
         }
-        if (next.completed.function.Get() && !next.seat.host && next.item->kind == "smg-standard" && held_enabled())
+        if (next.completed.function.Get() && !next.seat.host && held_enabled() &&
+            silverfish::guest_weapon_profiles::stock_selectable_automatic(next.item->kind))
             bind_mapped_input(next);
         return next.completed.function.Get() ? std::string_view{} : "stock_guest_primary_wrappers_unavailable";
     }
@@ -705,15 +706,14 @@ namespace
     bool scoped_held_fire()
     {
         // Keep the receipt route open after a mode change so it can drain a cancellation.
-        return scope.item && scope.item->kind == "smg-standard" && !scope.seat.host && held_enabled();
+        return scope.item && !scope.seat.host && held_enabled() &&
+            silverfish::guest_weapon_profiles::stock_selectable_automatic(scope.item->kind);
     }
 
     bool stock_automatic_selected()
     {
-        const auto& kinds = silverfish::guest_weapon_profiles::stock_selectable_automatic_kinds;
         auto* receiver = scope.seat.held.Get();
-        if (!scope.item || std::ranges::find(kinds, scope.item->kind) == kinds.end() ||
-            !scope.seat.mirrored || !live(receiver)) return false;
+        if (!scope.seat.mirrored || !live(receiver)) return false;
         auto* selector = field<U::FBoolProperty>(receiver, STR("HasSelectFire"));
         return selector && selector->GetPropertyValueInContainer(receiver) &&
             false_field(receiver, STR("SemiAutoSelected"));

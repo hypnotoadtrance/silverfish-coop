@@ -145,5 +145,11 @@ namespace silverfish::guest_weapon_profiles
         std::string_view{"light-ar-cqc"},
         std::string_view{"light-ar-silenced"},
     };
+    inline constexpr bool stock_selectable_automatic(std::string_view kind)
+    {
+        for (auto candidate : stock_selectable_automatic_kinds)
+            if (candidate == kind) return true;
+        return false;
+    }
     inline constexpr int bolt_action_magazine = 5;
 }
