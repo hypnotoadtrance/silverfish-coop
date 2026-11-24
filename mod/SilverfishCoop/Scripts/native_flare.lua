@@ -11,7 +11,7 @@ for _, name in ipairs({"Flare_Projectile_BP", "Blue_Flare_Projectile_BP", "Yello
     classes["BlueprintGeneratedClass " .. folder .. name .. "." .. name .. "_C"] = "flare"
 end
 flare.equipment = {}
-for _, name in ipairs({"Eqp_Flare", "Eqp_Flare_Blue", "Eqp_Flare_Yellow", "Eqp_Bolt"}) do
+for _, name in ipairs({"Eqp_Flare", "Eqp_Flare_Blue", "Eqp_Flare_Yellow", "Eqp_Bolt", "Gren_PipeBomb"}) do
     flare.equipment["/Game/Classes/Equipment/" .. name .. "." .. name .. "_C"] = true
 end
 local intent, receipt
@@ -261,10 +261,10 @@ function flare.sync(state, phase)
     end
     local local_pawn = state.local_pawn
     if not local_pawn or not valid(local_pawn.pawn) then return end
-    local sequence, guid, toss, class = SilverfishTakeLocalGuestFlare(local_pawn.pawn:GetAddress())
+    local sequence, guid, toss, class, fuse_ms = SilverfishTakeLocalGuestFlare(local_pawn.pawn:GetAddress())
     if sequence and flare.equipment[class] then
         local pawn = local_pawn.pawn
-        intent = {state.map, local_pawn.name, sequence, guid, toss and 1 or 0, class}
+        intent = {state.map, local_pawn.name, sequence, guid, toss and 1 or 0, class, fuse_ms}
         intent.actor, intent.slot, intent.save = pawn.EquipedItem, pawn.Save.PlayerEquipIndex, pawn.Save
     end
 end
@@ -316,16 +316,20 @@ function flare.command(fields, state, phase)
     if fields[2] == "native-guest-flare-complete" then return complete(fields, state, phase) end
     if fields[2] ~= "native-guest-flare-throw" then return end
     local name, guid, toss = fields[3], fields[4], fields[5]
-    if phase ~= "hosting" or #fields ~= 5 or #guid ~= 32 or guid:find("[^0-9A-F]") or not guid:find("[^0]")
+    local fuse = fields[6] and math.tointeger(tonumber(fields[6]))
+    if phase ~= "hosting" or (#fields ~= 5 and #fields ~= 6) or #guid ~= 32 or guid:find("[^0-9A-F]") or not guid:find("[^0]")
         or (toss ~= "0" and toss ~= "1") or type(SilverfishThrowNativeGuestFlare) ~= "function" then
         error("native_guest_flare_refused_scope", 0)
     end
+    if #fields == 6 and (not fuse or fuse < 0 or fuse > 5000 or tostring(fuse) ~= fields[6]) then
+        error("native_guest_flare_refused_fuse", 0)
+    end
     local qualified, pawn, detached = pcall(guest_save.exact_item_context, state, phase, name)
     if not qualified or not valid(pawn) or not valid(detached) then error("native_guest_flare_refused_owner", 0) end
-    local ok, reason, before, after, class, projectile = SilverfishThrowNativeGuestFlare(
-        pawn:GetAddress(), detached:GetAddress(), guid, toss == "1")
+    local arguments = {pawn:GetAddress(), detached:GetAddress(), guid, toss == "1", fuse}
+    local ok, reason, before, after, class, projectile, applied_fuse = SilverfishThrowNativeGuestFlare(table.unpack(arguments))
     if not ok then error(reason, 0) end
-    receipt = {state.map, name, guid, toss, before, after, class, projectile}
+    receipt = {state.map, name, guid, toss, before, after, class, projectile, applied_fuse}
     return "stock throwable thrown"
 end
 

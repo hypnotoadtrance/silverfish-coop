@@ -1363,7 +1363,7 @@ async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str)
         raise AssertionError((kind, role, "retired" if retired else "in flight", status))
 
     verified = {}
-    for owner, kind in ((host, "pipebomb"), (host, "bolt"), (guest, "bolt")):
+    for owner, kind in ((host, "pipebomb"), (host, "bolt"), (guest, "bolt"), (guest, "pipebomb")):
         if case not in ("all", kind) and (case != "ground" or kind != "bolt"):
             continue
         side = "host" if owner is host else "guest"
@@ -1385,7 +1385,12 @@ async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str)
             await wait_resident_status(position_run, lambda frame: math.dist(frame.get("game", {}).get("pawns", {})
                                        .get("local", {}).get("location", [0, 0, 0]), target) < 20, timeout=8)
         assert await probe(owner, "press", kind) == "press"
-        await asyncio.sleep(.2)
+        if owner is guest and kind == "pipebomb":
+            async with asyncio.timeout(3):
+                while (cooked := float(await probe(owner, "cook", kind))) < .18:
+                    await asyncio.sleep(.05)
+        else:
+            await asyncio.sleep(.2)
         started = time.time()
         assert await probe(owner, "release", kind) == "release"
         shots = await asyncio.gather(observe(host, kind, 3, must_render=owner is guest),
@@ -1446,6 +1451,13 @@ async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str)
             receipt = confirmation["game"]["native_guest_flare_throw"]
             assert (receipt["pawn"], receipt["before"], receipt["after"]) == (pawn, 1, 0), receipt
             record["consumed"] = receipt
+            if kind == "pipebomb":
+                assert 0 < receipt["fuse_ms"] < 5000 and abs(shots[0]["fuse_seconds"] - receipt["fuse_ms"] / 1000) < .002
+                record["stock_cook_before_release"] = cooked
+                async with asyncio.timeout(5):
+                    while (charges := await probe(guest, "charges", kind)) != "0,-1":
+                        await asyncio.sleep(.05)
+                record["guest_charges_after_throw"] = charges
         if kind == "pipebomb":
             record["retired"] = await asyncio.gather(observe(host, kind, 3, retired=True),
                                                       observe(guest, kind, 1, retired=True))

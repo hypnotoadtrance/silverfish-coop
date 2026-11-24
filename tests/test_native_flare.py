@@ -13,11 +13,23 @@ class StockFlareReceiptTests(unittest.TestCase):
             with self.subTest(item=item):
                 path = f"{OBSERVATORY}.Observitory_P:PersistentLevel.{projectile}_25"
                 row = [native_flare.ACTION, OBSERVATORY, "guest", "A" * 32, "0", "2", "1", item, path]
+                if item == native_flare.PIPE_BOMB:
+                    row.append("1250")
                 proof = native_flare.parse(row, "hosting", OBSERVATORY)
                 self.assertEqual((proof["before"], proof["after"], proof["projectile"]), (2, 1, path))
-                row[-1] = path.replace(projectile, "Unrecognized_Projectile_C")
+                row[8] = path.replace(projectile, "Unrecognized_Projectile_C")
                 with self.assertRaises(ValueError):
                     native_flare.parse(row, "hosting", OBSERVATORY)
+
+    def test_pipe_bomb_requires_its_stock_remaining_fuse(self):
+        row = [native_flare.INPUT, OBSERVATORY, "guest", "77", "C" * 32, "0", native_flare.PIPE_BOMB]
+        self.assertEqual(native_flare.parse([*row, "0"], "connected", OBSERVATORY)["fuse_ms"], 0)
+        for extra in ([], ["-1"], ["0001"], ["5001"]):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                native_flare.parse(row + extra, "connected", OBSERVATORY)
+        row[-1] = "/Game/Classes/Equipment/Eqp_Bolt.Eqp_Bolt_C"
+        with self.assertRaises(ValueError):
+            native_flare.parse([*row, "400"], "connected", OBSERVATORY)
 
     def test_bolt_uses_the_stack_throw_path_without_accepting_a_flare_receipt(self):
         bolt = "/Game/Classes/Equipment/Eqp_Bolt.Eqp_Bolt_C"
