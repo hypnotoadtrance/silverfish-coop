@@ -4087,8 +4087,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game))
         if not second_legacy_work:
-            assert len({runtime.staged_build(game) for game in games}) == 1, (
-                "The two portable fixtures produced different network build identities")
+            build_ids = []
+            for workspace, game in zip(workspaces, games, strict=True):
+                with runtime.installed_content(workspace, game):
+                    build_ids.append(runtime.staged_build(workspace))
+            assert build_ids[0] == build_ids[1], "The two portable fixtures produced different network build identities"
         boot_started = time.perf_counter()
         for game, workspace, release, port in zip(games, workspaces, qualified, choose_ports(), strict=True):
             title = workspace / release.title_directory
