@@ -5330,14 +5330,14 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             del observed["Config.sav"]
             assert observed == hashes and await stock_profile(seat.bridge) == preferences
             assert seat.bridge.process.poll() is None
+        if stock_npc_override or tutorial_dock_pursuit:
+            slot = max((source for source in stock_slots if source.stem != "Config"),
+                       key=lambda source: source.stat().st_mtime).stem
+            proof["singleplayer_after_coop"] = await verify_solo_combat(first, slot)
         failures = [name for name, result in proof.get("resident_check_results", {}).items()
                     if result["status"] == "failed"]
         if failures:
             raise AssertionError(f"Resident checks failed: {', '.join(failures)}")
-        if tutorial_dock_pursuit:
-            slot = max((source for source in stock_slots if source.stem != "Config"),
-                       key=lambda source: source.stat().st_mtime).stem
-            proof["singleplayer_after_coop"] = await verify_solo_combat(first, slot)
         proof.update(verified=True, solo_slots_and_settings_preserved=True,
                      both_titles_reused=len(proof["sessions"]) > 1,
                      launched_without_coop_environment=True)
@@ -5415,7 +5415,7 @@ if __name__ == "__main__":
     parser.add_argument("--stock-host-corpse-carry", action="store_true",
                         help="Measure stock host ragdoll carry on the guest and verify physics returns on release")
     parser.add_argument("--stock-npc-override", action="store_true",
-                        help="verify guest damage rejection and host death on a stock drone")
+                        help="verify stock drone damage authority in co-op and stock combat after returning to Singleplayer")
     parser.add_argument("--stock-split", action="store_true", help="test the stock guest stack-split popup with a Veteran loadout")
     parser.add_argument("--stock-equip", action="store_true", help="test the stock guest Equip action with a Veteran loadout")
     parser.add_argument("--stock-unequip", action="store_true",
