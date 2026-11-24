@@ -234,4 +234,7 @@ async def verify_dock_pursuit(host, guest, frame, command):
             error.add_note(f"Muzzle, target, and camera angles at stock launch: {launches}")
         raise
     finally:
-        assert await command(host, "dock-pursuit-stop") == "stopped"
+        try:
+            assert await command(guest, "dock-pursuit-guest-stop") == "stopped"
+        finally:
+            assert await command(host, "dock-pursuit-stop") == "stopped"
