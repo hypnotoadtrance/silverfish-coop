@@ -55,6 +55,18 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
         self.assertTrue(native_guest_weapon.valid_mounted_ammo("1911", alternate))
         self.assertTrue(native_guest_weapon.valid_mounted_ammo("heavy-pistol-silenced", ball))
         self.assertFalse(native_guest_weapon.valid_mounted_ammo("rusty-pistol", alternate))
+        for kind, load in (
+            ("rusty-pistol", guest_weapon_profiles.NINE_MM_VAMP),
+            ("burst-pistol", guest_weapon_profiles.NINE_MM_AP),
+            ("scout-rifle-02", guest_weapon_profiles.FIVE_SIX_AP),
+            ("drakv-cult", guest_weapon_profiles.FIVE_SIX_STUN),
+            ("battle-rifle-cult", guest_weapon_profiles.THIRTY_06_MINE),
+            ("rifle-50-semi", guest_weapon_profiles.FIFTY_CAL_HEIAP),
+            ("carbine-57", guest_weapon_profiles.FIVE_SEVEN_HP),
+        ):
+            with self.subTest(weapon=kind, ammo=load.row):
+                self.assertTrue(native_guest_weapon.valid_mounted_ammo(kind, load.item_path))
+        self.assertFalse(native_guest_weapon.valid_mounted_ammo("rifle-50-semi", guest_weapon_profiles.FIVE_SIX_AP.item_path))
 
     def test_shotgun_magazines_keep_each_stock_shell_and_its_projectile_count(self):
         shells = guest_weapon_profiles.SHOTGUN_AMMO

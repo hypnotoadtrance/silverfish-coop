@@ -8,6 +8,7 @@ local dock_map = "World /Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P.Tut_Dock_P"
 local click = "SoundCue /Game/Assets/Sounds/CUEs/Weapon_Cues/Reload_Cues/TriggerClick_Cue.TriggerClick_Cue"
 local factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local reserve_9mm = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
+local reserve_9mm_ap = "/Game/Classes/Items/Ammo_9mm_AP_BP.Ammo_9mm_AP_BP_C"
 local arm_profiles = {
     arm = {"/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C", reserve_9mm, 9, 2},
     ["arm-rusty"] = {"/Game/Classes/Weapons/Wep_RustyPistol.Wep_RustyPistol_C", reserve_9mm, 9, 2},
@@ -15,6 +16,12 @@ local arm_profiles = {
         "/Game/Classes/Items/Ammo_IntrRifle_BP.Ammo_IntrRifle_BP_C", 7, 3},
     ["arm-alternate"] = {"/Game/Classes/Weapons/Wep_1911.Wep_1911_C",
         "/Game/Classes/Items/Ammo_Magnum_HollowPoint_BP.Ammo_Magnum_HollowPoint_BP_C", 18, 4},
+    ["arm-ammo-order"] = {"/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C",
+        "/Game/Classes/Items/Ammo_9mm_Vamp_BP.Ammo_9mm_Vamp_BP_C", 35, 4},
+    ["arm-fifty-alt"] = {"/Game/Classes/Weapons/Wep_50SemiAuto.Wep_50SemiAuto_C",
+        "/Game/Classes/Items/Ammo_50Cal_HEIAP_BP.Ammo_50Cal_HEIAP_BP_C", 8, 4},
+    ["arm-intermediate-alt"] = {"/Game/Classes/Weapons/Wep_ScoutRifle_02.Wep_ScoutRifle_02_C",
+        "/Game/Classes/Items/Ammo_Intr_AP_BP.Ammo_Intr_AP_BP_C", 24, 4},
     ["arm-buckshot"] = {"/Game/Classes/Weapons/Wep_ShotGun_SemiAuto.Wep_ShotGun_SemiAuto_C",
         "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C", 5, 3},
     ["arm-nagant"] = {"/Game/Classes/Weapons/Wep_Nagant_01.Wep_Nagant_01_C", reserve_9mm, 0, 6},
@@ -193,8 +200,8 @@ local function ready(pawn)
     return ("%s,%d,%d"):format(identify(row), weapon.Ammo, row[ammo])
 end
 
-local function read_reserve(pawn)
-    local pack, rounds, rows = pawn.Save.PlayerBackpack, asset(reserve_path), {}
+local function read_reserve(pawn, path)
+    local pack, rounds, rows = pawn.Save.PlayerBackpack, asset(path or reserve_path), {}
     for index = 1, pack:GetArrayNum() do
         local row = pack[index]
         if same(row[item_class], rounds) then rows[#rows + 1] = ("%s,%d"):format(row_identity(row), row[ammo]) end
@@ -202,21 +209,17 @@ local function read_reserve(pawn)
     return table.concat(rows, "|")
 end
 
-local function seed_reserve(extra)
+local function seed_reserve(path, units, override)
     assert(local_pawn:HasAuthority() and peer:HasAuthority() and valid(peer.Save) and not same(local_pawn.Save, peer.Save),
         "stock reload requires a detached authoritative guest inventory")
-    assert(read_reserve(peer) == "", "fixture expected no preexisting matching reserve")
+    assert(read_reserve(peer, path) == "", "fixture expected no preexisting matching reserve")
     local pack, output = peer.Save.PlayerBackpack, {}
-    asset(factory):ItemActorToStruct(asset(reserve_path):GetCDO(), peer, output)
+    asset(factory):ItemActorToStruct(asset(path):GetCDO(), peer, output)
     local row = output.Item or output
-    assert(same(row[item_class], asset(reserve_path)) and row[ammo] == reserve_units, "stock reserve did not match its profile")
-    if extra then
-        assert(weapon_path == arm_profiles["arm-rusty"][1] and reserve_units == 9,
-            "the pursuit reserve requires the stock Rusty Pistol")
-        row[ammo] = 16
-    end
+    assert(same(row[item_class], asset(path)) and row[ammo] == units, "stock reserve did not match its profile")
+    if override then row[ammo] = override end
     pack[pack:GetArrayNum() + 1] = row
-    return read_reserve(peer)
+    return read_reserve(peer, path)
 end
 
 local function meshes(actor)
@@ -320,7 +323,9 @@ local function run(action, argument)
     if action == "seed-local" then return seed(local_pawn, 0) end
     if action == "seed-peer" then return seed(peer, 1) end
     if action == "seed-alternate" then
-        assert(observing() and weapon_path == arm_profiles["arm-alternate"][1])
+        assert(observing() and (reserve_path == arm_profiles["arm-alternate"][2]
+            or reserve_path == arm_profiles["arm-ammo-order"][2] or reserve_path == arm_profiles["arm-fifty-alt"][2]
+            or reserve_path == arm_profiles["arm-intermediate-alt"][2]))
         local equipment = peer.Save.PlayerEquipment
         for index = 1, equipment:GetArrayNum() do
             if not valid(equipment[index][item_class]) then
@@ -441,8 +446,16 @@ local function run(action, argument)
         assert(same(local_pawn.EquipedItem, held) and held.SemiAutoSelected == semi, "LightAR mode did not change")
         return action
     end
-    if action == "seed-reserve" or action == "seed-pursuit-reserve" then
-        return seed_reserve(action == "seed-pursuit-reserve")
+    if action == "seed-reserve" then return seed_reserve(reserve_path, reserve_units) end
+    if action == "seed-pursuit-reserve" then
+        assert(weapon_path == arm_profiles["arm-rusty"][1] and reserve_units == 9,
+            "the pursuit reserve requires the stock Rusty Pistol")
+        return seed_reserve(reserve_path, reserve_units, 16)
+    end
+    if action == "seed-second-reserve" or action == "second-reserve" then
+        assert(reserve_path == arm_profiles["arm-ammo-order"][2], "the ordered reserve requires the stock 9mm test")
+        if action == "seed-second-reserve" then return seed_reserve(reserve_9mm_ap, 24) end
+        return read_reserve(local_pawn, reserve_9mm_ap)
     end
     if action == "reserve" then return read_reserve(local_pawn) end
     if action == "peer-reserve" then return read_reserve(peer) end

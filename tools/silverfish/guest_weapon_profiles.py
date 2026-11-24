@@ -23,11 +23,24 @@ class StockAmmo:
 
 
 NINE_MM_BALL = StockAmmo("nine_mm_ball", 0, "9mm_Ball", "Ammo_Pistol_BP", "Projectile_Pistol_Light", 9)
+NINE_MM_AP = StockAmmo("nine_mm_ap", 0, "9mm_AP", "Ammo_9mm_AP_BP", "Projectile_9mm_AP", 24)
+NINE_MM_VAMP = StockAmmo("nine_mm_vamp", 0, "9mm_Vamp", "Ammo_9mm_Vamp_BP", "Projectile_9mm_Vampire", 35)
 FORTY_FIVE_BALL = StockAmmo("forty_five_ball", 1, "45Cal_Ball", "Ammo_Magnum_BP", "Projectile_Pistol_Magnum", 10)
 FORTY_FIVE_HOLLOW_POINT = StockAmmo(
     "forty_five_hollow_point", 1, "45Cal_HollowPoint", "Ammo_Magnum_HollowPoint_BP", "Projectile_45_HollowPoint", 18,
 )
+FORTY_FIVE_AIR_BURST = StockAmmo(
+    "forty_five_air_burst", 1, "45Cal_AirBurst", "Ammo_Magnum_AirBurstBP", "Projectile_45_AirBurst", 28,
+)
+FORTY_FIVE_MICRO_FRAG = StockAmmo(
+    "forty_five_micro_frag", 1, "45Cal_MicroFrag", "Ammo_Magnum_MicroFrag_BP", "Projectile_45_MicroFrag", 18,
+)
 FIVE_SIX_FMJ = StockAmmo("five_six_fmj", 2, "5.6Intr_FMJ", "Ammo_IntrRifle_BP", "Projectile_Rifle_Inter", 7)
+FIVE_SIX_AP = StockAmmo("five_six_ap", 2, "5.6Intr_AP", "Ammo_Intr_AP_BP", "Projectile_Inter_AP", 24)
+FIVE_SIX_INCENDIARY = StockAmmo(
+    "five_six_incendiary", 2, "5.6Intr_Incin", "Ammo_Intr_Incin_BP", "Projectile_Inter_Incindiary", 24,
+)
+FIVE_SIX_STUN = StockAmmo("five_six_stun", 2, "5.6Intr_Stun", "Ammo_IntrRifle_Stun_BP", "Projectile_Inter_Stun", 30)
 TWELVE_GAUGE_BUCK = StockAmmo(
     "twelve_gauge_buck", 4, "12Gauge_Buck", "Ammo_ShotgunShells_BP", "Projectile_ShotGun_Pellet", 5, projectile_count=9,
 )
@@ -53,14 +66,24 @@ SHOTGUN_AMMO = (
     TWELVE_GAUGE_DRAGON_BREATH, TWELVE_GAUGE_HYPERBALL,
 )
 FIVE_SEVEN_AP = StockAmmo("five_seven_ap", 11, "5-7_AP", "Ammo_5-7_AP_BP", "Projectile_5-7_AP", 7)
+FIVE_SEVEN_HP = StockAmmo("five_seven_hp", 11, "5-7_HP", "Ammo_5-7_HP_BP", "Projectile_5-7_HP", 12)
+FIVE_SEVEN_INCENDIARY = StockAmmo(
+    "five_seven_incendiary", 11, "5-7_Incin", "Ammo_5-7_Incin_BP", "Projectile_5-7_Incin", 12,
+)
 FIFTY_CAL_FMJ = StockAmmo("fifty_cal_fmj", 6, "50Cal_FMJ", "Ammo_50Cal_BP", "Projectile_50Cal", 8)
+FIFTY_CAL_HEIAP = StockAmmo("fifty_cal_heiap", 6, "50Cal_HEIAP", "Ammo_50Cal_HEIAP_BP", "Projectile_50Cal_HEIAP", 8)
 THIRTY_06_FMJ = StockAmmo("thirty_06_fmj", 3, "30-06_FMJ", "Ammo_FullRifle_BP", "Projectile_Rifle_Heavy", 5)
 THIRTY_06_INCENDIARY = StockAmmo(
     "thirty_06_incendiary", 3, "30-06_Incendiary", "Ammo_30-06_Incendiary_BP", "Projectile_30-06_Incendiary", 5,
 )
+THIRTY_06_HE = StockAmmo("thirty_06_he", 3, "30-06_HE", "Ammo_30-06_HEI_BP", "Projectile_30-06_HE", 14)
+THIRTY_06_MINE = StockAmmo("thirty_06_mine", 3, "30-06_Mine", "Ammo_30-06_Mine_BP", "Projectile_30-06_Mine", 24)
 STOCK_AMMO = (
-    NINE_MM_BALL, FORTY_FIVE_BALL, FORTY_FIVE_HOLLOW_POINT, FIVE_SIX_FMJ, *SHOTGUN_AMMO, FIVE_SEVEN_AP, FIFTY_CAL_FMJ,
-    THIRTY_06_FMJ, THIRTY_06_INCENDIARY,
+    NINE_MM_BALL, NINE_MM_AP, NINE_MM_VAMP,
+    FORTY_FIVE_BALL, FORTY_FIVE_HOLLOW_POINT, FORTY_FIVE_AIR_BURST, FORTY_FIVE_MICRO_FRAG,
+    FIVE_SIX_FMJ, FIVE_SIX_AP, FIVE_SIX_INCENDIARY, FIVE_SIX_STUN,
+    *SHOTGUN_AMMO, FIVE_SEVEN_AP, FIVE_SEVEN_HP, FIVE_SEVEN_INCENDIARY,
+    FIFTY_CAL_FMJ, FIFTY_CAL_HEIAP, THIRTY_06_FMJ, THIRTY_06_INCENDIARY, THIRTY_06_HE, THIRTY_06_MINE,
 )
 
 
@@ -193,6 +216,17 @@ ORDINARY_WEAPONS = (
     ("scout-rifle-03", "Wep_ScoutRifle_03", 10, 1, 0.1, FIVE_SIX_FMJ),
     ("scout-rifle-scoped", "Wep_ScoutRifle_Scoped", 10, 1, 0.15, FIVE_SIX_FMJ),
     ("sniper-rifle", "Wep_SniperRifle_", 8, 1, 0.2, THIRTY_06_FMJ),
+    ("burst-pistol", "Wep_Burst_Pistol", 18, 3, 0.06, NINE_MM_AP),
+    ("pdw-01", "Wep_PDW_01", 30, 0, 0.06, NINE_MM_AP),
+    ("model-1931-carbine", "Wep_Pistol_Long_Carbine", 18, 1, 0.1, NINE_MM_AP),
+    ("carbine-57", "Wep_5-7Carbine_01", 30, 1, 0.12, FIVE_SEVEN_HP),
+    ("carbine-57-bayonet", "Wep_5-7Carbine_Bayonet", 30, 1, 0.12, FIVE_SEVEN_HP),
+    ("l-car-01", "Wep_L-Car_01", 30, 3, 0.075, FIVE_SEVEN_HP),
+    ("stg-01", "Wep_STG_01", 20, 0, 0.12, FIVE_SEVEN_HP),
+    ("stg-02", "Wep_STG_02", 20, 0, 0.12, FIVE_SEVEN_HP),
+    ("stg-03", "Wep_STG_03", 20, 0, 0.12, FIVE_SEVEN_HP),
+    ("drakv-cult", "Wep_DrakV_Cult", 24, 0, 0.1, FIVE_SIX_STUN),
+    ("battle-rifle-cult", "Wep_BattleRifle_Cult", 20, 1, 0.08, THIRTY_06_MINE),
 )
 
 LOKI_RECEIVERS = (

@@ -2051,14 +2051,20 @@ namespace
         const profiles::StockAmmo* changed_round = nullptr;
         if (before == 0 && reserve_before == 0)
         {
-            for (const auto* candidate : profiles::stock_ammo)
+            // Stock FindAmmo_InInventory checks the Backpack in slot order
+            // when an empty weapon has run out of its currently selected round.
+            Unreal::FScriptArrayHelper backpack(inventory.backpack,
+                inventory.backpack->ContainerPtrToValuePtr<void>(context.save));
+            auto* ammo_base = find<Unreal::UClass>(ammo_master_path);
+            for (int index = 0; ammo_base && index < backpack.Num(); ++index)
             {
-                const bool compatible = bolt
-                    ? candidate == &profiles::thirty_06_incendiary && ammo_class == find<Unreal::UClass>(rifle_fmj_path)
-                    : stock_profile && compatible_magazine_round(*stock_profile->ammo, *candidate);
-                if (!compatible) continue;
-                auto* alternative = find<Unreal::UClass>(candidate->item);
-                if (!alternative || alternative == ammo_class || !find<Unreal::UClass>(candidate->projectile)) continue;
+                auto* alternative = Unreal::Cast<Unreal::UClass>(inventory.row_class(backpack.GetRawPtr(index)));
+                if (!alternative || alternative == ammo_class || !alternative->IsChildOf(ammo_base)) continue;
+                const auto* candidate = stock_profile ? magazine_round(*stock_profile, alternative) : nullptr;
+                if (bolt && ammo_class == find<Unreal::UClass>(rifle_fmj_path) &&
+                    alternative == find<Unreal::UClass>(profiles::thirty_06_incendiary.item))
+                    candidate = &profiles::thirty_06_incendiary;
+                if (!candidate || !find<Unreal::UClass>(candidate->projectile)) continue;
                 if (!snapshot_reserve(context, inventory, alternative, stacks, reserve_before))
                     return reload_proof(lua, false, "guest_weapon_reserve_unqualified", before, before);
                 if (reserve_before == 0) continue;

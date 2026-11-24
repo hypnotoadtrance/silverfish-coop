@@ -20,12 +20,26 @@ namespace silverfish::guest_weapon_profiles
 
     inline constexpr StockAmmo nine_mm_ball{0, STR("9mm_Ball"),
         STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Pistol_Light.Projectile_Pistol_Light_C"), 9, 1};
+    inline constexpr StockAmmo nine_mm_ap{0, STR("9mm_AP"),
+        STR("/Game/Classes/Items/Ammo_9mm_AP_BP.Ammo_9mm_AP_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_9mm_AP.Projectile_9mm_AP_C"), 24, 1};
+    inline constexpr StockAmmo nine_mm_vamp{0, STR("9mm_Vamp"),
+        STR("/Game/Classes/Items/Ammo_9mm_Vamp_BP.Ammo_9mm_Vamp_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_9mm_Vampire.Projectile_9mm_Vampire_C"), 35, 1};
     inline constexpr StockAmmo forty_five_ball{1, STR("45Cal_Ball"),
         STR("/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Pistol_Magnum.Projectile_Pistol_Magnum_C"), 10, 1};
     inline constexpr StockAmmo forty_five_hollow_point{1, STR("45Cal_HollowPoint"),
         STR("/Game/Classes/Items/Ammo_Magnum_HollowPoint_BP.Ammo_Magnum_HollowPoint_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_45_HollowPoint.Projectile_45_HollowPoint_C"), 18, 1};
+    inline constexpr StockAmmo forty_five_air_burst{1, STR("45Cal_AirBurst"),
+        STR("/Game/Classes/Items/Ammo_Magnum_AirBurstBP.Ammo_Magnum_AirBurstBP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_45_AirBurst.Projectile_45_AirBurst_C"), 28, 1};
+    inline constexpr StockAmmo forty_five_micro_frag{1, STR("45Cal_MicroFrag"),
+        STR("/Game/Classes/Items/Ammo_Magnum_MicroFrag_BP.Ammo_Magnum_MicroFrag_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_45_MicroFrag.Projectile_45_MicroFrag_C"), 18, 1};
     inline constexpr StockAmmo five_six_fmj{2, STR("5.6Intr_FMJ"),
         STR("/Game/Classes/Items/Ammo_IntrRifle_BP.Ammo_IntrRifle_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Rifle_Inter.Projectile_Rifle_Inter_C"), 7, 1};
+    inline constexpr StockAmmo five_six_ap{2, STR("5.6Intr_AP"),
+        STR("/Game/Classes/Items/Ammo_Intr_AP_BP.Ammo_Intr_AP_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Inter_AP.Projectile_Inter_AP_C"), 24, 1};
+    inline constexpr StockAmmo five_six_incendiary{2, STR("5.6Intr_Incin"),
+        STR("/Game/Classes/Items/Ammo_Intr_Incin_BP.Ammo_Intr_Incin_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Inter_Incindiary.Projectile_Inter_Incindiary_C"), 24, 1};
+    inline constexpr StockAmmo five_six_stun{2, STR("5.6Intr_Stun"),
+        STR("/Game/Classes/Items/Ammo_IntrRifle_Stun_BP.Ammo_IntrRifle_Stun_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Inter_Stun.Projectile_Inter_Stun_C"), 30, 1};
     inline constexpr StockAmmo twelve_gauge_buck{4, STR("12Gauge_Buck"),
         STR("/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_ShotGun_Pellet.Projectile_ShotGun_Pellet_C"), 5, 9};
     inline constexpr StockAmmo twelve_gauge_slugs{4, STR("12Gauge_Slugs"),
@@ -40,17 +54,34 @@ namespace silverfish::guest_weapon_profiles
         STR("/Game/Classes/Items/Ammo_ShotgunShells_HyperBall_BP.Ammo_ShotgunShells_HyperBall_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_SG_HyperBall.Projectile_SG_HyperBall_C"), 18, 3};
     inline constexpr StockAmmo five_seven_ap{11, STR("5-7_AP"),
         STR("/Game/Classes/Items/Ammo_5-7_AP_BP.Ammo_5-7_AP_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_5-7_AP.Projectile_5-7_AP_C"), 7, 1};
+    inline constexpr StockAmmo five_seven_hp{11, STR("5-7_HP"),
+        STR("/Game/Classes/Items/Ammo_5-7_HP_BP.Ammo_5-7_HP_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_5-7_HP.Projectile_5-7_HP_C"), 12, 1};
+    inline constexpr StockAmmo five_seven_incendiary{11, STR("5-7_Incin"),
+        STR("/Game/Classes/Items/Ammo_5-7_Incin_BP.Ammo_5-7_Incin_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_5-7_Incin.Projectile_5-7_Incin_C"), 12, 1};
     inline constexpr StockAmmo fifty_cal_fmj{6, STR("50Cal_FMJ"),
         STR("/Game/Classes/Items/Ammo_50Cal_BP.Ammo_50Cal_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_50Cal.Projectile_50Cal_C"), 8, 1};
+    inline constexpr StockAmmo fifty_cal_heiap{6, STR("50Cal_HEIAP"),
+        STR("/Game/Classes/Items/Ammo_50Cal_HEIAP_BP.Ammo_50Cal_HEIAP_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_50Cal_HEIAP.Projectile_50Cal_HEIAP_C"), 8, 1};
     inline constexpr StockAmmo thirty_06_fmj{3, STR("30-06_FMJ"),
         STR("/Game/Classes/Items/Ammo_FullRifle_BP.Ammo_FullRifle_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Rifle_Heavy.Projectile_Rifle_Heavy_C"), 5, 1};
     inline constexpr StockAmmo thirty_06_incendiary{3, STR("30-06_Incendiary"),
         STR("/Game/Classes/Items/Ammo_30-06_Incendiary_BP.Ammo_30-06_Incendiary_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_30-06_Incendiary.Projectile_30-06_Incendiary_C"), 5, 1};
+    inline constexpr StockAmmo thirty_06_he{3, STR("30-06_HE"),
+        STR("/Game/Classes/Items/Ammo_30-06_HEI_BP.Ammo_30-06_HEI_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_30-06_HE.Projectile_30-06_HE_C"), 14, 1};
+    inline constexpr StockAmmo thirty_06_mine{3, STR("30-06_Mine"),
+        STR("/Game/Classes/Items/Ammo_30-06_Mine_BP.Ammo_30-06_Mine_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_30-06_Mine.Projectile_30-06_Mine_C"), 24, 1};
     inline constexpr std::array stock_ammo{
         &nine_mm_ball,
+        &nine_mm_ap,
+        &nine_mm_vamp,
         &forty_five_ball,
         &forty_five_hollow_point,
+        &forty_five_air_burst,
+        &forty_five_micro_frag,
         &five_six_fmj,
+        &five_six_ap,
+        &five_six_incendiary,
+        &five_six_stun,
         &twelve_gauge_buck,
         &twelve_gauge_slugs,
         &twelve_gauge_dsapi,
@@ -58,9 +89,14 @@ namespace silverfish::guest_weapon_profiles
         &twelve_gauge_dragon_breath,
         &twelve_gauge_hyperball,
         &five_seven_ap,
+        &five_seven_hp,
+        &five_seven_incendiary,
         &fifty_cal_fmj,
+        &fifty_cal_heiap,
         &thirty_06_fmj,
         &thirty_06_incendiary,
+        &thirty_06_he,
+        &thirty_06_mine,
     };
 
     struct Profile
@@ -212,6 +248,17 @@ namespace silverfish::guest_weapon_profiles
         Profile{"scout-rifle-03", STR("/Game/Classes/Weapons/Wep_ScoutRifle_03.Wep_ScoutRifle_03_C"), true, 10, 1, 0.1, true, &five_six_fmj, true},
         Profile{"scout-rifle-scoped", STR("/Game/Classes/Weapons/Wep_ScoutRifle_Scoped.Wep_ScoutRifle_Scoped_C"), true, 10, 1, 0.15, true, &five_six_fmj, true},
         Profile{"sniper-rifle", STR("/Game/Classes/Weapons/Wep_SniperRifle_.Wep_SniperRifle__C"), true, 8, 1, 0.2, true, &thirty_06_fmj, true},
+        Profile{"burst-pistol", STR("/Game/Classes/Weapons/Wep_Burst_Pistol.Wep_Burst_Pistol_C"), true, 18, 3, 0.06, true, &nine_mm_ap, true},
+        Profile{"pdw-01", STR("/Game/Classes/Weapons/Wep_PDW_01.Wep_PDW_01_C"), true, 30, 0, 0.06, true, &nine_mm_ap, true},
+        Profile{"model-1931-carbine", STR("/Game/Classes/Weapons/Wep_Pistol_Long_Carbine.Wep_Pistol_Long_Carbine_C"), true, 18, 1, 0.1, true, &nine_mm_ap, true},
+        Profile{"carbine-57", STR("/Game/Classes/Weapons/Wep_5-7Carbine_01.Wep_5-7Carbine_01_C"), true, 30, 1, 0.12, true, &five_seven_hp, true},
+        Profile{"carbine-57-bayonet", STR("/Game/Classes/Weapons/Wep_5-7Carbine_Bayonet.Wep_5-7Carbine_Bayonet_C"), true, 30, 1, 0.12, true, &five_seven_hp, true},
+        Profile{"l-car-01", STR("/Game/Classes/Weapons/Wep_L-Car_01.Wep_L-Car_01_C"), true, 30, 3, 0.075, true, &five_seven_hp, true},
+        Profile{"stg-01", STR("/Game/Classes/Weapons/Wep_STG_01.Wep_STG_01_C"), true, 20, 0, 0.12, true, &five_seven_hp, true},
+        Profile{"stg-02", STR("/Game/Classes/Weapons/Wep_STG_02.Wep_STG_02_C"), true, 20, 0, 0.12, true, &five_seven_hp, true},
+        Profile{"stg-03", STR("/Game/Classes/Weapons/Wep_STG_03.Wep_STG_03_C"), true, 20, 0, 0.12, true, &five_seven_hp, true},
+        Profile{"drakv-cult", STR("/Game/Classes/Weapons/Wep_DrakV_Cult.Wep_DrakV_Cult_C"), true, 24, 0, 0.1, true, &five_six_stun, true},
+        Profile{"battle-rifle-cult", STR("/Game/Classes/Weapons/Wep_BattleRifle_Cult.Wep_BattleRifle_Cult_C"), true, 20, 1, 0.08, true, &thirty_06_mine, true},
     };
     inline constexpr std::array stock_held_fire_kinds{
         std::string_view{"smg-standard"},
@@ -290,6 +337,13 @@ namespace silverfish::guest_weapon_profiles
         std::string_view{"lmg-01"},
         std::string_view{"lmg-02"},
         std::string_view{"saw-01"},
+        std::string_view{"burst-pistol"},
+        std::string_view{"pdw-01"},
+        std::string_view{"l-car-01"},
+        std::string_view{"stg-01"},
+        std::string_view{"stg-02"},
+        std::string_view{"stg-03"},
+        std::string_view{"drakv-cult"},
     };
     inline constexpr bool stock_held_fire(std::string_view kind)
     {

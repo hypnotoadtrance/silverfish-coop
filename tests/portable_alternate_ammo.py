@@ -1,4 +1,4 @@
-"""Verify that the guest's stock .45 alternate ammo survives a reload, shot, and unload."""
+"""Exercise stock guest round selection, firing, and Take Ammo in one campaign."""
 
 import asyncio
 import re
@@ -7,13 +7,15 @@ from live_multi_smoke import campaign_save_hashes
 from portable_guest_world_start import resident_events, wait_resident_status
 from tools.silverfish import native_inventory
 from tools.silverfish.control import submit
-from tools.silverfish.guest_weapon_profiles import FORTY_FIVE_BALL, FORTY_FIVE_HOLLOW_POINT
+from tools.silverfish.guest_weapon_profiles import (
+    FIFTY_CAL_FMJ, FIFTY_CAL_HEIAP, FIVE_SIX_AP, FIVE_SIX_FMJ, FORTY_FIVE_BALL, FORTY_FIVE_HOLLOW_POINT,
+    NINE_MM_AP, NINE_MM_BALL, NINE_MM_VAMP,
+)
 
 
 async def verify_alternate_ammo(host, guest, pawn, probe):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     checkpoint = campaign_save_hashes(host.campaign)
-    alternate = FORTY_FIVE_HOLLOW_POINT.item_path
 
     async def command(seat, action):
         return await probe(seat.bridge, "portable-dry-fire", action)
@@ -43,32 +45,38 @@ async def verify_alternate_ammo(host, guest, pawn, probe):
                         return row["native_guest_weapon"]
                 await asyncio.sleep(.08)
 
-    try:
+    async def verify_round(arm, base, alternate, rounds, second=None):
         seats = host, guest
-        assert await asyncio.gather(*(command(seat, "arm-alternate") for seat in seats)) == ["armed", "armed"]
+        assert await asyncio.gather(*(command(seat, arm) for seat in seats)) == ["armed", "armed"]
         host_reserve = await command(host, "reserve")
         slot, guid = (await command(host, "seed-alternate")).split(",")
         assert await command(guest, f"select-probe-slot\t{slot}") == "scoped"
         assert re.fullmatch(r"[0-9A-F]{32}", guid), guid
         await read(guest, "projected", guid)
         assert await command(guest, "equip") == "selected"
-        await read(host, "peer-round", FORTY_FIVE_BALL.item_path)
-        await read(guest, "round", FORTY_FIVE_BALL.item_path)
+        await asyncio.gather(read(host, "peer-round", base.item_path), read(guest, "round", base.item_path))
         frame = await wait_resident_status(guest_run, lambda view: view.get("state") == "connected"
             and view.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
         reserve = await command(host, "seed-reserve")
-        assert re.fullmatch(r"[0-9A-F]{32},18", reserve), reserve
+        assert re.fullmatch(rf"[0-9A-F]{{32}},{alternate.fixture_units}", reserve), reserve
         await read(guest, "reserve", reserve)
+        if second:
+            following = await command(host, "seed-second-reserve")
+            assert re.fullmatch(rf"[0-9A-F]{{32}},{second.fixture_units}", following), following
+            await read(guest, "second-reserve", following)
         reloaded = await stock_input("reload", frame, guid)
         assert (reloaded["before"], reloaded["after"], reloaded["reserve_before"], reloaded["reserve_after"]) == (
-            0, 8, 18, 10), reloaded
-        await asyncio.gather(read(host, "peer-round", alternate), read(guest, "round", alternate))
-        await asyncio.gather(read(host, "peer-ready", f"{guid},8,8"), read(guest, "ready", f"{guid},8,8"))
+            0, rounds, alternate.fixture_units, alternate.fixture_units - rounds), reloaded
+        await asyncio.gather(read(host, "peer-round", alternate.item_path), read(guest, "round", alternate.item_path))
+        await asyncio.gather(read(host, "peer-ready", f"{guid},{rounds},{rounds}"),
+                             read(guest, "ready", f"{guid},{rounds},{rounds}"))
 
         assert await command(guest, "face-away") == "turned"
         shot = await stock_input("primary", frame, guid)
-        assert (shot["before"], shot["after"], shot["projectiles"]) == (8, 7, 1), shot
-        await asyncio.gather(read(host, "peer-ready", f"{guid},7,7"), read(guest, "ready", f"{guid},7,7"))
+        remaining = rounds - 1
+        assert (shot["before"], shot["after"], shot["projectiles"]) == (rounds, remaining, 1), shot
+        await asyncio.gather(read(host, "peer-ready", f"{guid},{remaining},{remaining}"),
+                             read(guest, "ready", f"{guid},{remaining},{remaining}"))
 
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
         await wait_resident_status(guest_run, lambda view: view.get("game", {}).get(
@@ -84,11 +92,28 @@ async def verify_alternate_ammo(host, guest, pawn, probe):
                         unloaded = result
                         break
                 await asyncio.sleep(.08)
-        assert (unloaded["class_path"], unloaded["split"], unloaded["remaining"]) == (alternate, 7, 0), unloaded
+        assert (unloaded["class_path"], unloaded["split"], unloaded["remaining"]) == (
+            alternate.item_path, remaining, 0), unloaded
         await asyncio.gather(read(host, "peer-ready", f"{guid},0,0"), read(guest, "ready", f"{guid},0,0"))
+        if second:
+            await read(guest, "second-reserve", following)
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+        await wait_resident_status(guest_run, lambda view: view.get("game", {}).get(
+            "native_inventory_view", {}).get("state") == "closed")
         assert await command(host, "reserve") == host_reserve and campaign_save_hashes(host.campaign) == checkpoint
-        return {"stock_alternate_ammo": {"pawn": pawn, "class_path": alternate,
-                                         "reload": reloaded, "shot": shot, "take_ammo": unloaded}}
-    finally:
-        await asyncio.gather(command(host, "disarm"), command(guest, "disarm"), return_exceptions=True)
+        return {"class_path": alternate.item_path, "reload": reloaded, "shot": shot, "take_ammo": unloaded,
+                **({"untouched_following_reserve": second.item_path} if second else {})}
+
+    cases = (
+        ("arm-alternate", FORTY_FIVE_BALL, FORTY_FIVE_HOLLOW_POINT, 8),
+        ("arm-ammo-order", NINE_MM_BALL, NINE_MM_VAMP, 12, NINE_MM_AP),
+        ("arm-intermediate-alt", FIVE_SIX_FMJ, FIVE_SIX_AP, 16),
+        ("arm-fifty-alt", FIFTY_CAL_FMJ, FIFTY_CAL_HEIAP, 6),
+    )
+    results = []
+    for case in cases:
+        try:
+            results.append(await verify_round(*case))
+        finally:
+            await asyncio.gather(command(host, "disarm"), command(guest, "disarm"), return_exceptions=True)
+    return {"stock_alternate_ammo": {"pawn": pawn, "rounds": results}}
