@@ -7,10 +7,15 @@
         local held = pawn.EquipedItem
         local child = guest_weapon.loki_child(held, pawn, kind)
         if not child then return "waiting" end
-        if fields[4] == "toggle" then
+        if fields[4] == "semi-and-toggle" then
+            assert(held.HasSelectFire == true and held.SemiAutoSelected == false)
+            held:ToggleSemiAuto()
+        end
+        if fields[4] == "toggle" or fields[4] == "semi-and-toggle" then
             held:ToggleMode(true)
             held:ToggleMode(false)
         end
+        if fields[4] == "ammo" then return mounted_ammo_path(child) end
         return ("%d,%d,%s"):format(held.Ammo, child.Ammo, same(child, held.InputIntercept) and "loki" or "primary")
     end
     if fields[2] == "fixture-loki-reserve" and headless
@@ -18,7 +23,12 @@
         assert(phase == "hosting" and state.map == "/Game/Classes/Maps/Maps_OverWorld/Observitory_P")
         local pawn, save = guest_save.exact_item_context(state, phase, fields[3])
         assert(pawn and save and not same(save, state.world.OwningGameInstance.SaveSlot_Ref))
-        local path = weapon_profiles.ammo["bolt-action-shotgun-loki"]
+        local paths = {
+            buckshot = weapon_profiles.ammo["bolt-action-shotgun-loki"],
+            ["ar-primary"] = weapon_profiles.ammo["ar-08"],
+            slug = "/Game/Classes/Items/Ammo_ShotgunShells_Slugs_BP.Ammo_ShotgunShells_Slugs_BP_C",
+        }
+        local path = assert(paths[fields[4] or "buckshot"])
         local class = StaticFindObject(path)
         if not class or not class:IsValid() then LoadAsset(path); class = StaticFindObject(path) end
         local converter = StaticFindObject("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C")

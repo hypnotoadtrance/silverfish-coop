@@ -7,7 +7,7 @@ from live_multi_smoke import campaign_save_hashes
 from portable_guest_world_start import resident_events, wait_resident_status
 from tools.silverfish import native_inventory
 from tools.silverfish.control import submit
-from tools.silverfish.guest_weapon_profiles import LOKI_RECEIVERS
+from tools.silverfish.guest_weapon_profiles import LOKI_RECEIVERS, TWELVE_GAUGE_SLUGS
 
 RECEIVERS = {
     "Wep_BoltAction_Shotgun_Loki": ("4", "1", "1.3", "true", "Ammo_ShotgunShells_BP_C"),
@@ -73,26 +73,64 @@ async def verify_stock_loki_control(host, _guest, _pawn):
     return {"stock_loki_control": proof}
 
 
+async def stock_input(guest_run, guest_frame, kind):
+    name = f"native-guest-{kind}-input-fixture"
+    event = f"native_guest_{kind}_input"
+    requested = await submit(guest_run, name)
+    assert requested["ok"], requested
+    sequence = requested[f"native_guest_{kind}_fixture"]["sequence"]
+    async with asyncio.timeout(12):
+        while True:
+            for entry in await resident_events(guest_run, guest_frame):
+                if entry.get("sequence") == sequence and entry["event"] in (event, event + "_rejected"):
+                    assert entry["event"] == event, entry
+                    return entry["native_guest_weapon"]
+            await asyncio.sleep(.1)
+
+
+async def loki_guest_read(guest, guid, verb="read"):
+    result = await guest.bridge.command("fixture-loki-guest", guid, verb)
+    return result["ack"]["message"]
+
+
+async def wait_loki_guest(guest, guid, expected):
+    reading = None
+    try:
+        async with asyncio.timeout(12):
+            while (reading := await loki_guest_read(guest, guid)) != expected:
+                await asyncio.sleep(.15)
+    except TimeoutError as error:
+        raise AssertionError(f"Guest Loki expected {expected} and reported {reading}") from error
+
+
+async def wait_loki_slot(guest, slot, guid):
+    async with asyncio.timeout(12):
+        while True:
+            result = await guest.bridge.command("fixture-stock-take-ammo-loadout", str(slot), guid, "read")
+            if result["ack"]["message"] != "waiting":
+                return result["ack"]["message"]
+            await asyncio.sleep(.15)
+
+
+async def wait_loki_host(host, pawn, guid, *, loaded=False, modes=None):
+    def matches(frame):
+        weapon = frame.get("game", {}).get("native_guest_equipped_weapons", {}).get(pawn, {})
+        return weapon.get("guid") == guid and (not modes or (
+            weapon.get("fire_mode"), weapon.get("barrel_mode")
+        ) == modes) and (not loaded or (
+            weapon.get("rounds"), weapon.get("underbarrel_rounds"), weapon.get("underbarrel_ammo"),
+            weapon.get("barrel_mode"),
+        ) == (1, 1, TWELVE_GAUGE_SLUGS.item_path, "loki-underbarrel"))
+
+    await wait_resident_status(host.campaign / "run", matches, timeout=12)
+
+
 async def verify_guest_loki(host, guest, pawn):
     checkpoint = campaign_save_hashes(host.campaign)
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_inventory = await submit(host_run, "native-inventory-list")
     guest_frame = await wait_resident_status(guest_run, lambda frame: frame.get("state") == "connected")
     proof = {}
-
-    async def stock_input(kind):
-        name = f"native-guest-{kind}-input-fixture"
-        event = f"native_guest_{kind}_input"
-        requested = await submit(guest_run, name)
-        assert requested["ok"], requested
-        sequence = requested[f"native_guest_{kind}_fixture"]["sequence"]
-        async with asyncio.timeout(12):
-            while True:
-                for entry in await resident_events(guest_run, guest_frame):
-                    if entry.get("sequence") == sequence and entry["event"] in (event, event + "_rejected"):
-                        assert entry["event"] == event, entry
-                        return entry["native_guest_weapon"]
-                await asyncio.sleep(.1)
 
     for profile in LOKI_RECEIVERS:
         seeded = await host.bridge.command("fixture-stock-take-ammo-seed", pawn, profile.kind)
@@ -104,44 +142,75 @@ async def verify_guest_loki(host, guest, pawn):
         assert moved["ok"], moved
         slot = moved[native_inventory.STORE_KEY]["slot"]
 
-        async def selected(verb):
-            result = await guest.bridge.command("fixture-loki-guest", guid, verb)
-            return result["ack"]["message"]
-
-        async def await_magazine(expected):
-            async with asyncio.timeout(12):
-                while await selected("read") != expected:
-                    await asyncio.sleep(.15)
-
-        async with asyncio.timeout(12):
-            while True:
-                result = await guest.bridge.command("fixture-stock-take-ammo-loadout", str(slot), guid, "read")
-                if result["ack"]["message"] != "waiting":
-                    break
-                await asyncio.sleep(.15)
+        await wait_loki_slot(guest, slot, guid)
         await guest.bridge.command("fixture-stock-take-ammo-loadout", str(slot), guid, "equip")
-        await await_magazine("1,0,primary")
-        await wait_resident_status(host_run, lambda frame:
-            frame.get("game", {}).get("native_guest_equipped_weapons", {}).get(pawn, {}).get("guid") == guid)
-        assert await selected("toggle") == "1,0,loki"
+        await wait_loki_guest(guest, guid, "1,0,primary")
+        await wait_loki_host(host, pawn, guid)
+        toggle = "semi-and-toggle" if profile.kind == "hcr-loki" else "toggle"
+        assert await loki_guest_read(guest, guid, toggle) == "1,0,loki"
+        if toggle == "semi-and-toggle":
+            await wait_loki_host(host, pawn, guid, modes=("semi", "loki-underbarrel"))
         seeded = await host.bridge.command("fixture-loki-reserve", pawn)
         assert seeded["ack"]["message"] == "seeded"
-        reload = await stock_input("reload")
+        reload = await stock_input(guest_run, guest_frame, "reload")
         assert (reload["guid"], reload["status"], reload["before"], reload["after"]) == (guid, "underbarrel_equipped", 0, 1), reload
-        await await_magazine("1,1,loki")
-        shot = await stock_input("primary")
+        await wait_loki_guest(guest, guid, "1,1,loki")
+        shot = await stock_input(guest_run, guest_frame, "primary")
         assert (shot["guid"], shot["status"], shot["before"], shot["after"], shot["projectiles"]) == (
             guid, "underbarrel_equipped", 1, 0, 9,
         ), shot
-        await await_magazine("1,0,loki")
-        assert await selected("toggle") == "1,0,primary"
-        primary = await stock_input("primary")
+        await wait_loki_guest(guest, guid, "1,0,loki")
+        assert await loki_guest_read(guest, guid, "toggle") == "1,0,primary"
+        primary = await stock_input(guest_run, guest_frame, "primary")
         assert (primary["guid"], primary["status"], primary["before"], primary["after"], primary["projectiles"]) == (
             guid, "equipped", 1, 0, profile.magazine.ammo.projectile_count,
         ), primary
-        await await_magazine("0,0,primary")
+        await wait_loki_guest(guest, guid, "0,0,primary")
         proof[profile.kind] = {"reload": reload, "underbarrel": shot, "primary": primary}
+
+    # Leave different, nonzero round types in the two magazines of the same AR-08.
+    seeded = await host.bridge.command("fixture-loki-reserve", pawn, "ar-primary")
+    assert seeded["ack"]["message"] == "seeded"
+    primary = await stock_input(guest_run, guest_frame, "reload")
+    assert (primary["guid"], primary["status"], primary["before"], primary["after"]) == (guid, "equipped", 0, 1), primary
+    await wait_loki_guest(guest, guid, "1,0,primary")
+    assert await loki_guest_read(guest, guid, "toggle") == "1,0,loki"
+    seeded = await host.bridge.command("fixture-loki-reserve", pawn, "slug")
+    assert seeded["ack"]["message"] == "seeded"
+    slug = await stock_input(guest_run, guest_frame, "reload")
+    assert (slug["guid"], slug["after"], slug["ammo_class"]) == (guid, 1, TWELVE_GAUGE_SLUGS.item_path), slug
+    await wait_loki_guest(guest, guid, "1,1,loki")
+    assert await loki_guest_read(guest, guid, "ammo") == TWELVE_GAUGE_SLUGS.item_path
+    await wait_loki_host(host, pawn, guid, loaded=True)
 
     assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_inventory["native_inventory"]
     assert campaign_save_hashes(host.campaign) == checkpoint
-    return {"guest_loki": proof}
+    return {"guest_loki": proof, "loki_saved_load": {"guid": guid, "slot": slot, "pawn": pawn, "slug": slug}}
+
+
+async def verify_guest_loki_reopened(host, guest, pawn, saved):
+    assert pawn != saved["pawn"]
+    checkpoint = campaign_save_hashes(host.campaign)
+    guest_run = guest.client / "run"
+    guest_frame = await wait_resident_status(guest_run, lambda frame: frame.get("state") == "connected")
+    slot, guid = str(saved["slot"]), saved["guid"]
+    readback = await wait_loki_slot(guest, slot, guid)
+    assert readback in ("1,stored", "1,1"), readback
+    if readback == "1,stored":
+        await guest.bridge.command("fixture-stock-take-ammo-loadout", slot, guid, "equip")
+    await wait_loki_host(host, pawn, guid, loaded=True)
+    await wait_loki_guest(guest, guid, "1,1,loki")
+    assert await loki_guest_read(guest, guid, "ammo") == TWELVE_GAUGE_SLUGS.item_path
+    fired = await stock_input(guest_run, guest_frame, "primary")
+    assert (fired["guid"], fired["before"], fired["after"], fired["projectiles"], fired["ammo_class"]) == (
+        guid, 1, 0, 1, TWELVE_GAUGE_SLUGS.item_path,
+    ), fired
+    await wait_loki_guest(guest, guid, "1,0,loki")
+    assert campaign_save_hashes(host.campaign) == checkpoint
+    return {"loki_reopened": {"guid": guid, "pawn": pawn, "slug": fired}}
+
+
+async def verify_guest_loki_reconnected(host, guest, saved):
+    await wait_loki_host(host, saved["pawn"], saved["guid"], loaded=True)
+    await wait_loki_guest(guest, saved["guid"], "1,1,loki")
+    assert await loki_guest_read(guest, saved["guid"], "ammo") == TWELVE_GAUGE_SLUGS.item_path

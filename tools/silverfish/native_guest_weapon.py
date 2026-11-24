@@ -15,6 +15,7 @@ SHOT_ACTOR_PATH = re.compile(r"/Game/Classes/Maps/[A-Za-z0-9_/.]+:PersistentLeve
 SELECT_EQUIPMENT = "native-guest-weapon-select"
 SET_FIRE_MODE = "native-guest-weapon-mode-store"
 FIRE_MODES = ("auto", "semi")
+BARREL_MODES = ("loki-primary", "loki-underbarrel")
 READBACK_STATES = {"backpack", "equipped", "stored_equipment"}
 CAMERA_READBACK_STATES = {"camera_backpack", "camera_stored_equipment", "camera_equipped"}
 CAMERA_PATH = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
@@ -150,7 +151,8 @@ async def service_equipment_selection(client, active: bool) -> None:
 
 async def store_fire_mode(host, bridge, character: str, target: str | None) -> dict:
     fields = target.split("@") if isinstance(target, str) else ()
-    if len(fields) != 3 or fields[0] != host.zone_epoch or not GUID.fullmatch(fields[1]) or fields[2] not in FIRE_MODES:
+    if (len(fields) != 3 or fields[0] != host.zone_epoch or not GUID.fullmatch(fields[1])
+            or fields[2] not in (*FIRE_MODES, *BARREL_MODES)):
         raise party.RuleError("native_guest_fire_mode_expired")
     _, guid, mode = fields
     area = host.last_game.get("map")

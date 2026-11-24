@@ -5608,7 +5608,10 @@ class Client:
                     kind in native_guest_weapon.LOKI_KINDS and type(shells) is int and 0 <= shells <= 4
                     and isinstance(shell, str) and shell in native_guest_weapon.LOKI_AMMO
                 ) else None
-                magazine = self.host_session, self.zone_epoch, scope, rounds, ammo, underbarrel
+                barrel = equipment.get("barrel_mode") if underbarrel else None
+                if barrel not in native_guest_weapon.BARREL_MODES:
+                    barrel = None
+                magazine = self.host_session, self.zone_epoch, scope, rounds, ammo, underbarrel, barrel
                 attempt = magazine, self.gameplay_seen
                 if self.primary_magazine != magazine and self.primary_magazine_attempt != attempt:
                     self.primary_magazine_attempt = attempt
@@ -5616,6 +5619,8 @@ class Client:
                         payload = (str(rounds),)
                         if underbarrel:
                             payload += (ammo or "-", str(underbarrel[0]), underbarrel[1])
+                            if barrel:
+                                payload += (barrel,)
                         elif ammo:
                             payload += (ammo,)
                         self.last_game = await self.bridge.command("native-guest-weapon-magazine", *scope, *payload, timeout=2)

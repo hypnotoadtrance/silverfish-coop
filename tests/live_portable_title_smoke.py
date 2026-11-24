@@ -52,7 +52,7 @@ from portable_guest_world_start import GuestWorldStartProof, resident_events, wa
 from portable_acid_pool import acid_pool_overlay, verify_acid_pool
 from portable_alternate_ammo import verify_alternate_ammo
 from portable_light_ar import verify_fire_mode_reopen, verify_stock_light_ar
-from portable_loki_control import verify_guest_loki, verify_stock_loki_control
+from portable_loki_control import verify_guest_loki, verify_guest_loki_reconnected, verify_guest_loki_reopened, verify_stock_loki_control
 from portable_lingering_teleport import lingering_overlay, verify_stock_lingering_teleport
 from portable_personal_consumable import verify_personal_consumable_reconnect, verify_stock_personal_consumable
 from portable_wipe_chooser import verify_stock_wipe_chooser
@@ -5756,6 +5756,17 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     else:
                         finish_check("stock_storm_ambience_reconnect", started)
 
+                async def check_loki_reconnect(guest, _started):
+                    if (saved := gameplay.get("loki_saved_load")) is None:
+                        return
+                    started = time.perf_counter()
+                    try:
+                        await verify_guest_loki_reconnected(host, guest, saved)
+                    except Exception as error:
+                        finish_check("stock_loki_reconnect", started, error)
+                    else:
+                        finish_check("stock_loki_reconnect", started)
+
                 exit_actions = ("prompt", "confirm") if campaign in {
                     "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_shot_view", "tutorial_dock_buckshot",
                     "tutorial_dock_melee", "tutorial_dock_late_join",
@@ -5769,6 +5780,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     after_reconnect = check_personal_reconnect
                 if campaign == "storm":
                     after_reconnect = check_storm_reconnect
+                if campaign == "observatory" and stock_loki_guest:
+                    after_reconnect = check_loki_reconnect
 
                 async def unexpected_process_exit():
                     while True:
@@ -5806,6 +5819,16 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                         "title-host-settings-" + uuid.uuid4().hex[:8]))
                 session = await run_resident_campaign(campaign, checks, host)
                 proof["sessions"].append(dict(session, resident_campaign=campaign))
+                if saved := session.get("loki_saved_load"):
+                    async def reopen_loki(host, guest, pawn):
+                        return await verify_guest_loki_reopened(host, guest, pawn, saved)
+
+                    reopened = await start_pair(host, second, "Gameplay scout", load_existing=True,
+                                                resume_character=session["character_id"], on_join=reopen_loki,
+                                                wait_status=wait_resident_status)
+                    assert reopened["campaign_id"] == session["campaign_id"]
+                    assert reopened["revision"] > session["revision"]
+                    proof["sessions"].append(dict(reopened, resident_campaign="loki_reopened"))
             assert len({row["campaign_id"] for row in proof["sessions"]}) == len(resident_campaigns) + int(stock_unequip)
             assert all(row["host_pid"] == first.bridge.process.pid and row["guest_pid"] == second.bridge.process.pid
                        for row in proof["sessions"])
