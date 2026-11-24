@@ -8,6 +8,8 @@ local profiles = {
     LightSwitch_BP_C = {"Switch_Mesh", "SwitchPanel"},
     LightSwitch_02_BP_C = {"Switch_Mesh", "SwitchPanel"},
 }
+local radio_path = "/Game/Assets/StaticMeshes/Mesh_Props/Prop_Radio01.Prop_Radio01_C"
+local radio_class = "BlueprintGeneratedClass " .. radio_path
 local bulb_profiles = {
     ["/Game/Classes/DynamicLights/DynamicLight_Master_BP.DynamicLight_Master_BP_C"] = "PointLight",
     ["/Game/Classes/DynamicLights/Dynamic_SpotLight_Master_BP.Dynamic_SpotLight_Master_BP_C"] = "SpotLight",
@@ -26,16 +28,25 @@ end
 
 local function parts(actor, scope)
     if not qualified(actor, scope) or type(actor.Powered) ~= "boolean" then return end
-    local kind = actor:GetClass():GetFName():ToString()
+    local class = actor:GetClass()
+    local box = actor.Box
+    if not valid(box) or not same(box:GetOwner(), actor) then return end
+    if class:GetFullName() == radio_class then
+        if valid(actor.MediaPlayer) and valid(actor.MediaSound) and same(actor.MediaSound:GetOwner(), actor) then
+            return {actor = actor, box = box, radio = true, lights = {}}
+        end
+        return
+    end
+    local kind = class:GetFName():ToString()
     local profile = profiles[kind]
     local package = profile and kind:sub(1, -3)
-    if not package or actor:GetClass():GetFullName() ~= "BlueprintGeneratedClass " .. root .. package .. "." .. kind then return end
-    local lever, panel, box = actor[profile[1]], actor[profile[2]], actor.Box
-    if not valid(lever) or not valid(panel) or not valid(box) then return end
-    for _, component in ipairs({lever, panel, box}) do
+    if not package or class:GetFullName() ~= "BlueprintGeneratedClass " .. root .. package .. "." .. kind then return end
+    local lever, panel = actor[profile[1]], actor[profile[2]]
+    if not valid(lever) or not valid(panel) then return end
+    for _, component in ipairs({lever, panel}) do
         if not same(component:GetOwner(), actor) then return end
     end
-    return lever, panel, box
+    return {actor = actor, lever = lever, panel = panel, box = box}
 end
 
 local function light_links(actor, scope)
@@ -74,17 +85,17 @@ local function census(state, phase)
     local statics = StaticFindObject(statics_path)
     if not valid(statics) then return {} end
     world, entries = state.world, {}
-    for _, package in ipairs({"CircutBox_BP", "LightSwitch_BP"}) do
-        local class = StaticFindObject(root .. package .. "." .. package .. "_C")
+    for _, path in ipairs({root .. "CircutBox_BP.CircutBox_BP_C", root .. "LightSwitch_BP.LightSwitch_BP_C", radio_path}) do
+        local class = StaticFindObject(path)
         if valid(class) then
             local output = {}
             statics:GetAllActorsOfClass(world, class, output)
             for _, actor in ipairs(output.OutActors or output) do
                 if type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
-                local lever, panel, box = parts(actor, world)
-                if lever and (phase ~= "hosting" or actor:HasAuthority()) then
-                    local name = actor:GetFullName()
-                    entries[name] = {actor = actor, lever = lever, panel = panel, box = box, lights = light_links(actor, world)}
+                local entry = parts(actor, world)
+                if entry and (phase ~= "hosting" or actor:HasAuthority()) then
+                    if not entry.radio then entry.lights = light_links(actor, world) end
+                    entries[actor:GetFullName()] = entry
                 end
             end
         end
@@ -95,7 +106,10 @@ end
 function switches.rows(state, phase, row)
     local rows = {}
     for name, entry in pairs(census(state, phase)) do
-        if valid(entry.actor) and not entry.actor:IsActorBeingDestroyed() and valid(entry.lever) then
+        local actor = entry.actor
+        if entry.radio and valid(actor) and not actor:IsActorBeingDestroyed() and valid(actor.MediaSound) then
+            rows[#rows + 1] = row("native-stock-switch", state.map, name, bit(actor.Powered), 0, 0, 0, "-", "-")
+        elseif valid(actor) and not actor:IsActorBeingDestroyed() and valid(entry.lever) then
             local angles = entry.lever.RelativeRotation
             local panel = entry.panel:GetMaterial(0)
             local lights = {}
@@ -118,12 +132,18 @@ function switches.focused_target(pawn, pressed_component)
         or #pressed_component == 0 or #pressed_component > 512 then return end
     local box = StaticFindObject(pressed_component)
     local actor = valid(box) and box:GetOwner()
-    local lever, _, expected = parts(actor, pawn:GetWorld())
-    if lever and same(box, expected) then return "stock-switch:" .. actor:GetFullName() end
+    local entry = parts(actor, pawn:GetWorld())
+    if entry and same(box, entry.box) then return "stock-switch:" .. actor:GetFullName() end
 end
 
 local function project(entry, powered, angles, lights)
     local actor, lever = entry.actor, entry.lever
+    if entry.radio then
+        if not valid(actor.MediaPlayer) or not valid(actor.MediaSound) then error("stock_switch_unavailable", 0) end
+        if actor.Powered ~= powered then actor:Toggle_Power(powered) end
+        if actor.Powered ~= powered then error("stock_switch_toggle_unverified", 0) end
+        return
+    end
     actor.Powered = powered
     actor:Toggle_Visuals()
     lever:K2_SetRelativeRotation(angles, false, {}, true)

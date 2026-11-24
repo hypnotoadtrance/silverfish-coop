@@ -94,6 +94,122 @@ local function arm_trace(world, driver, pawn, lantern, root, role)
     return "armed"
 end
 
+local impact_watch, impact_hooked
+local prop_hit = "/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C:" ..
+    "BndEvt__PhysicsProp_Master_BP_PropMesh_K2Node_ComponentBoundEvent_0_ComponentHitSignature__DelegateSignature"
+
+local function other_player(world, pawn)
+    local other
+    for _, player in ipairs(FindAllOf("Player_FP_C") or {}) do
+        if valid(player) and same(player:GetWorld(), world) and not same(player, pawn)
+            and not player:IsActorBeingDestroyed() and player.Dead == false then
+            assert(not other, "expected exactly one other player")
+            other = player
+        end
+    end
+    assert(valid(other), "the other stock player could not be found")
+    return other
+end
+
+local function position_text(point)
+    return ("%.3f %.3f %.3f"):format(point.X, point.Y, point.Z)
+end
+
+local function impact_lane(pawn, guest, lantern)
+    local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    local start = pawn:K2_GetActorLocation()
+    local half = pawn.CapsuleComponent:GetScaledCapsuleHalfHeight()
+    local radius = pawn.CapsuleComponent:GetScaledCapsuleRadius()
+    local ignored = {pawn, guest, lantern}
+    for _, heading in ipairs({0, 90, 180, 270, 45, 135, 225, 315}) do
+        local angle = math.rad(heading)
+        local x, y = start.X + math.cos(angle) * 315, start.Y + math.sin(angle) * 315
+        local hit = {}
+        if trace:LineTraceSingle(pawn, {X=x,Y=y,Z=start.Z+100}, {X=x,Y=y,Z=start.Z-half-85}, 0,
+            true, ignored, 0, hit, true, color, color, 0) then
+            hit = hit.OutHit or hit
+            local finish = {X=x,Y=y,Z=hit.ImpactPoint.Z+half+3}
+            if hit.ImpactNormal.Z > .9 and math.abs(finish.Z-start.Z) < 15
+                and not trace:CapsuleTraceSingle(pawn, start, finish, radius, half-8, 0, false, ignored, 0, {},
+                    true, color, color, 0)
+                and guest:K2_TeleportTo(finish, {Pitch=0,Yaw=heading+180,Roll=0}) then
+                guest:ForceNetUpdate()
+                return position_text(guest:K2_GetActorLocation())
+            end
+        end
+    end
+    error("expected a clear flat stock prop impact lane")
+end
+
+local function impact_probe(action, world, pawn, lantern, root)
+    local other = other_player(world, pawn)
+    local hosting = lane == "first"
+    if action == "impactlane" and hosting then return impact_lane(pawn, other, lantern) end
+    if (action == "impactplacehost" or action == "impactplaceguest") and hosting then
+        local source = action == "impactplacehost" and pawn or other
+        local target = same(source, pawn) and other or pawn
+        assert(not valid(source.HeldObject), "the impact thrower was not empty-handed")
+        local start, finish = source:K2_GetActorLocation(), target:K2_GetActorLocation()
+        local dx, dy = finish.X - start.X, finish.Y - start.Y
+        local distance = math.sqrt(dx*dx + dy*dy)
+        assert(distance > 300 and distance < 330, "the throwers left the test lane")
+        local point = {X = start.X + 110*dx/distance, Y = start.Y + 110*dy/distance, Z = start.Z - 25}
+        assert(lantern:K2_SetActorLocation(point, false, {}, true), "the lantern could not enter the test lane")
+        local bone = FName("None", EFindName.FNAME_Find)
+        root:SetPhysicsLinearVelocity({X=0,Y=0,Z=0}, false, bone)
+        root:SetPhysicsAngularVelocityInDegrees({X=0,Y=0,Z=0}, false, bone)
+        lantern:ForceNetUpdate()
+        return position_text(point)
+    end
+    if action == "impactposition" then return position_text(root:K2_GetComponentLocation()) end
+    if action == "impactgrab" and hosting then return host_grab(pawn, lantern, root) end
+    if (action == "impactaim" or action == "impactthrow" and hosting) and holds(pawn, lantern, root) then
+        local eye, target = pawn.Camera:K2_GetComponentLocation(), other:K2_GetActorLocation()
+        local x, y, z = target.X-eye.X, target.Y-eye.Y, target.Z+12-eye.Z
+        local rotation = {Pitch=math.deg(math.atan(z, math.sqrt(x*x+y*y))),Yaw=math.deg(math.atan(y,x)),Roll=0}
+        pawn.Controller:SetControlRotation(rotation)
+        pawn.Camera:K2_SetWorldRotation(rotation, false, {}, true)
+        if action == "impactaim" then return "aimed" end
+        local launch = root:K2_GetComponentLocation()
+        local aim = pawn.Camera:GetForwardVector()
+        pawn:Grab_Release_Object(true, false, false)
+        assert(not holds(pawn, lantern, root), "stock throw did not release the prop")
+        return table.concat({position_text(launch), position_text(aim),
+            position_text(root:GetPhysicsLinearVelocity(FName("None", EFindName.FNAME_Find)))}, ";")
+    end
+    if action == "impactarmguest" or action == "impactarmhost" then
+        local target = (action == "impactarmguest") == hosting and other or pawn
+        local body = target.CapsuleComponent
+        impact_watch = {lantern=lantern, target=target, hp=valid(target.Save) and target.Save.PlayerHealth or "-", hits={},
+            position=body:K2_GetComponentLocation(),
+            response=root:GetCollisionResponseToChannel(body:GetCollisionObjectType()),
+            target_response=body:GetCollisionResponseToChannel(root:GetCollisionObjectType())}
+        if not impact_hooked then
+            assert(valid(StaticFindObject(prop_hit)), "stock prop impact event unavailable")
+            RegisterHook(prop_hit, function(ctx, _, hit_actor, _, impulse)
+                local sample = impact_watch
+                if not sample or not same(ctx:get(), sample.lantern) or not same(hit_actor:get(), sample.target) then return end
+                local value = impulse:get()
+                sample.hits[#sample.hits+1] = math.sqrt(value.X^2 + value.Y^2 + value.Z^2)
+            end)
+            impact_hooked = true
+        end
+        return "armed"
+    end
+    if action == "impactread" then
+        local sample = impact_watch
+        assert(sample and same(sample.lantern, lantern), "expected an armed prop impact observation")
+        impact_watch = nil
+        local point = root:K2_GetComponentLocation()
+        local body = sample.target.CapsuleComponent
+        local health = valid(sample.target.Save) and sample.target.Save.PlayerHealth or "-"
+        return table.concat({sample.hp, health, position_text(sample.position),
+            position_text(point), sample.response, sample.target_response,
+            root:GetCollisionResponseToChannel(body:GetCollisionObjectType()), table.concat(sample.hits, " ")}, ";")
+    end
+    error("unknown stock prop impact probe action")
+end
+
 local function observer_probe(action, world, driver, pawn, lantern, root)
     local hosting = lane == "first"
     local role = hosting and 3 or 1
@@ -103,6 +219,12 @@ local function observer_probe(action, world, driver, pawn, lantern, root)
         and pawn:IsLocallyControlled() and pawn:HasAuthority() == hosting and lantern:GetLocalRole() == role
         and valid(controller) and controller:IsLocalController() and same(controller.Pawn, pawn),
         "unqualified stock lantern host or passive observer")
+    if action == "hostignite" and hosting then
+        assert(not holds(pawn, lantern, root))
+        lantern:SetOnFire(5, 0.2, pawn)
+        assert(lantern.Lit == true, "the stock fire function did not light the lantern")
+        return "lit"
+    end
     if action == "hostgrab" and hosting then
         place_lantern(pawn, lantern)
         return host_grab(pawn, lantern, root)
@@ -152,6 +274,10 @@ local function verify(action, pawn_name)
     local pawn = pawn_path and StaticFindObject(pawn_path)
     assert(valid(pawn) and pawn:GetFullName() == pawn_name and same(pawn:GetWorld(), world) and pawn.Dead == false,
         "unqualified Observatory pawn")
+    if action:match("^impact") then
+        assert(pawn:IsLocallyControlled() and pawn:HasAuthority() == (lane == "first"), "wrong impact seat")
+        return impact_probe(action, world, pawn, lantern, root)
+    end
     if action:match("^host") or action:match("^trace") then
         return observer_probe(action, world, driver, pawn, lantern, root)
     end
