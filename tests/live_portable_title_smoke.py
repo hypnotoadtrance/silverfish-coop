@@ -4542,7 +4542,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     row = {"passed": error is None, "seconds": round(time.perf_counter() - started, 3)}
                     if error is not None:
                         row.update(error=str(error) or type(error).__name__, traceback=traceback.format_exc())
-                        print(f"{name} failed: {row['error']}", flush=True)
+                        message = row["error"].splitlines()[0]
+                        if len(message) > 1200:
+                            message = message[:1200] + "… Full details are in portable-title-verification.json."
+                        print(f"{name} failed: {message}", flush=True)
                     results[name] = row
 
                 async def run_checks(host, guest, pawn):
