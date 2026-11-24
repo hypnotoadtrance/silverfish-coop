@@ -5007,7 +5007,8 @@ if __name__ == "__main__":
             args.guest_world_start, args.guest_world_start_travel, args.guest_ui_memory, args.compact_crate_status,
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
-    resident_check_options = {"stock_food", "stock_personal_consumable", "stock_wipe_chooser", "stock_campfire", "stock_npc_override",
+    resident_check_options = {"stock_unequip", "stock_food", "stock_personal_consumable", "stock_wipe_chooser",
+                              "stock_campfire", "stock_npc_override",
                               "stock_board_offers", "resident_weapon_cues", "resident_held_queue", "resident_stale_quick_slot",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "tutorial_dock_pursuit",
                               "tutorial_dock_held_mask", "tutorial_dock_gait",
