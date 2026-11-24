@@ -212,14 +212,17 @@ async def verify_dock_pursuit(host, guest, frame, command):
 
         assert moved, ("The host never observed the guest walk during pursuit", history)
         assert pursued_while_moving, ("The stock worker did not stay on the moving guest during the fight", history)
+        launches = await command(host, "dock-pursuit-launches")
         assert len(history) >= 3 and not current["alive"] and current["credited"], (
-            "The guest did not kill the original worker after sustained fire under pressure", history)
+            "The guest did not kill the original worker after sustained fire under pressure", history,
+            {"muzzle_target_camera_angles_at_launch": launches})
 
         async def shared_death():
             states = await asyncio.gather(*(command(seat, "dock-natural-state") for seat in (host, guest)))
             return states if all(state.startswith("false;true;1;") for state in states) else None
 
         death = await wait_for(shared_death, "The exact worker death/ragdoll did not reach both seats", 10)
-        return {"baseline": baseline, "retaliation": retaliation, "rounds": history, "both_peers_dead_and_ragdolled": death}
+        return {"baseline": baseline, "retaliation": retaliation, "rounds": history,
+                "muzzle_target_camera_angles_at_launch": launches, "both_peers_dead_and_ragdolled": death}
     finally:
         assert await command(host, "dock-pursuit-stop") == "stopped"
