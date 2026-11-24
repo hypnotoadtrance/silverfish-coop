@@ -179,7 +179,7 @@ end
 
 function fixed.aim_guest_fixture(path, state, phase)
     local entry = aim_fixture and resolve(path, state)
-    return entry and entry.standing and aim_fixture.aim_fixed_guest(state, phase, entry.mesh)
+    return entry and (entry.standing or entry.cue == "powerbox") and aim_fixture.aim_fixed_guest(state, phase, entry.mesh)
 end
 
 function fixed.command(args, state, phase)

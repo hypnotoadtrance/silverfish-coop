@@ -205,13 +205,13 @@ local function seed_pistol(state)
     return ("%08X%08X%08X%08X"):format(id.A & 0xffffffff, id.B & 0xffffffff, id.C & 0xffffffff, id.D & 0xffffffff)
 end
 
-local function select_pistol(pawn)
-    if exact(pawn.EquipedItem, pistol_class) then return "equipped" end
+local function select_pistol(pawn, slot)
+    if exact(pawn.EquipedItem, pistol_class) and (not slot or pawn.Save.PlayerEquipIndex == slot) then return "equipped" end
     local slots = pawn.Save.PlayerEquipment
     for index = 1, slots:GetArrayNum() do
-        if same(slots[index][item_class], StaticFindObject(pistol_class)) then
+        if (not slot or slot == index - 1) and same(slots[index][item_class], StaticFindObject(pistol_class)) then
             pawn:Equip_NextItem(index - 1, false)
-            return exact(pawn.EquipedItem, pistol_class) and "equipped" or "waiting"
+            return exact(pawn.EquipedItem, pistol_class) and pawn.Save.PlayerEquipIndex == index - 1 and "equipped" or "waiting"
         end
     end
     return "waiting"
@@ -258,14 +258,18 @@ local function sync(state, phase)
     local request = file:read("*l")
     file:close()
     if not request or request == last then return end
-    local operation, token
+    local operation, token, slot
     if portable then token, operation = request:match("^([0-9a-f]+)\t(%a+)$")
     else operation, token = request:match("^(%a+)|([0-9a-f]+)$") end
+    if portable and not token then
+        token, slot = request:match("^([0-9a-f]+)\tselectpistol\t([0-7])$")
+        if token then operation, slot = "selectpistol", tonumber(slot) end
+    end
     if not token or #token ~= 32 then return end
     local ok, result = pcall(function()
         if operation == "journal" then return journal(state) end
         if portable and phase == "connected" and operation == "selectpistol" then
-            return select_pistol(state.local_pawn.pawn)
+            return select_pistol(state.local_pawn.pawn, slot)
         end
         if portable and phase == "connected" and operation == "aimjammer" then return aim_jammer(state) end
         assert(state.map == area, "Simmi's stock board is only available in Observatory")

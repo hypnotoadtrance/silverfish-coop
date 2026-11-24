@@ -6,7 +6,9 @@ local trace_path = "/Script/Engine.Default__KismetSystemLibrary"
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1" and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local color = {R = 0, G = 0, B = 0, A = 0}
 -- The stock blast can reach 1,200 cm. Leave room for the pawn capsule and the tank's Arrow offset.
-local fixed_ranges = {1400, 1550, 1750, 1950, 2250}
+local tank_ranges = {1400, 1550, 1750, 1950, 2250}
+local power_box_class = "BlueprintGeneratedClass /Game/Assets/StaticMeshes/Mesh_Props/Prop_Explosive_PowerBox.Prop_Explosive_PowerBox_C"
+local power_box_ranges = {1050, 1200, 1400, 1550, 1750, 1950, 2250}
 local last
 
 local function valid(object) return object ~= nil and object ~= false and object:IsValid() end
@@ -68,7 +70,11 @@ end
 
 -- Match the stock weapon capture: complex visibility from the camera, then
 -- stock projectile collision from the muzzle through the camera's impact.
-local function fixed_contact(pawn, weapon, camera, mesh, center)
+local function fixed_ranges(actor)
+    return actor:GetClass():GetFullName() == power_box_class and power_box_ranges or tank_ranges
+end
+
+local function fixed_contact(pawn, weapon, camera, mesh, center, ranges)
     local library = StaticFindObject(trace_path)
     local muzzle_component = weapon.Arrow_Muzzle
     if not valid(library) or not component(muzzle_component, weapon, "ArrowComponent") then return end
@@ -78,7 +84,7 @@ local function fixed_contact(pawn, weapon, camera, mesh, center)
     for _, height in ipairs({0, 8, -8, 16, -16, 25, 45, 65, -35, -55, 90}) do
         local target = {X = center.X, Y = center.Y, Z = center.Z + height}
         local view, range = look(eye, target)
-        if range >= fixed_ranges[1] - 40 and range <= 2400 then
+        if range >= ranges[1] - 40 and range <= 2400 then
             local reach = (range + 100) / range
             local finish = {X = eye.X + (target.X - eye.X) * reach, Y = eye.Y + (target.Y - eye.Y) * reach,
                 Z = eye.Z + (target.Z - eye.Z) * reach}
@@ -116,7 +122,7 @@ function fixture.aim_fixed_guest(state, phase, mesh)
     local weapon, camera = pawn.EquipedItem, pawn.Camera
     if not valid(weapon) or weapon:GetClass():GetFullName() ~= "BlueprintGeneratedClass " .. firearms.paths["light-pistol"]
         or not component(camera, pawn, "CameraComponent") then return false end
-    local view = fixed_contact(pawn, weapon, camera, mesh, mesh_center(mesh))
+    local view = fixed_contact(pawn, weapon, camera, mesh, mesh_center(mesh), fixed_ranges(mesh:GetOwner()))
     if not view then return false end
     state.controller:SetControlRotation(view)
     camera:K2_SetWorldRotation(view, false, {}, true)
@@ -136,9 +142,9 @@ local function floor_at(context, center, x, y, radius, height)
 end
 
 local function align(context, center)
-    if context.fixed then
+    if context.fixed_ranges then
         local view, distance, aim = fixed_contact(context.pawn, context.weapon, context.camera,
-            context.target_mesh, center)
+            context.target_mesh, center, context.fixed_ranges)
         if not view then return end
         context.controller:SetControlRotation(view)
         context.camera:K2_SetWorldRotation(view, false, {}, true)
@@ -190,7 +196,7 @@ function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule
 
     local context = equipped(state, phase, name, guid, tag)
     context.trace, context.target_capsule, context.target_mesh = StaticFindObject(trace_path), target_capsule, target_mesh
-    context.fixed = fixed
+    context.fixed_ranges = fixed and fixed_ranges(actor)
     context.ignored = {context.pawn, context.weapon, actor}
     local rooftop = tag == "native-crossroads-jammer"
     context.floor_depth, context.aim_range, context.aim_pitch = (rooftop or fixed) and 1800 or 330,
@@ -229,7 +235,7 @@ function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule
         local current_distance, exact_hit = align(context, center)
         if exact_hit then return current_distance, exact_hit end
         local bearing = math.atan(original.point.Y - center.Y, original.point.X - center.X)
-        local ranges = fixed and fixed_ranges
+        local ranges = context.fixed_ranges
             or rooftop and {175, 245, 320, 410, 540, 670, 800, 1000, 1220} or {175, 245, 320, 410}
         for _, range in ipairs(ranges) do
             for _, offset in ipairs({0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180}) do

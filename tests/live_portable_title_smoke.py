@@ -3497,7 +3497,14 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
     from tools.silverfish.native_flood_jammer import OBSERVATORY_BOUNTY_BOARD
     from tools.silverfish.native_quest import AUTHORED_BOARD_ACTIONS
     from tools.silverfish.native_wire_board import catalog_specialists
-    from tools.silverfish.travel import CROSSROADS, FOREST, OBSERVATORY
+    from tools.silverfish.travel import CITY, CROSSROADS, DOCKS, FOREST, OBSERVATORY, RAIL_YARD
+
+    dry_dock = "/Game/Classes/Maps/Maps_Dungeons/DryDock_P"
+    objectives = (
+        ("Sab_Fuel_01", "Kill_ForestTank", 6, 1600, (OBSERVATORY, CROSSROADS, FOREST), "Prop_FuelTank_C_1", "fixedtank"),
+        ("Sab_Factory", "PB_Factory_Kill", 4, 1200, (OBSERVATORY, CROSSROADS, RAIL_YARD, CITY, DOCKS, dry_dock),
+         "Prop_Explosive_PowerBox_C_5", "powerbox"),
+    )
 
     async def command(seat, action, quest=None):
         request = f"{action}\t{quest}" if quest is not None else action
@@ -3533,11 +3540,17 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
     async def cross(source, destination):
         nonlocal pawn
         route, = (row for row in AUTHORED_ROUTES if (row.source, row.destination) == (source, destination))
-        assert route.kind == "overlap", route
         await wait_resident_status(host_run, lambda frame: frame["game"]["map"] == source
                                    and frame["game"].get("native_zone", {}).get("state") == "ready")
-        for participant, placement in ((pawn, "near"), ("local", "near"), ("local", "inside")):
-            await host.bridge.command("native-exit-position", participant, placement, route.entrance, route.actor)
+        if route.kind == "door":
+            for participant in (pawn, "local"):
+                await host.bridge.command("native-door-position", participant, "near", route.entrance)
+            opened = await host.bridge.command("native-door-probe", "local", route.entrance)
+            assert opened["native_door"]["decision"] in {"host_opening", "travel_requested"}, opened["native_door"]
+        else:
+            assert route.kind == "overlap", route
+            for participant, placement in ((pawn, "near"), ("local", "near"), ("local", "inside")):
+                await host.bridge.command("native-exit-position", participant, placement, route.entrance, route.actor)
         arrived = await wait_resident_status(host_run, lambda frame: frame["game"]["map"] == destination
             and not frame.get("awaiting_zone_guest") and frame["game"].get("native_guest_save", {}).get("state") == "bound",
             timeout=55)
@@ -3545,19 +3558,21 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
         await wait_resident_status(guest_run, lambda frame: frame.get("zone_epoch") == arrived["zone_epoch"]
                                    and frame.get("game", {}).get("map") == destination, timeout=35)
 
-    async def shoot_forest_tank():
+    async def shoot_objective(key, count, areas, actor, cue):
         async def weapon_setup(seat, verb):
             return await portable_probe_command(seat.bridge, "simmi-jobs", verb)
 
         guid = await weapon_setup(host, "seedpistol")
         stored = await submit(guest_run, native_inventory.STORE_EQUIPMENT, target=guid)
         assert stored["ok"] and stored[native_inventory.STORE_KEY]["guid"] == guid, stored
+        slot = stored[native_inventory.STORE_KEY]["slot"]
         async with asyncio.timeout(9):
-            while await weapon_setup(guest, "selectpistol") != "equipped":
+            while await weapon_setup(guest, f"selectpistol\t{slot}") != "equipped":
                 await asyncio.sleep(.15)
-        await cross(OBSERVATORY, CROSSROADS)
-        await cross(CROSSROADS, FOREST)
-        target = FOREST + ".Forest_01_P:PersistentLevel.Prop_FuelTank_C_1"
+        for source, destination in zip(areas, areas[1:]):
+            await cross(source, destination)
+        area = areas[-1]
+        target = f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel.{actor}"
         save_hashes = campaign_save_hashes(host.campaign)
 
         def prop(frame):
@@ -3571,18 +3586,19 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
             response = await host.bridge.command("native-fixed-explosive-flag-fixture", target)
             return response["ack"]["message"]
 
-        assert await flag() == "Kill_ForestTank|6"
+        assert await flag() == f"{key}|{count}"
         await wait_resident_status(host_run, lambda frame: prop(frame) and not prop(frame)["destroyed"])
         connected = await wait_resident_status(guest_run, lambda frame:
             prop(frame) and not prop(frame)["destroyed"]
             and frame.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
         local_pawn = connected["game"]["native_guest_primary_scope"]["pawn"]
-        blocked = connected["game"].get("native_canister_blocked", 0)
+        guard = "native_canister_blocked" if cue == "fixedtank" else "native_fixed_explosive_blocked"
+        blocked = connected["game"].get(guard, 0)
         await guest.bridge.command("native-fixed-explosive-guest-guard-fixture", target)
         guarded = await wait_resident_status(guest_run, lambda frame:
-            frame.get("game", {}).get("native_canister_blocked", 0) >= blocked + 2)
-        assert not prop(guarded)["destroyed"] and not prop(guarded)["burning"]
-        assert await flag() == "Kill_ForestTank|6"
+            frame.get("game", {}).get(guard, 0) >= blocked + 2)
+        assert not prop(guarded)["destroyed"] and not prop(guarded).get("burning")
+        assert await flag() == f"{key}|{count}"
         magazine = 7
         fired = []
         for _ in range(magazine):
@@ -3619,20 +3635,20 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
             except TimeoutError:
                 continue
         else:
-            raise AssertionError("The guest did not destroy the original forest tank")
+            raise AssertionError(f"The guest did not destroy {target}")
 
         witness = await wait_resident_status(guest_run, wreck)
         assert prop(witness)["mesh"] == prop(destroyed)["mesh"]
         assert destroyed["game"]["pawns"]["guest"]["health"] > 0
         cues = [r for r in await resident_events(guest_run, witness)
-                if r["event"] == "native_fixed_explosive_effect_played" and r.get("cue") == "fixedtank"]
-        assert len(cues) == 1 and cues[0]["map"] == FOREST, cues
-        assert await flag() == "Kill_ForestTank|7"
-        assert campaign_save_hashes(host.campaign) == save_hashes, "Destroying the tank wrote a save"
-        await cross(FOREST, CROSSROADS)
-        await cross(CROSSROADS, OBSERVATORY)
+                if r["event"] == "native_fixed_explosive_effect_played" and r.get("cue") == cue and r["map"] == area]
+        assert len(cues) == 1, cues
+        assert await flag() == f"{key}|{count + 1}"
+        assert campaign_save_hashes(host.campaign) == save_hashes, "Destroying the stock objective wrote a save"
+        for source, destination in zip(reversed(areas[1:]), reversed(areas[:-1])):
+            await cross(source, destination)
         await approach_board()
-        return {"actor": target, "guest_magazine": fired, "stock_counter": [6, 7],
+        return {"actor": target, "guest_magazine": fired, "stock_counter": [count, count + 1],
                 "host_mesh": prop(destroyed)["mesh"], "guest_mesh": prop(witness)["mesh"],
                 "denied_guest_local_callbacks": True, "no_save_on_destruction": True, "guest_blast_relay": cues[0]}
 
@@ -3663,7 +3679,7 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
     assert await command(host, "qualify-tracked") == "10"
     tracked_quests = []
     assert campaign_save_hashes(host.campaign) == checkpoint, "Accepting a stock board offer caused an early save"
-    for tracked, progress, cash in (("Sab_Fuel_01", 6, 1600), ("Sab_Factory", 5, 1200)):
+    for tracked, key, progress, cash, areas, actor, cue in objectives:
         checkpoint = campaign_save_hashes(host.campaign)
         offers = await board_catalog()
         assert tracked in offers["offers"] and tracked not in offers["turnins"], offers
@@ -3674,12 +3690,10 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
 
         assert await command(host, "track-progress", tracked) == str(progress)
         assert await command(host, "journal", tracked) == "1"
-        objective = {}
-        if tracked == "Sab_Fuel_01":
-            assert tracked not in (await board_catalog())["turnins"]
-            assert campaign_save_hashes(host.campaign) == checkpoint
-            objective = await shoot_forest_tank()
-            checkpoint = campaign_save_hashes(host.campaign)
+        assert tracked not in (await board_catalog())["turnins"]
+        assert campaign_save_hashes(host.campaign) == checkpoint
+        objective = await shoot_objective(key, progress, areas, actor, cue)
+        checkpoint = campaign_save_hashes(host.campaign)
         ready = await board_catalog()
         assert tracked in ready["turnins"], ready
         current = await wait_resident_status(host_run,
