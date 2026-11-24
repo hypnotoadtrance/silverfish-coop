@@ -23,7 +23,7 @@ from bootstrap import install_stage
 from tools.silverfish import (
     direct_ip, embedded_startup, native_finite_shop, native_guest_consumable, native_guest_drop, native_guest_melee,
     native_host_save, native_inventory, native_loose_pickup,
-    native_lantern, native_loot, native_prop_carry, native_stash, native_stock_switch, native_weapon_fire_view,
+    native_destructibles, native_lantern, native_loot, native_prop_carry, native_stash, native_stock_switch, native_weapon_fire_view,
     native_world_loot, runtime,
 )
 from tools.silverfish.authored_loot import GUARANTEED_CRATES
@@ -228,6 +228,18 @@ def warehouse_switch_overlay(game: Path):
         return script.replace(marker, marker + fixture, 1)
 
     return portable_script_overlay(game, "native_stock_switch.lua", add_switch_fixture)
+
+
+def warehouse_board_overlay(game: Path):
+    fixture = (Path(__file__).with_name("fixtures") / "portable_stock_destructible_probe.lua").read_text(encoding="utf-8")
+
+    def add_board_fixture(script):
+        marker = "function props.command(args, state, phase)\n"
+        if script.count(marker) != 1:
+            raise ValueError("The replica lacks the stock destructible command")
+        return script.replace(marker, marker + fixture, 1)
+
+    return portable_script_overlay(game, "native_destructibles.lua", add_board_fixture)
 
 
 def stash_memory_overlays(probes: ExitStack, game: Path, *, large: bool = False) -> dict:
@@ -1167,6 +1179,51 @@ async def verify_warehouse_switch(host: Seat, guest: Seat, pawn: str) -> dict:
     assert campaign_save_hashes(host.campaign) == checkpoint, "A switch caused an early checkpoint"
     return {"stock_warehouse_switch": {"actor": name, "initial": initial, "host_flip": host_flip,
                                         "guest_returned_to_initial": True, "checkpoint_unchanged": True}}
+
+
+async def verify_warehouse_board(host: Seat, guest: Seat, pawn: str) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
+    name = "Dest_WoodPlank_BP_C_1"
+
+    def intact(frame):
+        roster = frame.get("game", {}).get(native_destructibles.KEY)
+        return isinstance(roster, list) and name in roster
+
+    current = await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("native_zone", {}).get("state") == "ready")
+    if current["game"].get("map") != dock:
+        for participant, placement in ((pawn, "near"), ("local", "near"), ("local", "inside")):
+            await host.bridge.command("native-exit-position", participant, placement, "Obs_Dock", "Level_Exit_BP_C_213")
+    arrival = await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == dock
+                                         and intact(frame) and not frame.get("awaiting_zone_guest"), timeout=60)
+    epoch = arrival["zone_epoch"]
+    await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_destructible_view") ==
+                               {"map": dock, "epoch": epoch}, timeout=30)
+
+    async def inspect(seat):
+        reply = await seat.bridge.command("fixture-warehouse-board", "inspect")
+        return reply["ack"]["message"]
+
+    before_host, before_guest = await inspect(host), await inspect(guest)
+    assert before_host == before_guest and before_host.startswith("false,true,"), (before_host, before_guest)
+    # A guest-only damage callback must not remove a stock obstacle while the host still sees it.
+    await guest.bridge.command("fixture-warehouse-board", "damage")
+    assert await inspect(guest) == before_guest
+    checkpoint = campaign_save_hashes(host.campaign)
+    await host.bridge.command("fixture-warehouse-board", "impact")
+    await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == dock
+                               and native_destructibles.KEY in frame["game"] and not intact(frame), timeout=6)
+    deadline = asyncio.get_running_loop().time() + 8
+    while True:
+        after_guest = await inspect(guest)
+        if after_guest.startswith("true,false,"):
+            break
+        assert asyncio.get_running_loop().time() < deadline, after_guest
+        await asyncio.sleep(.08)
+    assert await inspect(host) == "removed"
+    assert campaign_save_hashes(host.campaign) == checkpoint, "A broken obstacle caused an early checkpoint"
+    return {"stock_warehouse_board": {"actor": name, "before": before_host, "guest_after": after_guest,
+                                       "host_removed": True, "guest_damage_guarded": True, "checkpoint_unchanged": True}}
 
 
 async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, retaliation: bool = False) -> dict:
@@ -3263,7 +3320,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_use: bool = False, stock_food: bool = False, stock_campfire: bool = False,
                  stock_npc_override: bool = False, stock_board_offers: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
-                 stock_weather_travel: bool = False, stock_melee_family: bool = False, stock_warehouse_switch: bool = False,
+                 stock_weather_travel: bool = False, stock_melee_family: bool = False, stock_warehouse_switch: bool = False, stock_warehouse_board: bool = False,
                  stock_npc_rivalry: bool = False,
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
@@ -3334,6 +3391,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_food, "stock_food", verify_resident_guest_food),
         (stock_take_ammo, "stock_take_ammo", verify_stock_take_ammo),
         (stock_warehouse_switch, "stock_warehouse_switch", verify_warehouse_switch),
+        (stock_warehouse_board, "stock_warehouse_board", verify_warehouse_board),
         (stock_bandage_revisit, "stock_bandage_revisit", verify_tutorial_bandage_revisit),
         (stock_shovel, "stock_shovel", lambda host, guest, pawn: verify_stock_shovel(host, guest, pawn, loot=stock_shovel_loot)),
         (tutorial_dock_combat, "tutorial_dock_retaliation" if tutorial_dock_retaliation else "tutorial_dock_combat",
@@ -3383,6 +3441,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["stock_take_ammo_overlays"] = [probes.enter_context(stock_take_ammo_overlay(game)) for game in games]
         if stock_warehouse_switch:
             proof["warehouse_switch_overlays"] = [probes.enter_context(warehouse_switch_overlay(game)) for game in games]
+        if stock_warehouse_board:
+            proof["warehouse_board_overlays"] = [probes.enter_context(warehouse_board_overlay(game)) for game in games]
         if stock_board_offers:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableBoardOfferProbe",
@@ -3393,7 +3453,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
                                                      fixture="portable_npc_override_probe.lua"))
-        if tutorial_dock_combat or stock_bandage_revisit or stock_shovel or stock_simmi_jammers or stock_weather_travel or stock_warehouse_switch:
+        if tutorial_dock_combat or stock_bandage_revisit or stock_shovel or stock_simmi_jammers or stock_weather_travel or stock_warehouse_switch or stock_warehouse_board:
             overlay_key = ("weather_zone_overlays" if stock_weather_travel else
                            "jammer_zone_overlays" if stock_simmi_jammers else "dock_zone_overlays")
             proof[overlay_key] = [probes.enter_context(tutorial_dock_zone_overlay(game)) for game in games]
@@ -3536,7 +3596,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         elif resident_checks:
             results = proof["resident_check_results"] = {}
             campaign_started = time.perf_counter()
-            leave_in_field = tutorial_dock_combat or stock_bandage_revisit or stock_shovel or stock_weather_travel or stock_warehouse_switch
+            leave_in_field = tutorial_dock_combat or stock_bandage_revisit or stock_shovel or stock_weather_travel or stock_warehouse_switch or stock_warehouse_board
             exit_actions = ("prompt", "confirm") if leave_in_field else ("save_and_quit",)
 
             async def run_resident_checks(host, guest, pawn):
@@ -3715,6 +3775,8 @@ if __name__ == "__main__":
                         help="collect the Tutorial Dock bandage and verify both views after revisiting the map")
     parser.add_argument("--stock-warehouse-switch", action="store_true",
                         help="verify host and guest interactions on the Tutorial Dock warehouse circuit box")
+    parser.add_argument("--stock-warehouse-board", action="store_true",
+                        help="verify both peers see the Tutorial Dock warehouse board break")
     parser.add_argument("--stock-shovel", action="store_true",
                         help="collect a stock shovel as the guest and verify its dig on both peers")
     parser.add_argument("--stock-shovel-loot", action="store_true",
@@ -3819,7 +3881,7 @@ if __name__ == "__main__":
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "stock_npc_rivalry",
                               "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_take_ammo",
                               "stock_host_corpse_carry", "stock_flashlights", "stock_simmi_jammers", "stock_weather_travel",
-                              "stock_melee_family", "stock_warehouse_switch"}
+                              "stock_melee_family", "stock_warehouse_switch", "stock_warehouse_board"}
     if args.rusty_pistol and not args.resident_weapon_cues:
         parser.error("Use --rusty-pistol with --resident-weapon-cues")
     if args.tutorial_dock_combat and not (args.rusty_pistol and args.stock_npc_override):
@@ -3833,7 +3895,7 @@ if __name__ == "__main__":
     if any((args.stock_food, args.stock_campfire, args.stock_npc_override, args.stock_board_offers,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
-            args.stock_melee_family, args.stock_warehouse_switch)) and (
+            args.stock_melee_family, args.stock_warehouse_switch, args.stock_warehouse_board)) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
         parser.error("Run the resident gameplay checks without other gameplay fixtures")
@@ -3880,6 +3942,7 @@ if __name__ == "__main__":
                        stock_weather_travel=args.stock_weather_travel,
                        stock_melee_family=args.stock_melee_family,
                        stock_warehouse_switch=args.stock_warehouse_switch,
+                       stock_warehouse_board=args.stock_warehouse_board,
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
                        rusty_pistol=args.rusty_pistol, tutorial_dock_combat=args.tutorial_dock_combat,
