@@ -45,9 +45,9 @@
                         local point = part:K2_GetActorLocation()
                         if (point.X-tonumber(x))^2 + (point.Y-tonumber(y))^2 + (point.Z-tonumber(z))^2 <= 400^2 then
                             local mesh = part.PropMesh.StaticMesh
-                            rows[#rows + 1] = ("%s,%s,%s,%d,%.3f,%.3f,%.3f"):format(part:GetFName():ToString(),
+                            rows[#rows + 1] = ("%s,%s,%s,%d,%d,%.3f,%.3f,%.3f"):format(part:GetFName():ToString(),
                                 class, valid(mesh) and mesh:GetFName():ToString() or "-", part:GetLocalRole(),
-                                point.X, point.Y, point.Z)
+                                part.Random and 1 or 0, point.X, point.Y, point.Z)
                         end
                     end
                 end
@@ -67,7 +67,8 @@
                 return "removed"
             end
             local point, angles = part:K2_GetActorLocation(), part:K2_GetActorRotation()
-            assert(part:K2_SetActorLocationAndRotation({X=point.X,Y=point.Y,Z=point.Z+125}, angles, false, {}, true))
+            assert(part.PropMesh:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find)))
+            assert(part:K2_SetActorLocationAndRotation({X=point.X+110,Y=point.Y+80,Z=point.Z+45}, angles, false, {}, true))
             part:ForceNetUpdate()
             return "moved"
         end

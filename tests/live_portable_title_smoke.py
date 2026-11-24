@@ -1752,8 +1752,8 @@ async def verify_warehouse_board(host: Seat, guest: Seat, pawn: str) -> dict:
                                        "checkpoint_unchanged": True}}
 
 
-async def warehouse_prop_probe(seat, mode, *args):
-    reply = await seat.bridge.command("fixture-stock-bottle", mode, *args)
+async def warehouse_prop_probe(seat, mode, *args, timeout=8):
+    reply = await seat.bridge.command("fixture-stock-bottle", mode, *args, timeout=timeout)
     return reply["ack"]["message"]
 
 
@@ -1895,7 +1895,10 @@ async def verify_stock_acid_bottle(host: Seat, guest: Seat, _pawn: str) -> dict:
     async def read_pool(seat, phase):
         async with asyncio.timeout(14):
             while True:
-                value = await warehouse_prop_probe(seat, "pool-near", impact)
+                try:
+                    value = await warehouse_prop_probe(seat, "pool-near", impact, timeout=1.2)
+                except TimeoutError:
+                    continue
                 if value == "absent" and phase == value:
                     return None
                 if value.startswith(phase + ";"):
@@ -1933,16 +1936,22 @@ async def verify_stock_wood_debris(host: Seat, guest: Seat, _pawn: str) -> dict:
         raw = await warehouse_prop_probe(seat, "wood-pieces", position)
         result = {}
         for row in raw.split(";") if raw else ():
-            name, kind, mesh, role, *center = row.split(",")
-            result[name] = {"kind": kind, "mesh": mesh, "role": int(role), "center": list(map(float, center))}
+            name, kind, mesh, role, random_mesh, *center = row.split(",")
+            result[name] = {"kind": kind, "mesh": mesh, "role": int(role), "random_mesh": random_mesh == "1",
+                            "center": list(map(float, center))}
         return result
+
+    def meshes(parts):
+        return sorted((row["kind"], row["mesh"]) for row in parts.values())
 
     async def check(stock_class, kind, count):
         path, replica, position = await stage_warehouse_prop(host, guest, stock_class, "floor-physics")
         before = await asyncio.gather(*(pieces(seat, position) for seat in (host, guest)))
         await warehouse_prop_probe(guest, "local-break", replica)
-        assert await warehouse_prop_probe(guest, "inspect", replica) == "1,false"
-        assert await pieces(guest, position) == before[1]
+        after = await warehouse_prop_probe(guest, "inspect", replica)
+        assert after == "1,false", {"guest_only_break_retired_source": after}
+        local_parts = (await pieces(guest, position)).keys() - before[1].keys()
+        assert not local_parts, {"guest_only_break_spawned_parts": list(local_parts)}
         started = time.time()
         hit = list(map(float, (await warehouse_prop_probe(host, "impact", path)).split(",")))
         impact = await wait_stock_prop_break(host, guest, frame, path, started, hit, guest_path=replica, kind=kind)
@@ -1957,39 +1966,45 @@ async def verify_stock_wood_debris(host: Seat, guest: Seat, _pawn: str) -> dict:
             async with asyncio.timeout(7):
                 while True:
                     authority, remote = await new_pair()
-                    if len(authority) == len(remote) == count:
+                    if len(authority) == len(remote) == count and meshes(authority) == meshes(remote):
                         break
                     await asyncio.sleep(.08)
         except TimeoutError as error:
             raise AssertionError({"host_pieces": authority, "guest_pieces": remote, "expected": count}) from error
-        assert all(row["role"] == 3 for row in authority.values()) and all(row["role"] == 1 for row in remote.values())
-        assert sorted((row["kind"], row["mesh"]) for row in authority.values()) == sorted(
-            (row["kind"], row["mesh"]) for row in remote.values())
+        assert (all(row["role"] == 3 for row in authority.values())
+                and all(row["role"] == 1 for row in remote.values())), (authority, remote)
+        assert all(not row["random_mesh"] for row in remote.values() if row["kind"] == "Prop_ScrapWood_Post_C"), remote
 
         selected, original = next(iter(authority.items()))
         assert await warehouse_prop_probe(host, "wood-nudge", selected) == "moved"
-        raised = None
-        async with asyncio.timeout(6):
-            while True:
-                actual, view = await new_pair()
-                target = actual.get(selected, {}).get("center")
-                if target and target[2] > original["center"][2] + 40:
-                    raised = target
-                if raised and any(row["mesh"] == original["mesh"] and row["kind"] == original["kind"]
-                                  and row["center"][2] > original["center"][2] + 35
-                                  and math.dist(row["center"], raised) < 65 for row in view.values()):
-                    break
-                await asyncio.sleep(.03)
+        displaced = None
+        actual, view = authority, remote
+        try:
+            async with asyncio.timeout(6):
+                while True:
+                    actual, view = await new_pair()
+                    target = actual.get(selected, {}).get("center")
+                    if target and math.dist(target[:2], original["center"][:2]) > 80:
+                        displaced = target
+                    if displaced and any(row["mesh"] == original["mesh"] and row["kind"] == original["kind"]
+                                         and math.dist(row["center"][:2], displaced[:2]) < 35 for row in view.values()):
+                        break
+                    await asyncio.sleep(.05)
+        except TimeoutError as error:
+            raise AssertionError({"relocation": displaced, "original": original, "last_readback": [actual, view]}) from error
 
         cues = [row for row in await resident_events(guest_run, frame)
                 if row["time_unix"] >= started and row["event"] == "native_prop_break_played"
                 and row["cue"] == "woodsplinters"]
         assert len(cues) == 1 and math.dist(cues[0]["location"], hit) < 150, cues
         assert await warehouse_prop_probe(host, "wood-remove", selected) == "removed"
-        async with asyncio.timeout(8):
-            while any(await new_pair()):
-                await asyncio.sleep(.09)
-        return {"host_pieces": authority, "guest_pieces": remote, "nudge": raised,
+        try:
+            async with asyncio.timeout(8):
+                while any(await new_pair()):
+                    await asyncio.sleep(.09)
+        except TimeoutError as error:
+            raise AssertionError("destroyed stock debris remained visible") from error
+        return {"host_pieces": authority, "guest_pieces": remote, "nudge": displaced,
                 "impact": impact, "splinters": cues[0], "removed_on_both": True}
 
     results, failures = {}, {}

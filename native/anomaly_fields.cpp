@@ -59,6 +59,7 @@ namespace
     constexpr auto physics_prop = STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C");
     constexpr std::wstring_view stock_prop_package = STR("/Game/Assets/StaticMeshes/Mesh_Props/");
     constexpr auto acid_bottle = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_AcidBottle.Prop_AcidBottle_C");
+    constexpr auto scrap_wood_post = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_ScrapWood_Post.Prop_ScrapWood_Post_C");
     constexpr auto fixed_prop = STR("/Game/Assets/StaticMeshes/Destructable/Explosive_Prop_Master_BP.Explosive_Prop_Master_BP_C");
     constexpr auto destructible = STR("/Game/Assets/StaticMeshes/Destructable/Static_DestructableObject_Master_BP.Static_DestructableObject_Master_BP_C");
     constexpr auto drum_fire_class = STR("/Game/Classes/Anomalies/Fire_Molotov.Fire_Molotov_C");
@@ -98,6 +99,7 @@ namespace
     std::array<U::FName, canister_classes.size()> canister_names;
     std::array<U::FName, 16> canister_events;
     U::FName fuel_drum, fuel_drum_graph, prop_broken, receive_tick, drum_fire_name;
+    U::FName user_construction_script, scrap_wood_post_name;
     std::array<U::FName, 5> fixed_prop_events;
     U::FName destructible_name;
     U::FName acid_pool_name, acid_dot_name, acid_fizzle, acid_extinguish, acid_actor_damage, dot_damage, receive_begin;
@@ -841,6 +843,23 @@ namespace
     {
         if (!guest_session || !actor || !function) return;
         const auto name = function->GetFName();
+        if (name == user_construction_script)
+        {
+            auto* type = actor->GetClassPrivate();
+            if (type && type == function->GetOuterPrivate() && type->GetFName() == scrap_wood_post_name &&
+                type->GetPathName() == scrap_wood_post && !actor->IsUnreachable() &&
+                !actor->HasAnyFlags(U::RF_WasLoaded) && U::IsInGameThreadRaw() && !function->GetNumParms() &&
+                !function->GetReturnProperty() && !function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) &&
+                !call.OriginalFunctionCallPrevented() &&
+                guest_world(static_cast<U::AActor*>(actor)->GetWorld()))
+            {
+                // A host post using the default mesh sends no mesh delta. Preserve that
+                // default on a guest instead of rerolling it during construction.
+                if (auto* random = property<U::FBoolProperty>(actor, STR("Random")))
+                    random->SetPropertyValueInContainer(actor, false);
+            }
+            return;
+        }
         if ((name == acid_fizzle || name == acid_extinguish || name == acid_actor_damage ||
              name == receive_begin || name == dot_damage) && U::IsInGameThreadRaw() &&
             !call.OriginalFunctionCallPrevented() && !function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net))
@@ -1119,6 +1138,8 @@ namespace silverfish::native_anomaly_fields
         fuel_drum = U::FName{STR("Prop_FuelDrum_C"), U::FNAME_Add};
         fuel_drum_graph = U::FName{STR("ExecuteUbergraph_Prop_FuelDrum"), U::FNAME_Add};
         prop_broken = U::FName{STR("PropBroken"), U::FNAME_Add};
+        user_construction_script = U::FName{STR("UserConstructionScript"), U::FNAME_Add};
+        scrap_wood_post_name = U::FName{STR("Prop_ScrapWood_Post_C"), U::FNAME_Add};
         drum_fire_name = U::FName{STR("Fire_Molotov_C"), U::FNAME_Add};
         receive_tick = U::FName{STR("ReceiveTick"), U::FNAME_Add};
         receive_begin = U::FName{STR("ReceiveBeginPlay"), U::FNAME_Add};
