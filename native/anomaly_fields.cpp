@@ -50,6 +50,9 @@ namespace
     constexpr auto rook_world = STR("/Game/Classes/Maps/Dreams/TheRook_P.TheRook_P");
     constexpr auto vortex_class = STR("/Game/Classes/Anomalies/VortexTrap_BP.VortexTrap_BP_C");
     constexpr auto roaming_teleport_class = STR("/Game/Classes/Anomalies/Wandering_Teleport_BP.Wandering_Teleport_BP_C");
+    constexpr auto lingering_class = STR("/Game/Classes/Anomalies/Lingering_Teleport_BP1.Lingering_Teleport_BP1_C");
+    constexpr auto artifact_spawner_class = STR("/Game/Classes/Actors/Artifact_Spawner_BP.Artifact_Spawner_BP_C");
+    constexpr auto lingering_overlap = STR("BndEvt__Lingering_Teleport_BP1_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature");
     constexpr auto physics_prop = STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C");
     constexpr auto bottle_class = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Bottle_Booze01.Prop_Bottle_Booze01_C");
     constexpr auto bottle_splash = STR("/Game/Assets/PFX/NI_BrokenBottle_WtLiquid.NI_BrokenBottle_WtLiquid");
@@ -89,7 +92,8 @@ namespace
     U::FName patch_name;
     std::array<U::FName, 3> patch_events;
     std::array<U::FName, 6> electrode_events;
-    std::array<U::FName, 7> roaming_events;
+    std::array<U::FName, 9> roaming_events;
+    U::FName lingering_teleport, artifact_spawner, spawn_anomalies, travel_pool;
     std::array<U::FName, canister_classes.size()> canister_names;
     std::array<U::FName, 16> canister_events;
     U::FName fuel_drum, fuel_drum_graph, prop_broken, receive_tick, drum_fire_name, bottle_name;
@@ -503,6 +507,87 @@ namespace
         return loading.context && (!driver || driver == pending) && server_connection(pending, loading.connection.Get());
     }
 
+    struct TravelSpawn
+    {
+        const Iteration* call{};
+        U::FWeakObjectPtr source, child, world;
+    };
+
+    thread_local TravelSpawn travel_spawn;
+    thread_local std::array<TravelSpawn, 64> lingering_spawns;
+
+    void begin_travel_spawn(Iteration& call, U::UObject* actor, U::UFunction* function)
+    {
+        if (!function || function->GetFName() != spawn_anomalies || !actor || !U::IsInGameThreadRaw() ||
+            call.OriginalFunctionCallPrevented()) return;
+        auto* type = actor->GetClassPrivate();
+        if (!type || type->GetFName() != artifact_spawner || type->GetPathName() != artifact_spawner_class ||
+            function->GetOuterPrivate() != type || function->GetNumParms() || !actor->HasAnyFlags(U::RF_WasLoaded)) return;
+        auto* world = static_cast<U::AActor*>(actor)->GetWorld();
+        if (!world || !world->GetPathName().starts_with(STR("/Game/Classes/Maps/")) ||
+            actor->GetOuterPrivate() != object(world, STR("PersistentLevel"))) return;
+        auto* pool = property<U::FStructProperty>(actor, STR("Pool"));
+        auto* row = pool ? property<U::FNameProperty>(pool->GetStruct().Get(), STR("RowName")) : nullptr;
+        auto* center = property<U::FBoolProperty>(actor, STR("Center_Amomally"));
+        if (!row || !center || !center->GetPropertyValueInContainer(actor) ||
+            row->GetPropertyValueInContainer(pool->ContainerPtrToValuePtr<void>(actor)) != travel_pool) return;
+        if (guest_world(world))
+        {
+            // Preserve the Travel row's physics setting for the separate stock artifact roll.
+            auto* physics = property<U::FBoolProperty>(actor, STR("UsePhysics"));
+            if (!physics) return;
+            physics->SetPropertyValueInContainer(actor, true);
+            call.PreventOriginalFunctionCall();
+        }
+        else if (!guest_session && !travel_spawn.call) travel_spawn = {&call, actor, {}, world};
+    }
+
+    void capture_lingering(Iteration& call, U::AActor* child)
+    {
+        if (!travel_spawn.call || travel_spawn.child.Get() || call.OriginalFunctionCallPrevented() || !child) return;
+        auto* type = child->GetClassPrivate();
+        if (!type || type->GetFName() != lingering_teleport || type->GetPathName() != lingering_class ||
+            child->HasAnyFlags(U::RF_WasLoaded)) return;
+        auto* source = static_cast<U::AActor*>(travel_spawn.source.Get());
+        auto* world = child->GetWorld();
+        if (!source || !world || world != travel_spawn.world.Get() || source->GetWorld() != world) return;
+        const auto first = source->K2_GetActorLocation(), second = child->K2_GetActorLocation();
+        const auto x = first.X() - second.X(), y = first.Y() - second.Y(), z = first.Z() - second.Z();
+        if (x*x + y*y + z*z <= 4.0) travel_spawn.child = child;
+    }
+
+    void end_travel_spawn(Iteration& call)
+    {
+        if (travel_spawn.call != &call) return;
+        auto* child = travel_spawn.child.Get();
+        auto* world = travel_spawn.world.Get();
+        if (child && world && !call.OriginalFunctionCallPrevented())
+        {
+            const auto slot = std::ranges::find_if(lingering_spawns, [world](const auto& entry) {
+                return !entry.child.Get() || entry.world.Get() != world;
+            });
+            if (slot != lingering_spawns.end()) *slot = travel_spawn;
+        }
+        travel_spawn = {};
+    }
+
+    int take_lingering_spawn(const Lua& lua)
+    {
+        if (guest_session || !U::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto world = static_cast<std::uintptr_t>(lua.get_integer());
+        for (auto& entry : lingering_spawns)
+        {
+            auto* child = entry.child.Get();
+            auto* source = entry.source.Get();
+            if (!child || !source || reinterpret_cast<std::uintptr_t>(entry.world.Get()) != world) continue;
+            lua.set_string(RC::to_utf8_string(child->GetPathName()));
+            lua.set_string(RC::to_utf8_string(source->GetPathName()));
+            entry = {};
+            return 2;
+        }
+        return 0;
+    }
+
     struct BottleBreak
     {
         const Iteration* call{};
@@ -652,7 +737,9 @@ namespace
         const bool drum = class_name == fuel_drum;
         const bool canister = prop_event && (name != receive_tick || drum) &&
             std::ranges::find(canister_names, class_name) != canister_names.end();
-        const bool roaming = roaming_event && class_name == roaming_teleport && type->GetPathName() == roaming_teleport_class;
+        const bool roaming = roaming_event &&
+            ((class_name == roaming_teleport && type->GetPathName() == roaming_teleport_class) ||
+             (class_name == lingering_teleport && type->GetPathName() == lingering_class));
         const bool gravity_well = gravity_event && class_name == gravity && type->GetPathName() == gravity_class;
         auto* binding = function->GetOuterPrivate();
         if (destructible_event && binding && binding->GetFName() == destructible_name &&
@@ -830,6 +917,10 @@ namespace silverfish::native_anomaly_fields
         overlap = U::FName{trap_overlap, U::FNAME_Add};
         electrode = U::FName{STR("Electrode_BP_C"), U::FNAME_Add};
         roaming_teleport = U::FName{STR("Wandering_Teleport_BP_C"), U::FNAME_Add};
+        lingering_teleport = U::FName{STR("Lingering_Teleport_BP1_C"), U::FNAME_Add};
+        artifact_spawner = U::FName{STR("Artifact_Spawner_BP_C"), U::FNAME_Add};
+        spawn_anomalies = U::FName{STR("SpawnAnomalies"), U::FNAME_Add};
+        travel_pool = U::FName{STR("Travel"), U::FNAME_Add};
         electrode_events = {
             U::FName{STR("BndEvt__Electrode_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature"), U::FNAME_Add},
             U::FName{STR("ReceiveBeginPlay"), U::FNAME_Add},
@@ -846,6 +937,8 @@ namespace silverfish::native_anomaly_fields
             U::FName{STR("Teleport_Actor"), U::FNAME_Add},
             U::FName{STR("ExecuteUbergraph_Wandering_Teleport_BP"), U::FNAME_Add},
             U::FName{STR("BndEvt__Wandering_Teleport_BP_Capsule_K2Node_ComponentBoundEvent_1_ComponentBeginOverlapSignature__DelegateSignature"), U::FNAME_Add},
+            U::FName{STR("ExecuteUbergraph_Lingering_Teleport_BP1"), U::FNAME_Add},
+            U::FName{lingering_overlap, U::FNAME_Add},
         };
         fuel_drum = U::FName{STR("Prop_FuelDrum_C"), U::FNAME_Add};
         fuel_drum_graph = U::FName{STR("ExecuteUbergraph_Prop_FuelDrum"), U::FNAME_Add};
@@ -902,6 +995,8 @@ namespace silverfish::native_anomaly_fields
         };
         hooks[0] = H::RegisterProcessEventPreCallback(
             [](Iteration& call, U::UObject* actor, U::UFunction* function, void* locals) {
+                if (stock_actor_begin != H::ERROR_ID && stock_event_post != H::ERROR_ID)
+                    begin_travel_spawn(call, actor, function);
                 intercept(call, actor, function);
                 if (stock_actor_begin != H::ERROR_ID && stock_event_post != H::ERROR_ID)
                     begin_drum_break(call, actor, function);
@@ -911,6 +1006,8 @@ namespace silverfish::native_anomaly_fields
             {false, false, owner, STR("Suppress independent guest trap field generation")});
         hooks[1] = H::RegisterProcessLocalScriptFunctionPreCallback(
             [script](Iteration& call, U::UObject* actor, U::FFrame& frame, void* result) {
+                if (stock_actor_begin != H::ERROR_ID && stock_script_post != H::ERROR_ID)
+                    begin_travel_spawn(call, actor, frame.Node());
                 script(call, actor, frame, result);
                 if (stock_actor_begin != H::ERROR_ID && stock_script_post != H::ERROR_ID)
                     begin_drum_break(call, actor, frame.Node());
@@ -920,6 +1017,8 @@ namespace silverfish::native_anomaly_fields
             {false, false, owner, STR("Suppress guest trap field Blueprint calls")});
         hooks[2] = H::RegisterProcessInternalPreCallback(
             [script](Iteration& call, U::UObject* actor, U::FFrame& frame, void* result) {
+                if (stock_actor_begin != H::ERROR_ID && stock_internal_post != H::ERROR_ID)
+                    begin_travel_spawn(call, actor, frame.Node());
                 script(call, actor, frame, result);
                 if (stock_actor_begin != H::ERROR_ID && stock_internal_post != H::ERROR_ID)
                     begin_drum_break(call, actor, frame.Node());
@@ -945,6 +1044,7 @@ namespace silverfish::native_anomaly_fields
                 if (loading.context == &context) loading = {};
             }, {false, true, owner, STR("Release the guest trap map loading scope")});
         const auto stock_result = [](Iteration& call, U::UObject* actor, U::FFrame& frame, void* result) {
+            end_travel_spawn(call);
             end_drum_break(call, frame.Node());
             end_bottle_break(call, frame.Node());
             if (observer_enabled)
@@ -959,11 +1059,13 @@ namespace silverfish::native_anomaly_fields
             stock_result, {false, false, owner, STR("Read reflected anomaly and prop results")});
         stock_event_post = H::RegisterProcessEventPostCallback(
             [](Iteration& call, U::UObject*, U::UFunction* function, void*) {
+                end_travel_spawn(call);
                 end_drum_break(call, function);
                 end_bottle_break(call, function);
             }, {false, false, owner, STR("Read stock prop break results")});
         stock_actor_begin = H::RegisterBeginPlayPostCallback(
             [](Iteration& call, U::AActor* actor) {
+                capture_lingering(call, actor);
                 capture_drum_fire(call, actor);
                 if (observer_enabled) capture_observer_reward(call, actor);
             }, {false, false, owner, STR("Track actual stock anomaly and prop child actors")});
@@ -972,6 +1074,8 @@ namespace silverfish::native_anomaly_fields
 
     void uninstall_hooks()
     {
+        travel_spawn = {};
+        lingering_spawns = {};
         drum_fires = {};
         drum_breaks = {};
         bottle_breaks = {};
@@ -995,7 +1099,10 @@ namespace silverfish::native_anomaly_fields
         lua.register_function("SilverfishReadNativeAnomalySkips", count);
         if (stock_actor_begin != H::ERROR_ID &&
             (stock_event_post != H::ERROR_ID || stock_script_post != H::ERROR_ID || stock_internal_post != H::ERROR_ID))
+        {
             lua.register_function("SilverfishTakeNativeDrumFire", take_drum_fire);
+            lua.register_function("SilverfishTakeNativeLingeringTeleport", take_lingering_spawn);
+        }
         if (observer_enabled) lua.register_function("SilverfishSetNativeObserverTarget", set_observer_target);
         if (observer_reward_replication_fixture)
             lua.register_function("SilverfishTakeNativeObserverReward", take_observer_reward);

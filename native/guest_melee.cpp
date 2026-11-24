@@ -67,6 +67,7 @@ namespace
     constexpr auto blunt_name = STR("BluntForce_6_6923B3964740DE281BD773BCCAAC2772");
     constexpr auto breach_name = STR("Breach_21_E0B1E3A34ACBB341494DE885CECBF89B");
     constexpr auto attack_timeout = std::chrono::milliseconds{2500};
+    constexpr auto hold_timeout = std::chrono::seconds{9};
     constexpr int max_rows = 4096;
     constexpr int max_effects = 256;
     constexpr std::size_t max_fenced_pipes = 32;
@@ -600,6 +601,11 @@ namespace
         float radius{sweep_radius};
         bool pending{}, settled{}, passive_free{};
         SwingMode mode{SwingMode::surface_fixture};
+        struct Input
+        {
+            int contacts{}, hits{}, charged{}, combo{};
+            bool active{}, held{}, charged_attack{}, combo_attack{};
+        } input;
         std::optional<FixtureContact> fixture;
         struct Damage
         {
@@ -612,6 +618,8 @@ namespace
             double before{-1}, after{-1}, total{-1};
             bool requested{};
             bool fenced_miss{};
+            bool destructible{};
+            bool blocked_by_obstacle{};
         } damage;
     };
 
@@ -621,7 +629,7 @@ namespace
     std::int64_t serial{};
     std::array callbacks{H::ERROR_ID, H::ERROR_ID, H::ERROR_ID};
 
-    bool owner_current(const Swing& expected)
+    bool owner_current(const Swing& expected, bool require_ready = true)
     {
         auto* pawn = expected.pawn.Get();
         auto* save = expected.save.Get();
@@ -641,8 +649,8 @@ namespace
             object(old_pipe, STR("As Melee Wep Anim BP")) == anim && object(mesh, STR("AnimScriptInstance")) == anim &&
             anim->GetOuterPrivate() == mesh && object(anim, STR("Wep_Object")) == old_pipe &&
             boolean(old_pipe, STR("HeldByPlayer"), true) && boolean(old_pipe, STR("bActorIsBeingDestroyed"), false) &&
-            boolean(pawn, STR("Dead"), false) && boolean(pawn, STR("UsingItem"), false) &&
-            boolean(pawn, STR("IsWeaponBlocked"), false) && boolean(pawn, STR("HeadUnderWater"), false) &&
+            (!require_ready || (boolean(pawn, STR("Dead"), false) && boolean(pawn, STR("UsingItem"), false) &&
+                boolean(pawn, STR("IsWeaponBlocked"), false) && boolean(pawn, STR("HeadUnderWater"), false))) &&
             silverfish::native_guest_regen::qualifies_detached_guest(pawn, save, expected.canonical.Get());
     }
 
@@ -656,6 +664,19 @@ namespace
     {
         auto* value = field<U::FDoubleProperty>(actor, STR("Health"));
         return value ? value->GetPropertyValueInContainer(actor) : -1.0;
+    }
+
+    constexpr auto destructible_class = STR("/Game/Assets/StaticMeshes/Destructable/Static_DestructableObject_Master_BP.Static_DestructableObject_Master_BP_C");
+    constexpr auto destructible_damage = STR("/Game/Assets/StaticMeshes/Destructable/Static_DestructableObject_Master_BP.Static_DestructableObject_Master_BP_C:DealDamage");
+
+    bool placed_destructible(U::UObject* candidate, U::UWorld* world)
+    {
+        auto* base = find<U::UClass>(destructible_class);
+        if (!live(candidate) || !base || !candidate->GetClassPrivate()->IsChildOf(base)) return false;
+        auto* actor = static_cast<U::AActor*>(candidate);
+        return actor->GetWorld() == world && actor->HasAnyFlags(U::RF_WasLoaded) &&
+            actor->GetLevel() == object(world, STR("PersistentLevel")) &&
+            boolean(actor, STR("bReplicates"), false) && boolean(actor, STR("bActorIsBeingDestroyed"), false);
     }
 
     bool qualified_enemy(U::UObject* candidate, U::UWorld* world)
@@ -686,27 +707,30 @@ namespace
             if (status) *status = cause;
             return false;
         };
+        if (!live(world) || !live(candidate)) return reject("target_class_unqualified");
         const auto* base = find<U::UClass>(npc_class);
-        if (!live(world) || !live(candidate) || !base || !candidate->GetClassPrivate()->IsChildOf(base))
-            return reject("target_class_unqualified");
+        const bool npc = base && candidate->GetClassPrivate()->IsChildOf(base);
+        if (!npc && !placed_destructible(candidate, world)) return reject("target_class_unqualified");
         auto* actor = static_cast<U::AActor*>(candidate);
         auto* role = field<U::FByteProperty>(actor, STR("Role"));
         if (actor->GetWorld() != world || !role || role->GetPropertyValueInContainer(actor) != 3)
             return reject("target_authority_unqualified");
-        if (!boolean(actor, STR("Alive"), true) || !boolean(actor, STR("bActorIsBeingDestroyed"), false))
+        if ((npc && !boolean(actor, STR("Alive"), true)) || !boolean(actor, STR("bActorIsBeingDestroyed"), false))
             return reject("target_life_unqualified");
         const double hp = enemy_health(actor);
         return std::isfinite(hp) && hp > 0.0 ? true : reject("target_health_unqualified");
     }
 
     // Ordinary attacks can reach Blueprint children that override the stock damage graph.
-    U::UFunction* combat_damage(U::UObject* actor)
+    U::UFunction* combat_damage(U::UObject* actor, bool destructible)
     {
         const U::FName name{STR("DealDamage")};
-        auto* definition = find<U::UFunction>(STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:DealDamage"));
+        auto* definition = find<U::UFunction>(destructible ? destructible_damage
+            : STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:DealDamage"));
         auto* call = actor ? actor->GetFunctionByNameInChain(name) : nullptr;
         if (!definition || !call || call->GetNumParms() != 7 || call->GetReturnProperty() ||
             call->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return nullptr;
+        if (destructible) return call == definition ? call : nullptr;
         for (auto* inherited = static_cast<U::UStruct*>(call); inherited; inherited = inherited->GetSuperStruct())
             if (inherited == definition) return call;
         return nullptr;
@@ -802,25 +826,54 @@ namespace
         auto* damage = field<U::FStructProperty>(type, damage_name);
         auto* damage_type = find<U::UScriptStruct>(damage_type_path);
         auto* blunt = field<U::FDoubleProperty>(damage_type, blunt_name);
-        auto* first = rows.GetRawPtr(0);
-        auto* sequence = name ? name->GetObjectPropertyValue(name->ContainerPtrToValuePtr<void>(first)) : nullptr;
-        if (!live(sequence) || !range || !radius || !breach || !damage || !damage_type ||
+        if (!name || !range || !radius || !breach || !damage || !damage_type ||
             damage->GetStruct().Get() != damage_type || !blunt) return false;
-        const double reach = range->GetPropertyValueInContainer(first);
-        const double width = radius->GetPropertyValueInContainer(first);
+        const auto matches = [&](const void* row) {
+            return attack->Identical(attack->ContainerPtrToValuePtr<void>(motor), row) &&
+                parameter->Identical(parameter->ContainerPtrToValuePtr<void>(contact_args), row);
+        };
+        const void* selected = rows.GetRawPtr(0);
+        if (contact_args && current.input.active)
+        {
+            // The stock animation selects the charge or combo row. Validate that
+            // exact authored struct at contact rather than choosing an attack here.
+            selected = nullptr;
+            auto* charged = field<U::FStructProperty>(weapon, STR("ChargedAttack"));
+            if (charged && charged->GetStruct().Get() == type)
+            {
+                auto* row = charged->ContainerPtrToValuePtr<void>(weapon);
+                if (matches(row))
+                {
+                    selected = row;
+                    current.input.charged_attack = true;
+                }
+            }
+            for (int index = 0; index < rows.Num() && !selected; ++index)
+            {
+                auto* row = rows.GetRawPtr(index);
+                if (matches(row))
+                {
+                    selected = row;
+                    current.input.combo_attack = index > 0;
+                }
+            }
+        }
+        if (!selected) return false;
+        auto* sequence = name->GetObjectPropertyValue(name->ContainerPtrToValuePtr<void>(selected));
+        const double reach = range->GetPropertyValueInContainer(selected);
+        const double width = radius->GetPropertyValueInContainer(selected);
+        if (!live(sequence)) return false;
         if (!(width > 0.0 && width < reach && reach <= 1000.0)) return false;
         if (!ordinary && (sequence != find<U::UObject>(sequence_path) || reach != sweep_range || width != sweep_radius ||
-            breach->GetPropertyValueInContainer(first) ||
-            blunt->GetPropertyValueInContainer(damage->ContainerPtrToValuePtr<void>(first)) != 30.0)) return false;
-        if (!contact_args)
+            breach->GetPropertyValueInContainer(selected) ||
+            blunt->GetPropertyValueInContainer(damage->ContainerPtrToValuePtr<void>(selected)) != 30.0)) return false;
+        if (!contact_args || current.input.active)
         {
             current.range = reach;
             current.radius = static_cast<float>(width);
             return true;
         }
-        return reach == current.range && static_cast<float>(width) == current.radius &&
-            attack->Identical(attack->ContainerPtrToValuePtr<void>(motor), first) &&
-            parameter->Identical(parameter->ContainerPtrToValuePtr<void>(contact_args), first);
+        return reach == current.range && static_cast<float>(width) == current.radius && matches(selected);
     }
 
     bool idle(const Swing& current)
@@ -837,6 +890,53 @@ namespace
         swing.pending = false;
         swing.settled = settled;
         swing.status = status;
+    }
+
+    bool apply_primary_edge(Swing& current, bool down)
+    {
+        auto* primary = static_cast<U::UFunction*>(current.primary.Get());
+        auto* held = primary_input<U::FBoolProperty>(primary, STR("Held"), offsetof(Primary, held));
+        if (!held || !owner_current(current, down)) return false;
+        Primary parameters{};
+        held->SetPropertyValueInContainer(&parameters, down);
+        current.pipe.Get()->ProcessEvent(primary, &parameters);
+        return owner_current(current, down) && boolean(current.pipe.Get(), STR("Holding_Primary"), down) &&
+            boolean(current.animation.Get(), STR("PrimaryInput"), down);
+    }
+
+    bool harvest_input_contact()
+    {
+        if (!swing.contacts) return true;
+        auto& damage = swing.damage;
+        if (swing.contacts != 1 || swing.qualified != 1 || damage.contact_frame || damage.sweep_frame || damage.deal_frame ||
+            (!damage.fenced_miss && (damage.sweeps != 1 || damage.calls != 1 ||
+                                    (damage.total <= 0 && !damage.blocked_by_obstacle)))) return false;
+        ++swing.input.contacts;
+        if (damage.total > 0) ++swing.input.hits;
+        if (swing.input.charged_attack) ++swing.input.charged;
+        if (swing.input.combo_attack) ++swing.input.combo;
+        swing.input.charged_attack = swing.input.combo_attack = false;
+        swing.contacts = swing.qualified = 0;
+        Swing::Damage next;
+        next.requested = damage.requested;
+        next.sweep = damage.sweep;
+        next.library = damage.library;
+        next.graph = damage.graph;
+        damage = std::move(next);
+        return true;
+    }
+
+    void cancel_input()
+    {
+        const bool verified = harvest_input_contact();
+        finish(verified ? "cancelled" : "mutation_unverified_guest_melee_cancel_contact");
+        if (!swing.input.held) return;
+        swing.input.held = false;
+        ++swing.releases;
+        // Dead, blocked and loading guests may still own the equipped receiver.
+        // Retire that exact stock input with Contact already fenced.
+        if (owner_current(swing, false) && !apply_primary_edge(swing, false))
+            finish("mutation_unverified_guest_melee_cancel_release");
     }
 
     bool passives_unchanged(const Swing& current)
@@ -858,6 +958,17 @@ namespace
                 "mutation_unverified_guest_melee_fixture_camera_restore");
         }
         if (!swing.pending) return;
+        if (swing.input.active)
+        {
+            if (!owner_current(swing) || Clock::now() >= swing.deadline) return cancel_input();
+            if (!harvest_input_contact()) return finish("mutation_unverified_guest_melee_contact_readback");
+            if (!swing.input.held && idle(swing))
+            {
+                swing.passive_free = passives_unchanged(swing);
+                finish(swing.passive_free ? "settled" : "mutation_unverified_guest_melee_passive_readback", swing.passive_free);
+            }
+            return;
+        }
         const bool ordinary = swing.mode == SwingMode::ordinary;
         const bool cancellable = ordinary && !swing.damage.calls && !swing.damage.sweeps && swing.damage.target_name == "-";
         if (!owner_current(swing)) return finish(cancellable ? "stock_swing_cancelled" : "mutation_unverified_guest_melee_owner");
@@ -867,6 +978,11 @@ namespace
         if (!swing.passive_free) return finish("mutation_unverified_guest_melee_passive_readback");
         if (!ordinary && (health(swing.canonical.Get()) != swing.host_health || health(swing.save.Get()) != swing.guest_health))
             return finish("mutation_unverified_guest_melee_health_readback");
+        if (ordinary && swing.damage.blocked_by_obstacle)
+        {
+            swing.damage = {};
+            return finish("stock_miss_verified", true);
+        }
         if (ordinary && swing.damage.fenced_miss && !swing.damage.sweeps && !swing.damage.calls)
             return finish("stock_miss_verified", true);
         if (swing.damage.requested && (swing.damage.sweeps != 1 || swing.damage.calls != 1 || swing.damage.total <= 0))
@@ -880,6 +996,11 @@ namespace
         // Retain the weak receiver fence after every terminal outcome. An animation
         // can notify after loss of ownership, timeout, or an explicit abort.
         const bool already_vetoed = call.OriginalFunctionCallPrevented();
+        if (swing.pending && swing.input.active && !harvest_input_contact())
+        {
+            call.PreventOriginalFunctionCall();
+            return finish("mutation_unverified_guest_melee_contact_readback");
+        }
         ++swing.contacts;
         const auto refuse = [&](std::string_view why) {
             if (!call.OriginalFunctionCallPrevented()) call.PreventOriginalFunctionCall();
@@ -894,7 +1015,8 @@ namespace
             --swing.contacts;
             return;
         }
-        if (already_vetoed || Clock::now() >= swing.deadline || swing.contacts != 1)
+        if (already_vetoed || Clock::now() >= swing.deadline || swing.contacts != 1 ||
+            (swing.input.active && swing.input.contacts >= swing.presses))
             return refuse("mutation_unverified_guest_melee_unexpected_contact");
         if (frame.Object() != receiver || !graph || graph->Node() != swing.graph.Get() ||
             graph->Object() != swing.animation.Get() || !notify || notify->Node() != swing.hit.Get() ||
@@ -982,7 +1104,8 @@ namespace
         }
         if (ordinary)
         {
-            auto* deal = combat_damage(enemy);
+            const bool destructible = placed_destructible(enemy, world);
+            auto* deal = combat_damage(enemy, destructible);
             if (!deal)
             {
                 swing.damage.contact_status = "damage_function_unqualified";
@@ -995,6 +1118,7 @@ namespace
             }
             swing.damage.target = enemy;
             swing.damage.deal = deal;
+            swing.damage.destructible = destructible;
             swing.damage.target_name = RC::to_utf8_string(enemy->GetFullName());
         }
         swing.damage.contact_frame = &frame;
@@ -1101,6 +1225,18 @@ namespace
             auto* amount = total ? output(frame, total) : nullptr;
             auto* dead = lethal ? output(frame, lethal) : nullptr;
             proof.after = enemy_health(receiver);
+            if (proof.destructible)
+            {
+                // The stock obstacle graph reports remaining Health and may destroy its actor
+                // during Damage_Feedback. The current frame still owns the exact receiver.
+                if (call.OriginalFunctionCallPrevented() || receiver != frame.Object() || !amount || !dead ||
+                    lethal->GetPropertyValue(dead) || !std::isfinite(proof.after) || proof.after > proof.before ||
+                    total->GetPropertyValue(amount) != proof.after)
+                    return finish("mutation_unverified_guest_melee_stock_destructible_readback");
+                proof.total = proof.before - proof.after;
+                proof.blocked_by_obstacle = proof.total == 0.0;
+                return;
+            }
             const bool killed = dead && lethal->GetPropertyValue(dead);
             const bool ordinary = swing.mode == SwingMode::ordinary;
             if (call.OriginalFunctionCallPrevented() || !amount || !dead || (killed && !ordinary) ||
@@ -1118,7 +1254,8 @@ namespace
         if (proof.contact_frame == &frame)
         {
             proof.contact_frame = nullptr;
-            if (swing.pending && (proof.sweeps != 1 || proof.calls != 1 || proof.total <= 0.0))
+            if (swing.pending && (proof.sweeps != 1 || proof.calls != 1 ||
+                (proof.total <= 0.0 && !proof.blocked_by_obstacle)))
                 finish("mutation_unverified_guest_melee_stock_damage_missing");
         }
     }
@@ -1170,6 +1307,20 @@ namespace
         return proof(lua, !swing.status.starts_with("mutation_unverified_"), swing.status, &swing);
     }
 
+    int input_report(const Lua& lua)
+    {
+        lua.set_bool(!swing.status.starts_with("mutation_unverified_"));
+        lua.set_string(swing.status);
+        lua.set_integer(swing.serial);
+        lua.set_integer(swing.presses);
+        lua.set_integer(swing.releases);
+        lua.set_integer(swing.input.contacts);
+        lua.set_integer(swing.input.hits);
+        lua.set_integer(swing.input.charged);
+        lua.set_integer(swing.input.combo);
+        return 9;
+    }
+
     U::UObject* pawn_at(std::int64_t address)
     {
         U::UObject* pawn{};
@@ -1215,16 +1366,17 @@ namespace
         return 3;
     }
 
-    template <SwingMode mode> int start(const Lua& lua)
+    template <SwingMode mode, bool input = false> int start(const Lua& lua)
     {
         constexpr bool damage = mode != SwingMode::surface_fixture;
         constexpr bool ordinary = mode == SwingMode::ordinary;
         const auto argc = lua.get_stack_size();
-        const bool fixture = ordinary && argc == 4 && fixture_enabled() && lua.is_integer(4);
+        const bool fixture = ordinary && !input && argc == 4 && fixture_enabled() && lua.is_integer(4);
         if (!(ordinary ? enabled() : fixture_enabled()) || !U::IsInGameThreadRaw() || (argc != 3 && !fixture) ||
             !lua.is_integer(1) || !lua.is_integer(2) ||
             !lua.is_string(3)) return proof(lua, false, "native_guest_melee_arguments_unqualified");
-        if (swing.pending || (!ordinary && swing.serial && swing.pipe.Get()))
+        if (swing.pending || (swing.input.active && swing.status.starts_with("mutation_unverified_")) ||
+            (!ordinary && swing.serial && swing.pipe.Get()))
             return proof(lua, false, "native_guest_melee_fixture_already_bound");
         const auto pawn_address = lua.get_integer();
         const auto save_address = lua.get_integer();
@@ -1232,6 +1384,7 @@ namespace
         const auto target_address = fixture ? lua.get_integer() : 0;
         Swing candidate;
         candidate.mode = mode;
+        candidate.input.active = input;
         if (pawn_address <= 0 || save_address <= 0 || !guid_from(guid, candidate.guid))
             return proof(lua, false, "native_guest_melee_arguments_unqualified");
         auto* pawn = pawn_at(pawn_address);
@@ -1286,7 +1439,7 @@ namespace
         candidate.graph = graph;
         if (!owner_current(candidate) || !idle(candidate))
             return proof(lua, false, "native_guest_melee_stock_pose_unqualified");
-        if constexpr (ordinary)
+        if constexpr (ordinary && !input)
         {
             auto* combo_step = field<U::FIntProperty>(anim, STR("ComboStep"));
             if (!combo_step || combo_step->GetPropertyValueInContainer(anim) != 0)
@@ -1354,10 +1507,17 @@ namespace
         if (new_pipe) fenced_pipes.push_back({candidate.pipe, candidate.contact});
 
         candidate.serial = ++serial;
-        candidate.deadline = Clock::now() + attack_timeout;
+        candidate.deadline = Clock::now() + (input ? hold_timeout : attack_timeout);
         candidate.status = "pending";
         candidate.pending = true;
         swing = std::move(candidate);
+        if constexpr (input)
+        {
+            swing.input.held = true;
+            ++swing.presses;
+            if (!apply_primary_edge(swing, true)) finish("mutation_unverified_guest_melee_press_readback");
+            return input_report(lua);
+        }
         Primary press{};
         held->SetPropertyValueInContainer(&press, true);
         ++swing.presses;
@@ -1378,6 +1538,39 @@ namespace
                 finish("mutation_unverified_guest_melee_release_readback");
         }
         return report(lua);
+    }
+
+    int input_edge(const Lua& lua)
+    {
+        if (!enabled() || !U::IsInGameThreadRaw() || lua.get_stack_size() != 2 ||
+            !lua.is_integer(1) || !lua.is_string(2) || !swing.input.active || swing.serial != lua.get_integer())
+            return proof(lua, false, "native_guest_melee_exact_serial_required");
+        const auto edge = lua.get_string();
+        if (edge != "press" && edge != "release" && edge != "cancel")
+            return proof(lua, false, "native_guest_melee_exact_edge_required");
+        if (!swing.pending || swing.input.held == (edge == "press"))
+            return proof(lua, false, "native_guest_melee_stock_edge_inactive");
+        if (edge == "cancel" || (edge == "release" && !owner_current(swing)))
+        {
+            cancel_input();
+            return input_report(lua);
+        }
+        const bool down = edge == "press";
+        if (down && !owner_current(swing)) return proof(lua, false, "native_guest_melee_exact_owner_unqualified");
+        swing.input.held = down;
+        if (down) ++swing.presses;
+        else ++swing.releases;
+        swing.deadline = Clock::now() + (down ? hold_timeout : attack_timeout);
+        if (!apply_primary_edge(swing, down)) finish(down ? "mutation_unverified_guest_melee_press_readback" :
+            "mutation_unverified_guest_melee_release_readback");
+        return input_report(lua);
+    }
+
+    int read_input(const Lua& lua)
+    {
+        if (!enabled() || !U::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1) ||
+            !swing.input.active || swing.serial != lua.get_integer()) return 0;
+        return input_report(lua);
     }
 
     template <bool abort> int observe(const Lua& lua)
@@ -1459,6 +1652,9 @@ void silverfish::native_guest_melee::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
     if (!enabled()) return;
     lua.register_function("SilverfishStartNativeGuestMeleeSwing", start<SwingMode::ordinary>);
+    lua.register_function("SilverfishStartNativeGuestMeleeInput", start<SwingMode::ordinary, true>);
+    lua.register_function("SilverfishApplyNativeGuestMeleeInputEdge", input_edge);
+    lua.register_function("SilverfishReadNativeGuestMeleeInput", read_input);
     if (env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_TITLE_FIXTURES"))
         lua.register_function("SilverfishReadNativeGuestMeleeContactStatus", [](const Lua& state) {
             auto cause = std::string{swing.damage.contact_status};
