@@ -912,6 +912,32 @@ local function live_worker_position(world)
     return ("%.7f,%.7f,%.7f"):format(point.X, point.Y, point.Z)
 end
 
+local function pursuit_frame(pawn, world, host, aim)
+    local actor = dock_worker(world, live_worker)
+    if not valid(actor) or not actor.Alive then return "absent" end
+    assert(actor:GetLocalRole() == (host and 3 or 1), "the original worker has the wrong role")
+    local shooter = host and authoritative_guest(world) or pawn
+    local camera, controller = shooter.Camera, shooter.Controller
+    local weapon = shooter.EquipedItem
+    assert(valid(weapon) and valid(weapon.Arrow_Muzzle), "the pursuit shooter has no stock muzzle")
+    local target = actor:K2_GetActorLocation()
+    local desired = heading(camera:K2_GetComponentLocation(), target)
+    if aim then
+        assert(not host and shooter:IsLocallyControlled(), "only the guest controls aim in the pursuit proof")
+        controller:SetControlRotation(desired)
+    end
+    local point = shooter:K2_GetActorLocation()
+    local barrel = weapon.Arrow_Muzzle:K2_GetComponentRotation()
+    local function vector(value)
+        return ("%.3f,%.3f,%.3f"):format(value.X, value.Y, value.Z)
+    end
+    local function angles(value)
+        return ("%.3f,%.3f"):format(value.Yaw, value.Pitch)
+    end
+    return table.concat({vector(point), vector(target), angles(desired), angles(controller:GetControlRotation()),
+        angles(camera:K2_GetComponentRotation()), angles(barrel), tostring(shooter.IsWeaponBlocked)}, ";")
+end
+
 local function dock_swing(world, host, action)
     local actor = dock_worker(world, dock_attacker)
     assert(valid(actor), "the swing probe requires the mapped worker")
@@ -1113,6 +1139,12 @@ local function run(action, actor_path)
         end) and "ready" or "unavailable"
     elseif action == "dock-natural-position" then
         return live_worker_position(world)
+    elseif action == "dock-pursuit-view" or action == "dock-pursuit-aim" then
+        return pursuit_frame(pawn, world, host, action == "dock-pursuit-aim")
+    elseif action == "dock-pursuit-stop" then
+        assert(host, "only the host owns the combat observer")
+        live_probe = nil
+        return "stopped"
     elseif action == "dock-natural-impact" then
         assert(host and live_probe and valid(live_probe.actor.Melee_SFX), "the stock worker impact is unavailable")
         return live_probe.actor.Melee_SFX:GetFullName():match(" (%S+)$")
