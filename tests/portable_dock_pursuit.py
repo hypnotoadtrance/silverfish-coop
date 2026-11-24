@@ -1,6 +1,7 @@
 """One unmodified warehouse worker pursues a firing, moving guest."""
 
 import asyncio
+from contextlib import suppress
 import math
 import time
 
@@ -224,5 +225,10 @@ async def verify_dock_pursuit(host, guest, frame, command):
         death = await wait_for(shared_death, "The exact worker death/ragdoll did not reach both seats", 10)
         return {"baseline": baseline, "retaliation": retaliation, "rounds": history,
                 "muzzle_target_camera_angles_at_launch": launches, "both_peers_dead_and_ragdolled": death}
+    except Exception as error:
+        with suppress(RuntimeError, TimeoutError):
+            launches = await command(host, "dock-pursuit-launches")
+            error.add_note(f"Muzzle, target, and camera angles at stock launch: {launches}")
+        raise
     finally:
         assert await command(host, "dock-pursuit-stop") == "stopped"
