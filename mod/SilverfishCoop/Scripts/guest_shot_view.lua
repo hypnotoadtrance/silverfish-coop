@@ -26,8 +26,10 @@ function shot_view.parse(view)
     if (#vectors ~= 1 and #vectors ~= 3 and #vectors ~= 4) or table.concat(vectors, ";") ~= view then return end
     if actor then
         local x, y, z = contact:match(vector_pattern)
-        if #vectors ~= 4 or #actor > 256 or not actor:match("^/Game/Classes/Maps/[%w_/.]+:PersistentLevel%.[%w_.]+$")
-            or not x then return end
+        local number = actor:match("^npc:([1-9]%d*)$")
+        local dynamic = number and #number <= 5 and tonumber(number) <= 65535
+        local placed = #actor <= 256 and actor:match("^/Game/Classes/Maps/[%w_/.]+:PersistentLevel%.[%w_.]+$")
+        if #vectors ~= 4 or not x or not (placed or dynamic) then return end
         values[13], values[14], values[15], values[16] = actor, tonumber(x), tonumber(y), tonumber(z)
     end
     return values

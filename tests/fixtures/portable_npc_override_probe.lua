@@ -929,6 +929,9 @@ end
 
 local function restore_garage_fixture()
     if garage_view and valid(garage_view.extra_barrier) then garage_view.extra_barrier:K2_DestroyActor() end
+    if garage_view and garage_view.dynamic and valid(garage_view.worker) then
+        garage_view.worker:K2_DestroyActor()
+    end
     if garage_view and garage_view.long_shot and valid(garage_view.worker) and garage_view.worker.Alive then
         local worker, saved = garage_view.worker, garage_view.long_shot
         worker.Health = saved.health
@@ -1030,7 +1033,7 @@ local function stage_second_garage_barrier(world, specification)
     return extra:GetFName():ToString()
 end
 
-local function stage_garage_shot(host, world)
+local function stage_garage_shot(host, world, dynamic)
     local _, mesh = stock_garage(world)
     local worker = dock_worker(world, "NPC_Survivor_Worker_C_2")
     local shooter = authoritative_guest(world)
@@ -1059,12 +1062,16 @@ local function stage_garage_shot(host, world)
                     if shooter:K2_TeleportTo({X=near.X,Y=near.Y,Z=at.Z+half+2}, {Pitch=0,Yaw=aim.Yaw,Roll=0}) then
                         shooter.CharacterMovement:StopMovementImmediately()
                         shooter:ForceNetUpdate()
-                        assert(worker:K2_SetActorLocation(far, false, {}, true), "could not stage the stock worker beyond the door")
+                        if dynamic then
+                            worker = create_stock_npc(host, world, "bandit", far, aim.Yaw)
+                            worker.bAlwaysRelevant = true
+                        end
+                        assert(worker:K2_SetActorLocation(far, false, {}, true), "could not stage the stock NPC beyond the door")
                         worker.CharacterMovement:DisableMovement()
                         worker:SetActorTickEnabled(false)
                         if valid(worker.Controller) then worker.Controller:SetActorTickEnabled(false) end
                         worker:ForceNetUpdate()
-                        garage_view = {shooter=shooter, worker=worker}
+                        garage_view = {shooter=shooter, worker=worker, dynamic=dynamic}
                         watch_garage_projectiles()
                         return table.concat({point_string(near), point_string(far), point_string(blocked),
                             point_string(high_target), tostring(worker.Health)}, ";")
@@ -1076,15 +1083,24 @@ local function stage_garage_shot(host, world)
     error(("the garage has no qualified low firing lane at %s (bounds %s)"):format(point_string(center), point_string(extent)), 0)
 end
 
-local function set_garage_aim(pawn, world, host, specification)
+local function garage_bandit(world, point)
+    for _, actor in ipairs(FindAllOf("NPC_Bandit_C") or {}) do
+        if valid(actor) and same(actor:GetWorld(), world) and actor.Alive then
+            local at = actor:K2_GetActorLocation()
+            if (at.X-point.X)^2 + (at.Y-point.Y)^2 + (at.Z-point.Z)^2 < 40^2 then return actor end
+        end
+    end
+end
+
+local function set_garage_aim(pawn, world, host, specification, dynamic)
     local from_text, to_text = specification:match("^([^;]+);([^;]+)$")
     assert(from_text and to_text)
     local from, to = position(from_text), position(to_text)
     local _, mesh = stock_garage(world)
     local shooter = host and authoritative_guest(world) or pawn
     local weapon = shooter.EquipedItem
-    local worker = dock_worker(world, "NPC_Survivor_Worker_C_2")
-    assert(valid(worker) and valid(weapon) and valid(weapon.Arrow_Muzzle))
+    local worker = dynamic and garage_bandit(world, to) or dock_worker(world, "NPC_Survivor_Worker_C_2")
+    assert(valid(weapon) and valid(weapon.Arrow_Muzzle))
     local aim = heading(from, to)
     assert(not host or (garage_view and same(garage_view.shooter, shooter)))
     if not garage_aim then
@@ -1658,9 +1674,9 @@ local function run(action, actor_path)
         shooter.Controller:SetControlRotation(angle)
         if host then shooter.Camera:K2_SetWorldRotation(angle, false, {}, true) end
         return "ready"
-    elseif action == "dock-garage-stage" then
+    elseif action == "dock-garage-stage" or action == "dock-garage-stage-dynamic" then
         assert(host)
-        return stage_garage_shot(pawn, world)
+        return stage_garage_shot(pawn, world, action == "dock-garage-stage-dynamic")
     elseif action == "dock-garage-open" then
         return open_garage_for_test(world)
     elseif action == "dock-garage-lower-host" then
@@ -1677,8 +1693,13 @@ local function run(action, actor_path)
         return relocate_garage_barrier(world, actor_path, action == "dock-garage-long-clear")
     elseif action == "dock-garage-restore" then
         return restore_garage_fixture()
-    elseif action == "dock-garage-aim" then
-        return set_garage_aim(pawn, world, host, actor_path)
+    elseif action == "dock-garage-aim" or action == "dock-garage-dynamic-aim" then
+        return set_garage_aim(pawn, world, host, actor_path, action == "dock-garage-dynamic-aim")
+    elseif action == "dock-garage-dynamic-name" then
+        local actor = garage_bandit(world, position(actor_path))
+        if not valid(actor) then return "absent" end
+        local key = require("native_npc_barter_identity").key(actor)
+        return actor:GetFName():ToString() .. ";" .. (key and tostring(tonumber(key:sub(-4), 16)) or "-")
     elseif action == "dock-garage-plank" then
         return stage_garage_plank(pawn, world, host, actor_path)
     elseif action == "dock-garage-plank-health" then

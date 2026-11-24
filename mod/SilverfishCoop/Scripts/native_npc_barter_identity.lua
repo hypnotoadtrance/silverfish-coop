@@ -1,13 +1,13 @@
 local identity = {}
 
 local reference = require("replicated_actor_reference")
-local trader_path = "/Game/Classes/Actors/Barter_BP.Barter_BP_C"
 local npc_path = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local prefix = "5346434F4F504241525445520000"
 
-local marker_class, trader_class, npc_class, world, phase
+local marker_class, npc_class, world, phase
 local active = false
 local number, markers, pending = 0, {}, {}
+local census, cursor
 local retry_interval = 1
 local registration_window = 30
 
@@ -26,6 +26,13 @@ local function exact_npc(actor)
     return active and valid(npc_class) and valid(actor) and actor:IsA(npc_class) and actor_in_world(actor)
 end
 
+local function bind(npc, marker, value)
+    markers[npc:GetAddress()] = {marker = marker, number = value}
+    if type(SilverfishBindNativeShotTarget) == "function" then
+        SilverfishBindNativeShotTarget(marker:GetFullName():match("^%S+ (.+)$"))
+    end
+end
+
 local function remember(marker)
     if not actor_in_world(marker) or not same(marker:GetClass(), marker_class) or marker:HasAuthority() then return true end
     local npc = marker:GetOwner()
@@ -33,16 +40,14 @@ local function remember(marker)
     local owner_known = exact_npc(npc)
     if not value and not owner_known then return true end
     if not value or not owner_known then return false end
-    markers[npc:GetAddress()] = {marker = marker, number = value}
+    bind(npc, marker, value)
     return true
 end
 
-local function publish(npc, trader)
+local function publish(npc)
     if not exact_npc(npc) or placed(npc) or not npc:HasAuthority() or number == reference.limit then return true end
-    if actor_in_world(trader) and valid(trader.LinkedShop) then return true end
-    if npc.bReplicates ~= true
-        or not actor_in_world(trader) or not same(trader:GetClass(), trader_class) or not same(trader.LinkedNPC, npc)
-        or not same(npc.BarterRef, trader) or npc.Alive ~= true or not valid(trader.MerchantData) then return false end
+    if npc.Alive ~= true then return true end
+    if npc.bReplicates ~= true then return false end
     local address = npc:GetAddress()
     local previous = markers[address]
     if previous and actor_in_world(previous.marker) then return true end
@@ -51,7 +56,7 @@ local function publish(npc, trader)
     local marker = reference.spawn(world, marker_class, "barter", npc, next_number)
     if not actor_in_world(marker) then return false end
     number = next_number
-    markers[address] = {marker = marker, number = number}
+    bind(npc, marker, number)
     return true
 end
 
@@ -69,9 +74,8 @@ local function install()
     if type(RegisterHook) ~= "function" or type(RegisterBeginPlayPostHook) ~= "function"
         or type(RegisterEndPlayPreHook) ~= "function" then return false end
     marker_class = StaticFindObject(reference.class)
-    trader_class = StaticFindObject(trader_path)
     npc_class = StaticFindObject(npc_path)
-    if not valid(marker_class) or not valid(trader_class) or not valid(npc_class) then return false end
+    if not valid(marker_class) or not valid(npc_class) then return false end
     RegisterHook("/Script/Engine.Actor:OnRep_Owner", function(context)
         if not active or phase ~= "connected" then return end
         local marker = context:get()
@@ -84,9 +88,6 @@ local function install()
         local actor = context:get()
         if exact_npc(actor) and not placed(actor) then
             enqueue(actor)
-        elseif valid(actor) and same(actor:GetClass(), trader_class) and actor_in_world(actor) then
-            local npc = actor.LinkedNPC
-            if exact_npc(npc) then enqueue(npc) end
         end
     end)
     RegisterEndPlayPreHook(function(context, reason)
@@ -116,16 +117,31 @@ function identity.sync(state, current)
     end
     if phase ~= current or not same(state.world, world) then
         world, phase, number, markers, pending = state.world, current, 0, {}, {}
+        if type(SilverfishBindNativeShotTarget) == "function" then SilverfishBindNativeShotTarget() end
         if phase == "hosting" then
-            for _, trader in ipairs(FindAllOf("Barter_BP_C") or {}) do
-                if actor_in_world(trader) and not publish(trader.LinkedNPC, trader) then enqueue(trader.LinkedNPC) end
+            local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+            if valid(statics) then
+                local output = {}
+                statics:GetAllActorsOfClass(world, npc_class, output)
+                census, cursor = output.OutActors or output, 1
             end
         else
+            census = nil
             -- A marker may have arrived before the guest entered the active session.
             for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
                 if not remember(marker) then enqueue(marker) end
             end
         end
+    end
+    if census then
+        local limit = math.min(cursor + 7, #census)
+        for index = cursor, limit do
+            local npc = census[index]
+            if npc and type(npc.type) == "function" and npc:type() == "RemoteUnrealParam" then npc = npc:get() end
+            if exact_npc(npc) and not publish(npc) then enqueue(npc) end
+        end
+        cursor = limit + 1
+        if cursor > #census then census = nil end
     end
     local now = os.time()
     for address, entry in pairs(pending) do
@@ -137,7 +153,7 @@ function identity.sync(state, current)
             if phase == "connected" then
                 complete = remember(actor)
             else
-                complete = publish(actor, actor.BarterRef)
+                complete = publish(actor)
             end
             if complete then pending[address] = nil else entry.next_attempt = now + retry_interval end
         end

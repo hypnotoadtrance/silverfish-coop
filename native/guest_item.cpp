@@ -371,8 +371,20 @@ namespace
         return {};
     }
 
+    unsigned contact_number(std::string_view name)
+    {
+        constexpr std::string_view prefix = "npc:";
+        if (!name.starts_with(prefix)) return 0;
+        name.remove_prefix(prefix.size());
+        if (name.empty() || name.size() > 5 || name.front() == '0') return 0;
+        unsigned id{};
+        const auto [end, error] = std::from_chars(name.data(), name.data() + name.size(), id);
+        return error == std::errc{} && end == name.data() + name.size() && id <= 65535 ? id : 0;
+    }
+
     bool valid_contact_path(std::string_view path)
     {
+        if (contact_number(path)) return true;
         constexpr std::string_view prefix = "/Game/Classes/Maps/";
         constexpr std::string_view level = ":PersistentLevel.";
         if (!path.starts_with(prefix) || path.size() > 256) return false;
@@ -1495,6 +1507,55 @@ namespace
         return actor->GetFunctionByNameInChain(damage_function) != nullptr;
     }
 
+    bool spawned_humanoid(Unreal::UObject* actor)
+    {
+        if (actor->HasAnyFlags(Unreal::RF_WasLoaded)) return false;
+        auto* npc = find<Unreal::UClass>(STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"));
+        return npc && actor->IsA(npc);
+    }
+
+    struct ContactReference
+    {
+        Unreal::FWeakObjectPtr marker;
+        unsigned number;
+    };
+    std::map<Unreal::UObject*, ContactReference> contact_references;
+
+    unsigned contact_reference(Unreal::UObject* target)
+    {
+        auto bound = contact_references.find(target);
+        if (bound == contact_references.end()) return 0;
+        auto* marker = bound->second.marker.Get();
+        if (live(marker) && object(marker, STR("Owner")) == target) return bound->second.number;
+        contact_references.erase(bound);
+        return 0;
+    }
+
+    int bind_contact_reference(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw()) return 0;
+        if (lua.get_stack_size() == 0)
+        {
+            contact_references.clear();
+            return 0;
+        }
+        if (!lua.is_string()) return 0;
+        const auto path = RC::to_generic_string(lua.get_string());
+        auto* candidate = find<Unreal::UObject>(path.c_str());
+        if (!live(candidate) || candidate->GetClassPrivate() != find<Unreal::UClass>(STR("/Script/Engine.TargetPoint")))
+            return 0;
+        auto* marker = static_cast<Unreal::AActor*>(candidate);
+        auto* target = object(marker, STR("Owner"));
+        if (!available_projectile_target(target, marker->GetWorld()) || !spawned_humanoid(target)) return 0;
+        const auto point = actor_aim_vector(marker, STR("/Script/Engine.Actor:K2_GetActorLocation"));
+        if (!point) return 0;
+        const auto height = (*point)[2] - 262144; // replicated_actor_reference.lua
+        const auto id = std::round(height);
+        if (id >= 1 && id <= 65535 && std::abs(height - id) < .25)
+            contact_references.insert_or_assign(target, ContactReference{Unreal::FWeakObjectPtr(marker), static_cast<unsigned>(id)});
+        return 0;
+    }
+
     void reconcile_projectile_contact(Unreal::AActor* projectile, Unreal::UObject* pawn, const ShotView& view)
     {
         if (!view.contact || view.contact_actor.empty()) return;
@@ -1521,7 +1582,8 @@ namespace
         auto excluded = std::span{exclusions};
         std::size_t count = 2;
         Unreal::UObject* target{};
-        const auto reported_actor = RC::to_generic_string(view.contact_actor);
+        const auto number = contact_number(view.contact_actor);
+        const auto reported_actor = number ? RC::StringType{} : RC::to_generic_string(view.contact_actor);
         // A damageable actor may be the reported contact, but must still block
         // the shot if it lies in front of a different reported actor.
         while (const auto hit = trace_shot(projectile, *origin, end, projectile_trace, excluded.first(count)))
@@ -1529,7 +1591,9 @@ namespace
             auto* actor = hit->actor;
             if (!hit->hit || !live(actor) || !authority(actor)) return;
             const bool damageable = takes_projectile_damage(actor);
-            if (actor->GetPathName() == reported_actor)
+            const bool matches = number ? contact_reference(actor) == number :
+                actor->GetPathName() == reported_actor && !spawned_humanoid(actor);
+            if (matches)
             {
                 if (count == 2 || !damageable || squared_length(difference(hit->point, *view.contact)) > 100 * 100 ||
                     !available_projectile_target(actor, projectile->GetWorld())) return;
@@ -3727,7 +3791,9 @@ silverfish::native_guest_item::ShotView silverfish::native_guest_item::capture_s
                     const auto world = static_cast<Unreal::AActor*>(pawn)->GetWorld();
                     if (hit && hit->hit && available_projectile_target(hit->actor, world) && takes_projectile_damage(hit->actor))
                     {
-                        auto path = RC::to_utf8_string(hit->actor->GetPathName());
+                        const auto number = contact_reference(hit->actor);
+                        auto path = number ? std::format("npc:{}", number) :
+                            spawned_humanoid(hit->actor) ? std::string{} : RC::to_utf8_string(hit->actor->GetPathName());
                         if (valid_contact_path(path))
                         {
                             view.contact_actor = std::move(path);
@@ -3828,6 +3894,7 @@ bool silverfish::native_guest_item::split_stock_stack(Unreal::UObject* context, 
 
 void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
+    lua.register_function("SilverfishBindNativeShotTarget", bind_contact_reference);
     if (env("SILVERFISH_COOP_NATIVE_INTERACT_INPUT"))
     {
         lua.register_function("SilverfishProjectNativeLokiRound", project_loki_round);

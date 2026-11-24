@@ -12,6 +12,7 @@ GUID = re.compile(r"[0-9A-F]{32}\Z")
 SHOT_DIRECTION = re.compile(r"-?[01]\.[0-9]{6}(?:,-?[01]\.[0-9]{6}){2}")
 SHOT_POSITION = re.compile(r"-?[0-9]{1,7}\.[0-9]{3}(?:,-?[0-9]{1,7}\.[0-9]{3}){2}")
 SHOT_ACTOR_PATH = re.compile(r"/Game/Classes/Maps/[A-Za-z0-9_/.]+:PersistentLevel\.[A-Za-z0-9_.]+")
+SHOT_NPC_REFERENCE = re.compile(r"npc:([1-9][0-9]{0,4})")
 SELECT_EQUIPMENT = "native-guest-weapon-select"
 SET_FIRE_MODE = "native-guest-weapon-mode-store"
 FIRE_MODES = ("auto", "semi")
@@ -58,8 +59,10 @@ def valid_shot_view(value: str) -> bool:
     if len(positions) not in (0, 2, 3):
         return False
     if contact:
-        if (len(contact) != 2 or len(positions) != 3 or len(contact[0]) > 256
-                or not SHOT_ACTOR_PATH.fullmatch(contact[0])):
+        actor = contact[0]
+        dynamic = SHOT_NPC_REFERENCE.fullmatch(actor)
+        if (len(contact) != 2 or len(positions) != 3 or len(actor) > 256
+                or not (SHOT_ACTOR_PATH.fullmatch(actor) or dynamic and int(dynamic[1]) <= 65535)):
             return False
         positions.append(contact[1])
     return (valid_shot_direction(direction) and all(SHOT_POSITION.fullmatch(point)

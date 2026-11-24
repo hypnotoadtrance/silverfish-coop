@@ -2736,10 +2736,28 @@ async def verify_dock_garage_shots(host: Seat, guest: Seat, frame: dict, command
 
 async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, command, *, pellets: int) -> dict:
     guest_run = guest.client / "run"
-    low, worker, high, obstruction, health = (await command(host, "dock-garage-stage")).split(";")
+    dynamic = pellets != 1
+    stage = "dock-garage-stage-dynamic" if dynamic else "dock-garage-stage"
+    low, worker, high, obstruction, health = (await command(host, stage)).split(";")
+    contact_name = ":PersistentLevel.NPC_Survivor_Worker_C_2"
+    actor_names = None
+    if dynamic:
+        async with asyncio.timeout(8):
+            while True:
+                names = await asyncio.gather(*(command(seat, f"dock-garage-dynamic-name\t{worker}") for seat in (host, guest)))
+                references = [name.split(";") for name in names]
+                if all(len(entry) == 2 and entry[1].isdecimal() for entry in references):
+                    break
+                await asyncio.sleep(.08)
+        (host_name, reference), (guest_name, guest_reference) = references
+        assert host_name != guest_name and reference == guest_reference, references
+        contact_name = f"npc:{reference}"
+        actor_names = {"host": host_name, "guest": guest_name, "shared": contact_name}
+        health = await command(host, "dock-garage-health")
     health = float(health)
     above = f"dock-garage-aim\t{high};{obstruction}"
-    below = f"dock-garage-aim\t{low};{worker}"
+    aim = "dock-garage-dynamic-aim" if dynamic else "dock-garage-aim"
+    below = f"{aim}\t{low};{worker}"
 
     async def shoot(expected_health, *, should_hit, contact_required=False):
         started = time.time()
@@ -2767,7 +2785,7 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         assert shot["after"] == shot["before"] - 1 and shot["projectiles"] == pellets, event
         if contact_required:
             contact = event.get("native_guest_trigger_view", {}).get("contact", {})
-            assert contact.get("actor", "").endswith(":PersistentLevel.NPC_Survivor_Worker_C_2"), event
+            assert contact.get("actor", "").endswith(contact_name), event
         try:
             async with asyncio.timeout(6):
                 while True:
@@ -2811,7 +2829,8 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
     second_barrier = await command(host, f"dock-garage-second-barrier\t{low};{worker}") if pellets == 1 else None
     guest_collision = await command(guest, f"dock-garage-projectile-trace\t{low};{worker}")
     host_collision = await command(host, f"dock-garage-projectile-trace\t{low};{worker}")
-    assert guest_collision == "NPC_Survivor_Worker_C_2" and host_collision == "StaticMeshActor_347", (
+    expected_guest_collision = actor_names["guest"] if dynamic else "NPC_Survivor_Worker_C_2"
+    assert guest_collision == expected_guest_collision and host_collision == "StaticMeshActor_347", (
         guest_collision, host_collision)
     receipt, after_disagreement = await shoot(before_mismatch, should_hit=True, contact_required=True)
     key = "tutorial_dock_world_collision_mismatch" if pellets == 1 else "tutorial_dock_buckshot_mismatch"
@@ -2819,6 +2838,8 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         "same_low_aim": True, "host_world_line": "blocked", "guest_world_line": "worker",
         "health": [before_mismatch, after_disagreement], "blocked_shot": blocked, "accepted_shot": receipt,
     }
+    if actor_names:
+        evidence[key]["actor_names"] = actor_names
     if second_barrier:
         witness = await command(host, "dock-garage-shot-witness")
         exclusions = witness.rsplit(";", 1)[-1].split(",")
