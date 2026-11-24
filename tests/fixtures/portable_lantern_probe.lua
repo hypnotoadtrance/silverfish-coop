@@ -6,6 +6,8 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not mailbox
 
 local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
 local path = map .. ":PersistentLevel.Prop_Lantern_01_C_1"
+local toolbox_path = map .. ":PersistentLevel.Prop_ToolBox01_C_7"
+local stalker_path = map .. ":PersistentLevel.NPC_LoneStalker_C_0"
 local command, reply = mailbox .. "/portable-lantern-command.tsv", mailbox .. "/portable-lantern-reply.tsv"
 local color = {R = 0, G = 0, B = 0, A = 0}
 local last, watch
@@ -125,6 +127,8 @@ end
 local impact_watch, impact_hooked
 local prop_hit = "/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C:" ..
     "BndEvt__PhysicsProp_Master_BP_PropMesh_K2Node_ComponentBoundEvent_0_ComponentHitSignature__DelegateSignature"
+local pawn_hit = "/Game/Classes/Player/Player_FP.Player_FP_C:DealDamage"
+local npc_hit = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:DealDamage"
 
 local function other_player(world, pawn)
     local other
@@ -172,10 +176,21 @@ end
 local function impact_probe(action, world, pawn, lantern, root)
     local other = other_player(world, pawn)
     local hosting = lane == "first"
+    local npc
+    if action:match("npc$") then
+        npc = StaticFindObject(stalker_path)
+        assert(valid(npc) and npc.Alive == true and same(npc:GetWorld(), world), "expected the original Observatory stalker")
+        action = action:sub(1, -4)
+    end
+    local function health(target)
+        if same(target, npc) then return target.Health end
+        return valid(target.Save) and target.Save.PlayerHealth or "-"
+    end
+    if action == "impactlaneguest" and hosting and npc then return impact_lane(npc, other, lantern) end
     if action == "impactlane" and hosting then return impact_lane(pawn, other, lantern) end
     if (action == "impactplacehost" or action == "impactplaceguest") and hosting then
         local source = action == "impactplacehost" and pawn or other
-        local target = same(source, pawn) and other or pawn
+        local target = npc or (same(source, pawn) and other or pawn)
         assert(not valid(source.HeldObject), "the impact thrower was not empty-handed")
         local start, finish = source:K2_GetActorLocation(), target:K2_GetActorLocation()
         local dx, dy = finish.X - start.X, finish.Y - start.Y
@@ -192,7 +207,7 @@ local function impact_probe(action, world, pawn, lantern, root)
     if action == "impactposition" then return position_text(root:K2_GetComponentLocation()) end
     if action == "impactgrab" and hosting then return host_grab(pawn, lantern, root) end
     if (action == "impactaim" or action == "impactthrow" and hosting) and holds(pawn, lantern, root) then
-        local eye, target = pawn.Camera:K2_GetComponentLocation(), other:K2_GetActorLocation()
+        local eye, target = pawn.Camera:K2_GetComponentLocation(), (npc or other):K2_GetActorLocation()
         local x, y, z = target.X-eye.X, target.Y-eye.Y, target.Z+12-eye.Z
         local rotation = {Pitch=math.deg(math.atan(z, math.sqrt(x*x+y*y))),Yaw=math.deg(math.atan(y,x)),Roll=0}
         pawn.Controller:SetControlRotation(rotation)
@@ -206,9 +221,11 @@ local function impact_probe(action, world, pawn, lantern, root)
             position_text(root:GetPhysicsLinearVelocity(FName("None", EFindName.FNAME_Find)))}, ";")
     end
     if action == "impactarmguest" or action == "impactarmhost" then
-        local target = (action == "impactarmguest") == hosting and other or pawn
+        local target = npc or ((action == "impactarmguest") == hosting and other or pawn)
+        local thrower = npc and (hosting and other or pawn) or (same(target, pawn) and other or pawn)
         local body = target.CapsuleComponent
-        impact_watch = {lantern=lantern, target=target, hp=valid(target.Save) and target.Save.PlayerHealth or "-", hits={},
+        impact_watch = {lantern=lantern, target=target, hp=health(target), hits={},
+            thrower=thrower, damage_calls=0, attributed=0,
             position=body:K2_GetComponentLocation(),
             response=root:GetCollisionResponseToChannel(body:GetCollisionObjectType()),
             target_response=body:GetCollisionResponseToChannel(root:GetCollisionObjectType())}
@@ -220,6 +237,14 @@ local function impact_probe(action, world, pawn, lantern, root)
                 local value = impulse:get()
                 sample.hits[#sample.hits+1] = math.sqrt(value.X^2 + value.Y^2 + value.Z^2)
             end)
+            local function observe_damage(ctx, _, _, instigator)
+                local sample = impact_watch
+                if not sample or not same(ctx:get(), sample.target) then return end
+                sample.damage_calls = sample.damage_calls + 1
+                if same(instigator:get(), sample.thrower) then sample.attributed = sample.attributed + 1 end
+            end
+            RegisterHook(pawn_hit, observe_damage)
+            RegisterHook(npc_hit, observe_damage)
             impact_hooked = true
         end
         return "armed"
@@ -230,10 +255,10 @@ local function impact_probe(action, world, pawn, lantern, root)
         impact_watch = nil
         local point = root:K2_GetComponentLocation()
         local body = sample.target.CapsuleComponent
-        local health = valid(sample.target.Save) and sample.target.Save.PlayerHealth or "-"
-        return table.concat({sample.hp, health, position_text(sample.position),
+        return table.concat({sample.hp, health(sample.target), position_text(sample.position),
             position_text(point), sample.response, sample.target_response,
-            root:GetCollisionResponseToChannel(body:GetCollisionObjectType()), table.concat(sample.hits, " ")}, ";")
+            root:GetCollisionResponseToChannel(body:GetCollisionObjectType()), table.concat(sample.hits, " "),
+            root:GetMass(), sample.damage_calls, sample.attributed}, ";")
     end
     error("unknown stock prop impact probe action")
 end
@@ -293,7 +318,9 @@ local function verify(action, pawn_name)
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
     local driver = valid(world) and world.NetDriver
-    local lantern = StaticFindObject(path)
+    local toolbox = action:match("^heavyimpact")
+    if toolbox then action = action:sub(6) end
+    local lantern = StaticFindObject(toolbox and toolbox_path or path)
     local root = valid(lantern) and lantern.PropMesh
     local mesh = StaticFindObject("/Script/Engine.StaticMeshComponent")
     assert(valid(world) and world:GetFullName() == "World " .. map and valid(driver)
@@ -301,7 +328,7 @@ local function verify(action, pawn_name)
         and lantern:HasAnyFlags(EObjectFlags.RF_WasLoaded)
         and not lantern:IsActorBeingDestroyed() and lantern.bReplicateMovement == true
         and same(root, lantern.RootComponent) and valid(mesh) and root:IsA(mesh),
-        "unqualified authored Observatory lantern")
+        "unqualified authored Observatory physics prop")
     local pawn_path = pawn_name:match("^Player_FP_C (.+)$")
     local pawn = pawn_path and StaticFindObject(pawn_path)
     assert(valid(pawn) and pawn:GetFullName() == pawn_name and same(pawn:GetWorld(), world) and pawn.Dead == false,

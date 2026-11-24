@@ -16,6 +16,7 @@ local max_handoff_offset = 175
 local max_release_reach = 375
 local max_linear_velocity = 6000
 local max_angular_velocity = 7200
+local pawn_channel, ignore_collision, block_collision = 2, 0, 2
 local color = {R = 0, G = 0, B = 0, A = 0}
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local world, state, phase, hook, release_hook, mailbox, sequence, next_read, next_local_pose
@@ -398,6 +399,19 @@ local function stock(pawn, kind, actor, range, pitch, yaw, corpse)
             observers.catch_offering(state, pawn, actor, camera:GetForwardVector())
         end
     end)
+    if invoked and kind == "throw" and not corpse and valid(actor) and actor:HasAuthority()
+        and not same(pawn.HeldObject, actor) and actor.BeingHeld == false and actor.IgnorePawn_WhenAsleep == true then
+        -- The host grip can already have woken the body before stock release.
+        -- An already awake body may still carry the pawn-ignore response from sleep.
+        pcall(function()
+            local root = mesh(actor)
+            local bone = FName("None", EFindName.FNAME_Find)
+            if valid(root) and root:IsSimulatingPhysics(bone)
+                and root:GetCollisionResponseToChannel(pawn_channel) == ignore_collision then
+                root:SetCollisionResponseToChannel(pawn_channel, block_collision)
+            end
+        end)
+    end
     local restored = pcall(function()
         camera:K2_SetRelativeRotation(previous_angle, false, {}, true)
         pawn.ActorBeingLookedAt = valid(previous_actor) and previous_actor or nil

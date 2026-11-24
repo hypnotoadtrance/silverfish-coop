@@ -3774,52 +3774,82 @@ async def verify_stock_host_prop_observer(host: Seat, guest: Seat, pawn: str, ev
                and math.dist(point, position) < 45)
 
     def impact_frame(raw):
-        before, after, target, settled, prop_response, target_response, final_response, impulses = raw.split(";")
+        before, after, target, settled, prop_response, target_response, final_response, impulses, mass, calls, attributed = raw.split(";")
         return {"hp": [float(hp) if hp != "-" else None for hp in (before, after)],
                 "target": list(map(float, target.split())), "settled": list(map(float, settled.split())),
                 "responses": list(map(int, (prop_response, target_response, final_response))),
-                "impulses": list(map(float, impulses.split()))}
+                "impulses": list(map(float, impulses.split())), "mass_kg": float(mass),
+                "damage_calls": int(calls), "attributed_calls": int(attributed)}
 
-    impacts = evidence["stock_impacts"] = {}
-    for thrower, recipient in ((host, "guest"), (guest, "host")):
-        thrower_name = "host" if thrower is host else "guest"
-        launch = list(map(float, (await call(host, f"impactplace{thrower_name}")).split()))
-        if thrower is host:
-            assert await call(host, "impactgrab") == "grabbed"
-        else:
-            async with asyncio.timeout(3):
-                while math.dist(list(map(float, (await call(guest, "impactposition")).split()))[:2], launch[:2]) > 45:
-                    await asyncio.sleep(.05)
-            grabbed = await submit(guest_run, native_prop_carry.FIXTURE, target=f"pickup@{lantern_class}|{native_lantern.ACTOR}")
-            assert grabbed["ok"], grabbed
-            await wait(host_run, lambda frame:
-                       (row := frame.get("game", {}).get(native_prop_carry.PROOF, {}))
-                       and (row["edge"], row["pawn"], row["actor"]) == ("grab", pawn, native_lantern.ACTOR))
-        assert await call(thrower, "impactaim") == "aimed"
-        await asyncio.sleep(.35)
-        assert await asyncio.gather(*(call(seat, f"impactarm{recipient}") for seat in (host, guest))) == ["armed", "armed"]
-        if thrower is host:
-            evidence["stock_host_throw_release"] = [list(map(float, value.split()))
-                                                   for value in (await call(host, "impactthrow")).split(";")]
-        else:
-            thrown = await submit(guest_run, native_prop_carry.FIXTURE, target="throw")
-            assert thrown["ok"], thrown
-            await wait(host_run, lambda frame:
-                       (row := frame.get("game", {}).get(native_prop_carry.PROOF, {}))
-                       and (row["edge"], row["pawn"], row["actor"]) == ("throw", pawn, native_lantern.ACTOR))
-        await asyncio.sleep(1.25)
-        impacts[recipient] = {name: impact_frame(raw) for name, raw in zip(
-            ("host", "guest"), await asyncio.gather(call(host, "impactread"), call(guest, "impactread")), strict=True)}
+    async def guest_grab(class_path, actor, launch, position_action):
+        async with asyncio.timeout(3):
+            while math.dist(list(map(float, (await call(guest, position_action)).split()))[:2], launch[:2]) > 45:
+                await asyncio.sleep(.05)
+        grabbed = await submit(guest_run, native_prop_carry.FIXTURE, target=f"pickup@{class_path}|{actor}")
+        assert grabbed["ok"], grabbed
+        await wait(host_run, lambda frame:
+                   (row := frame.get("game", {}).get(native_prop_carry.PROOF, {}))
+                   and (row["edge"], row["pawn"], row["actor"]) == ("grab", pawn, actor))
 
+    async def guest_throw(actor):
+        thrown = await submit(guest_run, native_prop_carry.FIXTURE, target="throw")
+        assert thrown["ok"], thrown
+        await wait(host_run, lambda frame:
+                   (row := frame.get("game", {}).get(native_prop_carry.PROOF, {}))
+                   and (row["edge"], row["pawn"], row["actor"]) == ("throw", pawn, actor))
+
+    async def impact_pair(class_path, actor, prefix="", *, require_protection=False):
+        impacts = {}
+        for thrower_name, thrower, recipient in (("host", host, "guest"), ("guest", guest, "host")):
+            launch = list(map(float, (await call(host, f"{prefix}impactplace{thrower_name}")).split()))
+            if thrower is host:
+                assert await call(host, f"{prefix}impactgrab") == "grabbed"
+            else:
+                await guest_grab(class_path, actor, launch, f"{prefix}impactposition")
+            assert await call(thrower, f"{prefix}impactaim") == "aimed"
+            await asyncio.sleep(.35)
+            assert await asyncio.gather(*(call(seat, f"{prefix}impactarm{recipient}") for seat in (host, guest))) == ["armed", "armed"]
+            if thrower is host:
+                evidence[f"{prefix}stock_host_throw_release"] = [list(map(float, value.split()))
+                    for value in (await call(host, f"{prefix}impactthrow")).split(";")]
+            else:
+                await guest_throw(actor)
+            await asyncio.sleep(1.25)
+            impacts[recipient] = {name: impact_frame(raw) for name, raw in zip(
+                ("host", "guest"), await asyncio.gather(
+                    call(host, f"{prefix}impactread"), call(guest, f"{prefix}impactread")), strict=True)}
+            frames = impacts[recipient]
+            if require_protection:
+                assert frames["host"]["attributed_calls"] == frames["host"]["damage_calls"] == 1, frames
+                assert max(frames["host"]["impulses"], default=0) > 5000, frames
+                assert frames["host"]["hp"][0] == frames["host"]["hp"][1] == frames["guest"]["hp"][1], frames
+            assert math.dist(frames["host"]["settled"], frames["guest"]["settled"]) < 20, frames
+        return impacts
+
+    impacts = evidence["stock_impacts"] = await impact_pair(lantern_class, native_lantern.ACTOR)
     evidence["stock_contact_recipients"] = [name for name, frames in impacts.items()
                                             if max(frames["host"]["impulses"], default=0) > 0]
-    # A launch that misses the receiver is inconclusive for collision, but
-    # still yields a useful measurement and leaves the next map test safe.
-    for frames in impacts.values():
-        assert math.dist(frames["host"]["settled"], frames["guest"]["settled"]) < 20, frames
+    toolbox_class = "/Game/Assets/StaticMeshes/Mesh_Props/Prop_ToolBox01.Prop_ToolBox01_C"
+    toolbox = f"Prop_ToolBox01_C {OBSERVATORY}.Observitory_P:PersistentLevel.Prop_ToolBox01_C_7"
+    evidence["stock_toolbox_impacts"] = await impact_pair(toolbox_class, toolbox, "heavy", require_protection=True)
+    position = tuple(map(float, (await call(host, "heavyimpactlaneguestnpc")).split()))
+    await wait(guest_run, lambda state: (point := state.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
+               and math.dist(point, position) < 45)
+    launch = list(map(float, (await call(host, "heavyimpactplaceguestnpc")).split()))
+    await guest_grab(toolbox_class, toolbox, launch, "heavyimpactposition")
+    assert await call(guest, "heavyimpactaimnpc") == "aimed"
+    await asyncio.sleep(.35)
+    assert await call(host, "heavyimpactarmguestnpc") == "armed"
+    await guest_throw(toolbox)
+    await asyncio.sleep(1.25)
+    target = evidence["guest_toolbox_npc_impact"] = impact_frame(await call(host, "heavyimpactreadnpc"))
+    assert target["attributed_calls"] == target["damage_calls"] == 1, target
+    assert target["hp"][1] < target["hp"][0], target
     assert campaign_save_hashes(host.campaign) == checkpoint, "A stock prop impact wrote a campaign checkpoint"
     return {"stock_host_prop_observer": True,
-            "stock_prop_contact_both_seats": len(evidence["stock_contact_recipients"]) == 2}
+            "stock_prop_contact_both_seats": len(evidence["stock_contact_recipients"]) == 2,
+            "heavy_prop_contact_and_friendly_fire_protection_both_directions": True,
+            "heavy_guest_prop_damaged_stock_npc": True}
 
 
 async def verify_guest_shop_lease(host: Seat, guest: Seat, pawn: str) -> dict:
