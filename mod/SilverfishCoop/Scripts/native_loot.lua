@@ -377,7 +377,7 @@ function loot.claim_context(state, phase, pawn_name, requested_crate, point)
         or distance > (point and math.min(range, 250) or range) then
         error("native_loot_crate_out_of_reach", 0)
     end
-    return { pawn = pawn, save = pawn.Save, stock = stock, distance = distance, crate = crate, profile = profile }
+    return { world = world, pawn = pawn, save = pawn.Save, stock = stock, distance = distance, crate = crate, profile = profile }
 end
 
 function loot.placement(state, phase, requested_crate)

@@ -421,13 +421,31 @@ async def verify_resident_pickup(host, guest, guest_pawn: str, source: tuple[dic
     assert before == (campaign_save_hashes(host.campaign), saved_hashes(host.profile / "Saved/SaveGames"))
     timings = summarize(trace, resident=True, combined_operation=receipt if combined else None)
     assert timings["escrow_load_ms"] is not None, "The measurement did not exercise the copied cold escrow"
+    cached_replays = None
+    if combined:
+        # This checkpoint has one item. Reissue its exact native claim to exercise
+        # the same escrow lookup after other commands have run, without minting loot.
+        assert inventory_guid == guid and not claim.get("stack_merge"), claim
+        replay_trace = await arm_probe(host.bridge.directory)
+        for _ in range(2):
+            replay = await host.bridge.command("native-loot-claim", host_pawn, CABINET, guid, roll["escrow"]["slot"],
+                                               *(str(axis) for axis in item["transform"]["position"]), timeout=5)
+            details = replay["native_loot"]
+            assert details["ok"] and details["status"] == "already_claimed", details
+        await finish_probe(replay_trace)
+        labels = [line.split("\t", 1)[0] for line in replay_trace.read_text(encoding="utf-8").splitlines()]
+        assert labels.count("claim-native") == 2 and "escrow-load" not in labels, labels
+        after = (await submit_ok(host_run, "native-inventory-list"))["native_inventory"]
+        assert after == inventory
+        assert before == (campaign_save_hashes(host.campaign), saved_hashes(host.profile / "Saved/SaveGames"))
+        cached_replays = {"native_claims": 2, "escrow_disk_loads": 0, "trace": str(replay_trace)}
     return {"cabinet": CABINET, "stock_class": item["class_path"], "guid": guid, "projection": identity,
             "operation": receipt, "inventory": received, "native_claim_unix": claim["time_unix"],
             "sound_receipt_unix": played["time_unix"], "timings": timings,
             "restored_source_revision": saved["revision"], "restored_scope": game["save_scope"],
             "restored_host_slot": restored["slot"], "restored_seed": SEED, "escrow_slot": roll["escrow"]["slot"],
             "trace": str(trace), "local_bridge": "memory", "both_projected_views_retired": True,
-            "saves_unchanged_after_pickup": True}
+            "saves_unchanged_after_pickup": True, "cached_replays": cached_replays}
 
 
 async def verify_saved_pickup(host, stopped, saved, source):

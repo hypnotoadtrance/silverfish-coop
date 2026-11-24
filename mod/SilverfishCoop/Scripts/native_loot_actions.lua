@@ -8,6 +8,7 @@ local title_fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
     and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local observation, placement, daily_update
 local escrow_cache, escrow_order = {}, {}
+local cache_world, cache_save
 local pending_escrows = {}
 local max_cached_escrows = 16
 local statics = "/Script/Engine.Default__GameplayStatics"
@@ -21,11 +22,27 @@ local function valid_object(value)
     return value and value:IsValid()
 end
 
+local function clear_cache()
+    escrow_cache, escrow_order = {}, {}
+    cache_world, cache_save = nil, nil
+end
+
+local function bind_cache(scope)
+    local world, stock = scope.world:GetAddress(), scope.stock:GetAddress()
+    if cache_world ~= world or cache_save ~= stock then
+        clear_cache()
+        cache_world, cache_save = world, stock
+    end
+end
+
 local function remember_escrow(slot, pool)
+    -- Resolve the loaded name on reuse so a collected UObject is never accessed from Lua.
+    local path = pool:GetFullName():match("^SaveGame_BP_C (/Engine/Transient[%.:][%w_]+)$")
+    if not path then return end
     for index, cached in ipairs(escrow_order) do
         if cached == slot then table.remove(escrow_order, index); break end
     end
-    escrow_cache[slot] = pool
+    escrow_cache[slot] = path
     escrow_order[#escrow_order + 1] = slot
     if #escrow_order > max_cached_escrows then escrow_cache[table.remove(escrow_order, 1)] = nil end
 end
@@ -115,7 +132,10 @@ local function capture(scope, slot, outputs, items, pending)
         end
         item.object:K2_DestroyActor()
     end
-    if restored and #items > 0 then remember_escrow(slot, restored) end
+    if restored and #items > 0 then
+        bind_cache(scope)
+        remember_escrow(slot, restored)
+    end
 end
 
 local function release_escrow(slot)
@@ -133,6 +153,7 @@ end
 actions.release_escrow = release_escrow
 
 function actions.release_pending()
+    clear_cache()
     for slot in pairs(pending_escrows) do release_escrow(slot) end
 end
 
@@ -215,7 +236,10 @@ function actions.command(fields, state, phase)
             result.status = tostring(scope)
             return "stock loot claim scope unavailable"
         end
-        local pool = pending_escrows[slot] and pending_escrows[slot].pool or escrow_cache[slot]
+        bind_cache(scope)
+        local pending_pool = actions.pending_escrow(scope.world, slot)
+        local cached_path = escrow_cache[slot]
+        local pool = pending_pool or (cached_path and StaticFindObject(cached_path))
         if not valid_object(pool) then
             local api = StaticFindObject(statics)
             pool = valid_object(api) and api:LoadGameFromSlot(slot, 0)
@@ -224,7 +248,7 @@ function actions.command(fields, state, phase)
             result.status = "native_loot_escrow_generation_missing"
             return "stock loot escrow missing"
         end
-        remember_escrow(slot, pool)
+        if not pending_pool then remember_escrow(slot, pool) end
         result.distance, result.escrow_slot = scope.distance, slot
         local source = scope.profile.capacity ~= 2 and {scope.crate:GetAddress()} or {}
         local retained, new_retention
@@ -337,7 +361,6 @@ end
 
 function actions.reset()
     observation, placement, daily_update = nil, nil, nil
-    escrow_cache, escrow_order = {}, {}
 end
 
 function actions.rows(state, phase, status_row)
