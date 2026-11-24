@@ -264,7 +264,7 @@ local function offset_body(entry, x, y)
 end
 
 local function restore_locomotion(entry)
-    entry.gait_blend = nil
+    entry.gait_blend, entry.pose_request, entry.pose_transition = nil, nil, nil
     if entry.pose_animation and valid(entry.body) then
         entry.body:SetAnimationMode(entry.animation_mode, false)
         entry.pose_animation, entry.pose_mesh, entry.pose_asset, entry.pose_is_blend = nil, nil, nil, nil
@@ -290,7 +290,7 @@ local function apply_locomotion(entry, aim, outfit)
     local profile = aimed[aim]
     if pawn.Dead or body:IsAnySimulatingPhysics()
         or valid(entry.movement_mesh) and entry.movement_mesh:IsAnySimulatingPhysics() then
-        entry.gait_blend = nil
+        entry.gait_blend, entry.pose_request, entry.pose_transition = nil, nil, nil
         return
     end
     if not valid(movement) or movement:IsFalling() then
@@ -306,29 +306,35 @@ local function apply_locomotion(entry, aim, outfit)
     if not valid(mesh) then return end
     local instance = body.AnimScriptInstance
     if valid(instance) and instance:IsAnyMontagePlaying() then
-        entry.gait_blend = nil
+        entry.gait_blend, entry.pose_request, entry.pose_transition = nil, nil, nil
         return
     end
-    if not crouched and not profile and not uses[entry] and movement:IsMovingOnGround() then
-        if gait.apply(entry, mesh, sprinting and 2 or moving and 1 or 0, asset, refresh_pose_when_hidden) then return end
-        instance = body.AnimScriptInstance
-    end
-    entry.gait_blend = nil
-
-    local name
+    local pace = sprinting and 2 or moving and 1 or 0
+    local grounded_gait = not crouched and not profile and not uses[entry] and movement:IsMovingOnGround()
+    local name, group
     if crouched then
+        group = profile and "crouched_aim" or "crouched"
         if profile then
             name = moving and "Walk_Crouching_Forward" or "Idle_Crouching_Aiming"
         else
             name = moving and crouched_walk or crouched_idle
         end
+    elseif grounded_gait then
+        name, group = gait.pose_name(entry, pace), "grounded"
+    elseif profile then
+        name, group = profile[moving and 2 or 1], "aim"
     elseif sprinting then
         name = running[entry.weapon_stance] or "Running_Unarmed"
-    elseif profile then
-        name = profile[moving and 2 or 1]
     elseif not moving then
         name = lowered[entry.weapon_stance]
     end
+    if group and not uses[entry] and gait.transition(entry, mesh, group, name, asset, refresh_pose_when_hidden) then return end
+    if grounded_gait then
+        if gait.apply(entry, mesh, pace, asset, refresh_pose_when_hidden) then return end
+        instance = body.AnimScriptInstance
+        name = sprinting and running[entry.weapon_stance] or not moving and lowered[entry.weapon_stance] or nil
+    end
+    entry.gait_blend = nil
     if not name then
         restore_locomotion(entry)
         return

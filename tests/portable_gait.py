@@ -21,6 +21,32 @@ def observed(response):
                 inputs=[] if inputs == "-" else list(map(float, inputs.split(","))))
 
 
+async def verify_postures(command, host, guest, baseline):
+    result = {}
+    body, instance = baseline["observer"]["identity"][3:5]
+    for action, destination, expected_crouch in (
+        ("aim", "Rifle_Aiming_Low_Close1", False), ("lower", "HandGun_Lowered_BlendSpace", False),
+        ("crouch", "Crouching_Idle", True), ("stand", "HandGun_Lowered_BlendSpace", False),
+    ):
+        assert await command(host, "posture") == "watching"
+        assert await command(guest, action) == "acted"
+        async with asyncio.timeout(6):
+            while True:
+                report = await command(host, "posed")
+                if report != "pending":
+                    b, i, asset, x, y, z, crouched, samples = report.split(";")
+                    if asset.endswith("." + destination) and (crouched == "1") == expected_crouch:
+                        assert (int(b), int(i)) == (body, instance), report
+                        recorded = [tuple(map(float, row.split(","))) for row in samples.split("/") if row]
+                        assert len(recorded) >= 4 and recorded[0][0] == 0 and recorded[-1][0] == 1, (action, report)
+                        assert all(left[0] <= right[0] for left, right in zip(recorded, recorded[1:])), (action, report)
+                        assert any(math.dist(frame[1:], recorded[0][1:]) > .5 for frame in recorded[1:-1]), (action, report)
+                        result[action] = {"asset": asset, "socket": tuple(map(float, (x, y, z))), "samples": recorded}
+                        break
+                await asyncio.sleep(.07)
+    return result
+
+
 async def verify_stock_gait(host, guest, probe):
     async def command(seat, action):
         return (await probe(seat.bridge, "portable-gait", action)).strip()
@@ -72,6 +98,7 @@ async def verify_stock_gait(host, guest, probe):
         assert move["ok"] and move["movement_scheduled"], move
 
     seeded = False
+    postures = {}
     def displaced(view, owner, previous):
         return all(math.dist(current["position"], old["position"]) > 12 for current, old in
                    ((view, previous["observer"]), (owner, previous["owner"])))
@@ -98,6 +125,9 @@ async def verify_stock_gait(host, guest, probe):
         released = await wait_pair("read", lambda view, owner:
             view["speed"] < 20 and owner["speed"] < 20 and view["inputs"] == [1, 2, 0], baseline)
         assert abs(walk["observer"]["phase"] - run["observer"]["phase"]) > .001, (walk, run)
+        assert await command(guest, "finish") == "restored"
+        seeded = False
+        postures = await verify_postures(command, host, guest, baseline)
     finally:
         if seeded:
             assert await command(guest, "finish") == "restored"
@@ -105,4 +135,5 @@ async def verify_stock_gait(host, guest, probe):
 
     return {"stock_grounded_gait": {"baseline": baseline, "walk": walk, "run": run, "idle": released,
                                     "host_stock_pace": host_baseline,
+                                    "posture_transitions": postures,
                                     "lane_cm": lane_length, "movement_window_ms": duration}}

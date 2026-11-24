@@ -82,8 +82,16 @@ local function record_blend()
         local world = body:GetWorld()
         if not valid(world) or world:GetAddress() ~= observer.world then return end
         local asset = instance.CurrentAsset
-        if not valid(asset) or asset:GetAddress() ~= observer.asset then return end
+        if not valid(asset) then return end
         local axis = position:get()
+        if observer.posture then
+            if asset:GetAddress() == observer.asset or not asset:GetFullName():match("^BlendSpace1D /Engine/Transient%.")
+                or axis.Y ~= 0 or axis.Z ~= 0 or #observer.posture >= 32 then return end
+            local socket = body:GetSocketTransform(FName("Weapon_Socket01"), 2).Translation
+            observer.posture[#observer.posture + 1] = ("%.5f,%.3f,%.3f,%.3f"):format(axis.X, socket.X, socket.Y, socket.Z)
+            return
+        end
+        if asset:GetAddress() ~= observer.asset then return end
         local inputs = observer.inputs
         if axis.Y == 0 and axis.Z == 0 and #inputs < 12 and axis.X ~= inputs[#inputs] then
             inputs[#inputs + 1] = axis.X
@@ -101,6 +109,21 @@ local function position_row(pawn)
 end
 
 local function observe(action, world, pawn, weapon)
+    if action == "posture" then
+        assert(observer)
+        observer.posture = {}
+        return "watching"
+    elseif action == "posed" then
+        assert(observer and observer.posture)
+        local hand, body, socket = hand_copy(pawn, weapon)
+        if not valid(hand) or not valid(body) then return "pending" end
+        local instance = body:GetAnimInstance()
+        local asset = valid(instance) and instance.CurrentAsset
+        if not valid(asset) then return "pending" end
+        local point = body:GetSocketTransform(socket, 2).Translation
+        return table.concat({body:GetAddress(), instance:GetAddress(), asset:GetFullName(), point.X, point.Y, point.Z,
+            bit(pawn.bIsCrouched), table.concat(observer.posture, "/")}, ";")
+    end
     assert(action == "arm" or action == "read")
     local hand, body, socket = hand_copy(pawn, weapon)
     local instance = valid(body) and body:GetAnimInstance()
@@ -162,6 +185,14 @@ local function drive(action, world, pawn, weapon)
         pawn.Controller:SetControlRotation(lane.control)
         lane = nil
         return "restored"
+    end
+    if action == "aim" or action == "lower" then
+        weapon:Use_Item_Secondary(action == "aim")
+        return "acted"
+    end
+    if action == "crouch" or action == "stand" then
+        if action == "crouch" then pawn:Crouch(false) else pawn:UnCrouch(false) end
+        return "acted"
     end
     assert(valid(pawn.Controller) and pawn.MoveInputs_Enabled and not pawn.Dead
         and not pawn.bIsCrouched and not pawn.Aiming and pawn.CharacterMovement:IsMovingOnGround(),
