@@ -1171,8 +1171,14 @@ local function pursuit_frame(pawn, world, host, aim)
         "Speaking", "HeadUnderWater", "Wep_HeldAside", "OnLadder"}) do
         if shooter[field] ~= false then blockers[#blockers + 1] = field end
     end
+    -- The weapon's point-blank input gate does not detect cover farther down range.
+    -- Record the actual first blocking component on the stock projectile channel.
+    local muzzle = weapon.Arrow_Muzzle:K2_GetComponentLocation()
+    local hit = line_hit(shooter, muzzle, target, {shooter, weapon}, 2)
+    local component = hit and hit.Component and hit.Component:Get()
+    local cover = valid(component) and not same(component:GetOwner(), actor) and component:GetFullName() or ""
     return table.concat({vector(point), vector(target), angles(desired), angles(controller:GetControlRotation()),
-        angles(camera:K2_GetComponentRotation()), angles(barrel), weapon.Ammo, table.concat(blockers, ",")}, ";")
+        angles(camera:K2_GetComponentRotation()), angles(barrel), weapon.Ammo, table.concat(blockers, ","), cover}, ";")
 end
 
 local function dock_swing(world, host, action)

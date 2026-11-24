@@ -1323,23 +1323,19 @@ namespace
 
     bool living_combat_target(Unreal::UObject* actor, Unreal::UWorld* world)
     {
-        auto* base = find<Unreal::UClass>(STR("/Script/Engine.Actor"));
-        auto* player = find<Unreal::UClass>(pawn_path);
-        return live(actor) && base && actor->IsA(base) && player && !actor->IsA(player) &&
-            static_cast<Unreal::AActor*>(actor)->GetWorld() == world && boolean(actor, STR("Alive"), true);
+        auto* target = live(actor) ? Unreal::Cast<Unreal::AActor>(actor) : nullptr;
+        if (!target || target->GetWorld() != world || !boolean(target, STR("Alive"), true)) return false;
+        static const Unreal::FName player_name{STR("Player_FP_C")};
+        for (const Unreal::UStruct* type = target->GetClassPrivate(); type; type = type->GetSuperStruct())
+            if (type->GetFName() == player_name && type->GetPathName() == pawn_path) return false;
+        return true;
     }
 
     void reconcile_projectile_contact(Unreal::AActor* projectile, Unreal::UObject* pawn, const ShotView& view)
     {
         if (!view.contact || view.contact_actor.empty()) return;
-        const auto path = RC::to_generic_string(view.contact_actor);
-        auto* target = find<Unreal::UObject>(path.c_str());
-        auto* world = projectile->GetWorld();
-        if (!living_combat_target(target, world) || !authority(target)) return;
-        auto* health = field<Unreal::FDoubleProperty>(target, STR("Health"));
         auto* velocity_field = field<Unreal::FStructProperty>(projectile, STR("Velocity"));
-        if (!health || !std::isfinite(health->GetPropertyValueInContainer(target)) ||
-            health->GetPropertyValueInContainer(target) <= 0 || !aim_vector_field(velocity_field, aim_vector_type)) return;
+        if (!aim_vector_field(velocity_field, aim_vector_type)) return;
         const auto origin = actor_aim_vector(projectile, STR("/Script/Engine.Actor:K2_GetActorLocation"));
         const auto velocity = read_aim_vector(velocity_field, projectile);
         if (!origin || !velocity) return;
@@ -1353,13 +1349,21 @@ namespace
         const auto end = ahead(*origin, direction, distance + 100);
         const auto first = trace_shot(projectile, *origin, end, projectile_trace, {pawn, weapon});
         auto* barrier = first && first->hit ? first->actor : nullptr;
-        if (!live(barrier) || barrier == target || !authority(barrier) ||
+        if (!live(barrier) || !authority(barrier) ||
             barrier->GetFunctionByNameInChain(Unreal::FName{STR("DealDamage"), Unreal::FNAME_Find})) return;
 
         // Only bypass one disagreeing surface when the same stock collision query still reaches
         // the reported living actor on the actual projectile path and near the reported contact.
+        // Resolve the actor from the host trace. A delayed report can name an actor that is
+        // already gone, so avoid a global object lookup from the projectile's BeginPlay hook.
         const auto retry = trace_shot(projectile, *origin, end, projectile_trace, {pawn, weapon, barrier});
-        if (!retry || retry->actor != target || squared_length(difference(retry->point, *view.contact)) > 100 * 100) return;
+        if (!retry || !retry->hit || squared_length(difference(retry->point, *view.contact)) > 100 * 100) return;
+        auto* target = retry->actor;
+        if (!living_combat_target(target, projectile->GetWorld()) || !authority(target) ||
+            target->GetPathName() != RC::to_generic_string(view.contact_actor)) return;
+        auto* health = field<Unreal::FDoubleProperty>(target, STR("Health"));
+        const auto current_health = health ? health->GetPropertyValueInContainer(target) : 0.0;
+        if (!std::isfinite(current_health) || current_health <= 0) return;
 
         auto* ignored = field<Unreal::FArrayProperty>(projectile, STR("Actors to Ignore"));
         auto* actor = ignored ? Unreal::CastField<Unreal::FObjectProperty>(ignored->GetInner()) : nullptr;

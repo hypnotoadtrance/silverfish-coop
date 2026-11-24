@@ -12,7 +12,7 @@ from portable_guest_world_start import resident_events
 
 MINIMUM_CLEARANCE_CM = 175
 NATIVE_TAP_LIFETIME = 1.5  # native/guest_primary_input.cpp receipt_lifetime
-RETREAT_MILLISECONDS = 650
+STRAFE_MILLISECONDS = 450
 
 
 def coordinates(value):
@@ -24,11 +24,11 @@ def aim_error(current, desired):
 
 
 def view_frame(fields):
-    seat, target, desired, control, camera, muzzle, rounds, blockers = fields.split(";")
+    seat, target, desired, control, camera, muzzle, rounds, blockers, cover = fields.split(";", 8)
     seat, target = coordinates(seat), coordinates(target)
     return {"seat": seat, "target": target, "clearance_cm": math.dist(seat[:2], target[:2]), "desired": coordinates(desired),
             "controller": coordinates(control), "camera": coordinates(camera), "muzzle": coordinates(muzzle),
-            "rounds": int(rounds), "blockers": blockers.split(",") if blockers else []}
+            "rounds": int(rounds), "blockers": blockers.split(",") if blockers else [], "cover": cover}
 
 
 def combat_frame(fields):
@@ -119,19 +119,22 @@ async def verify_dock_pursuit(host, guest, frame, command):
         direction = result.get("native_guest_trigger_direction")
         assert valid_shot_direction(direction), ("The shot did not carry the stock trigger view", result)
         attempt["trigger_direction"] = direction
+        attempt["trigger_view"] = result.get("native_guest_trigger_view")
         shot = result["native_guest_weapon"]
         assert (shot["before"], shot["after"], shot["projectiles"]) == (remaining, remaining - 1, 1), (shot, history)
         attempt["outcome"] = "fired"
         return shot
 
-    async def retreat(aim, side):
+    async def strafe(aim, side):
         x, y, _ = (seat - target for seat, target in zip(aim["seat"], aim["target"], strict=True))
         distance = math.hypot(x, y)
         assert distance > 1, ("Guest and worker occupy the same point", aim)
-        # Include lateral travel so the next shot requires a different aim while the worker gives chase.
-        x, y = (x - side * .5 * y) / distance, (y + side * .5 * x) / distance
+        # Circle at engagement range. A long retreat can leave the warehouse
+        # through a loading door and keep putting the door into the firing lane.
+        radial = .8 if distance < 350 else -.5 if distance > 450 else 0
+        x, y = radial * x - side * y, radial * y + side * x
         scale = math.hypot(x, y)
-        result = await submit(guest_run, "walk", x=x / scale, y=y / scale, milliseconds=RETREAT_MILLISECONDS, continuous=True)
+        result = await submit(guest_run, "walk", x=x / scale, y=y / scale, milliseconds=STRAFE_MILLISECONDS, continuous=True)
         assert result["ok"] and result["movement_scheduled"], (result, history)
 
     async def firing_window(side):
@@ -144,10 +147,10 @@ async def verify_dock_pursuit(host, guest, frame, command):
                 return None
             last_view = local_frame = view_frame(local)
             if side and time.monotonic() >= next_retreat:
-                await retreat(local_frame, side)
-                next_retreat = time.monotonic() + .75 * RETREAT_MILLISECONDS / 1000
+                await strafe(local_frame, side)
+                next_retreat = time.monotonic() + .75 * STRAFE_MILLISECONDS / 1000
                 return None
-            if (local_frame["clearance_cm"] < MINIMUM_CLEARANCE_CM or local_frame["blockers"]
+            if (local_frame["clearance_cm"] < MINIMUM_CLEARANCE_CM or local_frame["blockers"] or local_frame["cover"]
                     or aim_error(local_frame["camera"], local_frame["desired"]) > 8):
                 return None
             return local_frame
