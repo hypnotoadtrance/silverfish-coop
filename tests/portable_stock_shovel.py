@@ -118,6 +118,8 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False):
         return result
 
     if quest:
+        ordinary = await dig_once()
+        host_dig = await verify_host_dig()
         result = await dig_once(quest_dig=True)
         settled = await wait_resident_status(host_run, lambda f: f.get("game", {}).get(dig.KEY, {}).get("state") == "escrowed")
         package = settled["game"][dig.KEY]
@@ -126,7 +128,21 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False):
         assert (package["spade_guid"], custody["spade_guid"]) == (item["guid"], item["guid"])
         assert (custody["source"], custody["flag_value"], custody["package_guid"]) == (
             native_host_dig.SOURCE, 1, package["escrow_guid"])
-        return {"stock_missing_contact_guest_dig": {**result, "package": package, "custody": custody}}
+        raw_packages = await asyncio.gather(*(observe(seat, "quest-packages") for seat in (host, guest)))
+        assert raw_packages[0] == package["actor"], raw_packages
+        await observe(host, "quest-approach", "local")
+        assert await observe(host, "quest-collect", "local") == "stock_started"
+        collected = await wait_resident_status(host_run, lambda f: f.get("game", {}).get(dig.KEY, {}).get("state") == "owned")
+        owned = collected["game"][dig.KEY]
+        assert owned["escrow_guid"] == package["escrow_guid"] and owned["spade_guid"] == item["guid"], owned
+        saved = runtime.read_json(host.campaign / "save" / "campaign.json")
+        owner = saved["world"]["party"][dig.CUSTODY]
+        assert owner["state"] == "owned" and owner["package_guid"] == owned["package_guid"], owner
+        # The native owned receipt already verifies retirement. FindAllOf can
+        # enumerate the old UObject until Unreal garbage-collects it.
+        return {"stock_shovel": ordinary, "stock_host_shovel": host_dig,
+                "stock_missing_contact_guest_dig": {**result, "package": package, "custody": custody,
+                                                     "world_actors_before_pickup": raw_packages, "host_pickup": owned}}
 
     if not loot:
         return {"stock_shovel": await dig_once(), "stock_host_shovel": await verify_host_dig()}

@@ -77,6 +77,15 @@
             table.sort(holes)
             return table.concat(holes, ";") ~= "" and table.concat(holes, ";") or "none"
         end
+        if fields[2] == "fixture-spade-quest-packages" then
+            local packages = {}
+            for _, actor in ipairs(FindAllOf("Package_Item_FarmHouse_C") or {}) do
+                if valid(actor) and same(actor:GetWorld(), state.world) and not actor:IsActorBeingDestroyed() then
+                    packages[#packages + 1] = actor:GetFullName()
+                end
+            end
+            return table.concat(packages, ";") ~= "" and table.concat(packages, ";") or "none"
+        end
         local pawn = (phase == "connected" or fields[3] == "local") and state.local_pawn.pawn
             or guest_save.exact_item_context(state, phase, fields[3])
         if fields[2] == "fixture-spade-host-equip" or fields[2] == "fixture-spade-host-press" then
@@ -142,7 +151,7 @@
             return ("%.3f,%.3f,%.3f"):format(location.X, location.Y, location.Z)
         end
         if fields[2] == "fixture-spade-quest-approach" then
-            assert(phase == "hosting" and fields[3] ~= "local")
+            assert(phase == "hosting")
             local x, y, z = geometry.X, geometry.Y, geometry.Z
             local target = assert(soil({X=x, Y=y, Z=z+55}, {X=x, Y=y, Z=z-46}), "Missing Contact stock soil was unavailable")
             for bearing = 0, 315, 45 do
@@ -158,6 +167,23 @@
                 end
             end
             error("No walkable approach to the Missing Contact dig site", 0)
+        elseif fields[2] == "fixture-spade-quest-collect" then
+            local ctx = assert(scope(state, phase))
+            assert(fields[3] == "local" and same(pawn, ctx.pawn))
+            local report = assert(read(ctx))
+            local path = report.actor:match("^Package_Item_FarmHouse_C (%S+)$")
+            local actor = assert(path and StaticFindObject(path))
+            assert(valid(actor) and same(actor:GetWorld(), state.world) and report.phase == "escrowed")
+            local box = actor.Box
+            local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+            aim = math_api:FindLookAtRotation(pawn.Camera:K2_GetComponentLocation(), box:K2_GetComponentLocation())
+            controller:SetControlRotation(aim)
+            pawn.Camera:K2_SetWorldRotation(aim, false, {}, true)
+            pawn:LookTrace()
+            assert(pawn.CanInteract and same(pawn.InteractionTarget_Component, box), "The host could not focus the stock package")
+            local accepted, status = SilverfishProbeNativeInteractInput(pawn:GetAddress(), false)
+            assert(accepted and status == "stock_started", status)
+            return status
         elseif fields[2] == "fixture-spade-quest-aim" then
             local encoded = phase == "hosting" and fields[4] or fields[3]
             local x, y, z = encoded:match("^([%d%.%-]+),([%d%.%-]+),([%d%.%-]+)$")
