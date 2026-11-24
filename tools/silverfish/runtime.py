@@ -61,7 +61,7 @@ from . import native_smg_hold
 from .native_guest_weapon import PRIMARY_KINDS
 from .native_guest_armor import parse as parse_guest_armor
 from .native_guest_armor import DISGUISE_PROBE, parse_recognition
-from .native_guest_melee import parse as parse_guest_melee
+from . import native_guest_melee
 from . import native_host_dig, native_host_dig_live, native_package_handoff_journal
 from . import native_title_entry
 from .native_host_landmine import parse as parse_host_landmine
@@ -736,6 +736,7 @@ class Bridge:
         self._local_interaction_records = deque(maxlen=64)
         self._local_board_records = deque(maxlen=64)
         self._local_crate_records = deque(maxlen=64)
+        self._local_melee_records = deque(maxlen=64)
         self.status_source = "file"
         self._local_status = None
         self._file_command_lock = asyncio.Lock()
@@ -790,6 +791,8 @@ class Bridge:
                     self._local_board_records.append(record)
                 elif record.startswith(b"loot-crate-open\t"):
                     self._local_crate_records.append(record)
+                elif record.startswith(b"native-guest-melee-edge\t"):
+                    self._local_melee_records.append(record)
                 else:
                     self._local_interaction_records.append(record)
         records = list(pending)
@@ -798,6 +801,10 @@ class Bridge:
 
     def native_crate_inputs(self) -> list[bytes]:
         return self._take_local_inputs(self._local_crate_records)
+
+    def native_melee_input_requests(self):
+        return [edge for raw in self._take_local_inputs(self._local_melee_records)
+                if (edge := native_guest_melee.input_record(raw)) is not None]
 
     def interactions(self) -> list[tuple[str, str | None]]:
         """Consume complete local input records once, even if writing is in progress."""
@@ -1293,12 +1300,23 @@ class Bridge:
                     data["native_guest_save_retention"] = True
                 elif fields[0] in ("native-guest-melee-equip", "native-guest-melee-canary", "native-guest-melee-swing",
                                     "native-guest-melee-aim-fixture", "native-guest-melee-contact-fixture"):
-                    parsed = parse_guest_melee(fields)
+                    parsed = native_guest_melee.parse(fields)
                     if parsed:
                         key, row = parsed
                         if (fields[0] != "native-guest-melee-contact-fixture"
                                 or (data.get("state"), data.get("map")) == ("hosting", row["map"])):
                             data[key] = row
+                elif fields[0] == native_guest_melee.INPUT_STATE:
+                    row = native_guest_melee.parse_input_state(fields)
+                    if row and (data.get("state"), data.get("map")) == ("hosting", row["map"]):
+                        data[native_guest_melee.INPUT_KEY] = row
+                elif fields[0] == native_guest_melee.INPUT_FIXTURE and len(fields) == 7:
+                    _, area, pawn, guid, sequence, stroke, edge = fields
+                    record = "\t".join((native_guest_melee.INPUT_RECORD, sequence, area, pawn, guid, "melee", edge, stroke, "0"))
+                    if (row := native_guest_melee.input_record(record.encode())) and (
+                            data.get("state"), data.get("map")) == ("connected", area):
+                        data[native_guest_melee.INPUT_FIXTURE_KEY] = dict(
+                            sequence=row[0], map=area, pawn=pawn, guid=guid, edge=edge, stroke=row[6])
                 elif fields[0] == "native-guest-smg-hold" and len(fields) == 10:
                     with contextlib.suppress(ValueError):
                         row = native_smg_hold.parse(fields)
@@ -2859,7 +2877,7 @@ class Bridge:
                 elif fields[0] == "native-anomaly-position" and len(fields) == 6:
                     positions = data.setdefault("native_anomaly_positions", [])
                     if (len(positions) < 1024 and fields[1] in {
-                            "starburst", "burner", "vortex", "electrode", "wandering-teleport", "gravity",
+                            "starburst", "burner", "vortex", "electrode", "wandering-teleport", "lingering-teleport", "gravity",
                             "pyrogeist", "shadow-sphere", "angler-lamp", "observer",
                         }
                             and fields[5] in {"0", "1"}):

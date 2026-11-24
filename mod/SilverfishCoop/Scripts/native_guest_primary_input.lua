@@ -13,9 +13,10 @@ local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local camera_quest = "Photo_DB_Turrets"
-local event_path, held_event_path, is_downed, binding, fixture_proof, held_fixture_proof, shovel_intent
+local event_path, held_event_path, is_downed, binding, fixture_proof, held_fixture_proof, melee_fixture_proof, shovel_intent
 local held_edges = {press = true, release = true, cancel = true}
 local held_proofs = {["mapped-key"] = true, ["edge-window"] = true, ["headless-fixture"] = true}
+local melee_kinds = {["old-pipe"] = true, melee = true}
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -93,11 +94,29 @@ local function drain_held(current, address)
     return emitted, last
 end
 
+local function drain_melee(current, address)
+    if not melee_kinds[current.kind] or type(SilverfishTakeNativeGuestMeleeInput) ~= "function"
+        or type(SilverfishEnqueueLocalBridgeInput) ~= "function" then return end
+    local emitted, last = 0, nil
+    for _ = 1, 8 do
+        local sequence, owner, guid, edge, stroke, duration = SilverfishTakeNativeGuestMeleeInput(address)
+        if not valid_sequence(sequence) or not valid_sequence(stroke) or owner ~= address or guid ~= current.guid
+            or not held_edges[edge] or (edge == "press" and stroke ~= sequence)
+            or (edge ~= "press" and stroke >= sequence) or math.type(duration) ~= "integer"
+            or duration < 0 or duration > 9000 or (edge == "press" and duration ~= 0) then break end
+        local record = table.concat({"native-guest-melee-edge", sequence, current.map, current.name, guid,
+            current.kind, edge, stroke, duration}, "\t") .. "\n"
+        if not SilverfishEnqueueLocalBridgeInput(record) then break end
+        emitted, last = emitted + 1, sequence
+    end
+    return emitted, last
+end
+
 function primary.reset()
     if binding and type(SilverfishClearNativeGuestPrimaryScope) == "function" then
         SilverfishClearNativeGuestPrimaryScope()
     end
-    binding, fixture_proof, held_fixture_proof, shovel_intent = nil, nil, nil, nil
+    binding, fixture_proof, held_fixture_proof, melee_fixture_proof, shovel_intent = nil, nil, nil, nil, nil
 end
 
 local function drain_taps(current, address)
@@ -168,7 +187,7 @@ function primary.command(fields, state, phase)
         return "stock guest primary scope cleared"
     end
     if action ~= "native-guest-primary-scope" and action ~= "native-guest-primary-input-fixture"
-        and action ~= "native-guest-held-fire-fixture" then return end
+        and action ~= "native-guest-held-fire-fixture" and action ~= "native-guest-melee-input-fixture" then return end
     local current = context(state, phase)
     if not standing(current) then
         primary.reset()
@@ -178,6 +197,31 @@ function primary.command(fields, state, phase)
     -- authenticated equipment bound so input resumes when the lock clears.
     if action ~= "native-guest-primary-scope" and not can_use(current) then
         error("Stock primary input is temporarily blocked by the equipped player's state", 0)
+    end
+    if action == "native-guest-melee-input-fixture" then
+        local edge = fields[4]
+        if not fixtures or #fields ~= 4 or fields[3] ~= current.name or not same_context(current, binding)
+            or not melee_kinds[binding.kind] or (edge ~= "press" and edge ~= "release" and edge ~= "tap")
+            or type(SilverfishProbeNativeGuestMeleeInput) ~= "function" then
+            error("The stock melee fixture requires the exact scoped headless melee guest", 0)
+        end
+        local function probe(one_edge)
+            local address = current.pawn:GetAddress()
+            local ok, status, sequence, stroke = SilverfishProbeNativeGuestMeleeInput(address, one_edge)
+            if ok ~= true or status ~= "stock_" .. one_edge or not valid_sequence(sequence) or not valid_sequence(stroke) then
+                error("The stock melee fixture edge was unverified (" .. tostring(status) .. ")", 0)
+            end
+            local emitted, last = drain_melee(binding, address)
+            if emitted ~= 1 or last ~= sequence then error("The stock melee fixture edge could not be published", 0) end
+            melee_fixture_proof = {context = current, guid = binding.guid, sequence = sequence, stroke = stroke, edge = one_edge}
+        end
+        if edge == "tap" then
+            probe("press")
+            probe("release")
+        else
+            probe(edge)
+        end
+        return "stock guest melee fixture observed"
     end
     if action == "native-guest-held-fire-fixture" then
         local edge, duration = fields[4], math.tointeger(fields[5])
@@ -237,7 +281,7 @@ function primary.command(fields, state, phase)
 
     local guid, kind, quest = fields[5], fields[6], fields[7]
     local camera = kind == "camera"
-    local melee = kind == "old-pipe" or kind == "melee"
+    local melee = melee_kinds[kind]
     if #fields ~= (camera and 7 or 6) or fields[3] ~= current.map or fields[4] ~= current.name or not valid_guid(guid)
         or (camera and (current.map ~= camera_map or quest ~= camera_quest))
         or (not camera and not melee and kind ~= "blowtorch" and kind ~= "crowbar" and kind ~= "spade"
@@ -295,6 +339,10 @@ function primary.rows(state, phase, status_row)
         rows[#rows + 1] = status_row("native-guest-held-fire-fixture", current.map, current.name, held_fixture_proof.guid,
             held_fixture_proof.sequence, held_fixture_proof.stroke, held_fixture_proof.edge)
     end
+    if melee_fixture_proof and same_context(current, melee_fixture_proof.context) and melee_fixture_proof.guid == binding.guid then
+        rows[#rows + 1] = status_row("native-guest-melee-input-fixture", current.map, current.name, melee_fixture_proof.guid,
+            melee_fixture_proof.sequence, melee_fixture_proof.stroke, melee_fixture_proof.edge)
+    end
     return rows
 end
 
@@ -306,7 +354,11 @@ function primary.start(bridge, downed)
     LoopInGameThreadWithDelay(20, function()
         local current = binding
         if not current or not valid(current.pawn) then return end
-        local ok, failure = pcall(drain_taps, current, current.pawn:GetAddress())
+        local ok, failure = pcall(function()
+            local address = current.pawn:GetAddress()
+            drain_melee(current, address)
+            drain_taps(current, address)
+        end)
         if not ok then
             primary.reset()
             print("[SilverfishCoop] Stock primary input unavailable: " .. tostring(failure) .. "\n")

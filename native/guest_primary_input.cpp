@@ -2,6 +2,7 @@
 #include "guest_melee.hpp"
 #include "guest_weapon_registry.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <charconv>
@@ -232,14 +233,14 @@ namespace
 
     struct Receipt { std::uint64_t sequence{}; Clock::time_point expires{}; };
     enum class HeldEdge { press, release, cancel };
-    enum class HeldProof { none, mapped_key, edge_window, fixture };
+    enum class HeldProof { none, mapped_key, edge_window, stock_melee_edges, fixture };
     enum class FixtureDispatch { none, tap, held };
-    struct HeldReceipt { Receipt receipt{}; std::uint64_t stroke{}; HeldEdge edge{}; };
+    struct HeldReceipt { Receipt receipt{}; std::uint64_t stroke{}; HeldEdge edge{}; std::int64_t duration_ms{}; };
     struct HeldStroke
     {
         std::uint64_t id{};
         HeldProof proof{};
-        Clock::time_point expires{}, next_probe{};
+        Clock::time_point started{}, expires{}, next_probe{};
     };
     Scope scope;
     CapturedPress press;
@@ -706,6 +707,11 @@ namespace
         return scope.item && scope.item->kind == "smg-standard" && !scope.seat.host && held_enabled();
     }
 
+    bool scoped_melee_edges()
+    {
+        return !scope.seat.host && (scope.item == &old_pipe || scope.item == &melee);
+    }
+
     void discard_held(Clock::time_point now)
     {
         while (held_count && now >= held_receipts[held_head].receipt.expires)
@@ -715,11 +721,12 @@ namespace
         }
     }
 
-    bool queue_held(HeldEdge edge, std::uint64_t stroke, Clock::time_point now)
+    bool queue_held(HeldEdge edge, std::uint64_t stroke, Clock::time_point now, std::int64_t duration_ms = 0)
     {
         discard_held(now);
         if (held_count == receipt_limit || held_sequence == max_sequence) return false;
-        held_receipts[(held_head + held_count) % receipt_limit] = {{++held_sequence, now + receipt_lifetime}, stroke, edge};
+        held_receipts[(held_head + held_count) % receipt_limit] = {{++held_sequence, now + receipt_lifetime},
+                                                                  stroke, edge, duration_ms};
         ++held_count;
         return true;
     }
@@ -727,7 +734,9 @@ namespace
     void stop_held(HeldEdge edge, Clock::time_point now)
     {
         if (!held.id) return;
-        queue_held(edge, held.id, now);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - held.started);
+        const auto duration = std::clamp(elapsed, std::chrono::milliseconds{0}, std::chrono::milliseconds{9000});
+        queue_held(edge, held.id, now, duration.count());
         if (edge == HeldEdge::cancel && press.stroke == held.id && press.expires > now + held_probe_period)
             press.expires = now + held_probe_period;
         held = {};
@@ -740,14 +749,24 @@ namespace
         if (fixture_dispatch != FixtureDispatch::held)
         {
             if (!local_game_focused()) return false;
-            const auto key = mapped_key_state(scope);
-            if (key == KeyState::up) return false;
-            proof = key == KeyState::down ? HeldProof::mapped_key : HeldProof::edge_window;
-            until = now + (proof == HeldProof::mapped_key ? held_lease : held_edge_window);
+            if (scoped_melee_edges())
+            {
+                // This stock Enhanced Input action has explicit Started and Completed wrappers.
+                // Preserve the real edge interval rather than guessing from a platform key.
+                proof = HeldProof::stock_melee_edges;
+                until = now + held_lease;
+            }
+            else
+            {
+                const auto key = mapped_key_state(scope);
+                if (key == KeyState::up) return false;
+                proof = key == KeyState::down ? HeldProof::mapped_key : HeldProof::edge_window;
+                until = now + (proof == HeldProof::mapped_key ? held_lease : held_edge_window);
+            }
         }
         if (held.id || held_sequence == max_sequence || !queue_held(HeldEdge::press, held_sequence + 1, now))
             return false;
-        held = {held_sequence, proof, until, now + held_probe_period};
+        held = {held_sequence, proof, now, until, now + held_probe_period};
         press.stroke = held.id;
         return true;
     }
@@ -866,7 +885,7 @@ namespace
             press.seat.world.Get() == scope.seat.world.Get()) return;
         press = {scope.seat, scope.action, scope.completed, now + release_lease, active_generation};
         if (!can_act(scope.seat)) return;
-        if (scoped_held_fire() && fixture_dispatch != FixtureDispatch::tap)
+        if ((scoped_held_fire() || scoped_melee_edges()) && fixture_dispatch != FixtureDispatch::tap)
         {
             begin_held(now);
             return;
@@ -963,9 +982,10 @@ namespace
         return 1;
     }
 
-    int take_held(const Lua& lua)
+    int take_held(const Lua& lua, bool melee_edges)
     {
-        if (!available() || !scoped_held_fire() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        if (!available() || !(melee_edges ? scoped_melee_edges() : scoped_held_fire()) ||
+            lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
         const auto pawn = lua.get_integer();
         if (pawn != address(scope.seat.pawn.Get())) return 0;
         const auto now = Clock::now();
@@ -978,9 +998,10 @@ namespace
         lua.set_string(scope.text);
         lua.set_string(event.edge == HeldEdge::press ? "press" : event.edge == HeldEdge::release ? "release" : "cancel");
         lua.set_integer(static_cast<std::int64_t>(event.stroke));
+        if (melee_edges) lua.set_integer(event.duration_ms);
         held_head = (held_head + 1) % receipt_limit;
         --held_count;
-        return 5;
+        return melee_edges ? 6 : 5;
     }
 
     int read_held(const Lua& lua)
@@ -1101,9 +1122,10 @@ namespace
         return 4;
     }
 
-    int probe_held(const Lua& lua)
+    int probe_held(const Lua& lua, bool melee_edges)
     {
-        if (!available() || !scoped_held_fire() || !fixtures(false) || lua.get_stack_size() != 2 ||
+        if (!available() || !(melee_edges ? scoped_melee_edges() : scoped_held_fire()) ||
+            !fixtures(false) || lua.get_stack_size() != 2 ||
             !lua.is_integer(1) || !lua.is_string(2))
             return result(lua, false, "native_guest_held_fire_fixture_unavailable");
         const auto pawn_address = lua.get_integer();
@@ -1332,15 +1354,20 @@ namespace silverfish::native_guest_primary_input
         {
             lua.register_function("SilverfishSetNativeGuestPrimaryScope", [](const Lua& lua) { return set_scope(lua, false); });
             lua.register_function("SilverfishTakeNativeGuestPrimaryIntent", [](const Lua& lua) { return take(lua, false); });
+            lua.register_function("SilverfishTakeNativeGuestMeleeInput", [](const Lua& lua) { return take_held(lua, true); });
             lua.register_function("SilverfishClearNativeGuestPrimaryScope", [](const Lua&) { return clear(false); });
             lua.register_function("SilverfishReadNativeGuestAim", read_aim);
             if (fixtures(false))
+            {
                 lua.register_function("SilverfishProbeNativeGuestPrimaryInput", [](const Lua& lua) { return probe(lua, false); });
+                lua.register_function("SilverfishProbeNativeGuestMeleeInput", [](const Lua& lua) { return probe_held(lua, true); });
+            }
             if (held_enabled())
             {
-                lua.register_function("SilverfishTakeNativeGuestHeldFireIntent", take_held);
+                lua.register_function("SilverfishTakeNativeGuestHeldFireIntent", [](const Lua& lua) { return take_held(lua, false); });
                 lua.register_function("SilverfishReadNativeGuestHeldFire", read_held);
-                if (fixtures(false)) lua.register_function("SilverfishProbeNativeGuestHeldFire", probe_held);
+                if (fixtures(false))
+                    lua.register_function("SilverfishProbeNativeGuestHeldFire", [](const Lua& lua) { return probe_held(lua, false); });
             }
         }
     }

@@ -107,13 +107,14 @@ end
 
 local function read(ctx)
     if type(SilverfishReadNativeHostDigScope) ~= "function" then return nil, "native_read_unavailable" end
-    local phase, serial, spade, actor, package, x, y, z, material, incidental, escrow, fault =
+    local phase, serial, spade, actor, package, x, y, z, material, incidental, escrow, fault, collector =
         SilverfishReadNativeHostDigScope(ctx.world:GetAddress(), ctx.pawn:GetAddress())
     if phase == nil then return nil, "native_read_empty" end
     if not phases[phase] then return nil, "native_phase_unqualified" end
     if math.type(serial) ~= "integer" or serial < 0 or serial >= 2^53 then return nil, "native_serial_unqualified" end
     return {phase = phase, serial = serial, spade = spade, actor = actor, package = package, x = x, y = y, z = z,
-        material = material, incidental = incidental, escrow = escrow, fault = fault, pawn = ctx.name, world = ctx.world}
+        material = material, incidental = incidental, escrow = escrow, fault = fault, collector = collector,
+        pawn = ctx.name, world = ctx.world}
 end
 
 function dig.start(path)
@@ -164,8 +165,25 @@ local function handoff(fields, state, phase)
     return "stock sealed package handed off " .. identity
 end
 
+local function collect(fields, state, phase)
+    local refused = "stock_missing_contact_collect_"
+    local name, serial, identity = fields[3], math.tointeger(tonumber(fields[4])), fields[5]
+    local ctx = require_true(scope(state, phase), refused .. "unavailable")
+    require_true(#fields == 5 and serial and serial > 0 and serial < 2^53 and guid(identity)
+        and type(SilverfishCollectNativeGuestDigPackage) == "function" and quest_eligible(ctx), refused .. "unavailable")
+    local bound, guest, save = pcall(guest_save.exact_item_context, state, phase, name)
+    require_true(bound and valid(guest) and valid(save) and guest.Dead == false
+        and players.is_standing_guest(guest, name), refused .. "guest_unavailable")
+    local accepted, reason = SilverfishCollectNativeGuestDigPackage(ctx.world:GetAddress(), ctx.pawn:GetAddress(),
+        guest:GetAddress(), save:GetAddress(), serial, identity)
+    require_true(accepted == true and reason == "collect_requested", accepted == false and reason
+        or "mutation_unverified_missing_contact_collect_readback")
+    return "stock sealed package collect requested"
+end
+
 function dig.command(fields, state, phase)
     if fields[2] == "native-missing-contact-handoff" then return handoff(fields, state, phase) end
+    if fields[2] == "native-missing-contact-collect" then return collect(fields, state, phase) end
     if fields[2] == "native-guest-dig" then
         local name, identity = fields[3], fields[4]
         require_true(enabled and phase == "hosting" and #fields == 4 and guid(identity) and
@@ -259,11 +277,20 @@ function dig.rows(state, phase, status_row)
     local generation = captured and same(captured.world, ctx.world) and same(captured.pawn, ctx.pawn)
         and captured.serial == report.serial and captured.identity == report.escrow and captured.slot
     local contact = report.material ~= "" and report.phase ~= "ready"
+    local collector = {}
+    if math.type(report.collector) == "integer" and report.collector > 0 then
+        for _, participant in ipairs(state.pawns) do
+            if participant.kind == "guest" and valid(participant.pawn) and participant.pawn:GetAddress() == report.collector then
+                collector[1] = participant.name
+                break
+            end
+        end
+    end
     local function present(value) return value ~= "" and value or "-" end
     rows[#rows + 1] = status_row("native-host-dig-live", map, ctx.name, report.phase, report.serial, present(report.spade),
         present(report.actor), present(report.package), contact and report.x or "-", contact and report.y or "-",
         contact and report.z or "-", present(report.material), report.incidental, present(report.escrow),
-        generation or "-", present(report.fault))
+        generation or "-", present(report.fault), table.unpack(collector))
     return rows
 end
 

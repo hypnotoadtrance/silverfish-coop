@@ -42,8 +42,9 @@ local function board_accepts(board, key, row)
     local redeemable = board.RedeemableQuests
     local size = len(redeemable)
     if not int(size) or size < 0 or size > 128 then refuse("redeemable_list_unqualified") end
+    local id = wire.stock_quest_id(name(key))
     for index = 1, size do
-        if name(redeemable[index]) == name(key) then return true end
+        if wire.stock_quest_id(name(redeemable[index])) == id then return true end
     end
     if type(board.BountyBoard_RedeemableHere) ~= "boolean" or type(board.AcceptAllGlobalContracts) ~= "boolean"
         or not int(board.TurnIn_ID) then refuse("redeemable_scope_unqualified") end
@@ -82,8 +83,8 @@ local function shape(row)
     return result
 end
 
-local function backpack_objective(save, contract)
-    local result, quantity
+local function backpack_objectives(save, contract, allow_multiple)
+    local result, seen = {}, {}
     for slot, rows in ipairs({save.PlayerBackpack, save.PlayerEquipment}) do
         local size = len(rows)
         if not int(size) or size < 0 or size > 4096 then refuse("inventory_unqualified") end
@@ -91,17 +92,18 @@ local function backpack_objective(save, contract)
             local row = rows[index]
             if row and same(row[class_key], contract.objective) then
                 local units, id = row[units_key], row[guid_key]
-                if slot ~= 1 or result or not int(units) or units < (contract.stacks and 1 or 0)
+                if slot ~= 1 or (#result > 0 and not allow_multiple) or not int(units) or units < (contract.stacks and 1 or 0)
                     or not id or not int(id.A) or not int(id.B) or not int(id.C) or not int(id.D) then
                     refuse("objective_requires_one_unambiguous_backpack_stack")
                 end
-                result = ("%08X%08X%08X%08X"):format(id.A & 0xffffffff, id.B & 0xffffffff, id.C & 0xffffffff, id.D & 0xffffffff)
-                if not result:find("[^0]") then refuse("objective_guid_unqualified") end
-                quantity = units
+                local guid = ("%08X%08X%08X%08X"):format(id.A & 0xffffffff, id.B & 0xffffffff, id.C & 0xffffffff, id.D & 0xffffffff)
+                if not guid:find("[^0]") or seen[guid] then refuse("objective_guid_unqualified") end
+                seen[guid] = true
+                result[#result + 1] = {guid = guid, units = units}
             end
         end
     end
-    return result, quantity
+    return result
 end
 
 local function balances(context)
@@ -202,7 +204,7 @@ local function catalog(fields, state, phase)
     if not active or not contracts or #active > 128 or #contracts > 128 then refuse("catalog_extent") end
     local function descriptor(raw_key, raw_row, target, accepting)
         local key, row = raw_key:get(), raw_row:get()
-        local id = name(key)
+        local id = wire.stock_quest_id(name(key))
         if type(id) ~= "string" or #id > 96 or not id:match("^[A-Za-z0-9_]+$") then return end
         if accepting then
             -- Configure_Stock has already checked the board's eligibility rules.
@@ -218,11 +220,12 @@ local function catalog(fields, state, phase)
         local supported, contract = pcall(shape, row)
         if not supported or contract.step <= 0 then return end
         if contract.objective then
-            local permitted, guid = pcall(backpack_objective, context.receiving_save, contract)
-            if not permitted or not guid then return end
-            if not same(context.save, context.receiving_save) then
-                local known, other = pcall(backpack_objective, context.save, contract)
-                if not known or other then return end
+            local guest = not same(context.save, context.receiving_save)
+            local permitted, owned = pcall(backpack_objectives, context.receiving_save, contract, guest)
+            if not permitted or not owned[1] then return end
+            if guest then
+                local known, other = pcall(backpack_objectives, context.save, contract)
+                if not known or other[1] then return end
             end
         elseif contract.step < contract.final then
             return
@@ -267,7 +270,7 @@ function board_contract.command(fields, state, phase)
         return "Stock board contract already recorded"
     end
 
-    local contract, effects, library
+    local contract, effects, library, objective_before
     local starting_step
     if verb == "start" then
         context.board:Configure_Stock()
@@ -280,10 +283,13 @@ function board_contract.command(fields, state, phase)
         contract = shape(active)
         outcome.cash, outcome.xp = contract.cash, contract.xp
         if contract.objective then
-            outcome.guid, outcome.units = backpack_objective(context.receiving_save, contract)
-            if not outcome.guid then refuse("missing_objective") end
+            local guest = not same(context.save, context.receiving_save)
+            objective_before = backpack_objectives(context.receiving_save, contract, guest)
+            local selected = objective_before[1]
+            if not selected then refuse("missing_objective") end
+            outcome.guid, outcome.units = selected.guid, selected.units
             outcome.remaining = contract.stacks and outcome.units - 1 or 0
-            if not same(context.save, context.receiving_save) and backpack_objective(context.save, contract) then
+            if guest and backpack_objectives(context.save, contract)[1] then
                 refuse("canonical_objective_conflict")
             end
         elseif step < contract.final then
@@ -333,12 +339,17 @@ function board_contract.command(fields, state, phase)
             library:TurnIn_Quest(context.key, context.instance, true, context.host, out, out)
             if out.Success ~= true or valid(out.ConfirmationPopup) then return end
             if has_deposit then
-                if guest_deposit and backpack_objective(context.save, contract) then return end
-                local remaining_guid, remaining_units = backpack_objective(context.receiving_save, contract)
+                if guest_deposit and backpack_objectives(context.save, contract)[1] then return end
+                local observed = backpack_objectives(context.receiving_save, contract, guest_deposit)
                 if outcome.remaining > 0 then
-                    if remaining_guid ~= outcome.guid or remaining_units ~= outcome.remaining then return end
-                elseif remaining_guid then
-                    return
+                    objective_before[1].units = outcome.remaining
+                else
+                    table.remove(objective_before, 1)
+                end
+                if #observed ~= #objective_before then return end
+                for index, row in ipairs(observed) do
+                    local expected = objective_before[index]
+                    if row.guid ~= expected.guid or row.units ~= expected.units then return end
                 end
             end
             for _, effect in ipairs(effects) do

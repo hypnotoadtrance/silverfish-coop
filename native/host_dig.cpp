@@ -403,13 +403,13 @@ namespace
 
     struct LiveDig
     {
-        U::FWeakObjectPtr world, pawn, driver, save, held, source, package;
+        U::FWeakObjectPtr world, pawn, driver, save, held, source, package, collector, collector_save;
         Clock::time_point lease{}, press_until{}, pickup_until{};
         LiveState state{LiveState::Arming}, before_pickup{LiveState::Unclaimed};
         Census before{};
         Point impact{};
         std::int64_t serial{};
-        bool spade_called{}, inventory_called{};
+        bool spade_called{}, inventory_called{}, dispatching_guest_pickup{};
         int wallet{}, artifact_value{}, incidental{};
         std::string spade_guid, package_name, package_guid, escrow_guid, material;
         std::wstring package_flag;
@@ -786,9 +786,10 @@ namespace
         if (!player || !hit || player->GetOffset_Internal() != 0 || hit->GetOffset_Internal() != sizeof(void*)) return;
         auto* pawn = player->GetObjectPropertyValue(player->ContainerPtrToValuePtr<void>(args));
         auto* box = hit->GetObjectPropertyValue(hit->ContainerPtrToValuePtr<void>(args));
-        if (pawn != ctx.pawn || !box || box != object(receiver, STR("Box")) ||
-            object(pawn, STR("InteractionTarget_Component")) != box ||
-            !native_interaction_input::has_current_host_press(pawn))
+        const bool guest_input = live_dig.dispatching_guest_pickup && pawn == live_dig.collector.Get();
+        const bool host_input = pawn == ctx.pawn && object(pawn, STR("InteractionTarget_Component")) == box &&
+            native_interaction_input::has_current_host_press(pawn);
+        if (!box || box != object(receiver, STR("Box")) || (!host_input && !guest_input))
         {
             call.PreventOriginalFunctionCall();
             return;
@@ -844,6 +845,9 @@ namespace
         call.PreventOriginalFunctionCall();
     }
 
+    std::string_view transfer_package_row(const Context& host, U::UObject* guest, U::UObject* detached,
+                                          std::string_view identity, bool require_quest);
+
     void settle_live_pickup(const Context& ctx)
     {
         if (live_dig.state != LiveState::Collecting) return;
@@ -866,6 +870,19 @@ namespace
             buried == std::pair{1, true} && wallet == live_dig.wallet &&
             std::int64_t{artifact} == std::int64_t{live_dig.artifact_value} + 50)
         {
+            if (auto* collector = live_dig.collector.Get())
+            {
+                if (transfer_package_row(ctx, collector, live_dig.collector_save.Get(), guid, false) != "transferred")
+                {
+                    fail_live("stock_guest_package_transfer_unverified");
+                    return;
+                }
+            }
+            else if (live_dig.collector_save.Get())
+            {
+                fail_live("stock_guest_package_recipient_changed");
+                return;
+            }
             live_dig.package_guid = std::move(guid);
             live_dig.state = LiveState::Collected;
         }
@@ -873,7 +890,11 @@ namespace
         {
             if (guid.empty() && !flag.second && valid_package(ctx, package) &&
                 buried == std::pair{1, true} && wallet == live_dig.wallet && artifact == live_dig.artifact_value)
+            {
                 live_dig.state = live_dig.before_pickup;
+                live_dig.collector.Reset();
+                live_dig.collector_save.Reset();
+            }
             else if (!live_dig.inventory_called) fail_live("stock_pickup_inventory_callback_unverified");
             else if (guid.empty()) fail_live("stock_pickup_canonical_package_missing");
             else if (!retired) fail_live("stock_pickup_actor_not_retired");
@@ -1021,6 +1042,120 @@ namespace
         return read(host, first) && read(guest, second) && squared_distance(first, second) <= 300.0 * 300.0;
     }
 
+    std::string_view transfer_package_row(const Context& host, U::UObject* guest, U::UObject* detached,
+                                          std::string_view identity, bool require_quest)
+    {
+        HandoffInventory inventory;
+        std::string owned;
+        if (!inventory.valid() || !inventory.pickup_flags(host.save)) return "stock_missing_contact_handoff_pickup_unqualified";
+        if (!loot_escrow::sealed_package_guid(host.save, owned) || owned != identity)
+            return "stock_missing_contact_handoff_source_unqualified";
+
+        auto* from = inventory.backpack->ContainerPtrToValuePtr<void>(host.save);
+        auto* to = inventory.backpack->ContainerPtrToValuePtr<void>(detached);
+        U::FScriptArrayHelper from_rows(inventory.backpack, from), to_rows(inventory.backpack, to);
+        if (to_rows.Num() < 0 || to_rows.Num() >= handoff_inventory_limit || from == to ||
+            (to_rows.Num() && from_rows.GetRawPtr() == to_rows.GetRawPtr()))
+            return "stock_missing_contact_handoff_destination_unqualified";
+        int source = 0;
+        while (source < from_rows.Num() && !inventory.is_package(from_rows.GetRawPtr(source))) ++source;
+        if (source == from_rows.Num()) return "stock_missing_contact_handoff_source_unqualified";
+        const auto* original = from_rows.GetRawPtr(source);
+        const auto* original_guid = inventory.guid->ContainerPtrToValuePtr<void>(original);
+        auto* defaults = inventory.package->GetClassDefaultObject().Get();
+        auto* important = field<U::FBoolProperty>(defaults, STR("NeverDrop"));
+        if (!defaults || !defaults->HasAnyFlags(U::RF_ClassDefaultObject) || !boolean(defaults, STR("Stacks"), false) ||
+            !important || inventory.never_drop->GetPropertyValueInContainer(original) != important->GetPropertyValueInContainer(defaults))
+            return "stock_missing_contact_handoff_stock_row_unqualified";
+        const auto has_no_package = [&](U::UObject* owner) {
+            bool conflict = false;
+            return inventory.visit(owner, [&](const void* row) {
+                conflict |= inventory.is_package(row) || inventory.guid->Identical(original_guid,
+                    inventory.guid->ContainerPtrToValuePtr<void>(row));
+            }) && !conflict;
+        };
+        if (!has_no_package(detached)) return "stock_missing_contact_handoff_destination_conflict";
+
+        bool foreign_conflict = false;
+        U::UObjectGlobals::ForEachUObject([&](U::UObject* candidate, int, int) {
+            if (candidate == host.pawn || candidate == guest || !live(candidate)) return RC::LoopAction::Continue;
+            if (candidate->GetClassPrivate() == host.instance->GetClassPrivate() && candidate != host.instance)
+            {
+                auto* save = object(candidate, STR("SaveSlot_Ref"));
+                foreign_conflict = save == host.save || save == detached;
+            }
+            else if (candidate->GetClassPrivate() == host.pawn->GetClassPrivate())
+            {
+                auto* save = object(candidate, STR("Save"));
+                foreign_conflict = save == host.save || save == detached || (authority(candidate) &&
+                    static_cast<U::AActor*>(candidate)->GetWorld() == host.world && exact(save, save_class) && !has_no_package(save));
+            }
+            return foreign_conflict ? RC::LoopAction::Break : RC::LoopAction::Continue;
+        });
+        if (foreign_conflict) return "stock_missing_contact_handoff_owner_conflict";
+
+        HandoffValue from_before, to_before, prepared_from, prepared_to;
+        if (!from_before.capture(inventory.backpack, from) || !to_before.capture(inventory.backpack, to) ||
+            !prepared_from.capture(inventory.backpack, from) || !prepared_to.capture(inventory.backpack, to))
+            return "stock_missing_contact_handoff_inventory_snapshot_unavailable";
+        constexpr std::size_t protected_count = 4;
+        const std::array<U::FProperty*, protected_count> guarded{inventory.equipment, inventory.armor, inventory.helmet, inventory.flags};
+        std::array<std::array<HandoffValue, protected_count>, 2> protected_values;
+        const std::array owners{host.save, detached};
+        for (std::size_t owner = 0; owner < owners.size(); ++owner)
+            for (std::size_t property = 0; property < guarded.size(); ++property)
+                if (!protected_values[owner][property].capture(guarded[property], guarded[property]->ContainerPtrToValuePtr<void>(owners[owner])))
+                    return "stock_missing_contact_handoff_inventory_snapshot_unavailable";
+        const auto protected_unchanged = [&] {
+            for (std::size_t owner = 0; owner < owners.size(); ++owner)
+                for (std::size_t property = 0; property < guarded.size(); ++property)
+                    if (!protected_values[owner][property].matches(guarded[property]->ContainerPtrToValuePtr<void>(owners[owner]))) return false;
+            return true;
+        };
+
+        U::FScriptArrayHelper planned_from(inventory.backpack, prepared_from.value.get()),
+                              planned_to(inventory.backpack, prepared_to.value.get());
+        const auto new_index = planned_to.AddValues(1);
+        if (new_index != to_rows.Num() || planned_to.Num() != to_rows.Num() + 1)
+            return "stock_missing_contact_handoff_append_unqualified";
+        inventory.row->CopyCompleteValue(planned_to.GetRawPtr(new_index), original);
+        if (!inventory.same_row(original, planned_to.GetRawPtr(new_index))) return "stock_missing_contact_handoff_payload_unqualified";
+        planned_from.RemoveValues(source, 1);
+        if (planned_from.Num() != from_rows.Num() - 1) return "stock_missing_contact_handoff_debit_unqualified";
+        for (int i = 0; i < planned_from.Num(); ++i)
+            if (!inventory.same_row(planned_from.GetRawPtr(i), from_rows.GetRawPtr(i + (i >= source))))
+                return "stock_missing_contact_handoff_source_changed";
+        for (int i = 0; i < new_index; ++i)
+            if (!inventory.same_row(planned_to.GetRawPtr(i), to_rows.GetRawPtr(i)))
+                return "stock_missing_contact_handoff_destination_changed";
+
+        const auto same_owners_and_quest = [&] {
+            const auto current = qualify(address(host.world), address(host.pawn), false, require_quest, nullptr,
+                host.world->GetPathName() == black_market_world ? black_market_world : world_path);
+            return current.world == host.world && current.driver == host.driver && current.pawn == host.pawn &&
+                current.save == host.save && current.instance == host.instance && (!require_quest || handoff_alive(host.pawn, host.save)) &&
+                silverfish::native_guest_regen::qualifies_detached_guest(guest, detached, host.save) &&
+                static_cast<U::AActor*>(guest)->GetWorld() == host.world && handoff_alive(guest, detached) &&
+                (!require_quest || silverfish::native_quest_rewards::active_missing_contact(host.save));
+        };
+        if (!same_owners_and_quest() || !from_before.matches(from) || !to_before.matches(to) || !protected_unchanged())
+            return "stock_missing_contact_handoff_scope_changed";
+        inventory.backpack->CopyCompleteValue(from, prepared_from.value.get());
+        inventory.backpack->CopyCompleteValue(to, prepared_to.value.get());
+        std::string sent, received;
+        if (prepared_from.matches(from) && prepared_to.matches(to) && to_rows.Num() == planned_to.Num() &&
+            inventory.same_row(planned_to.GetRawPtr(new_index), to_rows.GetRawPtr(new_index)) &&
+            protected_unchanged() && same_owners_and_quest() &&
+            loot_escrow::sealed_package_guid(host.save, sent) && sent.empty() &&
+            loot_escrow::sealed_package_guid(detached, received) && received == identity)
+            return "transferred";
+
+        inventory.backpack->CopyCompleteValue(to, to_before.value.get());
+        inventory.backpack->CopyCompleteValue(from, from_before.value.get());
+        return from_before.matches(from) && to_before.matches(to) && protected_unchanged() && same_owners_and_quest() ?
+            "stock_missing_contact_handoff_rolled_back" : "mutation_unverified_missing_contact_handoff_rollback";
+    }
+
     int handoff_package(const Lua& lua)
     {
         const auto fail = [&](std::string_view status) { return result(lua, false, status); };
@@ -1063,114 +1198,8 @@ namespace
         if (!silverfish::native_quest_rewards::active_missing_contact(host.save))
             return fail("stock_missing_contact_handoff_quest_unqualified");
 
-        HandoffInventory inventory;
-        std::string owned;
-        if (!inventory.valid() || !inventory.pickup_flags(host.save)) return fail("stock_missing_contact_handoff_pickup_unqualified");
-        if (!loot_escrow::sealed_package_guid(host.save, owned) || owned != identity)
-            return fail("stock_missing_contact_handoff_source_unqualified");
-
-        auto* from = inventory.backpack->ContainerPtrToValuePtr<void>(host.save);
-        auto* to = inventory.backpack->ContainerPtrToValuePtr<void>(detached);
-        U::FScriptArrayHelper from_rows(inventory.backpack, from), to_rows(inventory.backpack, to);
-        if (to_rows.Num() < 0 || to_rows.Num() >= handoff_inventory_limit || from == to ||
-            (to_rows.Num() && from_rows.GetRawPtr() == to_rows.GetRawPtr()))
-            return fail("stock_missing_contact_handoff_destination_unqualified");
-        int source = 0;
-        while (source < from_rows.Num() && !inventory.is_package(from_rows.GetRawPtr(source))) ++source;
-        if (source == from_rows.Num()) return fail("stock_missing_contact_handoff_source_unqualified");
-        const auto* original = from_rows.GetRawPtr(source);
-        const auto* original_guid = inventory.guid->ContainerPtrToValuePtr<void>(original);
-        auto* defaults = inventory.package->GetClassDefaultObject().Get();
-        auto* important = field<U::FBoolProperty>(defaults, STR("NeverDrop"));
-        if (!defaults || !defaults->HasAnyFlags(U::RF_ClassDefaultObject) || !boolean(defaults, STR("Stacks"), false) ||
-            !important || inventory.never_drop->GetPropertyValueInContainer(original) != important->GetPropertyValueInContainer(defaults))
-            return fail("stock_missing_contact_handoff_stock_row_unqualified");
-        const auto has_no_package = [&](U::UObject* owner) {
-            bool conflict = false;
-            return inventory.visit(owner, [&](const void* row) {
-                conflict |= inventory.is_package(row) || inventory.guid->Identical(original_guid,
-                    inventory.guid->ContainerPtrToValuePtr<void>(row));
-            }) && !conflict;
-        };
-        if (!has_no_package(detached)) return fail("stock_missing_contact_handoff_destination_conflict");
-
-        bool foreign_conflict = false;
-        U::UObjectGlobals::ForEachUObject([&](U::UObject* candidate, int, int) {
-            if (candidate == host.pawn || candidate == guest || !live(candidate)) return RC::LoopAction::Continue;
-            if (candidate->GetClassPrivate() == host.instance->GetClassPrivate() && candidate != host.instance)
-            {
-                auto* save = object(candidate, STR("SaveSlot_Ref"));
-                foreign_conflict = save == host.save || save == detached;
-            }
-            else if (candidate->GetClassPrivate() == host.pawn->GetClassPrivate())
-            {
-                auto* save = object(candidate, STR("Save"));
-                foreign_conflict = save == host.save || save == detached || (authority(candidate) &&
-                    static_cast<U::AActor*>(candidate)->GetWorld() == host.world && exact(save, save_class) && !has_no_package(save));
-            }
-            return foreign_conflict ? RC::LoopAction::Break : RC::LoopAction::Continue;
-        });
-        if (foreign_conflict) return fail("stock_missing_contact_handoff_owner_conflict");
-
-        HandoffValue from_before, to_before, prepared_from, prepared_to;
-        if (!from_before.capture(inventory.backpack, from) || !to_before.capture(inventory.backpack, to) ||
-            !prepared_from.capture(inventory.backpack, from) || !prepared_to.capture(inventory.backpack, to))
-            return fail("stock_missing_contact_handoff_inventory_snapshot_unavailable");
-        constexpr std::size_t protected_count = 4;
-        const std::array<U::FProperty*, protected_count> guarded{inventory.equipment, inventory.armor, inventory.helmet, inventory.flags};
-        std::array<std::array<HandoffValue, protected_count>, 2> protected_values;
-        const std::array owners{host.save, detached};
-        for (std::size_t owner = 0; owner < owners.size(); ++owner)
-            for (std::size_t property = 0; property < guarded.size(); ++property)
-                if (!protected_values[owner][property].capture(guarded[property], guarded[property]->ContainerPtrToValuePtr<void>(owners[owner])))
-                    return fail("stock_missing_contact_handoff_inventory_snapshot_unavailable");
-        const auto protected_unchanged = [&] {
-            for (std::size_t owner = 0; owner < owners.size(); ++owner)
-                for (std::size_t property = 0; property < guarded.size(); ++property)
-                    if (!protected_values[owner][property].matches(guarded[property]->ContainerPtrToValuePtr<void>(owners[owner]))) return false;
-            return true;
-        };
-
-        U::FScriptArrayHelper planned_from(inventory.backpack, prepared_from.value.get()),
-                              planned_to(inventory.backpack, prepared_to.value.get());
-        const auto new_index = planned_to.AddValues(1);
-        if (new_index != to_rows.Num() || planned_to.Num() != to_rows.Num() + 1)
-            return fail("stock_missing_contact_handoff_append_unqualified");
-        inventory.row->CopyCompleteValue(planned_to.GetRawPtr(new_index), original);
-        if (!inventory.same_row(original, planned_to.GetRawPtr(new_index))) return fail("stock_missing_contact_handoff_payload_unqualified");
-        planned_from.RemoveValues(source, 1);
-        if (planned_from.Num() != from_rows.Num() - 1) return fail("stock_missing_contact_handoff_debit_unqualified");
-        for (int i = 0; i < planned_from.Num(); ++i)
-            if (!inventory.same_row(planned_from.GetRawPtr(i), from_rows.GetRawPtr(i + (i >= source))))
-                return fail("stock_missing_contact_handoff_source_changed");
-        for (int i = 0; i < new_index; ++i)
-            if (!inventory.same_row(planned_to.GetRawPtr(i), to_rows.GetRawPtr(i)))
-                return fail("stock_missing_contact_handoff_destination_changed");
-
-        const auto same_owners_and_quest = [&] {
-            const auto current = qualify_host();
-            return current.world == host.world && current.driver == host.driver && current.pawn == host.pawn &&
-                current.save == host.save && current.instance == host.instance && handoff_alive(host.pawn, host.save) &&
-                silverfish::native_guest_regen::qualifies_detached_guest(guest, detached, host.save) &&
-                static_cast<U::AActor*>(guest)->GetWorld() == host.world && handoff_alive(guest, detached) &&
-                silverfish::native_quest_rewards::active_missing_contact(host.save);
-        };
-        if (!same_owners_and_quest() || !from_before.matches(from) || !to_before.matches(to) || !protected_unchanged())
-            return fail("stock_missing_contact_handoff_scope_changed");
-        inventory.backpack->CopyCompleteValue(from, prepared_from.value.get());
-        inventory.backpack->CopyCompleteValue(to, prepared_to.value.get());
-        std::string sent, received;
-        if (prepared_from.matches(from) && prepared_to.matches(to) && to_rows.Num() == planned_to.Num() &&
-            inventory.same_row(planned_to.GetRawPtr(new_index), to_rows.GetRawPtr(new_index)) &&
-            protected_unchanged() && same_owners_and_quest() &&
-            loot_escrow::sealed_package_guid(host.save, sent) && sent.empty() &&
-            loot_escrow::sealed_package_guid(detached, received) && received == identity)
-            return result(lua, true, "transferred");
-
-        inventory.backpack->CopyCompleteValue(to, to_before.value.get());
-        inventory.backpack->CopyCompleteValue(from, from_before.value.get());
-        return fail(from_before.matches(from) && to_before.matches(to) && protected_unchanged() && same_owners_and_quest() ?
-            "stock_missing_contact_handoff_rolled_back" : "mutation_unverified_missing_contact_handoff_rollback");
+        const auto status = transfer_package_row(host, guest, detached, identity, true);
+        return result(lua, status == "transferred", status);
     }
 
     Context read_live_context(const Lua& lua, const char** reason = nullptr)
@@ -1268,7 +1297,8 @@ namespace
         {
             std::string current;
             stock_wallet::Wallet flags;
-            if (!loot_escrow::sealed_package_guid(ctx.save, current) || current != live_dig.package_guid ||
+            auto* collector_save = live_dig.collector_save.Get();
+            if (!loot_escrow::sealed_package_guid(collector_save ? collector_save : ctx.save, current) || current != live_dig.package_guid ||
                 !flags.bind(ctx.instance) || flags.flag_value(ctx.instance, buried_flag) != std::pair{1, true} ||
                 flags.flag_value(ctx.instance, live_dig.package_flag.c_str()) != std::pair{1, true})
                 fail_live("stock_live_dig_collected_package_changed");
@@ -1283,7 +1313,77 @@ namespace
         lua.set_integer(live_dig.incidental);
         lua.set_string(live_dig.escrow_guid);
         lua.set_string(live_dig.issue);
-        return 12;
+        lua.set_integer(static_cast<std::int64_t>(address(live_dig.collector.Get())));
+        return 13;
+    }
+
+    int collect_guest_package(const Lua& lua)
+    {
+        if (!ready() || !ordinary || lua.get_stack_size() != 6 || !lua.is_string(6))
+            return result(lua, false, "stock_missing_contact_collect_arguments");
+        std::array<Address, 4> input{};
+        for (auto& value : input)
+        {
+            if (!lua.is_integer(1)) return result(lua, false, "stock_missing_contact_collect_arguments");
+            const auto parsed = lua.get_integer();
+            if (parsed <= 0) return result(lua, false, "stock_missing_contact_collect_arguments");
+            value = static_cast<Address>(parsed);
+        }
+        if (!lua.is_integer(1)) return result(lua, false, "stock_missing_contact_collect_arguments");
+        const auto serial = lua.get_integer();
+        const auto identity = lua.get_string();
+        const auto [world_id, host_id, guest_id, save_id] = input;
+        const auto ctx = qualify(world_id, host_id, false, false);
+        auto* package = live_dig.package.Get();
+        if (!live_context(ctx) || live_dig.state != LiveState::Escrowed || !valid_package(ctx, package) ||
+            serial <= 0 || live_dig.serial != serial || identity.empty() || live_dig.escrow_guid != identity)
+            return result(lua, false, "stock_missing_contact_collect_unavailable");
+
+        U::UObject* guest{};
+        U::UObjectGlobals::ForEachUObject([&](U::UObject* candidate, int, int) {
+            if (address(candidate) != guest_id) return RC::LoopAction::Continue;
+            if (exact(candidate, pawn_class) && static_cast<U::AActor*>(candidate)->GetWorld() == ctx.world) guest = candidate;
+            return RC::LoopAction::Break;
+        });
+        auto* save = object(guest, STR("Save"));
+        if (address(save) != save_id || !silverfish::native_guest_regen::qualifies_detached_guest(guest, save, ctx.save) ||
+            !handoff_alive(guest, save))
+            return result(lua, false, "stock_missing_contact_collect_recipient_changed");
+        HandoffInventory inventory;
+        std::string owned;
+        if (!inventory.valid() || !loot_escrow::sealed_package_guid(save, owned) || !owned.empty())
+            return result(lua, false, "stock_missing_contact_collect_recipient_inventory");
+        U::FScriptArrayHelper destination(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(save));
+        if (destination.Num() >= handoff_inventory_limit)
+            return result(lua, false, "stock_missing_contact_collect_backpack_full");
+
+        auto* fn = find<U::UFunction>(item_interact);
+        auto* player = field<U::FObjectProperty>(fn, STR("Player"));
+        auto* hit = field<U::FObjectProperty>(fn, STR("HitComponent"));
+        const U::FName name{STR("SendInteractionToActor")};
+        auto* box = object(package, STR("Box"));
+        if (!fn || package->GetClassPrivate()->GetFunctionByNameInChain(name) != fn || !player || !hit ||
+            !live(box) || box->GetOuterPrivate() != package || fn->GetNumParms() != 2 || fn->GetParmsSize() != 2 * sizeof(void*) ||
+            fn->GetReturnProperty() || fn->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) ||
+            player->GetOffset_Internal() != 0 || hit->GetOffset_Internal() != sizeof(void*))
+            return result(lua, false, "stock_missing_contact_collect_interaction_unavailable");
+
+        live_dig.collector = guest;
+        live_dig.collector_save = save;
+        live_dig.dispatching_guest_pickup = true;
+        std::array arguments{guest, box};
+        package->ProcessEvent(fn, arguments.data());
+        live_dig.dispatching_guest_pickup = false;
+        settle_live_pickup(ctx);
+        if (live_dig.state == LiveState::Escrowed)
+        {
+            live_dig.collector.Reset();
+            live_dig.collector_save.Reset();
+            return result(lua, false, "stock_missing_contact_collect_interaction_refused");
+        }
+        if (live_dig.state != LiveState::Collecting && live_dig.state != LiveState::Collected)
+            return result(lua, false, "mutation_unverified_missing_contact_collect_stock_result");
+        return result(lua, true, "collect_requested");
     }
 
     int capture_live_escrow(const Lua& lua)
@@ -1485,6 +1585,7 @@ namespace silverfish::native_host_dig
             lua.register_function("SilverfishDispatchNativeGuestDig", start_guest_dig);
             lua.register_function("SilverfishRenewNativeHostDigScope", renew_live);
             lua.register_function("SilverfishReadNativeHostDigScope", read_live);
+            lua.register_function("SilverfishCollectNativeGuestDigPackage", collect_guest_package);
             lua.register_function("SilverfishCaptureNativeHostDigEscrow", capture_live_escrow);
             lua.register_function("SilverfishVerifyNativeHostDigEscrow", verify_live_escrow);
             lua.register_function("SilverfishAcknowledgeNativeHostDig", acknowledge_live);

@@ -1,9 +1,9 @@
 from types import SimpleNamespace
 import time
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
-from tools.silverfish import native_host_dig as stock, native_host_dig_live as dig, party
+from tools.silverfish import native_host_dig as stock, native_host_dig_live as dig, native_world_loot, party
 from tools.silverfish.travel import BLACK_MARKET, CROSSROADS
 
 
@@ -128,6 +128,78 @@ class DigCustodyTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.assert_awaited_once_with(dig.TAG + "-restore", PAWN, SLOT, ESCROW, SPADE,
                                                *map(str, stock.SITE), MATERIAL, timeout=6)
         host.checkpoint_native.assert_not_awaited()
+
+
+class GuestPackageCollectionTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.guest_pawn = PAWN.rsplit("_", 1)[0] + "_123"
+        self.epoch = "d" * 32
+        self.operation = "e" * 32
+        self.target = f"{self.epoch}@{ESCROW}"
+        self.loose = game("escrowed", escrow=ESCROW)
+        self.collected = game("collected", package=PACKAGE, escrow=ESCROW)
+        self.collected[dig.KEY]["collector"] = self.guest_pawn
+        self.collected["ack"] = {"message": "stock sealed package collect requested"}
+        self.owned = game("owned", package=PACKAGE, escrow=ESCROW)
+        self.owned[dig.KEY]["collector"] = self.guest_pawn
+        data = party.new_party()
+        party.add_player(data, GUEST_ID)
+        data[dig.CUSTODY] = custody("escrowed")
+        self.host = SimpleNamespace(native_host_dig_live=True, persist_native_guest=True, native_profile=True,
+                                    native_checkpoint_unsafe=False, stopping=False, transitioning=False, party=data,
+                                    zone_epoch=self.epoch, last_game=self.loose, last_seen=time.monotonic(),
+                                    native_recipients=lambda: {GUEST_ID: {"pawn": self.guest_pawn, "connected": True}},
+                                    checkpoint_native=AsyncMock(return_value=48), control=Mock())
+        patcher = patch("tools.silverfish.native_inventory.retain_guest_save", new_callable=AsyncMock, return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def test_collect_checkpoints_the_guest_owner_and_replays_exact_receipt(self):
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[self.collected, self.owned]))
+        result = await dig.collect(self.host, bridge, GUEST_ID, self.target, self.operation)
+        expected = {dig.CUSTODY: dict(custody("owned"), owner=GUEST_ID)}
+        self.assertEqual(result, expected)
+        self.assertEqual(await dig.collect(self.host, bridge, GUEST_ID, self.target, self.operation), expected)
+        self.host.checkpoint_native.assert_awaited_once()
+        args, kwargs = self.host.checkpoint_native.await_args
+        self.assertEqual(args[1]["receipts"][GUEST_ID][0]["result"], expected)
+        self.assertEqual(kwargs, {"dig_token": f"dig@1@owned@{PACKAGE}", "require_guest_frames": frozenset({GUEST_ID})})
+        self.assertEqual(bridge.command.await_count, 2)
+        self.assertFalse(self.host.native_checkpoint_unsafe)
+
+    async def test_collect_requires_an_exact_recipient_before_checkpoint(self):
+        self.collected[dig.KEY].pop("collector")
+        bridge = SimpleNamespace(command=AsyncMock(return_value=self.collected))
+        with self.assertRaisesRegex(RuntimeError, "authenticated guest inventory"):
+            await dig.collect(self.host, bridge, GUEST_ID, self.target, self.operation)
+        self.assertTrue(self.host.stopping)
+        self.host.checkpoint_native.assert_not_awaited()
+
+    async def test_deferred_stock_refusal_leaves_exact_escrow_and_session_open(self):
+        pending = dict(game("collecting", escrow=ESCROW), ack=self.collected["ack"], sequence=21)
+        restored = dict(self.loose, sequence=22)
+
+        async def wait_for(predicate, **_):
+            self.assertFalse(predicate(dict(self.loose, sequence=20)))
+            self.assertTrue(predicate(restored))
+            return restored
+
+        bridge = SimpleNamespace(command=AsyncMock(return_value=pending), wait_for=wait_for)
+        with self.assertRaisesRegex(party.RuleError, "stock_missing_contact_collect_interaction_refused"):
+            await dig.collect(self.host, bridge, GUEST_ID, self.target, self.operation)
+        self.assertEqual(self.host.party[dig.CUSTODY], custody("escrowed"))
+        self.assertFalse(self.host.stopping or self.host.native_checkpoint_unsafe)
+        self.host.checkpoint_native.assert_not_awaited()
+
+    def test_physical_package_projects_only_for_the_current_guest_visit(self):
+        frame = dig.package_frame(self.host)
+        state = dict(game("escrowed"), state="connected", pawns={"local": {
+            "name": self.guest_pawn, "location": list(stock.SITE)}})
+        items = native_world_loot.nearby(state, {}, self.epoch, quest_package=frame)
+        projected = items[dig.package_identity(ESCROW)]
+        self.assertEqual((projected.class_path, projected.claim_action, projected.claim_target),
+                         (stock.PACKAGE_CLASS, dig.COLLECT, ESCROW))
+        self.assertFalse(native_world_loot.nearby(state, {}, "f" * 32, quest_package=frame))
 
 
 class PackageHandoffTests(unittest.IsolatedAsyncioTestCase):

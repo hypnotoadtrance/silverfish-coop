@@ -105,7 +105,9 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_prop_carry.ACTION, native_flare.ACTION,
                         native_lantern.EXTINGUISH,
                         *native_guest_weapon.GUEST_ACTIONS, native_guest_weapon.SELECT_EQUIPMENT,
-                        *native_guest_consumable.RESULT, native_guest_melee.SWING, native_host_dig_live.GUEST_ACTION,
+                        *native_guest_consumable.RESULT, native_guest_melee.SWING, native_guest_melee.INPUT,
+                        native_host_dig_live.GUEST_ACTION,
+                        native_host_dig_live.COLLECT,
                         native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION)
 TRANSPORT_FIXTURES = ("stardust", "fruiting-stardust", "green", "blue", "red", "gold", "purple", "teleport-cube")
 CUBE_RESULTS = {"inspect": ("present", "absent"), "debit": ("removed", "absent"),
@@ -287,6 +289,7 @@ class Host:
         self.native_zones = native_zones
         self.native_guest_controls = native_guest_controls and native_guest and native_zones and native_backend == "cpp"
         self.smg_holds = native_smg_hold.Authority(self) if guest_held_fire and self.native_guest_controls else None
+        self.melee_input = native_guest_melee.AuthorityInput(self) if self.native_guest_controls else None
         self.mindcore_carry = (native_mindcore_carry.Authority(self)
                                if native_guest and native_zones and native_backend == "cpp" else None)
         self.stack_drop_projection = native_guest_drop_projection.Projection()
@@ -980,6 +983,8 @@ class Host:
             view[native_loose_pickup.STATE] = self.loose_pickups.hidden(self)
         if mushrooms := native_mushrooms.frame(self.last_game, self.zone_epoch):
             view[native_mushrooms.KEY] = mushrooms
+        if package := native_host_dig_live.package_frame(self):
+            view[native_host_dig_live.PACKAGE_FRAME] = package
         if dead_drop := native_dead_drop.frame(self):
             view[native_dead_drop.FRAME] = dead_drop
         if cabinet := native_dust_cabinet.frame(self):
@@ -1090,10 +1095,14 @@ class Host:
             self.enrollment.begin_travel()
 
     async def reopen_zone_guests(self, transport, roles: dict[str, str], prior: dict[str, dict]) -> None:
+        guest = self.guest
+        character = roles.get("guest")
         if transport is not None:
             await transport.refresh_game_routes()
-        if self.enrollment and "guest" in roles and self.guest:
-            reservation = self.enrollment.reserve(self.guest["guest_id"], roles["guest"], self.last_game)
+        if self.enrollment and character and guest:
+            if self.guest is not guest or guest["character_id"] != character:
+                raise RuntimeError("The authenticated guest changed during destination enrollment")
+            reservation = self.enrollment.reserve(guest["guest_id"], character, self.last_game)
             if reservation.state != "reserved":
                 raise RuntimeError(f"The destination could not reserve the native guest ({reservation.reason})")
         self.awaiting_zone_guest = roles.get("guest")
@@ -1311,7 +1320,30 @@ class Host:
                     raise RuntimeError("The authored arrival was acknowledged in the wrong world")
             self.last_game = observed
             self.last_seen = time.monotonic()
-            await self.reopen_zone_guests(transport, roles, guests)
+            returning_guests = self.enrollment is not None and any(role != "host" for role in roles)
+            hold = transport.hold_game_routes() if transport and returning_guests else contextlib.nullcontext()
+            with hold:
+                if returning_guests:
+                    # The destination can report hosting before its native roster becomes readable.
+                    source_driver = departure_proof[2] if departure_proof else source_frame.get("native_roster", {}).get("driver")
+                    arrival_sequence = observed["sequence"]
+                    arrival_pawn = observed.get("pawns", {}).get("local", {}).get("name")
+
+                    def listener_ready(frame):
+                        try:
+                            census = _census(frame)
+                        except ValueError:
+                            return False
+                        pawn = frame.get("pawns", {}).get("local", {}).get("name")
+                        return (census.map == destination and census.sequence >= arrival_sequence
+                                and census.driver != source_driver and not census.connections
+                                and isinstance(pawn, str) and bool(pawn)
+                                and (arrival_pawn is None or pawn == arrival_pawn))
+
+                    if not listener_ready(observed):
+                        self.last_game = await bridge.wait_for(listener_ready, timeout=7)
+                        self.last_seen = time.monotonic()
+                await self.reopen_zone_guests(transport, roles, guests)
             if dream_plan:
                 await self.ensure_dream_stack(bridge, dream_plan)
             self.zone_epoch = uuid.uuid4().hex
@@ -2199,8 +2231,13 @@ class Host:
                 guid = native_guest_melee.current_guid(target, self.zone_epoch)
                 async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                     result = await native_guest_melee.perform(self, bridge, action, character, guid, request["operation_id"])
+            elif action == native_guest_melee.INPUT and self.melee_input:
+                async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
+                    result = await self.melee_input.request(bridge, character, target, request["operation_id"])
             elif action == native_host_dig_live.GUEST_ACTION:
                 result = await native_host_dig_live.guest_dig(self, bridge, character, target, request["operation_id"])
+            elif action == native_host_dig_live.COLLECT:
+                result = await native_host_dig_live.collect(self, bridge, character, target, request["operation_id"])
             elif action in (native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION):
                 result = await native_guest_armor.perform(self, bridge, character, request["operation_id"], action, target)
             elif action in native_guest_consumable.RESULT:
@@ -4253,6 +4290,8 @@ class Host:
                 self.deliver_native_deaths(bridge)
             if self.smg_holds:
                 await self.smg_holds.settle(bridge)
+            if self.melee_input:
+                self.melee_input.observe()
             if self.native_zones:
                 await self.service_native_zones(bridge, transport, now)
                 if not self.stopping:
@@ -5116,6 +5155,7 @@ class Client:
         self.last_flare_intent = 0
         self.guest_primary_input = guest_primary_input
         self.guest_held_input = native_smg_hold.GuestInput(self) if invite.get("native_guest_held_fire") else None
+        self.melee_input = native_guest_melee.GuestInput(self) if guest_primary_input else None
         self.mindcore_carry = native_mindcore_carry.GuestInput(self) if invite.get("native_zones") else None
         self.prop_carry = native_prop_carry.Guest(self)
         self.last_primary_intent = 0
@@ -5413,7 +5453,8 @@ class Client:
         elif action in (native_guest_melee.SWING, native_host_dig_live.GUEST_ACTION):
             target = native_guest_melee.request_target(target, self.zone_epoch)
         elif (action in native_loot.PRY_TOOL_ACTIONS.values()
-              or action in (native_stock_door.ACTION, native_stock_switch.ACTION, native_critters.ACTION)
+              or action in (native_stock_door.ACTION, native_stock_switch.ACTION, native_critters.ACTION,
+                            native_host_dig_live.COLLECT)
               or action in native_stock_door.PRY_ACTIONS.values()):
             target = f"{self.zone_epoch}@{target}"
         request = {"action": action, "operation_id": operation_id, "target": target}
@@ -5532,6 +5573,8 @@ class Client:
                         self.primary_magazine = magazine
                     except (OSError, RuntimeError) as error:
                         self.control.event("native_guest_magazine_projection_deferred", reason=str(error))
+        if self.melee_input:
+            await self.melee_input.service(self.primary_scope if eligible else None)
         inputs = self.bridge.native_primary_input_requests()
         if shovel := self.last_game.get(native_host_dig_live.GUEST_INTENT):
             inputs.append(shovel)
@@ -6172,6 +6215,13 @@ class Client:
                         fixture_arguments = (crate,)
                     self.last_game = await self.bridge.command(action, self.primary_scope[1], *fixture_arguments, timeout=5)
                     result = {"native_guest_primary_fixture": self.last_game.get("native_guest_primary_fixture", {})}
+                elif action == native_guest_melee.INPUT_FIXTURE and self.guest_primary_input:
+                    edge = request.get("target")
+                    if (not self.primary_scope or self.primary_scope[3] not in native_guest_melee.KINDS
+                            or self.last_game.get("state") != "connected" or edge not in ("press", "release", "tap")):
+                        raise ValueError("The melee input fixture requires a scoped stock weapon and a press, release or tap")
+                    self.last_game = await self.bridge.command(action, self.primary_scope[1], edge, timeout=4)
+                    result = {native_guest_melee.INPUT_FIXTURE_KEY: self.last_game[native_guest_melee.INPUT_FIXTURE_KEY]}
                 elif action == native_smg_hold.LOCAL_FIXTURE and self.guest_held_input:
                     edge, duration = request.get("target"), request.get("milliseconds")
                     if (edge not in ("press", "release") or duration is not None and
@@ -6642,6 +6692,7 @@ class Client:
                         carried=self.gameplay.get(native_world_loot.MOVING),
                         player_drops=self.gameplay.get(native_guest_drop_record.STATE) if shared_pickups else None,
                         mushroom_frame=self.gameplay.get(native_mushrooms.KEY),
+                        quest_package=self.gameplay.get(native_host_dig_live.PACKAGE_FRAME),
                     )
                 except (OSError, RuntimeError) as error:
                     if self.world_loot.last_error != str(error):

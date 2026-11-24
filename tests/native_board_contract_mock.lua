@@ -1,4 +1,7 @@
 package.path = "mod/SilverfishCoop/Scripts/?.lua;" .. package.path
+package.loaded.guest_save = {}
+package.loaded.players = {}
+local stock_keys = require("native_wire_quest")
 
 local function ref(value) return {get = function() return value end} end
 local function array(rows)
@@ -42,6 +45,7 @@ local item_path = "/Game/Classes/Items/Item_MonsterEye.Item_MonsterEye_C"
 local class = object({GetFullName = function() return "BlueprintGeneratedClass " .. item_path end})
 class.GetCDO = function() return object({Stacks = true, GetClass = function() return class end}) end
 local row_item = {[item_class] = class, [item_units] = 2, [item_guid] = {A = 1, B = 2, C = 3, D = 4}}
+local spare_stack = {[item_class] = class, [item_units] = 1, [item_guid] = {A = 5, B = 6, C = 7, D = 8}}
 local portion = {[item_class] = class, [item_units] = 1, [item_guid] = {A = 9, B = 8, C = 7, D = 6}}
 local want_guid = "00000001000000020000000300000004"
 local split_guid = "00000009000000080000000700000006"
@@ -81,6 +85,7 @@ board.Configure_Stock = function(self)
 end
 
 package.loaded.native_wire_quest = {
+    stock_quest_id = stock_keys.stock_quest_id,
     live_stock_board_context = function(state, phase, pawn, board_name, key)
         assert(state.world == world and phase == "hosting" and pawn == "Guest" and board_name == "Board")
         return {key = key, world = world, board = board, save = store, receiving_save = bag, host = player,
@@ -169,6 +174,10 @@ store.PlayerBackpack[1] = row_item
 denied("missing_objective", "turnin", "inspect", eye)
 store.PlayerBackpack = array({})
 bag.PlayerBackpack[1] = row_item
+bag.PlayerBackpack[2] = row_item
+assert(catalog()[8] == "-")
+denied("objective_guid_unqualified", "turnin", "inspect", eye)
+bag.PlayerBackpack[2] = spare_stack
 assert(catalog()[7] == kill and catalog()[8] == eye)
 board.TurnIn_ID = 1
 assert(catalog()[8] == "-")
@@ -178,10 +187,12 @@ action("turnin", "inspect", eye)
 assert(proof()[18] == want_guid and proof()[16] == 801 and proof()[9] == 1)
 denied("objective_changed", "turnin", "apply", eye, "-")
 denied("objective_changed", "turnin", "apply", eye, want_guid, "1")
+denied("objective_changed", "turnin", "apply", eye, "00000005000000060000000700000008", "1")
 action("turnin", "apply", eye, want_guid, "2")
 assert(proof()[10] == -10 and proof()[13] == 818 and #store.PlayerBackpack == 0)
 assert(proof()[18] == want_guid and proof()[19] == 2 and proof()[20] == 1 and proof()[21] == split_guid)
-assert(#bag.PlayerBackpack == 1 and bag.PlayerBackpack[1] == row_item and row_item[item_units] == 1)
+assert(#bag.PlayerBackpack == 2 and bag.PlayerBackpack[1] == row_item and row_item[item_units] == 1)
+assert(bag.PlayerBackpack[2] == spare_stack and spare_stack[item_units] == 1)
 action("turnin", "inspect", eye)
 assert(proof()[8] == "already" and host_flags.Player_Cash == 818)
 
@@ -198,4 +209,23 @@ action("turnin", "inspect", kill)
 assert(proof()[18] == "-" and proof()[16] == 3000 and proof()[9] == 2)
 action("turnin", "apply", kill, "-")
 assert(proof()[13] == 3818 and host_flags.BountyDone == 1 and host_flags.Rep_Freelancer == 42)
+
+local missing, display = "Note_Farmhouse", "Note_FarmHouse"
+local configure = board.Configure_Stock
+local missing_recipe = quest(2, class, 450)
+missing_recipe[items] = array({class}) -- A specialist recipe cannot use the ordinary turn-in path.
+board.Configure_Stock = function(self)
+    configure(self)
+    if not store.ActiveQuests[display] then self.Contracts[display] = missing_recipe end
+end
+assert(catalog(missing)[7] == missing)
+store.ActiveQuests[display] = missing_recipe
+assert(catalog()[8] == "-")
+assert(catalog(missing)[7] == "-" and catalog(missing)[8] == missing)
+function FName(text)
+    return {GetComparisonIndex = function() return 1 end,
+        ToString = function() return text == missing and display or text end}
+end
+assert(stock_keys.stock_quest_key(missing):ToString() == display)
+assert(stock_keys.stock_quest_id("Other_Quest") == "Other_Quest")
 print("Stock board live-row qualification and settlement passed")
