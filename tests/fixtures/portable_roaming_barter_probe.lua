@@ -95,7 +95,9 @@ local function roaming_probe(fields, state, phase)
                             or not valid(screen.TraderInventoryPanel) then return "closed" end
                         local cards = screen.TraderInventoryPanel.Cards
                         local ids = {}
-                        for index = 1, cards:GetArrayNum() do ids[#ids + 1] = guid(cards[index].Item) end
+                        for index = 1, cards:GetArrayNum() do
+                            ids[#ids + 1] = assert(guid(cards[index].Item[item_guid]))
+                        end
                         table.sort(ids)
                         local wallet = pawn.Save.Flags:Find(FName("Player_Cash"))
                         return table.concat({tostring(screen:GetAddress()), tostring(wallet:get()), tostring(screen:GetIsEnabled()),
