@@ -36,7 +36,7 @@ local keys = {
     ping = "GlobalPing_OnTurnIn_108_68CA1968452BFC635A107EBB1EE3AA7F",
     tracked_flag = "TrackFlag_ForStep_111_31112EA54B887C1D869E1291BC819774",
 }
-local last, observer_live
+local last, observer_live, observer_retry
 
 local function valid(object) return object ~= nil and object ~= false and object:IsValid() end
 local function same(first, second) return valid(first) and valid(second) and first:GetAddress() == second:GetAddress() end
@@ -270,11 +270,17 @@ local function objective_row(state, phase, status_row)
         or not valid(host) or not valid(state.world) or state.world:GetFullName() ~= "World " .. profile.objective_world
         or type(SilverfishWatchFloodJammer) ~= "function" or type(SilverfishReadFloodJammer) ~= "function" then
         if observer_live and type(SilverfishClearFloodJammer) == "function" then SilverfishClearFloodJammer() end
-        observer_live = false
+        observer_live, observer_retry = false, nil
         return
     end
     local save = host.Save
     if not valid(save) then return end
+    local now = os.clock()
+    if observer_retry and now < observer_retry.at and same(observer_retry.world, state.world)
+        and same(observer_retry.host, host) and same(observer_retry.save, save) then
+        return status_row(profile.tag .. "-objective", profile.objective_map, profile.jammer_name, profile.trigger_name,
+            observer_retry.reason, "-", "-", "-", "-", "-", "-", "-")
+    end
     local guests = {}
     for _, detail in ipairs(state.pawns) do
         if detail.name ~= state.local_pawn.name then
@@ -287,6 +293,12 @@ local function objective_row(state, phase, status_row)
     end
     local ready, reason = SilverfishWatchFloodJammer(host:GetAddress(), save:GetAddress(), table.unpack(guests))
     observer_live = ready == true
+    if ready then
+        observer_retry = nil
+    else
+        observer_retry = {world = state.world, host = host, save = save, at = now + .75,
+            reason = reason or "stock_observer_unavailable"}
+    end
     local proof, before, after, xp_before, xp_after, role, shooter, projectile = SilverfishReadFloodJammer(host:GetAddress())
     if not proof then proof = reason or "stock_observer_unavailable" end
     return status_row(profile.tag .. "-objective", profile.objective_map, profile.jammer_name, profile.trigger_name, proof,

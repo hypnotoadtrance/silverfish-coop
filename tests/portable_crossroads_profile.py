@@ -28,6 +28,9 @@ def instrument_profile(source):
     mailbox = 'io.open(command_path, "rb")'
     assert before.count(mailbox) == 1
     before = before.replace(mailbox, f'{wrapper}("command_mailbox", io.open, command_path, "rb")')
+    viewport = 'FindFirstOf("GameViewportClient")'
+    assert before.count(viewport) == 1
+    before = before.replace(viewport, f'{wrapper}("viewport_discovery", FindFirstOf, "GameViewportClient")')
     return before + "status_publication.profile = (function()\n" + code + "\nend)()\n\n" + anchor + rest
 
 

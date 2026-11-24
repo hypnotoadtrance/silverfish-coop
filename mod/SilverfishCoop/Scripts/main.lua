@@ -213,10 +213,16 @@ local function map_package(world)
 end
 
 local function current_world()
-    local viewport = FindFirstOf("GameViewportClient")
-    if valid(viewport) and valid(viewport.World) then
-        return viewport.World
+    local viewport = status_publication.viewport
+    if not valid(viewport) then
+        viewport = FindFirstOf("GameViewportClient")
+        status_publication.viewport = viewport
     end
+    local loaded_world = valid(viewport) and viewport.World or nil
+    if valid(loaded_world) then
+        return loaded_world
+    end
+    status_publication.viewport = nil
 
     for _, controller in ipairs(FindAllOf("PlayerControler_FP_C") or {}) do
         if valid(controller) and controller:IsLocalController() then

@@ -79,20 +79,30 @@ local function assign_patch_ids(state, patch, pending, used)
     if not count or count == 0 or count > 128 or not valid(instance) or not same(patch.Save, instance.SaveSlot_Ref) then return end
     local library = StaticFindObject("/Script/Engine.Default__KismetGuidLibrary")
     if not valid(library) then return end
-    local matched = {}
+    local matched, saved_by_class = {}, {}
+    for index = 1, count do
+        local stored = list[index]
+        if not guid_hex(stored[saved_child_guid]) then
+            local item_class = stored[saved_child_class]
+            local kind = item_class and item_class:GetObjectID():GetAssetPathName():ToString()
+            local position = stored[saved_child_transform].Translation
+            if kind and position then
+                local group = saved_by_class[kind]
+                if not group then group = {}; saved_by_class[kind] = group end
+                group[#group + 1] = {index = index, X = position.X, Y = position.Y, Z = position.Z}
+            end
+        end
+    end
     for _, entry in ipairs(pending) do
         local item, selected = entry.item, nil
         local name = actor_path(item:GetClass())
         local point = item:K2_GetActorLocation()
-        for index = 1, count do
-            local stored = list[index]
-            local item_class = stored[saved_child_class]
-            local kind = item_class and item_class:GetObjectID():GetAssetPathName():ToString()
-            local position = stored[saved_child_transform].Translation
-            if not guid_hex(stored[saved_child_guid]) and kind == name and position
-                and (point.X - position.X)^2 + (point.Y - position.Y)^2 + (point.Z - position.Z)^2 <= 0.05^2 then
-                if selected or matched[index] then return end
-                selected = index
+        local candidates = name and saved_by_class[name]
+        if not candidates then return end
+        for _, position in ipairs(candidates) do
+            if (point.X - position.X)^2 + (point.Y - position.Y)^2 + (point.Z - position.Z)^2 <= 0.05^2 then
+                if selected or matched[position.index] then return end
+                selected = position.index
             end
         end
         if not selected then return end
@@ -111,8 +121,13 @@ local function assign_patch_ids(state, patch, pending, used)
             entry.saved_id[word] = entry.new_id[word]
         end
     end
+    local counts = {}
+    for index = 1, count do
+        local id = guid_hex(list[index][saved_child_guid])
+        if id then counts[id] = (counts[id] or 0) + 1 end
+    end
     for _, entry in ipairs(pending) do
-        if guid_hex(entry.live_id) ~= entry.hex or saved(patch, entry.hex) ~= 1 then
+        if guid_hex(entry.live_id) ~= entry.hex or counts[entry.hex] ~= 1 then
             for _, rollback in ipairs(pending) do
                 for _, word in ipairs(guid_words) do rollback.live_id[word], rollback.saved_id[word] = 0, 0 end
             end
