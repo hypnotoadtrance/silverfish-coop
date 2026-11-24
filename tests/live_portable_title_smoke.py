@@ -45,6 +45,7 @@ from live_stock_creator_smoke import creator_action, installed_probe
 from live_stock_pause_exit_smoke import stock_pause
 from live_unified_title_smoke import Seat, offered, start_pair
 from portable_dock_pursuit import verify_dock_pursuit
+from portable_held_mask import verify_stock_held_mask
 from portable_eye_board import verify_stock_eye_stacks
 from portable_guest_world_start import GuestWorldStartProof, resident_events, wait_resident_status
 from portable_lingering_teleport import lingering_overlay, verify_stock_lingering_teleport
@@ -1948,7 +1949,15 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
         and frame.get("gameplay_fresh") and frame.get("game", {}).get("map") == dock
         and frame["game"].get("native_guest_primary_scope", {}).get("kind") == "rusty-pistol"), timeout=12)
     if pursuit:
-        return {"tutorial_dock_pursuit": await verify_dock_pursuit(host, guest, frame, command)}
+        presentation = {}
+        try:
+            presentation.update(await verify_stock_held_mask(host, guest, portable_probe_command))
+        except (RuntimeError, AssertionError, TimeoutError) as error:
+            presentation["stock_held_mask_error"] = str(error) or type(error).__name__
+            print(f"stock held mask failed: {presentation['stock_held_mask_error']}", flush=True)
+        combat = await verify_dock_pursuit(host, guest, frame, command)
+        assert "stock_held_mask_error" not in presentation, (presentation, combat)
+        return {**presentation, "tutorial_dock_pursuit": combat}
     if retaliation:
         return {"tutorial_dock_retaliation": await verify_tutorial_dock_retaliation(host, guest, frame)}
     seen = await asyncio.gather(*(command(seat, "dock-worker") for seat in (host, guest)))
@@ -4271,6 +4280,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableCampfireProbe",
                                                      fixture="portable_campfire_probe.lua"))
+        if tutorial_dock_pursuit:
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableHeldMaskProbe",
+                                                     fixture="portable_held_mask_probe.lua"))
         if resident_weapon_cues:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableWeaponCueProbe",
                                                  fixture="avatar_presentation_probe.lua"))
