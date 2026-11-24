@@ -88,9 +88,10 @@ async def verify_stock_lingering_teleport(host, guest, pawn, probe):
         await asyncio.gather(near(host_run, "guest", destination), near(guest_run, "local", destination))
         async with asyncio.timeout(8):
             while True:
+                # NullRHI can dispatch the stock effect without allocating a Niagara component.
                 cues = [row for row in await resident_events(guest_run, guest_frame)
                         if row["event"] == "native_wandering_teleport_effect_played"
-                        and row["time_unix"] >= started and row["particles"] and abs(row["volume"] - .6) < .001]
+                        and row["time_unix"] >= started and abs(row["volume"] - .6) < .001]
                 departure = [cue for cue in cues if math.dist(cue["location"], guest_start) < 150]
                 arrival = [cue for cue in cues if math.dist(cue["location"], destination) < 150]
                 if departure and arrival:

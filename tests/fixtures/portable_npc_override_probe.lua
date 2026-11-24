@@ -10,6 +10,7 @@ local damage_key = "Kenetic_2_47ECE93447043FC41017B8B98F2C7DE5"
 local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
 local last, authority_drone, authority_turret
 local shooters = {}
+local melee_aim, melee_stage
 local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
 local color = {R=0, G=0, B=0, A=0}
 local pipe_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
@@ -254,16 +255,20 @@ local function melee_lane(guest, target, angle)
     return count > 0, ("sphere hits=%d, blocking=%s, out=%s"):format(count, tostring(blocking), type(sphere.OutHits))
 end
 
-local function stage_melee(world)
+local function stage_melee(world, attempt)
     local guest = authoritative_guest(world)
     local target = melee_target(world, true)
     local eye = guest.Camera:K2_GetComponentLocation()
-    local yaw = math.rad(guest:K2_GetActorRotation().Yaw)
     assert(valid(target) and target.Alive and target:HasAuthority() and target.bReplicates, "stock melee target unavailable")
+    if not melee_stage or not same(melee_stage.world, world) or not same(melee_stage.target, target) then
+        melee_stage = {world=world, target=target, yaw=guest:K2_GetActorRotation().Yaw}
+    end
+    local bearings, ranges = {0, 45, 315, 90, 270, 180}, {160, 140, 195, 125}
     local blockers = {}
-    for _, range in ipairs({160, 195, 125}) do
-        for offset = 0, 315, 45 do
-            local angle = yaw + math.rad(offset)
+    for index = 1, #ranges do
+        local range = ranges[(index + attempt - 2) % #ranges + 1]
+        for offset = 1, #bearings do
+            local angle = math.rad(melee_stage.yaw + bearings[(offset + attempt - 2) % #bearings + 1])
             local center = {X=eye.X+range*math.cos(angle), Y=eye.Y+range*math.sin(angle), Z=eye.Z-24}
             if target:K2_SetActorLocation(center, false, {}, true) then
                 local clear, status = melee_lane(guest, target, heading(eye, center))
@@ -279,6 +284,32 @@ local function stage_melee(world)
     local failures = {}
     for status in pairs(blockers) do failures[#failures+1] = status end
     error("no clear stock melee contact lane: " .. table.concat(failures, ", "))
+end
+
+local function aim_melee(world, pawn, center)
+    local active = {world=world, pawn=pawn, center=center, expires=os.clock()+3}
+    melee_aim = active
+    local function aim()
+        if melee_aim ~= active or os.clock() >= active.expires then return false end
+        local viewport = FindFirstOf("GameViewportClient")
+        if not valid(viewport) or not same(viewport.World, active.world) or not valid(active.pawn)
+            or active.pawn:IsActorBeingDestroyed() or not same(active.pawn:GetWorld(), active.world) then return false end
+        local camera, controller = active.pawn.Camera, active.pawn.Controller
+        if not valid(camera) or not valid(controller) or not same(camera:GetOwner(), active.pawn)
+            or not same(controller.Pawn, active.pawn) or not same(controller:GetWorld(), active.world) then return false end
+        local angle = heading(camera:K2_GetComponentLocation(), active.center)
+        controller:SetControlRotation(angle)
+        camera:K2_SetWorldRotation(angle, false, {}, true)
+        return true
+    end
+    if not aim() then melee_aim = nil; return false end
+    LoopInGameThreadWithDelay(15, function()
+        if not aim() then
+            if melee_aim == active then melee_aim = nil end
+            return true
+        end
+    end)
+    return true
 end
 
 local shooter_paths = {
@@ -990,6 +1021,9 @@ local function run(action, actor_path)
     if action == "disarm-weapon-observers" then
         shot_turret, turret_effects = nil, nil
         return "disarmed"
+    elseif action == "clear-melee-aim" then
+        melee_aim = nil
+        return "cleared"
     end
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
@@ -1136,6 +1170,7 @@ local function run(action, actor_path)
         assert(host and valid(actor) and same(actor:GetWorld(), world) and not actor.Alive)
         actor:K2_DestroyActor()
         shooters.state = nil
+        melee_stage = nil
         return "cleared"
     elseif action == "select-pipe" then
         assert(not host, "the guest must pick their test equipment")
@@ -1176,19 +1211,17 @@ local function run(action, actor_path)
         return error_cm and ("%.3f"):format(error_cm) or "waiting"
     elseif action == "stage-melee" then
         assert(host, "only the host can stage the stock target")
-        return stage_melee(world)
+        local attempt = math.tointeger(actor_path) or 1
+        assert(attempt >= 1 and attempt <= 4, "invalid stock melee fixture bearing")
+        return stage_melee(world, attempt)
     elseif action == "face-melee" then
         assert(not host, "the guest must drive the test swing")
-        local angle = heading(pawn.Camera:K2_GetComponentLocation(), position(actor_path))
-        pawn.Controller:SetControlRotation(angle)
-        pawn.Camera:K2_SetWorldRotation(angle, false, {}, true)
+        assert(aim_melee(world, pawn, position(actor_path)), "the guest stock camera is not ready")
         return "ready"
     elseif action == "align-melee" then
         assert(host, "the test needs the host's replica camera")
         local guest = authoritative_guest(world)
-        local angle = heading(guest.Camera:K2_GetComponentLocation(), position(actor_path))
-        guest.Controller:SetControlRotation(angle)
-        guest.Camera:K2_SetWorldRotation(angle, false, {}, true)
+        assert(aim_melee(world, guest, position(actor_path)), "the authoritative guest stock camera is not ready")
         local clear, status = melee_lane(guest, melee_target(world, true), guest.Camera:K2_GetComponentRotation())
         return clear and "true" or status
     elseif action == "melee-state" then

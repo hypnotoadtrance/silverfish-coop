@@ -980,31 +980,35 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
         grip_error = float(report)
         assert 0 <= grip_error <= 5, (grip, grip_error)
     misses = []
-    # The unattended client camera can settle after the fixture aligns the swing.
-    # Retry only a verified stock miss that left the staged target untouched.
-    for _ in range(3 if verify_observer else 1):
+    # Retry a verified miss from a different stock contact lane.
+    for attempt in range(1, 4 if verify_observer else 2):
         if verify_observer:
             prior_serial = observer(await current_status(host_run)).get("serial", 0)
-        center, name = (await command(host, "stage-melee")).split(";", 1)
+        center, name = (await command(host, f"stage-melee\t{attempt}")).split(";", 1)
         async with asyncio.timeout(6):
             while not (await command(guest, f"melee-state\t{center}")).startswith("true;false;"):
                 await asyncio.sleep(.05)
-        assert await command(guest, f"face-melee\t{center}") == "ready"
-        await asyncio.sleep(.25)
-        assert await command(host, f"align-melee\t{center}") == "true"
-        before = await command(host, f"melee-state\t{center}")
-        assert before == f"true;false;7.000;{name}", before
-        tap = await submit(guest_run, "native-guest-primary-input-fixture")
-        assert tap["ok"], tap
-        sequence = tap["native_guest_primary_fixture"]["sequence"]
-        async with asyncio.timeout(8):
-            while True:
-                events = await resident_events(guest_run, frame)
-                event = next((row for row in events if row.get("sequence") == sequence
-                              and row["event"] in {"native_guest_melee_input", "native_guest_melee_input_rejected"}), None)
-                if event:
-                    break
-                await asyncio.sleep(.05)
+        try:
+            assert await command(guest, f"face-melee\t{center}") == "ready"
+            await asyncio.sleep(.25)
+            assert await command(host, f"align-melee\t{center}") == "true"
+            before = await command(host, f"melee-state\t{center}")
+            assert before == f"true;false;7.000;{name}", before
+            tap = await submit(guest_run, "native-guest-primary-input-fixture")
+            assert tap["ok"], tap
+            sequence = tap["native_guest_primary_fixture"]["sequence"]
+            async with asyncio.timeout(8):
+                while True:
+                    events = await resident_events(guest_run, frame)
+                    event = next((row for row in events if row.get("sequence") == sequence
+                                  and row["event"] in {"native_guest_melee_input", "native_guest_melee_input_rejected"}), None)
+                    if event:
+                        break
+                    await asyncio.sleep(.05)
+        finally:
+            cleared = await asyncio.gather(*(command(seat, "clear-melee-aim") for seat in (host, guest)),
+                                           return_exceptions=True)
+        assert cleared == ["cleared", "cleared"], cleared
         assert event["event"] == "native_guest_melee_input", event
         proof = event[native_guest_melee.SWING_KEY]
         contact = await command(host, "melee-contact")
@@ -1026,7 +1030,7 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
                 raise AssertionError(f"Guest swing did not animate for host: {observer(host_frame)}, {avatar}, {proof}") from error
         if not (native_guest_melee.verified_miss(proof) and after == before and contact == "sphere_empty"):
             break
-        misses.append({"stock_input": tap, "host_receipt": proof, "contact": contact})
+        misses.append({"stock_input": tap, "host_receipt": proof, "contact": contact, "fixture_target_position": center})
     assert proof["target"] == name and proof["enemy_health_after"] <= 0 and native_guest_melee.verified_damage(proof), (
         proof, contact, before, after, result.get("host_observer_swing"))
     if misses:
@@ -3984,7 +3988,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     # Install the requested probes once. Campaigns with incompatible map, quest,
     # or loadout requirements start fresh from the same two stock title processes.
     resident_campaigns = {}
-    weapon_campaign = "tutorial_dock" if tutorial_dock_combat else "observatory"
+    weapon_campaign = "tutorial_dock_combat" if tutorial_dock_combat else "observatory"
     for enabled, campaign, name, check in (
         (stock_campfire, "observatory", "stock_campfire", verify_resident_campfire),
         (stock_npc_override and not resident_weapon_cues, "observatory", "stock_npc_override", verify_resident_npc_override),
@@ -4014,7 +4018,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_warehouse_switch, "tutorial_dock", "stock_warehouse_switch", verify_warehouse_switch),
         (stock_warehouse_board, "tutorial_dock", "stock_warehouse_board", verify_warehouse_board),
         (stock_bottle, "tutorial_dock", "stock_bottle", verify_stock_bottle),
-        (tutorial_dock_combat, "tutorial_dock", "tutorial_dock_retaliation" if tutorial_dock_retaliation else "tutorial_dock_combat",
+        (tutorial_dock_combat, "tutorial_dock_combat", "tutorial_dock_retaliation" if tutorial_dock_retaliation else "tutorial_dock_combat",
          lambda host, guest, pawn: verify_tutorial_dock_combat(host, guest, pawn, retaliation=tutorial_dock_retaliation)),
         (stock_eye_stacks, "shopkeep", "stock_eye_stacks", verify_stock_eye_stacks),
     ):
@@ -4292,7 +4296,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                         finish_check("stock_missing_contact_reconnect_and_turn_in", started)
 
                 exit_actions = ("prompt", "confirm") if campaign in {
-                    "tutorial_dock", "crossroads", "crossroads_anomaly", "shopkeep"
+                    "tutorial_dock", "tutorial_dock_combat", "crossroads", "crossroads_anomaly", "shopkeep"
                 } else ("save_and_quit",)
                 requires_package_reconnect = campaign == "crossroads" and stock_shovel_quest
                 return await start_pair(host, second, "Gameplay scout", on_join=run_checks,

@@ -198,6 +198,9 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False):
             event, = events
             assert event["event"] == "native_guest_dig_input", event
             dispatch = event[dig.GUEST_RESULT]
+        if quest_dig:
+            # The buried-item branch can emit its package without leaving an ordinary terrain hole.
+            return {"contact": contacts, "dispatch": dispatch, "guid": item["guid"]}
         additions = []
         try:
             async with asyncio.timeout(10):
