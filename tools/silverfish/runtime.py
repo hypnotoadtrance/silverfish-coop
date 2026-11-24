@@ -3491,8 +3491,11 @@ class Bridge:
             len(value) > 512 or any(character in value for character in "\t\r\n") for value in arguments
         ):
             raise ValueError("Invalid stock held-fire command")
+        action = f"native-guest-smg-hold-{operation}"
+        if self.local_bridge is not None:
+            return await self.command(action, *arguments, timeout=1.2, update_status=False)
         nonce = uuid.uuid4().hex
-        fields = (nonce, f"native-guest-smg-hold-{operation}", *arguments)
+        fields = (nonce, action, *arguments)
         command = self.directory / "held-fire-command.tsv"
         write_text(command, "\t".join(fields) + "\n")
         reply = self.directory / "held-fire-reply.tsv"

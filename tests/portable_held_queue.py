@@ -106,8 +106,10 @@ async def verify_stock_held_queue(host, guest, pawn, probe):
         assert terminal["revision"] is None, terminal
         held = (await control(guest_run, "native-guest-weapon-inspect", target=guid))["native_guest_weapon"]
         assert held["actor_ammo"] == held["stored_ammo"] == terminal["after"], held
-        for filename in ("native-guest-primary-events", "native-guest-held-fire-events"):
-            assert not (guest.bridge.directory / filename).exists(), filename
+        for seat, names in ((guest, ("native-guest-primary-events", "native-guest-held-fire-events")),
+                            (host, ("held-fire-command.tsv", "held-fire-reply.tsv"))):
+            for filename in names:
+                assert not (seat.bridge.directory / filename).exists(), filename
         # The press fixture returns only after publishing its exact sequence. The accepted host edge and
         # absent mailbox files prove that press used the same in-process bridge as the release receipt.
         return {"stock_held_queue": {"press": pressed, "release": released, "release_publication": expected,
