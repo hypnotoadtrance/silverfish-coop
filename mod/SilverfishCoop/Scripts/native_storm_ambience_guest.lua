@@ -10,6 +10,7 @@ local one = {X = 1, Y = 1, Z = 1}
 local no_rotation = {Pitch = 0, Yaw = 0, Roll = 0}
 local transform = {Rotation = {X = 0, Y = 0, Z = 0, W = 1}, Translation = zero, Scale3D = one}
 local duration = 3
+local creation_attempts = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and 1 or 3
 local active
 
 local function valid(object)
@@ -44,9 +45,9 @@ end
 local function restore_stock(stock)
     local actor = stock and stock.actor
     if not valid(actor) or actor:IsActorBeingDestroyed() or not same(actor:GetWorld(), stock.world) then return end
-    if same(stock.audio, actor.Ambiant_SFX) then stock.audio:SetVolumeMultiplier(stock.volume) end
-    if same(stock.particle, actor.Ambiant_PFX) then stock.particle:SetVisibility(stock.visible, false) end
-    if same(stock.post, actor.PostProcess) then stock.post.bEnabled = stock.enabled end
+    if same(stock.audio, actor.Ambiant_SFX) then pcall(stock.audio.SetVolumeMultiplier, stock.audio, stock.volume) end
+    if same(stock.particle, actor.Ambiant_PFX) then pcall(stock.particle.SetVisibility, stock.particle, stock.visible, false) end
+    if same(stock.post, actor.PostProcess) then pcall(function() stock.post.bEnabled = stock.enabled end) end
 end
 
 local function suppress_stock(entry)
@@ -74,20 +75,23 @@ local function suppress_stock(entry)
 end
 
 local function destroy(component)
-    if not valid(component) then return end
-    local owner = component:GetOwner()
-    pcall(component.K2_DestroyComponent, component, valid(owner) and owner or nil)
+    pcall(function()
+        if not valid(component) then return end
+        local owner = component:GetOwner()
+        component:K2_DestroyComponent(valid(owner) and owner or nil)
+    end)
 end
 
 local function clear_projection(entry)
     if valid(entry.audio) then pcall(entry.audio.Stop, entry.audio) end
     if valid(entry.particle) then pcall(entry.particle.Deactivate, entry.particle) end
-    if valid(entry.post) then entry.post.bEnabled = false end
+    if valid(entry.post) then pcall(function() entry.post.bEnabled = false end) end
     destroy(entry.audio)
     destroy(entry.particle)
     destroy(entry.post)
     entry.particle, entry.audio, entry.post, entry.material, entry.fog_readback = nil, nil, nil, nil, nil
     entry.particle_path, entry.sound_path, entry.volume = nil, nil, nil
+    entry.particle_attempts, entry.sound_attempts = nil, nil
 end
 
 function ambience.clear()
@@ -103,20 +107,23 @@ local function valid_report(report, profile)
     if not profile or report.phase ~= "active" and report.phase ~= "fading"
         or not math.tointeger(report.level) or not bounded(report.level, 0, 3)
         or not bounded(report.blend, 0, 1) or not bounded(report.fade, 0, 60)
-        or not bounded(report.volume, 0, 4)
+        or not bounded(report.volume, 0, 2)
+        or report.sound == "-" and report.volume ~= 0
         or report.particle ~= "-" and report.particle ~= profile.particle
         or report.sound ~= "-" and report.sound ~= profile.sound then return false end
     local fog = report.fog
-    return not fog or fog.material == profile.fog and bounded(fog.density, 0, 5) and bounded(fog.start, 0, 100000)
-        and bounded(fog.r, 0, 10) and bounded(fog.g, 0, 10) and bounded(fog.b, 0, 10) and bounded(fog.a, 0, 1)
+    return not fog or fog.material == profile.fog and bounded(fog.density, 0, 1) and bounded(fog.start, 0, 100000)
+        and bounded(fog.r, 0, 1) and bounded(fog.g, 0, 1) and bounded(fog.b, 0, 1) and bounded(fog.a, 0, 1)
 end
 
 local function project_particle(entry, path)
-    if path == entry.particle_path then return end
-    if valid(entry.particle) then pcall(entry.particle.Deactivate, entry.particle) end
-    destroy(entry.particle)
-    entry.particle, entry.particle_path = nil, path
-    if path == "-" then return end
+    if path ~= entry.particle_path then
+        if valid(entry.particle) then pcall(entry.particle.Deactivate, entry.particle) end
+        destroy(entry.particle)
+        entry.particle, entry.particle_path, entry.particle_attempts = nil, path, 0
+    end
+    if path == "-" or valid(entry.particle) or entry.particle_attempts >= creation_attempts then return end
+    entry.particle_attempts = entry.particle_attempts + 1
     local api, particle = StaticFindObject("/Script/Niagara.Default__NiagaraFunctionLibrary"), asset(path, "NiagaraSystem")
     if not valid(api) or not particle then return end
     -- Stock DayCycle spawns LocalStorm at world origin, and the inherited
@@ -135,18 +142,19 @@ local function project_sound(entry, report, pitch)
     if report.sound ~= entry.sound_path then
         if valid(entry.audio) then pcall(entry.audio.Stop, entry.audio) end
         destroy(entry.audio)
-        entry.audio, entry.sound_path, entry.volume = nil, report.sound, nil
-        if report.sound ~= "-" then
-            local root, sound = scope.pawn.RootComponent, asset(report.sound, "SoundWave")
-            if not valid(root) or not same(root:GetOwner(), scope.pawn) or not sound then return end
-            entry.audio = scope.statics:SpawnSoundAttached(sound, root, FName("None"), zero, no_rotation,
-                0, true, volume, pitch, 0, nil, nil, false)
-            if not exact(entry.audio, audio_class) or not same(entry.audio.Sound, sound) then
-                destroy(entry.audio)
-                entry.audio = nil
-            elseif report.phase == "active" and report.fade > 0 then
-                entry.audio:FadeIn(report.fade, 1, 0, 0)
-            end
+        entry.audio, entry.sound_path, entry.volume, entry.sound_attempts = nil, report.sound, nil, 0
+    end
+    if report.sound ~= "-" and not valid(entry.audio) and entry.sound_attempts < creation_attempts then
+        entry.sound_attempts = entry.sound_attempts + 1
+        local root, sound = scope.pawn.RootComponent, asset(report.sound, "SoundWave")
+        if not valid(root) or not same(root:GetOwner(), scope.pawn) or not sound then return end
+        entry.audio = scope.statics:SpawnSoundAttached(sound, root, FName("None"), zero, no_rotation,
+            0, true, volume, pitch, 0, nil, nil, false)
+        if not exact(entry.audio, audio_class) or not same(entry.audio.Sound, sound) then
+            destroy(entry.audio)
+            entry.audio = nil
+        elseif report.phase == "active" and report.fade > 0 then
+            entry.audio:FadeIn(report.fade, 1, 0, 0)
         end
     end
     if valid(entry.audio) and entry.volume ~= volume then entry.audio:SetVolumeMultiplier(volume) end
@@ -154,9 +162,11 @@ local function project_sound(entry, report, pitch)
 end
 
 local function project_fog(entry, fog)
+    local last = entry.fog_readback
+    if fog and last and last.requested == fog and valid(entry.post) and entry.post.bEnabled then return end
+    entry.fog_readback = nil
+    if valid(entry.post) then entry.post.bEnabled = false end
     if not fog then
-        if valid(entry.post) then entry.post.bEnabled = false end
-        entry.fog_readback = nil
         return
     end
     local pawn = entry.scope.pawn
@@ -174,11 +184,9 @@ local function project_fog(entry, fog)
         if not valid(library) or not source then return end
         entry.material = library:CreateDynamicMaterialInstance(pawn, source, FName("None"), 0)
         if not exact(entry.material, "Class /Script/Engine.MaterialInstanceDynamic") then return end
-        entry.material_path = fog.material
         entry.post.Settings.WeightedBlendables.Array[1] = {Weight = 1, Object = entry.material}
+        entry.material_path = fog.material
     end
-    local last = entry.fog_readback
-    if last and last.material == fog.material and last.requested == fog then return end
     local material = entry.material
     local density, start, tint = FName("Density"), FName("StartDistance"), FName("Color")
     material:SetScalarParameterValue(density, fog.density)
@@ -187,9 +195,13 @@ local function project_fog(entry, fog)
     local color = material:K2_GetVectorParameterValue(tint)
     local blend = entry.post.Settings.WeightedBlendables.Array[1]
     if not blend or not same(blend.Object, material) then return end
-    entry.fog_readback = {material = fog.material, requested = fog, density = material:K2_GetScalarParameterValue(density),
+    local readback = {material = fog.material, requested = fog, density = material:K2_GetScalarParameterValue(density),
         start = material:K2_GetScalarParameterValue(start), r = color.R, g = color.G, b = color.B, a = color.A}
+    for _, field in ipairs({"density", "start", "r", "g", "b", "a"}) do
+        if not bounded(readback[field], fog[field] - .005, fog[field] + .005) then return end
+    end
     entry.post.bEnabled = true
+    entry.fog_readback = readback
 end
 
 local function current(entry, scope, epoch)
@@ -228,7 +240,7 @@ function ambience.sync(scope, epoch)
     if not current(active, scope, epoch) or scope.statics:GetRealTimeSeconds(scope.world) >= active.expires then
         ambience.clear()
     else
-        suppress_stock(active)
+        pcall(suppress_stock, active)
     end
 end
 
