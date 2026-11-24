@@ -3501,9 +3501,9 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
 
     dry_dock = "/Game/Classes/Maps/Maps_Dungeons/DryDock_P"
     objectives = (
-        ("Sab_Fuel_01", "Kill_ForestTank", 6, 1600, (OBSERVATORY, CROSSROADS, FOREST), "Prop_FuelTank_C_1", "fixedtank"),
+        ("Sab_Fuel_01", "Kill_ForestTank", 6, 1600, (OBSERVATORY, CROSSROADS, FOREST), ("Prop_FuelTank_C_1",), "fixedtank"),
         ("Sab_Factory", "PB_Factory_Kill", 4, 1200, (OBSERVATORY, CROSSROADS, RAIL_YARD, CITY, DOCKS, dry_dock),
-         "Prop_Explosive_PowerBox_C_5", "powerbox"),
+         tuple(f"Prop_Explosive_PowerBox_C_{index}" for index in (5, 11, 9, 3)), "powerbox"),
     )
 
     async def command(seat, action, quest=None):
@@ -3558,7 +3558,7 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
         await wait_resident_status(guest_run, lambda frame: frame.get("zone_epoch") == arrived["zone_epoch"]
                                    and frame.get("game", {}).get("map") == destination, timeout=35)
 
-    async def shoot_objective(key, count, areas, actor, cue):
+    async def shoot_objective(key, count, areas, actors, cue):
         async def weapon_setup(seat, verb):
             return await portable_probe_command(seat.bridge, "simmi-jobs", verb)
 
@@ -3572,7 +3572,19 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
         for source, destination in zip(areas, areas[1:]):
             await cross(source, destination)
         area = areas[-1]
-        target = f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel.{actor}"
+        prefix = f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel."
+        for actor in actors:
+            target = prefix + actor
+            try:
+                aimed = await host.bridge.command("native-fixed-explosive-aim-fixture", target, pawn, guid, timeout=6)
+                break
+            except RuntimeError as exc:
+                if str(exc) != "stock_flood_jammer_aim_no_stock_sight_line":
+                    raise
+        else:
+            for source, destination in zip(reversed(areas[1:]), reversed(areas[:-1])):
+                await cross(source, destination)
+            raise AssertionError(f"No reachable position outside the blast for {actors} in {area}")
         save_hashes = campaign_save_hashes(host.campaign)
 
         def prop(frame):
@@ -3601,8 +3613,9 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
         assert await flag() == f"{key}|{count}"
         magazine = 7
         fired = []
-        for _ in range(magazine):
-            aimed = await host.bridge.command("native-fixed-explosive-aim-fixture", target, pawn, guid, timeout=6)
+        for shot_number in range(magazine):
+            if shot_number:
+                aimed = await host.bridge.command("native-fixed-explosive-aim-fixture", target, pawn, guid, timeout=6)
             await at_point(aimed["pawns"]["guest"]["location"])
             async with asyncio.timeout(7):
                 while True:
@@ -3679,7 +3692,7 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
     assert await command(host, "qualify-tracked") == "10"
     tracked_quests = []
     assert campaign_save_hashes(host.campaign) == checkpoint, "Accepting a stock board offer caused an early save"
-    for tracked, key, progress, cash, areas, actor, cue in objectives:
+    for tracked, key, progress, cash, areas, actors, cue in objectives:
         checkpoint = campaign_save_hashes(host.campaign)
         offers = await board_catalog()
         assert tracked in offers["offers"] and tracked not in offers["turnins"], offers
@@ -3692,7 +3705,7 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
         assert await command(host, "journal", tracked) == "1"
         assert tracked not in (await board_catalog())["turnins"]
         assert campaign_save_hashes(host.campaign) == checkpoint
-        objective = await shoot_objective(key, progress, areas, actor, cue)
+        objective = await shoot_objective(key, progress, areas, actors, cue)
         checkpoint = campaign_save_hashes(host.campaign)
         ready = await board_catalog()
         assert tracked in ready["turnins"], ready

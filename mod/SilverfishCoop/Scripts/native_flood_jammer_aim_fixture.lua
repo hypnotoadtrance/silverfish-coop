@@ -8,7 +8,8 @@ local color = {R = 0, G = 0, B = 0, A = 0}
 -- The stock blast can reach 1,200 cm. Leave room for the pawn capsule and the tank's Arrow offset.
 local tank_ranges = {1400, 1550, 1750, 1950, 2250}
 local power_box_class = "BlueprintGeneratedClass /Game/Assets/StaticMeshes/Mesh_Props/Prop_Explosive_PowerBox.Prop_Explosive_PowerBox_C"
-local power_box_ranges = {1050, 1200, 1400, 1550, 1750, 1950, 2250}
+-- Dry Dock's stock electrical blast reaches 600 cm. The box may be recessed in a short room.
+local power_box_ranges = {730, 860, 970, 1050, 1200, 1400, 1550, 1750, 1950, 2250}
 local last
 
 local function valid(object) return object ~= nil and object ~= false and object:IsValid() end
@@ -77,23 +78,25 @@ end
 local function fixed_contact(pawn, weapon, camera, mesh, center, ranges)
     local library = StaticFindObject(trace_path)
     local muzzle_component = weapon.Arrow_Muzzle
-    if not valid(library) or not component(muzzle_component, weapon, "ArrowComponent") then return end
+    local sight_range = pawn.SightRange
+    if not valid(library) or not component(muzzle_component, weapon, "ArrowComponent")
+        or not finite(sight_range) or sight_range <= 0 then return end
     local context = {trace = library, pawn = pawn}
     local ignored = {pawn, weapon}
     local eye = camera:K2_GetComponentLocation()
     for _, height in ipairs({0, 8, -8, 16, -16, 25, 45, 65, -35, -55, 90}) do
         local target = {X = center.X, Y = center.Y, Z = center.Z + height}
         local view, range = look(eye, target)
-        if range >= ranges[1] - 40 and range <= 2400 then
-            local reach = (range + 100) / range
+        if range >= ranges[1] - 40 and range <= math.min(2400, sight_range) then
+            local reach = sight_range / range
             local finish = {X = eye.X + (target.X - eye.X) * reach, Y = eye.Y + (target.Y - eye.Y) * reach,
                 Z = eye.Z + (target.Z - eye.Z) * reach}
             local sight = trace(context, eye, finish, 1, true, ignored)
-            if sight and vector(sight.ImpactPoint) and sight.Component and same(sight.Component:Get(), mesh) then
+            local point = sight and sight.ImpactPoint or finish
+            if vector(point) then
                 local muzzle = muzzle_component:K2_GetComponentLocation()
-                local point = sight.ImpactPoint
                 local angle, distance = look(muzzle, point)
-                if math.abs(angle.Pitch) < 56 then
+                if distance > 1 and math.abs(angle.Pitch) < 56 then
                     local span = (distance + 100) / distance
                     local end_point = {X = muzzle.X + (point.X - muzzle.X) * span,
                         Y = muzzle.Y + (point.Y - muzzle.Y) * span, Z = muzzle.Z + (point.Z - muzzle.Z) * span}
