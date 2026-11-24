@@ -27,6 +27,7 @@ FORTY_FIVE_BALL = StockAmmo("forty_five_ball", 1, "45Cal_Ball", "Ammo_Magnum_BP"
 FORTY_FIVE_HOLLOW_POINT = StockAmmo(
     "forty_five_hollow_point", 1, "45Cal_HollowPoint", "Ammo_Magnum_HollowPoint_BP", "Projectile_45_HollowPoint", 18,
 )
+FIVE_SIX_FMJ = StockAmmo("five_six_fmj", 2, "5.6Intr_FMJ", "Ammo_IntrRifle_BP", "Projectile_Rifle_Inter", 7)
 TWELVE_GAUGE_BUCK = StockAmmo(
     "twelve_gauge_buck", 4, "12Gauge_Buck", "Ammo_ShotgunShells_BP", "Projectile_ShotGun_Pellet", 5, projectile_count=9,
 )
@@ -37,7 +38,7 @@ THIRTY_06_INCENDIARY = StockAmmo(
     "thirty_06_incendiary", 3, "30-06_Incendiary", "Ammo_30-06_Incendiary_BP", "Projectile_30-06_Incendiary", 5,
 )
 STOCK_AMMO = (
-    NINE_MM_BALL, FORTY_FIVE_BALL, FORTY_FIVE_HOLLOW_POINT, TWELVE_GAUGE_BUCK, FIVE_SEVEN_AP, FIFTY_CAL_FMJ,
+    NINE_MM_BALL, FORTY_FIVE_BALL, FORTY_FIVE_HOLLOW_POINT, FIVE_SIX_FMJ, TWELVE_GAUGE_BUCK, FIVE_SEVEN_AP, FIFTY_CAL_FMJ,
     THIRTY_06_FMJ, THIRTY_06_INCENDIARY,
 )
 
@@ -89,6 +90,11 @@ ORDINARY_WEAPONS = (
     ("grease-gun", "Wep_GreaseGun", 28, 0, 0.133333, FORTY_FIVE_BALL),
     ("aek-01", "Wep_AEK_01", 30, 3, 0.04, FORTY_FIVE_BALL),
     ("aek-02", "Wep_AEK_02", 30, 3, 0.04, FORTY_FIVE_BALL),
+    ("light-ar-01", "Wep_LightAR_01", 24, 0, 0.1, FIVE_SIX_FMJ),
+    ("light-ar-02", "Wep_LightAR_02", 24, 0, 0.1, FIVE_SIX_FMJ),
+    ("light-ar-03", "Wep_LightAR_03", 24, 0, 0.1, FIVE_SIX_FMJ),
+    ("light-ar-cqc", "Wep_LightAR_CQC", 24, 0, 0.1, FIVE_SIX_FMJ),
+    ("light-ar-silenced", "Wep_LightAR_Silenced", 24, 0, 0.1, FIVE_SIX_FMJ),
     ("rifle-57-01", "Wep_5-7AR_01", 50, 4, 0.05, FIVE_SEVEN_AP),
     ("rifle-57-02", "Wep_5-7AR_02", 50, 4, 0.05, FIVE_SEVEN_AP),
     ("rifle-57-03", "Wep_5-7AR_03", 50, 4, 0.05, FIVE_SEVEN_AP),

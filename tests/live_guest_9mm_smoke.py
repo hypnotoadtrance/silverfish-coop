@@ -13,7 +13,9 @@ from live_multi_smoke import saved_hashes
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.silverfish.guest_weapon_profiles import FIREARMS, FIVE_SEVEN_AP, FORTY_FIVE_BALL, NINE_MM_BALL, TWELVE_GAUGE_BUCK
+from tools.silverfish.guest_weapon_profiles import (
+    FIREARMS, FIVE_SEVEN_AP, FIVE_SIX_FMJ, FORTY_FIVE_BALL, NINE_MM_BALL, TWELVE_GAUGE_BUCK,
+)
 
 
 OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
@@ -24,7 +26,8 @@ DEFAULT_WEAPONS = ("light-pistol-suppressed", "smg-standard")
 async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
     families = {WEAPONS[kind].magazine.ammo for kind in kinds}
     only_9mm = families == {NINE_MM_BALL}
-    artifact_prefixes = {TWELVE_GAUGE_BUCK: "stock-buckshot", FIVE_SEVEN_AP: "stock-57-ap", FORTY_FIVE_BALL: "stock-45-ball"}
+    artifact_prefixes = {TWELVE_GAUGE_BUCK: "stock-buckshot", FIVE_SEVEN_AP: "stock-57-ap",
+                         FIVE_SIX_FMJ: "stock-56-fmj", FORTY_FIVE_BALL: "stock-45-ball"}
     prefix = next((label for ammo, label in artifact_prefixes.items() if ammo in families), "stock-9mm")
     name = prefix + "-" + uuid.uuid4().hex[:8]
     host = ("--campaign", name)
@@ -134,7 +137,7 @@ async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
         first = await enroll()
         tracked = {family: {} for family in families if family != NINE_MM_BALL}
         wrong_keys = {FORTY_FIVE_BALL: "nonmatching_reserve", TWELVE_GAUGE_BUCK: "buckshot_nonmatching_reserve",
-                      FIVE_SEVEN_AP: "57_ap_nonmatching_reserve"}
+                      FIVE_SEVEN_AP: "57_ap_nonmatching_reserve", FIVE_SIX_FMJ: "56_fmj_nonmatching_reserve"}
         held_ammo = NINE_MM_BALL
         for kind in kinds:
             profile = WEAPONS[kind]
@@ -175,7 +178,7 @@ async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
                 evidence[wrong_key] = {"guid": nonmatching_guid, "refused": wrong_ammo["error"]}
 
             reserve_guid = await seed_reserve()
-            second_reserve = await seed_reserve() if ammo in (TWELVE_GAUGE_BUCK, FIVE_SEVEN_AP) else None
+            second_reserve = await seed_reserve() if ammo in (TWELVE_GAUGE_BUCK, FIVE_SEVEN_AP, FIVE_SIX_FMJ) else None
             steps = None
             if ammo in tracked:
                 reserve = tracked[ammo]

@@ -5,6 +5,7 @@ local canisters = require("native_explosive_canisters")
 local drum_fire = require("native_drum_fire")
 local fixed = require("native_fixed_explosives")
 local destructibles = require("native_destructibles")
+local acid_pools = require("native_acid_pools")
 local pyrogeist = require("native_pyrogeist_view")
 local shadows = require("native_shadow_sphere_view")
 local lamps = require("native_angler_lamp_view")
@@ -248,6 +249,7 @@ function fields.start(role)
             canisters.ended(address, destroyed)
             fixed.ended(address)
             destructibles.ended(address, destroyed)
+            acid_pools.ended(address, destroyed)
         end)
     end
 end
@@ -256,6 +258,7 @@ function fields.guest(enabled)
     if not enabled then
         drum_fire.clear()
         destructibles.clear()
+        acid_pools.clear()
     end
     if type(SilverfishSetNativeAnomalyGuest) == "function" then SilverfishSetNativeAnomalyGuest(enabled) end
 end
@@ -274,6 +277,8 @@ function fields.command(args, state, phase)
     if explosive ~= nil then return explosive end
     local destructible = destructibles.command(args, state, phase)
     if destructible ~= nil then return destructible end
+    local acid = acid_pools.command(args, state, phase)
+    if acid ~= nil then return acid end
     local effect = effects.command(args, state, phase, animate_vortex)
     if effect ~= nil then return effect end
     if args[2] == "native-anomaly-trigger-fixture" and args[3] == "restore-wandering-probe" then
@@ -381,6 +386,7 @@ function fields.rows(state, phase, row)
         observers.clear_visuals()
         drum_fire.clear()
         destructibles.clear()
+        acid_pools.clear()
         return {}
     end
     if not same(world, state.world) or world_map ~= state.map then
@@ -541,6 +547,7 @@ function fields.rows(state, phase, row)
     for _, view in ipairs(drum_fire.rows(state, phase, row)) do rows[#rows + 1] = view end
     for _, item in ipairs(fixed.rows(state, phase, row)) do rows[#rows + 1] = item end
     rows[#rows + 1] = destructibles.rows(state, phase, row)
+    rows[#rows + 1] = acid_pools.rows(state, phase, row)
     return rows
 end
 

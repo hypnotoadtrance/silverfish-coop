@@ -2,6 +2,8 @@
 
 from collections import deque
 import math
+import re
+import time
 
 from .native_guest_drop_record import valid_id, valid_position
 
@@ -14,6 +16,8 @@ ANGLER_MAP = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 OBSERVER_OPACITY = "native_observer_opacity"
 CANISTERS = "native_explosive_canisters"
 FIXED_EXPLOSIVES = "native_fixed_explosives"
+ACID_POOLS = "native_acid_pools"
+ACID_POOL_VIEW = "native_acid_pool_view"
 FIXED_CUES = ("powerbox", "fixedtank", "fixedfire")
 OBSERVER_CUES = ("observersparks", "observerred", "observergreen", "observerblue", "observerpurple", "observergold")
 KINDS = {"charge": 4000, "blast": 500100, "vortex": 500100, "electrode": 8100, "canister": 500100, "wandering": 500100,
@@ -27,6 +31,55 @@ CUE_EVENTS = {"pipebomb": "native_pipe_bomb_effect_played", "vortex": "native_vo
 MAX_CUES = 12
 MAX_SENSORS = 256
 MAX_ANGLER_LAMPS = 32
+_MAX_ACID_POOLS = 64
+_ACID_STATE = re.compile(r"([A-Za-z0-9_]{1,96}):[afe]")
+
+
+def valid_acid_pools(states):
+    if not isinstance(states, list) or len(states) > _MAX_ACID_POOLS:
+        return False
+    previous = ""
+    for state in states:
+        match = _ACID_STATE.fullmatch(state) if isinstance(state, str) else None
+        if not match or match[1] <= previous:
+            return False
+        previous = match[1]
+    return True
+
+
+class AcidPoolPlayback:
+    def __init__(self):
+        self.applied = None
+        self.retry = None
+
+    async def project(self, bridge, game, frame, epoch):
+        area = game.get("map")
+        view = game.get(ACID_POOL_VIEW)
+        if game.get("state") != "connected" or not isinstance(view, dict) or view.get("map") != area:
+            self.applied = None
+            self.retry = None
+            return game
+        if not isinstance(frame, dict) or not valid_id(epoch) or (frame.get("map"), frame.get("epoch")) != (area, epoch):
+            return game
+        states = frame.get("actors")
+        if not valid_acid_pools(states):
+            return game
+        fingerprint = (area, epoch, tuple(states))
+        if self.applied == fingerprint and view.get("epoch") == epoch:
+            return game
+        if self.retry and self.retry[0] == fingerprint and time.monotonic() < self.retry[1]:
+            return game
+        try:
+            updated = await bridge.command("native-acid-pools-apply", area, epoch, *(states or ["-"]), timeout=1.5)
+        except (OSError, ValueError, RuntimeError):
+            self.retry = (fingerprint, time.monotonic() + 1)
+            return game
+        if updated.get(ACID_POOL_VIEW) == {"map": area, "epoch": epoch}:
+            self.applied = fingerprint
+            self.retry = None
+            return updated
+        self.retry = (fingerprint, time.monotonic() + 1)
+        return game
 
 
 def valid_angler_colors(row):

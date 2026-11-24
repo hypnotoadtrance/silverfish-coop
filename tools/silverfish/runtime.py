@@ -2860,6 +2860,15 @@ class Bridge:
                 elif fields[0] == "native-destructible-view" and len(fields) == 3 and data.get("state") == "connected":
                     if fields[1] == data.get("map"):
                         data["native_destructible_view"] = {"map": fields[1], "epoch": fields[2]}
+                elif fields[0] == "native-acid-pool-roster" and len(fields) == 3 and data.get("state") == "hosting":
+                    area, roster = fields[1:]
+                    states = [] if roster == "-" else roster.split("|")
+                    if area == data.get("map") and native_anomaly_effects.valid_acid_pools(states):
+                        data[native_anomaly_effects.ACID_POOLS] = states
+                elif fields[0] == "native-acid-pool-view" and len(fields) == 3 and data.get("state") == "connected":
+                    area, epoch = fields[1:]
+                    if area == data.get("map") and (epoch == "-" or native_guest_drop_record.valid_id(epoch)):
+                        data[native_anomaly_effects.ACID_POOL_VIEW] = {"map": area, "epoch": epoch}
                 elif fields[0] == "native-fixed-explosive" and len(fields) == 6 and data.get("state") in {"hosting", "connected"}:
                     props = data.setdefault(native_anomaly_effects.FIXED_EXPLOSIVES, {})
                     area = data.get("map", "")
