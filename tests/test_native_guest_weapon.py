@@ -11,7 +11,7 @@ from tools.silverfish import (
 
 class NativeGuestWeaponProfilesTests(unittest.TestCase):
     def test_shot_contact_accepts_only_canonical_npc_references(self):
-        geometry = "1.000,0.000,0.000;0.000,0.000,0.000;1.000,0.000,0.000;0.000,0.000,0.000"
+        geometry = "1.000000,0.000000,0.000000;0.000,0.000,0.000;1.000,0.000,0.000;0.000,0.000,0.000"
         for reference in ("npc:1", "npc:65535"):
             self.assertTrue(native_guest_weapon.valid_shot_view(f"{geometry}|{reference}|1.000,0.000,0.000"))
         for reference in ("npc:0", "npc:01", "npc:65536", "npc:-1", "npc:2.5"):
