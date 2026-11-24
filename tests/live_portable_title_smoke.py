@@ -51,6 +51,7 @@ from portable_personal_consumable import verify_personal_consumable_reconnect, v
 from portable_simmi_jammer import verify_stock_simmi_jammers
 from portable_weather_travel import verify_weather_travel
 from portable_stock_shovel import verify_stock_shovel, verify_stock_shovel_reconnect
+from portable_placed_item import placed_item_overlay, verify_stock_placed_item
 from portable_world_view_receipt import patch_world_view_receipts, verify_world_view_receipt
 from tools.silverfish.title_session import STATUS_FILE as TITLE_STATUS_FILE
 
@@ -4028,7 +4029,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
                  stock_weather_travel: bool = False, stock_melee_family: bool = False, stock_melee_edges: bool = False,
                  stock_warehouse_switch: bool = False, stock_warehouse_board: bool = False, stock_bottle: bool = False,
-                 stock_roaming_barter: bool = False, stock_critters: bool = False,
+                 stock_roaming_barter: bool = False, stock_critters: bool = False, stock_placed_item: bool = False,
                  stock_eye_stacks: bool = False, stock_lingering_teleport: bool = False,
                  stock_npc_rivalry: bool = False, stock_throwables: str | None = None,
                  memory_status: bool = False, stock_prop_grip: bool = False,
@@ -4110,6 +4111,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_weather_travel, "crossroads", "stock_weather_travel",
          lambda host, guest, pawn: verify_weather_travel(host, guest, pawn, portable_probe_command)),
         (stock_critters, "crossroads", "stock_critters", verify_stock_critters),
+        (stock_placed_item, "crossroads", "stock_placed_item", verify_stock_placed_item),
         (stock_shovel, "crossroads", "stock_shovel", lambda host, guest, pawn: verify_stock_shovel(
             host, guest, pawn, loot=stock_shovel_loot, quest=stock_shovel_quest)),
         (stock_lingering_teleport, "crossroads_anomaly", "stock_lingering_teleport",
@@ -4184,6 +4186,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["roaming_barter_overlays"] = [probes.enter_context(roaming_barter_overlay(game)) for game in games]
         if stock_critters:
             proof["stock_critter_overlays"] = [probes.enter_context(stock_critter_overlay(game)) for game in games]
+        if stock_placed_item:
+            proof["stock_placed_item_overlays"] = [
+                probes.enter_context(placed_item_overlay(game, portable_script_overlay)) for game in games
+            ]
         if stock_lingering_teleport:
             proof["lingering_teleport_overlays"] = [
                 probes.enter_context(lingering_overlay(game, portable_script_overlay)) for game in games
@@ -4202,7 +4208,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
                                                      fixture="portable_npc_override_probe.lua"))
         if (tutorial_dock_combat or tutorial_dock_melee or stock_bandage_revisit or stock_shovel or stock_simmi_jammers or stock_weather_travel
-                or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_critters
+                or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_critters or stock_placed_item
                 or stock_eye_stacks or stock_lingering_teleport):
             overlay_key = ("weather_zone_overlays" if stock_weather_travel else
                            "jammer_zone_overlays" if stock_simmi_jammers else "dock_zone_overlays")
@@ -4643,6 +4649,8 @@ if __name__ == "__main__":
                         help="verify one compact resident stock weather receipt in a private muted portable pair")
     parser.add_argument("--stock-weather-travel", action="store_true",
                         help="verify stock weather, rain, and sirens after opening Crossroads in one muted portable pair")
+    parser.add_argument("--stock-placed-item", action="store_true",
+                        help="verify one placed Crossroads item's stock carry, drop, and shared pickup")
     parser.add_argument("--stock-melee-family", action="store_true",
                         help="verify guest Heavy Pipe and Old Pipe kills and stock melee input")
     parser.add_argument("--stock-melee-edges", action="store_true",
@@ -4724,7 +4732,7 @@ if __name__ == "__main__":
                               "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_shovel_quest", "stock_take_ammo",
                               "stock_host_corpse_carry", "stock_flashlights", "stock_simmi_jammers", "stock_weather_travel",
                               "stock_melee_family", "stock_melee_edges", "stock_warehouse_switch", "stock_warehouse_board", "stock_bottle",
-                              "stock_roaming_barter", "stock_critters", "stock_throwables", "stock_eye_stacks",
+                              "stock_roaming_barter", "stock_critters", "stock_placed_item", "stock_throwables", "stock_eye_stacks",
                               "stock_lingering_teleport"}
     if args.rusty_pistol and not args.resident_weapon_cues:
         parser.error("Use --rusty-pistol with --resident-weapon-cues")
@@ -4741,7 +4749,7 @@ if __name__ == "__main__":
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
             args.stock_melee_family, args.stock_melee_edges, args.stock_warehouse_switch, args.stock_warehouse_board, args.stock_bottle,
-            args.stock_roaming_barter, args.stock_critters, args.stock_throwables, args.stock_eye_stacks,
+            args.stock_roaming_barter, args.stock_critters, args.stock_placed_item, args.stock_throwables, args.stock_eye_stacks,
             args.stock_lingering_teleport)) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
@@ -4793,6 +4801,7 @@ if __name__ == "__main__":
                        stock_warehouse_switch=args.stock_warehouse_switch,
                        stock_warehouse_board=args.stock_warehouse_board, stock_bottle=args.stock_bottle,
                        stock_roaming_barter=args.stock_roaming_barter, stock_critters=args.stock_critters,
+                       stock_placed_item=args.stock_placed_item,
                        stock_eye_stacks=args.stock_eye_stacks, stock_lingering_teleport=args.stock_lingering_teleport,
                        stock_throwables=args.stock_throwables,
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
