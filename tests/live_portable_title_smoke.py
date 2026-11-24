@@ -52,6 +52,7 @@ from portable_wipe_chooser import verify_stock_wipe_chooser
 from portable_simmi_jammer import verify_stock_simmi_jammers
 from portable_weather_travel import verify_weather_travel
 from portable_lightning import verify_stock_lightning
+from portable_storm import StockStormTrial
 from portable_stock_shovel import verify_stock_shovel, verify_stock_shovel_reconnect
 from portable_placed_item import placed_item_overlay, verify_stock_placed_item
 from portable_world_view_receipt import patch_world_view_receipts, verify_world_view_receipt
@@ -4040,7 +4041,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_wipe_chooser: bool = False,
                  stock_npc_override: bool = False, stock_board_offers: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
-                 stock_weather_travel: bool = False, stock_lightning: bool = False,
+                 stock_weather_travel: bool = False, stock_lightning: bool = False, stock_storm_ambience: bool = False,
                  stock_melee_family: bool = False, stock_melee_edges: bool = False,
                  stock_warehouse_switch: bool = False, stock_warehouse_board: bool = False, stock_bottle: bool = False,
                  stock_roaming_barter: bool = False, stock_critters: bool = False, stock_placed_item: bool = False,
@@ -4100,6 +4101,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     # Install the requested probes once. Campaigns with incompatible map, quest,
     # or loadout requirements start fresh from the same two stock title processes.
     resident_campaigns = {}
+    storm_trial = StockStormTrial(portable_probe_command) if stock_storm_ambience else None
     weapon_campaign = "tutorial_dock_combat" if tutorial_dock_combat else "observatory"
     for enabled, campaign, name, check in (
         (stock_campfire, "observatory", "stock_campfire", verify_resident_campfire),
@@ -4128,6 +4130,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_weather_travel(host, guest, pawn, portable_probe_command)),
         (stock_lightning, "crossroads", "stock_lightning",
          lambda host, guest, pawn: verify_stock_lightning(host, guest, pawn, portable_probe_command)),
+        (storm_trial, "storm", "stock_storm_ambience",
+         storm_trial.joined if storm_trial else None),
         (stock_critters, "crossroads", "stock_critters", verify_stock_critters),
         (stock_placed_item, "crossroads", "stock_placed_item", verify_stock_placed_item),
         (stock_shovel, "crossroads", "stock_shovel", lambda host, guest, pawn: verify_stock_shovel(
@@ -4158,6 +4162,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableLightningProbe",
                                                      fixture="portable_lightning_probe.lua"))
+        if storm_trial:
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableStormProbe",
+                                                     fixture="portable_storm_probe.lua"))
         if stock_simmi_jammers:
             proof["jammer_aim_overlays"] = [probes.enter_context(jammer_aim_overlay(game)) for game in games]
             for game in games:
@@ -4441,6 +4449,17 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     else:
                         finish_check("stock_personal_consumable_reconnect", started)
 
+                async def check_storm_reconnect(guest, _started):
+                    if "stock_storm_ambience" not in gameplay:
+                        return
+                    started = time.perf_counter()
+                    try:
+                        await storm_trial.reconnected(host, guest)
+                    except Exception as error:
+                        finish_check("stock_storm_ambience_reconnect", started, error)
+                    else:
+                        finish_check("stock_storm_ambience_reconnect", started)
+
                 exit_actions = ("prompt", "confirm") if campaign in {
                     "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_melee", "crossroads", "crossroads_anomaly", "shopkeep"
                 } else ("save_and_quit",)
@@ -4449,7 +4468,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     after_reconnect = check_shovel_reconnect
                 if campaign == "personal_consumable":
                     after_reconnect = check_personal_reconnect
+                if campaign == "storm":
+                    after_reconnect = check_storm_reconnect
                 return await start_pair(host, second, "Gameplay scout", on_join=run_checks,
+                                        before_join=storm_trial.prepare if campaign == "storm" else None,
                                         wait_status=wait_resident_status, host_exit_actions=exit_actions,
                                         after_reconnect=after_reconnect)
 
@@ -4678,6 +4700,8 @@ if __name__ == "__main__":
                         help="verify stock weather, rain, and sirens after opening Crossroads in one muted portable pair")
     parser.add_argument("--stock-lightning", action="store_true",
                         help="verify one stock lightning strike and thunder across a private Crossroads pair")
+    parser.add_argument("--stock-storm-ambience", action="store_true",
+                        help="verify active stock storms across fresh join and reconnect in one private pair")
     parser.add_argument("--stock-placed-item", action="store_true",
                         help="verify one placed Crossroads item's stock carry, drop, and shared pickup")
     parser.add_argument("--stock-melee-family", action="store_true",
@@ -4762,6 +4786,7 @@ if __name__ == "__main__":
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "tutorial_dock_melee", "stock_npc_rivalry",
                               "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_shovel_quest", "stock_take_ammo",
                               "stock_host_corpse_carry", "stock_flashlights", "stock_simmi_jammers", "stock_weather_travel", "stock_lightning",
+                              "stock_storm_ambience",
                               "stock_melee_family", "stock_melee_edges", "stock_warehouse_switch", "stock_warehouse_board", "stock_bottle",
                               "stock_roaming_barter", "stock_critters", "stock_placed_item", "stock_throwables", "stock_eye_stacks",
                               "stock_lingering_teleport"}
@@ -4779,6 +4804,7 @@ if __name__ == "__main__":
             args.stock_campfire, args.stock_npc_override, args.stock_board_offers, args.tutorial_dock_melee,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel, args.stock_lightning,
+            args.stock_storm_ambience,
             args.stock_melee_family, args.stock_melee_edges, args.stock_warehouse_switch, args.stock_warehouse_board, args.stock_bottle,
             args.stock_roaming_barter, args.stock_critters, args.stock_placed_item, args.stock_throwables, args.stock_eye_stacks,
             args.stock_lingering_teleport)) and (
@@ -4829,6 +4855,7 @@ if __name__ == "__main__":
                        stock_simmi_jammers=args.stock_simmi_jammers,
                        stock_weather_travel=args.stock_weather_travel,
                        stock_lightning=args.stock_lightning,
+                       stock_storm_ambience=args.stock_storm_ambience,
                        stock_melee_family=args.stock_melee_family,
                        stock_melee_edges=args.stock_melee_edges,
                        stock_warehouse_switch=args.stock_warehouse_switch,
