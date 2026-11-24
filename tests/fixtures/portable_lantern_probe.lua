@@ -215,8 +215,15 @@ local function impact_probe(action, world, pawn, lantern, root)
         if action == "impactaim" then return "aimed" end
         local launch = root:K2_GetComponentLocation()
         local aim = pawn.Camera:GetForwardVector()
+        local toolbox = lantern:GetClass():GetFName():ToString() == "Prop_ToolBox01_C"
+        if toolbox then
+            -- Stock sleep can clear the instigator during a grip. Exercise that state on every run.
+            lantern.Instigator = nil
+            assert(not valid(lantern.Instigator), "could not stage the missing thrower")
+        end
         pawn:Grab_Release_Object(true, false, false)
         assert(not holds(pawn, lantern, root), "stock throw did not release the prop")
+        if toolbox then assert(same(lantern.Instigator, pawn), "stock toolbox throw lost its host attribution") end
         return table.concat({position_text(launch), position_text(aim),
             position_text(root:GetPhysicsLinearVelocity(FName("None", EFindName.FNAME_Find)))}, ";")
     end

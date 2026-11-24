@@ -21,6 +21,7 @@ local color = {R = 0, G = 0, B = 0, A = 0}
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local world, state, phase, hook, release_hook, mailbox, sequence, next_read, next_local_pose
 local enrolled, holdings, edges, local_hold, latest = {}, {}, {}, nil, nil
+local host_release
 local fixture_actor, loose_fixtures = nil, {}
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local grip_filter = os.getenv("SILVERFISH_COOP_PROP_GRIP_FILTER") ~= "0"
@@ -71,12 +72,16 @@ local function unflagged_body(actor)
     return item_body(actor) or flares.carry_root(actor, world)
 end
 
-local function mesh(actor)
+local function prop_mesh(actor)
     local base = StaticFindObject(prop_path)
     if not valid(base) or not valid(actor) or not actor:IsA(base) or actor_class(actor) == core_path
-        or not same(actor:GetWorld(), world) or actor:IsActorBeingDestroyed() then return unflagged_body(actor) end
+        or not same(actor:GetWorld(), world) or actor:IsActorBeingDestroyed() then return end
     local root = actor.PropMesh
     if same(root, actor.RootComponent) and same(root:GetOwner(), actor) then return root end
+end
+
+local function mesh(actor)
+    return prop_mesh(actor) or unflagged_body(actor)
 end
 
 local function handle(pawn)
@@ -134,6 +139,18 @@ local function solved_pose(root, bone)
 end
 
 local function capture_release(grip)
+    if phase == "hosting" then
+        local pawn = state.local_pawn and state.local_pawn.pawn
+        if state.listening and same(grip, handle(pawn)) and pawn:IsLocallyControlled() and pawn:HasAuthority() and pawn.Dead == false then
+            host_release = nil
+            local actor = pawn.HeldObject
+            if same(prop_mesh(actor), grip:GetGrabbedComponent()) and actor:HasAuthority()
+                and actor.BeingHeld == true and same(actor["Holding Actor"], pawn) then
+                host_release = {actor = actor, pawn = pawn, time = os.clock()}
+            end
+        end
+        return
+    end
     if phase ~= "connected" or not local_hold or not state.listening or state.server ~= true then return end
     local pawn = state.local_pawn and state.local_pawn.pawn
     if not same(pawn, local_hold.pawn) or not same(grip, handle(pawn)) or not pawn:IsLocallyControlled()
@@ -201,8 +218,27 @@ local function emit(pawn, kind, class, position, pitch, yaw, corpse, placement, 
     return sequence
 end
 
+local function attribute_prop_throw(pawn, actor)
+    local root, bone = prop_mesh(actor), FName("None", EFindName.FNAME_Find)
+    if not valid(root) or not actor:HasAuthority() or same(pawn.HeldObject, actor) or actor.BeingHeld ~= false
+        or not root:IsSimulatingPhysics(bone) then return end
+    -- Stock sleep can clear the prop's instigator while the physics handle is still holding it.
+    -- Use the pawn that just released this exact grip so stock impact damage carries its source.
+    if not same(actor.Instigator, pawn) then actor.Instigator = pawn end
+    if actor.IgnorePawn_WhenAsleep == true and root:GetCollisionResponseToChannel(pawn_channel) == ignore_collision then
+        root:SetCollisionResponseToChannel(pawn_channel, block_collision)
+    end
+end
+
 local function observe(pawn, throwing, dropping)
     local local_pawn = state and state.local_pawn and state.local_pawn.pawn
+    if phase == "hosting" and same(pawn, local_pawn) then
+        local release = host_release
+        host_release = nil
+        if throwing and not dropping and release and same(release.pawn, pawn) and os.clock() - release.time <= final_capture_age then
+            attribute_prop_throw(pawn, release.actor)
+        end
+    end
     if phase == "hosting" and not throwing and not dropping and same(pawn, local_pawn) then
         -- Dead NPCs, loose items and stock flare projectiles lack the prop ownership fields.
         -- Discard a competing local grip before the next physics step.
@@ -399,19 +435,8 @@ local function stock(pawn, kind, actor, range, pitch, yaw, corpse)
             observers.catch_offering(state, pawn, actor, camera:GetForwardVector())
         end
     end)
-    if invoked and kind == "throw" and not corpse and valid(actor) and actor:HasAuthority()
-        and not same(pawn.HeldObject, actor) and not unflagged_body(actor) then
-        -- The host grip can already have woken the body before stock release.
-        -- An already awake body may still carry the pawn-ignore response from sleep.
-        pcall(function()
-            if actor.BeingHeld ~= false or actor.IgnorePawn_WhenAsleep ~= true then return end
-            local root = mesh(actor)
-            local bone = FName("None", EFindName.FNAME_Find)
-            if valid(root) and root:IsSimulatingPhysics(bone)
-                and root:GetCollisionResponseToChannel(pawn_channel) == ignore_collision then
-                root:SetCollisionResponseToChannel(pawn_channel, block_collision)
-            end
-        end)
+    if invoked and kind == "throw" and not corpse then
+        pcall(attribute_prop_throw, pawn, actor)
     end
     local restored = pcall(function()
         camera:K2_SetRelativeRotation(previous_angle, false, {}, true)
@@ -957,7 +982,9 @@ function carry.sync(current, seat, bridge)
     if not same(world, current.world) then
         world, enrolled, holdings, edges, local_hold, latest = current.world, {}, {}, {}, nil, nil
         fixture_actor, loose_fixtures, next_read, next_local_pose = nil, {}, nil, nil
+        host_release = nil
     end
+    if seat ~= "hosting" then host_release = nil end
     state, phase, mailbox = current, seat, bridge and bridge .. "/native-prop-carry-poses"
     if not hook and type(RegisterHook) == "function" and valid(StaticFindObject(grab_path)) then
         if valid(StaticFindObject(release_component_path)) then

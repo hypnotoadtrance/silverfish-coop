@@ -1470,12 +1470,58 @@ async def verify_tutorial_bandage_revisit(host: Seat, guest: Seat, pawn: str) ->
             "host_owned_unclaimed_source": {"actor": second_bandage, "visibility": [host_suppressed, guest_suppressed]}}}
 
 
+WAREHOUSE_DOCK = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
+WAREHOUSE_DEVICES = {
+    device: f"{kind} {WAREHOUSE_DOCK}.Tut_Dock_P:PersistentLevel.{kind}_{number}"
+    for device, kind, number in (("switch", "CircutBox_BP_C", 1), ("radio", "Prop_Radio01_C", 3))
+}
+
+
+def warehouse_device_states(frame):
+    switches = frame.get("game", {}).get(native_stock_switch.KEY, {})
+    return {device: switches[name] for device, name in WAREHOUSE_DEVICES.items() if name in switches}
+
+
+async def prepare_warehouse_late_join(host):
+    host_run = host.campaign / "run"
+    await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("native_zone", {}).get("state") == "ready")
+    for placement in ("near", "inside"):
+        await host.bridge.command("native-exit-position", "local", placement, "Obs_Dock", "Level_Exit_BP_C_213")
+    arrival = await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == WAREHOUSE_DOCK
+                                        and warehouse_device_states(frame).keys() == WAREHOUSE_DEVICES.keys(), timeout=60)
+    assert not arrival.get("awaiting_zone_guest")
+    assert not any(lease["state"] == "active" for lease in arrival["campaign"]["leases"]), arrival["campaign"]["leases"]
+    initial = warehouse_device_states(arrival)
+    checkpoint = campaign_save_hashes(host.campaign)
+    for device in WAREHOUSE_DEVICES:
+        await host.bridge.command(f"fixture-warehouse-{device}", "host")
+    toggled = warehouse_device_states(await wait_resident_status(host_run, lambda frame:
+        (current := warehouse_device_states(frame)).keys() == initial.keys()
+        and all(current[device]["powered"] != initial[device]["powered"] for device in initial)
+        and current["switch"]["angles"] != initial["switch"]["angles"]
+        and current["switch"]["lights"] != initial["switch"]["lights"]
+        and current["switch"]["panel"] != initial["switch"]["panel"]))
+    assert campaign_save_hashes(host.campaign) == checkpoint
+    return {"zone_epoch": arrival["zone_epoch"], "initial": initial, "toggled": toggled}
+
+
+async def verify_warehouse_late_join(host, guest, baseline):
+    assert baseline
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    expected = baseline["toggled"]
+    host_frame, guest_frame = await asyncio.gather(*(wait_resident_status(run, lambda frame:
+        frame.get("game", {}).get("map") == WAREHOUSE_DOCK and frame.get("zone_epoch") == baseline["zone_epoch"]
+        and warehouse_device_states(frame) == expected) for run in (host_run, guest_run)))
+    return {"stock_warehouse_late_join": {**baseline, "host": warehouse_device_states(host_frame),
+                                          "guest_first_visit": warehouse_device_states(guest_frame)}}
+
+
 async def verify_warehouse_switch(host: Seat, guest: Seat, pawn: str, *, radio: bool = False,
                                   check_track_selection: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
-    dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
-    kind, number, device = ("Prop_Radio01_C", 3, "radio") if radio else ("CircutBox_BP_C", 1, "switch")
-    name = f"{kind} {dock}.Tut_Dock_P:PersistentLevel.{kind}_{number}"
+    dock = WAREHOUSE_DOCK
+    device = "radio" if radio else "switch"
+    name = WAREHOUSE_DEVICES[device]
     fixture = f"fixture-warehouse-{device}"
 
     def switch(frame):
@@ -4882,6 +4928,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     # Install the requested probes once. Campaigns with incompatible map, quest,
     # or loadout requirements start fresh from the same two stock title processes.
     resident_campaigns = {}
+    warehouse_prejoin = {}
+
+    async def prepare_warehouse(host, _guest, _character):
+        warehouse_prejoin.update(await prepare_warehouse_late_join(host))
+
     storm_trial = StockStormTrial(portable_probe_command) if stock_storm_ambience else None
     weapon_campaign = "tutorial_dock_combat" if tutorial_dock_combat else "observatory"
     shot_view_campaign = "tutorial_dock_shot_view" if tutorial_dock_pursuit else weapon_campaign
@@ -4960,6 +5011,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_warehouse_switch, "tutorial_dock", "stock_warehouse_switch", verify_warehouse_switch),
         (stock_warehouse_switch, "tutorial_dock", "stock_warehouse_radio",
          lambda host, guest, pawn: verify_warehouse_switch(host, guest, pawn, radio=True, check_track_selection=stock_radio_media)),
+        (stock_warehouse_switch, "tutorial_dock_late_join", "stock_warehouse_late_join",
+         lambda host, guest, _pawn: verify_warehouse_late_join(host, guest, warehouse_prejoin)),
         (stock_bandage_revisit, "tutorial_dock", "stock_bandage_revisit", verify_tutorial_bandage_revisit),
         (stock_warehouse_board, "tutorial_dock", "stock_warehouse_board", verify_warehouse_board),
         (stock_bottle, "tutorial_dock", "stock_bottle", verify_stock_bottle),
@@ -5355,7 +5408,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
 
                 exit_actions = ("prompt", "confirm") if campaign in {
                     "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_shot_view", "tutorial_dock_buckshot",
-                    "tutorial_dock_melee",
+                    "tutorial_dock_melee", "tutorial_dock_late_join",
                     "crossroads", "crossroads_anomaly",
                     "lab_east_wing_acid", "shopkeep"
                 } or stock_host_prop_observer and campaign == prop_campaign else ("save_and_quit",)
@@ -5375,9 +5428,12 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                 raise RuntimeError(f"The staged {role} exited during {campaign} with code {code}")
                         await asyncio.sleep(.2)
 
+                before_join = {"storm": storm_trial.prepare} if storm_trial else {}
+                before_join["tutorial_dock_late_join"] = prepare_warehouse
                 session = asyncio.create_task(start_pair(
                     host, second, "Gameplay scout", on_join=run_checks,
-                    before_join=storm_trial.prepare if campaign == "storm" else None,
+                    before_join=before_join.get(campaign),
+                    initial_map=WAREHOUSE_DOCK if campaign == "tutorial_dock_late_join" else OBSERVATORY,
                     wait_status=wait_resident_status, host_exit_actions=exit_actions,
                     after_reconnect=after_reconnect))
                 watcher = asyncio.create_task(unexpected_process_exit())

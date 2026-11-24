@@ -44,7 +44,8 @@ async def offered(seat):
 async def start_pair(host, guest, character_name, *, on_join=None, create_character=None,
                      before_join=None, after_reconnect=None, wait_status=wait,
                      host_exit_actions=("save_and_quit",), after_exit=None, load_existing=False,
-                     wait_for_host_pause=None, resume_character=None, guest_stock_exit=False):
+                     wait_for_host_pause=None, resume_character=None, guest_stock_exit=False,
+                     initial_map=OBSERVATORY):
     if resume_character is not None and (not load_existing or create_character is not None):
         raise ValueError("Rejoining a saved character requires an existing campaign")
     host_run, guest_run = host.campaign / "run", guest.client / "run"
@@ -105,7 +106,7 @@ async def start_pair(host, guest, character_name, *, on_join=None, create_charac
         await before_join(host, guest, character)
     await join("submit")
     joined = await wait_status(guest_run, lambda frame: frame.get("state") == "connected" and frame.get("gameplay_fresh") is True)
-    assert joined["pid"] == guest_pid and joined["character_id"] == character and joined["game"]["map"] == OBSERVATORY
+    assert joined["pid"] == guest_pid and joined["character_id"] == character and joined["game"]["map"] == initial_map, joined
     assert joined["game"]["save_scope"] == uuid.UUID(character).hex
     verify_loopback_socket(guest_pid, joined["unreal_local_port"])
 
