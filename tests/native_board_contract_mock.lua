@@ -42,6 +42,7 @@ local item_path = "/Game/Classes/Items/Item_MonsterEye.Item_MonsterEye_C"
 local class = object({GetFullName = function() return "BlueprintGeneratedClass " .. item_path end})
 class.GetCDO = function() return object({Stacks = true, GetClass = function() return class end}) end
 local row_item = {[item_class] = class, [item_units] = 2, [item_guid] = {A = 1, B = 2, C = 3, D = 4}}
+local spare_stack = {[item_class] = class, [item_units] = 1, [item_guid] = {A = 5, B = 6, C = 7, D = 8}}
 local portion = {[item_class] = class, [item_units] = 1, [item_guid] = {A = 9, B = 8, C = 7, D = 6}}
 local want_guid = "00000001000000020000000300000004"
 local split_guid = "00000009000000080000000700000006"
@@ -169,6 +170,10 @@ store.PlayerBackpack[1] = row_item
 denied("missing_objective", "turnin", "inspect", eye)
 store.PlayerBackpack = array({})
 bag.PlayerBackpack[1] = row_item
+bag.PlayerBackpack[2] = row_item
+assert(catalog()[8] == "-")
+denied("objective_guid_unqualified", "turnin", "inspect", eye)
+bag.PlayerBackpack[2] = spare_stack
 assert(catalog()[7] == kill and catalog()[8] == eye)
 board.TurnIn_ID = 1
 assert(catalog()[8] == "-")
@@ -178,10 +183,12 @@ action("turnin", "inspect", eye)
 assert(proof()[18] == want_guid and proof()[16] == 801 and proof()[9] == 1)
 denied("objective_changed", "turnin", "apply", eye, "-")
 denied("objective_changed", "turnin", "apply", eye, want_guid, "1")
+denied("objective_changed", "turnin", "apply", eye, "00000005000000060000000700000008", "1")
 action("turnin", "apply", eye, want_guid, "2")
 assert(proof()[10] == -10 and proof()[13] == 818 and #store.PlayerBackpack == 0)
 assert(proof()[18] == want_guid and proof()[19] == 2 and proof()[20] == 1 and proof()[21] == split_guid)
-assert(#bag.PlayerBackpack == 1 and bag.PlayerBackpack[1] == row_item and row_item[item_units] == 1)
+assert(#bag.PlayerBackpack == 2 and bag.PlayerBackpack[1] == row_item and row_item[item_units] == 1)
+assert(bag.PlayerBackpack[2] == spare_stack and spare_stack[item_units] == 1)
 action("turnin", "inspect", eye)
 assert(proof()[8] == "already" and host_flags.Player_Cash == 818)
 

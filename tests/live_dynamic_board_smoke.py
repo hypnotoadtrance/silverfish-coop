@@ -152,11 +152,13 @@ async def verify(work, vanilla_saved):
             without_item = (await action(guest, dynamic.CATALOG))[dynamic.CATALOG_KEY]
             assert QUEST not in without_item["offers"] and QUEST not in without_item["turnins"], without_item
 
-            guid = await probe(bridge, "eye")
-            assert valid_guid(guid)
-            item = (await inventory(guest))[guid]
+            guid, spare_guid = (await probe(bridge, "eye")).split(";")
+            assert valid_guid(guid) and valid_guid(spare_guid) and guid != spare_guid
+            before_pack = await inventory(guest)
+            item, spare = before_pack[guid], before_pack[spare_guid]
             assert (item["class_path"], item["quantity"], item["source"], item["stackable"]) == (ITEM, 2, "backpack", True), item
-            assert guid not in await inventory(host)
+            assert (spare["class_path"], spare["quantity"], spare["source"], spare["stackable"]) == (ITEM, 1, "backpack", True), spare
+            assert not {guid, spare_guid} & (await inventory(host)).keys()
             ready = (await action(guest, dynamic.CATALOG))[dynamic.CATALOG_KEY]
             assert QUEST in ready["turnins"] and QUEST not in ready["offers"], ready
             second_menu = await open_native_board()
@@ -168,15 +170,18 @@ async def verify(work, vanilla_saved):
             assert valid_guid(consumed) and consumed != guid, paid
             assert paid["wallet"] == 801 and set(paid["recipients"]) == {char, "host"}, paid
             host_pack, guest_pack = await inventory(host), await inventory(guest)
-            assert guid not in host_pack and consumed not in host_pack and consumed not in guest_pack
+            assert not {guid, spare_guid, consumed} & host_pack.keys() and consumed not in guest_pack
             remaining = guest_pack[guid]
             assert remaining == {**item, "quantity": 1}, (item, remaining)
+            assert guest_pack[spare_guid] == spare
             replay = await action(guest, "native-quest-turnin", "--target", QUEST)
             assert replay["effect"] == "native_quest_already_settled" and replay["wallet"] == 801, replay
-            assert (await inventory(guest))[guid] == remaining
+            after_replay = await inventory(guest)
+            assert after_replay[guid] == remaining and after_replay[spare_guid] == spare
             assert campaign_save_hashes(root) == before, "Board actions wrote campaign saves outside a checkpoint"
             evidence = {"verified": True, "menus": [first_menu, second_menu], "ready": ready,
-                        "item": item, "remainder": remaining, "receipt": paid, "replay": replay, "deferred_writes": True}
+                        "item": item, "remainder": remaining, "untouched_eye_stack": spare,
+                        "receipt": paid, "replay": replay, "deferred_writes": True}
             (run / "dynamic-board-proof.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
         finally:
             for owner, process in reversed(jobs):

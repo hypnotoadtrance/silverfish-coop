@@ -85,17 +85,25 @@ local function prepare(state, host, operation)
     local defaults = item:GetCDO()
     local count = defaults.Ammo
     assert(defaults.Stacks == true and count == 2, "The native Eye stack recipe changed")
-    local rows, out = save.PlayerBackpack, {}
+    local rows = save.PlayerBackpack
     for index = 1, rows:GetArrayNum() do assert(not same(rows[index][class_field], item)) end
-    factory:MakeItemStack(item, count, remote, out)
-    local stock = out.Item or out
-    local guid = identity(stock)
-    assert(same(stock[class_field], item) and stock[amount_field] == count and guid:find("[^0]"))
-    local index = rows:GetArrayNum() + 1
-    rows[index] = stock
-    assert(rows:GetArrayNum() == index and identity(rows[index]) == guid and same(rows[index][class_field], item))
+
+    local function append_stack(units)
+        local out = {}
+        factory:MakeItemStack(item, units, remote, out)
+        local stock = out.Item or out
+        local guid = identity(stock)
+        assert(same(stock[class_field], item) and stock[amount_field] == units and guid:find("[^0]"))
+        local index = rows:GetArrayNum() + 1
+        rows[index] = stock
+        assert(rows:GetArrayNum() == index and identity(rows[index]) == guid and same(rows[index][class_field], item))
+        return guid
+    end
+
+    local guid, spare = append_stack(count), append_stack(1)
+    assert(guid ~= spare)
     seeded = true
-    return guid
+    return guid .. ";" .. spare
 end
 
 local function sync(state, phase)
