@@ -322,7 +322,11 @@ function pickup.update(state, phase)
             local carry = require("native_prop_carry")
             local limit = math.min(binding.carry_cursor + 7, #binding.carry_sources)
             for index = binding.carry_cursor, limit do
-                carry.enroll_loose(StaticFindObject(binding.carry_sources[index]))
+                local path = binding.carry_sources[index]
+                local actor = StaticFindObject(path)
+                if carry.enroll_loose(actor) and type(SilverfishAcknowledgeLooseCarry) == "function" then
+                    SilverfishAcknowledgeLooseCarry(path, actor:GetAddress())
+                end
             end
             binding.carry_cursor = limit + 1
             if limit == #binding.carry_sources then binding.carry_sources = nil end
