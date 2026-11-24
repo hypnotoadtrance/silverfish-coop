@@ -8,6 +8,36 @@
             return valid(actor) and not actor:IsActorBeingDestroyed() and valid(actor:GetWorld())
                 and actor:GetWorld():GetAddress() == state.world:GetAddress()
         end
+        if mode == "spawn-prop" or mode == "locate-prop" then
+            local stem = assert(args[4]:match("^(Prop_[%w_]+)$"))
+            local base = "/Game/Assets/StaticMeshes/Mesh_Props/" .. stem .. "." .. stem .. "_C"
+            local location = pawn:K2_GetActorLocation()
+            if mode == "spawn-prop" and phase == "hosting" then
+                local class = StaticFindObject(base)
+                if not valid(class) then LoadAsset(base); class = StaticFindObject(base) end
+                assert(valid(class))
+                local point = {X=location.X+105, Y=location.Y+60, Z=location.Z+90}
+                local candidate = state.world:SpawnActor(class, point, {Pitch=0,Yaw=0,Roll=0})
+                assert(current(candidate) and candidate:HasAuthority() and candidate.bReplicates and candidate.DestroyIfBroken)
+                candidate.PropMesh:SetSimulatePhysics(false)
+                candidate:ForceNetUpdate()
+                return ("%s;%.3f,%.3f,%.3f"):format(candidate:GetFullName():match("^%S+ (.+)$"), point.X, point.Y, point.Z)
+            end
+            assert(phase == "connected")
+            local x, y, z = assert(args[5]):match("^([^,]+),([^,]+),([^,]+)$")
+            x, y, z = tonumber(x), tonumber(y), tonumber(z)
+            local found
+            for _, candidate in ipairs(FindAllOf(stem .. "_C") or {}) do
+                if current(candidate) and candidate:GetLocalRole() == 1 and not candidate.Broken then
+                    local point = candidate:K2_GetActorLocation()
+                    if (point.X-x)^2 + (point.Y-y)^2 + (point.Z-z)^2 < 40^2 then
+                        assert(not found, "ambiguous replicated stock prop")
+                        found = candidate
+                    end
+                end
+            end
+            return found and found:GetFullName():match("^%S+ (.+)$") or "waiting"
+        end
         if mode == "find" and phase == "hosting" then
             local nearest, range
             local origin = pawn:K2_GetActorLocation()
@@ -168,7 +198,7 @@
             actor:DealDamage({BluntForce_6_6923B3964740DE281BD773BCCAAC2772 = 500},
                 {Location = point, ImpactPoint = point}, pawn, {X = 0, Y = 0, Z = 0}, true, total, lethal)
             if current(actor) and not actor.Broken then
-                error(("Stock bottle survived the staged impact: %s health=%s->%s damage=%s lethal=%s"):format(path,
+                error(("Stock prop survived the staged impact: %s health=%s->%s damage=%s lethal=%s"):format(path,
                     tostring(before), tostring(actor.Health), tostring(total.TotalDamage), tostring(lethal.IsLethal)))
             end
             return ("%f,%f,%f"):format(point.X, point.Y, point.Z)

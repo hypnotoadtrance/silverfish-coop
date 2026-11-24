@@ -20,12 +20,15 @@ ACID_POOLS = "native_acid_pools"
 ACID_POOL_VIEW = "native_acid_pool_view"
 FIXED_CUES = ("powerbox", "fixedtank", "fixedfire")
 OBSERVER_CUES = ("observersparks", "observerred", "observergreen", "observerblue", "observerpurple", "observergold")
+OTHER_PROP_BREAKS = ("ceramic", "platestand", "glass", "paper", "cardboard")
+PROP_BREAK_CUES = ("bottle", *OTHER_PROP_BREAKS)
 KINDS = {"charge": 4000, "blast": 500100, "vortex": 500100, "electrode": 8100, "canister": 500100, "wandering": 500100,
-         "bottle": 8000,
+         **dict.fromkeys(PROP_BREAK_CUES, 8000),
          **dict.fromkeys(("fueldrum", "pipebomb", *FIXED_CUES, *OBSERVER_CUES), 500100)}
 CUE_EVENTS = {"pipebomb": "native_pipe_bomb_effect_played", "vortex": "native_vortex_effect_played", "electrode": "native_electrode_effect_played",
               "wandering": "native_wandering_teleport_effect_played", "bottle": "native_bottle_break_played",
               "canister": "native_canister_effect_played", "fueldrum": "native_fuel_drum_effect_played",
+              **dict.fromkeys(OTHER_PROP_BREAKS, "native_prop_break_played"),
               **dict.fromkeys(FIXED_CUES, "native_fixed_explosive_effect_played"),
               **dict.fromkeys(OBSERVER_CUES, "native_observer_absorb_played")}
 MAX_CUES = 12
@@ -296,7 +299,7 @@ class Playback:
                     or type(kind) is not str or kind not in KINDS or not valid_position(position)
                     or type(scale) not in {int, float} or not 0 < scale <= 10
                     or type(volume) not in {int, float} or not 0 <= volume <= 10
-                    or kind == "bottle" and (scale, volume) != (1, 1)):
+                    or kind in PROP_BREAK_CUES and (scale, volume) != (1, 1)):
                 continue
             if math.dist(origin, position) > KINDS[kind]:
                 self.seen.append(serial)

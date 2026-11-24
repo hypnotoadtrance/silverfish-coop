@@ -3,7 +3,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish.native_anomaly_effects import (
     ACID_POOL_VIEW, AcidPoolPlayback,
-    ANGLER_COLORS, ANGLER_MAP, CANISTERS, ELECTRODE_PHASES, FIXED_EXPLOSIVES, OBSERVER_OPACITY, Playback, VORTEX_SENSORS,
+    ANGLER_COLORS, ANGLER_MAP, CANISTERS, ELECTRODE_PHASES, FIXED_EXPLOSIVES, OBSERVER_OPACITY, PROP_BREAK_CUES, Playback,
+    VORTEX_SENSORS,
     angler_frame, observer_frame, project_angler_colors, project_canisters, project_electrodes,
     project_fixed_explosives, project_observer_opacity, project_sensors, valid_acid_pools,
 )
@@ -146,33 +147,36 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
         await playback.sync(bridge, control, game, frame, "b" * 32, "host")
         self.assertEqual(bridge.command.await_count, 1)
 
-    async def test_bottle_break_plays_only_the_nearby_stock_cue_without_a_live_actor(self):
+    async def test_prop_break_plays_only_the_nearby_stock_cue_without_a_live_actor(self):
         epoch = "a" * 32
         area = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
         game = {"state": "connected", "map": area, "pawns": {"local": {"location": [0, 0, 0]}}}
-        bridge = Mock(command=AsyncMock(return_value={**game, "ack": {"message": "7:1:0"}}))
-        control = Mock()
-        playback = Playback()
-        frame = {"map": area, "epoch": epoch, "cues": [
-            [7, "bottle", [100, 50, 2], 1, 1],
-            [7, "bottle", [100, 50, 2], 1, 1],
-            [8, "bottle", [8001, 0, 0], 1, 1],
-            [9, "bottle", [100, 50, 2], 2, 1],
-            [10, "bottle", [100, 50, 2], 1, .5],
-        ]}
-        await playback.sync(bridge, control, game, frame, "b" * 32, "host")
-        await playback.sync(bridge, control, {**game, "state": "hosting"}, frame, epoch, "host")
-        bridge.command.assert_not_awaited()
+        for kind in PROP_BREAK_CUES:
+            with self.subTest(kind=kind):
+                bridge = Mock(command=AsyncMock(return_value={**game, "ack": {"message": "7:1:0"}}))
+                control = Mock()
+                playback = Playback()
+                frame = {"map": area, "epoch": epoch, "cues": [
+                    [7, kind, [100, 50, 2], 1, 1],
+                    [7, kind, [100, 50, 2], 1, 1],
+                    [8, kind, [8001, 0, 0], 1, 1],
+                    [9, kind, [100, 50, 2], 2, 1],
+                    [10, kind, [100, 50, 2], 1, .5],
+                ]}
+                await playback.sync(bridge, control, game, frame, "b" * 32, "host")
+                await playback.sync(bridge, control, {**game, "state": "hosting"}, frame, epoch, "host")
+                bridge.command.assert_not_awaited()
 
-        for _ in range(2):
-            await playback.sync(bridge, control, game, frame, epoch, "host")
-        bridge.command.assert_awaited_once_with(
-            "native-anomaly-play-cues", area, epoch, "7|bottle|100|50|2|1|1", timeout=1.5,
-        )
-        control.event.assert_called_once_with(
-            "native_bottle_break_played", cue="bottle", serial=7, location=[100, 50, 2], map=area,
-            particles=True, animated=False, scale=1, volume=1,
-        )
+                for _ in range(2):
+                    await playback.sync(bridge, control, game, frame, epoch, "host")
+                bridge.command.assert_awaited_once_with(
+                    "native-anomaly-play-cues", area, epoch, f"7|{kind}|100|50|2|1|1", timeout=1.5,
+                )
+                event = "native_bottle_break_played" if kind == "bottle" else "native_prop_break_played"
+                control.event.assert_called_once_with(
+                    event, cue=kind, serial=7, location=[100, 50, 2], map=area,
+                    particles=True, animated=False, scale=1, volume=1,
+                )
 
     async def test_partial_anomaly_acknowledgment_retries_only_the_missing_cue(self):
         playback = Playback()
