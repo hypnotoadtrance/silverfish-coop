@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bootstrap import install_stage
 from tools.silverfish import (
     direct_ip, embedded_startup, native_finite_shop, native_guest_consumable, native_guest_drop, native_guest_melee,
-    native_host_save, native_inventory, native_loose_pickup,
+    native_host_save, native_inventory, native_loose_pickup, native_smg_hold,
     native_anomaly_effects, native_critters, native_destructibles, native_lantern, native_npc_barter, native_loot, native_prop_carry, native_stash, native_stock_switch, native_weapon_fire_view,
     native_world_loot, runtime,
 )
@@ -2039,7 +2039,7 @@ async def verify_tutorial_dock_melee(host: Seat, guest: Seat, pawn: str) -> dict
 
 async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, retaliation: bool = False,
                                      pursuit: bool = False, held_mask: bool = False, grounded_gait: bool = False,
-                                     shot_view: bool = False) -> dict:
+                                     shot_view: bool = False, held_shot_view: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     for seat in (host, guest):
         for probe in ("portable-dry-fire", "portable-footstep"):
@@ -2059,7 +2059,10 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
         and frame["game"].get("native_guest_primary_scope", {}).get("kind") == "rusty-pistol"), timeout=12)
     presentation = {}
     if shot_view:
-        return await verify_dock_garage_shots(host, guest, frame, command)
+        presentation.update(await verify_dock_garage_shots(host, guest, frame, command))
+        if held_shot_view:
+            presentation.update(await verify_dock_garage_burst(host, guest, frame, command))
+        return presentation
     if grounded_gait:
         from portable_gait import verify_stock_gait
 
@@ -2229,6 +2232,73 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         assert math.dist(tuple(map(float, geometry["eye"].split(","))), tuple(map(float, expected.split(",")))) < 10, event
     return {"tutorial_dock_shot_view": {"host_camera_line": "blocked", "clear_guest_line": "worker",
             "health": [health, after_blocked, after_clear], "blocked": blocked, "clear": clear}}
+
+
+async def verify_dock_garage_burst(host: Seat, guest: Seat, dock_frame: dict, command) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    seats = (host, guest)
+
+    async def weapon(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-dry-fire", action)
+
+    async def guest_route(expected, approach):
+        async with asyncio.timeout(7):
+            while await command(guest, approach) != expected:
+                await asyncio.sleep(.05)
+
+    try:
+        assert await asyncio.gather(*(weapon(seat, "arm-light-ar") for seat in seats)) == ["armed", "armed"]
+        guid = await weapon(host, "seed-dock-light-ar")
+        async with asyncio.timeout(8):
+            while await weapon(guest, "projected") != guid:
+                await asyncio.sleep(.05)
+        assert await weapon(guest, "equip") == "selected"
+        guest_frame = await wait_resident_status(guest_run, lambda row:
+            row.get("zone_epoch") == dock_frame["zone_epoch"] and
+            row.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
+        assert await weapon(guest, "light-ar-auto") == "light-ar-auto"
+        host_frame = await wait_resident_status(host_run, lambda row: any(
+            item.get("guid") == guid and item.get("fire_mode") == "auto"
+            for item in row.get("game", {}).get("native_guest_equipped_weapons", {}).values()))
+        before = campaign_save_hashes(host.campaign)
+        assert await asyncio.gather(*(command(seat, "dock-garage-open") for seat in seats)) == ["raised", "raised"]
+        low, worker, high, obstruction, health = (await command(host, "dock-garage-stage")).split(";")
+        above, below = f"dock-garage-aim\t{high};{obstruction}", f"dock-garage-aim\t{low};{worker}"
+        assert await command(host, above) == "blocked"
+        await guest_route("blocked", above)
+
+        start = await submit(guest_run, native_smg_hold.LOCAL_FIXTURE, target="press", milliseconds=550)
+        assert start["ok"], start
+        stroke = start["native_guest_held_fire_fixture"]["stroke"]
+        async with asyncio.timeout(3):
+            while True:
+                events = await resident_events(guest_run, guest_frame)
+                if any(event.get("stroke") == stroke and event.get("edge") == "press"
+                       and event["event"] == "native_guest_held_fire_input" for event in events):
+                    break
+                await asyncio.sleep(.015)
+        blocked_health = float(await command(host, "dock-garage-health"))
+        assert math.isclose(blocked_health, float(health), rel_tol=0, abs_tol=1e-6), (blocked_health, health)
+        assert await command(guest, below) == "worker"
+        async with asyncio.timeout(6):
+            while not (terminal := next((event for event in await resident_events(host_run, host_frame)
+                            if event["event"] == "native_guest_smg_hold_accepted" and event.get("guid") == guid), None)):
+                await asyncio.sleep(.05)
+        after_health = float(await command(host, "dock-garage-health"))
+        assert after_health < blocked_health, (blocked_health, after_health, terminal)
+        assert terminal["status"] == "released" and 1 < terminal["rounds"] == terminal["projectiles"], terminal
+        assert terminal["before"] - terminal["after"] == terminal["rounds"], terminal
+        after_ammo = f"{guid},{terminal['after']},{terminal['after']}"
+        async with asyncio.timeout(5):
+            while await weapon(host, "peer-ready") != after_ammo or await weapon(guest, "ready") != after_ammo:
+                await asyncio.sleep(.05)
+        assert campaign_save_hashes(host.campaign) == before
+        return {"tutorial_dock_held_shot_view": {"health": [float(health), blocked_health, after_health],
+                "host_camera_line": "blocked", "clear_guest_line": "worker", "burst": terminal}}
+    finally:
+        restored = await asyncio.gather(*(command(seat, "dock-garage-restore") for seat in seats), return_exceptions=True)
+        disarmed = await asyncio.gather(*(weapon(seat, "disarm") for seat in seats), return_exceptions=True)
+        assert restored == ["restored", "restored"] and disarmed == ["disarmed", "disarmed"], (restored, disarmed)
 
 
 async def capture_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool,
@@ -4541,7 +4611,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                                pursuit=tutorial_dock_pursuit,
                                                                held_mask=tutorial_dock_held_mask,
                                                                grounded_gait=tutorial_dock_gait,
-                                                               shot_view=tutorial_dock_shot_view)),
+                                                               shot_view=tutorial_dock_shot_view,
+                                                               held_shot_view=tutorial_dock_shot_view and stock_light_ar)),
         (tutorial_dock_melee, "tutorial_dock_melee", "tutorial_dock_melee", verify_tutorial_dock_melee),
         (stock_eye_stacks, "shopkeep", "stock_eye_stacks", verify_stock_eye_stacks),
     ):

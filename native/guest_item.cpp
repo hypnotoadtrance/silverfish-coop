@@ -1119,6 +1119,18 @@ namespace
         TapBirths* previous;
     };
 
+    void count_guest_projectile(Unreal::AActor* actor, Unreal::UObject* pawn, int& count, bool& owned)
+    {
+        if (!pawn) return;
+        const auto* owner = object(actor, STR("Owner"));
+        const auto* instigator = object(actor, STR("Instigator"));
+        // Reactions inside the same Blueprint call can launch another actor's weapon.
+        // A round with only one matching identity still invalidates the receipt.
+        if (owner != pawn && instigator != pawn) return;
+        ++count;
+        owned = owned && authority(actor) && owner == pawn && instigator == pawn;
+    }
+
     bool install_tap_birth_hook()
     {
         if (tap_birth_hook != Hook::ERROR_ID) return true;
@@ -1126,9 +1138,7 @@ namespace
             [](Hook::TCallbackIterationData<void>&, Unreal::AActor* actor) {
                 auto* shot = active_tap;
                 if (!shot || !actor || actor->GetClassPrivate() != shot->projectile || actor->GetWorld() != shot->world) return;
-                ++shot->count;
-                shot->owned = shot->owned && authority(actor) && object(actor, STR("Owner")) == shot->pawn &&
-                    object(actor, STR("Instigator")) == shot->pawn;
+                count_guest_projectile(actor, shot->pawn, shot->count, shot->owned);
             }, {false, false, STR("SilverfishCoopNative"), STR("Count stock guest tap projectiles before impact")});
         return tap_birth_hook != Hook::ERROR_ID;
     }
@@ -1845,10 +1855,7 @@ namespace
         auto& smg_hold = *shot_hold;
         if (smg_hold.shot_before < 0 ||
             actor->GetClassPrivate() != smg_hold.projectile.Get() || actor->GetWorld() != smg_hold.world.Get()) return;
-        ++smg_hold.shot_births;
-        auto* pawn = smg_hold.pawn.Get();
-        smg_hold.owned_birth = smg_hold.owned_birth && pawn && authority(actor) &&
-            object(actor, STR("Owner")) == pawn && object(actor, STR("Instigator")) == pawn;
+        count_guest_projectile(actor, smg_hold.pawn.Get(), smg_hold.shot_births, smg_hold.owned_birth);
     }
 
     void hold_post(HoldHook&, Unreal::UObject* receiver, Unreal::FFrame& frame, void*)

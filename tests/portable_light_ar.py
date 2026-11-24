@@ -103,6 +103,11 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
         host_reserve = await command(host, "reserve")
         guid = await command(host, "seed-peer")
         assert re.fullmatch(r"[0-9A-F]{32}", guid), guid
+        crossfire_guid = await command(host, "seed-crossfire")
+        assert re.fullmatch(r"[0-9A-F]{32}", crossfire_guid), crossfire_guid
+        assert await command(host, "equip") == "selected"
+        await wait_readback(host, "ready", f"{crossfire_guid},2,2")
+        assert await command(host, "face-away") == "turned"
         await wait_readback(guest, "projected", guid)
         assert await command(guest, "equip") == "selected"
         await wait_readback(host, "peer-ready", f"{guid},1,1")
@@ -129,12 +134,15 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
         if denied["ok"]:
             await submit(guest_run, native_smg_hold.LOCAL_FIXTURE, target="release")
         assert denied["ok"] is False and "native_guest_held_fire_fixture_requires_automatic_mode" in denied["error"], denied
+        assert await command(host, "crossfire-arm") == "armed"
         shot = await stock_input("primary", guest_frame, guid)
         assert (shot["before"], shot["after"], shot["projectiles"]) == (1, 0, 1), shot
         await wait_readback(host, "peer-ready", f"{guid},0,0")
         await wait_readback(guest, "ready", f"{guid},0,0")
+        assert await command(host, "crossfire-read") == "fired"
+        await wait_readback(host, "ready", f"{crossfire_guid},1,1")
         projectile_calls, shot_sounds, muzzle_flashes, clicks = map(int, (await command(host, "shot-read")).split(","))
-        assert (projectile_calls, clicks) == (1, 0), (projectile_calls, clicks)
+        assert (projectile_calls, clicks) == (2, 0), (projectile_calls, clicks)
 
         reserve = await command(host, "seed-reserve")
         assert re.fullmatch(rf"[0-9A-F]{{32}},{units}", reserve), reserve
@@ -149,6 +157,7 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
         assert await command(guest, "light-ar-auto") == "light-ar-auto"
         await persisted_mode(guid, "auto")
         assert await command(host, "clear") == "clear"
+        assert await command(host, "crossfire-arm") == "armed"
         burst, burst_directions = await stock_burst(guest_frame, guid)
         assert (burst["status"], burst["before"], burst["pawn"]) == ("released", units, pawn), burst
         assert 1 < burst["rounds"] == burst["projectiles"] == units - burst["after"] < units, burst
@@ -156,7 +165,9 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
             await wait_readback(seat, action, f"{guid},{burst['after']},{burst['after']}")
         await asyncio.sleep(.35)
         calls, *_ = (await command(host, "shot-read")).split(",")
-        assert int(calls) == burst["projectiles"], (calls, burst)
+        assert int(calls) == burst["projectiles"] + 1, (calls, burst)
+        assert await command(host, "crossfire-read") == "fired"
+        await wait_readback(host, "ready", f"{crossfire_guid},0,0")
         if re_equip:
             assert await command(host, "arm-nagant") == await command(guest, "arm-nagant") == "armed"
             long_rifle = await command(host, "seed-local")
@@ -193,6 +204,7 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
                                "stock_projectile_calls": projectile_calls, "stock_fire_sounds": shot_sounds,
                                "stock_muzzle_flashes": muzzle_flashes, "reload": reloaded,
                                "semi_hold_blocked": True, "automatic_burst": burst, "burst_muzzle_yaws": burst_directions,
+                               "nested_host_shots_excluded_from_guest_counts": 2,
                                "host_stored_both_modes": True, "semi_after_re_equip": re_equip,
                                "observer_idle_grip": grip, "stock_switch_while_aiming": re_equip,
                                "guest_observes_host_nagant_grip": nagant_grip, "obrez_to_pistol_while_aiming": obrez_switch,

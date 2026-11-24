@@ -4,6 +4,7 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_TI
 
 local prefix = mailbox .. "/portable-dry-fire-"
 local map = "World /Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
+local dock_map = "World /Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P.Tut_Dock_P"
 local click = "SoundCue /Game/Assets/Sounds/CUEs/Weapon_Cues/Reload_Cues/TriggerClick_Cue.TriggerClick_Cue"
 local factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local reserve_9mm = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
@@ -25,6 +26,7 @@ local last, local_pawn, peer, failure, world_address
 local hooked = false
 local clicks, projectiles, shot_sounds, muzzle_flashes = {}, 0, 0, 0
 local burst_directions
+local crossfire
 local local_flashes, local_reload = 0, nil
 local retire_projectile, projectile_retired
 
@@ -63,7 +65,9 @@ end
 local function arm()
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
-    assert(valid(world) and world:GetFullName() == map, "stock Observatory unavailable")
+    local name = valid(world) and world:GetFullName()
+    assert(name == map or name == dock_map and weapon_path == arm_profiles["arm-light-ar"][1],
+        "stock weapon fixture map unavailable")
     local statics = asset("/Script/Engine.Default__GameplayStatics")
     local_pawn = statics:GetPlayerPawn(world, 0)
     assert(valid(local_pawn) and local_pawn:IsLocallyControlled() and same(local_pawn:GetWorld(), world), "expected local stock pawn")
@@ -107,6 +111,14 @@ local function arm()
             if burst_directions and same(weapon, peer.EquipedItem) and valid(weapon.Arrow_Muzzle) then
                 local rotation = weapon.Arrow_Muzzle:K2_GetComponentRotation()
                 burst_directions[#burst_directions + 1] = ("%.3f"):format(rotation.Yaw)
+            end
+            if crossfire == "armed" and same(weapon, peer.EquipedItem) then
+                crossfire = "pending"
+                local own = local_pawn.EquipedItem
+                own:Use_Item_Primary(true)
+                own:Use_Item_Primary(false)
+            elseif crossfire == "pending" and same(weapon, local_pawn.EquipedItem) then
+                crossfire = "fired"
             end
         end
     end)
@@ -271,6 +283,7 @@ local function run(action, argument)
     if action == "disarm" then
         world_address, local_pawn, peer, local_reload = nil, nil, nil, nil
         retire_projectile, projectile_retired = nil, nil
+        crossfire = nil
         return "disarmed"
     end
     if action == "retire-peer-projectile" then
@@ -291,6 +304,16 @@ local function run(action, argument)
     end
     if action == "seed-local" then return seed(local_pawn, 0) end
     if action == "seed-peer" then return seed(peer, 1) end
+    if action == "seed-dock-light-ar" then
+        assert(observing() and local_pawn:GetWorld():GetFullName() == dock_map
+            and weapon_path == arm_profiles["arm-light-ar"][1])
+        return seed(peer, 16)
+    end
+    if action == "seed-crossfire" then
+        assert(observing() and local_pawn:HasAuthority()
+            and weapon_path == arm_profiles["arm-light-ar"][1] and local_pawn:GetWorld():GetFullName() == map)
+        return seed(local_pawn, 2)
+    end
     if action == "projected" then return identify(local_pawn.Save.PlayerEquipment[slot]) end
     if action == "equip" then
         assert(identify(local_pawn.Save.PlayerEquipment[slot]) ~= "-", "stock weapon is not in the projected slot")
@@ -390,6 +413,12 @@ local function run(action, argument)
         return "watching"
     end
     if action == "burst-read" then return table.concat(burst_directions, ",") end
+    if action == "crossfire-arm" then
+        assert(observing() and local_pawn:HasAuthority() and ready(local_pawn) ~= "waiting")
+        crossfire = "armed"
+        return crossfire
+    end
+    if action == "crossfire-read" then return crossfire or "unarmed" end
     if action == "burst-aim-first" or action == "burst-aim-second" then
         assert(observing() and not local_pawn:HasAuthority())
         local yaw = action == "burst-aim-first" and 90 or -45
