@@ -14,6 +14,8 @@ The `rc-f0b1c06` Crossroads baseline used two muted Direct IP instances. During 
 
 `rc-be31b46` moves placed canister status reads into C++. In isolated Crossroads runs, the largest canister status samples were 1 ms and 5 ms, compared with 20 ms in the preceding build. Across host and guest, 1,024 native reads took 1 to 3 ms and matched the Lua reads, which took 13 to 21 ms. Both seats saw stock propane movement and a fuel drum's ignition and destruction. The guest applied the ignition and received one explosion cue. The muted test did not observe an active continuous flame or report creation of blast particles. Those effects need a rendered two-PC retest. The original saves were preserved. Crossroads still had a guest walking interval of 58 ms, and Steam latency remains open.
 
+`rc-3ae5434` batches stock jammer transforms in C++. Each 1,024-read comparison took 4 to 6 ms natively and 40 to 110 ms in Lua. All nine pose values matched for both seats in Crossroads and Black Lake, and mismatched world addresses were rejected. On the same two muted Direct IP launches, the party accepted and turned in both Simmi quests with matching journals and shared payouts. Crossroads weather travel, critters, mushrooms, and stock canister state and cue dispatch also passed. The largest jammer status sample was 1 ms. The largest overall Crossroads intervals were still 67 ms on host and 55 ms on guest, so frame pacing remains open. The test preserved the original saves.
+
 ## `rc-1799e4b` playtest
 
 | Area | Two-PC observation |
