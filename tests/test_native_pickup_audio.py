@@ -58,10 +58,10 @@ class NativePickupAudioTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(cues.frame(host, epoch))
 
         guest = {**host, "state": "connected"}
-        bridge = Mock(command=AsyncMock(return_value={**guest, "ack": {"message": f"{positioned},{unpositioned}"}}))
+        bridge = Mock(command=AsyncMock(return_value={"ack": {"message": f"{positioned},{unpositioned}"}}))
         control, receiver = Mock(), Playback()
         for _ in range(2):
-            await receiver.sync(bridge, control, guest, frame, epoch, "host")
+            self.assertIs(await receiver.sync(bridge, control, guest, frame, epoch, "host"), guest)
         bridge.command.assert_awaited_once_with(
             COMMAND, OBSERVATORY, epoch, f"{positioned}|{path}|cash|45", f"{unpositioned}|{path}|cash|40",
             timeout=1.5)
@@ -166,6 +166,23 @@ class HostPickupPresentationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bridge.command.await_args_list, [self.batch])
         self.assertEqual(self.control.event.call_args_list, [self.played])
         self.assertEqual(self.cues.frame(self.game, self.audio_epoch)["cues"][0][0], self.operation)
+
+    async def test_short_retirement_receipts_remove_only_the_verified_item(self):
+        other = "c" * 32
+        game = dict(self.game, **{loot.KEY: {self.identity: {}, other: {}}})
+        self.host.last_game = game
+        self.bridge.command.return_value = {"ack": {"message": f"retired|{self.operation}"}}
+        await self.retire()
+        self.assertEqual(self.host.last_game, dict(game, **{loot.KEY: {other: {}}}))
+        self.assertIn(self.identity, game[loot.KEY])
+        self.assertEqual(self.control.event.call_args_list, [self.played])
+
+        self.bridge.command.return_value = {"ack": {"message": "stock world loot retired"}}
+        result = await self.projection.retire_claim(self.bridge, game, (self.projection_epoch, self.identity))
+        self.assertEqual(result, self.host.last_game)
+        self.bridge.command.return_value = {"ack": {"message": "unexpected proof"}}
+        with self.assertRaisesRegex(RuntimeError, "did not verify retirement"):
+            await self.projection.retire_claim(self.bridge, game, (self.projection_epoch, self.identity))
 
     async def test_retirement_failure_still_acknowledges_stock_sound(self):
         self.bridge.command.return_value = {

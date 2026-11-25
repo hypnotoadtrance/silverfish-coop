@@ -97,6 +97,16 @@ def source_with_probe(name: str, before: bytes, *, combined: bool = False) -> by
         publish = "SilverfishPublishLocalBridgeReply(pending.ticket, frame)"
         anchors = {**anchors, publish: publish + "\n            "
                    "require('cabinet_pickup_profile').acknowledge(pending.fields, acknowledged_result, acknowledged_message)"}
+        if "pickup-presentation-ack" in text:
+            invoke = "pcall(pickup_presentation or native_weapon_fire_view.command,"
+            short_reply = 'status_row(tag, fields[1], accepted and "accepted" or "error", message or "") .. "\\n")'
+            anchors.update({
+                invoke: "pcall(require('cabinet_pickup_profile').timed, 'command:' .. fields[2], "
+                        "pickup_presentation or native_weapon_fire_view.command,",
+                short_reply: short_reply + "\n        "
+                    "require('cabinet_pickup_profile').acknowledge(fields, accepted and 'accepted' or 'error', message or '')"
+                    "\n        require('cabinet_pickup_profile').mark('presentation-short', fields[4])",
+            })
     for old, new in anchors.items():
         if text.count(old) != 1:
             raise ValueError(f"The cabinet timing anchor has changed in {name}: {old}")
@@ -242,7 +252,8 @@ def summarize(trace: Path, *, resident: bool = False, combined_operation: str | 
         else:
             summary.update(joint_command_ms=joint_command["elapsed_ms"], joint_tick_ms=joint["elapsed_ms"],
                            stock_f_to_joint_ack_ms=ms(ack["start"], stock["start"]),
-                           joint_ack=ack["label"].removeprefix("presentation-ack:"))
+                           joint_ack=ack["label"].removeprefix("presentation-ack:"),
+                           joint_short_receipt=any(row["label"] == "presentation-short" for row in entries))
     return summary
 
 

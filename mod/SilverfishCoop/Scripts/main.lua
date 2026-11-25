@@ -1752,6 +1752,12 @@ local function observe_session()
     return state, current_phase
 end
 
+status_publication.pickup_presentation = {
+    ["native-sound-pickup"] = native_pickup_audio.command,
+    ["native-world-loot-retire"] = native_guest_drop_projection.command,
+    ["native-world-loot-present-host-claim"] = native_guest_drop_projection.command,
+}
+
 local function tick(fields, pending, periodic)
     if fields and pending and fields[2] == "native-guest-smg-hold-aim" then
         if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
@@ -1767,12 +1773,16 @@ local function tick(fields, pending, periodic)
         SilverfishPublishLocalBridgeReply(pending.ticket, native_guest_smg_hold.command_reply(fields, state, current_phase, status_row))
         return true
     end
-    if fields and pending and fields[2] == "native-weapon-play-shots" then
+    local pickup_presentation = fields and status_publication.pickup_presentation[fields[2]]
+    if fields and pending and (fields[2] == "native-weapon-play-shots"
+        or pickup_presentation and status_publication.compact() and status_publication.steady(state, current_phase)) then
         if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
         pending.dispatched = true
-        local accepted, message = pcall(native_weapon_fire_view.command, fields, state, current_phase, native_player_avatar)
+        local tag = pickup_presentation and "pickup-presentation-ack" or "weapon-cue-ack"
+        local accepted, message = pcall(pickup_presentation or native_weapon_fire_view.command,
+            fields, state, current_phase, not pickup_presentation and native_player_avatar)
         SilverfishPublishLocalBridgeReply(pending.ticket,
-            status_row("weapon-cue-ack", fields[1], accepted and "accepted" or "error", message or "") .. "\n")
+            status_row(tag, fields[1], accepted and "accepted" or "error", message or "") .. "\n")
         if not periodic then return true end
         fields, pending = nil, nil
     end

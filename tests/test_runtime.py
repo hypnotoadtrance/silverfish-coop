@@ -33,6 +33,28 @@ class BridgeWalkTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pickup_presentation_receipts_do_not_replace_resident_status(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        bridge.local_bridge = Mock(command=AsyncMock())
+        bridge._local_status = {"sequence": 42, "state": "hosting"}
+
+        async def reply(request, timeout):
+            nonce, action, *_ = request.decode().split("\t")
+            return f"pickup-presentation-ack\t{nonce}\taccepted\t{action}\n"
+
+        bridge.local_bridge.command.side_effect = reply
+        for action in (runtime.native_pickup_audio.COMMAND, runtime.native_world_loot.RETIRE,
+                       runtime.native_world_loot.PRESENT_HOST_CLAIM):
+            result = await bridge.command(action, "fixture")
+            self.assertEqual(set(result), {"ack"})
+            self.assertEqual(result["ack"]["message"], action)
+        self.assertEqual(bridge._local_status, {"sequence": 42, "state": "hosting"})
+
+        bridge.local_bridge.command.side_effect = None
+        bridge.local_bridge.command.return_value = "pickup-presentation-ack\twrong\taccepted\tretired\n"
+        with self.assertRaisesRegex(RuntimeError, "did not match"):
+            await bridge.command(runtime.native_world_loot.RETIRE, "fixture")
+
     async def test_embedded_command_accepts_exact_receipt_without_file_polling(self):
         with TemporaryDirectory() as temporary:
             bridge = runtime.Bridge(Path(temporary), None)

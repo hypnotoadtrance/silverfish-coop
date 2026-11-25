@@ -30,7 +30,7 @@ from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lif
 from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory, native_sewer_barter, native_stash
 from . import native_guest_drop_projection, native_guest_drop_record, native_guest_stack_drop
-from . import native_loot, native_world_loot
+from . import native_loot, native_pickup_audio, native_world_loot
 from . import native_loose_pickup
 from . import native_mushrooms, native_critters
 from . import native_prop_carry
@@ -3578,12 +3578,17 @@ class Bridge:
             raw = await self.local_bridge.command(request.encode("utf-8") + (stash_payload or b""), timeout)
             if action == native_stash.RENDER_MEMORY and _GUEST_UI_REPLY in raw:
                 raise RuntimeError("The resident stash renderer returned an unexpected body")
-            if action == "native-weapon-play-shots" and raw.startswith("weapon-cue-ack\t"):
+            receipt_tag = None
+            if action == "native-weapon-play-shots":
+                receipt_tag = "weapon-cue-ack"
+            elif action in (native_pickup_audio.COMMAND, native_world_loot.RETIRE, native_world_loot.PRESENT_HOST_CLAIM):
+                receipt_tag = "pickup-presentation-ack"
+            if receipt_tag and raw.startswith(receipt_tag + "\t"):
                 receipt = raw[:-1].split("\t", 3) if raw.endswith("\n") and "\n" not in raw[:-1] else []
                 if len(receipt) != 4 or receipt[1] != fields[0]:
-                    raise RuntimeError("The local weapon cue receipt did not match the request")
+                    raise RuntimeError("The local presentation receipt did not match the request")
                 if receipt[2] != "accepted":
-                    raise RuntimeError(receipt[3] or "The game declined weapon cue playback")
+                    raise RuntimeError(receipt[3] or f"The game declined the {action} command")
                 return {"ack": {"id": receipt[1], "result": receipt[2], "message": receipt[3]}}
             if action == native_weather_view.LOCAL_APPLY and raw.startswith("native-world-view-reply\t"):
                 return self._local_world_view_reply(raw, fields)

@@ -391,15 +391,23 @@ class Projection:
         self.retired.add(identity)
         self.items.pop(identity, None)
 
+    @staticmethod
+    def _after_retirement(game, snapshot, identity):
+        if "state" in snapshot:
+            return snapshot
+        return {**game, KEY: {key: item for key, item in game.get(KEY, {}).items() if key != identity}}
+
     async def retire_claim(self, bridge, game, target):
         epoch, identity = target[:2]
         if epoch != self.epoch:
             return game
         self._remember_retirement(identity)
         snapshot = await bridge.command(RETIRE, epoch, identity, timeout=3)
+        if "state" not in snapshot and snapshot.get("ack", {}).get("message") != "stock world loot retired":
+            raise RuntimeError("The claimed stock world item did not verify retirement")
         if identity in snapshot.get(KEY, {}):
             raise RuntimeError("The claimed stock world item did not retire")
-        return snapshot
+        return self._after_retirement(game, snapshot, identity)
 
     async def present_host_claim(self, host, bridge, target, operation, result):
         game = host.last_game
@@ -433,7 +441,8 @@ class Projection:
         if not separator or status != "retired" or identity in snapshot.get(KEY, {}):
             reason = status if status.startswith("world_loot_retirement_") else "The claimed stock world item did not retire"
             control.event("native_world_loot_retirement_deferred", reason=reason)
-        return snapshot
+            return snapshot if "state" in snapshot else game
+        return self._after_retirement(game, snapshot, identity)
 
     async def fixture(self, bridge, game, identity):
         shown = game.get(KEY, {}).get(identity, {})

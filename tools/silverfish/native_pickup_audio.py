@@ -127,4 +127,4 @@ class Playback:
             control.event("native_pickup_sound_unavailable", reason=str(error))
             return game
         self.acknowledge(control, area, asked, snapshot.get("ack", {}).get("message", ""))
-        return snapshot
+        return snapshot if "state" in snapshot else game
