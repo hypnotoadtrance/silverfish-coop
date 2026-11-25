@@ -291,7 +291,7 @@ async def claim(host, bridge, character, requested, operation, *, local_input=Fa
         host.native_checkpoint_unsafe = False
         host.control.event("native_loose_pickup_claimed", revision=revision, operation_id=operation,
                            escrow="memory" if proof.get("memory") else "disk", **row)
-        native_pickup_audio.committed(host, pawn, operation, row["class_path"])
+        native_pickup_audio.committed(host, pawn, operation, row["class_path"], credit=row.get("wallet_credit"))
         return result
     finally:
         if host.native_checkpoint_unsafe:

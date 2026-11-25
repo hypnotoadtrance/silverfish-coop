@@ -7,6 +7,32 @@ from tools.silverfish.travel import OBSERVATORY
 
 
 class NativePickupAudioTests(unittest.IsolatedAsyncioTestCase):
+    async def test_committed_cash_reuses_the_stock_widget_at_any_distance_on_the_guest(self):
+        from tools.silverfish.authored_cash import SMALL_STACK
+
+        epoch, operation = "a" * 32, "b" * 32
+        host = {"state": "hosting", "map": OBSERVATORY,
+                "pawns": {"local": {"name": "host pawn", "location": [0, 0, 0]}}}
+        game = {"state": "connected", "map": OBSERVATORY,
+                "pawns": {"local": {"name": "guest pawn", "location": [10000, 0, 0]}}}
+        notices = PickupAudio()
+        path = SMALL_STACK.class_path
+        notices.append(host, epoch, "host pawn", operation, path, amount=45)
+        frame = notices.frame(host, epoch, operation=operation)
+        self.assertEqual(frame["cash"], {operation: 45})
+        sender = Playback()
+        self.assertEqual(sender.prepare(host, frame, epoch, "host")[0], [f"{operation}|{path}|0|0|0"])
+
+        bridge = Mock(command=AsyncMock(return_value={**game, "ack": {"message": operation}}))
+        control, receiver = Mock(), Playback()
+        await receiver.sync(bridge, control, game, {**frame, "cash": {operation: 200}}, epoch, "host")
+        bridge.command.assert_not_awaited()
+        for _ in range(2):
+            await receiver.sync(bridge, control, game, frame, epoch, "host")
+        bridge.command.assert_awaited_once_with(
+            COMMAND, OBSERVATORY, epoch, f"{operation}|{path}|0|0|0|45", timeout=1.5)
+        control.event.assert_called_once_with("native_cash_popup_queued", operation_id=operation, map=OBSERVATORY, amount=45)
+
     async def test_committed_sound_uses_claimant_position_and_is_not_replayed(self):
         epoch = "a" * 32
         claim = "b" * 32

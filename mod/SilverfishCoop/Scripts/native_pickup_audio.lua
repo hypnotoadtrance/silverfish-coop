@@ -1,4 +1,6 @@
 local audio = {}
+local cash_popup = require("native_cash_popup")
+audio.update = cash_popup.update
 local pickup_base = "/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"
 local attenuation_path = "/Game/Assets/Sounds/SoundClasses/SmallSound_Attenuation.SmallSound_Attenuation"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
@@ -50,16 +52,25 @@ function audio.command(fields, state, phase, loaded_only)
     end
     local heard, origin = {}, pawn:K2_GetActorLocation()
     for i = 5, #fields do
-        local id, path, x, y, z = fields[i]:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
+        local id, path, x, y, z, amount = fields[i]:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|(%d+)$")
+        if not id then id, path, x, y, z = fields[i]:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$") end
         x, y, z = tonumber(x), tonumber(y), tonumber(z)
         local package, export
         if path and #path <= 256 then package, export = path:match("^(/Game/Classes/[%w_/%-]+)%.([%w_%-]+)_C$") end
         if token(id) and seen[id] then
             heard[#heard + 1] = id
-        elseif token(id) and package and package:match("([^/]+)$") == export and x and y and z
-            and (origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2 <= 1800^2 then
-            local ok, played = pcall(cue_at, path, pawn, { X = x, Y = y, Z = z }, loaded_only)
-            if ok and played then
+        elseif token(id) and package and package:match("([^/]+)$") == export and x and y and z then
+            local near = (origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2 <= 1800^2
+            local queued, played = false, false
+            if amount and phase == "connected" and not loaded_only then
+                local ok, accepted = pcall(cash_popup.enqueue, state, pawn, epoch, path, tonumber(amount))
+                queued = ok and accepted == true
+            end
+            if near and (not amount or queued) then
+                local ok, sounded = pcall(cue_at, path, pawn, { X = x, Y = y, Z = z }, loaded_only)
+                played = ok and sounded
+            end
+            if queued or played then
                 seen[id] = true
                 history[#history + 1] = id
                 if #history > 32 then seen[table.remove(history, 1)] = nil end

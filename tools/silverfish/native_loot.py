@@ -6,6 +6,7 @@ import time
 import uuid
 
 from . import native_host_save, native_pickup_audio, party
+from .authored_cash import CASH_RANGES
 from .authored_loot import (CRATES, DEFERRED_PRY_CLASSES, LEGACY_CRATE, key_unlock_only, lockable_container, loot_capacity, random_lid,
                             valid_item_transform, valid_lid_angle, valid_loot_trait_calls)
 from .native_gold import valid_guid
@@ -35,13 +36,6 @@ STACK_MERGE_TAG = "native-loot-stack-merge"
 PLACEMENT_KEY = "native_loot_placement"
 FORCED_ROLL_STATUS = "opened_fixture_seeded"
 SPECIAL_MEMORY_CAPABILITY = "native_loot_special_memory"
-CASH_RANGES = {
-    f"/Game/Classes/Items/Item_Money_{name}.Item_Money_{name}_C": limits
-    for name, limits in (("CoupleBills", (6, 10)), ("SmallStack", (30, 50)),
-                         ("LargeStack", (100, 200)), ("MassivePile", (3000, 5000)))
-}
-
-
 def public_roll(roll: dict) -> dict:
     return {key: value for key, value in roll.items() if key != "escrow"}
 
@@ -973,7 +967,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                 host.control.event("native_loot_claim_accepted", operation_id=operation_id, **result["native_loot_claim"])
             else:
                 host.control.event("native_loot_claim_committed", revision=revision, **result["native_loot_claim"])
-            native_pickup_audio.committed(host, pawn, operation_id, claimed["class_path"])
+            native_pickup_audio.committed(host, pawn, operation_id, claimed["class_path"], credit=credit)
             return result
         if action == "seed":
             if not proof["lucky_looter"]:

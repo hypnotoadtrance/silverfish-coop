@@ -416,7 +416,7 @@ class Projection:
         playback, control, audio_epoch = host.pickup_playback, host.control, host.zone_epoch
         cue = host.pickup_audio.frame(game, audio_epoch, operation=operation)
         args, asked = playback.prepare(game, cue, audio_epoch, control.generation)
-        if len(args) != 1 or asked != {operation}:
+        if len(args) != 1 or asked.keys() != {operation}:
             return await self.retire_claim(bridge, game, target)
 
         self._remember_retirement(identity)

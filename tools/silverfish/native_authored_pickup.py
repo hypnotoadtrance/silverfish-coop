@@ -419,5 +419,5 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
     host.party = candidate
     host.native_checkpoint_unsafe = False
     host.control.event("native_authored_pickup_committed", revision=revision, operation_id=operation_id, **row)
-    native_pickup_audio.committed(host, pawn, operation_id, row["class_path"])
+    native_pickup_audio.committed(host, pawn, operation_id, row["class_path"], credit=row.get("wallet_credit"))
     return result

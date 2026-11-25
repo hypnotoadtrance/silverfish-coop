@@ -26,6 +26,7 @@ SMALL_STACK = CashType("SmallStack", "small-stack", 30, 50)
 LARGE_STACK = CashType("LargeStack", "large-stack", 100, 200)
 MASSIVE_PILE = CashType("MassivePile", "massive-pile", 3000, 5000)
 CASH_TYPES = (COUPLE_BILLS, SMALL_STACK, LARGE_STACK, MASSIVE_PILE)
+CASH_RANGES = {item.class_path: (item.minimum, item.maximum) for item in CASH_TYPES}
 MAP_SLUGS = {CITY: "city", CROSSROADS: "crossroads"}
 
 

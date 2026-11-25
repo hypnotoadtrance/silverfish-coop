@@ -481,7 +481,7 @@ async def claim(host, bridge, character, guid, operation):
         host.party = candidate
         host.native_checkpoint_unsafe = False
         host.control.event("native_stock_enemy_loot_claimed", revision=revision, operation_id=operation, **result[CLAIM_KEY])
-        native_pickup_audio.committed(host, pawn, operation, committed["class_path"])
+        native_pickup_audio.committed(host, pawn, operation, committed["class_path"], credit=committed.get("wallet_credit"))
         return result
     finally:
         if host.native_checkpoint_unsafe:

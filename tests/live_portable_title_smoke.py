@@ -64,6 +64,7 @@ from portable_stock_door import verify_stock_crossroads_door
 from portable_stock_shovel import verify_stock_shovel, verify_stock_shovel_reconnect
 from portable_mushrooms import verify_stock_mushrooms
 from portable_placed_item import placed_item_overlay, verify_stock_placed_item
+from portable_cash_popup import cash_pickup_overlay, verify_stock_cash_popup
 from portable_world_view_receipt import patch_world_view_receipts, verify_world_view_receipt
 from tools.silverfish.title_session import STATUS_FILE as TITLE_STATUS_FILE
 
@@ -78,7 +79,7 @@ INDEPENDENT_RESIDENT_MAPS = {
     "stock_avatar_tail": {OBSERVATORY}, "stock_impact_cues": {OBSERVATORY},
     "stock_lockpicks": {OBSERVATORY}, "stock_observatory_tv": {OBSERVATORY},
     "stock_critters": {CROSSROADS}, "stock_lingering_teleport": {CROSSROADS}, "stock_mushrooms": {CROSSROADS},
-    "stock_placed_item": {CROSSROADS}, "stock_weather_travel": {OBSERVATORY},
+    "stock_placed_item": {CROSSROADS}, "stock_cash_popup": {CROSSROADS}, "stock_weather_travel": {OBSERVATORY},
     "stock_warehouse_switch": {OBSERVATORY, WAREHOUSE_DOCK}, "stock_warehouse_radio": {OBSERVATORY, WAREHOUSE_DOCK},
     "stock_warehouse_candle": {WAREHOUSE_DOCK},
     "stock_bottle": {OBSERVATORY, WAREHOUSE_DOCK},
@@ -6273,6 +6274,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_lingering_teleport, "crossroads" if crossroads_profile else "crossroads_anomaly", "stock_lingering_teleport",
          lambda host, guest, pawn: verify_stock_lingering_teleport(host, guest, pawn, portable_probe_command)),
         (stock_placed_item, "crossroads", "stock_placed_item", verify_stock_placed_item),
+        (stock_placed_item, "crossroads", "stock_cash_popup",
+         lambda host, guest, pawn: verify_stock_cash_popup(host, guest, pawn, portable_probe_command, campaign_save_hashes)),
         (stock_mushrooms, "crossroads", "stock_mushrooms", verify_stock_mushrooms),
         (stock_simmi_jammers, "simmi", "stock_simmi_jammers",
          lambda host, guest, pawn: verify_stock_simmi_jammers(host, guest, pawn, portable_probe_command)),
@@ -6427,6 +6430,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["stock_placed_item_overlays"] = [
                 probes.enter_context(placed_item_overlay(game, portable_script_overlay)) for game in games
             ]
+            probes.enter_context(cash_pickup_overlay(first_game, portable_script_overlay))
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableCashPopupProbe",
+                                                     fixture="portable_cash_popup_probe.lua"))
         if stock_mushrooms:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableMushroomRegrowthProbe",
                                                  fixture="mushroom_regrowth_probe.lua"))
