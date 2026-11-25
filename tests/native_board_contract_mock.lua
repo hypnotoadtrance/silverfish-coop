@@ -71,6 +71,7 @@ local bag = object({PlayerBackpack = array({}), PlayerEquipment = array({})})
 local guest = object({Save = bag})
 local world = object({})
 local host_flags = {Player_Cash = 17, Player_Xp = 3, Rep_Freelancer = 2}
+local stock_pings = {}
 store.Flags = {
     Contains = function(_, key) return host_flags[key:ToString()] ~= nil end,
     Find = function(_, key) return ref(host_flags[key:ToString()]) end,
@@ -103,7 +104,7 @@ package.loaded.native_wire_quest = {
 local function stock_finalize(_, key, instance, no_confirmation, host, out)
     assert(instance == game_instance and host == player and no_confirmation)
     local contract = assert(store.ActiveQuests[key])
-    if contract[consumed] then
+    if contract[objective]:GetArrayNum() > 0 and contract[consumed] then
         assert(store.PlayerBackpack[1] == portion)
         store.PlayerBackpack = array({})
     else
@@ -114,6 +115,7 @@ local function stock_finalize(_, key, instance, no_confirmation, host, out)
     host_flags.Player_Xp = host_flags.Player_Xp + contract[xp]
     for flag, number in pairs(contract[flags]) do host_flags[flag] = number end
     for _, number in pairs(contract[rep]) do host_flags.Rep_Freelancer = host_flags.Rep_Freelancer + number * 2 end
+    if contract[ping] ~= "None" then stock_pings[#stock_pings + 1] = contract[ping] end
     out.Success = true
 end
 
@@ -221,11 +223,24 @@ kill_recipe[items] = array({class})
 assert(catalog()[8] == "-" and catalog(kill)[8] == kill)
 denied("specialized_recipe", "turnin", "inspect", kill)
 kill_recipe[items] = array({})
+kill_recipe[ping] = "Coup_HuntPlayer"
 action("turnin", "inspect", kill)
 assert(proof()[18] == "-" and proof()[16] == 3000 and proof()[9] == 1)
 action("turnin", "apply", kill, "-")
 assert(proof()[13] == 3818 and host_flags.BountyDone == 1 and host_flags.Rep_Freelancer == 42)
 assert(require("native_quest_catalog").tracked_step(store, kill_recipe) == -10)
+action("turnin", "apply", kill, "-")
+assert(proof()[8] == "already" and #stock_pings == 1 and stock_pings[1] == "Coup_HuntPlayer")
+assert(host_flags.Player_Cash == 3818)
+
+local photo = "Photo_BrnzQuarry"
+local photo_recipe = quest(0, nil, 100)
+photo_recipe[consumed], photo_recipe[step] = true, 2
+store.ActiveQuests[photo] = photo_recipe
+assert(catalog()[8] == photo)
+action("turnin", "apply", photo, "-")
+assert(proof()[10] == -10 and proof()[13] == 3918 and proof()[18] == "-")
+assert(store.PlayerBackpack[1] == host_stack and bag.PlayerBackpack[1] == row_item and #stock_pings == 1)
 
 local missing, display = "Note_Farmhouse", "Note_FarmHouse"
 local configure = board.Configure_Stock

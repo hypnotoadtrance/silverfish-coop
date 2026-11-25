@@ -33,11 +33,6 @@ local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:G
 local function int(value) return math.type(value) == "integer" and value >= -2147483648 and value <= 2147483647 end
 local function len(values) return values and values:GetArrayNum() end
 local function name(value) return type(value) == "userdata" and value:ToString() or value end
-local function empty_name(value)
-    value = name(value)
-    return value == "" or value == "None"
-end
-
 local function board_accepts(board, key, row)
     local redeemable = board.RedeemableQuests
     local size = len(redeemable)
@@ -64,10 +59,15 @@ local function shape(save, row)
     local step = quest_catalog.tracked_step(save, row)
     local final, cash, xp = row[keys.final], row[keys.cash], row[keys.xp]
     local quantity, consumed = len(row[keys.objective]), row[keys.consumed]
+    local ping = name(row[keys.ping])
+    -- The normal stock turn-in sends follow-up pings in the host world.
+    -- Item deposits use the native inventory transaction and have separate constraints.
+    local ping_supported = ping == "" or ping == "None"
+        or quantity == 0 and type(ping) == "string" and #ping <= 96 and ping:match("^[A-Za-z0-9_-]+$")
     if row[keys.kind] ~= 2 or not int(step) or not int(final) or final < 1 or not int(cash) or cash < 0
         or not int(xp) or xp < 0 or not int(row[keys.redeem]) or len(row[keys.items]) ~= 0
-        or len(row[keys.chained]) ~= 0 or not empty_name(row[keys.ping])
-        or not ((quantity == 0 and consumed == false) or (quantity == 1 and consumed == true))
+        or len(row[keys.chained]) ~= 0 or not ping_supported or type(consumed) ~= "boolean"
+        or not (quantity == 0 or quantity == 1 and consumed)
         or not row[keys.flags] or #row[keys.flags] > 16 or not row[keys.rep] or #row[keys.rep] > 16 then
         refuse("specialized_recipe")
     end

@@ -9,6 +9,8 @@ local menu_class = "/Game/Classes/GUI/Menu_QuestLog_Widget.Menu_QuestLog_Widget_
 local step = "Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A"
 local final = "Objective_FinalStep_57_F5A16DBF4E231A030BBD9F864F62A14B"
 local items = "Reward_Items_32_2B334D5F4DBA7AA760BF33A8E93A4C0A"
+local objective_items = "Objective_Items_56_9FD46BE9431873A188AED4B08F0AF083"
+local consumes_items = "ObjectiveItemsAreConsumed_61_4669760345DABF3B531CBF8AFABA6333"
 local chained = "Add_Quests_OnComplete_66_06ACA8C44193595C2DFAD8A85B7FC8B9"
 local track = "TrackFlag_ForStep_111_31112EA54B887C1D869E1291BC819774"
 local ping = "GlobalPing_OnTurnIn_108_68CA1968452BFC635A107EBB1EE3AA7F"
@@ -16,6 +18,11 @@ local tracked = {
     Sab_Fuel_01 = {flag = "Kill_ForestTank", threshold = 7, progress = 6},
     Sab_Factory = {flag = "PB_Factory_Kill", threshold = 5, progress = 4},
 }
+local turnin_variants = {
+    Asn_Panzer_01 = {ping = "Coup_HuntPlayer", consumes = false},
+    Photo_BrnzQuarry = {ping = "None", consumes = true},
+}
+local followup_count, followup_hook = 0, false
 local last
 
 local function valid(object) return object and object:IsValid() end
@@ -84,6 +91,33 @@ local function run(action, quest)
         instance:Add_PointTo_SaveFlag(flag, expected.progress, true, true)
         assert(pawn.Save.Flags:Contains(flag) and pawn.Save.Flags:Find(flag):get() == expected.progress)
         return tostring(expected.progress)
+    end
+    if action == "stage-turnin-variant" then
+        local instance = world.OwningGameInstance
+        assert(pawn:HasAuthority() and same(pawn.Save, instance.SaveSlot_Ref))
+        local expected = assert(turnin_variants[quest])
+        local key = FName(quest, EFindName.FNAME_Find)
+        local active = pawn.Save.ActiveQuests
+        assert(not active:Contains(key), "This stock contract must start absent")
+        instance:AddQuest_ByName(key)
+        local row = active:Find(key):get()
+        assert(row and row[step] == 1 and row[final] >= 1 and row[objective_items]:GetArrayNum() == 0
+            and row[consumes_items] == expected.consumes and text(row[ping]) == expected.ping)
+        row[step] = row[final]
+        assert(active:Find(key):get()[step] == row[final], "Could not stage the completed objective")
+        if expected.ping ~= "None" and not followup_hook then
+            local watched = expected.ping
+            RegisterHook("/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.FL_CodeLib01_C:GlobalPing",
+                function(_, key_param)
+                    if text(key_param:get()) == watched then followup_count = followup_count + 1 end
+                end)
+            followup_hook = true
+        end
+        return tostring(row[final])
+    end
+    if action == "turnin-followups" then
+        assert(pawn:HasAuthority())
+        return tostring(followup_count)
     end
     if action == "catalog" then
         assert(pawn:HasAuthority(), "Only the host can read the stock catalog")

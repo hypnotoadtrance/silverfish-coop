@@ -3776,8 +3776,46 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
     assert any(entry.get("quest") == quest and entry.get("state") == "accepted" for entry in entries), entries
 
     assert await command(host, "qualify-tracked") == "10"
-    tracked_quests = []
     assert campaign_save_hashes(host.campaign) == checkpoint, "Accepting a stock board offer caused an early save"
+
+    async def settle(quest_id, cash):
+        before = campaign_save_hashes(host.campaign)
+        ready = await board_catalog()
+        assert quest_id in ready["turnins"], ready
+        current = await wait_resident_status(host_run,
+            lambda frame: type(frame.get("game", {}).get("native_wallet")) is int)
+        wallet = current["game"]["native_wallet"]
+        await board_menu()
+        await select(quest_id, "turnin")
+        settled = await wait_resident_status(host_run, lambda frame:
+            frame.get("gameplay", {}).get("native_quests", {}).get(quest_id, {}).get("step") == -10)
+        receipt = settled["gameplay"]["native_quests"][quest_id]
+        assert (receipt["cash"], receipt["xp"], receipt["wallet"]) == (cash, 1, wallet + cash), receipt
+        member = guest_frame["character_id"]
+        assert set(receipt["recipients"]) == {"host", member} and receipt["actor"] == member, receipt
+        await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_wallet") == wallet + cash)
+        async with asyncio.timeout(8):
+            while True:
+                journals = await asyncio.gather(*(command(seat, "journal", quest_id) for seat in (host, guest)))
+                if journals == ["-10", "-10"]:
+                    break
+                await asyncio.sleep(.1)
+        assert quest_id not in (await board_catalog())["turnins"]
+        assert campaign_save_hashes(host.campaign) == before, "Redeeming a stock board quest caused an early save"
+        return receipt
+
+    variants = []
+    for quest_id, cash, expected_pings in (("Photo_BrnzQuarry", 100, 0), ("Asn_Panzer_01", 3500, 1)):
+        assert int(await command(host, "stage-turnin-variant", quest_id)) > 0
+        receipt = await settle(quest_id, cash)
+        selection = native_board_contract.menu_target(guest_frame["zone_epoch"], OBSERVATORY_BOUNTY_BOARD, quest_id)
+        replay = await submit(guest_run, "native-quest-turnin", target=selection)
+        assert replay["ok"] and replay["effect"] == "native_quest_already_settled", replay
+        assert int(await command(host, "turnin-followups")) == expected_pings
+        assert campaign_save_hashes(host.campaign) == checkpoint
+        variants.append({"quest_id": quest_id, "receipt": receipt, "stock_followups": expected_pings})
+
+    tracked_quests = []
     for tracked, key, progress, cash, areas, actors, cue in objectives:
         checkpoint = campaign_save_hashes(host.campaign)
         offers = await board_catalog()
@@ -3786,42 +3824,17 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
         await select(tracked, "start")
         early = await board_catalog()
         assert tracked not in early["offers"] and tracked not in early["turnins"], early
-
         assert await command(host, "track-progress", tracked) == str(progress)
         assert await command(host, "journal", tracked) == "1"
         assert tracked not in (await board_catalog())["turnins"]
         assert campaign_save_hashes(host.campaign) == checkpoint
         objective = await shoot_objective(key, progress, areas, actors, cue)
-        checkpoint = campaign_save_hashes(host.campaign)
-        ready = await board_catalog()
-        assert tracked in ready["turnins"], ready
-        current = await wait_resident_status(host_run,
-            lambda frame: type(frame.get("game", {}).get("native_wallet")) is int)
-        wallet = current["game"]["native_wallet"]
-        await board_menu()
-        await select(tracked, "turnin")
-        settled = await wait_resident_status(host_run, lambda frame:
-            frame.get("gameplay", {}).get("native_quests", {}).get(tracked, {}).get("step") == -10)
-        receipt = settled["gameplay"]["native_quests"][tracked]
-        assert (receipt["cash"], receipt["xp"], receipt["wallet"]) == (cash, 1, wallet + cash), receipt
-        member = guest_frame["character_id"]
-        assert set(receipt["recipients"]) == {"host", member} and receipt["actor"] == member, receipt
-        await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_wallet") == wallet + cash)
-        async with asyncio.timeout(8):
-            while True:
-                journals = await asyncio.gather(*(command(seat, "journal", tracked) for seat in (host, guest)))
-                if journals == ["-10", "-10"]:
-                    break
-                await asyncio.sleep(.1)
-        assert tracked not in (await board_catalog())["turnins"]
+        receipt = await settle(tracked, cash)
         tracked_quests.append({"quest_id": tracked, "world_flag_progress": progress, "receipt": receipt, **objective})
-        assert campaign_save_hashes(host.campaign) == checkpoint, "Redeeming a stock board quest caused an early save"
-
-    assert campaign_save_hashes(host.campaign) == checkpoint, "Accepting a stock board offer caused an early save"
     return {"resident_board_offers": {"stock_offers": sorted(offered), "guest_offers": sorted(visible),
                                       "previously_filtered_offers": sorted(previously_filtered),
                                       "accepted": quest, "journal_step": int(observed[0]),
-                                      "tracked_turnins": tracked_quests,
+                                      "tracked_turnins": tracked_quests, "turnin_variants": variants,
                                       "campaign_checkpoint_unchanged": True}}
 
 
