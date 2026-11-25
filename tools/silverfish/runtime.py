@@ -818,6 +818,7 @@ class Bridge:
         self._local_board_records = deque(maxlen=64)
         self._local_dialogue_records = deque(maxlen=64)
         self._local_crate_records = deque(maxlen=64)
+        self._local_door_confirmations: deque[bytes] = deque()
         self._local_death_records = deque(maxlen=64)
         self._local_zone_records = deque(maxlen=64)
         self._local_authored_zone_records = deque(maxlen=64)
@@ -889,7 +890,7 @@ class Bridge:
 
     def _take_local_inputs(self, pending: deque[bytes]) -> list[bytes]:
         # Keep unread interaction, combat, and travel inputs in the native FIFO until their collectors have room.
-        room = 64 - max(len(self._local_interaction_records), len(self._local_crate_records),
+        room = 64 - max(len(self._local_interaction_records), len(self._local_crate_records), len(self._local_door_confirmations),
                         len(self._local_primary_records), len(self._local_held_fire_records),
                         len(self._local_death_records), len(self._local_zone_records),
                         len(self._local_authored_zone_records), len(self._local_stardust_records),
@@ -902,6 +903,8 @@ class Bridge:
                     self._local_dialogue_records.append(record)
                 elif record.startswith((b"loot-crate-open\t", b"loot-lockpick\t")):
                     self._local_crate_records.append(record)
+                elif record.startswith(b"stock-door-settled\t"):
+                    self._local_door_confirmations.append(record)
                 elif record.startswith(b"downed\t"):
                     self._local_death_records.append(record)
                 elif record.startswith(b"request\t"):
@@ -929,6 +932,9 @@ class Bridge:
         records = list(pending)
         pending.clear()
         return records
+
+    def stock_door_confirmations(self):
+        return self._take_local_inputs(self._local_door_confirmations)
 
     def native_crate_inputs(self) -> list[bytes]:
         return self._take_local_inputs(self._local_crate_records)

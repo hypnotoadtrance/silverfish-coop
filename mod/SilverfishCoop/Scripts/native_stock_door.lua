@@ -12,7 +12,8 @@ local active_world, active_phase, scanned_at, actors, door_parts
 local sampler, pending_census, periodic_sampling
 local trace_report
 local tool_report
-local motions = {}
+local motions, confirmations = {}, {}
+local confirmation_sequence, confirmation_row
 local move_component = "/Script/Engine.KismetSystemLibrary:MoveComponentTo"
 local clock, math_library
 local motion_probe, preview
@@ -338,12 +339,12 @@ local function project(fields, state, phase)
     return "stock door flags and hinge transform synchronized" .. (#deferred > 0 and "|" .. table.concat(deferred, "|") or "")
 end
 
-local function sample_door(scan, name)
+local function sample_door(scan, name, ready_pose)
     local actor, parts = scan.actors[name], door_parts[name]
     if not valid(actor) or actor:IsActorBeingDestroyed() or not parts
         or not valid(parts[1]) or not valid(parts[2]) or not valid(parts[3]) then return end
     local arrow, panel, knob = table.unpack(parts)
-    local value = pose(actor, arrow)
+    local value = ready_pose or pose(actor, arrow)
     if not value then return end
     local center, grip = panel:K2_GetComponentLocation(), knob:K2_GetComponentLocation()
     local collision = math.tointeger(panel:GetCollisionEnabled())
@@ -366,7 +367,35 @@ local function sample_slice(scan, deadline)
     end
 end
 
-function doors.start(report_motion)
+local function send_confirmations()
+    if active_phase ~= "hosting" or not valid(active_world) then
+        confirmations = {}
+        return
+    end
+    local now = os.clock()
+    for name, pending in pairs(confirmations) do
+        local actor = pending.actor
+        if now >= pending.expires or not valid(actor) or actor:IsActorBeingDestroyed()
+            or not same(pending.world, active_world) or not same(actor:GetWorld(), active_world) then
+            confirmations[name] = nil
+        elseif pending.goal and actor.Locked == false and actor.Open == pending.opens and same(actor, actors[name]) then
+            local parts = door_parts[name]
+            local actual = parts and valid(parts[1]) and pose(actor, parts[1])
+            local expected = actual and {false, actual[2], pending.opens, table.unpack(pending.goal)}
+            local record = actual and matches(actual, expected)
+                and sample_door({actors = actors, map = pending.map, row = confirmation_row}, name, actual)
+            if record and SilverfishEnqueueLocalBridgeInput(
+                confirmation_row("stock-door-settled", pending.id, confirmation_sequence(),
+                    string.format("%.1f", (now - pending.start) * 1000)) .. "\t" .. record .. "\n") then
+                if sampler and sampler.actors == actors then sampler.readings[name] = record end
+                confirmations[name] = nil
+            end
+        end
+    end
+end
+
+function doors.start(report_motion, next_sequence, status_row)
+    confirmation_sequence, confirmation_row = next_sequence, status_row
     if type(SilverfishStockDoorGuardAvailable) ~= "function" then return end
     clock = StaticFindObject(statics_path)
     math_library = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
@@ -384,6 +413,12 @@ function doors.start(report_motion)
                 if not (opens or call.Linkage == 15) or not same(call.CallbackTarget, actor) then return end
                 local duration, p, r = seconds:get(), location:get(), rotation:get()
                 if not finite(duration, 3) or duration < .06 or not p or not r then return end
+                local pending = confirmations[name]
+                if pending and pending.opens == opens and same(pending.actor, actor)
+                    and finite(r.Pitch, 360) and finite(r.Yaw, 360) and finite(r.Roll, 360)
+                    and finite(p.X, 10000) and finite(p.Y, 10000) and finite(p.Z, 10000) then
+                    pending.goal = {r.Pitch, r.Yaw, r.Roll, p.X, p.Y, p.Z}
+                end
                 local ease = (in_ease:get() and 1 or 0) + (out_ease:get() and 2 or 0)
                 report_motion(active_world, name, opens and 1 or 0, duration, ease, shortest:get() and 1 or 0,
                     p.X, p.Y, p.Z, r.Pitch, r.Yaw, r.Roll)
@@ -413,6 +448,7 @@ function doors.start(report_motion)
                 end
             end
         end
+        if next(confirmations) then pcall(send_confirmations) end
         local deadline = os.clock() + .002
         if pending_census and not pcall(census_slice, pending_census, deadline) then pending_census = nil end
         local scan = sampler
@@ -547,9 +583,18 @@ local function interact(fields, state, phase)
     if not qualified or not valid(pawn) or pawn.Dead ~= false then error("stock_door_guest_unavailable", 0) end
     -- The guest's stock press already captured the knob. Run the stock door
     -- event on the host so its lock, obstruction, and movement rules still apply.
-    local was_open = actor.Open
+    local was_open, started = actor.Open, os.clock()
+    local pending
+    if type(SilverfishEnqueueLocalBridgeInput) == "function" and confirmation_sequence and confirmation_row then
+        pending = {id = fields[1], actor = actor, world = state.world, map = state.map,
+            opens = not was_open, start = started, expires = started + 2}
+        confirmations[fields[3]] = pending
+    end
     actor:SendInteractionToActor(pawn, knob)
-    return "stock hinged door interaction dispatched " .. (was_open and "open" or "closed")
+    local result = "stock hinged door interaction dispatched " .. (was_open and "open" or "closed")
+    if pending and pending.goal then return result .. "|" .. table.concat(pending.goal, "|") end
+    confirmations[fields[3]] = nil
+    return result
 end
 
 local function tool_pry(fields, state, phase)

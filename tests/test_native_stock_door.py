@@ -46,6 +46,31 @@ class StockDoorActionTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.command.assert_awaited_once()
         self.assertEqual(self.host.party["receipts"]["guest"], [])
 
+    async def test_native_settlement_matches_dispatch_and_preserves_the_world_snapshot(self):
+        dispatch = "c" * 32
+        opening = {**self.closed, "open": True}
+        snapshot = {**self.host.last_game, "sequence": 11, door.KEY: {self.actor: opening},
+                    "ack": {"id": dispatch, "message": "stock hinged door interaction dispatched open|0|10|0|0|0|0"}}
+        self.bridge.command.return_value = snapshot
+        completion = asyncio.get_running_loop().create_future()
+        self.assertIsNone(await self.interact(completion))
+
+        def record(ticket, sequence, yaw="10"):
+            pose = ("native-stock-door", CROSSROADS, self.actor, "0", "1", "0", "0", yaw, *("0",) * 10, "1")
+            fields = ("stock-door-settled", ticket, str(sequence), "350", *pose)
+            return "\t".join(fields).encode()
+
+        self.actions.settle(self.host, [record("d" * 32, 12), record(dispatch, 10), record(dispatch, 12, yaw="2")])
+        self.assertFalse(completion.done())
+        self.actions.settle(self.host, [record(dispatch, 12)])
+        response = completion.result()
+        self.assertEqual(response[door.SETTLEMENT], {"source": "memory_input", "host_dispatch_to_settle_ms": 350})
+        self.assertEqual(response[door.DELTA]["sequence"], 12)
+        self.assertIs(response[door.RESULT]["open"], False)
+        self.assertEqual(response[door.DELTA]["doors"][self.actor]["yaw"], 10)
+        self.assertIs(self.host.last_game, snapshot)
+        self.assertEqual((await self.interact())[door.DELTA], response[door.DELTA])
+
     async def test_pending_motion_releases_dispatch_and_deduplicates_until_authoritative_frame(self):
         reply = {**self.host.last_game, "sequence": 11,
                  "ack": {"message": "stock hinged door interaction dispatched closed"}}

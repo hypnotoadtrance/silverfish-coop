@@ -170,6 +170,7 @@ async def verify_stock_crossroads_door(host, guest, pawn, *, lockpick=None):
     return {**evidence, "stock_crossroads_door": {"actor": WOOD_DOOR, "authoritative_lock_refusal": True,
                                      "close": closed[door.RESULT], "open": reopened[door.RESULT],
                                      "guest_confirm_ms": [closed["elapsed_ms"], reopened["elapsed_ms"]],
+                                     "host_settlement": [closed.get(door.SETTLEMENT), reopened.get(door.SETTLEMENT)],
                                      "guest_movement_start_ms": [close_motion, reopen_motion],
                                      "guest_preview_start_ms": [close_preview, reopen_preview],
                                      "independent_inspection": closed["independent_inspection"],

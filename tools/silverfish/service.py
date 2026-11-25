@@ -4278,7 +4278,7 @@ class Host:
             if bridge.process.poll() is not None:
                 raise RuntimeError(f"Host game exited with code {bridge.process.returncode}")
             await self.observe(bridge, transport)
-            self.stock_doors.settle(self)
+            self.stock_doors.settle(self, bridge.stock_door_confirmations())
             if self.mindcore_carry:
                 self.mindcore_carry.maintain()
             try:
@@ -4516,7 +4516,7 @@ class Host:
                     snapshot = await loot_view.sync(self.last_game, rolls, claim_crate)
                     if snapshot is not self.last_game:
                         self.last_game, self.last_seen = snapshot, time.monotonic()
-            self.stock_doors.settle(self)
+            self.stock_doors.settle(self, bridge.stock_door_confirmations())
             self.publish_host_status(transport, bridge)
             await bridge.wait_for_interaction(
                 .25, wake_event=None if self.native_checkpoint_unsafe else self.native_request_ready,

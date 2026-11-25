@@ -20,6 +20,7 @@ INPUT_FIXTURE = "native-stock-door-input-fixture"
 STAGE_FIXTURE = "native-stock-door-stage-fixture"
 TRACE_FIXTURE = "native-stock-door-trace"
 TRACE_RESULT = "native_stock_door_trace"
+SETTLEMENT = "native_stock_door_settlement"
 PRY_RESULT = "native_stock_door_pry"
 PRY_ACTIONS = {"blowtorch": "native-guest-door-blowtorch", "crowbar": "native-guest-door-crowbar"}
 TARGET_PREFIX = "stock-door:"
@@ -157,15 +158,20 @@ class DoorMotion:
     opens: bool
     deadline: float
     replies: list[asyncio.Future]
+    dispatch_id: str | None = None
+    destination: dict | None = None
 
     def settled(self, game):
         row = game.get(KEY, {}).get(self.actor, {})
         return ((game.get("state"), game.get("map")) == ("hosting", self.area)
                 and game.get("sequence", 0) >= self.sequence and row.get("locked") is False
-                and row.get("open") is self.opens)
+                and row.get("open") is self.opens
+                and (self.destination is None or matches(row, row | self.destination)))
 
-    def result(self, host, game):
+    def result(self, host, game, *, settle_ms=None):
         result = {RESULT: {"actor": self.actor, "open": self.opens}, DELTA: frame(game, self.epoch, self.actor)}
+        if settle_ms is not None:
+            result[SETTLEMENT] = {"source": "memory_input", "host_dispatch_to_settle_ms": settle_ms}
         receipts = host.party["receipts"].setdefault(self.character, [])
         receipts.append({"id": self.operation, "request": self.fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
@@ -216,14 +222,37 @@ class Interactions:
             return motion.result(host, reply)
         self.pending[actor] = motion
 
-    def settle(self, host):
+    def settle(self, host, records=()):
         if not self.pending:
             return
         now, game = time.monotonic(), host.last_game
+        completed = {}
+        by_dispatch = {motion.dispatch_id: motion for motion in self.pending.values() if motion.dispatch_id}
+        for record in records:
+            fields = record.decode("utf-8", errors="replace").split("\t")
+            if len(fields) != 23 or fields[0] != "stock-door-settled" or not fields[2].isascii() or not fields[2].isdigit():
+                continue
+            motion = by_dispatch.get(fields[1])
+            if motion is None or fields[6] != motion.actor or len(fields[2]) > 16:
+                continue
+            sequence = int(fields[2])
+            if not max(motion.sequence, game.get("sequence", 0)) <= sequence < 2**53:
+                continue
+            try:
+                elapsed = float(fields[3])
+                observed = parse(fields[4:], "hosting", motion.area)
+            except ValueError:
+                continue
+            sample = {"state": "hosting", "map": motion.area, "sequence": sequence, KEY: {motion.actor: observed}}
+            if 0 <= elapsed <= 2000 and motion.settled(sample):
+                completed[motion.actor] = sample, elapsed
         for actor, motion in tuple(self.pending.items()):
             in_visit = ((host.zone_epoch, game.get("state"), game.get("map")) == (motion.epoch, "hosting", motion.area)
                         and not (host.stopping or host.transitioning or host.party["wipe"]))
-            if in_visit and motion.settled(game):
+            if in_visit and actor in completed:
+                sample, elapsed = completed[actor]
+                response = {"ok": True, **motion.result(host, sample, settle_ms=elapsed)}
+            elif in_visit and motion.settled(game):
                 # The door moved even if its guest disconnected. Keep its receipt for a rejoin.
                 response = {"ok": True, **motion.result(host, game)}
             elif not in_visit:
@@ -249,7 +278,19 @@ async def _start_motion(host, bridge, character, pawn, area, epoch, actor, opera
             raise party.RuleError(str(error)) from error
         raise
 
-    prefix, _, before = reply.get("ack", {}).get("message", "").rpartition(" ")
+    message, separator, end_pose = reply.get("ack", {}).get("message", "").partition("|")
+    prefix, _, before = message.rpartition(" ")
+    axes = end_pose.split("|") if separator else []
+    if separator:
+        try:
+            pose = [float(value) for value in axes]
+        except ValueError as error:
+            raise RuntimeError("The host did not report a valid stock door destination") from error
+        if len(pose) != 6 or any(not -limit <= value <= limit for value, limit in zip(pose, (360,) * 3 + (10000,) * 3)):
+            raise RuntimeError("The host did not report a valid stock door destination")
+        destination = dict(zip((*_ANGLES, *_OFFSET), pose, strict=True))
+    else:
+        destination = None
     sequence = reply.get("sequence")
     if (prefix != "stock hinged door interaction dispatched" or before not in {"open", "closed"}
             or (reply.get("state"), reply.get("map")) != ("hosting", area)
@@ -258,7 +299,7 @@ async def _start_motion(host, bridge, character, pawn, area, epoch, actor, opera
     now = time.monotonic()
     host.last_game, host.last_seen = reply, now
     return DoorMotion(area, epoch, actor, character, operation, fingerprint, sequence,
-                      before == "closed", now + 2, [future]), reply
+                      before == "closed", now + 2, [future], reply.get("ack", {}).get("id"), destination), reply
 
 
 async def pry(host, bridge, character, requested, operation, kind):
