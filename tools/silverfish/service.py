@@ -304,6 +304,7 @@ class Host:
         self.voice_audio, self.voice_playback = native_voice.VoiceQueue(), native_voice.Playback()
         self.guest_avatar_aims = {}
         self.guest_avatar_lighters = {}
+        self.guest_avatar_visors = {}
         self.guest_flashlights = {}
         self.guest_sprints = {}
         self.applied_guest_sprints = None
@@ -2110,7 +2111,7 @@ class Host:
         role, character = identity
         if request.get("action") == "snapshot" and request.keys() <= {
             "action", "voice_events", "avatar_aim", "sprinting", "zone_epoch", native_guest_clock.WORLD_START,
-            native_flashlight.GUEST_SOURCE, native_player_avatar.GUEST_LIGHTER,
+            native_flashlight.GUEST_SOURCE, native_player_avatar.GUEST_LIGHTER, native_player_avatar.GUEST_VISOR,
         }:
             if request.get("zone_epoch") == self.zone_epoch and not self.transitioning:
                 member = self.native_recipients().get(character) if self.native_guest else None
@@ -2122,6 +2123,8 @@ class Host:
                         native_player_avatar.guest_aim(self, character, member, request["avatar_aim"])
                     if native_player_avatar.GUEST_LIGHTER in request:
                         native_player_avatar.guest_lighter(self, character, member, request[native_player_avatar.GUEST_LIGHTER])
+                    if native_player_avatar.GUEST_VISOR in request:
+                        native_player_avatar.guest_visor(self, character, member, request[native_player_avatar.GUEST_VISOR])
                     if native_flashlight.GUEST_SOURCE in request:
                         native_flashlight.receive_guest(self, character, member["pawn"], request[native_flashlight.GUEST_SOURCE])
                     if type(request.get("sprinting")) is bool:
@@ -5171,6 +5174,7 @@ class Client:
         self.last_sprint_sent = None
         self.last_aim_sent = None
         self.last_lighter_sent = None
+        self.last_visor_sent = None
         self.last_flashlight_sent = None
         self.next_projection = 0.0
         self.gameplay_seen = 0.0
@@ -5271,7 +5275,7 @@ class Client:
         self.native_return_reservation = None
         self.native_return_retry_allowed = False
         self.next_snapshot = 0.0
-        self.last_sprint_sent = self.last_aim_sent = self.last_lighter_sent = None
+        self.last_sprint_sent = self.last_aim_sent = self.last_lighter_sent = self.last_visor_sent = None
         self.last_flashlight_sent = None
         self.stack_drop_projection.rebind()
         self.crate_lids.reset()
@@ -6097,11 +6101,17 @@ class Client:
         lighter_mode = self.last_game.get(native_player_avatar.LOCAL_LIGHTER) if lighter_ready else None
         lighter_update = (self.zone_epoch, lighter_mode) if lighter_mode is not None else None
         lighter_changed = lighter_ready and lighter_update != self.last_lighter_sent
+        visor_ready = active and isinstance(outfit_frame, dict) and "visor_players" in outfit_frame
+        visor_helmet = self.last_game.get(native_player_avatar.LOCAL_VISOR) if visor_ready else None
+        visor_update = (self.zone_epoch, visor_helmet) if visor_helmet is not None else None
+        visor_changed = visor_ready and visor_update != self.last_visor_sent
         sprint_changed = sprint_update is not None and sprint_update != self.last_sprint_sent
         aim_changed = aim_update is not None and aim_update != self.last_aim_sent
         flashlight_changed = flashlight_ready and native_flashlight.guest_edge(flashlight_update) != native_flashlight.guest_edge(
             self.last_flashlight_sent)
-        if not (sprint_changed or aim_changed or flashlight_changed or lighter_changed) and (edges_only or now < self.next_snapshot):
+        if not (sprint_changed or aim_changed or flashlight_changed or lighter_changed or visor_changed) and (
+            edges_only or now < self.next_snapshot
+        ):
             return
         self.next_snapshot = now + 0.5
         request = {"action": "snapshot"}
@@ -6114,12 +6124,15 @@ class Client:
                 request.update(sprinting=sprint, zone_epoch=self.zone_epoch)
             if lighter_update is not None or lighter_changed:
                 request.update({native_player_avatar.GUEST_LIGHTER: lighter_mode or "-", "zone_epoch": self.zone_epoch})
+            if visor_update is not None or visor_changed:
+                request.update({native_player_avatar.GUEST_VISOR: visor_helmet or "-", "zone_epoch": self.zone_epoch})
             if flashlight_update is not None or flashlight_changed:
                 request.update({native_flashlight.GUEST_SOURCE: flashlight_update[1] if flashlight_update else None,
                                 "zone_epoch": self.zone_epoch})
         self.last_sprint_sent, self.last_aim_sent = sprint_update, aim_update
         self.last_flashlight_sent = flashlight_update
         self.last_lighter_sent = lighter_update
+        self.last_visor_sent = visor_update
         self.snapshot_request = asyncio.create_task(self._request_gameplay_snapshot(request))
 
     async def refresh_gameplay(self, *, project: bool = True, wait: bool = True) -> None:

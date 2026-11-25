@@ -4327,6 +4327,55 @@ async def verify_stock_flashlights(host: Seat, guest: Seat, _pawn: str) -> dict:
                                lambda frame: not frame.get("game", {}).get("native_guest_flashlight_view"), timeout=8)
     await inspect(host, guest_mode, guest_id, powered=False)
     assert await torch(host, guest_mode, "guestoffhandboundary") == guard
+    assert await torch(host, "visor", "seedhost") == [str(host_id)]
+    assert await torch(host, "visor", "seedguest") == [str(guest_id)]
+    helmet = "/Game/Classes/Armor_Items/Helm_TacLight.Helm_TacLight_C"
+    await wait_resident_status(guest.client / "run", lambda frame: any(
+        row.get("head") == helmet for row in frame.get("gameplay", {}).get("native_avatar_outfits", {}).get("outfits", {}).values()))
+
+    async def worn_views(target, owner_id, powered):
+        run = target.campaign / "run" if target is host else target.client / "run"
+        await wait_resident_status(run, lambda frame: (str(owner_id) in frame.get("game", {}).get(
+            "native_avatar_visor_view", [])) is powered)
+
+    async def worn(owner, observer, owner_id, selection, hand):
+        async with asyncio.timeout(6):
+            while True:
+                try:
+                    before = await torch(owner, "visor", "read")
+                    break
+                except AssertionError as error:
+                    if "visor stock helmet not projected" not in str(error):
+                        raise
+                    await asyncio.sleep(.1)
+        assert before[:2] == ["false", "false"], before
+        assert await torch(owner, selection, "selectregular") == ["selected"]
+        await torch(owner, hand, "lighton")
+        await view(observer, owner_id, None, True)
+        source = await torch(owner, "visor", "on")
+        assert source[:2] == ["true", "true"], source
+        await worn_views(observer, owner_id, True)
+        beam = await torch(observer, "visor", f"observe{owner_id}")
+        assert beam[0] == "2" and beam[1:5] == source[3:7] and float(beam[-1]) < 25, (source, beam)
+        await torch(owner, "visor", "turn")
+        async with asyncio.timeout(4):
+            while True:
+                turned = await torch(owner, "visor", "read")
+                observed = await torch(observer, "visor", f"observe{owner_id}")
+                error = angular_error(turned[7:10], observed[5:8])
+                if error < 8 and angular_error(beam[5:8], observed[5:8]) > 15:
+                    break
+                await asyncio.sleep(.12)
+        assert (await torch(owner, "visor", "off"))[:2] == ["false", "false"]
+        await worn_views(observer, owner_id, False)
+        await view(observer, owner_id, None, True)
+        assert await torch(observer, "visor", f"observe{owner_id}") == ["1"]
+        await torch(owner, hand, "lightoff")
+        await view(observer, owner_id, None, False)
+        return {"source": source, "observer": beam, "turned_error_degrees": error, "held_light_stayed_on": True}
+
+    host_visor = await worn(host, guest, host_id, offhand, stock)
+    guest_visor = await worn(guest, host, guest_id, guest_mode, guest_stock)
     assert campaign_save_hashes(host.campaign) == checkpoint, "Flashlight controls caused a premature save"
     angle = {"host_initial": angular_error(host_stock_light[9:12], regular_beam["direction"]),
              "guest_initial": angular_error(guest_stock_light[9:12], host_beam["direction"]),
@@ -4339,6 +4388,7 @@ async def verify_stock_flashlights(host: Seat, guest: Seat, _pawn: str) -> dict:
                                   "guest_held": guest_held,
                                   "host_held_beam": host_beam, "held_aim_error_degrees": angle,
                                   "host_held_turn": host_turn, "guest_held_turn": guest_turn,
+                                  "host_visor": host_visor, "guest_visor": guest_visor,
                                   "cleared_on_holster": True, "campaign_checkpoint_unchanged": True}}
 
 

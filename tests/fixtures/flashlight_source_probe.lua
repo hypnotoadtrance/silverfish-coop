@@ -28,6 +28,8 @@ local source, cue_calls, power_calls, hooked, selected_guid = nil, 0, 0, false, 
 local offhand_pawn, primary, seeded_slots
 local guest_hold, host_guard
 local trace_pawn, trace_instance, trace_hooks, trace_rows
+local visor_class = "/Game/Classes/Armor_Items/Helm_TacLight.Helm_TacLight_C"
+local visor_mesh = "StaticMesh /Game/Classes/Player/PlayerAssets/HelmetMeshes/SM_Helm_TacLight.SM_Helm_TacLight"
 
 local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -648,11 +650,71 @@ local function observe(world, local_pawn, id)
         spot.Intensity, spot.AttenuationRadius, geometry}, "\t")
 end
 
+local function visor_operation(world, pawn, connected, operation)
+    local observer = operation:match("^observe(%d+)$")
+    if observer or operation == "seedguest" then
+        assert(observer or not connected, "visor fixture guest seed requires host")
+        local remote
+        for _, candidate in ipairs(FindAllOf("Player_FP_C") or {}) do
+            if valid(candidate) and not candidate:IsActorBeingDestroyed() and not same(candidate, pawn)
+                and same(candidate:GetWorld(), world) and (not observer or player_id(candidate) == tonumber(observer)) then
+                assert(not remote, "visor fixture requires one remote player")
+                remote = candidate
+            end
+        end
+        assert(valid(remote), "visor fixture remote not ready")
+        if observer then
+            local beam, count
+            count = 0
+            for _, param in ipairs(remote:K2_GetComponentsByClass(asset("/Script/Engine.SpotLightComponent"))) do
+                local spot = type(param.type) == "function" and param:type() == "RemoteUnrealParam" and param:get() or param
+                local mount = valid(spot) and spot:GetAttachParent()
+                local mesh = valid(mount) and mount.StaticMesh
+                if valid(mesh) and mesh:GetFullName() == visor_mesh and spot:IsVisible() then
+                    assert(not beam, "visor fixture found duplicate beams")
+                    beam = spot
+                end
+                if valid(spot) and spot:IsVisible() then count = count + 1 end
+            end
+            if not beam then return tostring(count) end
+            local direction, location, helmet = beam:K2_GetComponentRotation(), beam:K2_GetComponentLocation(),
+                beam:GetAttachParent():K2_GetComponentLocation()
+            local offset = math.sqrt((location.X - helmet.X)^2 + (location.Y - helmet.Y)^2 + (location.Z - helmet.Z)^2)
+            return table.concat({count, beam.Intensity, beam.AttenuationRadius, beam.InnerConeAngle, beam.OuterConeAngle,
+                direction.Pitch, direction.Yaw, direction.Roll, offset}, "\t")
+        end
+        assert(remote:HasAuthority() and valid(remote.Save) and not same(remote.Save, pawn.Save))
+        pawn = remote
+    end
+    if operation == "seedhost" or operation == "seedguest" then
+        assert(not connected and not valid(pawn.Save.PlayerHelmet[item_class]), "visor fixture expected no worn helmet")
+        local class, output = asset(visor_class), {}
+        asset(equip_factory):MakeDefaultItem(class, pawn, output)
+        local row = output.Item or output
+        assert(same(row[item_class], class), "visor fixture could not make stock helmet")
+        pawn.Save.PlayerHelmet = row
+        if operation == "seedhost" then world.OwningGameInstance:UpdateHelmet() end
+        return tostring(player_id(pawn))
+    end
+    assert(same(pawn.Save.PlayerHelmet[item_class], asset(visor_class)), "visor stock helmet not projected")
+    if operation == "on" or operation == "off" then
+        pawn:Toggle_FlashLight(false)
+    elseif operation == "turn" then
+        local rotation = pawn.Controller:GetControlRotation()
+        pawn.Controller:SetControlRotation({Pitch = rotation.Pitch < 0 and 24 or -24, Yaw = rotation.Yaw, Roll = 0})
+    end
+    local source = pawn.FlashLight_Source_BP.ChildActor
+    local spot = source.SpotLight
+    local direction = spot:K2_GetComponentRotation()
+    return table.concat({tostring(source.Powered), tostring(spot:IsVisible()), source.Type, spot.Intensity,
+        spot.AttenuationRadius, spot.InnerConeAngle, spot.OuterConeAngle, direction.Pitch, direction.Yaw, direction.Roll}, "\t")
+end
+
 local function run(operation)
+    local mode
     if portable then
-        local mode
         mode, operation = operation:match("^([a-z]+)x([a-z0-9]+)$")
-        assert(mode == "regularhost" or mode == "regularguest" or mode == "offhandhost" or mode == "offhandguest",
+        assert(mode == "regularhost" or mode == "regularguest" or mode == "offhandhost" or mode == "offhandguest" or mode == "visor",
             "unknown portable beam fixture mode")
         guest_source = mode == "regularguest"
         offhand = mode:match("^offhand") ~= nil
@@ -665,6 +727,11 @@ local function run(operation)
     local pawn = asset("/Script/Engine.Default__GameplayStatics"):GetPlayerPawn(world, 0)
     assert(valid(pawn) and pawn:IsLocallyControlled() and same(pawn:GetWorld(), world), "flashlight_probe_local_pawn_unavailable")
     local connected = valid(driver.ServerConnection)
+    if mode == "visor" then
+        assert(same(pawn.Save, world.OwningGameInstance.SaveSlot_Ref) and pawn:HasAuthority() ~= connected,
+            "visor fixture local save unavailable")
+        return visor_operation(world, pawn, connected, operation)
+    end
     if connected and guest_offhand and operation == "diagnoseoffhand" then return diagnose_offhand(world, pawn, driver) end
     if connected and not guest_source and not guest_offhand then
         return observe(world, pawn, assert(math.tointeger(operation:match("^observe(%d+)$"))))

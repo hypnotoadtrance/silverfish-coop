@@ -2,14 +2,11 @@ local flashlight = {}
 
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local source_class = "/Game/Classes/Equipment/Equipment_Assets/FlashLight_Source_BP.FlashLight_Source_BP_C"
-local light_class = "/Script/Engine.SpotLightComponent"
-local light_template = source_class .. ":SpotLight_GEN_VARIABLE"
 local cookie_path = "/Game/Assets/Materials/Mat_Misc/M_LightCookie.M_LightCookie"
-local click_path = "/Game/Assets/Sounds/CUEs/Mechanical_Cues/Switch_Reset_Cue.Switch_Reset_Cue"
-local click_range = 4000 -- Switch_Reset_Cue's stock attenuation maximum in centimeters.
+local light_class = "/Script/Engine.SpotLightComponent"
 local maths = "/Script/Engine.Default__KismetMathLibrary"
-local statics = "/Script/Engine.Default__GameplayStatics"
 local avatar = require("native_player_avatar")
+local light_view = require("native_avatar_light")
 local offhand_view = require("native_avatar_offhand")
 local guest_save = require("guest_save")
 local players = require("players")
@@ -23,18 +20,10 @@ local regular = {class = equipment_path .. "Eqp_Flashlight.Eqp_Flashlight_C",
 local heavy = {class = equipment_path .. "Eqp_Heavy_Flashlight.Eqp_Heavy_Flashlight_C",
     mesh = torch_path .. "SM_Prop_Flashlight_02.SM_Prop_Flashlight_02", intensity = 20, radius = 6000,
     inner = 30, outer = 60, pose = {0, 18.463014427, 16.476153329, 0, 90, 0, 1, 1, 1}}
-local transform = {Translation = {X = 0, Y = 0, Z = 0}, Rotation = {X = 0, Y = 0, Z = 0, W = 1}, Scale3D = {X = 1, Y = 1, Z = 1}}
-
 local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
 local function exact(object, class) return valid(object) and same(object:GetClass(), StaticFindObject(class)) end
 local function finite(value, low, high) return type(value) == "number" and value >= low and value <= high end
-
-local function asset(path)
-    local object = StaticFindObject(path)
-    if not valid(object) then LoadAsset(path); object = StaticFindObject(path) end
-    return object
-end
 
 local function scope(state, phase)
     local host, world = phase == "hosting", state.world
@@ -208,53 +197,6 @@ local function existing_beam(world, pawn, profile)
     return spot, source
 end
 
-local function local_beam(pawn, mount, profile, values)
-    local class, cookie = StaticFindObject(light_class), asset(cookie_path)
-    if not valid(class) or not valid(cookie) or not valid(asset(source_class)) then return end
-    local stock = StaticFindObject(light_template)
-    if not valid(stock) or not same(stock:GetClass(), class) then return end
-    local spot = pawn:AddComponentByClass(class, true, transform, true)
-    if not valid(spot) then return end
-    local ok = pcall(function()
-        spot:SetVisibility(false, false)
-        spot:SetMobility(2)
-        pawn:FinishAddComponent(spot, true, transform)
-        local none = FName("None", EFindName.FNAME_Find)
-        if not spot:K2_AttachToComponent(mount, none, 2, 2, 0, false) then error("flashlight view attachment refused") end
-        spot:K2_SetRelativeLocationAndRotation({X = values[1], Y = values[2], Z = values[3]},
-            {Pitch = values[4], Yaw = values[5], Roll = values[6]}, false, {}, true)
-        -- A bare component uses engine defaults. Match the stock emitter's units,
-        -- falloff and cookie even when the remote first-person actor is hidden.
-        spot:SetUseInverseSquaredFalloff(stock.bUseInverseSquaredFalloff)
-        spot:SetIntensityUnits(stock.IntensityUnits)
-        spot:SetLightFalloffExponent(stock.LightFalloffExponent)
-        spot:SetCastShadows(stock.CastShadows)
-        spot:SetUseTemperature(stock.bUseTemperature)
-        spot:SetTemperature(stock.Temperature)
-        spot:SetLightFunctionFadeDistance(stock.LightFunctionFadeDistance)
-        spot:SetLightFunctionDisabledBrightness(stock.DisabledBrightness)
-        spot:SetVolumetricScatteringIntensity(stock.VolumetricScatteringIntensity)
-        spot:SetHiddenInGame(false, false)
-        spot:SetIntensity(profile.intensity)
-        spot:SetAttenuationRadius(profile.radius)
-        spot:SetInnerConeAngle(profile.inner)
-        spot:SetOuterConeAngle(profile.outer)
-        spot:SetLightColor({R = values[7], G = values[8], B = values[9], A = 1}, true)
-        spot:SetLightFunctionMaterial(cookie)
-    end)
-    if ok then return spot end
-    spot:K2_DestroyComponent(pawn)
-end
-
-local function click(listener, mount)
-    local api, sound = StaticFindObject(statics), asset(click_path)
-    if not valid(api) or not valid(sound) then return false end
-    local point, ear = mount:K2_GetComponentLocation(), listener:K2_GetActorLocation()
-    if (point.X - ear.X)^2 + (point.Y - ear.Y)^2 + (point.Z - ear.Z)^2 > click_range^2 then return false end
-    api:PlaySoundAtLocation(listener, sound, point, {Pitch = 0, Yaw = 0, Roll = 0}, 1, 1, 0, nil, nil, nil, nil)
-    return true
-end
-
 local function aim_offhand(view, now)
     local rendered = view.rendered
     if not rendered or not valid(rendered.light) or not valid(rendered.pawn) then return end
@@ -306,7 +248,7 @@ local function project_offhand(view, pawn)
         view.next_retry = now + .5
         local mount = offhand_view.create(pawn, body)
         if not valid(mount) then return end
-        local light = local_beam(pawn, mount, regular, regular.pose)
+        local light = light_view.create(pawn, mount, regular, regular.pose)
         if not valid(light) then mount:K2_DestroyComponent(pawn); return end
         light:SetAbsolute(false, true, false)
         rendered = {offhand = true, visual_only = true, body = body, pawn = pawn, mount = mount, light = light,
@@ -352,7 +294,7 @@ local function project(state, listener, view)
         -- If the source is already active on this seat, leave the stock effect in charge.
         local stock_visible = valid(light) and source.Powered == true and light:IsVisible()
             and not light.bHiddenInGame and not source.bHidden
-        if not stock_visible then light = local_beam(pawn, mount, view.profile, view.values) end
+        if not stock_visible then light = light_view.create(pawn, mount, view.profile, view.values) end
         if valid(light) then
             rendered = {pawn = pawn, mount = mount, light = light,
                 instance = view.instance, visual_only = not stock_visible}
@@ -369,7 +311,7 @@ local function project(state, listener, view)
     if view.click_until then
         local current = now <= view.click_until
         view.click_until = nil
-        if current and click(listener, rendered and rendered.light or mount) then view.heard = view.switch end
+        if current and light_view.click(listener, rendered and rendered.light or mount) then view.heard = view.switch end
     end
 end
 

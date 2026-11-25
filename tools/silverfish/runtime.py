@@ -3369,6 +3369,15 @@ class Bridge:
                 elif (fields[0] == "native-avatar-local-lighter" and len(fields) == 2
                       and data.get("state") == "connected" and fields[1] in native_player_avatar.LIGHTER_MODES):
                     data[native_player_avatar.LOCAL_LIGHTER] = fields[1]
+                elif (fields[0] == "native-avatar-local-visor" and len(fields) == 2 and fields[1] != "-"
+                      and data.get("state") == "connected" and native_player_avatar.valid_path(fields[1])):
+                    data[native_player_avatar.LOCAL_VISOR] = fields[1]
+                elif (fields[0] in ("native-avatar-visor-source", "native-avatar-visor-view") and len(fields) == 2
+                      and data.get("state") in ("hosting", "connected") and native_player_avatar.valid_id(fields[1])):
+                    if fields[0] == "native-avatar-visor-view":
+                        data.setdefault(native_player_avatar.VISOR_VIEW, []).append(fields[1])
+                    elif data["state"] == "hosting":
+                        data.setdefault(native_player_avatar.VISOR_SOURCE, []).append(fields[1])
                 elif (fields[0] == "player-local-sprint" and len(fields) == 2
                       and data.get("state") == "connected" and fields[1] in ("0", "1")):
                     data["player_local_sprint"] = fields[1] == "1"

@@ -3,6 +3,7 @@ local weapon_view = require("native_avatar_weapon_view")
 local handgun_view = require("native_avatar_handgun")
 local character_view = require("native_avatar_character_view")
 local gait = require("native_avatar_gait")
+local visor = require("native_avatar_visor")
 local avatar = {}
 
 local body_path = "/Game/Classes/NPCs/NPC_Assets/CharacterModels/Player_NoArmor.Player_NoArmor"
@@ -42,6 +43,8 @@ local observed_weapons = {}
 local client_world, client_map, client_receipt
 local host_world, host_aim_receipt, host_aims
 local holding_aim, lighter_mode
+local local_visor
+local client_visors, host_visors = {}, {}
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local armor_root = "/Game/Classes/Armor_Items/"
 
@@ -137,12 +140,14 @@ end
 
 local function sync_local_aim(state, phase)
     local pawn = phase == "connected" and state.local_pawn and state.local_pawn.pawn or nil
-    holding_aim, lighter_mode = nil, nil
+    holding_aim, lighter_mode, local_visor = nil, nil, nil
     if not valid(pawn) or not pawn:IsLocallyControlled() then return end
     holding_aim = false
     if not pawn.Dead then
         local read, mode = pcall(weapon_view.local_lighter, pawn)
         if read then lighter_mode = mode end
+        local read_visor, powered = pcall(visor.powered, pawn, state.world)
+        if read_visor and powered == true then local_visor = worn(pawn.Save.PlayerHelmet) end
     end
     if pawn.Dead or pawn.Sprinting or pawn.IsWeaponBlocked then return end
     -- The stock ADS state works for all local firearms, including ones that
@@ -193,9 +198,14 @@ local function observe(state, phase)
                     local gun = aim_kind(read_weapon and cached and cached.actor or nil)
                     local firearm = gun ~= "-" and cached.actor:GetClass():GetFullName():match("^BlueprintGeneratedClass (.+)$")
                     if not firearm or not firearm_path(firearm) then firearm = "-" end
+                    local read_visor, powered = false, false
+                    if pawn:IsLocallyControlled() and head ~= "-" then
+                        read_visor, powered = pcall(visor.powered, pawn, state.world)
+                    end
                     observations[id] = { pawn = details.name, body = body, head = head, weapon = read_weapon and weapon or "-",
                         appearance = read_appearance and appearance or "-", gun = gun, aim = pawn.Aiming and gun or "-",
-                        firearm = firearm, sprinting = pawn.Sprinting == true, moving = has_horizontal_motion(pawn) }
+                        firearm = firearm, sprinting = pawn.Sprinting == true, moving = has_horizontal_motion(pawn),
+                        visor = read_visor and powered == true }
                 end
             end
         end
@@ -397,6 +407,7 @@ local function remove(entry)
     weapon_view.clear(entry)
     handgun_view.clear(entry)
     character_view.clear(entry)
+    visor.clear(entry)
     if valid(entry.helmet) and valid(entry.pawn) then
         entry.helmet:K2_DestroyComponent(entry.pawn)
     end
@@ -812,6 +823,7 @@ local function apply_outfit(entry, outfit, cosmetics)
             entry.helmet:SetVisibility(false, false)
         end
         entry.hide_plumage = defaults and defaults.HideHair == true
+        visor.equip(entry, defaults)
         entry.head_worn = mesh and head_path or "-"
         entry.request_head = head_path
     end
@@ -821,12 +833,14 @@ function avatar.sync(state, phase)
     local world = phase == "connected" and state.world:GetAddress() or nil
     if client_world ~= world or client_map ~= state.map then
         client_world, client_map, client_outfits, client_receipt = world, state.map, {}, nil
+        client_visors = {}
     end
     local authority = phase == "hosting" and state.world:GetAddress() or nil
-    if authority ~= host_world then host_world, host_aim_receipt, host_aims = authority, nil, {} end
+    if authority ~= host_world then host_world, host_aim_receipt, host_aims, host_visors = authority, nil, {}, {} end
     sync_local_aim(state, phase)
     observe(state, phase)
     local outfits = phase == "hosting" and observations or client_outfits
+    local visors = phase == "hosting" and host_visors or client_visors
     local seen = {}
     if (phase == "hosting" or phase == "connected") and state.local_pawn then
         local stock_time
@@ -855,6 +869,7 @@ function avatar.sync(state, phase)
                             local cosmetics = character_view.decode(appearance)
                             if not cosmetics then error("Invalid remote character appearance") end
                             apply_outfit(entry, outfit, cosmetics)
+                            pcall(visor.sync, entry, visors[entry.id] == true and not pawn.Dead, state.local_pawn.pawn)
                             character_view.apply(entry, cosmetics, appearance, asset, visual_component)
                             local equipment = outfit and outfit.weapon or "-"
                             if phase == "hosting" then equipment = weapon_view.lighter_override(equipment, host_aims[entry.id]) end
@@ -898,15 +913,32 @@ function avatar.sync(state, phase)
     end
 end
 
+local function read_visors(fields)
+    local visors = {}
+    if fields[5] ~= "visor" then return visors, 5 end
+    local list, count = fields[6], 0
+    if not list or #list > 54 or not list:match("^%d[%d,]*%d$") and not list:match("^%d$") then
+        error("Invalid remote visor list")
+    end
+    for value in list:gmatch("[^,]+") do
+        local id = math.tointeger(tonumber(value))
+        count = count + 1
+        if not id or id < 0 or id > 2147483647 or visors[id] or count > 5 then error("Invalid remote visor") end
+        visors[id] = true
+    end
+    return visors, 7
+end
+
 function avatar.command(fields, state, phase)
     if fields[2] == "native-avatar-host-aims" then
         local receipt = fields[4]
+        local visors, first = read_visors(fields)
         if phase ~= "hosting" or fields[3] ~= state.map or not receipt or #receipt ~= 32
-            or not receipt:match("^[0-9a-f]+$") or (#fields - 4) % 2 ~= 0 or #fields > 12 then
+            or not receipt:match("^[0-9a-f]+$") or (#fields - first + 1) % 2 ~= 0 or #fields > first + 7 then
             error("Invalid hosted avatar aim scope")
         end
         local aims = {}
-        for index = 5, #fields, 2 do
+        for index = first, #fields, 2 do
             local id, mode = math.tointeger(tonumber(fields[index])), fields[index + 1]
             if not id or id < 0 or id > 2147483647 or aims[id]
                 or not (aimed[mode] or mode == "closed" or mode == "open" or mode == "lit") then
@@ -914,17 +946,18 @@ function avatar.command(fields, state, phase)
             end
             aims[id] = mode
         end
-        host_world, host_aim_receipt, host_aims = state.world:GetAddress(), receipt, aims
+        host_world, host_aim_receipt, host_aims, host_visors = state.world:GetAddress(), receipt, aims, visors
         return "Guest avatar aim received"
     end
     if fields[2] ~= "native-avatar-outfits" then return end
     local receipt = fields[4]
+    local visors, first = read_visors(fields)
     if phase ~= "connected" or fields[3] ~= state.map or not receipt or #receipt ~= 32
-        or not receipt:match("^[0-9a-f]+$") or (#fields - 4) % 9 ~= 0 or #fields > 49 then
+        or not receipt:match("^[0-9a-f]+$") or (#fields - first + 1) % 9 ~= 0 or #fields > first + 44 then
         error("Invalid remote avatar outfit scope")
     end
     local outfits = {}
-    for index = 5, #fields, 9 do
+    for index = first, #fields, 9 do
         local id = math.tointeger(tonumber(fields[index]))
         local body, head, weapon, appearance = fields[index + 1], fields[index + 2], fields[index + 3], fields[index + 4]
         local aim, firearm, sprint = fields[index + 5], fields[index + 6], fields[index + 7]
@@ -941,6 +974,7 @@ function avatar.command(fields, state, phase)
         if motion ~= "-" then outfits[id].moving = motion == "1" end
     end
     client_world, client_map, client_outfits, client_receipt = state.world:GetAddress(), state.map, outfits, receipt
+    client_visors = visors
     return "Remote avatar outfits received"
 end
 
@@ -957,6 +991,9 @@ function avatar.rows(row)
                 swings[entry] and 1 or 0)
         end
         if entry.displayed_lean then rows[#rows + 1] = row("native-avatar-lean", entry.name, entry.displayed_lean) end
+        if valid(entry.visor_light) and entry.visor_light:IsVisible() then
+            rows[#rows + 1] = row("native-avatar-visor-view", entry.id)
+        end
         if entry.last_use then
             local use = entry.last_use
             rows[#rows + 1] = row("native-avatar-use", entry.name, use.serial, use.item, use.mesh,
@@ -970,11 +1007,13 @@ function avatar.rows(row)
     for id, outfit in pairs(observations) do
         rows[#rows + 1] = row("native-avatar-outfit", id, outfit.pawn, outfit.body, outfit.head, outfit.weapon,
             outfit.appearance, outfit.aim, outfit.gun, outfit.firearm, outfit.sprinting and 1 or 0, outfit.moving and 1 or 0)
+        if outfit.visor then rows[#rows + 1] = row("native-avatar-visor-source", id) end
     end
     if client_receipt then rows[#rows + 1] = row("native-avatar-outfits-receipt", client_receipt) end
     if host_aim_receipt then rows[#rows + 1] = row("native-avatar-host-aim-receipt", host_aim_receipt) end
     if holding_aim ~= nil then rows[#rows + 1] = row("native-avatar-local-aim", holding_aim and 1 or 0) end
     if lighter_mode then rows[#rows + 1] = row("native-avatar-local-lighter", lighter_mode) end
+    if local_visor and local_visor ~= "-" then rows[#rows + 1] = row("native-avatar-local-visor", local_visor) end
     return rows
 end
 

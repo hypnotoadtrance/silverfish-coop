@@ -16,6 +16,10 @@ HOST_AIM_RECEIPT = "native_avatar_host_aim_receipt"
 LOCAL_AIM = "native_avatar_local_aim"
 LOCAL_LIGHTER = "native_avatar_local_lighter"
 GUEST_LIGHTER = "avatar_lighter"
+LOCAL_VISOR = "native_avatar_local_visor"
+GUEST_VISOR = "avatar_visor"
+VISOR_SOURCE = "native_avatar_visor_source"
+VISOR_VIEW = "native_avatar_visor_view"
 LIGHTER_MODES = ("closed", "open", "lit")
 _LIGHTER_MESHES = [
     f"/Game/Assets/StaticMeshes/Mesh_Props/PropActor_Meshes/{name}.{name}"
@@ -179,6 +183,17 @@ def guest_lighter(host, character, member, mode):
         host.guest_avatar_lighters[pawn] = host.zone_epoch, mode, time.monotonic() + 1.5
 
 
+def guest_visor(host, character, member, helmet):
+    pawn = member["pawn"]
+    standing = host.party["players"].get(character, {}).get("downed") is False
+    if (helmet == "-" or not valid_path(helmet) or not standing or host.party.get("wipe")
+            or not any(outfit["pawn"] == pawn and outfit["head"] == helmet
+                       for outfit in host.last_game.get(KEY, {}).values())):
+        host.guest_avatar_visors.pop(pawn, None)
+    else:
+        host.guest_avatar_visors[pawn] = host.zone_epoch, helmet, time.monotonic() + 1.5
+
+
 def frame(host):
     game = host.last_game
     area, epoch = game.get("map"), host.zone_epoch
@@ -196,7 +211,14 @@ def frame(host):
             pawn: value for pawn, value in guest_lighters.items()
             if pawn in allowed and value[0] == epoch and value[2] > now
         }
-    outfits, lighter_modes = {}, {}
+    guest_visors = getattr(host, "guest_avatar_visors", {})
+    if guest_visors:
+        host.guest_avatar_visors = guest_visors = {
+            pawn: value for pawn, value in guest_visors.items()
+            if pawn in allowed and value[0] == epoch and value[2] > now
+        }
+    host_visors = game.get(VISOR_SOURCE, ())
+    outfits, lighter_modes, visor_players = {}, {}, []
     for player_id, outfit in game[KEY].items():
         pawn = outfit["pawn"]
         if pawn in allowed or pawn == lead:
@@ -212,15 +234,27 @@ def frame(host):
                     lighter_mode = "closed"
                 elif lighter_mode and pawn in guest_lighters:
                     lighter_mode = guest_lighters[pawn][1]
+                if (standing and not host.party.get("wipe") and pawn in guest_visors
+                        and guest_visors[pawn][1] == row["head"]):
+                    visor_players.append(player_id)
+            elif (player_id in host_visors and not host.party.get("wipe")
+                  and not host.party["players"].get("host", {}).get("downed")):
+                visor_players.append(player_id)
             if lighter_mode:
                 lighter_modes[player_id] = lighter_mode
             outfits[player_id] = row
-    return {"map": area, "epoch": epoch, "outfits": outfits, "lighter_modes": lighter_modes}
+    return {"map": area, "epoch": epoch, "outfits": outfits, "lighter_modes": lighter_modes,
+            "visor_players": sorted(visor_players)}
+
+
+def _visor_arguments(players):
+    return ("visor", ",".join(players)) if players else ()
 
 
 async def project_host(host, bridge):
     game = host.last_game
-    if not host.guest_avatar_aims and not getattr(host, "guest_avatar_lighters", None) and not game.get(HOST_AIM_RECEIPT):
+    if (not host.guest_avatar_aims and not getattr(host, "guest_avatar_lighters", None)
+            and not getattr(host, "guest_avatar_visors", None) and not game.get(HOST_AIM_RECEIPT)):
         return game
     incoming = frame(host)
     if incoming is None:
@@ -230,11 +264,14 @@ async def project_host(host, bridge):
             if row["aim"] != "-" and game[KEY][player_id]["pawn"] != lead}
     aims.update({player_id: mode for player_id, mode in incoming["lighter_modes"].items()
                  if game[KEY][player_id]["pawn"] != lead})
-    receipt = hashlib.sha256(json.dumps([incoming["map"], incoming["epoch"], aims], sort_keys=True).encode()).hexdigest()[:32]
+    visors = [player_id for player_id in incoming["visor_players"] if game[KEY][player_id]["pawn"] != lead]
+    receipt = hashlib.sha256(json.dumps([incoming["map"], incoming["epoch"], aims, visors],
+                                        sort_keys=True).encode()).hexdigest()[:32]
     if game.get(HOST_AIM_RECEIPT) == receipt:
         return game
     arguments = [value for pair in sorted(aims.items()) for value in pair]
-    return await bridge.command("native-avatar-host-aims", incoming["map"], receipt, *arguments, timeout=2)
+    return await bridge.command("native-avatar-host-aims", incoming["map"], receipt,
+                                *_visor_arguments(visors), *arguments, timeout=2)
 
 
 async def project(bridge, game, incoming, epoch):
@@ -258,13 +295,18 @@ async def project(bridge, game, incoming, epoch):
             or weapon_meshes(outfits[player_id]["weapon"] + "~" + mode) is None
             for player_id, mode in modes.items()):
         return game
+    visors = incoming.get("visor_players", [])
+    if (not isinstance(visors, list) or len(visors) > 5
+            or any(not valid_id(player_id) or player_id not in outfits or outfits[player_id]["head"] == "-"
+                   for player_id in visors) or len(visors) != len(set(visors))):
+        return game
     if modes:
         outfits = {player_id: dict(row, weapon=row["weapon"] + "~" + modes[player_id]) if player_id in modes else row
                    for player_id, row in outfits.items()}
-    receipt = hashlib.sha256(json.dumps([area, epoch, outfits], sort_keys=True).encode()).hexdigest()[:32]
+    receipt = hashlib.sha256(json.dumps([area, epoch, outfits, visors], sort_keys=True).encode()).hexdigest()[:32]
     if game.get(RECEIPT) == receipt:
         return game
-    arguments = []
+    arguments = list(_visor_arguments(visors))
     for player_id, row in sorted(outfits.items()):
         motion = row.get("moving")
         arguments.extend((player_id, *(row[key] for key in _OUTFIT[:-2]), str(int(row["sprinting"])),
