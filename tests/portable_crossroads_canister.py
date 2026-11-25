@@ -76,6 +76,21 @@ def instrument_canisters(source):
         for index = 1, 6 do assert(native[index] == reflected[index], "Canister sample differs at field " .. index) end
         assert(SilverfishReadNativePlacedCanister(address, world_address + 1, hosting, false, true) == nil,
             "The sampler accepted a different world")
+        local saved_sample, calls = entry.sample, 0
+        local function count_rows(...)
+            calls = calls + 1
+            return ...
+        end
+        local _, burning, health, x, y, z = table.unpack(native, 1, native.n)
+        observed_row(entry, count_rows, burning, false, health, x, y, z)
+        observed_row(entry, count_rows, burning, false, health, x, y, z)
+        assert(calls == 1, "An unchanged status sample was formatted twice")
+        observed_row(entry, count_rows, burning, false, health, x + 1, y, z)
+        observed_row(entry, count_rows, not burning, false, health, x + 1, y, z)
+        observed_row(entry, count_rows, not burning, true, health, x + 1, y, z)
+        observed_row(entry, count_rows, not burning, true, health - 1, x + 1, y, z)
+        assert(calls == 5, "A changed canister sample reused a stale row")
+        entry.sample = saved_sample
         local count = 512
         local function time_reads(read, ...)
             local start = os.clock()
@@ -98,10 +113,10 @@ local function observe_canister(path)
     return canister_witness[path]
 end""")
     for line, observation in (
-        ('                rows[#rows + 1] = row("native-explosive-canister", entry.path, burning and 1 or 0,',
+        ('                rows[#rows + 1] = observed_row(entry, row, burning, particles_active, health, x, y, z)',
          '                local witness = observe_canister(entry.path)\n'
          '                if burning then witness.frames = witness.frames + 1 end\n'
-         '                if particles and particles:IsActive() then witness.active = witness.active + 1 end\n'),
+         '                if particles_active then witness.active = witness.active + 1 end\n'),
         ('        local path, mode = args[index]:match("^([^|]+)|([012])$")',
          '        local witness = path and observe_canister(path)\n'
          '        if mode == "1" then witness.apply_lit = witness.apply_lit + 1 end\n'
@@ -134,7 +149,8 @@ async def verify_crossroads_canister(host, guest, _pawn, resident_events, campai
         result = await command(seat, "sample", target)
         count, native_ms, lua_ms = map(float, result["ack"]["message"].split(","))
         return {"reads_per_path": int(count), "native_ms": native_ms, "lua_ms": lua_ms,
-                "sample_matched": True, "wrong_world_refused": True}
+                "sample_matched": True, "wrong_world_refused": True, "unchanged_row_reused": True,
+                "row_refreshed_for_movement_fire_particles_and_health": True}
 
     async def stage(target):
         await wait_resident_status(host_run, lambda frame: stock(frame, target).get("phase") == 0)

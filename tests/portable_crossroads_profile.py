@@ -6,7 +6,9 @@ import math
 import re
 
 from portable_guest_world_start import wait_resident_status
+from tools.silverfish import native_package_handoff_journal
 from tools.silverfish.control import current_status, submit
+from tools.silverfish.travel import CROSSROADS
 
 
 def instrument_profile(source):
@@ -76,6 +78,16 @@ def instrument_shop_discovery(source):
     if source.count(anchor) != 1:
         raise ValueError("The stock shop actor discovery anchor changed")
     return source.replace(anchor, 'pcall(SilverfishProfileCrossroadsCall, "stock_shop_discovery", shop_actors, world)')
+
+
+def instrument_journal_context(source):
+    gate = 'and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"'
+    call = "local context = host(state, phase)\n    if not context or not same(menu:GetOwningPlayer()"
+    if source.count(gate) != 1 or source.count(call) != 1:
+        raise ValueError("The stock journal timing anchors changed")
+    return source.replace(gate, 'and (os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"'
+                          ' or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1")').replace(
+        call, call.replace("host(state, phase)", 'SilverfishProfileCrossroadsCall("journal_host_context", host, state, phase)'))
 
 
 def instrument_anomaly_work(source):
@@ -193,7 +205,7 @@ async def profile_world(host, guest, area, probe):
         profiles = await asyncio.gather(*(read(seat) for seat in seats.values()))
         for profile in profiles:
             timings = profile["timings"]
-            for operation in ("command_mailbox", "crate_inline_scan", "npc_marker_class_lookup"):
+            for operation in ("command_mailbox", "crate_inline_scan", "npc_marker_class_lookup", "journal_host_context"):
                 assert operation not in timings, (operation, timings.get(operation))
             discoveries = timings["loose_discovery"]["count"]
             assert 0 < discoveries <= math.ceil(profile["seconds"] / .125) + 1, profile
@@ -232,7 +244,20 @@ async def profile_world(host, guest, area, probe):
     after_movement = await transport()
     comparison = await asyncio.gather(*(compare_vitals(seat) for seat in seats.values()))
     rows = await asyncio.gather(*(compare_rows(seat) for seat in seats.values()))
+    journal = {}
+    if area == CROSSROADS:
+        async def journal_action(action):
+            reply = await submit(runs["host"], native_package_handoff_journal.FIXTURE, target=action)
+            assert reply.get("ok") and reply.get("native_package_handoff_journal_fixture") == action, reply
+
+        await journal_action("open")
+        view = await wait_resident_status(runs["host"], lambda frame:
+            frame["game"].get("native_host_invite_journal") == "journal"
+            and frame["game"].get(native_package_handoff_journal.JOURNAL, {}).get("state") == "idle")
+        await journal_action("close")
+        await wait_resident_status(runs["host"], lambda frame: "native_host_invite_journal" not in frame["game"])
+        journal = {"journal_open_and_close": view["game"][native_package_handoff_journal.JOURNAL]}
     return {"idle": idle, "guest_walking": moving, "guest_max_displacement_cm": max(movement),
             "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(after_idle, after_movement),
             "row_format_comparison": dict(zip(seats, rows, strict=True)),
-            "vitals_comparison": dict(zip(seats, comparison, strict=True))}
+            "vitals_comparison": dict(zip(seats, comparison, strict=True)), **journal}

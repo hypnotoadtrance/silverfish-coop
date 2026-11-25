@@ -6677,7 +6677,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     try:
         if crossroads_profile:
             from portable_crossroads_profile import (
-                instrument_anomaly_work, instrument_inline_crate_scan, instrument_input_mappings,
+                instrument_anomaly_work, instrument_inline_crate_scan, instrument_input_mappings, instrument_journal_context,
                 instrument_loose_discovery, instrument_npc_class_discovery, instrument_profile,
                 instrument_shop_discovery, instrument_vital_reads,
             )
@@ -6712,6 +6712,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             ]
             proof["crossroads_shop_overlays"] = [
                 probes.enter_context(portable_script_overlay(game, "native_world.lua", instrument_shop_discovery))
+                for game in games
+            ]
+            proof["crossroads_journal_overlays"] = [
+                probes.enter_context(portable_script_overlay(game, "native_host_invite.lua", instrument_journal_context))
                 for game in games
             ]
             proof["crossroads_loot_overlays"] = [

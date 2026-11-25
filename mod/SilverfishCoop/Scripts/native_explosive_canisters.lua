@@ -98,6 +98,17 @@ local function sample_lua(entry, hosting)
     return true, burning, actor.Health, location and location.X, location and location.Y, location and location.Z
 end
 
+local function observed_row(entry, row, burning, particles_active, health, x, y, z)
+    local sample = entry.sample
+    if sample and sample.row == row and sample.burning == burning and sample.particles_active == particles_active
+        and sample.health == health and sample.x == x and sample.y == y and sample.z == z then return sample.text end
+    local text = row("native-explosive-canister", entry.path, burning and 1 or 0, particles_active and 1 or 0,
+        entry.changed and 1 or 0, health, x or "-", y or "-", z or "-")
+    entry.sample = {row = row, burning = burning, particles_active = particles_active, health = health, x = x, y = y, z = z,
+        text = text}
+    return text
+end
+
 function canisters.rows(state, phase, row)
     if not same(state.world, world) or state.map ~= area then
         world, area, active, removed = state.world, state.map, {}, {}
@@ -134,9 +145,8 @@ function canisters.rows(state, phase, row)
             elseif entry.path then
                 entry.changed = entry.changed or burning
                 local particles = burning and phase == "connected" and fire_components(entry.actor)
-                rows[#rows + 1] = row("native-explosive-canister", entry.path, burning and 1 or 0,
-                    particles and particles:IsActive() and 1 or 0, entry.changed and 1 or 0, health,
-                    x or "-", y or "-", z or "-")
+                local particles_active = particles and particles:IsActive() == true or false
+                rows[#rows + 1] = observed_row(entry, row, burning, particles_active, health, x, y, z)
             end
         else
             if entry.path then removed[entry.path] = true end

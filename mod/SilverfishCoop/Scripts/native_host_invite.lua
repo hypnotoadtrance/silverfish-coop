@@ -28,6 +28,7 @@ local handoff_screens = {package_choosing = "choosing", package_submitting = "su
 local journal_fixture = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local bridge, offer_path, request_path, response_path, current, session, fixture_menu
+local statics, viewport
 local dispatch
 
 local function valid(object)
@@ -64,24 +65,32 @@ local function host(state, phase)
         or not same(controller:GetWorld(), world) or not same(pawn:GetWorld(), world) then
         return nil, "pawn_scope_changed"
     end
-    local statics, viewport = StaticFindObject(stats_path), FindFirstOf("GameViewportClient")
+    if not valid(statics) then statics = StaticFindObject(stats_path) end
     if not valid(statics) or statics:IsGamePaused(controller) ~= false then return nil, "world_pause_unverified" end
-    if not exact(viewport, viewport_class) or not same(viewport.World, world) then return nil, "viewport_unqualified" end
     local instance = statics:GetGameInstance(controller)
-    if not valid(instance) or not same(viewport:GetOuter(), instance:GetOuter()) then
+    local outer = valid(instance) and instance:GetOuter()
+    if not valid(outer) then return nil, "game_instance_unqualified" end
+    if not valid(viewport) or not same(viewport.World, world) or not same(viewport:GetOuter(), outer) then
+        viewport = FindFirstOf("GameViewportClient")
+    end
+    if not exact(viewport, viewport_class) or not same(viewport.World, world) then return nil, "viewport_unqualified" end
+    if not same(viewport:GetOuter(), outer) then
         return nil, "game_instance_unqualified"
     end
     return {world = world, controller = controller, pawn = pawn, viewport = viewport, instance = instance, map = state.map}
 end
 
 local function journal(state, phase)
-    local context = host(state, phase)
-    if not context then return end
-    local stack = context.controller.MenuStack
+    local controller = state.controller
+    if phase ~= "hosting" or not valid(controller) then return end
+    local stack = controller.MenuStack
     local count = stack and stack:GetArrayNum()
     if not count or count < 1 or count > 32 then return end
     local menu = stack[count]
-    if not exact(menu, journal_class) or not same(menu:GetOwningPlayer(), context.controller)
+    if not exact(menu, journal_class) then return end
+
+    local context = host(state, phase)
+    if not context or not same(menu:GetOwningPlayer(), context.controller)
         or not same(menu:GetOuter(), context.instance) or not menu:IsInViewport() or not menu:IsVisible() then return end
     for index = 1, count - 1 do if exact(stack[index], journal_class) then return end end
     context.menu = menu
