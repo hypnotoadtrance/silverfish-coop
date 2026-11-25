@@ -17,3 +17,7 @@ Reset or verify each check's starting state and record its result and timing. Co
 When related checks span maps, start one campaign and arrange the checks in travel order. The portable smoke runner can combine `--stock-host-prop-observer` and `--stock-warehouse-switch` from Observatory through Tutorial Dock. For Crossroads performance and world state, combine `--crossroads-profile --stock-critters --stock-lingering-teleport --stock-placed-item --stock-mushrooms` for one Observatory-to-Crossroads campaign. Add `--stock-crate-ring` to this route to exercise a guest Interact before the guest crate cache is populated. The individual results include setup failures and identify checks blocked by an earlier failure. Use the recorded results to rerun the affected check after a fix.
 
 Reserve the full automated suite for major releases or when the user explicitly requests it. Leave in-depth foreground and two-PC playtesting to the players. In release handoffs, identify the behaviors to try, the expected results, and which symptoms or details to report.
+
+# Documentation maintenance
+
+Review the player guide, installation steps, and known issues once per working day. Check them against the current published candidate and recent test evidence. Update current guidance and mark older test results with their build. Refresh the release download index whenever published candidates change.

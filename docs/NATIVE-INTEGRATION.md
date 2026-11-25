@@ -1,5 +1,7 @@
 # Native integration status
 
+This page records native integration tests across development builds. Check the [known issues list](KNOWN-ISSUES.md) for the latest status and the [release index](RELEASES.md) for the downloadable builds.
+
 ## Replication and travel pacing
 
 The listen host caps replication of the player pawns at 24 updates per second. Unreal predicts the owning player's movement and smooths remote players between replicated updates. The Direct IP relay forwards engine datagrams as they arrive. Under congestion it drops old queued datagrams in packet groups and expires the backlog after 120 ms. Stock Unreal handles the reliability of its own messages. [Unreal movement networking](https://dev.epicgames.com/documentation/unreal-engine/understanding-networked-movement-in-the-character-movement-component-for-unreal-engine) · [Replication bandwidth guidance](https://dev.epicgames.com/documentation/unreal-engine/performance-and-bandwidth-tips-for-unreal-engine)

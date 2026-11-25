@@ -24,7 +24,7 @@ $sfCli = @('-m', 'tools.silverfish', '--work', $sfWork)
 & $sfPython @sfCli stage --source $sfGame --ue4ss $sfUe4ss
 ```
 
-Use a new workspace for each fresh stage. To load the game's signatures, extract `zCustomGameConfigs.zip` from the same UE4SS release and pass `--signatures` with its `Project Silverfish\UE4SS_Signatures` directory. Use the same game build and mod revision on every PC. The launcher copies the stock game files and writes co-op profiles under the workspace. The original Steam launch continues to use the single-player save directory.
+Use a new workspace for each fresh stage. To load the game's signatures, extract `zCustomGameConfigs.zip` from the same UE4SS release and pass `--signatures` with its `Project Silverfish\UE4SS_Signatures` directory. Use the same game build and mod revision on every PC. On one Windows volume, staging can reuse a private stock cache through `--stock-cache`. The cache contains `SilverFish-Windows.ucas` at its root and can contain the stock radio tracks and TV clips under their original `SilverFish/Content` paths. Staging checks the cached files against the selected game build before creating hard links. Co-op profiles live under the workspace, and the original Steam launch continues to use the single-player save directory.
 
 Set `$sfPython` and `$sfCli` again when opening a new terminal. The workspace path is local to each PC. On one PC both terminals can use the same stage with separate campaign and guest profiles.
 

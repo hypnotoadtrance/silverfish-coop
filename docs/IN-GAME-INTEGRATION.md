@@ -1,5 +1,7 @@
 # In-game co-op integration
 
+This page records integration work and test results from multiple development builds. Check the [known issues list](KNOWN-ISSUES.md) and [published candidates](RELEASES.md) for current status and downloads.
+
 Players launch Project Silverfish through Steam and choose **Singleplayer** or **Multiplayer** on the stock title screen. The host chooses Steam Networking or Direct IP and can require a password in either mode. The guest connects through Steam or enters the host's Direct IP address and port, supplies a password if required, and selects or creates a character in that campaign. The menu shows connection, admission, world loading, reconnect, and save status.
 
 The [18 locked rules](DESIGN.md) apply to every milestone. Moving the controls into the game leaves the host responsible for the shared world, wallet, travel, rewards, and committed campaign. Direct IP and Steam Invite both use the same campaign identities and admission rules.
@@ -121,7 +123,7 @@ Keep a local, versioned JSON interface alongside the menu. It should expose sess
 - Verify manual bolt handling, reload animations, and melee variants beyond the bat and Old Pipe. Extend coverage to fires spawned by fixed explosive props.
 - Compare frame times and network traffic at the Observatory and Crossroads. Measure the client projection and host discovery work separately from packet arrival before changing update pacing.
 
-## Latest Steam playtest backlog
+## Steam playtest reports and follow-up checks
 
 The host sent a Steam invite and the guest accepted and entered the campaign. The remaining Steam checks cover reconnect, longer sessions, and whether the fixes below behave the same over Steam as in muted Direct IP tests.
 

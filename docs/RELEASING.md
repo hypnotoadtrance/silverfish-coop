@@ -30,7 +30,9 @@ $sfTag = "rc-$($sfRevision.Substring(0,7))"
 2. Create and push an annotated tag such as `rc-d9978a3` at the exact source commit used for the ZIP. On GitHub, open **Releases → Draft a new release** and select that tag.
 3. Include the UTC date and short commit ID in the release title. State that the candidate is for testing and bug reports. Summarize changes, supported game build, installation, known issues, and the ZIP’s SHA-256. Record automated checks and human playtesting separately. If the exact ZIP is awaiting human verification, say so. Give testers a short list of actions, expected results, and details to include if they report a problem.
 4. Attach `Silverfish-Coop-RC-*.zip` under the release assets and select **This is a pre-release**. Publish once the upload is complete, then open the release and verify the asset name and checksum. Keep the automatically generated **Source code** downloads available for readers who need the source snapshot.
-5. Run `python tools/release_index.py` from the repository root, verify the new candidate appears first, and commit the refreshed [release download index](RELEASES.md). The index uses GitHub’s publication timestamps.
+5. Retain up to three published candidates for the current Mountain Time day and the newest candidate from each earlier publication day. Run `python tools/release_index.py` from the repository root after publishing and pruning, verify the new candidate appears first and the older links still resolve, then commit the refreshed [release download index](RELEASES.md).
+
+Once per working day, compare the player guide, installation steps, and known issues with the published candidate and the latest test evidence. Use the [known issues list](KNOWN-ISSUES.md) for current status and identify the build when retaining a historical test result.
 
 The current workflow builds locally and uploads through GitHub Releases. A future automated build would need a Windows runner with access to the pinned SDK dependencies and the qualified Steam executable. [GitHub’s release publishing guide](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)
 
