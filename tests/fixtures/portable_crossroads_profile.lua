@@ -4,6 +4,8 @@ local capture, complete, previous, previous_cycles, last
 local stamp = SilverfishBridgeProfileStamp
 local window_us = 3000000
 local coarse_window_us = 5000000
+local gc_window_us = 12000000
+local gc_pause, gc_step_multiplier = 120, 160
 
 local function record(active, tag, wall_ms, cycles)
     local rows = active.rows[tag]
@@ -83,7 +85,10 @@ local function result()
             peak[#peak + 1] = (";%s,%.4f,%d"):format(tag, call.wall, call.cycles)
         end
     end
-    local status = {("^%d,%d"):format(complete.max_status_rows, complete.max_status_bytes)}
+    local status = {("^%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,%d,%d"):format(
+        complete.max_status_rows, complete.max_status_bytes, complete.heap_start, complete.heap_peak,
+        complete.heap_max_drop, complete.heap_large_drops, complete.previous_pause or 0,
+        complete.previous_step_multiplier or 0, complete.restored_pause or 0, complete.restored_step_multiplier or 0)}
     for tag, sample in pairs(complete.status_peaks) do
         status[#status + 1] = (";%s,%.4f,%d,%.3f"):format(tag, sample.wall, sample.cycles, sample.heap_delta)
     end
@@ -128,6 +133,12 @@ LoopInGameThreadWithDelay(1, function()
     local active = capture
     if not active then return end
     local now, cycles = stamp()
+    local heap = collectgarbage("count")
+    active.heap_peak = math.max(active.heap_peak, heap)
+    local collected = active.heap_previous - heap
+    active.heap_max_drop = math.max(active.heap_max_drop, collected)
+    if collected >= 1024 then active.heap_large_drops = active.heap_large_drops + 1 end
+    active.heap_previous = heap
     if previous then
         local duration, used_cycles = (now - previous) / 1000, cycles - previous_cycles
         record(active, "frame", duration, used_cycles)
@@ -142,6 +153,10 @@ LoopInGameThreadWithDelay(1, function()
     if now >= active.deadline then
         active.elapsed = (now - active.started) / 1e6
         status_publication.mirror = active.original_mirror
+        if active.previous_pause then
+            active.restored_pause = collectgarbage("setpause", active.previous_pause)
+            active.restored_step_multiplier = collectgarbage("setstepmul", active.previous_step_multiplier)
+        end
         capture, complete = nil, active
     end
 end)
@@ -156,17 +171,24 @@ LoopInGameThreadWithDelay(50, function()
     local ticket, action = text:match("^(%x+)\t([a-z]+)$")
     if not ticket or #ticket ~= 32 then return end
     local message
-    if (action == "arm" or action == "coarse") and not capture then
+    if (action == "arm" or action == "coarse" or action == "gcbaseline" or action == "gctuned") and not capture then
         local now, cycles
         if type(stamp) == "function" then now, cycles = stamp() end
         if type(now) == "number" and type(cycles) == "number" then
-            local coarse = action == "coarse"
+            local coarse = action ~= "arm"
+            local gc_trial = action == "gcbaseline" or action == "gctuned"
+            local heap = collectgarbage("count")
             capture, previous, previous_cycles, complete = {
                 rows = {}, calls = {}, peak = 0, peak_calls = {}, started = now,
-                coarse = coarse, deadline = now + (coarse and coarse_window_us or window_us),
+                coarse = coarse, deadline = now + (gc_trial and gc_window_us or coarse and coarse_window_us or window_us),
                 status_peaks = {}, max_status_rows = 0, max_status_bytes = 0,
+                heap_start = heap, heap_previous = heap, heap_peak = heap, heap_max_drop = 0, heap_large_drops = 0,
                 original_mirror = status_publication.mirror,
             }, nil, nil, nil
+            if action == "gctuned" then
+                capture.previous_pause = collectgarbage("setpause", gc_pause)
+                capture.previous_step_multiplier = collectgarbage("setstepmul", gc_step_multiplier)
+            end
             -- Keep the private launch flags, and time the installed memory-only gameplay path.
             status_publication.mirror = false
             message = "armed"

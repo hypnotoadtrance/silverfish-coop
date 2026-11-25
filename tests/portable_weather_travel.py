@@ -17,7 +17,7 @@ async def enter_crossroads(host, pawn):
         await host.bridge.command("native-exit-position", participant, position, route.entrance, route.actor)
 
 
-async def verify_weather_travel(host, guest, pawn, probe, *, profile=False):
+async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_trial=False):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
 
     async def weather(seat, action):
@@ -94,7 +94,7 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False):
         assert clear["epoch"] == wet["epoch"] == dry["epoch"] and clear["epoch"] != initial["zone_epoch"]
         assert campaign_save_hashes(host.campaign) == checkpoint, "Weather projection wrote a campaign save"
         if profile:
-            performance["crossroads"] = await profile_world(host, guest, CROSSROADS, probe)
+            performance["crossroads"] = await profile_world(host, guest, CROSSROADS, probe, gc_trial=gc_trial)
     finally:
         assert await weather(host, "resume") == "restored"
     result = {"stock_weather_travel": {"clear": clear, "wet": wet, "dry": dry,

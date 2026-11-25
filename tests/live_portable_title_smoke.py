@@ -6803,7 +6803,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_board_offers: bool = False, stock_quarry_photo: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
                  stock_weather_travel: bool = False, stock_lightning: bool = False, stock_storm_ambience: bool = False,
-                 crossroads_profile: bool = False, stock_crossroads_door: bool = False, stock_dock_gate: bool = False,
+                 crossroads_profile: bool = False, crossroads_gc_trial: bool = False,
+                 stock_crossroads_door: bool = False, stock_dock_gate: bool = False,
                  stock_crossroads_recovery: bool = False,
                  stock_melee_family: bool = False, stock_melee_edges: bool = False,
                  stock_warehouse_switch: bool = False, stock_warehouse_board: bool = False, stock_bottle: bool = False,
@@ -6988,7 +6989,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_stock_crate_ring(host, guest, pawn, memory_positions=True, cold=True)),
         (stock_weather_travel, "crossroads", "stock_weather_travel",
          lambda host, guest, pawn: verify_weather_travel(host, guest, pawn, portable_probe_command,
-                                                        profile=crossroads_profile)),
+                                                        profile=crossroads_profile, gc_trial=crossroads_gc_trial)),
         (stock_lightning, "crossroads", "stock_lightning",
          lambda host, guest, pawn: verify_stock_lightning(host, guest, pawn, portable_probe_command)),
         (storm_trial, "storm", "stock_storm_ambience",
@@ -7910,6 +7911,8 @@ if __name__ == "__main__":
                         help="verify both players recover from the stock Crossroads kill volume")
     parser.add_argument("--crossroads-profile", action="store_true",
                         help="measure co-op frame and subsystem times around the stock weather travel check")
+    parser.add_argument("--crossroads-gc-trial", action="store_true",
+                        help="compare the current and earlier Lua collection schedules while walking")
     parser.add_argument("--stock-lightning", action="store_true",
                         help="verify one stock lightning strike and thunder across a private Crossroads pair")
     parser.add_argument("--stock-storm-ambience", action="store_true",
@@ -8048,7 +8051,9 @@ if __name__ == "__main__":
     if args.stock_shovel_host_quest and not args.stock_shovel_quest:
         parser.error("Use --stock-shovel-host-quest with --stock-shovel-quest")
     resident_check_options.add("stock_cooked_meal")
-    resident_check_options.update(("crossroads_profile", "stock_crossroads_recovery"))
+    resident_check_options.update(("crossroads_profile", "crossroads_gc_trial", "stock_crossroads_recovery"))
+    if args.crossroads_gc_trial and not args.crossroads_profile:
+        parser.error("--crossroads-gc-trial requires --crossroads-profile")
     resident_check_options.update(("guest_stash_memory", "guest_stash_large_memory"))
     if args.crossroads_profile:
         resident_check_options.add("stock_crate_ring")
@@ -8118,7 +8123,8 @@ if __name__ == "__main__":
                        stock_flashlights=args.stock_flashlights,
                        stock_simmi_jammers=args.stock_simmi_jammers,
                        stock_weather_travel=args.stock_weather_travel,
-                       crossroads_profile=args.crossroads_profile, stock_crossroads_door=args.stock_crossroads_door,
+                       crossroads_profile=args.crossroads_profile, crossroads_gc_trial=args.crossroads_gc_trial,
+                       stock_crossroads_door=args.stock_crossroads_door,
                        stock_crossroads_recovery=args.stock_crossroads_recovery,
                        stock_dock_gate=args.stock_dock_gate,
                        stock_lightning=args.stock_lightning,

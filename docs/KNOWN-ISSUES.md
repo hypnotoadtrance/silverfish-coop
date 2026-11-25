@@ -72,6 +72,8 @@ Development candidate `rc-5de6301` reads stock mushroom patch membership and nea
 
 A follow-up on the same ZIP profiled status assembly in two muted Direct IP launches. In a five-second Crossroads walking sample with per-function tracing disabled, a guest interval reached 31.7 ms, including 23.5 ms in status publication. Concatenation took 9.8 ms while the Lua heap shrank by about 30 MiB. The measured native bridge handoff stayed below 0.06 ms across the sampled seats and maps. The detailed host walking sample also captured a 54.7 ms interval outside the timed co-op calls. Weather travel, stock door toggles, and preservation of the original saves passed. The heap change points to Lua collection during that guest hitch. The cause of the separate host interval and rendered frame pacing remain open.
 
+The optional private collection trial on `rc-0d06181` used three consecutive 12-second Crossroads walking samples on the same host and guest, with a pause of 120 and step multiplier of 160 in the middle sample. Both seats restored their original 200 and 100 settings afterward. The guest recorded 1, 14, and 3 heap drops of at least 1 MiB. Guest frame P99 was 7.43, 7.69, and 7.38 ms. Guest status P99 was 3.05, 9.21, and 4.40 ms. The guest's longest interval fell from 34.1 to 18.9 ms in the tuned window and stayed at 18.9 ms after restoring the defaults. The heap started at different sizes in each window. This comparison supports keeping the shipped defaults, with further work directed at recurring allocations. The same two muted Direct IP launches passed weather travel and stock door toggles, and preserved the original saves.
+
 ## `rc-6690ff4` playtest
 
 | Area | Two-PC observation |

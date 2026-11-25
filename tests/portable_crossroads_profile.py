@@ -318,20 +318,25 @@ def read_comparison(raw):
         name, wall, cycles = entry.split(",")
         slow_calls[name], call_cycles[name] = float(wall), int(cycles)
     frame_size, *stages = status.split(";")
-    max_rows, max_bytes = map(int, frame_size.split(","))
+    max_rows, max_bytes, heap_start, heap_peak, max_drop, large_drops, old_pause, old_step, pause, step = frame_size.split(",")
+    heap = {"start_kib": float(heap_start), "peak_kib": float(heap_peak),
+            "largest_drop_kib": float(max_drop), "drops_over_one_mib": int(large_drops)}
+    if int(old_pause):
+        heap["gc_settings"] = {"previous_pause": int(old_pause), "previous_step_multiplier": int(old_step),
+                               "sampled_pause": int(pause), "sampled_step_multiplier": int(step)}
     status_peaks = {}
     for entry in stages:
         name, wall, cycles, heap_delta = entry.split(",")
         status_peaks[name] = {"elapsed_ms": float(wall), "thread_cycles": int(cycles),
                               "lua_heap_delta_kib": float(heap_delta)}
-    assert max_bytes > 0 and max_rows > 0 and "status_native_publish" in status_peaks, status
+    assert int(max_bytes) > 0 and int(max_rows) > 0 and "status_native_publish" in status_peaks, status
     return {"seconds": float(duration), "timings": totals, "status_sections": status_peaks,
-            "max_status_bytes": max_bytes, "max_status_rows": max_rows,
+            "max_status_bytes": int(max_bytes), "max_status_rows": int(max_rows), "lua_heap": heap,
             "slowest_interval": {"elapsed_ms": float(elapsed), "inclusive_calls_ms": slow_calls,
                                  "thread_cycles": int(peak_cycles), "inclusive_call_cycles": call_cycles}}
 
 
-async def profile_world(host, guest, area, probe):
+async def profile_world(host, guest, area, probe, *, gc_trial=False):
     guest_run = guest.client / "run"
     seats = {"host": host, "guest": guest}
     runs = {"host": host.campaign / "run", "guest": guest_run}
@@ -439,6 +444,19 @@ async def profile_world(host, guest, area, probe):
         assert all(sample["seconds"] >= 5 for sample in samples), samples
         coarse = {"coarse_guest_walking": dict(zip(seats, samples, strict=True)),
                   "coarse_guest_displacement_cm": coarse_displacement}
+        if gc_trial:
+            results = {}
+            for label, action in (("before", "gcbaseline"), ("tuned", "gctuned"), ("after", "gcbaseline")):
+                await arm(action)
+                travelled = await walk(5)
+                samples = await asyncio.gather(*(read(seat) for seat in seats.values()))
+                assert all(sample["seconds"] >= 12 for sample in samples), samples
+                if label == "tuned":
+                    for sample in samples:
+                        applied = sample["lua_heap"]["gc_settings"]
+                        assert (applied["sampled_pause"], applied["sampled_step_multiplier"]) == (120, 160), applied
+                results[label] = {"displacement_cm": travelled, **dict(zip(seats, samples, strict=True))}
+            coarse["gc_comparison"] = results
     settled = await wait_resident_status(guest_run, pawns_here)
     comparison = await asyncio.gather(*(compare_vitals(seat) for seat in seats.values()))
     rows = await asyncio.gather(*(compare_rows(seat) for seat in seats.values()))
