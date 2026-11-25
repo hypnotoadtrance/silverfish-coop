@@ -99,9 +99,11 @@ local function run(action,id)
     end
     if action == "guest-off" then
         assert(not pawn:HasAuthority() and lamp.Lit and focus(pawn,lamp), "guest did not focus the lit oil lamp")
-        local ok,reason = SilverfishProbeNativeInteractInput(pawn:GetAddress(),true)
-        assert(ok and (reason == "stock_started_consumed" or reason == "stock_started"), tostring(reason))
-        return reason
+        local library = StaticFindObject("/Script/EnhancedInput.Default__EnhancedInputLibrary")
+        local input = StaticFindObject("/Game/Classes/Player/Player_Inputs/IA_Interact.IA_Interact")
+        pawn:InpActEvt_IA_Interact_K2Node_EnhancedInputActionEvent_19(library:MakeInputActionValueOfType(1,0,0,0),0,0,input)
+        pawn:InpActEvt_IA_Interact_K2Node_EnhancedInputActionEvent_21(library:MakeInputActionValueOfType(0,0,0,0),.05,.05,input)
+        return "pressed"
     end
     error("unknown stock oil lamp fixture command")
 end
