@@ -197,6 +197,14 @@ local function item_row(columns)
         [item.no_drop] = integer(columns[8], 0, 1) == 1, [item.guid] = guid}
 end
 
+local function different_item(before, after)
+    local previous, incoming = before[item.guid], after[item.guid]
+    for _, axis in ipairs(axes) do
+        if previous[axis] ~= incoming[axis] then return true end
+    end
+    return false
+end
+
 local function project(state, phase, character, path, raw, sequence)
     local old, pawn, id = scope.bind_guest(state, phase)
     if not old or character:gsub("-", "") ~= id then error("The co-op view belongs to another guest", 0) end
@@ -313,6 +321,8 @@ local function project(state, phase, character, path, raw, sequence)
     -- Magazine updates use the live equipment snapshot. A slower inventory
     -- response must leave that count in place for the same held item.
     guest_weapon.preserve_magazine(pawn, old, view.PlayerEquipment, projected_selection)
+    local helmet_changed = different_item(old.PlayerHelmet, view.PlayerHelmet)
+    local armor_changed = different_item(old.PlayerArmor, view.PlayerArmor)
     for _, name in pairs(slots) do old[name] = view[name] end
     old.PlayerEquipIndex = projected_selection
     if old.PlayerEquipIndex ~= projected_selection then error("The stock co-op equipped slot failed readback", 0) end
@@ -354,6 +364,8 @@ local function project(state, phase, character, path, raw, sequence)
         error("The attached co-op Journal view failed readback", 0)
     end
     local instance = state.world.OwningGameInstance
+    if helmet_changed then instance:UpdateHelmet() end
+    if armor_changed then instance:UpdateArmor() end
     -- The stock weight update compiles passives after resolving player zero.
     -- Keep the explicit refresh if that lookup cannot reach this bound pawn.
     local stock_player = api:GetPlayerCharacter(state.world, 0)

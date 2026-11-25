@@ -46,6 +46,7 @@ local page_size, max_items = 16, 8194
 local event_path, equip_path, is_downed, binding, observation, display
 local binding_state, stock_drop, stock_session, sync_stock
 local stock_context_hook
+local stock_layout, max_stock_layout = {}, 8
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -99,9 +100,9 @@ end
 
 function inventory_view.clear()
     remove_display()
-    if stock_session or stock_drop then
-        local previous = stock_session or stock_drop
-        stock_session, stock_drop = nil, nil
+    if stock_session or stock_drop or #stock_layout > 0 then
+        local previous = stock_session or stock_drop or stock_layout[1]
+        stock_session, stock_drop, stock_layout = nil, nil, {}
         pcall(function()
             local controller = previous.context.controller
             local stack = valid(controller) and controller.MenuStack
@@ -664,7 +665,7 @@ local function open_stock_inventory(fields, current, state, phase)
     local pawn = current.pawn:GetAddress()
     if #fields ~= 4 or not observation or observation.state ~= "pending" or observation.sequence ~= sequence
         or not same_context(current, observation.context) or not epoch or #epoch ~= 32 or not epoch:match("^[0-9a-f]+$")
-        or stock_session or stock_drop or not valid(save) or not action or not stack or stack:GetArrayNum() ~= 0
+        or stock_session or stock_drop or #stock_layout > 0 or not valid(save) or not action or not stack or stack:GetArrayNum() ~= 0
         or type(SilverfishSetNativeGuestDropScope) ~= "function"
         or not SilverfishSetNativeGuestDropScope(pawn, epoch, save:GetAddress(), true) then
         error("The stock inventory could not open for the current co-op guest", 0)
@@ -684,9 +685,9 @@ local function open_stock_inventory(fields, current, state, phase)
 end
 
 function inventory_view.accept_layout_projection(pawn, sequence)
-    local pending = stock_drop
+    local pending = stock_layout[1] or stock_drop
     if not pending or not pending.layout_preview or not same(pending.context.pawn, pawn) then return true end
-    return pending.sequence == tonumber(sequence)
+    return #stock_layout <= 1 and pending.sequence == tonumber(sequence)
 end
 
 local function update_local_worn_slot(current, slot)
@@ -713,6 +714,7 @@ local function preview_stock_layout(action)
     -- Keep the exact destination and outcome for the host report. Rebuild the
     -- stock cards while the native input receipt is still occupied.
     action.layout_preview = receipt
+    action.displayed = action.save.PlayerBackpack:GetArrayNum()
     if slot then action.expected = slot + 1 end
     local screen = action.screen
     if not action.sort then screen.ItemManager:CloseContextMenu() end
@@ -734,7 +736,7 @@ sync_stock = function(current, state, phase, allowed)
     if not present or (exposed and not allowed) then
         if exposed then current.controller:CloseMenu({}) end
         stock_session = nil
-        if not stock_drop then SilverfishClearNativeHostDropScope() end
+        if not stock_drop and #stock_layout == 0 then SilverfishClearNativeHostDropScope() end
         if observation then observation.state = "closed" end
         return
     end
@@ -742,20 +744,25 @@ sync_stock = function(current, state, phase, allowed)
     local pawn = current.pawn:GetAddress()
     if not same(save, session.save) or not SilverfishSetNativeGuestDropScope(pawn, session.epoch, save:GetAddress(), true) then
         if exposed then current.controller:CloseMenu({}) end
-        stock_session, stock_drop = nil, nil
+        stock_session, stock_drop, stock_layout = nil, nil, {}
         SilverfishClearNativeHostDropScope()
         if observation then observation.state = "closed" end
         return
     end
-    if stock_drop or not exposed or not allowed then return end
+    if stock_drop or #stock_layout >= max_stock_layout or not exposed or not allowed then return end
     local sequence, guid, quantity, entry, expected = SilverfishTakeNativeGuestDropRequest(pawn, session.epoch)
     if not sequence then return end
     stock_drop = {context = current, screen = session.screen, save = save, epoch = session.epoch, sequence = sequence,
         guid = entry == "sort" and "-" or guid, quantity = quantity, entry = entry, expected = expected,
         sort = entry == "sort", split = (entry == "split" or entry == "take-ammo") and quantity or nil,
         unload = entry == "take-ammo", equip = entry == "equip", worn_drop = entry:match("^worn_drop_") ~= nil, live = true}
-    -- A UI refresh failure still leaves a valid report for a typed local move.
+    -- Release the native input latch after applying a personal move. The oldest report
+    -- still goes first. A world action captured behind the moves keeps the latch.
     pcall(preview_stock_layout, stock_drop)
+    if stock_drop.layout_preview and type(SilverfishReleaseNativeGuestLayoutRequest) == "function"
+        and SilverfishReleaseNativeGuestLayoutRequest(pawn, session.epoch, sequence) then
+        stock_layout[#stock_layout + 1], stock_drop = stock_drop, nil
+    end
 end
 
 local function preview_personal_consumable(fields, current, state, phase)
@@ -799,7 +806,8 @@ local function preview_personal_consumable(fields, current, state, phase)
 end
 
 local function finish_stock_drop(fields, current, state, phase)
-    local pending = stock_drop
+    local queued = stock_layout[1]
+    local pending = queued or stock_drop
     local remaining = integer(fields[5], 2147483647)
     local sorted = pending and pending.sort and fields[5] == "sorted"
     local created = #fields == 6 and fields[6]
@@ -822,6 +830,16 @@ local function finish_stock_drop(fields, current, state, phase)
                 or pending.worn_drop and not dropped_worn)
             and fields[5] ~= "refused") then
         error("The stock inventory settlement belongs to another request", 0)
+    end
+    if queued then
+        table.remove(stock_layout, 1)
+        if #stock_layout == 0 and not stock_session and not stock_drop then SilverfishClearNativeHostDropScope() end
+        -- The stock widgets already reflect the preview or a newer move. Only the
+        -- last report can project a replacement inventory while the queue drains.
+        if equipped then return ("verified stock equipment slot %d"):format(slot) end
+        if unequipped then return ("verified stock unequip from slot %d"):format(source) end
+        if sorted then return "verified open stock backpack sort with " .. pending.displayed .. " cards" end
+        return "stock personal inventory move refused"
     end
     stock_drop = nil
     local ok, result = pcall(function()
@@ -996,6 +1014,17 @@ function inventory_view.command(fields, state, phase)
             return "stock inventory closed before refresh"
         end
         live.screen.BackpackPanel:FullRefresh()
+        for index = 1, 10 do
+            local slot = widget_at(live.screen.ItemManager.EquipSlots, index)
+            if valid(slot) then
+                local row = index <= 8 and live.save.PlayerEquipment[index]
+                    or index == 9 and live.save.PlayerHelmet or live.save.PlayerArmor
+                local guid = valid(row[item_class]) and stock_item_guid(row) or nil
+                local card = slot.ItemCard
+                local visible = exact(card, card_path) and valid(card.Item[item_class]) and stock_card_guid(card) or nil
+                if guid ~= visible then slot:FullRefresh() end
+            end
+        end
         if not stock_cards(live.screen, live.save) then error("stock backpack contents did not refresh", 0) end
         return "verified stock backpack refresh"
     end
@@ -1187,13 +1216,14 @@ function inventory_view.rows(state, phase, status_row)
     if not current then return {} end
     local rows = {status_row("native-inventory-split-view-capability", 1)}
     if binding_state then rows[#rows + 1] = status_row("native-inventory-view-binding", binding_state) end
-    if stock_drop and stock_drop.live and same_context(current, stock_drop.context) then
-        rows[#rows + 1] = status_row("native-inventory-stock-action", current.map, current.name, stock_drop.epoch,
-            stock_drop.sequence, stock_drop.entry, stock_drop.guid, stock_drop.quantity, stock_drop.expected or 0,
-            stock_drop.layout_preview or "")
-        if stock_drop.preview then
+    local pending = stock_layout[1] or stock_drop
+    if pending and pending.live and same_context(current, pending.context) then
+        rows[#rows + 1] = status_row("native-inventory-stock-action", current.map, current.name, pending.epoch,
+            pending.sequence, pending.entry, pending.guid, pending.quantity, pending.expected or 0,
+            pending.layout_preview or "")
+        if pending.preview then
             rows[#rows + 1] = status_row("native-guest-personal-consumable-preview", current.map, current.name,
-                stock_drop.guid, table.unpack(stock_drop.preview))
+                pending.guid, table.unpack(pending.preview))
         end
     end
     if not observation or not same_context(current, observation.context) then return rows end

@@ -132,7 +132,7 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
     finish = ("native-inventory-stock-drop-finish", epoch, sequence)
     try:
         if layout_preview is not None:
-            await client.guest_ui.close()
+            await client.guest_ui.close(preserve_stock=True)
         if sorting:
             if entry != "sort" or quantity != 0:
                 raise ValueError("The native action did not request a backpack sort")

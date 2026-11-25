@@ -6928,9 +6928,11 @@ class Client:
                 await pause_exit.poll(scope, self.leave_session)
                 if self.stopping:
                     break
-            inventory = self.last_game.get(native_guest_drop_record.STOCK_ACTION_KEY, {})
-            if inventory.get("layout_preview") is not None:
-                # The held-item report or shot can already refer to a newly moved slot.
+            # The held-item report or shot can already refer to a newly moved slot.
+            for _ in range(8):
+                inventory = self.last_game.get(native_guest_drop_record.STOCK_ACTION_KEY, {})
+                if inventory.get("layout_preview") is None or inventory["sequence"] <= self.last_stock_inventory_action:
+                    break
                 await native_guest_drop.service_stock_view(self, active)
             await native_guest_weapon.service_equipment_selection(self, active)
             if self.mindcore_carry:

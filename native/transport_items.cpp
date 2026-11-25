@@ -3193,6 +3193,23 @@ namespace
         return 4;
     }
 
+    int lua_release_guest_layout(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 3 || !lua.is_integer(1) ||
+            !lua.is_string(2) || !lua.is_integer(3)) return 0;
+        const auto sequence = lua.get_integer(3);
+        const std::string epoch{lua.get_string(2)};
+        const auto pawn = lua.get_integer(1);
+        if (!drop_argument(pawn, epoch, false) || !host_drop_scope.stock_inventory || !host_drop_request ||
+            !host_drop_request->taken || host_drop_request->sequence != sequence ||
+            Clock::now() >= host_drop_request->expires) return 0;
+        const auto entry = host_drop_request->entry;
+        if (entry != "equip" && entry != "unequip" && entry != "sort") return 0;
+        host_drop_request.reset();
+        lua.set_bool(true);
+        return 1;
+    }
+
     template <bool host>
     int lua_finish_drop(const Lua& lua)
     {
@@ -4245,6 +4262,7 @@ void silverfish::native_transport::register_lua(RC::LuaMadeSimple::Lua& lua)
         lua.register_function("SilverfishTakeNativeHostDropRequest", lua_take_drop<true>);
         lua.register_function("SilverfishFinishNativeHostDropRequest", lua_finish_drop<true>);
         lua.register_function("SilverfishTakeNativeGuestDropRequest", lua_take_drop<false>);
+        lua.register_function("SilverfishReleaseNativeGuestLayoutRequest", lua_release_guest_layout);
         lua.register_function("SilverfishPreviewNativeGuestPersonalConsumable", lua_preview_personal_consumable);
         lua.register_function("SilverfishFinishNativeGuestDropRequest", lua_finish_drop<false>);
         lua.register_function("SilverfishProbeNativeTransportHeldItem", lua_probe_held_item);

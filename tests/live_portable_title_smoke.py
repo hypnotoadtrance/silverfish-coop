@@ -5080,20 +5080,24 @@ async def verify_stock_unequip(first, second, evidence):
             evidence["guest_worn_equip"].append({"receipt": receipt, "worn_row": rows[0],
                                                  "local_move": await local_move(receipt, "equip", guid, slot)})
         evidence["guest_worn_swap"] = []
-        for index, ((key, slot, equip, _), guid) in enumerate(zip(worn, replacements, strict=True)):
+        local_pair = await portable_probe_command(guest.bridge, probe, f"guest-swap-worn-pair\t{','.join(replacements)}")
+        assert local_pair.split(",") == replacements, local_pair
+        evidence["guest_worn_swaps_before_host_receipt"] = local_pair.split(",")
+        for index, ((key, slot, _, _), guid) in enumerate(zip(worn, replacements, strict=True)):
             displaced = current_worn[index]
-            assert (await portable_probe_command(guest.bridge, probe, f"{equip}\t{guid}")).split(",") == current_worn
             receipt = await witness("native_stock_inventory_action", key, guid)
             assert receipt["stock_inventory_proof"] == f"verified stock equipment slot {slot}", receipt
             assert receipt[key]["replaced_guid"] == displaced, receipt
-            current_worn[index] = guid
-            assert (await portable_probe_command(guest.bridge, probe, "guest-worn-state")).split(",") == current_worn
+            assert (await portable_probe_command(guest.bridge, probe, "guest-worn-state")).split(",") == replacements
             inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
             sources = {row["guid"]: row["source"] for row in inventory}
             assert (sources.get(displaced), sources.get(guid)) == ("backpack", "helmet" if slot == 8 else "armor")
             preview = await local_move(receipt, "equip", guid, slot)
             assert preview["result"] == displaced, (preview, displaced)
             evidence["guest_worn_swap"].append(dict(receipt, local_move=preview))
+        first_swap, second_swap = evidence["guest_worn_swap"]
+        assert first_swap["time_unix"] <= second_swap["time_unix"], evidence["guest_worn_swap"]
+        current_worn = replacements.copy()
         evidence["guest_worn"] = []
         for index, ((_, slot, _, action), guid) in enumerate(zip(worn, replacements, strict=True)):
             assert (await portable_probe_command(guest.bridge, probe, f"{action}\t{guid}")).split(",") == current_worn

@@ -117,14 +117,15 @@ class GuestView:
         self.health_checked = None
         self.health_error = None
 
-    async def close(self):
+    async def close(self, *, preserve_stock=False):
+        pending = (self.pending_stock_refresh or self.request_for_stock) if preserve_stock else None
         if self.request is not None:
             self.request.cancel()
             with contextlib.suppress(asyncio.CancelledError, OSError, ValueError, RuntimeError):
                 await self.request
             self.request = None
         self.request_for_stock = None
-        self.pending_stock_refresh = None
+        self.pending_stock_refresh = pending
 
     @staticmethod
     def inventory_scope(client):
@@ -285,7 +286,7 @@ class GuestView:
 
     async def refresh(self, client, *, layout_sequence=None):
         """Project a newly committed inventory while the requesting screen is still mounted."""
-        await self.close()
+        await self.close(preserve_stock=layout_sequence is not None)
         if layout_sequence is not None:
             self.digest = "-"
         area, epoch = client.last_game.get("map"), client.zone_epoch
@@ -294,7 +295,12 @@ class GuestView:
             reply = await client.gameplay_action(ACTION, uuid.uuid4().hex, "-")
             if not await self.receive(client, reply["native_guest_ui"], area, epoch, character,
                                       layout_sequence=layout_sequence):
+                self.queue_stock_inventory(client)
+                if layout_sequence is not None:
+                    return
                 raise RuntimeError("The local inventory changed before reconciliation")
+            if layout_sequence is not None and self.stock_view(client) is not None:
+                client.last_game = await client.bridge.command("native-inventory-stock-refresh", epoch, timeout=4)
         except (KeyError, TypeError, OSError, RuntimeError, ValueError, zlib.error):
             self.queue_stock_inventory(client)
             raise

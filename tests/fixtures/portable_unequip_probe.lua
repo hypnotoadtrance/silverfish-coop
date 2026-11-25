@@ -369,6 +369,30 @@ local function run(action, argument)
             equip_worn(pawn, seed.ids[3], false)
         end
         return "pressed"
+    elseif action == "guest-swap-worn-pair" then
+        assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")
+        local helmet, armor = argument:match("^([%x]+),([%x]+)$")
+        assert(helmet and #helmet == 32 and #armor == 32, "fixture expected the two replacement GUIDs")
+        local inventory_view = require("native_inventory_view")
+        local state = {world = world, map = path:match("^([^.]+)"), server = true, listening = true,
+            controller = control, local_pawn = {pawn = pawn, controller_object = control, name = pawn:GetFullName()}}
+        equip_worn(pawn, helmet, false)
+        inventory_view.sync(state, "connected")
+        local function first_report()
+            for _, record in ipairs(inventory_view.rows(state, "connected", table.pack)) do
+                if record[1] == "native-inventory-stock-action" then return record end
+            end
+        end
+        local first = assert(first_report())
+        assert(first[7] == helmet and inventory_view.accept_layout_projection(pawn, tostring(first[5])))
+        equip_worn(pawn, armor, true)
+        inventory_view.sync(state, "connected")
+        assert(first_report()[5] == first[5], "the newest swap replaced the older outstanding report")
+        assert(not inventory_view.accept_layout_projection(pawn, tostring(first[5])),
+            "an older reply could overwrite the newest local swap")
+        local result = worn_state(pawn)
+        assert(result == helmet .. "," .. armor, "both replacements must apply before yielding the game thread")
+        return result
     elseif action == "guest-equip-helmet" or action == "guest-equip-armor" then
         assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")
         local prior = worn_state(pawn)
