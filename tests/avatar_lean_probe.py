@@ -115,10 +115,20 @@ def input_diagnostic(result):
     held = [row for row in result["samples"] if row["phase"] == "held"]
     sign = -1 if result["side"] == "left" else 1
     minimum_injections = 1 if result["input_method"] == "continuous" else 8
+    dispatch = result["native_dispatch"]
+    if dispatch and dispatch.keys() != {"held", "total"}:
+        return {"verified": False, "status": "incomplete_stock_dispatch_trace", "trace": result}
+    if dispatch:
+        started = dispatch["held"]["blueprint_entry"]["started"]
+        completed = dispatch["total"]["blueprint_entry"]["completed"]
+    else:
+        started, completed = result["stock_started"], result["stock_completed"]
     if result["injections"] < minimum_injections:
         status = "insufficient_input_samples"
-    elif not (result["stock_started"] >= 1 and result["stock_completed"] >= 1):
-        status = "stock_events_unobserved"
+    elif not started:
+        status = "stock_started_unobserved"
+    elif not completed:
+        status = "stock_completed_unobserved"
     elif len(held) < 8 or sign * median(row["requested"] for row in held[-4:]) <= 6:
         status = "stock_request_unobserved"
     elif sign * median(row["owner_roll"] for row in held[-4:]) <= 6:
