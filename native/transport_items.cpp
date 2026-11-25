@@ -1526,7 +1526,12 @@ namespace
         if (!*matched) return false;
         auto* use = stock_no_args(manager, entries->use_held);
         if (!use || (!held && !start_stock_cursor(manager, item, true))) return true;
-        if (!held) guest_use_cursor = {manager, {}, guid, item.panel};
+        if (!held)
+        {
+            guest_use_cursor = {manager, {}, guid, item.panel};
+            if (auto* close = stock_no_args(manager, Unreal::FName{STR("CloseContextMenu")}))
+                manager->ProcessEvent(close, nullptr);
+        }
         // The exact stock quest classifier will open the game's warning.
         // The cursor is a copy and the confirm and cancel handlers consume it.
         opening_package_confirmation = manager;

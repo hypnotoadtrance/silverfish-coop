@@ -127,7 +127,7 @@ local function capture(state, phase, pawn_name)
     local balance = canonical.Flags:Contains(cash) and canonical.Flags:Find(cash):get() or 0
     local rows = {table.concat({state.map, character}, "\t"),
         table.concat({"inventory-layout", pack_size, equipment_size, selected}, "\t"),
-        table.concat({"cash", integer(balance, 0, max_int32)}, "\t")}
+        table.concat({"cash", integer(balance, min_int32, max_int32)}, "\t")}
     local checked, character_row = pcall(function()
         local character = save.Character
         local name = character[creator.name_field]:ToString()
@@ -245,7 +245,7 @@ local function project(state, phase, character, path, raw, sequence)
             creator.install(view, row[4], name)
             if row[3] ~= "-" then appearance.install(view.Character, row[3]) end
         elseif row[1] == "cash" and #row == 2 and balance == nil then
-            balance = integer(row[2], 0, max_int32)
+            balance = integer(row[2], min_int32, max_int32)
         elseif row[1] == "reputation" and not reputation and #row <= 65 and #row % 2 == 1 then
             reputation = {}
             for index = 2, #row, 2 do

@@ -114,13 +114,15 @@ async def verify_stock_shovel_reconnect(host, guest, evidence, *, open_package=N
     before = await wait_resident_status(host_run, lambda frame: type(frame.get("game", {}).get("native_wallet")) is int)
     expected_wallet = before["game"]["native_wallet"] + contract.cash
     await host.bridge.command(contract.command("approach"), arrived["game"]["native_guest_save"]["pawn"])
+    if open_package:
+        await action(guest_run, "native-quest-start", target=contract.quest_id)
+        await step(1)
+        evidence["stock_package_opened"] = await open_package(host, guest, packages[0]["guid"], saves)
+        return
     await open_board()
     await press("start", "starting")
     accepted = await step(1)
     await wait_resident_status(guest_run, lambda frame: not frame.get("game", {}).get("native_wire_board_stock"))
-    if open_package:
-        evidence["stock_package_opened"] = await open_package(host, guest, packages[0]["guid"], saves)
-        return
     await open_board()
     await press("turnin", "redeeming")
     completed = await step(-10)

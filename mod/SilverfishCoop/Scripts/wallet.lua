@@ -85,7 +85,7 @@ function wallet.rows(state, phase, status_row)
             if save and save.Flags:Contains(cash) then return save.Flags:Find(cash):get() end
         end)
         local amount = ok and math.tointeger(projected)
-        if amount and 0 <= amount and amount <= max_cash then
+        if amount and -2147483648 <= amount and amount <= max_cash then
             return { status_row("wallet", amount) }
         end
         return {}
