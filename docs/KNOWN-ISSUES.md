@@ -12,8 +12,10 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 | Live Frog | The guest successfully ate a frog during the two-PC retest. |
 | Dedicated melee slot | The guest could equip melee weapons in other slots but could not equip them in the dedicated melee slot. |
 | Candle and Oil Lamp | The two-PC retest confirmed that candle lighting and extinguishing synchronized. The Oil Lamp's lit state still did not synchronize. |
-| Mushroom consumption | The guest could eat a Brown Mushroom. Using a Red Mushroom did not work. |
-| Wandering trader confirmation | The guest opened the stock barter window and staged an offer. Clicking Trade did not complete the transaction. |
+| Mushroom consumption | The guest could eat a Brown Mushroom. Using a Red Mushroom did not work. On `rc-b1654c1`, a muted Direct IP guest used a Red Mushroom from the stock inventory. The stack went from two to one, food rose by three, and infection and delayed poisoning reached only the guest. Brown Mushroom and the stock food and medicine checks passed on the same two launches. No campaign checkpoint changed. |
+| Wandering trader confirmation | The guest opened the stock barter window in Observatory and staged an offer. Clicking Trade left the original panel unchanged and showed no confirmation popup. One isolated host purchase and one isolated guest purchase succeeded through the stock button on `rc-b1654c1`. The original trade failure remains open. |
+| Guest level transitions | The guest saw the expected fade to black, then briefly saw the main menu during the next map's load. |
+| Castaway dialogue | The guest saw the keyboard-driven text overlay when talking to the Castaway in Observatory. This conversation still needs the stock dialogue screen. |
 
 ## `rc-161145a` playtest
 

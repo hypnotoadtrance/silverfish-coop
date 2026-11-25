@@ -3878,12 +3878,16 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
     assert [(row["guid"], row["quantity"]) for row in remaining if row["guid"] in seeded] == [(seeded[3], 1)], remaining
 
     seed_started = time.time()
+    assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+    await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
     red = await command(host, "seed-red-mushroom")
     stocked = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
     async with asyncio.timeout(8):
         while not any(row["event"] == "native_guest_ui_projected" and row["items"] == len(stocked)
                       and row["time_unix"] >= seed_started for row in await resident_events(guest_run, guest_frame)):
             await asyncio.sleep(.08)
+    assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+    await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
     poison_key = native_guest_consumable.RESULT["native-guest-red-mushroom"]
     started = time.time()
     press = await submit(guest_run, "native-inventory-stock-use-click-fixture", target=red)
