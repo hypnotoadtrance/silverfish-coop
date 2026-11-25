@@ -302,8 +302,7 @@ function feedback.command(fields, state, phase)
         or not finite(x, hit_offset_limit) or not finite(y, hit_offset_limit) or not finite(z, hit_offset_limit)
         or math.type(mask) ~= "integer" or mask < 0 or mask > psyche_mask
         or (play_voice ~= "0" and play_voice ~= "1")
-        or (mask == psyche_mask and (play_voice ~= "0" or amount > 10 or x ~= 0 or y ~= 0 or z ~= 0
-            or state.map ~= "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P")) then
+        or (mask == psyche_mask and (play_voice ~= "0" or amount > 10 or x ~= 0 or y ~= 0 or z ~= 0)) then
         error("Guest hurt feedback cue unavailable", 0)
     end
     local scope = epoch .. "|" .. name
