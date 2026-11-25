@@ -2135,11 +2135,13 @@ async def verify_stock_acid_bottle(host: Seat, guest: Seat, _pawn: str) -> dict:
 
 async def verify_stock_friendly_fire(host: Seat, guest: Seat, pawn: str, *, enabled: bool) -> dict:
     await reach_bottle_warehouse(host, guest, pawn)
-    await host.bridge.wait_for(lambda game: game.get("native_death", {}).get("scope") == "party")
+    await wait_resident_status(host.campaign / "run", lambda frame:
+        frame.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
     checkpoint = campaign_save_hashes(host.campaign)
     damage = {}
     for source, target in (("guest", "host"), ("host", "guest")):
-        path, _, _ = await stage_warehouse_prop(host, guest, "Prop_AcidBottle")
+        # The authority's DotVolume owns gameplay even when an out-of-range bottle has no guest replica.
+        path, _ = (await warehouse_prop_probe(host, "spawn-prop", "Prop_AcidBottle")).split(";")
         impact = await warehouse_prop_probe(host, "floor-impact", path, source)
         hp = await warehouse_prop_probe(host, "pool-damage", impact, source, target)
         before, after = map(float, hp.split(","))
@@ -2148,6 +2150,7 @@ async def verify_stock_friendly_fire(host: Seat, guest: Seat, pawn: str, *, enab
         self_before, self_after = map(float, hp.split(","))
         assert self_after < self_before, (enabled, source, self_before, self_after)
         damage[source] = {"teammate": [before, after], "self": [self_before, self_after]}
+        assert await warehouse_prop_probe(host, "pool-cleanup", impact) == "removed"
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"stock_friendly_fire": {"enabled": enabled, "acid_damage": damage, "checkpoint_unchanged": True}}
 

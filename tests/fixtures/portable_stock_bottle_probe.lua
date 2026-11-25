@@ -74,7 +74,7 @@ local function stock_prop_fixture(args, state, phase)
             part:ForceNetUpdate()
             return "moved"
         end
-        if mode == "pool-near" or mode == "pool-remove" or mode == "pool-damage" then
+        if mode == "pool-near" or mode == "pool-remove" or mode == "pool-damage" or mode == "pool-cleanup" then
             local found
             for _, candidate in ipairs(FindAllOf("AcidPool_BP_C") or {}) do
                 if current(candidate) and near(candidate, assert(args[4])) then
@@ -83,8 +83,8 @@ local function stock_prop_fixture(args, state, phase)
                 end
             end
             if not found then return "absent" end
-            if mode == "pool-remove" then
-                assert(phase == "hosting" and found:HasAuthority() and found.FizzledOut)
+            if mode == "pool-remove" or mode == "pool-cleanup" then
+                assert(phase == "hosting" and found:HasAuthority() and (mode == "pool-cleanup" or found.FizzledOut))
                 found:K2_DestroyActor()
                 return "removed"
             end
@@ -93,6 +93,8 @@ local function stock_prop_fixture(args, state, phase)
                 local remote = #state.guests == 1 and state.guests[1].pawn
                 local thrower = args[5] == "guest" and remote or pawn
                 local target = args[6] == "guest" and remote or pawn
+                local _, token, address = SilverfishReadNativeFallStatus()
+                assert(token > 0 and valid(remote) and address == remote:GetAddress(), "the native damage scope is unavailable")
                 assert(valid(thrower) and valid(target) and found.DotVolume:FindInstigator():GetAddress() == thrower:GetAddress(),
                     "the stock pool lost the player's instigator")
                 local hp = target.Save.PlayerHealth
