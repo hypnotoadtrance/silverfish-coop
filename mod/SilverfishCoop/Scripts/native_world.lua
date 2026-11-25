@@ -11,6 +11,7 @@ local playtest_maps = {
     ["/Game/Classes/Maps/PlaytestMap_01"] = true,
     ["/Game/Classes/Maps/PlaytestMap_02"] = true,
 }
+local shop_class_path = "/Game/Classes/Actors/Shop_BP.Shop_BP_C"
 local shop_ids = { "Shop_BP_C_0", "Shop_BP_C_1" }
 local buckets = {
     { "stock", "StockInventory" },
@@ -78,8 +79,18 @@ local function brief(message)
 end
 
 local function shop_actors(world)
+    local statics, class = StaticFindObject(gameplay_statics_path), StaticFindObject(shop_class_path)
+    local actors
+    if valid(statics) and valid(class) then
+        local output = {}
+        statics:GetAllActorsOfClass(world, class, output)
+        actors = output.OutActors or output
+    else
+        actors = FindAllOf("Shop_BP_C") or {}
+    end
     local matches = {}
-    for _, actor in ipairs(FindAllOf("Shop_BP_C") or {}) do
+    for _, actor in ipairs(actors) do
+        if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
         if valid(actor) and actor:HasAuthority() and not actor:IsActorBeingDestroyed() then
             local name = actor:GetFullName()
             local id = name:match("^Shop_BP_C /[^%s]+:PersistentLevel%.(Shop_BP_C_[01])$")

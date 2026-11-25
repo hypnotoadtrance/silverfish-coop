@@ -36,6 +36,14 @@ async def verify_stock_eye_stacks(host, guest, pawn):
         visits.append(arrival["zone_epoch"])
 
     assert len(set(visits)) == len(visits)
+    merchant = f"Shop_BP_C {SHOPKEEP}.Shop_ShopKeep_P:PersistentLevel.Shop_BP_C_1"
+    def stock_shop(frame):
+        game = frame.get("game", {})
+        if game.get("map") == SHOPKEEP:
+            return next((row for row in game.get("native_shops", ())
+                         if row.get("actor") == merchant and row.get("state") in {"ok", "partial"}), None)
+
+    observed = stock_shop(await wait_resident_status(host_run, stock_shop))
     proof = await verify_eye_board(host_run, guest_run, host.bridge.directory, character,
                                   wait_status=wait_resident_status)
-    return {"stock_eye_stacks": dict(proof, zone_visits=visits)}
+    return {"stock_eye_stacks": dict(proof, zone_visits=visits, stock_shop_observation=observed)}

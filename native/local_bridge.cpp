@@ -14,6 +14,11 @@
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+
 namespace
 {
     using Lua = RC::LuaMadeSimple::Lua;
@@ -129,6 +134,23 @@ namespace
     {
         lua.set_integer(silverfish::local_stash_ticket::body_limit);
         return 1;
+    }
+
+    bool timing_fixture_enabled()
+    {
+        wchar_t value[2]{};
+        return GetEnvironmentVariableW(L"SILVERFISH_COOP_HEADLESS", value, 2) == 1 && value[0] == L'1' &&
+            GetEnvironmentVariableW(L"SILVERFISH_COOP_TITLE_FIXTURES", value, 2) == 1 && value[0] == L'1';
+    }
+
+    int profile_stamp(const Lua& lua)
+    {
+        ULONG64 cycles{};
+        if (!QueryThreadCycleTime(GetCurrentThread(), &cycles)) return 0;
+        const auto now = std::chrono::steady_clock::now().time_since_epoch();
+        lua.set_integer(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
+        lua.set_integer(static_cast<std::int64_t>(cycles));
+        return 2;
     }
 
     int enqueue_input(const Lua& lua)
@@ -684,6 +706,7 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishReadLocalNativeZoneHeartbeat", read_zone_heartbeat);
         lua.register_function("SilverfishReadLocalNativeZoneRoster", read_zone_roster);
         lua.register_function("SilverfishReadLocalGuestInteractionLease", read_guest_interaction_lease);
+        if (timing_fixture_enabled()) lua.register_function("SilverfishBridgeProfileStamp", profile_stamp);
     }
 
     void stop()

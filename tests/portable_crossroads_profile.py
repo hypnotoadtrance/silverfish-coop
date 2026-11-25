@@ -71,6 +71,13 @@ def instrument_npc_class_discovery(source):
                           '"npc_marker_class_lookup", StaticFindObject, path)')
 
 
+def instrument_shop_discovery(source):
+    anchor = "pcall(shop_actors, world)"
+    if source.count(anchor) != 1:
+        raise ValueError("The stock shop actor discovery anchor changed")
+    return source.replace(anchor, 'pcall(SilverfishProfileCrossroadsCall, "stock_shop_discovery", shop_actors, world)')
+
+
 def instrument_anomaly_work(source):
     calls = (
         "pyrogeist.apply", "shadows.project", "lamps.project", "observers.target", "observers.publish_rewards",
@@ -133,14 +140,21 @@ def read_comparison(raw):
     duration, *sections = summary.split(";")
     totals = {}
     for section in sections:
-        name, count, p50, p95, p99, maximum, total = section.split(",")
+        name, count, p50, p95, p99, maximum, total, *cycles = section.split(",")
+        cpu = dict(zip(("p50", "p95", "p99", "max", "sum"), map(int, cycles), strict=True))
         totals[name] = dict(count=int(count), p50_ms=float(p50), p95_ms=float(p95), p99_ms=float(p99),
-                            max_ms=float(maximum), sum_ms=float(total))
+                            max_ms=float(maximum), sum_ms=float(total), thread_cycles=cpu)
+        assert all(value >= 0 for value in cpu.values()), (name, cpu)
     assert float(duration) >= 3 and totals["frame"]["count"] > 10 and totals["write_status"]["count"] > 3
-    elapsed, *calls = slow_frame.split(";")
-    slow_calls = dict((name, float(total)) for name, total in (entry.split(",") for entry in calls))
+    peak, *calls = slow_frame.split(";")
+    elapsed, peak_cycles = peak.split(",")
+    slow_calls, call_cycles = {}, {}
+    for entry in calls:
+        name, wall, cycles = entry.split(",")
+        slow_calls[name], call_cycles[name] = float(wall), int(cycles)
     return {"seconds": float(duration), "timings": totals,
-            "slowest_interval": {"elapsed_ms": float(elapsed), "inclusive_calls_ms": slow_calls}}
+            "slowest_interval": {"elapsed_ms": float(elapsed), "inclusive_calls_ms": slow_calls,
+                                 "thread_cycles": int(peak_cycles), "inclusive_call_cycles": call_cycles}}
 
 
 async def profile_world(host, guest, area, probe):
