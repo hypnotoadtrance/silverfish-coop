@@ -390,7 +390,88 @@ local function held_equipment_row(pawn)
         valid(selected) and selected:GetFullName() or "-"}, "\t")
 end
 
+local binocular_path = "/Game/Classes/Equipment/Eqp_Binoculars.Eqp_Binoculars_C"
+local binocular_mesh = "StaticMesh /Game/Classes/Equipment/Equipment_Assets/Equipment_Meshs/SM_Item_Binoculars_01.SM_Item_Binoculars_01"
+local binocular_cues = {in_count = 0, out_count = 0}
+if portable_fixture or portable_guest then
+    RegisterHook("/Script/Engine.GameplayStatics:PlaySoundAtLocation", function(_, source, sound)
+        local pawn, cue = source:get(), sound:get()
+        if not valid(pawn) or not valid(cue) or pawn:GetClass():GetFName():ToString() ~= "Player_FP_C"
+            or pawn:IsLocallyControlled() then return end
+        local name = cue:GetFName():ToString()
+        if name == "Scope_In_Cue" then binocular_cues.in_count = binocular_cues.in_count + 1 end
+        if name == "Scope_Out_Cue" then binocular_cues.out_count = binocular_cues.out_count + 1 end
+    end)
+end
+
+local function binocular_operation(operation)
+    local viewport = FindFirstOf("GameViewportClient")
+    local world = valid(viewport) and viewport.World
+    assert(valid(world) and world:GetFullName() == "World " .. map, "avatar_probe_world_unavailable")
+    local local_pawn, remote_pawn
+    for _, pawn in ipairs(FindAllOf("Player_FP_C") or {}) do
+        if valid(pawn) and same(pawn:GetWorld(), world) and not pawn:IsActorBeingDestroyed() then
+            if pawn:IsLocallyControlled() then local_pawn = pawn
+            elseif pawn:GetLocalRole() ~= 0 then remote_pawn = pawn end
+        end
+    end
+    assert(valid(local_pawn) and valid(remote_pawn), "avatar_probe_rig_pending")
+    local item = asset(binocular_path)
+    local index = 5
+    if operation == "seedbinoculars" then
+        local host, guest = player_pair()
+        for _, pawn in ipairs({host, guest}) do
+            local rows = pawn.Save.PlayerEquipment
+            assert(rows:GetArrayNum() >= index and not valid(rows[index][item_class]), "binocular fixture slot occupied")
+            local out = {}
+            asset(inventory):MakeDefaultItem(item, pawn, out)
+            local row = out.Item or out
+            assert(same(row[item_class], item), "stock binoculars could not be created")
+            rows[index] = row
+        end
+        return "seeded"
+    end
+    if operation == "selectbinoculars" then
+        local rows = local_pawn.Save.PlayerEquipment
+        if not rows or rows:GetArrayNum() < index or not same(rows[index][item_class], item) then
+            error("avatar_probe_rig_pending", 0)
+        end
+        local_pawn:Equip_NextItem(index - 1, false)
+        local equipped = local_pawn.EquipedItem
+        assert(valid(equipped) and same(equipped:GetClass(), item) and same(equipped.User, local_pawn),
+            "stock binoculars did not equip")
+        return "selected"
+    elseif operation == "raisebinoculars" or operation == "lowerbinoculars" then
+        local held = local_pawn.EquipedItem
+        assert(valid(held) and same(held:GetClass(), item) and same(held.User, local_pawn), "stock binoculars not held")
+        local raised = operation == "raisebinoculars"
+        held:Use_Item_Secondary(raised)
+        return "input"
+    end
+
+    local meshes = remote_pawn:K2_GetComponentsByClass(asset("/Script/Engine.StaticMeshComponent"))
+    local optic, count
+    count = 0
+    for i = 1, #meshes do
+        local part = unwrap(meshes[i])
+        if valid(part) and same(part:GetOwner(), remote_pawn) and valid(part.StaticMesh)
+            and part.StaticMesh:GetFullName() == binocular_mesh and part:IsVisible() and not part.bHiddenInGame then
+            optic, count = part, count + 1
+        end
+    end
+    if count == 0 then return "pending" end
+    assert(count == 1 and valid(optic:GetAttachParent()), "the observer saw duplicate binoculars")
+    local raised = optic:GetAttachSocketName():ToString() == "None"
+    local at = optic.RelativeLocation
+    local distance = math.sqrt(at.X^2 + at.Y^2 + at.Z^2)
+    return table.concat({raised and "raised" or "lowered", optic:GetFullName(), optic:GetAttachSocketName():ToString(),
+        ("%.3f"):format(distance), binocular_cues.in_count, binocular_cues.out_count}, "\t")
+end
+
 local function run(operation)
+    if (portable_fixture or portable_guest) and operation:match("binoculars$") then
+        return binocular_operation(operation)
+    end
     if wipe_host then
         assert(operation == "heldstate", "avatar_probe_unknown_wipe_operation")
         local _, guest = player_pair()

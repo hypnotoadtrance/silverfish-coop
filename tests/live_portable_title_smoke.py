@@ -3431,6 +3431,46 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str) -> dict:
     return {"stock_lockpicks": proofs}
 
 
+async def verify_stock_avatar_binoculars(host: Seat, guest: Seat, _pawn: str) -> dict:
+    async def command(seat, action):
+        return (await portable_probe_command(seat.bridge, "avatar-probe", action + "binoculars\n")).strip()
+
+    async def view(seat, phase):
+        async with asyncio.timeout(8):
+            while True:
+                reply = await command(seat, "observe")
+                if reply.split("\t")[0] == phase:
+                    return reply.split("\t")
+                await asyncio.sleep(.12)
+
+    checkpoint = campaign_save_hashes(host.campaign)
+    assert await command(host, "seed") == "seeded"
+    outcomes = {}
+    for label, owner, observer in (("host", host, guest), ("guest", guest, host)):
+        async with asyncio.timeout(10):
+            while True:
+                try:
+                    assert await command(owner, "select") == "selected"
+                    break
+                except AssertionError as error:
+                    if str(error).strip() != "avatar_probe_rig_pending":
+                        raise
+                    await asyncio.sleep(.25)
+        lowered = await view(observer, "lowered")
+        assert await command(owner, "raise") == "input"
+        raised = await view(observer, "raised")
+        assert await command(owner, "lower") == "input"
+        returned = await view(observer, "lowered")
+        assert lowered[1] == raised[1] == returned[1], (lowered, raised, returned)
+        assert lowered[2] == returned[2] == "Weapon_Socket01"
+        assert 30 <= float(raised[3]) <= 40 and raised[2] == "None", raised
+        before, up, after = (tuple(map(int, report[4:6])) for report in (lowered, raised, returned))
+        assert up == (before[0] + 1, before[1]) and after == (up[0], up[1] + 1), (before, up, after)
+        outcomes[label] = {"retained_mesh": raised[1], "raised_offset_cm": float(raised[3]), "scope_cues": 2}
+    assert campaign_save_hashes(host.campaign) == checkpoint
+    return {"stock_avatar_binoculars": outcomes}
+
+
 async def verify_stock_avatar_tail(host: Seat, guest: Seat, _pawn: str) -> dict:
     async def command(seat, action):
         return (await portable_probe_command(seat.bridge, "avatar-probe", action + "\n")).strip()
@@ -6173,7 +6213,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_buried_placements: bool = False,
                  stock_take_ammo: bool = False, stock_shotguns: bool = False, stock_alternate_ammo: bool = False,
                  stock_impact_cues: bool = False,
-                 stock_avatar_tail: bool = False,
+                 stock_avatar_tail: bool = False, stock_avatar_binoculars: bool = False,
                  stock_interaction_feedback: bool = False,
                  stock_loki_control: bool = False, stock_loki_guest: bool = False,
                  stock_light_ar: bool = False, stock_fire_mode_reopen: bool = False,
@@ -6262,6 +6302,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_flashlights, "observatory", "stock_flashlights", verify_stock_flashlights),
         (stock_melee_edges, "observatory", "stock_melee_edges", verify_stock_melee_edges_only),
         (stock_avatar_tail, "observatory", "stock_avatar_tail", verify_stock_avatar_tail),
+        (stock_avatar_binoculars, "observatory", "stock_avatar_binoculars", verify_stock_avatar_binoculars),
         (stock_interaction_feedback, "observatory", "stock_lockpicks", verify_stock_lockpicks),
         (stock_interaction_feedback, "observatory", "stock_observatory_tv", verify_observatory_tv),
         (stock_melee_family, "observatory", "stock_melee_family", verify_stock_melee_family),
@@ -6563,8 +6604,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(portable_script_overlay(game, "native_guest_ui.lua", add_stale_quick_slot_witness))
                 for game in games
             ]
-        if resident_weapon_cues or stock_avatar_tail:
-            for game in games if stock_avatar_tail else (first_game,):
+        if resident_weapon_cues or stock_avatar_tail or stock_avatar_binoculars:
+            for game in games if stock_avatar_tail or stock_avatar_binoculars else (first_game,):
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableWeaponCueProbe",
                                                      fixture="avatar_presentation_probe.lua"))
         if resident_weapon_cues:
@@ -7079,6 +7120,8 @@ if __name__ == "__main__":
                         help="verify guest shotgun Take Ammo, reload, and fire for each stock 12-gauge round")
     parser.add_argument("--stock-impact-cues", action="store_true",
                         help="verify the guest's suppressed shotgun receives the host's individual stock impact decals")
+    parser.add_argument("--stock-avatar-binoculars", action="store_true",
+                        help="verify both peers see and hear the stock binoculars raise and lower")
     parser.add_argument("--stock-avatar-tail", action="store_true",
                         help="verify the armored stock tail seam through turning and jumping")
     parser.add_argument("--stock-interaction-feedback", action="store_true",
@@ -7208,7 +7251,8 @@ if __name__ == "__main__":
                               "tutorial_dock_melee", "stock_npc_rivalry",
                               "stock_bandage_revisit", "stock_buried_placements", "stock_shovel", "stock_shovel_loot",
                               "stock_shovel_quest", "stock_shovel_host_quest", "stock_take_ammo",
-                              "stock_shotguns", "stock_impact_cues", "stock_avatar_tail", "stock_interaction_feedback",
+                              "stock_shotguns", "stock_impact_cues", "stock_avatar_tail", "stock_avatar_binoculars",
+                              "stock_interaction_feedback",
                               "stock_loki_control", "stock_loki_guest",
                               "stock_host_corpse_carry", "stock_host_prop_observer", "stock_flashlights", "stock_simmi_jammers",
                               "stock_weather_travel", "stock_lightning", "stock_crossroads_door", "stock_dock_gate",
@@ -7254,7 +7298,7 @@ if __name__ == "__main__":
             args.stock_campfire, args.stock_npc_override, args.stock_board_offers, args.stock_quarry_photo, args.tutorial_dock_melee,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_buried_placements,
             args.stock_take_ammo, args.stock_shotguns,
-            args.stock_impact_cues, args.stock_avatar_tail, args.stock_interaction_feedback,
+            args.stock_impact_cues, args.stock_avatar_tail, args.stock_avatar_binoculars, args.stock_interaction_feedback,
             args.stock_loki_control, args.stock_loki_guest,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
             args.crossroads_profile, args.stock_lightning, args.stock_crossroads_door, args.stock_dock_gate,
@@ -7337,7 +7381,7 @@ if __name__ == "__main__":
                        stock_shovel_quest=args.stock_shovel_quest, stock_shovel_host_quest=args.stock_shovel_host_quest,
                        stock_take_ammo=args.stock_take_ammo, stock_shotguns=args.stock_shotguns,
                        stock_impact_cues=args.stock_impact_cues,
-                       stock_avatar_tail=args.stock_avatar_tail,
+                       stock_avatar_tail=args.stock_avatar_tail, stock_avatar_binoculars=args.stock_avatar_binoculars,
                        stock_interaction_feedback=args.stock_interaction_feedback,
                        stock_loki_control=args.stock_loki_control, stock_loki_guest=args.stock_loki_guest,
                        stock_alternate_ammo=args.stock_alternate_ammo,

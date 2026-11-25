@@ -16,6 +16,7 @@ local animation_root = "/Game/Classes/NPCs/NPC_Assets/Animations/"
 local crouched_idle = "Crouching_Idle"
 local crouched_walk = "Crouched_Walking"
 local firearm_class = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
+local binocular_class = "BlueprintGeneratedClass /Game/Classes/Equipment/Eqp_Binoculars.Eqp_Binoculars_C"
 local health_item_class = "/Game/Classes/Items/HealthItem_Master_BP.HealthItem_Master_BP_C"
 local gameplay_statics = "/Script/Engine.Default__GameplayStatics"
 local math_library = "/Script/Engine.Default__KismetMathLibrary"
@@ -25,7 +26,8 @@ local zero_rotation = {Pitch = 0, Yaw = 0, Roll = 0}
 local zero_location = {X = 0, Y = 0, Z = 0}
 -- The stock handgun lowers through HandGun_Lowered_BlendSpace and uses the
 -- alert gunman's RifleWalk_BlendSpace for the raised stance.
-local aimed = {pistol = {"Rifle_Aiming_Low_Close1", "Walk_Forward"}, rifle = {"Rifle_Aiming_Idle", "Rifle_Walk"}}
+local aimed = {pistol = {"Rifle_Aiming_Low_Close1", "Walk_Forward"}, rifle = {"Rifle_Aiming_Idle", "Rifle_Walk"},
+    optic = {"Rifle_Aiming_Idle", "Rifle_Walk"}}
 local lowered = {pistol = "HandGun_Idle_2", rifle = "Rifle_Idle_1_"}
 local running = {pistol = "HandGun_Run", rifle = "Rifle_Run_Forward"}
 local melee_clips = {slash = "Standing_Melee_Attack_Horizontal", backhand = "Standing_Melee_Attack_Backhand",
@@ -128,7 +130,9 @@ end
 local function aim_kind(weapon)
     if not valid(weapon) then return "-" end
     local base = StaticFindObject(firearm_class)
-    if not valid(base) or not weapon:IsA(base) then return "-" end
+    if not valid(base) or not weapon:IsA(base) then
+        return weapon:GetClass():GetFullName() == binocular_class and "optic" or "-"
+    end
     -- The stock player animation graph identifies handguns by ItemType 3.
     return weapon.ItemType == 3 and "pistol" or "rifle"
 end
@@ -887,6 +891,9 @@ function avatar.sync(state, phase)
                             if phase == "hosting" then
                                 aim = outfit and host_aims[entry.id] == outfit.gun and outfit.gun or "-"
                             end
+                            if aim == "optic" and not entry.binocular then aim = "-" end
+                            local raised = aim == "optic" and not pawn.Dead and not uses[entry]
+                            weapon_view.raise_binocular(entry, raised)
                             apply_locomotion(entry, aim, outfit)
                             entry.rifle_idle = aim == "-" and entry.weapon_stance == "rifle"
                                 and entry.gait_blend ~= nil and entry.gait_blend.target == 0

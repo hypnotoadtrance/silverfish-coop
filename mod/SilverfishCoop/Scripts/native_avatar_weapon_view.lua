@@ -13,6 +13,9 @@ local scene_type = "/Script/Engine.SceneComponent"
 local statics_type = "/Script/Engine.Default__GameplayStatics"
 local math_library = "/Script/Engine.Default__KismetMathLibrary"
 local sound_attenuation = "/Game/Assets/Sounds/SoundClasses/SmallSound_Attenuation.SmallSound_Attenuation"
+local binocular_mesh = "/Game/Classes/Equipment/Equipment_Assets/Equipment_Meshs/SM_Item_Binoculars_01.SM_Item_Binoculars_01"
+local scope_in = "/Game/Assets/Sounds/CUEs/Weapon_Cues/Scope_In_Cue.Scope_In_Cue"
+local scope_out = "/Game/Assets/Sounds/CUEs/Weapon_Cues/Scope_Out_Cue.Scope_Out_Cue"
 local bat_mesh = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Assets/MeleeWep_Models/SM_Wep_Bat_01.SM_Wep_Bat_01"
 -- The bat mesh starts at the knob and extends along local Z. Put the handle
 -- inside the hand socket and keep the orientation chosen by the stock rig.
@@ -206,8 +209,9 @@ function view.observe(pawn, save, cached)
         local components = equipment:K2_GetComponentsByClass(class)
         for index = 1, #components do
             local component = unwrap(components[index])
-            if valid(component) and not same(component, rig) and same(component:GetOwner(), equipment) and component:IsVisible()
-                and component.bHiddenInGame == false then
+            local stock_binocular = kind == "s" and same(component, equipment.SM_Item_Binoculars_01)
+            if valid(component) and not same(component, rig) and same(component:GetOwner(), equipment)
+                and (stock_binocular or component:IsVisible() and component.bHiddenInGame == false) then
                 local asset = component[profile[2]]
                 local path = valid(asset) and asset:GetFullName():match("^%S+ (%S+)$")
                 if path and stock_asset(path) and #parts < maximum_parts then
@@ -359,7 +363,7 @@ function view.clear(entry)
     entry.rifle_pivot, entry.rifle_grip, entry.rifle_rotated = nil, nil, nil
     entry.weapon_shape, entry.weapon_meshes = nil, nil
     entry.weapon_stance = nil
-    entry.weapon_slide = nil
+    entry.weapon_slide, entry.binocular = nil, nil
 end
 
 local function align_bat_grip(component, body, socket)
@@ -425,6 +429,9 @@ local function attach(entry, parts, lighter_mode)
         if lighter_mode and part.path == lighter.body_path then body = component end
         if lighter_mode and part.path == lighter.lid_path then lid = component end
         if part.path == bat_mesh and part.kind == "s" then align_bat_grip(component, entry.body, socket) end
+        if part.path == binocular_mesh and part.kind == "s" then
+            entry.binocular = {component = component, idle = part.pose, raised = false}
+        end
         local visible = part.kind ~= "h"
         component:SetHiddenInGame(not visible, false)
         component:SetVisibility(visible, false)
@@ -481,6 +488,33 @@ function view.apply(entry, model, firearm)
     end
     if mode then lighter.apply(entry, mode) end
     entry.weapon_model, entry.weapon_shape = model, shape
+end
+
+function view.raise_binocular(entry, raised)
+    local optic = entry.binocular
+    if not optic or optic.raised == raised or not valid(optic.component) or not valid(entry.head_pivot) then return end
+    local component = optic.component
+    local parent = raised and entry.head_pivot or entry.body
+    local socket = FName(raised and "None" or "Weapon_Socket01", EFindName.FNAME_Find)
+    if not component:K2_AttachToComponent(parent, socket, 2, 2, 0, false) then return end
+    if raised then
+        -- The stock mesh and Aim_Arrow share their optical orientation. In the arrow's frame the
+        -- mesh center sits 34.76 cm forward and 5.63 cm below it, with the eyepiece facing the player.
+        component:K2_SetRelativeLocationAndRotation({X = 34.76, Y = 0, Z = -5.63}, zero_rotation, false, {}, true)
+    else
+        local idle = optic.idle
+        component:K2_SetRelativeLocationAndRotation({X = idle[1], Y = idle[2], Z = idle[3]},
+            {Pitch = idle[4], Yaw = idle[5], Roll = idle[6]}, false, {}, true)
+    end
+    optic.raised = raised
+    local path = raised and scope_in or scope_out
+    local sound = StaticFindObject(path)
+    if not valid(sound) then LoadAsset(path); sound = StaticFindObject(path) end
+    local statics, attenuation = StaticFindObject(statics_type), StaticFindObject(sound_attenuation)
+    if valid(statics) and valid(sound) and valid(attenuation) then
+        statics:PlaySoundAtLocation(entry.pawn, sound, component:K2_GetComponentLocation(), zero_rotation,
+            1, 1, 0, attenuation, nil, nil, nil)
+    end
 end
 
 function view.rifle_idle(entry, idle, api, add_pivot)

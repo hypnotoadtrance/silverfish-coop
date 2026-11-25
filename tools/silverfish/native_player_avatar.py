@@ -38,7 +38,7 @@ _HELMET_MESHES = "/Game/Classes/Player/PlayerAssets/HelmetMeshes/"
 _APPEARANCE = ("face", "plumage", "body", "tail_static", "tail_skeletal", "scale_pattern", "skin_color",
                "plumage_color", "eye_color", "eye_style")
 _OUTFIT = ("body", "head", "weapon", "appearance", "aim", "firearm", "sprinting", "moving")
-_AIM = ("-", "pistol", "rifle")
+_AIM = ("-", "pistol", "rifle", "optic")
 
 
 def valid_path(path):
