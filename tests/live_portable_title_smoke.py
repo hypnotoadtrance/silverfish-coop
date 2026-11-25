@@ -3370,28 +3370,49 @@ async def capture_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gu
     assert campaign / "campaign.json" in before
     backup_before = {path: fingerprint(path) for path in cloud.glob("SFCoopBackup-*.sav")}
     checkpoint = json.loads((campaign / "campaign.json").read_bytes())
-    result = await portable_probe_command(host.bridge, "avatar-probe", "consume\n")
-    player_id, class_name = result.strip().split("\t")
-    player_id = int(player_id)
-    assert class_name == f"BlueprintGeneratedClass {item}", result
+    bandage_ranges = []
+    last_serial = 0
+    try:
+        for action, limits in (("soundnear", (250, 700)), ("soundrange", (1900, 2700))):
+            assert await portable_probe_command(host.bridge, "avatar-probe", action) == "positioned"
+            assert await portable_probe_command(guest.bridge, "avatar-probe", "soundclear") == "cleared"
+            async with asyncio.timeout(5):
+                while await portable_probe_command(host.bridge, "avatar-probe", "soundready") != "true":
+                    await asyncio.sleep(.05)
+            result = await portable_probe_command(host.bridge, "avatar-probe", "consume\n")
+            player_id, class_name, source = result.strip().split("\t")
+            player_id = int(player_id)
+            assert class_name == f"BlueprintGeneratedClass {item}", result
 
-    def heard_use(frame):
-        game = frame.get("game", {})
-        for remote, avatar in game.get("native_player_avatars", {}).items():
-            if avatar.get("player_id") == player_id:
-                use = game.get("native_avatar_use", {}).get(remote, {})
-                if use.get("item") == item and use.get("active") is False and use["hand_motion_cm"] > 20:
-                    return use
-        return None
+            def heard_use(frame):
+                game = frame.get("game", {})
+                for remote, avatar in game.get("native_player_avatars", {}).items():
+                    if avatar.get("player_id") == player_id:
+                        use = game.get("native_avatar_use", {}).get(remote, {})
+                        if (use.get("item") == item and use.get("serial", 0) > last_serial
+                                and use.get("active") is False and use["hand_motion_cm"] > 20):
+                            return use
+                return None
 
-    observed = await wait_resident_status(guest_run, heard_use, timeout=12)
-    prop = heard_use(observed)
-    assert prop["mesh"].endswith(".SM_Prop_Bandage_02"), prop
-    cues = use_events(await resident_events(guest_run, observed))
-    assert {entry["event"] for entry in cues} == set(event_names) and len(cues) == 2, cues
-    assert {entry["serial"] for entry in cues} == {prop["serial"]}, (cues, prop)
-    visual, = [entry for entry in cues if entry["event"] == event_names[1]]
-    assert visual["player_id"] == player_id, visual
+            observed = await wait_resident_status(guest_run, heard_use, timeout=12)
+            prop = heard_use(observed)
+            last_serial = prop["serial"]
+            assert prop["mesh"].endswith(".SM_Prop_Bandage_02"), prop
+            cues = [cue for cue in use_events(await resident_events(guest_run, observed)) if cue["serial"] == last_serial]
+            sound = await portable_probe_command(guest.bridge, "avatar-probe", "soundread")
+            assert {entry["event"] for entry in cues} == set(event_names) and len(cues) == 2, (limits, cues, sound)
+            visual, = [entry for entry in cues if entry["event"] == event_names[1]]
+            assert visual["player_id"] == player_id, visual
+            cue, distance, x, y, z, override, volume, pitch, offset = sound.split(",")
+            assert cue.endswith("/Bandage_01_Cue.Bandage_01_Cue"), sound
+            assert limits[0] <= float(distance) <= limits[1], (limits, sound)
+            assert (override, volume, pitch, offset) == ("false", "1.00", "1.00", "0.00"), sound
+            position_error = math.dist(tuple(map(float, source.split(","))), tuple(map(float, (x, y, z))))
+            assert position_error <= 1, (source, sound)
+            bandage_ranges.append({"listener_distance_cm": float(distance), "position_error_cm": position_error,
+                                   "stock_attenuation": True, "playback_calls": 1})
+    finally:
+        assert await portable_probe_command(host.bridge, "avatar-probe", "soundrestore") == "restored"
     guest_melee = await verify_resident_guest_melee(host, guest) if guest_combat and not rusty else {}
     footsteps = await verify_resident_footsteps(host, guest)
     pistol = await verify_resident_pistol(host, guest, guest_combat=guest_combat, rusty=rusty, memory_queue=memory_queue,
@@ -3412,7 +3433,8 @@ async def capture_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gu
             assert backed_up == checkpoint, "The cloud mirror backed up a new checkpoint during stock player actions"
             backup_revisions.append(backed_up["revision"])
     return {"resident_weapon_cues": {"stock_player_id": player_id, "source": class_name, "observer_cues": cues,
-                                     "prop": prop, "local_bridge_both_peers": "memory",
+                                     "prop": prop, "bandage_audio_ranges": bandage_ranges,
+                                     "local_bridge_both_peers": "memory",
                                      "no_cue_mailbox": True, "saves_unchanged_before_checkpoint": True,
                                      "previous_checkpoint_cloud_copies": backup_revisions,
                                      "stock_footsteps": footsteps, "stock_pistol": pistol, "npc_shots": npc_shots, "npc_kill": npc_kill,

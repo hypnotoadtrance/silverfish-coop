@@ -112,14 +112,19 @@ local function consumable_defaults(path)
     if valid(defaults) and valid(base) and defaults:IsA(base) then return defaults end
 end
 
-local function play_quiet_sound(sound, listener, point)
-    local statics, attenuation = StaticFindObject(statics_path), asset(local_attenuation)
-    if not valid(statics) or not valid(attenuation) or not valid(sound) then return false end
-    local origin = listener:K2_GetActorLocation()
-    if (origin.X - point.X)^2 + (origin.Y - point.Y)^2 + (origin.Z - point.Z)^2 > 1800^2 then return false end
+local function play_sound_at_location(sound, listener, point, attenuation)
+    local statics = StaticFindObject(statics_path)
+    if not valid(statics) or not valid(sound) then return false end
     statics:PlaySoundAtLocation(listener, sound, point, {Pitch = 0, Yaw = 0, Roll = 0},
         1, 1, 0, attenuation, nil, nil, nil)
     return true
+end
+
+local function play_quiet_sound(sound, listener, point)
+    local origin = listener:K2_GetActorLocation()
+    if (origin.X - point.X)^2 + (origin.Y - point.Y)^2 + (origin.Z - point.Z)^2 > 1800^2 then return false end
+    local attenuation = asset(local_attenuation)
+    return valid(attenuation) and play_sound_at_location(sound, listener, point, attenuation)
 end
 
 local function stock_cycle(path)
@@ -259,10 +264,13 @@ function view.dry_fired(pawn)
     if valid(current.listener) then play_quiet_sound(asset(trigger_click), current.listener, point) end
 end
 
-function view.consumed(pawn, path, stock_played)
+function view.consumed(pawn, path, stock_played, point)
     if not current or not valid(pawn) or not pawn:HasAuthority() or not stock_consumable(path)
         or not same(pawn:GetWorld(), current.world) then return end
-    local point = pawn:K2_GetActorLocation()
+    if not point then
+        local prop = pawn.Prop_Arrow
+        point = valid(prop) and prop:K2_GetComponentLocation() or pawn:K2_GetActorLocation()
+    end
     local player = current.avatar.player_id({pawn = pawn, controller_object = pawn.Controller})
     serial = serial + 1
     record({serial, "consume", path, point.X, point.Y, point.Z, player,
@@ -270,7 +278,7 @@ function view.consumed(pawn, path, stock_played)
     if not stock_played and valid(current.listener) then
         local defaults = consumable_defaults(path)
         if not defaults then return end
-        pcall(play_quiet_sound, defaults.UseSound, current.listener, point)
+        pcall(play_sound_at_location, defaults.UseSound, current.listener, point)
         pcall(current.avatar.play_consumable, current.world, player, path, defaults, serial)
     end
 end
@@ -287,7 +295,7 @@ local function capture_use(context)
         or not same(root:GetAttachParent(), pawn.Prop_Arrow) or same(item, current.latest_use) then return end
     local path = item:GetClass():GetFullName():match("^BlueprintGeneratedClass (.+)$")
     current.latest_use = item
-    view.consumed(pawn, path, true)
+    view.consumed(pawn, path, true, item:K2_GetActorLocation())
 end
 
 local function npc_shooter(weapon)
@@ -659,7 +667,8 @@ function view.command(args, state, phase, avatar)
                 last_played = id
                 local resolved, defaults = pcall(consumable_defaults, values[3])
                 if resolved and defaults then
-                    local ok, heard = pcall(play_quiet_sound, defaults.UseSound, pawn, {X = x, Y = y, Z = z})
+                    -- Stock consumables use the sound asset's attenuation and their own location.
+                    local ok, heard = pcall(play_sound_at_location, defaults.UseSound, pawn, {X = x, Y = y, Z = z})
                     if ok and heard then receipts[#receipts + 1] = ("%d:consume"):format(id) end
                     local player = math.tointeger(tonumber(values[7]))
                     if player and player >= 0 and player <= 2147483647 then

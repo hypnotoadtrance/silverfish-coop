@@ -245,6 +245,51 @@ local function prepare_lane(pawn, y)
     assert(pawn:K2_SetActorLocation(point, false, {}, true), "avatar_probe_lane_position_unavailable")
 end
 
+local bandage_sound = "SoundCue /Game/Assets/Sounds/CUEs/Equipment_Cues/Bandage_01_Cue.Bandage_01_Cue"
+local bandage_audio = {}
+local bandage_start
+local bandage_ranges = {soundnear = 420, soundrange = 2200}
+
+local function stage_bandage_listener(host, guest, radius)
+    local trace = asset("/Script/Engine.Default__KismetSystemLibrary")
+    local origin = guest:K2_GetActorLocation()
+    local half_height = host.CapsuleComponent:GetScaledCapsuleHalfHeight()
+    if not bandage_start or not same(bandage_start.pawn, host) then
+        bandage_start = {pawn = host, position = host:K2_GetActorLocation()}
+    end
+    for yaw = 0, 315, 45 do
+        local angle = math.rad(yaw)
+        local x, y = origin.X + radius * math.cos(angle), origin.Y + radius * math.sin(angle)
+        local hit = {}
+        local found = trace:LineTraceSingle(host, {X = x, Y = y, Z = origin.Z + 80},
+            {X = x, Y = y, Z = origin.Z - half_height - 140}, 0, false, {host, guest}, 0,
+            hit, true, trace_color, trace_color, 0)
+        if found then
+            local floor = (hit.OutHit or hit).ImpactPoint
+            local point = {X = x, Y = y, Z = floor.Z + half_height + 2}
+            assert(host:K2_SetActorLocation(point, false, {}, true), "avatar_probe_bandage_position_unavailable")
+            host:ForceNetUpdate()
+            return "positioned"
+        end
+    end
+    error("avatar_probe_bandage_floor_unavailable", 0)
+end
+
+if portable_guest then
+    RegisterHook("/Script/Engine.GameplayStatics:PlaySoundAtLocation",
+        function(_, source, sound, location, _, volume, pitch, start, attenuation)
+            local pawn, cue = source:get(), sound:get()
+            if not valid(pawn) or not valid(cue) or cue:GetFullName() ~= bandage_sound
+                or pawn:GetClass():GetFName():ToString() ~= "Player_FP_C" or not pawn:IsLocallyControlled()
+                or pawn:GetWorld():GetFullName() ~= "World " .. map then return end
+            local ear, point = pawn:K2_GetActorLocation(), location:get()
+            local distance = math.sqrt((ear.X-point.X)^2 + (ear.Y-point.Y)^2 + (ear.Z-point.Z)^2)
+            bandage_audio[#bandage_audio + 1] = ("%s,%.3f,%.3f,%.3f,%.3f,%s,%.2f,%.2f,%.2f"):format(
+                bandage_sound, distance, point.X, point.Y, point.Z, tostring(valid(attenuation:get())),
+                volume:get(), pitch:get(), start:get())
+        end)
+end
+
 local function face_open_lane(pawn, teammate, strafe)
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local point = pawn:K2_GetActorLocation()
@@ -469,6 +514,11 @@ local function binocular_operation(operation)
 end
 
 local function run(operation)
+    if portable_guest and operation == "soundclear" then
+        bandage_audio = {}
+        return "cleared"
+    end
+    if portable_guest and operation == "soundread" then return table.concat(bandage_audio, "|") end
     if (portable_fixture or portable_guest) and operation:match("binoculars$") then
         return binocular_operation(operation)
     end
@@ -512,7 +562,8 @@ local function run(operation)
         return pawn.Aiming and "aiming" or "lowered"
     end
     assert(not portable_fixture or operation == "consume" or operation == "rig" or operation == "style"
-        or operation == "turn" or operation == "jump", "avatar_probe_unknown_portable_operation")
+        or operation == "turn" or operation == "jump" or bandage_ranges[operation]
+        or operation == "soundrestore" or operation == "soundready", "avatar_probe_unknown_portable_operation")
     local movement_operation = sprint_fixture and movement_operations[operation]
         or aim_movement_fixture and aim_movement_operations[operation]
     if guest_fixture then
@@ -583,6 +634,18 @@ local function run(operation)
         return
     end
     local host, guest = player_pair()
+    if portable_fixture and bandage_ranges[operation] then
+        return stage_bandage_listener(host, guest, bandage_ranges[operation])
+    end
+    if portable_fixture and operation == "soundready" then return tostring(host.UsingItem == false) end
+    if portable_fixture and operation == "soundrestore" then
+        if bandage_start and same(bandage_start.pawn, host) then
+            assert(host:K2_SetActorLocation(bandage_start.position, false, {}, true), "avatar_probe_bandage_restore_failed")
+            host:ForceNetUpdate()
+            bandage_start = nil
+        end
+        return "restored"
+    end
     if movement_operation then return movement_probe(operation, host, guest) end
     if rifle_fixture and operation == "seedrifle" then
         local class = asset(long_gun)
@@ -643,7 +706,8 @@ local function run(operation)
             if not ok or id == nil then id = state.PlayerId end
             assert(type(id) == "number" and math.tointeger(id) and id >= 0 and same(actor:GetOwner(), host),
                 "avatar_probe_host_identity_unavailable")
-            return ("%d\t%s"):format(id, actor:GetClass():GetFullName())
+            local point = actor:K2_GetActorLocation()
+            return ("%d\t%s\t%.3f,%.3f,%.3f"):format(id, actor:GetClass():GetFullName(), point.X, point.Y, point.Z)
         end
     elseif operation == "equip" then
         style(host, "SM_Head_UV_02_EarRing", "SM_Plumage_007", { R = .2, G = .7, B = .35, A = 1 })
