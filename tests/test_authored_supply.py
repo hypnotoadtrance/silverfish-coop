@@ -114,7 +114,7 @@ class SupplyClaimTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_client_attaches_current_epoch_to_stock_input_and_keeps_explicit_stale_epoch(self):
-        sender = SimpleNamespace(zone_epoch=EPOCH, last_game={"state": "connected"},
+        sender = SimpleNamespace(zone_epoch=EPOCH, host_session="session", last_game={"state": "connected"},
                                  transport=SimpleNamespace(connected=True, request=AsyncMock(return_value={"ok": True})))
         operation = "c" * 32
         targets = (CITY_AMMO.source, f"{CITY_AMMO.source}@{OLD_EPOCH}", pickup.CITY_WIRE)

@@ -49,7 +49,10 @@ local standing_mapping
 local restoring_gate
 local walking
 local walk_frame_action, walk_frame_clock, last_walk_frame
+local embedded = os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") == "1"
 local input_file
+local pending_interactions
+local interact_phase
 local input_sequence = 0
 local interact_hook_checked = false
 local native_interact_address
@@ -64,6 +67,11 @@ end
 
 local function finite(number)
     return type(number) == "number" and number == number and math.abs(number) < math.huge
+end
+
+local function now(pawn)
+    local statics = StaticFindObject(gameplay_statics_path)
+    return statics:GetRealTimeSeconds(pawn)
 end
 
 local function active(phase)
@@ -112,7 +120,13 @@ local function write_interaction(pawn, pickup_source, pressed_component, project
         or native_bag_projection.focused_target(pawn) or native_enemy_shell_view.focused_target(pawn)
     input_sequence = input_sequence + 1
     local record = "interact\t" .. tostring(input_sequence) .. (target and "\t" .. target or "") .. "\n"
-    if type(SilverfishEnqueueLocalBridgeInput) == "function" and SilverfishEnqueueLocalBridgeInput(record) then
+    if embedded then
+        if pending_interactions then
+            local lines = pending_interactions.lines
+            lines[#lines + 1] = record
+        elseif SilverfishEnqueueLocalBridgeInput(record) ~= true then
+            pending_interactions = {world = pawn:GetWorld(), expires = now(pawn) + 1.5, lines = {record}}
+        end
         native_stock_door.preview_input(pawn, target)
         if pickup_source then pcall(native_authored_pickup.preview_input, pawn, pickup_source, projected_actor) end
         return target
@@ -124,11 +138,30 @@ local function write_interaction(pawn, pickup_source, pressed_component, project
     if written and closed then return target end
 end
 
+local function flush_interactions(pawn)
+    local pending = pending_interactions
+    if not pending then return true end
+    if same(pending.world, pawn:GetWorld()) and now(pawn) < pending.expires then
+        while #pending.lines > 0 do
+            if SilverfishEnqueueLocalBridgeInput(pending.lines[1]) ~= true then return false end
+            table.remove(pending.lines, 1)
+        end
+    end
+    pending_interactions = nil
+    return true
+end
+
 local function drain_native_interact()
     local address = native_interact_address
     local pawn = local_player and local_player.pawn
     if not address or not valid(pawn) or pawn:GetAddress() ~= address
-        or pawn:IsActorBeingDestroyed() or not pawn:IsLocallyControlled() then return end
+        or pawn:IsActorBeingDestroyed() or not pawn:IsLocallyControlled()
+        or desired[local_player.name] or pawn.Dead ~= false then
+        pending_interactions = nil
+        return
+    end
+    -- Do not take more native receipts until the prior batch has room in the bridge.
+    if not flush_interactions(pawn) then return end
     for _ = 1, 8 do
         local source = native_authored_pickup.take_press(pawn)
         if not source then break end
@@ -164,11 +197,16 @@ local function sync_native_interact(phase)
     local pawn = local_player and local_player.pawn
     if not active(phase) or not valid(pawn) then
         if native_interact_address then SilverfishClearNativeInteractScope() end
-        native_interact_address = nil
+        native_interact_address, pending_interactions, interact_phase = nil, nil, nil
         return
     end
     local address = pawn:GetAddress()
+    local previous = native_interact_address
     native_interact_address = SilverfishSetNativeInteractScope(address, phase == "hosting") and address or nil
+    if not native_interact_address or native_interact_address ~= previous or phase ~= interact_phase then
+        pending_interactions = nil
+    end
+    interact_phase = phase
     return drain_native_interact()
 end
 
@@ -203,11 +241,6 @@ local function writable(record)
     local pawn = record.pawn
     return valid(pawn) and not pawn:IsActorBeingDestroyed() and same(pawn:GetWorld(), record.world)
         and pawn:GetFullName() == record.name and (pawn:HasAuthority() or pawn:IsLocallyControlled())
-end
-
-local function now(pawn)
-    local statics = StaticFindObject(gameplay_statics_path)
-    return statics:GetRealTimeSeconds(pawn)
 end
 
 local function cancel_walk_frames()
@@ -980,11 +1013,11 @@ function players.rows(status_row)
 end
 
 local function on_interact(context)
-    if type(SilverfishTakeNativeInteractPress) ~= "function" then write_interaction(context:get()) end
+    if not embedded and type(SilverfishTakeNativeInteractPress) ~= "function" then write_interaction(context:get()) end
 end
 
 local function ensure_hooks()
-    if type(SilverfishTakeNativeInteractPress) == "function" then
+    if embedded or type(SilverfishTakeNativeInteractPress) == "function" then
         interact_hook_checked = true
     elseif not interact_hook_checked and valid(StaticFindObject(interact_path)) then
         local ok, failure = pcall(RegisterHook, interact_path, on_interact)
@@ -1010,7 +1043,7 @@ function players.start(bridge)
         if not native_interact_address then return end
         local ok, failure = pcall(drain_native_interact)
         if not ok then
-            native_interact_address = nil
+            native_interact_address, pending_interactions = nil, nil
             print("[SilverfishCoop] Interact input unavailable: " .. tostring(failure) .. "\n")
         end
     end)

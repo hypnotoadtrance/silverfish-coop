@@ -102,7 +102,7 @@ class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(bridge.snapshot()["sequence"], 10)
             self.assertEqual(bridge.status_source, "file")
 
-    async def test_embedded_inputs_wake_worker_and_keep_file_fallback_in_order(self):
+    async def test_embedded_inputs_wake_worker_without_reading_stale_file_input(self):
         with TemporaryDirectory() as temporary:
             bridge = runtime.Bridge(Path(temporary), None)
             bridge.local_bridge = Mock()
@@ -114,8 +114,25 @@ class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(bridge.wait_for_interaction(1), .2)
             self.assertEqual(bridge.interactions(), [
                 (uuid.uuid5(bridge.input_namespace, str(sequence)).hex, target)
-                for sequence, target in ((8, None), (9, None), (10, "stock-critter:1"))
+                for sequence, target in ((8, None), (10, "stock-critter:1"))
             ])
+
+    async def test_full_interaction_lane_keeps_new_press_in_the_native_queue(self):
+        with TemporaryDirectory() as temporary:
+            bridge = runtime.Bridge(Path(temporary), None)
+            bridge.local_bridge = Mock()
+            bridge.local_bridge.input_ready.return_value = True
+            bridge.local_bridge.read_input.return_value = [b"interact\t65"]
+            bridge._local_interaction_records.extend(
+                f"interact\t{sequence}".encode() for sequence in range(1, 65)
+            )
+            self.assertEqual(bridge.native_crate_inputs(), [])
+            bridge.local_bridge.read_input.assert_not_called()
+            self.assertEqual(bridge.interactions(), [
+                (uuid.uuid5(bridge.input_namespace, str(sequence)).hex, None) for sequence in range(1, 65)
+            ])
+            self.assertEqual(bridge.interactions(), [(uuid.uuid5(bridge.input_namespace, "65").hex, None)])
+            bridge.local_bridge.read_input.assert_called_once_with(64)
 
     async def test_crate_ring_input_does_not_consume_a_loose_interaction(self):
         with TemporaryDirectory() as temporary:

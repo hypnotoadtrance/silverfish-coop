@@ -793,7 +793,7 @@ class Bridge:
                                    guest=False) -> None:
         """Wake for local input, a new game frame, or pending network work."""
         deadline = time.monotonic() + timeout
-        streams = [("input.tsv", self.input_offset)]
+        streams = [("input.tsv", self.input_offset)] if self.local_bridge is None else []
         if guest:
             if self.local_bridge is None:
                 streams.extend((("native-guest-primary-events", self.primary_input_offset),
@@ -844,8 +844,9 @@ class Bridge:
                     pass
 
     def _take_local_inputs(self, pending: deque[bytes]) -> list[bytes]:
-        # Keep unread combat and travel inputs in the native FIFO until the collectors can take another batch.
-        room = 64 - max(len(self._local_primary_records), len(self._local_held_fire_records),
+        # Keep unread interaction, combat, and travel inputs in the native FIFO until their collectors have room.
+        room = 64 - max(len(self._local_interaction_records), len(self._local_crate_records),
+                        len(self._local_primary_records), len(self._local_held_fire_records),
                         len(self._local_death_records), len(self._local_zone_records),
                         len(self._local_authored_zone_records), len(self._local_stardust_records),
                         len(self._local_fruiting_stardust_records))
@@ -902,16 +903,18 @@ class Bridge:
 
     def interactions(self) -> list[tuple[str, str | None]]:
         """Consume complete local input records once, even if writing is in progress."""
-        try:
-            with (self.directory / "input.tsv").open("rb") as stream:
-                stream.seek(self.input_offset)
-                batch = stream.read(4096)
-        except OSError:
-            batch = b""
-        end = batch.rfind(b"\n") + 1
-        self.input_offset += end if end else len(batch) if len(batch) == 4096 else 0
-        records = batch[:end].splitlines()
-        records.extend(self._take_local_inputs(self._local_interaction_records))
+        if self.local_bridge is not None:
+            records = self._take_local_inputs(self._local_interaction_records)
+        else:
+            try:
+                with (self.directory / "input.tsv").open("rb") as stream:
+                    stream.seek(self.input_offset)
+                    batch = stream.read(4096)
+            except OSError:
+                return []
+            end = batch.rfind(b"\n") + 1
+            self.input_offset += end if end else len(batch) if len(batch) == 4096 else 0
+            records = batch[:end].splitlines()
         results = []
         for line in records:
             fields = line.split(b"\t")
