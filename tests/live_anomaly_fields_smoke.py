@@ -189,7 +189,7 @@ async def verify(work, vanilla, activate, placed, generated, glass_web=False):
 
     async def launch(run, label, *arguments):
         env = dict(os.environ)
-        if (activate or glass_web) and label == "guest":
+        if (activate or glass_web) and placed != "stone-maze" and label == "guest":
             env["SILVERFISH_COOP_RENDER_CAPTURE"] = "guest"
         with (host / f"{label}.log").open("wb") as log:
             job = await asyncio.create_subprocess_exec(*cli, *arguments, stdout=log, stderr=log, cwd=REPO,
@@ -242,8 +242,9 @@ async def verify(work, vanilla, activate, placed, generated, glass_web=False):
                 and math.dist(event["location"], source) < 5]
 
     try:
+        recovery = ("--native-guest-regen",) if placed == "stone-maze" and activate else ()
         await launch(host, "host", "host", "--campaign", name, "--port", "0", "--start-zone", area,
-                     "--native-guest", "--native-events", "--native-expanded-zones", "--fixtures", *flags)
+                     "--native-guest", "--native-events", "--native-expanded-zones", "--fixtures", *recovery, *flags)
         initial = await wait(host, lambda row: row.get("state") == "hosting" and scene(row))
         job = await asyncio.create_subprocess_exec(*cli, "invite", "--campaign", name, "--name", "Field guest",
                                                    "--character", "Surveyor", stdout=asyncio.subprocess.PIPE,
@@ -358,14 +359,30 @@ async def verify(work, vanilla, activate, placed, generated, glass_web=False):
 
                     baseline = await wait(host, lambda row: rads(row, "guest") >= 0)
                     starting_rads = rads(baseline, "guest")
-                    assert (await submit(host, "native-anomaly-trigger-fixture", target=target))["ok"]
-                    radiated = await wait(host, lambda row: rads(row, "guest") > starting_rads, timeout=8)
+                    trial = proof["spinning_ball_guest_radiation"] = {"before": starting_rads}
+                    enter = await submit(host, "native-anomaly-trigger-fixture", target=f"spinning-enter|{target}")
+                    assert enter["ok"], enter
+                    radiated = await wait(host, lambda row: rads(row, "guest") > starting_rads, timeout=10)
                     received = await wait(guest, lambda row: rads(row, "local") > starting_rads, timeout=8)
-                    assert math.isclose(rads(received, "local"), rads(radiated, "guest"), abs_tol=.01)
-                    proof["spinning_ball_guest_radiation"] = {
-                        "before": starting_rads, "host_guest_rads": rads(radiated, "guest"),
-                        "projected_guest_rads": rads(received, "local"),
-                    }
+                    trial.update(host_guest_rads=rads(radiated, "guest"), projected_guest_rads=rads(received, "local"))
+                    leave = await submit(host, "native-anomaly-trigger-fixture", target=f"spinning-leave|{target}")
+                    assert leave["ok"], leave
+                    trial["left_stock_overlap"] = True
+                    local_tick = await submit(guest, fixture, target=f"spinning-localtick|{target}")
+                    assert local_tick["ok"], local_tick
+                    trial["guest_tick_vetoed"] = True
+                    exited = await wait(host, lambda row: rads(row, "guest") > 0, timeout=5)
+                    exit_rads = rads(exited, "guest")
+                    trial["exit_rads"] = exit_rads
+                    recovered = await wait(host, lambda row: 0 <= rads(row, "guest") < exit_rads, timeout=8)
+                    dose = rads(recovered, "guest")
+                    trial.update(recovery_rads=dose, damaged_health=recovered["game"]["pawns"]["guest"]["health"])
+                    assert trial["damaged_health"] < guest_health, trial
+                    cleared = await wait(host, lambda row: rads(row, "guest") == 0, timeout=22)
+                    final_health = cleared["game"]["pawns"]["guest"]["health"]
+                    synced = await wait(guest, lambda row: rads(row, "local") == 0 and math.isclose(
+                        row["game"]["pawns"]["local"]["health"], final_health, abs_tol=.15), timeout=10)
+                    trial.update(cleared_rads=rads(synced, "local"), cleared_health=final_health)
                     continue
                 if kind == "electrode":
                     armed = await wait(host, lambda row: electrode_phase(row, 1))

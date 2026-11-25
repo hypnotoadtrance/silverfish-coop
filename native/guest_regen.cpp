@@ -33,6 +33,7 @@ namespace
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto regen_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:RegenHealth");
+    constexpr auto radiation_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:RadDamage");
 
     bool opt_in(const char* name)
     {
@@ -437,7 +438,7 @@ namespace
     {
         Address requested{};
         Scope scope;
-        double last{-1.0}, total{};
+        double last{-1.0}, total{}, radiation_due{-1.0};
         std::int64_t pulses{};
         bool blocked{};
     };
@@ -492,6 +493,28 @@ namespace
         return 13;
     }
 
+    void pulse_radiation(Entry& entry, U::UObject* pawn, double now)
+    {
+        auto* save = entry.scope.save.Get();
+        auto* rads = field<U::FDoubleProperty>(save, STR("PlayerRads"));
+        const auto dose = rads ? rads->GetPropertyValueInContainer(save) : 0.0;
+        if (!std::isfinite(dose) || dose <= 0.0)
+        {
+            entry.radiation_due = -1.0;
+            return;
+        }
+        // Stock schedules RadDamage after a one-second latent delay. The host's remote pawn has no tick.
+        if (entry.radiation_due < 0.0 || entry.radiation_due > now + 1.0)
+            entry.radiation_due = now + 1.0;
+        if (now < entry.radiation_due) return;
+        entry.radiation_due = now + 1.0;
+
+        auto* damage = find<U::UFunction>(radiation_path);
+        if (!damage || damage->GetOuterPrivate() != pawn->GetClassPrivate() || damage->GetNumParms() ||
+            damage->GetReturnProperty() || damage->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return;
+        pawn->ProcessEvent(damage, nullptr);
+    }
+
     int pulse(const Lua& lua)
     {
         if (!enabled() || !U::IsInGameThreadRaw() || lua.get_stack_size() != 3 ||
@@ -511,8 +534,15 @@ namespace
         if (entry->last < 0.0) return reply(lua, "refused_world_clock");
 
         auto* pawn = entry->scope.pawn.Get();
-        if (!pawn || static_cast<U::AActor*>(pawn)->IsActorTickEnabled() || !is_false(pawn, STR("Dead")) ||
-            !is_false(pawn, STR("IsWeaponBlocked")) || !is_false(pawn, STR("UsingItem")))
+        if (!pawn || static_cast<U::AActor*>(pawn)->IsActorTickEnabled() || !is_false(pawn, STR("Dead")))
+        {
+            entry->last = -1.0;
+            entry->radiation_due = -1.0;
+            return reply(lua, "paused_pawn_gate");
+        }
+        pulse_radiation(*entry, pawn, now);
+        if (!is_false(pawn, STR("Dead")) || !is_false(pawn, STR("IsWeaponBlocked")) ||
+            !is_false(pawn, STR("UsingItem")))
         {
             entry->last = -1.0;
             return reply(lua, "paused_pawn_gate");

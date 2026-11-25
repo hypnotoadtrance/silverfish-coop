@@ -35,7 +35,7 @@ local host_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") =
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local rook = "/Game/Classes/Maps/Dreams/TheRook_P"
 local pending, active, pending_fires, fires, fixtures = {}, {}, {}, {}, {}
-local world, world_map, fixture_kind, wandering_probe
+local world, world_map, fixture_kind, wandering_probe, spinning_probe
 local recovery, glass_break_hook
 local glass_pending, glass_live = {}, {}
 local glass_work = {}
@@ -433,6 +433,60 @@ function fields.guest(enabled)
     if type(SilverfishSetNativeAnomalyGuest) == "function" then SilverfishSetNativeAnomalyGuest(enabled) end
 end
 
+local function spinning_contact(mode, actor, guest, state)
+    local source = spinning_radiation(actor)
+    local sphere = source and source.Sphere
+    local host = state.local_pawn and state.local_pawn.pawn
+    if not source or not source:HasAuthority() or not valid(sphere) or not in_world(host, state.world)
+        or not sphere:GetGenerateOverlapEvents() or sphere:IsOverlappingActor(host) then
+        error("The stock radiation overlap is unavailable", 0)
+    end
+    if mode == "leave" then
+        local trial = spinning_probe
+        if not trial or not same(trial.actor, actor) or not same(trial.guest, guest)
+            or not guest:K2_TeleportTo(trial.origin, trial.rotation) or sphere:IsOverlappingActor(guest) then
+            error("The guest did not leave the stock radiation field", 0)
+        end
+        if host.Save.PlayerRads ~= trial.host_rads then error("The guest exposed the host's save to radiation", 0) end
+        guest:ForceNetUpdate()
+        spinning_probe = nil
+        return "The guest left the stock radiation field"
+    end
+
+    local center, radius = sphere:K2_GetComponentLocation(), sphere:GetScaledSphereRadius()
+    local point, rotation = guest:K2_GetActorLocation(), guest:K2_GetActorRotation()
+    local half, host_rads = guest.CapsuleComponent:GetScaledCapsuleHalfHeight(), host.Save.PlayerRads
+    local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    local color = {R=0, G=0, B=0, A=0}
+    if sphere:IsOverlappingActor(guest) then error("The guest already overlaps the stock radiation field", 0) end
+    for degrees = 0, 330, 30 do
+        local angle = math.rad(degrees)
+        local x, y = center.X + radius * .68 * math.cos(angle), center.Y + radius * .68 * math.sin(angle)
+        local result = {}
+        if trace:LineTraceSingle(host, {X=x,Y=y,Z=center.Z+350}, {X=x,Y=y,Z=center.Z-radius},
+            0, true, {host, guest, actor, source}, 0, result, true, color, color, 0) then
+            local hit = result.OutHit or result
+            local z = hit.ImpactPoint.Z + half + 2
+            local safe = hit.ImpactNormal.Z > .75 and (.68 * radius)^2 + (z-center.Z)^2 < (radius-half)^2
+            for _, entry in pairs(active) do
+                if not safe then break end
+                if entry.kind == "gravity" and in_world(entry.actor, state.world) and valid(entry.actor.Sphere) then
+                    local field = entry.actor.Sphere
+                    local at = field:K2_GetComponentLocation()
+                    safe = (x-at.X)^2 + (y-at.Y)^2 + (z-at.Z)^2 > (field:GetScaledSphereRadius()+half)^2
+                end
+            end
+            if safe and guest:K2_TeleportTo({X=x,Y=y,Z=z}, rotation) and sphere:IsOverlappingActor(guest) then
+                spinning_probe = {actor=actor, guest=guest, origin=point, rotation=rotation, host_rads=host_rads}
+                guest:ForceNetUpdate()
+                return "The guest entered the stock radiation field"
+            end
+        end
+    end
+    guest:K2_TeleportTo(point, rotation)
+    error("No ground inside the stock radiation field was clear of the Gravity Well", 0)
+end
+
 function fields.command(args, state, phase)
     if args[2] == "native-vortex-apply-sensors" then return project_placed_sensors(args, state, phase) end
     if args[2] == "native-angler-apply-colors" then return lamps.apply_colors(args, state, phase, active) end
@@ -495,11 +549,15 @@ function fields.command(args, state, phase)
     if args[2] == "native-anomaly-trigger-fixture" or args[2] == "native-placed-anomaly-guest-fixture"
         or args[2] == "native-electrode-retire-fixture" then
         local guest_probe = args[2] == "native-placed-anomaly-guest-fixture"
+        local spin_mode, path
+        if (args[2] == "native-anomaly-trigger-fixture" or guest_probe) and type(args[3]) == "string" then
+            spin_mode, path = args[3]:match("^spinning%-([a-z]+)|(.+)$")
+        end
         local trap = fixtures[args[3]]
         local kind = trap and args[3]
         if not trap then
             for _, entry in pairs(active) do
-                if entry.placed == args[3] then trap, kind = entry.actor, entry.kind; break end
+                if entry.placed == (path or args[3]) then trap, kind = entry.actor, entry.kind; break end
             end
         end
         if kind == "gravity" and guest_probe and #args == 3 and headless and phase == "connected"
@@ -520,6 +578,16 @@ function fields.command(args, state, phase)
             if phase ~= "connected" or not in_world(pawn, state.world) or not pawn:IsLocallyControlled()
                 or not valid(pawn.CapsuleComponent) or trigger_enabled(trap, kind) then
                 error("Placed trap guest overlap probe unavailable", 0)
+            end
+            if kind == "spinning-ball" and spin_mode == "localtick" then
+                local save = pawn.Save
+                if not valid(save) or save.PlayerRads <= 0 then error("The guest has no radiation to verify", 0) end
+                local hp, regen, rads = save.PlayerHealth, save.PlayerRegen, save.PlayerRads
+                pawn:RadDamage()
+                if save.PlayerHealth ~= hp or save.PlayerRegen ~= regen or save.PlayerRads ~= rads then
+                    error("The guest independently applied stock radiation damage", 0)
+                end
+                return "The guest kept the authoritative radiation state"
             end
             local callback = kind == "electrode" and electrode_overlap
                 or kind == "wandering-teleport" and wandering_overlap or overlap
@@ -562,6 +630,7 @@ function fields.command(args, state, phase)
             return "Stock wandering teleport invoked on the host"
         end
         if kind == "spinning-ball" then
+            if spin_mode == "enter" or spin_mode == "leave" then return spinning_contact(spin_mode, trap, guest, state) end
             local source = spinning_radiation(trap)
             if not source or not source:HasAuthority() then error("Stock Spinning Ball radiation unavailable", 0) end
             -- The placed ball sits over a separate Gravity Well. Isolate its stock damage callback.
@@ -626,7 +695,7 @@ function fields.rows(state, phase, row)
     if not same(world, state.world) or world_map ~= state.map then
         active, fires, fixtures, world, world_map = {}, {}, {}, state.world, state.map
         glass_live, glass_work = {}, {}
-        recovery = nil
+        recovery, spinning_probe = nil, nil
         effects.clear()
         electrodes.clear()
         lamps.clear()

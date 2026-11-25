@@ -98,6 +98,8 @@ namespace
     constexpr auto damage_full_name = STR("Function /Game/Classes/Player/Player_FP.Player_FP_C:DealDamage");
     constexpr auto direct_damage_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:Deal_DirectDamage");
     constexpr auto direct_damage_full_name = STR("Function /Game/Classes/Player/Player_FP.Player_FP_C:Deal_DirectDamage");
+    constexpr auto radiation_damage_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:RadDamage");
+    constexpr auto radiation_damage_full_name = STR("Function /Game/Classes/Player/Player_FP.Player_FP_C:RadDamage");
     constexpr auto offhand_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:OffhandFlashlight");
     constexpr auto offhand_full_name = STR("Function /Game/Classes/Player/Player_FP.Player_FP_C:OffhandFlashlight");
     constexpr auto mode_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:K2_OnMovementModeChanged");
@@ -1192,6 +1194,7 @@ namespace
         Unreal::FWeakObjectPtr world, instance, driver, connection;
         FriendlyFire damage;
         Unreal::UFunction* direct{};
+        Unreal::UFunction* radiation{};
         Unreal::UFunction* die{};
         Unreal::UFunction* offhand{};
         Unreal::FBoolProperty* offhand_equip{};
@@ -1201,7 +1204,7 @@ namespace
 
         [[nodiscard]] bool accepts(Unreal::UFunction* callee) const
         {
-            return callee && (callee == damage.damage || callee == direct || callee == die);
+            return callee && (callee == damage.damage || callee == direct || callee == radiation || callee == die);
         }
     };
 
@@ -1303,6 +1306,9 @@ namespace
         scope.connection = connection;
         scope.damage = damage;
         scope.direct = direct;
+        auto* radiation = find_player_script(radiation_damage_path, radiation_damage_full_name);
+        if (radiation && radiation->GetOuterPrivate() == die->GetOuterPrivate() && radiation->GetNumParms() == 0 &&
+            !radiation->GetReturnProperty()) scope.radiation = radiation;
         scope.die = die;
         auto* offhand = find_player_script(offhand_path, offhand_full_name);
         if (offhand && offhand->GetOuterPrivate() == die->GetOuterPrivate() && offhand->GetNumParms() == 1)
@@ -1462,7 +1468,7 @@ namespace
             }
         }
         else if (callee == scope.direct) ++scope.direct_blocked;
-        else ++scope.die_blocked;
+        else if (callee == scope.die) ++scope.die_blocked;
         return true;
     }
 
