@@ -6,7 +6,7 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 
 | Area | Two-PC observation |
 | --- | --- |
-| Live Frog | The guest picked up a frog. Both Use in the stock context menu and dragging it onto their character failed to consume it. The stock frog's infection effect excluded it from the general guest consumable path. |
+| Live Frog | The guest picked up a frog. Both Use in the stock context menu and dragging it onto their character failed to consume it. Development candidate `rc-7683381` accepts stock inherited infection effects in the guest consumable path. A muted Direct IP pair verified both gestures after reconnecting. Each consumed one frog, restored about eight food points, and increased only the guest's sickness on both seats. The campaign checkpoint stayed unchanged. |
 | Shotgun wall decals | The host saw the wall impacts and spread from the guest's suppressed shotgun. The firing guest reported no visible decals. |
 | Intro metal gate | The guest saw the open and closed positions, with an instant change between them. |
 | Guest melee impacts | The host heard the guest's melee hits. The guest reported missing the impact sound and the effect on physics objects. |
@@ -14,6 +14,9 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 | Shared cash pickup popup | The party balance updated correctly. Only the player who picked up the cash saw the stock receipt popup. |
 | Resting with Insomnia | The host pressed Interact at a bed with the Insomnia perk. The clock stayed at the same time of day. |
 | Radio | The guest heard the radio after the host switched it on. |
+| Wild mushrooms | The players reported that mushroom pickup worked in this session. |
+
+On development candidate `rc-7683381`, a separate muted Direct IP pair verified two stock hit presentations in the same game tick. The injured guest received both the burn and blunt impact cues, one hurt call, and the latest hit direction. The host had neither impact cue nor the guest's hit overlay. The same run exercised real campfire damage and regeneration. Both runs preserved their copied saves and used two executable launches each.
 
 ## Being worked on
 

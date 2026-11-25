@@ -174,6 +174,9 @@ async def verify_personal_consumable_reconnect(host, guest, proof, probe):
     previous_food = dragged["vitals"]["food"]
     results = {}
     for action, guid in zip(("context", "drag"), proof["frog_guids"], strict=True):
+        async with asyncio.timeout(5):
+            while await command(guest, "guest-use-ready") != "ready":
+                await asyncio.sleep(.08)
         used = await use_stock_item(run, frame, guid, FALLBACK_RECEIPT, drag=action == "drag")
         assert (used["class_path"], used["quantity_before"], used["quantity_after"]) == (LIVE_FROG, 1, 0), used
         fed, sick = used["vitals"]["food"], used["vitals"]["sickness"]

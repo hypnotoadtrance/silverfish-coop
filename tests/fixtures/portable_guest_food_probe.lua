@@ -173,6 +173,10 @@ local function run(action)
         assert(not pawn:HasAuthority(), "the health readback needs an enrolled guest")
         return medical_vitals(save)
     end
+    if action == "guest-use-ready" then
+        assert(not pawn:HasAuthority(), "the stock item timer readback needs an enrolled guest")
+        return pawn.UsingItem == false and pawn.IsWeaponBlocked == false and "ready" or "busy"
+    end
     if action == "guest-personal-vitals" then
         assert(not pawn:HasAuthority(), "the personal stat readback needs an enrolled guest")
         return ("%.6f,%.6f,%d,%d,%d"):format(save.PlayerFood, save.PlayerRegen, stock_flag(save, "Player_Fatigue"),
