@@ -1869,7 +1869,7 @@ class Bridge:
                                                           "profile": None if profile == "-" else profile}
                 elif fields[0] == "native-guest-hurt" and len(fields) == 8 and data.get("state") == "hosting":
                     cues = data.setdefault(native_damage_feedback.KEY, [])
-                    if len(cues) < native_damage_feedback.LIMIT and (cue := native_damage_feedback.parse(fields)):
+                    if len(cues) < native_damage_feedback.STATUS_LIMIT and (cue := native_damage_feedback.parse(fields)):
                         cues.append(cue)
                 elif fields[0] == "native-voice-speaker" and len(fields) in {4, 7} and data.get("state") == "hosting":
                     name, personality, pitch = fields[1:4]

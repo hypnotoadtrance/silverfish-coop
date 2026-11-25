@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 from tools.silverfish.native_anomaly_effects import (
     ACID_POOL_VIEW, AcidPoolPlayback,
@@ -118,7 +118,32 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call.kwargs["sound_mask"] for call in control.event.call_args_list], [16, 4])
         self.assertEqual(bridge.command.await_count, 2)
         bridge.command.assert_awaited_with("native-guest-hurt-play", "Crossroads", epoch, "GuestPawn",
-                                           "13", "38", "72.5", "-24", "8", "4", timeout=1.5)
+                                           "13", "38", "72.5", "-24", "8", "4", "0", timeout=1.5)
+
+    async def test_guest_hurt_preserves_earlier_hit_sounds_and_retries_unacknowledged_feedback(self):
+        playback = HurtPlayback()
+        epoch = "a" * 32
+        game = {"state": "connected", "map": "Crossroads", "pawns": {"local": {"name": "GuestPawn"}}}
+        frame = {"map": game["map"], "epoch": epoch, "cues": [
+            [3, 7, 0, 0, 0, 16], [2, 48, 44, -5, 1, 4], [4, 12, 39, -30, 8, 2],
+        ]}
+        played = {**game, "ack": {"message": "guest hurt feedback played"}}
+        duplicate = {**game, "ack": {"message": "guest hurt feedback already played"}}
+        bridge = Mock(command=AsyncMock(side_effect=[RuntimeError("overlay unavailable"), played, duplicate]))
+        control = Mock()
+
+        for _ in range(3):
+            await playback.sync(bridge, control, game, frame, epoch)
+
+        psychic = call("native-guest-hurt-play", "Crossroads", epoch, "GuestPawn",
+                       "3", "7", "0", "0", "0", "16", "0", timeout=1.5)
+        physical = call("native-guest-hurt-play", "Crossroads", epoch, "GuestPawn",
+                        "4", "12", "39", "-30", "8", "6", "1", timeout=1.5)
+        self.assertEqual(bridge.command.await_args_list, [psychic, physical, psychic])
+        self.assertEqual(control.event.call_args_list, [
+            call("native_guest_hurt_unavailable", reason="overlay unavailable"),
+            call("native_guest_hurt_played", serial=4, damage=12, sound_mask=6),
+        ])
 
     async def test_glass_thread_snap_requires_stock_geometry_and_plays_once(self):
         playback = Playback()

@@ -5,6 +5,7 @@ from .native_guest_drop_record import valid_id
 KEY = "native_guest_hurt"
 COMMAND = "native-guest-hurt-play"
 LIMIT = 12
+STATUS_LIMIT = 4 * LIMIT
 PSYCHE = 16
 HIT_OFFSET_LIMIT = 1e9
 
@@ -37,7 +38,7 @@ def frame(game, epoch, pawn):
 class Playback:
     def __init__(self):
         self.scope = None
-        self.last = 0
+        self.last = {}
 
     async def sync(self, bridge, control, game, incoming, epoch):
         if game.get("state") != "connected" or not valid_id(epoch) or not isinstance(incoming, dict):
@@ -51,20 +52,35 @@ class Playback:
             return game
         scope = area, epoch, identity
         if self.scope != scope:
-            self.scope, self.last = scope, 0
+            self.scope, self.last = scope, {}
         latest = {}
+        physical_mask = 0
+        hurt_voice = False
         for cue in cues:
-            if valid_cue(cue) and cue[0] > self.last:
-                psyche = cue[-1] == PSYCHE
-                if psyche not in latest or cue[0] > latest[psyche][0]:
-                    latest[psyche] = cue
-        for cue in sorted(latest.values(), key=lambda value: value[0]):
-            self.last = cue[0]
+            if not valid_cue(cue):
+                continue
+            psyche = cue[-1] == PSYCHE
+            if cue[0] <= self.last.get(psyche, 0):
+                continue
+            if not psyche:
+                physical_mask |= cue[-1]
+                hurt_voice |= cue[1] >= 40
+            if psyche not in latest or cue[0] > latest[psyche][0]:
+                latest[psyche] = cue
+        for psyche, cue in sorted(latest.items(), key=lambda item: item[1][0]):
+            serial, amount, x, y, z, mask = cue
+            if not psyche:
+                mask = physical_mask
+            play_voice = int(not psyche and hurt_voice)
             try:
-                game = await bridge.command(COMMAND, area, epoch, identity, *map(str, cue), timeout=1.5)
+                game = await bridge.command(COMMAND, area, epoch, identity,
+                                            *map(str, (serial, amount, x, y, z, mask, play_voice)), timeout=1.5)
             except (OSError, RuntimeError) as error:
                 control.event("native_guest_hurt_unavailable", reason=str(error))
                 continue
-            if game.get("ack", {}).get("message") == "guest hurt feedback played":
-                control.event("native_guest_hurt_played", serial=self.last, damage=cue[1], sound_mask=cue[-1])
+            message = game.get("ack", {}).get("message")
+            if message in {"guest hurt feedback played", "guest hurt feedback already played"}:
+                self.last[psyche] = serial
+            if message == "guest hurt feedback played":
+                control.event("native_guest_hurt_played", serial=serial, damage=amount, sound_mask=mask)
         return game

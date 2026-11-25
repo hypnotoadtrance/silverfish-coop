@@ -84,6 +84,9 @@ function feedback.sync(state, phase)
             health[pawn:GetAddress()] = {save = save, value = save.PlayerHealth}
         end
     end
+    for address in pairs(events) do
+        if not health[address] then events[address] = nil end
+    end
     if not pulse_hooked and valid(StaticFindObject(damage_pulse)) then
         RegisterHook(damage_pulse, function(context, amount, direction, _, damage)
             local pawn = context:get()
@@ -103,10 +106,13 @@ end
 function feedback.rows(state, phase, row)
     if phase ~= "hosting" or not valid(state.world) or state.world:GetAddress() ~= world then return {} end
     local rows = {}
-    for _, event in ipairs(events) do
-        if os.time() - event.timestamp < 3 then
-            rows[#rows + 1] = row("native-guest-hurt", event.serial, event.pawn,
-                event.amount, event.x, event.y, event.z, event.mask)
+    local now = os.time()
+    for _, cues in pairs(events) do
+        for _, event in ipairs(cues) do
+            if now - event.timestamp < 3 then
+                rows[#rows + 1] = row("native-guest-hurt", event.serial, event.pawn,
+                    event.amount, event.x, event.y, event.z, event.mask)
+            end
         end
     end
     return rows
@@ -114,10 +120,13 @@ end
 
 local function record(pawn, amount, direction, mask)
     if serial >= 2^53 - 1 then return end
+    local address = pawn:GetAddress()
+    local cues = events[address] or {}
+    events[address] = cues
     serial = serial + 1
-    events[#events + 1] = {serial = serial, pawn = pawn:GetFullName(), amount = math.min(amount, 1000),
+    cues[#cues + 1] = {serial = serial, pawn = pawn:GetFullName(), amount = math.min(amount, 1000),
         x = direction.X, y = direction.Y, z = direction.Z, mask = mask, timestamp = os.time()}
-    if #events > 12 then table.remove(events, 1) end
+    if #cues > 12 then table.remove(cues, 1) end
 end
 
 observed_hit = function(pawn, amount, direction, damage)
@@ -272,7 +281,7 @@ function feedback.command(fields, state, phase)
     if fields[2] ~= "native-guest-hurt-play" then return end
     local epoch, name = fields[4], fields[5]
     local local_player, controller = state.local_pawn, state.controller
-    if phase ~= "connected" or #fields ~= 11 or state.map ~= fields[3] or not epoch or #epoch ~= 32
+    if phase ~= "connected" or #fields ~= 12 or state.map ~= fields[3] or not epoch or #epoch ~= 32
         or not epoch:match("^[a-f0-9]+$") or not local_player or local_player.name ~= name
         or not valid(controller) or not controller:IsLocalController() then error("Guest hurt feedback scope unavailable", 0) end
     local save, pawn = save_scope.bind_guest(state, phase)
@@ -280,38 +289,43 @@ function feedback.command(fields, state, phase)
         or not same(pawn:GetWorld(), state.world) then error("Guest hurt feedback owner unavailable", 0) end
     local id, amount, x, y, z, mask = table.unpack({tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8]),
         tonumber(fields[9]), tonumber(fields[10]), tonumber(fields[11])})
+    local play_voice = fields[12]
     if math.type(id) ~= "integer" or id < 1 or id >= 2^53 or not finite(amount, 1000) or amount < 1
         or not finite(x, hit_offset_limit) or not finite(y, hit_offset_limit) or not finite(z, hit_offset_limit)
         or math.type(mask) ~= "integer" or mask < 0 or mask > psyche_mask
-        or (mask == psyche_mask and (amount > 10 or x ~= 0 or y ~= 0 or z ~= 0
+        or (play_voice ~= "0" and play_voice ~= "1")
+        or (mask == psyche_mask and (play_voice ~= "0" or amount > 10 or x ~= 0 or y ~= 0 or z ~= 0
             or state.map ~= "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P")) then
         error("Guest hurt feedback cue unavailable", 0)
     end
-    if visit ~= epoch then
+    local scope = epoch .. "|" .. name
+    if visit ~= scope then
         if active_overlay and valid(active_overlay.actor) then active_overlay.actor:K2_DestroyActor() end
         if valid(psyche_overlay) then psyche_overlay:K2_DestroyActor() end
-        visit, last_played, active_overlay = epoch, 0, nil
+        visit, last_played, active_overlay = scope, {}, nil
         psyche_overlay = nil
     end
-    if id <= last_played then return "guest hurt feedback already played" end
-    last_played = id
+    local psyche = mask == psyche_mask
+    if id <= (last_played[psyche] or 0) then return "guest hurt feedback already played" end
     local health_before = save.PlayerHealth
-    if mask == psyche_mask then
+    if psyche then
         if not show_psyche(state, pawn, amount) or save.PlayerHealth ~= health_before then
             error("Guest psychic feedback readback failed", 0)
         end
+        last_played[psyche] = id
         return "guest hurt feedback played"
     end
     local shown = show_overlay(state, pawn, {X = x, Y = y, Z = z}, amount)
-    local damage = {}
-    for _, kind in ipairs(hit_sounds) do
-        if mask & kind[1] ~= 0 then damage[kind[2]] = 4 end
-    end
-    voice.local_feedback(pawn, function()
-        if mask > 0 then pawn:DmgSfx(damage) end
-        if amount >= 40 and valid(pawn.Vox_Hurt) then pawn:Speak(pawn.Vox_Hurt) end
-    end)
     if not shown or save.PlayerHealth ~= health_before then error("Guest hurt feedback readback failed", 0) end
+    -- The overlay is committed. An audio error must not replay the visual or a cue that already played.
+    last_played[psyche] = id
+    voice.local_feedback(pawn, function()
+        for _, kind in ipairs(hit_sounds) do
+            if mask & kind[1] ~= 0 then pawn:DmgSfx({[kind[2]] = 4}) end
+        end
+        if play_voice == "1" and valid(pawn.Vox_Hurt) then pawn:Speak(pawn.Vox_Hurt) end
+    end)
+    if save.PlayerHealth ~= health_before then error("Guest hurt feedback changed health", 0) end
     return "guest hurt feedback played"
 end
 

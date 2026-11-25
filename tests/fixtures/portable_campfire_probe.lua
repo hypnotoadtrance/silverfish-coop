@@ -8,11 +8,14 @@ local camp = map .. ":PersistentLevel.CampFire_02_BP_C_1"
 local flame_class = "BlueprintGeneratedClass /Game/Classes/Anomalies/Fire_Camp_BP.Fire_Camp_BP_C"
 local overlay_path = "/Game/Classes/Player/PlayerAssets/PPActor_Damage_BP.PPActor_Damage_BP_C"
 local hit_sound = "SoundCue /Game/Assets/Sounds/CUEs/PhysImpact_Cues/BurnDmg_Cue.BurnDmg_Cue"
+local blunt_sound = "SoundCue /Game/Assets/Sounds/CUEs/PhysImpact_Cues/Melee_Blunt_Cue.Melee_Blunt_Cue"
 local fire_property = "Fire_12_2B415A724C533C075B6BB390B76BF247"
+local blunt_property = "BluntForce_6_6923B3964740DE281BD773BCCAAC2772"
 local pawn_path = "/Game/Classes/Player/Player_FP.Player_FP_C:"
 local local_pawn, peer, flame, last, armed, failure
 local previous_position = {}
 local overlays, hit_sounds, muted_hits, local_fire, peer_fire, hurt_voices = 0, 0, 0, 0, 0, 0
+local blunt_hits, muted_blunt = 0, 0
 local remote_offset = 0
 local voice_attenuation = "SoundAttenuation /Game/Assets/Sounds/SoundClasses/Vocal_Attenuation.Vocal_Attenuation"
 local voice_replays, voice_origin = {}, nil
@@ -64,6 +67,9 @@ local function arm()
         if valid(cue) and cue:GetFullName() == hit_sound then
             if same(owner, local_pawn) and volume:get() > 0 then hit_sounds = hit_sounds + 1 end
             if same(owner, peer) and volume:get() <= .001 then muted_hits = muted_hits + 1 end
+        elseif valid(cue) and cue:GetFullName() == blunt_sound then
+            if same(owner, local_pawn) and volume:get() > 0 then blunt_hits = blunt_hits + 1 end
+            if same(owner, peer) and volume:get() <= .001 then muted_blunt = muted_blunt + 1 end
         end
     end))
     RegisterHook(pawn_path .. "Pulse_Dmg_FX", watch(function(context, _, direction, _, damage)
@@ -117,8 +123,29 @@ local function run(action)
     if action == "arm" then return arm() end
     if action == "clear" then
         overlays, hit_sounds, muted_hits, local_fire, peer_fire, hurt_voices, failure = 0, 0, 0, 0, 0, 0, nil
-        remote_offset = 0
+        remote_offset, blunt_hits, muted_blunt = 0, 0, 0
         return "cleared"
+    end
+    if action == "burst-audio" then
+        assert(not failure, failure)
+        return ("%d,%d"):format(blunt_hits, muted_blunt)
+    end
+    if action == "burst-peer" then
+        assert(local_pawn:HasAuthority() and peer:HasAuthority() and valid(peer.Save) and not same(peer.Save, local_pawn.Save),
+            "detached guest unavailable on the host")
+        assert(not flame.Capsule:IsOverlappingActor(peer) and peer.Save.PlayerHealth > 66,
+            "the guest must be healthy and outside the campfire")
+        local point = flame:K2_GetActorLocation()
+        local hit = {Location = point, ImpactPoint = point}
+        local force = {X = 0, Y = 0, Z = 0}
+        local before = peer.Save.PlayerHealth
+        peer:DealDamage({[fire_property] = 54}, hit, flame, force, false, {}, {})
+        local burned = peer.Save.PlayerHealth
+        peer:DealDamage({[blunt_property] = 8}, hit, flame, force, false, {}, {})
+        local hit_twice = peer.Save.PlayerHealth
+        assert(before - burned >= 40 and burned > hit_twice and hit_twice > 0,
+            ("unexpected stock burst health %.4f,%.4f,%.4f"):format(before, burned, hit_twice))
+        return ("%.6f,%.6f,%.6f"):format(before, burned, hit_twice)
     end
     if action == "voice-character" then
         local authority = local_pawn:HasAuthority()
