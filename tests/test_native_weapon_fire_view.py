@@ -104,7 +104,8 @@ class ItemUseCueTests(unittest.IsolatedAsyncioTestCase):
         host = self.host()
         path = MagicMock(spec=Path)
         mailbox = Mock(local_weapon_cues_available=True)
-        reads = iter((self.frame(1, self.area + "_Old"), self.frame(2), self.frame(2), self.frame(3), None))
+        burst = self.frame(3) + self.frame(4).split(b"\n", 1)[1]
+        reads = iter((self.frame(1, self.area + "_Old"), self.frame(2), self.frame(2), burst, None))
 
         def take():
             data = next(reads)
@@ -116,10 +117,13 @@ class ItemUseCueTests(unittest.IsolatedAsyncioTestCase):
         transport = Mock()
         await asyncio.wait_for(relay(host, SimpleNamespace(directory=path, local_bridge=mailbox), transport), 1)
         path.__truediv__.return_value.stat.assert_not_called()
-        forwarded = [json.loads(call.args[0]) for call in transport.send_weapon_shot.call_args_list]
-        self.assertEqual(forwarded, [[self.area, self.epoch, [serial, "consume", self.item, 121, -59, 2.05, 257]]
-                                     for serial in (2, 3)])
-        allowed = transport.send_weapon_shot.call_args.args[1]
+        forwarded = [[json.loads(packet) for packet in call.args[0]]
+                     for call in transport.send_weapon_shots.call_args_list]
+        self.assertEqual(forwarded, [
+            [[self.area, self.epoch, [serial, "consume", self.item, 121, -59, 2.05, 257]] for serial in serials]
+            for serials in ((2,), (3, 4))
+        ])
+        allowed = transport.send_weapon_shots.call_args.args[1]
         self.assertTrue(allowed("connected"))
         self.assertFalse(allowed("offline"))
 
@@ -133,10 +137,11 @@ class ItemUseCueTests(unittest.IsolatedAsyncioTestCase):
         def forward(*_):
             host.stopping = True
 
-        transport.send_weapon_shot.side_effect = forward
+        transport.send_weapon_shots.side_effect = forward
         await asyncio.wait_for(relay(host, SimpleNamespace(directory=directory, local_bridge=mailbox), transport), 1)
         mailbox.take_local_weapon_cues.assert_not_called()
-        self.assertEqual(json.loads(transport.send_weapon_shot.call_args.args[0]),
+        packet, = transport.send_weapon_shots.call_args.args[0]
+        self.assertEqual(json.loads(packet),
                          [self.area, self.epoch, [1, "consume", self.item, 121, -59, 2.05, 257]])
 
     def test_memory_queue_requires_both_native_entry_points(self):

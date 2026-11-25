@@ -863,27 +863,27 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
     async def test_weapon_cues_reach_current_game_guest_without_entering_unreal(self):
         guest_id = self.request["guest_id"]
         self.assertTrue((await self.connect_guest())["accepted"])
-        self.host.send_weapon_shot(b"wrong guest", lambda _: False)
+        self.host.send_weapon_shots((b"wrong guest",), lambda _: False)
         self.host.send_loot_motion(b"wrong guest", lambda _: False)
         self.host.restrict_game_routes(set())
-        self.host.send_weapon_shot(b"during travel", lambda _: True)
+        self.host.send_weapon_shots((b"during travel",), lambda _: True)
         self.host.send_loot_motion(b"during travel", lambda _: True)
         self.host.restrict_game_routes(None)
-        self.host.send_weapon_shot(b"live cue", lambda admitted: admitted == guest_id)
+        self.host.send_weapon_shots((b"live cue",), lambda admitted: admitted == guest_id)
         self.host.send_loot_motion(b"falling item", lambda admitted: admitted == guest_id)
         await self.exchange(1200)
         self.assertEqual(self.client.take_weapon_shots(), [b"live cue"])
         self.assertEqual(self.client.take_weapon_shots(), [])
         self.assertEqual([packet for _, packet in self.client.take_loot_motion()], [b"falling item"])
 
-        self.host.send_weapon_shot(b"queued cue", lambda _: True)
+        self.host.send_weapon_shots((b"queued cue",), lambda _: True)
         async with asyncio.timeout(1):
             while not self.client.weapon_shots_ready():
                 await asyncio.sleep(.01)
         await asyncio.sleep(.3)
         self.assertEqual(self.client.take_weapon_shots(), [])
 
-        self.host.send_weapon_shot(b"before disconnect", lambda _: True)
+        self.host.send_weapon_shots((b"before disconnect",), lambda _: True)
         self.host.send_loot_motion(b"before disconnect", lambda _: True)
         async with asyncio.timeout(1):
             while not self.client.weapon_shots_ready() or not self.client.loot_motion_ready():
@@ -894,6 +894,33 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.disconnected.get(), 3)
         self.assertTrue((await self.connect_guest())["accepted"])
         self.assertEqual(self.client.take_weapon_shots(), [])
+
+    async def test_weapon_cue_burst_shares_quic_packets_without_changing_cue_frames(self):
+        self.assertTrue((await self.connect_guest())["accepted"])
+        cues = [bytes([index]) * 128 for index in range(1, 5)]
+
+        async def receive_cues():
+            async with asyncio.timeout(1):
+                while len(self.client._weapon_shots) < len(cues):
+                    await asyncio.sleep(.005)
+            self.assertEqual(self.client.take_weapon_shots(), cues)
+
+        before = self.host.statistics()
+        for cue in cues:
+            self.host.send_weapon_shots((cue,), lambda _: True)
+        separate = self.host.statistics()
+        self.assertEqual(separate["quic_datagrams_sent"] - before["quic_datagrams_sent"], len(cues))
+        separate_bytes = separate["quic_payload_bytes_sent"] - before["quic_payload_bytes_sent"]
+        await receive_cues()
+
+        before = self.host.statistics()
+        self.host.send_weapon_shots(cues, lambda _: True)
+        after = self.host.statistics()
+        self.assertEqual(after["relay_queue_departed_frames"] - before["relay_queue_departed_frames"], len(cues))
+        self.assertEqual(after["quic_datagrams_sent"] - before["quic_datagrams_sent"], 1)
+        self.assertLess(after["quic_payload_bytes_sent"] - before["quic_payload_bytes_sent"], separate_bytes)
+        await receive_cues()
+        self.assertTrue(self.client_inbox.messages.empty())
 
     async def test_application_invalid_body_and_handler_error_keep_link_usable(self):
         async def on_request(_, payload):

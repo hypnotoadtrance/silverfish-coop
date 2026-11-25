@@ -13,7 +13,7 @@ import ssl
 import struct
 import zlib
 from collections import deque
-from collections.abc import Awaitable, Callable, Coroutine, Iterator
+from collections.abc import Awaitable, Callable, Coroutine, Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -604,6 +604,12 @@ class _LinkProtocol(QuicConnectionProtocol):
         self.transmit()
 
     def _forward_presentation(self, header: bytes, data: bytes) -> bool:
+        if not self._queue_presentation(header, data):
+            return False
+        self.transmit()
+        return True
+
+    def _queue_presentation(self, header: bytes, data: bytes) -> bool:
         if not self.authorized or not self.game_access or self.terminated or not 0 < len(data) <= _FRAGMENT_SIZE:
             return False
         now = self._loop.time()
@@ -620,7 +626,6 @@ class _LinkProtocol(QuicConnectionProtocol):
                         self._stats.prop_pose_datagrams_replaced += 1
                     else:
                         self._stats.avatar_pose_datagrams_replaced += 1
-                    self.transmit()
                     return True
         if len(pending) >= _MAX_QUEUED_FRAMES:
             if header == _WEAPON_SHOT_HEADER:
@@ -635,7 +640,6 @@ class _LinkProtocol(QuicConnectionProtocol):
         elif header == _AVATAR_POSE_HEADER:
             self._stats.avatar_pose_datagrams_queued += 1
         self._stats.relay_queue_max_frames = max(self._stats.relay_queue_max_frames, len(pending))
-        self.transmit()
         return True
 
     def _expire_game_queue(self, now: float) -> None:
@@ -1204,7 +1208,7 @@ class HostLink:
     def send_avatar_pose(self, data: bytes, allowed: Callable[[str], bool]) -> None:
         """Offer one replaceable pose frame to each eligible guest game link."""
         if isinstance(data, bytes) and 0 < len(data) <= _FRAGMENT_SIZE:
-            self._send_presentation(_AVATAR_POSE_HEADER, data,
+            self._send_presentation(_AVATAR_POSE_HEADER, (data,),
                                     lambda guest_id: guest_id in self._guest_routes and allowed(guest_id))
 
     def set_footstep_handler(self, handler: Callable[[str, bytes], None] | None) -> None:
@@ -1217,19 +1221,25 @@ class HostLink:
 
     def send_footstep(self, data: bytes, allowed: Callable[[str], bool]) -> None:
         if isinstance(data, bytes) and 0 < len(data) <= _FOOTSTEP_MAX_SIZE:
-            self._send_presentation(_FOOTSTEP_HEADER, data,
+            self._send_presentation(_FOOTSTEP_HEADER, (data,),
                                     lambda guest_id: guest_id in self._guest_routes and allowed(guest_id))
 
-    def send_weapon_shot(self, data: bytes, allowed: Callable[[str], bool]) -> None:
-        self._send_presentation(_WEAPON_SHOT_HEADER, data, allowed)
+    def send_weapon_shots(self, cues: Sequence[bytes], allowed: Callable[[str], bool]) -> None:
+        self._send_presentation(_WEAPON_SHOT_HEADER, cues, allowed)
 
     def send_loot_motion(self, data: bytes, allowed: Callable[[str], bool]) -> None:
-        self._send_presentation(_LOOT_MOTION_HEADER, data, allowed)
+        self._send_presentation(_LOOT_MOTION_HEADER, (data,), allowed)
 
-    def _send_presentation(self, header: bytes, data: bytes, allowed: Callable[[str], bool]) -> None:
+    def _send_presentation(self, header: bytes, frames: Sequence[bytes], allowed: Callable[[str], bool]) -> None:
         for guest_id, protocol in self._protocols.items():
             if self.connected(guest_id) and self._native_route_permitted(guest_id) and allowed(guest_id):
-                protocol._forward_presentation(header, data)
+                queued = False
+                for data in frames:
+                    if protocol._queue_presentation(header, data):
+                        queued = True
+                if queued:
+                    # Keep each cue as its own QUIC frame and let QUIC pack the burst.
+                    protocol.transmit()
 
     async def close(self) -> None:
         if self._closed:

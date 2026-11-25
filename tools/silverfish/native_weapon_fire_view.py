@@ -204,6 +204,7 @@ async def relay(host, bridge, transport, *, footsteps=None):
             member = host.authenticated_guest(guest_id)
             return bool(member and member[1] in seats)
 
+        frames = []
         for cue in fresh:
             # Quantize presentation only. Stock raycasts still use the original transform.
             if cue[1] == "cycle":
@@ -214,8 +215,8 @@ async def relay(host, bridge, transport, *, footsteps=None):
                 payload = cue[:3] + [round(value, 2) for value in cue[3:6]] + cue[6:]
             else:
                 payload = cue[:2] + [round(axis, 2) for axis in cue[2:]]
-            packet = json.dumps([area, epoch, payload], separators=(",", ":")).encode("ascii")
-            transport.send_weapon_shot(packet, allowed)
+            frames.append(json.dumps([area, epoch, payload], separators=(",", ":")).encode("ascii"))
+        transport.send_weapon_shots(frames, allowed)
 
 
 class Playback:
