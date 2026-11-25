@@ -1023,7 +1023,7 @@ class Host:
             view[native_loot.STOCK_ALARMS] = alarms
         if boxes := self.last_game.get(native_loot.POWER_BOX_STATES):
             view[native_loot.POWER_BOX_STATES] = boxes
-        if lantern := native_lantern.frame(self.last_game, self.zone_epoch):
+        if lantern := native_lantern.published(self.last_game, self.zone_epoch):
             view[native_lantern.KEY] = lantern
         if flashlight := native_flashlight.frame(self):
             view[native_flashlight.KEY] = flashlight
@@ -6383,7 +6383,8 @@ class Client:
                     self.last_game = await native_stock_switch.project(
                         self.bridge, self.last_game, self.gameplay.get(native_stock_switch.KEY), self.zone_epoch)
                     self.last_game = await native_lantern.project(
-                        self.bridge, self.last_game, self.gameplay.get(native_lantern.KEY), self.zone_epoch)
+                        self.bridge, self.last_game, self.gameplay.get(native_lantern.KEY), self.zone_epoch,
+                        stock_switches=self.gameplay.get(native_stock_switch.KEY))
                     self.last_game = await native_stock_enemy_drops.project_broker_cue(
                         self.bridge, self.last_game, self.gameplay.get(native_stock_enemy_drops.BROKER_CUE), self.zone_epoch)
                     await native_inventory_death.project_bags(self, self.bridge, self.invite["character_id"],
@@ -6935,7 +6936,8 @@ class Client:
                 await self.cancel_gameplay_snapshot()
                 self.gameplay[native_lantern.KEY] = result[native_lantern.KEY]
                 self.last_game = await native_lantern.project(
-                    self.bridge, self.last_game, result[native_lantern.KEY], self.zone_epoch)
+                    self.bridge, self.last_game, result[native_lantern.KEY], self.zone_epoch,
+                    stock_switches=self.gameplay.get(native_stock_switch.KEY))
             return result
         action = (native_authored_pickup.ACTION if target in native_authored_pickup.SOURCES
                   else native_loose_pickup.CLAIM if native_loose_pickup.target_path(target)

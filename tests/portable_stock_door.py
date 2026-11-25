@@ -18,6 +18,22 @@ DOCK_GATE = f"Door_Bars_01_BP_C {DOCK}.Tut_Dock_P:PersistentLevel.Door_Bars_01_B
 WOOD_DOOR = f"Door_Wood_04_BP_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Door_Wood_04_BP_C_1719"
 
 
+def allow_concurrent_inspection(source):
+    """Let the isolated runner's crate request reach any host tick."""
+    declaration = '    local content, ticket\n    if type(SilverfishTakeLocalBridgeCommand) == "function" then\n        local active\n'
+    gate = 'if active and not content and (not periodic or resident_title and status_publication.installed'
+    action = '    local id = fields[1]\n    if not id or #id > 80'
+    assert all(source.count(anchor) == 1 for anchor in (declaration, gate, action))
+    # The controller's resident ticket already reaches any tick. The runner
+    # uses the file mailbox, whose periodic poll can consume the hinge window.
+    return (source.replace(declaration, declaration.replace('content, ticket', 'content, ticket, active')
+                           .removesuffix('        local active\n'))
+            .replace(gate, gate.replace('not periodic or ', '(not periodic and role ~= "host") or '))
+            .replace(action, '    if active and not ticket and not periodic and role == "host"\n'
+                     '        and fields[2] ~= "native-loot-inspect" then return end\n'
+                     + action))
+
+
 async def toggle_door(host, guest, actor, pawn, expected_open, *, inspect_during_motion=None):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
 
@@ -37,7 +53,7 @@ async def toggle_door(host, guest, actor, pawn, expected_open, *, inspect_during
         completed_at = time.time()
         proof = inspection["native_loot"]
         assert (proof["ok"], proof["pawn"], proof["crate"]) == (True, pawn, inspect_during_motion), proof
-        evidence = {"actor": inspect_during_motion, "completed_at": completed_at,
+        evidence = {"actor": inspect_during_motion, "requested_at": probe_start, "completed_at": completed_at,
                     "local_bridge_ms": round((completed_at - probe_start) * 1000)}
         if native_loot.INSPECTION_BYTES in inspection:
             evidence["reply_bytes"] = inspection[native_loot.INSPECTION_BYTES]

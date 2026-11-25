@@ -61,7 +61,7 @@ from portable_quarry_photo import verify_quarry_photo
 from portable_weather_travel import verify_weather_travel
 from portable_lightning import verify_stock_lightning
 from portable_storm import StockStormTrial
-from portable_stock_door import verify_stock_crossroads_door, verify_stock_dock_gate
+from portable_stock_door import allow_concurrent_inspection, verify_stock_crossroads_door, verify_stock_dock_gate
 from portable_stock_shovel import verify_stock_buried_placements, verify_stock_shovel, verify_stock_shovel_reconnect
 from portable_mushrooms import instrument_mushroom_sampler, verify_stock_mushrooms
 from portable_placed_item import placed_item_overlay, verify_stock_placed_item
@@ -7247,6 +7247,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if stock_crossroads_door or stock_dock_gate:
             proof["stock_door_overlays"] = [
                 probes.enter_context(stock_door_overlay(game)) for game in games
+            ]
+        if stock_crossroads_door:
+            proof["stock_crate_concurrency_overlays"] = [
+                probes.enter_context(portable_main_overlay(game, allow_concurrent_inspection)) for game in games
             ]
         if stock_warehouse_switch or stock_interaction_feedback:
             proof["warehouse_switch_overlays"] = [probes.enter_context(warehouse_switch_overlay(game)) for game in games]

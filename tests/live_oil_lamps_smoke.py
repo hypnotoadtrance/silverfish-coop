@@ -64,6 +64,10 @@ async def verify_oil_lamps(host, guest, pawn):
             replica, guest_lit = await verify_state(actor, True)
         finally:
             assert await probe(guest, "lower-lighter", actor) == "true;false"
+        # A compact ignition receipt and a later full status can disagree for
+        # the same lamp. Check the native state after another publication.
+        await asyncio.sleep(.3)
+        replica, guest_lit_after_refresh = await verify_state(actor, True)
         receipts = [row for row in await suite.resident_events(guest_run, replica)
                     if row.get("time_unix", 0) >= started
                     and row.get("native_stock_switch_interaction", {}).get("actor") == actor]
@@ -74,7 +78,8 @@ async def verify_oil_lamps(host, guest, pawn):
         _, host_extinguished = await verify_state(actor, False)
         assert suite.campaign_save_hashes(host.campaign) == checkpoint
         evidence[actor] = dict(host_lit=host_lit, guest_extinguished=guest_extinguished,
-                               guest_lit=guest_lit, host_extinguished=host_extinguished, receipts=receipts)
+                               guest_lit=guest_lit, guest_lit_after_refresh=guest_lit_after_refresh,
+                               host_extinguished=host_extinguished, receipts=receipts)
 
     await verify_one(lamp_id(OBSERVATORY, 1))
     await enter_crossroads(host, pawn)

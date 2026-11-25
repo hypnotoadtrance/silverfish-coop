@@ -2,7 +2,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock
 
-from tools.silverfish import native_lantern as lantern, party
+from tools.silverfish import native_lantern as lantern, native_stock_switch as switches, party
 
 
 def observation(lit, phase="hosting"):
@@ -12,6 +12,25 @@ def observation(lit, phase="hosting"):
 
 
 class ObservatoryLanternTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stock_switch_state_takes_precedence_over_an_older_lantern_sample(self):
+        epoch = "a" * 32
+        host = observation(False)
+        rows = {lantern.ACTOR: {"powered": True, "angles": [0, 0, 0], "lights": {}}}
+        stale = lantern.published(host, epoch)
+        self.assertIsNotNone(stale)
+        self.assertIsNone(lantern.published({**host, switches.KEY: rows}, epoch))
+
+        guest = observation(True, "connected")
+        after = observation(False, "connected")
+        bridge = SimpleNamespace(command=AsyncMock(return_value=after))
+        current = {"map": lantern.OBSERVATORY, "epoch": epoch, "switches": rows}
+        self.assertIs(await lantern.project(bridge, guest, stale, epoch, stock_switches=current), guest)
+        bridge.command.assert_not_awaited()
+
+        previous = {**current, "epoch": "b" * 32}
+        self.assertIs(await lantern.project(bridge, guest, stale, epoch, stock_switches=previous), after)
+        bridge.command.assert_awaited_once_with(lantern.ACTION, lantern.OBSERVATORY, lantern.ACTOR, "0", timeout=3)
+
     async def test_extinguish_requires_current_guest_scope_and_verified_stock_change(self):
         epoch = "a" * 32
         pawn = "guest pawn"

@@ -2,7 +2,7 @@
 
 import re
 
-from . import native_loot, party
+from . import native_loot, native_stock_switch, party
 from .travel import OBSERVATORY
 
 
@@ -57,7 +57,17 @@ def frame(game, epoch):
         return dict(map=OBSERVATORY, actor=ACTOR, epoch=epoch, lit=lantern["lit"])
 
 
-async def project(bridge, game, state, epoch):
+def published(game, epoch):
+    # The stock switch receipt can be newer than the lantern sampled in the
+    # last full snapshot. Send a single light state whenever both paths exist.
+    if ACTOR not in game.get(native_stock_switch.KEY, {}):
+        return frame(game, epoch)
+
+
+async def project(bridge, game, state, epoch, *, stock_switches=None):
+    if (stock_switches and (stock_switches.get("map"), stock_switches.get("epoch")) == (OBSERVATORY, epoch)
+            and ACTOR in stock_switches.get("switches", {})):
+        return game
     local = game.get(KEY, {})
     if (not isinstance(state, dict) or (state.get("map"), state.get("actor"), state.get("epoch")) != (OBSERVATORY, ACTOR, epoch)
             or (game.get("map"), game.get("state"), local.get("map"), local.get("actor"))
