@@ -3370,16 +3370,19 @@ async def capture_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gu
     assert campaign / "campaign.json" in before
     backup_before = {path: fingerprint(path) for path in cloud.glob("SFCoopBackup-*.sav")}
     checkpoint = json.loads((campaign / "campaign.json").read_bytes())
+    async def avatar_command(seat, action):
+        return (await portable_probe_command(seat.bridge, "avatar-probe", action + "\n")).strip()
+
     bandage_ranges = []
     last_serial = 0
     try:
         for action, limits in (("soundnear", (250, 700)), ("soundrange", (1900, 2700))):
-            assert await portable_probe_command(host.bridge, "avatar-probe", action) == "positioned"
-            assert await portable_probe_command(guest.bridge, "avatar-probe", "soundclear") == "cleared"
+            assert await avatar_command(host, action) == "positioned"
+            assert await avatar_command(guest, "soundclear") == "cleared"
             async with asyncio.timeout(5):
-                while await portable_probe_command(host.bridge, "avatar-probe", "soundready") != "true":
+                while await avatar_command(host, "soundready") != "true":
                     await asyncio.sleep(.05)
-            result = await portable_probe_command(host.bridge, "avatar-probe", "consume\n")
+            result = await avatar_command(host, "consume")
             player_id, class_name, source = result.strip().split("\t")
             player_id = int(player_id)
             assert class_name == f"BlueprintGeneratedClass {item}", result
@@ -3399,7 +3402,7 @@ async def capture_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gu
             last_serial = prop["serial"]
             assert prop["mesh"].endswith(".SM_Prop_Bandage_02"), prop
             cues = [cue for cue in use_events(await resident_events(guest_run, observed)) if cue["serial"] == last_serial]
-            sound = await portable_probe_command(guest.bridge, "avatar-probe", "soundread")
+            sound = await avatar_command(guest, "soundread")
             assert {entry["event"] for entry in cues} == set(event_names) and len(cues) == 2, (limits, cues, sound)
             visual, = [entry for entry in cues if entry["event"] == event_names[1]]
             assert visual["player_id"] == player_id, visual
@@ -3411,12 +3414,14 @@ async def capture_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gu
             assert position_error <= 1, (source, sound)
             bandage_ranges.append({"listener_distance_cm": float(distance), "position_error_cm": position_error,
                                    "stock_attenuation": True, "playback_calls": 1})
+        # Dry fire and footsteps have their own short stock sound ranges.
+        assert await avatar_command(host, "soundnear") == "positioned"
+        guest_melee = await verify_resident_guest_melee(host, guest) if guest_combat and not rusty else {}
+        footsteps = await verify_resident_footsteps(host, guest)
+        pistol = await verify_resident_pistol(host, guest, guest_combat=guest_combat, rusty=rusty, memory_queue=memory_queue,
+                                             pursuit=pursuit)
     finally:
-        assert await portable_probe_command(host.bridge, "avatar-probe", "soundrestore") == "restored"
-    guest_melee = await verify_resident_guest_melee(host, guest) if guest_combat and not rusty else {}
-    footsteps = await verify_resident_footsteps(host, guest)
-    pistol = await verify_resident_pistol(host, guest, guest_combat=guest_combat, rusty=rusty, memory_queue=memory_queue,
-                                         pursuit=pursuit)
+        assert await avatar_command(host, "soundrestore") == "restored"
     npc_shots = await verify_resident_npc_shots(host, guest_run, guest_frame) if guest_combat else []
     npc_kill = await verify_resident_npc_kill(host, guest) if guest_combat and not npc_rivalry else {}
     turret_death = await verify_resident_turret_combat(host, guest, guest_frame) if guest_combat else {}
