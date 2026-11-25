@@ -810,7 +810,7 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
                 for entry in await resident_events(guest_run, guest_frame):
                     if entry.get("sequence") == sequence and entry["event"] in (event, event + "_rejected"):
                         assert entry["event"] == event, entry
-                        return entry["native_guest_weapon"]
+                        return entry
                 await asyncio.sleep(.08)
 
     for seat in (host, guest):
@@ -844,7 +844,7 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
     loaded_press = await submit(guest_run, "native-guest-primary-input-fixture")
     assert loaded_press["ok"], loaded_press
     capture = loaded_press["native_guest_primary_fixture"]
-    shot = await input_result("native_guest_primary_input", capture["sequence"])
+    shot = (await input_result("native_guest_primary_input", capture["sequence"]))["native_guest_weapon"]
     assert (shot["guid"], shot["before"], shot["after"], shot["projectiles"]) == (guest_guid, 1, 0, 1), shot
     if rusty:
         retirement = await command(host, "retirement-read")
@@ -891,7 +891,8 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
     await wait_for(guest, "reserve", reserve)
     reloaded = await submit(guest_run, "native-guest-reload-input-fixture")
     assert reloaded["ok"] and reloaded["native_guest_reload_fixture"]["stock_wrappers"] == 2, reloaded
-    reload = await input_result("native_guest_reload_input", reloaded["native_guest_reload_fixture"]["sequence"])
+    reload_event = await input_result("native_guest_reload_input", reloaded["native_guest_reload_fixture"]["sequence"])
+    reload = reload_event["native_guest_weapon"]
     async with asyncio.timeout(6):
         while True:
             _, reload_clip, position = (await command(guest, "first-person-read")).split(";")
@@ -899,7 +900,8 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
                 break
             await asyncio.sleep(.05)
     owner_reloads = [row for row in await resident_events(guest_run, guest_frame)
-                     if row["event"] == "native_guest_reload_view_played"]
+                     if row["event"] == "native_guest_reload_view_played"
+                     and row.get("operation_id") == reload_event["operation_id"]]
     assert [row["clip"] for row in owner_reloads] == [reload_clip], owner_reloads
     loaded = 8 if rusty else 9
     reserve_left = f"{reserve.split(',')[0]},{reserve_rounds - loaded}" if rusty else ""
@@ -914,7 +916,8 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
     async def fire_at_drone():
         loaded_press = await submit(guest_run, "native-guest-primary-input-fixture")
         assert loaded_press["ok"], loaded_press
-        result = await input_result("native_guest_primary_input", loaded_press["native_guest_primary_fixture"]["sequence"])
+        event = await input_result("native_guest_primary_input", loaded_press["native_guest_primary_fixture"]["sequence"])
+        result = event["native_guest_weapon"]
         assert (result["guid"], result["before"], result["after"], result["projectiles"]) == (
             guest_guid, loaded, loaded - 1, 1), result
         await wait_for(host, "peer-ready", f"{guest_guid},{loaded - 1},{loaded - 1}")
@@ -3114,10 +3117,17 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         if family == "turret":
             shots = [receipt]
             while after_disagreement > 0 and shots[-1]["native_guest_weapon"]["after"] > 0:
-                target = await command(guest, f"dock-garage-turret-aimpoint\t{actor_names['guest']}")
-                approach = f"dock-garage-aim\t{low};{target};turret"
-                lanes = [await command(host, approach), await command(guest, approach)]
-                assert lanes == ["blocked", "worker"], {"lanes": lanes, "target": target, "health": after_disagreement}
+                target, lanes = "", []
+                try:
+                    async with asyncio.timeout(3):
+                        while lanes != ["blocked", "worker"]:
+                            target = await command(guest, f"dock-garage-turret-aimpoint\t{actor_names['guest']}")
+                            approach = f"dock-garage-aim\t{low};{target};turret"
+                            lanes = [await command(host, approach), await command(guest, approach)]
+                            if lanes != ["blocked", "worker"]:
+                                await asyncio.sleep(.05)
+                except TimeoutError as error:
+                    raise AssertionError(dict(lanes=lanes, target=target, health=after_disagreement)) from error
                 followup, after_disagreement = await shoot(after_disagreement, should_hit=True, contact_required=True)
                 shots.append(followup)
                 evidence[key]["health"].append(after_disagreement)

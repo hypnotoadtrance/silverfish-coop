@@ -1041,7 +1041,12 @@ local function restore_garage_fixture()
     if garage_aim then
         local camera, muzzle = garage_aim.camera, garage_aim.muzzle
         if valid(camera) then camera:K2_SetRelativeLocation(garage_aim.camera_location, false, {}, true) end
-        if valid(muzzle) then muzzle:K2_SetRelativeLocation(garage_aim.muzzle_location, false, {}, true) end
+        if valid(muzzle) then
+            if garage_aim.absolute_location ~= nil then
+                muzzle:SetAbsolute(garage_aim.absolute_location, muzzle.bAbsoluteRotation, muzzle.bAbsoluteScale)
+            end
+            muzzle:K2_SetRelativeLocation(garage_aim.muzzle_location, false, {}, true)
+        end
     end
     if garage_door and valid(garage_door.mesh) then
         garage_door.mesh:K2_SetWorldLocation(garage_door.point, false, {}, true)
@@ -1874,8 +1879,12 @@ local function run(action, actor_path)
     elseif action == "dock-garage-offset-muzzle" then
         assert(not host and garage_aim and same(garage_aim.muzzle, pawn.EquipedItem.Arrow_Muzzle))
         local point = position(actor_path)
-        garage_aim.muzzle:K2_SetWorldLocation(point, false, {}, true)
-        return point_string(garage_aim.muzzle:K2_GetComponentLocation())
+        local muzzle = garage_aim.muzzle
+        -- Hold the fixture's world-space offset until the stock trigger samples it.
+        if garage_aim.absolute_location == nil then garage_aim.absolute_location = muzzle.bAbsoluteLocation end
+        muzzle:SetAbsolute(true, muzzle.bAbsoluteRotation, muzzle.bAbsoluteScale)
+        muzzle:K2_SetWorldLocation(point, false, {}, true)
+        return point_string(muzzle:K2_GetComponentLocation())
     elseif action == "dock-garage-dynamic-name" then
         local point, kind = actor_path:match("^([^;]+);(%a+)$")
         local actor = garage_npc(world, position(point), kind)
