@@ -52,6 +52,8 @@ The `rc-f0b1c06` Crossroads baseline used two muted Direct IP instances. During 
 
 `rc-07a576d` signals the idle host as soon as a guest action enters its queue. In an isolated scheduling check, median queue-signal-to-wake time fell from 20 ms to under 0.1 ms. In two muted Direct IP runs, the last crate item appeared after 118 and 148 ms, compared with 175 ms in one previous-build sample. The host confirmed the rolls after 72 and 89 ms. Crate, Crossroads doors and weather, frog pickup, shared cash, and mushrooms passed in both runs. The placed-item pose probe needed a focused rerun after a diagnostic timeout and an unavailable host test command. With bounded retries for the read-only probe, carry, drop, and pickup all passed on the same ZIP. The six isolated launches preserved the original saves. Rendered hitching and Steam latency remain open.
 
+Development build `rc-cc42674` resolves the crate by its authored path and checks the exact address before opening it. It also restricts escrow liveness checks to the relevant saves and their potential owners. One muted Direct IP pair passed the cold two-item crate, Crossroads weather travel and door, placed-item carry and pickup, shared cash, and mushrooms. Both launches preserved the original saves. In that sample the lid preview started at 51 ms, the host confirmed the roll at 76 ms, and both items appeared by 139 ms. The host action took 30 ms, including 24 ms in the native open call and 5 ms in escrow retention and capture. The sample sits within the previous build's end-to-end range. The test timed crate opening and item appearance. The hitch reported when taking items from the cabinet still needs a direct pickup measurement.
+
 ## `rc-6690ff4` playtest
 
 | Area | Two-PC observation |
