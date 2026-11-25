@@ -2,6 +2,8 @@ local loot = require("native_loot")
 local input = {}
 local alarm = require("native_loot_alarm")
 local lid_preview = require("native_loot_crate_preview")
+local stock_door = require("native_stock_door")
+local guest_save = require("guest_save")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_LOOT") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
@@ -614,21 +616,28 @@ function input.command(fields, state, phase)
     if command == "native-loot-guest-lockpick" then
         local profile = loot.profile(state.map, fields[3])
         local outcome, before, spent = fields[6], tonumber(fields[7]), fields[8]
-        if phase ~= "hosting" or #fields ~= 8 or not profile or not profile.lockable
+        if phase ~= "hosting" or #fields ~= 8 or (profile and not profile.lockable)
             or (outcome ~= "0" and outcome ~= "1") or (spent ~= "0" and spent ~= "1")
             or not math.tointeger(before) or before < 1 or (outcome == "0" and spent == "0")
             or type(SilverfishSettleNativeGuestLockpick) ~= "function" then error("stock_lockpick_refused_scope", 0) end
-        local qualified, scope = pcall(loot.qualify, state, phase, fields[4], fields[3], true)
-        if not qualified or same(scope.save, scope.stock) or type(scope.crate.Locked) ~= "boolean" then
-            error("stock_lockpick_refused_container", 0)
+        local crate, pawn, save, stock
+        if profile then
+            local qualified, scope = pcall(loot.qualify, state, phase, fields[4], fields[3], true)
+            if qualified then crate, pawn, save, stock = scope.crate, scope.pawn, scope.save, scope.stock end
+        else
+            crate = stock_door.lockpick_target(state, phase, fields[3])
+            pawn, save = guest_save.exact_item_context(state, phase, fields[4])
+            local instance = state.world.OwningGameInstance
+            stock = valid(instance) and instance.SaveSlot_Ref
         end
-        local crate = scope.crate
-        if outcome == "1" and crate.Locked and
+        if not valid(crate) or type(crate.Locked) ~= "boolean" or not valid(pawn) or pawn.Dead ~= false
+            or not valid(save) or not valid(stock) or same(save, stock) then error("stock_lockpick_refused_container", 0) end
+        if profile and outcome == "1" and crate.Locked and
             (type(crate["Pick Chance"]) ~= "number" or not (crate["Pick Chance"] > 0)
                 or not valid(StaticFindObject(profile.actor_class .. ":PickLock"))) then
             error("stock_lockpick_refused_lock", 0)
         end
-        local ok, result = SilverfishSettleNativeGuestLockpick(scope.pawn:GetAddress(), scope.save:GetAddress(), fields[5], before,
+        local ok, result = SilverfishSettleNativeGuestLockpick(pawn:GetAddress(), save:GetAddress(), fields[5], before,
             spent == "1")
         if not ok then error(result, 0) end
         if outcome == "1" and crate.Locked then
@@ -639,22 +648,37 @@ function input.command(fields, state, phase)
     end
     if command == "native-loot-lockpick-input-fixture" then
         local profile = loot.profile(state.map, fields[3])
-        local current = headless and title_fixtures and phase == "connected" and #fields == 3 and profile and profile.lockable
-            and input.update(state, phase, profile)
-        local _, box
-        if current and current.crate.Locked == true then _, box = scene(current) end
-        local item = current and current.pawn.EquipedItem
-        local kind = valid(item) and item:GetClass():GetFName():ToString()
-        if not box or (kind ~= "Eqp_LockPick_C" and kind ~= "Eqp_LockPick_Hev_C") then
+        if not headless or not title_fixtures or phase ~= "connected" or #fields ~= 3 then
             error("stock_lockpick_input_fixture_unavailable", 0)
         end
-        stock_focus(current.pawn, box, function()
+        local target, box
+        local pawn = state.local_pawn and state.local_pawn.pawn
+        if profile and profile.lockable then
+            local current = input.update(state, phase, profile)
+            if current and current.crate.Locked == true then
+                target = current.crate
+                local _
+                _, box = scene(current)
+            end
+        elseif not profile then
+            target = stock_door.lockpick_target(state, phase, fields[3])
+            box = valid(target) and target.Locked == true and target.Box_Knob
+        end
+        local item = valid(pawn) and pawn.EquipedItem
+        local kind = valid(item) and item:GetClass():GetFName():ToString()
+        if not valid(box) or (kind ~= "Eqp_LockPick_C" and kind ~= "Eqp_LockPick_Hev_C") then
+            error("stock_lockpick_input_fixture_unavailable", 0)
+        end
+        stock_focus(pawn, box, function()
+            if not profile and not same(pawn.ActorBeingLookedAt, target) then
+                error("stock_door_lockpick_fixture_focus_unavailable", 0)
+            end
             item:Use_Item_Primary(true, 0.0)
-            if not same(item.TargetActor, current.crate) or not same(item.LockRef, current.crate) then
+            if not same(item.TargetActor, target) or not same(item.LockRef, target) then
                 error("stock_lockpick_input_fixture_target_unverified", 0)
             end
             item:Use_Item_Primary(false, 0.0)
-        end)
+        end, not profile and "stock_door_lockpick_fixture_focus_unavailable" or nil)
         return "stock lockpick started"
     end
     if command == "native-loot-guest-blowtorch-use" or command == "native-loot-guest-crowbar-use" then
@@ -866,12 +890,14 @@ end
 local function visit_lockpicks(state, status_row, accept)
     if not state.server or type(SilverfishReadNativeLockpickResults) ~= "function" then return end
     local detail = state.local_pawn
+    if not detail or not valid(detail.pawn) then return end
     local rows = table.pack(SilverfishReadNativeLockpickResults(detail.pawn:GetAddress()))
     for index = 1, rows.n, 6 do
         local container, sequence, guid, unlocked, before, spent = table.unpack(rows, index, index + 5)
-        local profile = loot.profile_at(state.map, container)
-        if profile then
-            accept(sequence, status_row("loot-lockpick", state.map, profile.name, detail.name, sequence, guid,
+        local profile = type(container) == "number" and loot.profile_at(state.map, container)
+        local name = profile and profile.name or type(container) == "string" and container
+        if name then
+            accept(sequence, status_row("loot-lockpick", state.map, name, detail.name, sequence, guid,
                 unlocked and 1 or 0, before, spent))
         end
     end

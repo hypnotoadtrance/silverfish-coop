@@ -1,5 +1,6 @@
 #include "loot_crate_input.hpp"
 #include "authored_loot_registry.hpp"
+#include "datasilo_door.hpp"
 #include "electronic_locker.hpp"
 #include "guest_item.hpp"
 #include "interaction_input.hpp"
@@ -15,6 +16,7 @@
 #include <string_view>
 #include <vector>
 
+#include <Helpers/String.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
@@ -249,7 +251,7 @@ namespace
         U::FWeakObjectPtr pawn, crate, tool;
         std::string guid;
         int before{}, spent{};
-        bool unlocked{};
+        bool unlocked{}, hinged{};
         std::uint64_t sequence{};
         Clock::time_point deadline{};
     };
@@ -286,10 +288,12 @@ namespace
             !boolean(pawn, STR("Dead"), false) || object(pawn, STR("EquipedItem")) != tool) return;
         auto* crate = object(tool, STR("LockRef"));
         if (!crate || crate != object(tool, STR("TargetActor"))) return;
-        const auto* profile = silverfish::shared_loot::authored_profile(crate);
-        if (!profile || !profile->stock_class->pry_entry ||
-            !boolean(crate, STR("Locked"), true) || !boolean(crate, STR("Looted"), false) ||
+        if (!boolean(crate, STR("Locked"), true) ||
             !actor_in_world(crate, static_cast<U::AActor*>(pawn)->GetWorld())) return;
+        const auto* profile = silverfish::shared_loot::authored_profile(crate);
+        const bool hinged = !profile && silverfish::native_datasilo_door::guest_hinged_lock(crate);
+        if (hinged ? !boolean(crate, STR("LockBroken"), false) :
+            !profile || !profile->stock_class->pry_entry || !boolean(crate, STR("Looted"), false)) return;
         auto* ammo = field<U::FIntProperty>(tool, STR("Ammo"));
         auto* chance = field<U::FDoubleProperty>(tool, STR("Target_PickChance"));
         if (!ammo || !chance || !(chance->GetPropertyValueInContainer(tool) > 0.0)) return;
@@ -297,6 +301,7 @@ namespace
         auto guid = silverfish::native_guest_item::local_equipped_identity(pawn, tool);
         if (units < 1 || guid.empty()) return;
         pending_lockpick = {pawn, crate, tool, std::move(guid), units};
+        pending_lockpick.hinged = hinged;
     }
 
     void finish_lockpick(Iteration& call, U::UObject* tool, U::UFunction* method, const void* args)
@@ -311,7 +316,7 @@ namespace
         if (!ammo) return;
         const auto spent = completed.before - ammo->GetPropertyValueInContainer(tool);
         if (spent < 0 || spent > 1) return;
-        completed.unlocked = boolean(crate, STR("Locked"), false);
+        if (!completed.hinged) completed.unlocked = boolean(crate, STR("Locked"), false);
         if (!completed.unlocked && !spent) return;
         completed.spent = spent;
         completed.sequence = ++sequence;
@@ -334,9 +339,18 @@ namespace
         for (const auto& result : lockpick_results)
         {
             if (result.pawn.Get() != pawn) continue;
-            const auto* profile = silverfish::shared_loot::authored_profile(result.crate.Get());
-            if (!profile) continue;
-            lua.set_integer(static_cast<std::int64_t>(profile - profiles.data() + 1));
+            auto* target = result.crate.Get();
+            if (result.hinged)
+            {
+                if (!actor_in_world(target, static_cast<U::AActor*>(pawn)->GetWorld())) continue;
+                lua.set_string(RC::to_utf8_string(target->GetFullName()));
+            }
+            else
+            {
+                const auto* profile = silverfish::shared_loot::authored_profile(target);
+                if (!profile) continue;
+                lua.set_integer(static_cast<std::int64_t>(profile - profiles.data() + 1));
+            }
             lua.set_integer(static_cast<std::int64_t>(result.sequence));
             lua.set_string(result.guid);
             lua.set_bool(result.unlocked);
@@ -655,6 +669,13 @@ namespace
 
 namespace silverfish::native_loot_crate_input
 {
+    void observe_hinged_pick(U::UObject* actor)
+    {
+        // A guarded PickLock call during this stock attempt means the Blueprint's success roll passed.
+        if (pending_lockpick.hinged && pending_lockpick.crate.Get() == actor)
+            pending_lockpick.unlocked = true;
+    }
+
     bool consume_vehicle_pry(U::UObject* crate, U::UObject* pawn)
     {
         if (!ready()) return false;

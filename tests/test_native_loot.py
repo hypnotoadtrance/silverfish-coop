@@ -31,6 +31,15 @@ class AuthoredCrateRegistryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             native_loot.parse_lockpick(fields)
 
+    def test_stock_lockpick_result_accepts_exact_hinged_actor_shape_in_current_map(self):
+        door = full_name(CROSSROADS, "Door_Wood_04_BP_C_1719")
+        fields = ["loot-lockpick", CROSSROADS, door, "Player_FP_C exact guest", "1", "A" * 32, "1", "1", "1"]
+        self.assertEqual(native_loot.parse_lockpick(fields)["crate"], door)
+        for invalid in (door.replace("PersistentLevel", "OtherLevel"), door.replace(CROSSROADS, OBSERVATORY)):
+            fields[2] = invalid
+            with self.assertRaises(ValueError):
+                native_loot.parse_lockpick(fields)
+
     def test_first_three_profiles_and_rollout_counts_match_generated_files(self):
         self.assertEqual(tuple(CRATES)[:3], (LEGACY_CRATE, OTHER_CRATE, BRIDGE_CRATE))
         self.assertEqual(len(PLACEMENTS), 287)

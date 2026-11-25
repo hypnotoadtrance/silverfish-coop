@@ -82,7 +82,7 @@ async def toggle_door(host, guest, actor, pawn, expected_open, *, inspect_during
     return receipt, first, preview
 
 
-async def verify_stock_crossroads_door(host, guest, pawn):
+async def verify_stock_crossroads_door(host, guest, pawn, *, lockpick=None):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
 
     def observed(frame):
@@ -121,7 +121,12 @@ async def verify_stock_crossroads_door(host, guest, pawn):
     checkpoint = campaign_save_hashes(host.campaign)
     refused = await submit(guest_run, door.ACTION, target=WOOD_DOOR)
     assert refused.get("error") == "stock_door_locked", refused
-    await host.bridge.command(door.FIXTURE, "pry", WOOD_DOOR)
+    if lockpick:
+        evidence = await lockpick(host, guest, pawn, hinged=WOOD_DOOR)
+        await toggle_door(host, guest, WOOD_DOOR, pawn, True)
+    else:
+        evidence = {}
+        await host.bridge.command(door.FIXTURE, "pry", WOOD_DOOR)
     opened = await wait_resident_status(host_run, lambda frame:
         observed(frame).get("open") is True and observed(frame).get("locked") is False)
     await wait_resident_status(guest_run, lambda frame: door.matches(observed(frame), observed(opened)))
@@ -135,7 +140,7 @@ async def verify_stock_crossroads_door(host, guest, pawn):
     assert replay.get("ok") and replay[door.RESULT] == closed[door.RESULT]
     assert not await panel(host, query) and not await panel(guest, query)
     assert campaign_save_hashes(host.campaign) == checkpoint
-    return {"stock_crossroads_door": {"actor": WOOD_DOOR, "authoritative_lock_refusal": True,
+    return {**evidence, "stock_crossroads_door": {"actor": WOOD_DOOR, "authoritative_lock_refusal": True,
                                      "close": closed[door.RESULT], "open": reopened[door.RESULT],
                                      "guest_confirm_ms": [closed["elapsed_ms"], reopened["elapsed_ms"]],
                                      "guest_movement_start_ms": [close_motion, reopen_motion],

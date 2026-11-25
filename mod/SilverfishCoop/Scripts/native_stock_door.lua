@@ -125,6 +125,13 @@ local function target_door(state, phase, name, known)
     return actor
 end
 
+function doors.lockpick_target(state, phase, name)
+    local actor = target_door(state, phase, name)
+    if valid(actor) and actor.LockBroken == false and type(actor.Locked) == "boolean"
+        and type(actor.LockPick_Chance) == "number" and actor.LockPick_Chance > 0
+        and valid(StaticFindObject(base_path .. ":PickLock")) then return actor end
+end
+
 local function pose(actor, arrow)
     local rot, location = arrow.RelativeRotation, arrow.RelativeLocation
     if type(actor.Locked) ~= "boolean" or type(actor.LockBroken) ~= "boolean" or type(actor.Open) ~= "boolean"
@@ -422,7 +429,7 @@ local function sample_command(scan, fields)
             local name = fields[index]:match("^([^|]+)|")
             if name and scan.actors[name] then scan.readings[name] = sample_door(scan, name) end
         end
-    elseif action and action:sub(1, 18) == "native-stock-door-" then
+    elseif action == "native-loot-guest-lockpick" or action and action:sub(1, 18) == "native-stock-door-" then
         local name = fields[action == "native-stock-door-fixture" and 4 or 3]
         if name and scan.actors[name] then scan.readings[name] = sample_door(scan, name) end
     end
@@ -510,7 +517,11 @@ local function fixture(fields, state, phase)
     local mode = fields[3]
     local actor = target_door(state, phase, fields[4])
     if #fields ~= 4 or not valid(actor) or not components(actor) then error("stock_door_fixture_scope_unavailable", 0) end
-    if mode == "pry" and phase == "hosting" and host_fixture and actor.Locked == true then
+    if mode == "pickable" and ((phase == "hosting" and host_fixture) or (phase == "connected" and guest_fixture))
+        and doors.lockpick_target(state, phase, fields[4]) and actor.Locked == true then
+        actor.LockPick_Chance = 1.0
+        return "stock door lockpick chance set"
+    elseif mode == "pry" and phase == "hosting" and host_fixture and actor.Locked == true then
         actor:PriedOpen_Lock()
     elseif mode == "guard" and phase == "connected" and guest_fixture and actor.Locked == true then
         actor:PriedOpen_Lock()
@@ -622,6 +633,15 @@ local function trace(fields, state, phase)
 end
 
 function doors.command(fields, state, phase)
+    if fields[2] == "native-stock-door-lockpick-feedback" then
+        local actor = phase == "connected" and #fields == 3 and target_door(state, phase, fields[3])
+        local effects = StaticFindObject("/Game/Classes/Libraries/Fuctions_Lib/FL_GameEffects.Default__FL_GameEffects_C")
+        if not valid(actor) or actor.Locked ~= false or not valid(effects) then
+            error("stock_lockpick_feedback_unavailable", 0)
+        end
+        effects:SendAlertMessage_ToScreen(FText("You picked the lock!"), actor, actor)
+        return "stock door lockpick feedback played"
+    end
     if fields[2] == "native-stock-door-project" then return project(fields, state, phase) end
     if fields[2] == "native-stock-door-fixture" then return fixture(fields, state, phase) end
     if fields[2] == "native-stock-door-guest-interact" then return interact(fields, state, phase) end

@@ -1,4 +1,5 @@
 #include "datasilo_door.hpp"
+#include "loot_crate_input.hpp"
 #include "shared_loot.hpp"
 
 #include <algorithm>
@@ -165,6 +166,9 @@ namespace
             return;
         }
         if (seat(receiver, true) != Seat::guest) return;
+        static const U::FName pick_lock{STR("PickLock")};
+        if (offset == 5344 || name == pick_lock)
+            silverfish::native_loot_crate_input::observe_hinged_pick(receiver);
         if (!script_graph || (offset >= 0 && std::ranges::any_of(stock_entries, [offset](const auto& item) {
                 return item.offset == offset;
             }))) call.PreventOriginalFunctionCall();
@@ -238,6 +242,11 @@ namespace silverfish::native_datasilo_door
             return;
         }
         installed.store(true, std::memory_order_release);
+    }
+
+    bool guest_hinged_lock(U::UObject* actor)
+    {
+        return available() && live(actor) && ordinary_door(actor) && seat(actor, true) == Seat::guest;
     }
 
     void uninstall_hooks()

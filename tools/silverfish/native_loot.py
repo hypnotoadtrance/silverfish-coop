@@ -5,7 +5,7 @@ import math
 import time
 import uuid
 
-from . import native_host_save, native_pickup_audio, party
+from . import native_host_save, native_pickup_audio, native_stock_door, party
 from .authored_cash import CASH_RANGES
 from .authored_loot import (CRATES, DEFERRED_PRY_CLASSES, LEGACY_CRATE, key_unlock_only, lockable_container, loot_capacity, random_lid,
                             valid_item_transform, valid_lid_angle, valid_loot_trait_calls)
@@ -535,7 +535,8 @@ async def restore_key_unlocks(host, bridge):
 
 def parse_lockpick(fields):
     _, area, crate, pawn, sequence, guid, unlocked, quantity, spent = fields
-    if (not lockable_container(crate, area) or not pawn.startswith("Player_FP_C ")
+    if (not (lockable_container(crate, area) or area and native_stock_door.actor_map(crate) == area)
+            or not pawn.startswith("Player_FP_C ")
             or not 0 < int(sequence) < 2**53 or not valid_guid(guid) or unlocked not in ("0", "1")
             or not 0 < int(quantity) <= 2**31 - 1 or spent not in ("0", "1") or unlocked == spent == "0"):
         raise ValueError("Invalid stock lockpick result")
@@ -583,6 +584,10 @@ async def settle_lockpick(host, bridge, character, target, operation):
         host.native_pickup.forget_committed_row(character, guid)
     proof = {"map": area, "crate": crate, "guid": guid, "locked": locked == "locked", "remaining": remaining}
     result = {LOCKPICK_RESULT: proof}
+    if native_stock_door.actor_map(crate) == area:
+        delta = native_stock_door.frame(frame, epoch, crate)
+        if delta:
+            result[native_stock_door.DELTA] = delta
     recent = host.party["receipts"].setdefault(character, [])
     recent.append({"id": operation, "request": fingerprint, "result": result})
     del recent[:-party.RECENT_ACTIONS]

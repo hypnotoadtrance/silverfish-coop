@@ -25,7 +25,7 @@ from tools.silverfish import (
     direct_ip, embedded_startup, native_finite_shop, native_guest_consumable, native_guest_drop, native_guest_melee,
     native_dialogue, native_host_save, native_inventory, native_loose_pickup, native_smg_hold,
     native_anomaly_effects, native_critters, native_destructibles, native_lantern, native_npc_barter, native_loot, native_prop_carry, native_stash, native_stock_switch, native_weapon_fire_view,
-    native_stock_enemy_drops, native_world_loot, runtime,
+    native_stock_door, native_stock_enemy_drops, native_world_loot, runtime,
 )
 from tools.silverfish.authored_loot import GUARANTEED_CRATES
 from tools.silverfish.control import NAME, current_status, submit
@@ -3562,14 +3562,18 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gue
     return evidence
 
 
-async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str) -> dict:
+async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str, hinged=None) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     checkpoint = campaign_save_hashes(host.campaign)
     host_inventory = (await submit(host_run, "native-inventory-list"))["native_inventory"]
-    crate, = [name for name, area in native_loot.CRATES.items() if area == OBSERVATORY
-              and name.endswith(":PersistentLevel.LootLocker_Small_BP_C_0")]
+    if hinged:
+        crate = hinged
+    else:
+        crate, = [name for name, area in native_loot.CRATES.items() if area == OBSERVATORY
+                  and name.endswith(":PersistentLevel.LootLocker_Small_BP_C_0")]
     proofs = []
-    for kind, units in (("lockpick", 2), ("heavy-lockpick", 1)):
+    cases = (("heavy-lockpick", 1),) if hinged else (("lockpick", 2), ("heavy-lockpick", 1))
+    for kind, units in cases:
         seeded = await host.bridge.command("fixture-stock-take-ammo-seed", pawn, kind, str(units))
         guid = seeded["ack"]["message"]
         frame = await wait_resident_status(guest_run, lambda f: f.get("state") == "connected")
@@ -3608,17 +3612,40 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str) -> dict:
                     break
                 await asyncio.sleep(.08)
         assert held["actor_ammo"] == held["stored_ammo"] == units, held
-        for seat in (host, guest):
-            armed = await seat.bridge.command("fixture-stock-lockpick-locker", "arm")
-            assert armed["ack"]["message"] == "locked", armed["ack"]
-        approached = await host.bridge.command("native-loot-approach", pawn, crate)
-        assert approached["native_loot"]["ok"], approached["native_loot"]
-        position, = [row["location"] for row in approached["pawns"].values() if row["name"] == pawn]
-        await wait_resident_status(guest_run, lambda frame:
-            (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location")) and math.dist(point, position) < 50)
         started = time.monotonic()
         started_at = time.time()
-        press = await guest.bridge.command("native-loot-lockpick-input-fixture", crate)
+        if hinged:
+            for seat in (host, guest):
+                await seat.bridge.command(native_stock_door.FIXTURE, "pickable", hinged)
+            frame = await wait_resident_status(host_run, lambda f: hinged in f["game"].get(native_stock_door.KEY, {}))
+            x, y, z = frame["game"][native_stock_door.KEY][hinged]["knob_location"]
+            for dx, dy in ((110, 0), (0, 110), (-110, 0), (0, -110)):
+                moved = await host.bridge.restore("guest", {"location": [x + dx, y + dy, z]})
+                assert moved["pawns"]["guest"]["name"] == pawn
+                position = moved["pawns"]["guest"]["location"]
+                frame = await wait_resident_status(guest_run, lambda f:
+                    (point := f["game"].get("pawns", {}).get("local", {}).get("location")) and math.dist(point, position) < 50)
+                started, started_at = time.monotonic(), time.time()
+                try:
+                    press = await guest.bridge.command("native-loot-lockpick-input-fixture", hinged)
+                except RuntimeError as error:
+                    if str(error) != "stock_door_lockpick_fixture_focus_unavailable":
+                        raise
+                else:
+                    break
+            else:
+                raise RuntimeError("The guest could not aim the stock lockpick at the Crossroads door")
+        else:
+            for seat in (host, guest):
+                armed = await seat.bridge.command("fixture-stock-lockpick-locker", "arm")
+                assert armed["ack"]["message"] == "locked", armed["ack"]
+            approached = await host.bridge.command("native-loot-approach", pawn, crate)
+            assert approached["native_loot"]["ok"], approached["native_loot"]
+            position, = [row["location"] for row in approached["pawns"].values() if row["name"] == pawn]
+            await wait_resident_status(guest_run, lambda f:
+                (point := f.get("game", {}).get("pawns", {}).get("local", {}).get("location")) and math.dist(point, position) < 50)
+            started, started_at = time.monotonic(), time.time()
+            press = await guest.bridge.command("native-loot-lockpick-input-fixture", crate)
         assert press["ack"]["message"] == "stock lockpick started", press["ack"]
         async with asyncio.timeout(12):
             while True:
@@ -3628,24 +3655,34 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str) -> dict:
                 if receipt:
                     break
                 await asyncio.sleep(.06)
+        assert receipt["event"] == "native_guest_lockpick", receipt
         result = receipt[native_loot.LOCKPICK_RESULT]
         assert result["guid"] == guid and result["locked"] is False, receipt
         assert result["remaining"] in (units, units - 1), receipt
         assert kind != "heavy-lockpick" or result["remaining"] == units - 1, receipt
-        for seat in (host, guest):
-            lock = await seat.bridge.command("fixture-stock-lockpick-locker", "read")
-            assert lock["ack"]["message"] == "unlocked", lock["ack"]
+        if hinged:
+            for run in (host_run, guest_run):
+                await wait_resident_status(run, lambda f:
+                    f["game"].get(native_stock_door.KEY, {}).get(hinged, {}).get("locked") is False)
+            assert any(row["time_unix"] >= started_at and row["actor"] == hinged
+                       for row in await resident_events(guest_run, frame)
+                       if row["event"] == "native_stock_door_lockpick_feedback_played")
+        else:
+            for seat in (host, guest):
+                lock = await seat.bridge.command("fixture-stock-lockpick-locker", "read")
+                assert lock["ack"]["message"] == "unlocked", lock["ack"]
         rows = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
         expected = [result["remaining"]] if result["remaining"] else []
         assert [row["quantity"] for row in rows if row["guid"] == guid] == expected, rows
         proofs.append({"class_path": item["class_path"], "slot": slot, "units": units,
                        "remaining": result["remaining"], "result_roundtrip_ms": receipt["milliseconds"],
                        "press_to_ack_ms": round((time.monotonic() - started) * 1000)})
-    roll = await submit(guest_run, "native-loot-open", target=crate)
-    assert roll["ok"] and roll["native_loot_roll"]["crate"] == crate, roll
+    if not hinged:
+        roll = await submit(guest_run, "native-loot-open", target=crate)
+        assert roll["ok"] and roll["native_loot_roll"]["crate"] == crate, roll
     assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_inventory
     assert campaign_save_hashes(host.campaign) == checkpoint
-    return {"stock_lockpicks": proofs}
+    return {"stock_hinged_lockpick" if hinged else "stock_lockpicks": proofs}
 
 
 async def verify_stock_avatar_binoculars(host: Seat, guest: Seat, _pawn: str) -> dict:
@@ -6804,7 +6841,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_stock_lightning(host, guest, pawn, portable_probe_command)),
         (storm_trial, "storm", "stock_storm_ambience",
          storm_trial.joined if storm_trial else None),
-        (stock_crossroads_door, "crossroads", "stock_crossroads_door", verify_stock_crossroads_door),
+        (stock_crossroads_door, "crossroads", "stock_crossroads_door",
+         lambda host, guest, pawn: verify_stock_crossroads_door(
+             host, guest, pawn, lockpick=verify_stock_lockpicks if stock_interaction_feedback else None)),
         (stock_critters, "crossroads", "stock_critters", verify_stock_critters),
         (stock_shovel, "crossroads", "stock_shovel", lambda host, guest, pawn: verify_stock_shovel(
             host, guest, pawn, loot=stock_shovel_loot, quest=stock_shovel_quest, host_quest=stock_shovel_host_quest,
@@ -7660,7 +7699,7 @@ if __name__ == "__main__":
     parser.add_argument("--stock-footsteps", action="store_true",
                         help="verify both directions of stock footstep audio")
     parser.add_argument("--stock-interaction-feedback", action="store_true",
-                        help="verify the guest's stock lockpick equipment and Observatory television")
+                        help="verify the guest's lockpicks and TV, and pick the Crossroads door when selected")
     parser.add_argument("--stock-loki-control", action="store_true",
                         help="verify stock Loki mode, reload, and fire on the three host receiver mounts")
     parser.add_argument("--stock-loki-guest", action="store_true",

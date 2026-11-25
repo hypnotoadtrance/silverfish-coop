@@ -5589,10 +5589,12 @@ class Client:
                     hidden = self.gameplay.setdefault(native_loose_pickup.STATE, [])
                     if path not in hidden:
                         hidden.append(path)
-            if target and (action == native_stock_door.ACTION or action in native_stock_door.PRY_ACTIONS.values()):
+            if target and (action == native_stock_door.ACTION or action in native_stock_door.PRY_ACTIONS.values()
+                           or action == native_loot.LOCKPICK and native_stock_door.DELTA in reply):
                 await self.cancel_gameplay_snapshot()
+                actor = target.split("@", 2)[1] if action == native_loot.LOCKPICK else target.rsplit("@", 1)[-1]
                 delta = native_stock_door.accept_delta(self.gameplay, reply.get(native_stock_door.DELTA),
-                                                       area, epoch, target.rsplit("@", 1)[-1])
+                                                       area, epoch, actor)
                 if delta and not self.needs_travel and not self.server_transitioning:
                     try:
                         self.last_game = await native_stock_door.project(self.bridge, self.last_game, delta, epoch)
@@ -5872,7 +5874,8 @@ class Client:
             operation = uuid.uuid5(self.bridge.input_namespace, f"{session}:{epoch}:{pawn}:lockpick:{sequence}").hex
             target = "@".join((epoch, *(row[key] for key in ("crate", "guid", "unlocked", "quantity", "spent"))))
             crate = row["crate"]
-            if row["unlocked"] == "1":
+            hinged = native_stock_door.actor_map(crate) == area
+            if row["unlocked"] == "1" and not hinged:
                 self.pending_lockpick_unlocks.add(crate)
             started = time.monotonic()
             try:
@@ -5882,7 +5885,15 @@ class Client:
                 if proof.get("locked") is False and (proof.get("map"), proof.get("crate"), proof.get("guid")) == (area, crate, row["guid"]):
                     await self.cancel_gameplay_snapshot()
                     if self.stock_interaction_scope() == scope:
-                        self.gameplay.setdefault(native_loot.VEHICLE_LOCKS, {})[crate] = False
+                        if not hinged:
+                            self.gameplay.setdefault(native_loot.VEHICLE_LOCKS, {})[crate] = False
+                        elif row["unlocked"] == "1":
+                            try:
+                                await self.bridge.command("native-stock-door-lockpick-feedback", crate, timeout=1)
+                            except (OSError, RuntimeError, TimeoutError) as error:
+                                self.control.event("native_stock_door_lockpick_feedback_deferred", reason=str(error))
+                            else:
+                                self.control.event("native_stock_door_lockpick_feedback_played", actor=crate)
                 self.control.event("native_guest_lockpick", sequence=sequence, milliseconds=elapsed, **result)
             except (ValueError, OSError, RuntimeError) as error:
                 self.control.event("native_guest_lockpick_rejected", sequence=sequence, reason=str(error))
