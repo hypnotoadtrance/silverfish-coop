@@ -60,6 +60,7 @@ from portable_simmi_jammer import verify_stock_simmi_jammers
 from portable_weather_travel import verify_weather_travel
 from portable_lightning import verify_stock_lightning
 from portable_storm import StockStormTrial
+from portable_stock_door import verify_stock_crossroads_door
 from portable_stock_shovel import verify_stock_shovel, verify_stock_shovel_reconnect
 from portable_mushrooms import verify_stock_mushrooms
 from portable_placed_item import placed_item_overlay, verify_stock_placed_item
@@ -5764,7 +5765,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_npc_override: bool = False, stock_board_offers: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
                  stock_weather_travel: bool = False, stock_lightning: bool = False, stock_storm_ambience: bool = False,
-                 crossroads_profile: bool = False,
+                 crossroads_profile: bool = False, stock_crossroads_door: bool = False,
                  stock_melee_family: bool = False, stock_melee_edges: bool = False,
                  stock_warehouse_switch: bool = False, stock_warehouse_board: bool = False, stock_bottle: bool = False,
                  stock_roaming_barter: bool = False, stock_critters: bool = False, stock_placed_item: bool = False,
@@ -5908,6 +5909,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_stock_lightning(host, guest, pawn, portable_probe_command)),
         (storm_trial, "storm", "stock_storm_ambience",
          storm_trial.joined if storm_trial else None),
+        (stock_crossroads_door, "crossroads", "stock_crossroads_door", verify_stock_crossroads_door),
         (stock_critters, "crossroads", "stock_critters", verify_stock_critters),
         (stock_shovel, "crossroads", "stock_shovel", lambda host, guest, pawn: verify_stock_shovel(
             host, guest, pawn, loot=stock_shovel_loot, quest=stock_shovel_quest)),
@@ -6084,6 +6086,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                      fixture="portable_npc_override_probe.lua"))
         if (tutorial_dock_combat or tutorial_dock_melee or stock_bandage_revisit or stock_shovel or stock_simmi_jammers or stock_weather_travel or stock_lightning
                 or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_critters or stock_placed_item
+                or stock_crossroads_door
                 or stock_board_offers or stock_eye_stacks or stock_lingering_teleport or stock_acid_pool or stock_mushrooms):
             overlay_key = ("weather_zone_overlays" if stock_weather_travel or stock_lightning else
                            "jammer_zone_overlays" if stock_simmi_jammers else
@@ -6649,6 +6652,8 @@ if __name__ == "__main__":
                         help="verify one compact resident stock weather receipt in a private muted portable pair")
     parser.add_argument("--stock-weather-travel", action="store_true",
                         help="verify stock weather, rain, and sirens after opening Crossroads in one muted portable pair")
+    parser.add_argument("--stock-crossroads-door", action="store_true",
+                        help="verify stock guest door toggles, replay, and panel collision in Crossroads")
     parser.add_argument("--crossroads-profile", action="store_true",
                         help="measure co-op frame and subsystem times around the stock weather travel check")
     parser.add_argument("--stock-lightning", action="store_true",
@@ -6746,7 +6751,7 @@ if __name__ == "__main__":
                               "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_shovel_quest", "stock_take_ammo",
                               "stock_shotguns", "stock_loki_control", "stock_loki_guest",
                               "stock_host_corpse_carry", "stock_host_prop_observer", "stock_flashlights", "stock_simmi_jammers",
-                              "stock_weather_travel", "stock_lightning",
+                              "stock_weather_travel", "stock_lightning", "stock_crossroads_door",
                               "stock_storm_ambience",
                               "stock_melee_family", "stock_melee_edges", "stock_warehouse_switch", "stock_warehouse_board", "stock_bottle",
                               "stock_roaming_barter", "stock_critters", "stock_placed_item", "stock_mushrooms", "stock_throwables", "stock_eye_stacks",
@@ -6788,7 +6793,7 @@ if __name__ == "__main__":
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo, args.stock_shotguns,
             args.stock_loki_control, args.stock_loki_guest,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
-            args.crossroads_profile, args.stock_lightning,
+            args.crossroads_profile, args.stock_lightning, args.stock_crossroads_door,
             args.stock_storm_ambience,
             args.stock_melee_family, args.stock_melee_edges, args.stock_warehouse_switch, args.stock_warehouse_board, args.stock_bottle,
             args.stock_roaming_barter, args.stock_critters, args.stock_placed_item, args.stock_throwables, args.stock_eye_stacks,
@@ -6841,7 +6846,7 @@ if __name__ == "__main__":
                        stock_flashlights=args.stock_flashlights,
                        stock_simmi_jammers=args.stock_simmi_jammers,
                        stock_weather_travel=args.stock_weather_travel,
-                       crossroads_profile=args.crossroads_profile,
+                       crossroads_profile=args.crossroads_profile, stock_crossroads_door=args.stock_crossroads_door,
                        stock_lightning=args.stock_lightning,
                        stock_storm_ambience=args.stock_storm_ambience,
                        stock_melee_family=args.stock_melee_family,

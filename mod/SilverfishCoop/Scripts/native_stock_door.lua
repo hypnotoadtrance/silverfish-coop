@@ -326,19 +326,22 @@ end
 local function interact(fields, state, phase)
     local actor = target_door(state, phase, fields[3])
     if #fields ~= 4 or phase ~= "hosting" or not valid(actor) or not components(actor)
-        or actor.Locked ~= false then error("stock_door_guest_locked_or_unavailable", 0) end
+        or type(actor.Locked) ~= "boolean" then error("stock_door_guest_unavailable", 0) end
+    if actor.Locked then error("stock_door_locked", 0) end
     local qualified, pawn = pcall(guest_save.exact_item_context, state, phase, fields[4])
     if not qualified or not valid(pawn) or pawn.Dead ~= false then error("stock_door_guest_unavailable", 0) end
     local knob = actor.Box_Knob
-    require("native_loot_crate_input").stock_focus(pawn, knob, function()
+    local _, was_open = require("native_loot_crate_input").stock_focus(pawn, knob, function()
         -- Stock F uses the interaction trace. The separate visibility ray can
         -- hit the wall behind a valid knob when the door is open.
-        if not same(actor.Box_Knob, knob) or actor.Locked ~= false then
+        if not same(actor.Box_Knob, knob) or actor.Locked ~= false or type(actor.Open) ~= "boolean" then
             error("stock_door_guest_out_of_reach", 0)
         end
+        local before = actor.Open
         actor:SendInteractionToActor(pawn, knob)
+        return before
     end, "stock_door_guest_out_of_reach")
-    return "stock hinged door interaction dispatched"
+    return "stock hinged door interaction dispatched " .. (was_open and "open" or "closed")
 end
 
 local function tool_pry(fields, state, phase)

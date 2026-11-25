@@ -127,7 +127,7 @@ guest.CanInteract = true
 package.loaded.native_loot_crate_input = {stock_focus = function(pawn, knob, dispatch, refusal)
     assert(pawn == guest and knob == opened.Box_Knob)
     if pawn.CanInteract ~= true or pawn.InteractionTarget_Component ~= knob then error(refusal, 0) end
-    return dispatch()
+    return true, dispatch()
 end}
 function opened:SendInteractionToActor(pawn, knob)
     assert(pawn == guest and knob == self.Box_Knob)
@@ -135,7 +135,7 @@ function opened:SendInteractionToActor(pawn, knob)
 end
 
 local close = {"request", "native-stock-door-guest-interact", opened.name, "guest pawn"}
-assert(doors.command(close, authority, "hosting") and not opened.Open,
+assert(doors.command(close, authority, "hosting") == "stock hinged door interaction dispatched open" and not opened.Open,
     "the stock F trace can close the exact open door even when the visibility trace hits a wall")
 opened.Open = true
 guest.InteractionTarget_Component = object()

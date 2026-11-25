@@ -1,0 +1,99 @@
+"""Exercise a stock hinged door in one portable Crossroads campaign."""
+
+import math
+import time
+
+from live_multi_smoke import campaign_save_hashes
+from portable_guest_world_start import resident_events, wait_resident_status
+from portable_weather_travel import enter_crossroads
+from tools.silverfish import native_stock_door as door
+from tools.silverfish.control import submit
+from tools.silverfish.travel import CROSSROADS, OBSERVATORY
+
+
+WOOD_DOOR = f"Door_Wood_04_BP_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Door_Wood_04_BP_C_1719"
+
+
+async def verify_stock_crossroads_door(host, guest, pawn):
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+
+    def observed(frame):
+        return frame.get("game", {}).get(door.KEY, {}).get(WOOD_DOOR, {})
+
+    ready = await wait_resident_status(host_run, lambda frame:
+        frame["game"].get("native_zone", {}).get("state") == "ready")
+    if ready["game"]["map"] == OBSERVATORY:
+        await enter_crossroads(host, pawn)
+    arrival = await wait_resident_status(host_run, lambda frame:
+        frame["game"].get("map") == CROSSROADS and not frame.get("awaiting_zone_guest")
+        and frame["game"].get("native_guest_save", {}).get("state") == "bound"
+        and observed(frame).get("locked") is True, timeout=60)
+    epoch = arrival["zone_epoch"]
+    initial = observed(arrival)
+    await wait_resident_status(guest_run, lambda frame:
+        frame.get("zone_epoch") == epoch and door.matches(observed(frame), initial))
+
+    hx, hy, _ = initial["panel_location"]
+    kx, ky, kz = initial["knob_location"]
+    length = math.hypot(kx - hx, ky - hy)
+    assert 40 < length < 200, initial
+    x, y = (hx + kx) / 2, (hy + ky) / 2
+    dx, dy = 70 * (ky - hy) / length, -70 * (kx - hx) / length
+    points = (x + dx, y + dy, kz, x - dx, y - dy, kz)
+
+    async def panel(seat, query):
+        report = await seat.bridge.command(door.TRACE_FIXTURE, WOOD_DOOR, query, *map(str, points))
+        row = report[door.TRACE_RESULT]
+        assert row["actor"] == WOOD_DOOR and row["query"] == int(query)
+        return row["panel"]
+
+    query = "0" if await panel(host, "0") else "2"
+    assert await panel(host, query) and await panel(guest, query)
+    checkpoint = campaign_save_hashes(host.campaign)
+    refused = await submit(guest_run, door.ACTION, target=WOOD_DOOR)
+    assert refused.get("error") == "stock_door_locked", refused
+    await host.bridge.command(door.FIXTURE, "pry", WOOD_DOOR)
+    opened = await wait_resident_status(host_run, lambda frame:
+        observed(frame).get("open") is True and observed(frame).get("locked") is False)
+    await wait_resident_status(guest_run, lambda frame: door.matches(observed(frame), observed(opened)))
+
+    async def toggle(expected_open):
+        attempts = []
+        for side in range(4):
+            approach = await submit(host_run, door.STAGE_FIXTURE, target=f"guest@{WOOD_DOOR}", amount=side)
+            if not approach.get("ok"):
+                attempts.append(approach)
+                continue
+            point = approach["position"]
+            await wait_resident_status(guest_run, lambda frame:
+                math.dist(frame["game"].get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), point) < 55)
+            started = time.time()
+            pressed = await submit(guest_run, door.INPUT_FIXTURE, target=WOOD_DOOR)
+            if pressed.get("ok"):
+                break
+            attempts.append(pressed)
+        else:
+            raise RuntimeError(f"No stock approach reached the Crossroads hinge knob: {attempts}")
+
+        authority = observed(await wait_resident_status(host_run, lambda frame:
+            observed(frame).get("open") is expected_open and observed(frame).get("locked") is False))
+        replica = await wait_resident_status(guest_run, lambda frame: door.matches(observed(frame), authority))
+        actions = [event for event in await resident_events(guest_run, replica)
+                   if event.get("time_unix", 0) >= started and event.get("event") == "local_interaction"
+                   and event.get(door.RESULT, {}).get("actor") == WOOD_DOOR]
+        receipt, = actions
+        assert receipt[door.RESULT]["open"] is expected_open
+        assert await panel(host, query) is not expected_open
+        assert await panel(guest, query) is not expected_open
+        return receipt
+
+    closed = await toggle(False)
+    reopened = await toggle(True)
+    replay = await submit(guest_run, door.ACTION, operation_id=closed["operation_id"], target=WOOD_DOOR)
+    assert replay.get("ok") and replay[door.RESULT] == closed[door.RESULT]
+    assert not await panel(host, query) and not await panel(guest, query)
+    assert campaign_save_hashes(host.campaign) == checkpoint
+    return {"stock_crossroads_door": {"actor": WOOD_DOOR, "authoritative_lock_refusal": True,
+                                     "close": closed[door.RESULT], "open": reopened[door.RESULT],
+                                     "close_replay_preserved_open_door": True,
+                                     "collision_verified_both_seats": True, "campaign_unchanged": True}}

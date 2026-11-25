@@ -141,8 +141,7 @@ async def interact(host, bridge, character, requested, operation):
     game = host.last_game
     area = game.get("map")
     member = host.native_recipients().get(character, {})
-    row = game.get(KEY, {}).get(actor)
-    if (not epoch or epoch != host.zone_epoch or actor_map(actor) != area or not row
+    if (not epoch or epoch != host.zone_epoch or not area or actor_map(actor) != area
             or game.get("state") != "hosting" or host.transitioning or host.stopping or host.native_checkpoint_unsafe
             or not member.get("connected") or host.party["wipe"] or host.party["players"][character]["downed"]
             or not party.REQUEST_ID.fullmatch(operation)):
@@ -154,19 +153,26 @@ async def interact(host, bridge, character, requested, operation):
             if receipt["request"] != fingerprint:
                 raise party.RuleError("operation_id_conflict")
             return receipt["result"]
-    if row["locked"]:
-        raise party.RuleError("stock_door_locked")
     try:
         reply = await bridge.command(TAG + "-guest-interact", actor, member["pawn"], timeout=4)
     except RuntimeError as error:
-        if str(error).startswith("stock_door_guest_"):
+        if str(error) == "stock_door_locked" or str(error).startswith("stock_door_guest_"):
             raise party.RuleError(str(error)) from error
         raise
 
-    def toggled(frame):
-        observed = frame.get(KEY, {}).get(actor, {})
-        return ((frame.get("state"), frame.get("map")) == ("hosting", area) and observed.get("locked") is False
-                and observed.get("open") is not None and observed["open"] != row["open"])
+    prefix, _, before = reply.get("ack", {}).get("message", "").rpartition(" ")
+    sequence = reply.get("sequence")
+    if (prefix != "stock hinged door interaction dispatched" or before not in {"open", "closed"}
+            or (reply.get("state"), reply.get("map")) != ("hosting", area)
+            or type(sequence) is not int or sequence <= 0):
+        raise RuntimeError("The host did not report the door state at dispatch")
+    expected_open = before == "closed"
+
+    def toggled(snapshot):
+        observed = snapshot.get(KEY, {}).get(actor, {})
+        return ((snapshot.get("state"), snapshot.get("map")) == ("hosting", area)
+                and snapshot.get("sequence", 0) >= sequence and observed.get("locked") is False
+                and observed.get("open") is expected_open)
 
     host.last_game = reply if toggled(reply) else await bridge.wait_for(toggled, timeout=2)
     host.last_seen = time.monotonic()
