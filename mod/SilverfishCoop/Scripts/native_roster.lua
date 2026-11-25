@@ -143,7 +143,7 @@ function native_roster.rows(state, phase, status_row)
         rows[#rows + 1] = status_row("native-roster", guest.status, identity, guest.name, guest.controller, guest.pawn)
     end
     last_scope = observed
-    return rows
+    return rows, observed
 end
 
 local function finite(value)

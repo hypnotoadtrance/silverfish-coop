@@ -1602,8 +1602,9 @@ local function write_status(state, current_phase, failure, fields, pending, crat
             rows[#rows + 1] = status_row("native-authored-arrival", proof.destination, proof.actor, proof.placement,
                 proof.x, proof.y, proof.z)
         end
-        for _, row in ipairs(native_roster.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
-        for _, row in ipairs(native_roster_spawn.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        local roster_rows, roster = native_roster.rows(state, current_phase, status_row)
+        for _, row in ipairs(roster_rows) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_roster_spawn.rows(state, current_phase, status_row, roster)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_stardust.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_dream.rows(status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_matrix.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

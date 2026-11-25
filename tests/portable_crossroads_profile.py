@@ -129,6 +129,13 @@ def instrument_death_poll(source):
                           'SilverfishTakeScopedNativeDeathHit, record.address, scope_token)', 1)
 
 
+def instrument_spawn_context(source):
+    anchor = "pcall(host_context, state, phase)"
+    if source.count(anchor) != 1:
+        raise ValueError("The stock spawn status timing anchor changed")
+    return source.replace(anchor, 'pcall(SilverfishProfileCrossroadsCall, "roster_spawn_qualify", host_context, state, phase)')
+
+
 def instrument_flashlight_scope(source):
     previous, boundary, sync = source.partition("function flashlight.sync(state, phase)")
     body, next_function, rest = sync.partition("function flashlight.command(")
@@ -255,7 +262,7 @@ async def profile_world(host, guest, area, probe):
         for seat, profile in zip(seats, profiles, strict=True):
             timings = profile["timings"]
             for operation in ("command_mailbox", "crate_inline_scan", "npc_marker_class_lookup", "journal_host_context",
-                              "death_pawn_receipt",
+                              "death_pawn_receipt", "roster_spawn_qualify",
                               "player_actor_fallback"):
                 assert operation not in timings, (operation, timings.get(operation))
             discoveries = timings["loose_discovery"]["count"]

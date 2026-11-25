@@ -252,30 +252,51 @@ function spawn.command(fields, state, phase)
     end
     if not valid(pawn) then ruled_out("stock_pawn_not_spawned") end
     local point = pawn:K2_GetActorLocation()
+    local pawn_name = pawn:GetFullName()
     if not matching_pawn(pawn, controller, context.world, context.pawn_type, false)
-        or not stock_name(pawn:GetFullName(), "Player_FP_C ") or pawn.Dead ~= false or not vector(point)
+        or not stock_name(pawn_name, "Player_FP_C ") or pawn.Dead ~= false or not vector(point)
         or distance_squared(point, transform.Translation) > max_spawn_adjustment ^ 2
         or distance_squared(point, origin) > max_spawn_distance ^ 2 then
         error("mutation_unverified_stock_roster_spawn_pawn", 0)
     end
 
-    last = {map = state.map, world = context.world, connection = connection, controller = controller,
-        connection_name = connection_name, controller_name = controller_name, pawn = pawn, point = point}
+    last = {map = state.map, world = context.world, host = context.host, driver = context.driver:GetAddress(),
+        connection = connection:GetAddress(), controller = controller, connection_name = connection_name,
+        controller_name = controller_name, pawn = pawn, pawn_name = pawn_name, point = point}
     return "exact stock remote player restarted"
 end
 
-function spawn.rows(state, phase, status_row)
-    local checked, context = pcall(host_context, state, phase)
-    if not checked or not context then
+function spawn.rows(state, phase, status_row, roster)
+    if not enabled or phase ~= "hosting" or not roster then
         last = nil
         return {}
     end
-    local rows = {status_row("native-roster-spawn-capability", 1)}
-    if last and same(last.world, context.world) and connection_member(context, last.connection, last.connection_name)
-        and same(remote_controller(last.connection, context), last.controller)
-        and matching_pawn(last.pawn, last.controller, context.world, context.pawn_type, false) then
+    local pending = false
+    local recovered
+    for _, guest in ipairs(roster.guests) do
+        if guest.status == "joining" and guest.controller ~= "-" then pending = true end
+        if last and guest.address == last.connection and guest.name == last.connection_name
+            and guest.controller == last.controller_name and guest.pawn == last.pawn_name then
+            recovered = guest.pawn_object
+        end
+    end
+    if not pending and not last then return {} end
+    local host = state.local_pawn and state.local_pawn.pawn
+    if not valid(host) or host.Dead ~= false then
+        last = nil
+        return {}
+    end
+    local rows = {}
+    -- The same frame already inspected each client connection. Only qualify the
+    -- stock spawn entry point while an identified controller is waiting for a pawn.
+    if pending then
+        local checked, context = pcall(host_context, state, phase)
+        if checked and context then rows[#rows + 1] = status_row("native-roster-spawn-capability", 1) end
+    end
+    if last and last.map == state.map and last.driver == roster.driver and same(last.world, state.world)
+        and same(last.host, host) and same(last.pawn, recovered) and same(recovered.Controller, last.controller) then
         rows[#rows + 1] = status_row("native-roster-spawn", "restarted", last.map, last.connection_name,
-            last.controller_name, last.pawn:GetFullName(), last.point.X, last.point.Y, last.point.Z)
+            last.controller_name, last.pawn_name, last.point.X, last.point.Y, last.point.Z)
     else
         last = nil
     end
