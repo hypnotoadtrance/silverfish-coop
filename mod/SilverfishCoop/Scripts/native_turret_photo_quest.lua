@@ -470,6 +470,7 @@ local function field_shutter(command, state, phase)
     frame.Translation, frame.Rotation = position, {X = qx, Y = qy, Z = qz, W = qw}
     local source = quest_table()
     local cash, xp = read_flag(context.instance, "Player_Cash"), read_flag(context.instance, "Player_Xp")
+    local inspected, best_score = 0, 0
     for _, target in ipairs(field_components(context.world)) do
         local recipe = field_recipe(context.save, source, target)
         if recipe and within(frame.Translation, xyz(target.actor:K2_GetActorLocation()), recipe.distance) then
@@ -488,9 +489,10 @@ local function field_shutter(command, state, phase)
                 field_result = {context = context, recipe = recipe, camera = guid, score = score, actor = target.actor:GetFullName()}
                 return "verified stock photo objective progress"
             end
+            inspected, best_score = inspected + 1, math.max(best_score, score)
         end
     end
-    field_fail("no_objective_in_frame")
+    field_fail(("no_objective_in_frame:%d:%.3f"):format(inspected, best_score))
 end
 
 function photo.command(command, state, phase)

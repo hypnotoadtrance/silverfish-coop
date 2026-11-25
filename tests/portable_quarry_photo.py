@@ -76,7 +76,7 @@ async def verify_quarry_photo(host, guest, pawn, probe):
     await command(guest, "miss")
     await asyncio.sleep(.35)
     missed = await shutter()
-    assert missed.get("reason") == "stock_photo_no_objective_in_frame", missed
+    assert missed.get("reason", "").startswith("stock_photo_no_objective_in_frame:1:"), missed
     assert await command(host, "journal") == "1"
     await asyncio.sleep(3.1)
     await command(guest, "aim")

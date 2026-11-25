@@ -128,6 +128,7 @@ local function run(action, argument)
     local rotation = {Pitch = aim.Pitch, Yaw = aim.Yaw, Roll = 0}
     if action == "miss" then rotation.Yaw = (rotation.Yaw + 180) % 360 end
     pawn.Controller:SetControlRotation(rotation)
+    pawn.Camera:K2_SetWorldRotation(rotation, false, {}, true)
     camera.SceneCaptureComponent2D:K2_SetWorldRotation(rotation, false, {}, true)
     return action
 end
