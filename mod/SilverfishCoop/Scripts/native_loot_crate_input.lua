@@ -614,7 +614,7 @@ function input.command(fields, state, phase)
     if command == "native-loot-guest-lockpick" then
         local profile = loot.profile(state.map, fields[3])
         local outcome, before, spent = fields[6], tonumber(fields[7]), fields[8]
-        if phase ~= "hosting" or #fields ~= 8 or not profile or not profile.lockable or profile.key_unlock_only
+        if phase ~= "hosting" or #fields ~= 8 or not profile or not profile.lockable
             or (outcome ~= "0" and outcome ~= "1") or (spent ~= "0" and spent ~= "1")
             or not math.tointeger(before) or before < 1 or (outcome == "0" and spent == "0")
             or type(SilverfishSettleNativeGuestLockpick) ~= "function" then error("stock_lockpick_refused_scope", 0) end

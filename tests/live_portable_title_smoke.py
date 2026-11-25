@@ -3395,7 +3395,7 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str) -> dict:
     crate, = [name for name, area in native_loot.CRATES.items() if area == OBSERVATORY
               and name.endswith(":PersistentLevel.LootLocker_Small_BP_C_0")]
     proofs = []
-    for kind, units in (("lockpick", 2), ("heavy-lockpick", 3)):
+    for kind, units in (("lockpick", 2), ("heavy-lockpick", 1)):
         seeded = await host.bridge.command("fixture-stock-take-ammo-seed", pawn, kind, str(units))
         guid = seeded["ack"]["message"]
         frame = await wait_resident_status(guest_run, lambda f: f.get("state") == "connected")
@@ -3456,7 +3456,8 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str) -> dict:
             lock = await seat.bridge.command("fixture-stock-lockpick-locker", "read")
             assert lock["ack"]["message"] == "unlocked", lock["ack"]
         rows = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
-        assert [row["quantity"] for row in rows if row["guid"] == guid] == [result["remaining"]], rows
+        expected = [result["remaining"]] if result["remaining"] else []
+        assert [row["quantity"] for row in rows if row["guid"] == guid] == expected, rows
         proofs.append({"class_path": item["class_path"], "slot": slot, "units": units,
                        "remaining": result["remaining"], "result_roundtrip_ms": receipt["milliseconds"],
                        "press_to_ack_ms": round((time.monotonic() - started) * 1000)})

@@ -287,7 +287,7 @@ namespace
         auto* crate = object(tool, STR("LockRef"));
         if (!crate || crate != object(tool, STR("TargetActor"))) return;
         const auto* profile = silverfish::shared_loot::authored_profile(crate);
-        if (!profile || !profile->stock_class->pry_entry || profile->stock_class->key_unlock_only ||
+        if (!profile || !profile->stock_class->pry_entry ||
             !boolean(crate, STR("Locked"), true) || !boolean(crate, STR("Looted"), false) ||
             !actor_in_world(crate, static_cast<U::AActor*>(pawn)->GetWorld())) return;
         auto* ammo = field<U::FIntProperty>(tool, STR("Ammo"));

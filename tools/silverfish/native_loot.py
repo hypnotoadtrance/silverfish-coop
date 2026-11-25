@@ -535,7 +535,7 @@ async def restore_key_unlocks(host, bridge):
 
 def parse_lockpick(fields):
     _, area, crate, pawn, sequence, guid, unlocked, quantity, spent = fields
-    if (not lockable_container(crate, area) or key_unlock_only(crate, area) or not pawn.startswith("Player_FP_C ")
+    if (not lockable_container(crate, area) or not pawn.startswith("Player_FP_C ")
             or not 0 < int(sequence) < 2**53 or not valid_guid(guid) or unlocked not in ("0", "1")
             or not 0 < int(quantity) <= 2**31 - 1 or spent not in ("0", "1") or unlocked == spent == "0"):
         raise ValueError("Invalid stock lockpick result")
