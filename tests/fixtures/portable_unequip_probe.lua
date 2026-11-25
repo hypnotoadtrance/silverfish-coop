@@ -373,7 +373,6 @@ local function run(action, argument)
         assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")
         local helmet, armor = argument:match("^([%x]+),([%x]+)$")
         assert(helmet and #helmet == 32 and #armor == 32, "fixture expected the two replacement GUIDs")
-        local inventory_view = require("native_inventory_view")
         local state = {world = world, map = path:match("^([^.]+)"), server = true, listening = true,
             controller = control, local_pawn = {pawn = pawn, controller_object = control, name = pawn:GetFullName()}}
         equip_worn(pawn, helmet, false)

@@ -6851,9 +6851,18 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableDryFireProbe",
                                                      fixture="portable_dry_fire_probe.lua"))
         if stock_unequip:
-            for game in games:
-                probes.enter_context(installed_probe(game, mod="SilverfishPortableUnequipProbe",
-                                                     fixture="portable_unequip_probe.lua"))
+            fixture = (Path(__file__).with_name("fixtures") / "portable_unequip_probe.lua").read_text(encoding="utf-8")
+
+            def add_stock_inventory_witness(script):
+                marker = "\nreturn inventory_view\n"
+                if not script.endswith(marker):
+                    raise ValueError("The replica lacks the stock inventory view")
+                return script[:-len(marker)] + "\n;(function()\n" + fixture + "\nend)()\n" + marker
+
+            proof["stock_unequip_overlays"] = [
+                probes.enter_context(portable_script_overlay(game, "native_inventory_view.lua", add_stock_inventory_witness))
+                for game in games
+            ]
         if stock_prop_grip or stock_host_prop_observer:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableLanternProbe",

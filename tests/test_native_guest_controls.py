@@ -290,6 +290,23 @@ class NativeGuestStockPickupViewTests(unittest.IsolatedAsyncioTestCase):
 
         self.client.gameplay_action = AsyncMock(side_effect=fetch)
 
+    async def test_layout_recovery_waits_for_newer_local_edits(self):
+        self.release.set()
+        self.view.receive.side_effect = [False, True]
+        await self.view.refresh(self.client, layout_sequence="5")
+        scope = self.view.inventory_scope(self.client)
+        self.assertEqual(self.view.pending_stock_refresh, scope)
+        self.client.bridge.command.assert_not_awaited()
+        await self.view.close(preserve_stock=True)
+        self.assertEqual(self.view.pending_stock_refresh, scope)
+
+        await self.view.sync(self.client, True)
+        await self.view.request
+        await self.view.sync(self.client, True)
+        self.view.receive.assert_awaited_with(self.client, {"capture": 2}, self.area, self.epoch, str(self.character))
+        self.client.bridge.command.assert_awaited_once_with("native-inventory-stock-refresh", self.epoch, timeout=4)
+        self.assertIsNone(self.view.pending_stock_refresh)
+
     async def test_pickups_coalesce_without_waiting_for_stale_inventory_reply(self):
         await self.view.sync(self.client, True)
         await asyncio.sleep(0)
