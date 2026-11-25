@@ -52,17 +52,23 @@ function audio.command(fields, state, phase, loaded_only)
     end
     local heard, origin = {}, pawn:K2_GetActorLocation()
     for i = 5, #fields do
-        local id, path, x, y, z, amount = fields[i]:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|(%d+)$")
-        if not id then id, path, x, y, z = fields[i]:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$") end
+        local id, path, amount = fields[i]:match("^([^|]+)|([^|]+)|cash|(%d+)$")
+        local x, y, z
+        if not id then
+            id, path, x, y, z, amount = fields[i]:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|(%d+)$")
+            if not id then id, path, x, y, z = fields[i]:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$") end
+        end
         x, y, z = tonumber(x), tonumber(y), tonumber(z)
+        local positioned = x and y and z
+        local show_cash = amount and phase == "connected" and not loaded_only
         local package, export
         if path and #path <= 256 then package, export = path:match("^(/Game/Classes/[%w_/%-]+)%.([%w_%-]+)_C$") end
         if token(id) and seen[id] then
             heard[#heard + 1] = id
-        elseif token(id) and package and package:match("([^/]+)$") == export and x and y and z then
-            local near = (origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2 <= 1800^2
+        elseif token(id) and package and package:match("([^/]+)$") == export and (positioned or show_cash) then
+            local near = positioned and (origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2 <= 1800^2
             local queued, played = false, false
-            if amount and phase == "connected" and not loaded_only then
+            if show_cash then
                 local ok, accepted = pcall(cash_popup.enqueue, state, pawn, epoch, path, tonumber(amount))
                 queued = ok and accepted == true
             end

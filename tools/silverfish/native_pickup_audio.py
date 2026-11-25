@@ -13,6 +13,7 @@ COMMAND = "native-sound-pickup"
 MAX_CUES = 16
 AUDIBLE_RADIUS = 1800
 CUE_LIFETIME = 2.5
+CASH_NOTICE_LIFETIME = 8
 
 
 def stock_cash_amount(class_path, amount):
@@ -35,22 +36,26 @@ class PickupAudio:
         if game.get("state") != "hosting" or not valid_id(epoch) or not valid_id(operation) or not valid_class(class_path):
             return
         location = next((row.get("location") for row in game.get("pawns", {}).values() if row.get("name") == pawn), None)
-        if valid_position(location):
-            cash = amount if stock_cash_amount(class_path, amount) else None
-            self.cues.append((time.monotonic() + CUE_LIFETIME, game.get("map"), epoch,
-                              [operation, class_path, [round(axis, 2) for axis in location]], cash))
+        location = [round(axis, 2) for axis in location] if valid_position(location) else None
+        cash = amount if stock_cash_amount(class_path, amount) else None
+        if location is not None or cash is not None:
+            self.cues.append((time.monotonic(), game.get("map"), epoch, operation, class_path, location, cash))
 
     def frame(self, game, epoch, *, operation=None):
         area = game.get("map")
         now = time.monotonic()
-        while self.cues and self.cues[0][0] <= now:
+        while self.cues and self.cues[0][0] + CASH_NOTICE_LIFETIME <= now:
             self.cues.popleft()
         cues, cash = [], {}
-        for _, source, visit, cue, amount in self.cues:
-            if (source, visit) == (area, epoch) and (operation is None or cue[0] == operation):
-                cues.append(cue)
-                if amount is not None:
-                    cash[cue[0]] = amount
+        for created, source, visit, identity, class_path, location, amount in self.cues:
+            if (source, visit) != (area, epoch) or (operation is not None and identity != operation):
+                continue
+            if created + CUE_LIFETIME <= now:
+                location = None
+            if location is not None or amount is not None:
+                cues.append([identity, class_path, location])
+            if amount is not None:
+                cash[identity] = amount
         if cues:
             frame = {"map": area, "epoch": epoch, "cues": cues}
             if cash:
@@ -74,8 +79,9 @@ class Playback:
             self.scope = scope
             self.seen.clear()
         origin = game.get("pawns", {}).get("local", {}).get("location")
+        listener_position_available = valid_position(origin)
         cues = frame.get("cues")
-        if not isinstance(cues, list) or len(cues) > MAX_CUES or not valid_position(origin):
+        if not isinstance(cues, list) or len(cues) > MAX_CUES:
             return [], {}
         cash = frame.get("cash", {}) if game["state"] == "connected" else {}
         if not isinstance(cash, dict):
@@ -85,13 +91,16 @@ class Playback:
             if not isinstance(cue, list) or len(cue) != 3:
                 continue
             operation, class_path, location = cue
-            if (not valid_id(operation) or operation in self.seen or operation in asked or not valid_class(class_path)
-                    or not valid_position(location)):
+            if not valid_id(operation) or operation in self.seen or operation in asked or not valid_class(class_path):
                 continue
             amount = cash.get(operation)
             if amount is not None and not stock_cash_amount(class_path, amount):
                 continue
-            if amount is not None or math.dist(origin, location) <= AUDIBLE_RADIUS:
+            if not listener_position_available or not valid_position(location):
+                if amount is not None:
+                    asked[operation] = amount
+                    args.append(f"{operation}|{class_path}|cash|{amount}")
+            elif amount is not None or math.dist(origin, location) <= AUDIBLE_RADIUS:
                 asked[operation] = amount
                 encoded = "|".join((operation, class_path, *map(str, location)))
                 args.append(encoded if amount is None else f"{encoded}|{amount}")

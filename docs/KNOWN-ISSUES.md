@@ -4,7 +4,7 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 
 ## Current priorities
 
-1. Improve host and guest frame pacing, local interaction response, and network latency. Compare Observatory and Crossroads under load, track packet volume and queue delays, and work toward a 100 ms round trip where the connection allows it.
+1. Improve host and guest frame pacing, local interaction response, and network latency during play. Compare Observatory and Crossroads under load, track packet volume and queue delays, and work toward a 100 ms round trip where the connection allows it. Ordinary map loading time is a lower priority. Keep transition bugs that interrupt the session or leave the party behind in the functional backlog.
 2. Rework co-op menus and flows, starting with hosting, joining, and Steam invites. Keep stock menus for gameplay where the game already provides them.
 3. Return to visual and animation polish after the performance and UI/UX passes. Gameplay regressions stay in the functional backlog.
 

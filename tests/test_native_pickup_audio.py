@@ -33,6 +33,43 @@ class NativePickupAudioTests(unittest.IsolatedAsyncioTestCase):
             COMMAND, OBSERVATORY, epoch, f"{operation}|{path}|0|0|0|45", timeout=1.5)
         control.event.assert_called_once_with("native_cash_popup_queued", operation_id=operation, map=OBSERVATORY, amount=45)
 
+    async def test_cash_notice_survives_missing_positions_and_the_sound_window(self):
+        from tools.silverfish.authored_cash import SMALL_STACK
+
+        epoch, positioned, unpositioned, sound = (letter * 32 for letter in "abcd")
+        path = SMALL_STACK.class_path
+        host = {"state": "hosting", "map": OBSERVATORY,
+                "pawns": {"local": {"name": "host pawn", "location": [0, 0, 0]}}}
+        guest = {"state": "connected", "map": OBSERVATORY}
+        cues = PickupAudio()
+        with patch("tools.silverfish.native_pickup_audio.time.monotonic") as clock:
+            clock.return_value = 100
+            cues.append(host, epoch, "host pawn", positioned, path, amount=45)
+            cues.append(host, epoch, "guest pawn", unpositioned, path, amount=40)
+            cues.append(host, epoch, "host pawn", sound, path)
+            self.assertEqual(Playback().prepare(guest, cues.frame(host, epoch), epoch, "host")[0],
+                             [f"{positioned}|{path}|cash|45", f"{unpositioned}|{path}|cash|40"])
+            clock.return_value = 103
+            frame = cues.frame(host, epoch)
+            self.assertEqual(frame["cues"], [[positioned, path, None], [unpositioned, path, None]])
+            self.assertEqual(Playback().prepare(host, frame, epoch, "host"), ([], {}))
+            self.assertEqual(Playback().prepare(guest, frame, "e" * 32, "host"), ([], {}))
+            clock.return_value = 109
+            self.assertIsNone(cues.frame(host, epoch))
+
+        guest = {**host, "state": "connected"}
+        bridge = Mock(command=AsyncMock(return_value={**guest, "ack": {"message": f"{positioned},{unpositioned}"}}))
+        control, receiver = Mock(), Playback()
+        for _ in range(2):
+            await receiver.sync(bridge, control, guest, frame, epoch, "host")
+        bridge.command.assert_awaited_once_with(
+            COMMAND, OBSERVATORY, epoch, f"{positioned}|{path}|cash|45", f"{unpositioned}|{path}|cash|40",
+            timeout=1.5)
+        self.assertEqual(control.event.call_args_list, [
+            call("native_cash_popup_queued", operation_id=positioned, map=OBSERVATORY, amount=45),
+            call("native_cash_popup_queued", operation_id=unpositioned, map=OBSERVATORY, amount=40),
+        ])
+
     async def test_committed_sound_uses_claimant_position_and_is_not_replayed(self):
         epoch = "a" * 32
         claim = "b" * 32
