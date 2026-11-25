@@ -683,6 +683,12 @@ local function open_stock_inventory(fields, current, state, phase)
     return ("opened stock guest inventory with %d backpack cards"):format(displayed)
 end
 
+function inventory_view.accept_layout_projection(pawn, sequence)
+    local pending = stock_drop
+    if not pending or not pending.layout_preview or not same(pending.context.pawn, pawn) then return true end
+    return pending.sequence == tonumber(sequence)
+end
+
 local function update_local_worn_slot(current, slot)
     local instance = current.world.OwningGameInstance
     if slot == 8 then instance:UpdateHelmet() else instance:UpdateArmor() end

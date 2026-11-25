@@ -240,8 +240,10 @@ class GuestView:
                 reply = request.result()
                 # A pickup arrived after this request started. Use one fresh view for all resulting changes.
                 if not pending and (requested_stock is None or requested_stock == scope):
-                    await self.receive(client, reply["native_guest_ui"], area, epoch, character)
-                    if requested_stock is not None and requested_stock == self.stock_view(client):
+                    projected = await self.receive(client, reply["native_guest_ui"], area, epoch, character)
+                    if not projected and requested_stock is not None:
+                        self.pending_stock_refresh = requested_stock
+                    if projected and requested_stock is not None and requested_stock == self.stock_view(client):
                         client.last_game = await client.bridge.command("native-inventory-stock-refresh", epoch, timeout=4)
                     self.last_error = None
             except (KeyError, TypeError, OSError, RuntimeError, ValueError, zlib.error) as error:
@@ -260,14 +262,14 @@ class GuestView:
             self.pending_stock_refresh = None
             self.request = asyncio.create_task(client.gameplay_action(ACTION, uuid.uuid4().hex, self.digest))
 
-    async def receive(self, client, result, area, epoch, character):
+    async def receive(self, client, result, area, epoch, character, *, layout_sequence=None):
         digest = result["digest"]
         if ((result["map"], result["epoch"], result["owner"]) != (area, epoch, character)
                 or (client.last_game.get("map"), client.zone_epoch) != (area, epoch)
                 or not isinstance(digest, str) or not _DIGEST.fullmatch(digest)):
             raise ValueError("The co-op view belongs to another visit")
         if digest == self.digest:
-            return
+            return True
         encoded = result["payload"]
         if not isinstance(encoded, str) or len(encoded) > 27_000:
             raise ValueError("Invalid co-op view encoding")
@@ -275,31 +277,37 @@ class GuestView:
         contents = stream.decompress(base64.b64decode(encoded, validate=True), MAX_BYTES + 1)
         if not stream.eof or stream.unused_data or sha256(contents).hexdigest() != digest:
             raise ValueError("Invalid co-op view content")
-        await self.project(client, character, validate(contents, area, character))
-        self.digest = digest
+        projected = await self.project(client, character, validate(contents, area, character),
+                                       layout_sequence=layout_sequence)
+        if projected:
+            self.digest = digest
+        return projected
 
-    async def refresh(self, client, *, force=False):
+    async def refresh(self, client, *, layout_sequence=None):
         """Project a newly committed inventory while the requesting screen is still mounted."""
         await self.close()
-        if force:
+        if layout_sequence is not None:
             self.digest = "-"
         area, epoch = client.last_game.get("map"), client.zone_epoch
         character = client.invite["character_id"]
         try:
             reply = await client.gameplay_action(ACTION, uuid.uuid4().hex, "-")
-            await self.receive(client, reply["native_guest_ui"], area, epoch, character)
+            if not await self.receive(client, reply["native_guest_ui"], area, epoch, character,
+                                      layout_sequence=layout_sequence):
+                raise RuntimeError("The local inventory changed before reconciliation")
         except (KeyError, TypeError, OSError, RuntimeError, ValueError, zlib.error):
             self.queue_stock_inventory(client)
             raise
         self.identity = (client.host_session, epoch, area)
         self.next_poll = time.monotonic() + 3
 
-    async def project(self, client, character, contents):
+    async def project(self, client, character, contents, *, layout_sequence=None):
         bridge, game = client.bridge, getattr(client, "last_game", {})
         path = None
         try:
             if game.get(runtime.GUEST_UI_MEMORY) is True and bridge.local_bridge is not None:
-                response, _ = await bridge.guest_ui_command(character, payload=contents.encode("ascii"))
+                layout = {"layout_sequence": layout_sequence} if layout_sequence is not None else {}
+                response, _ = await bridge.guest_ui_command(character, payload=contents.encode("ascii"), **layout)
                 if (response.get("state"), response.get("map"), response.get("save_scope")) != (
                         "connected", game.get("map"), uuid.UUID(character).hex):
                     raise RuntimeError("The resident stock view belongs to another guest or visit")
@@ -307,14 +315,19 @@ class GuestView:
                 nonce = uuid.uuid4().hex
                 path = bridge.directory / f"native-guest-ui-{nonce}.tsv"
                 runtime.write_text(path, contents, newline="")
-                response = await bridge.command("native-guest-ui-project", character, nonce, timeout=4)
-            receipt = _READY.fullmatch(response.get("ack", {}).get("message", ""))
+                layout = (layout_sequence,) if layout_sequence is not None else ()
+                response = await bridge.command("native-guest-ui-project", character, nonce, *layout, timeout=4)
+            message = response.get("ack", {}).get("message", "")
+            if message == "stock personal inventory update pending":
+                return False
+            receipt = _READY.fullmatch(message)
             if not receipt:
                 raise RuntimeError("The isolated guest inventory and Journal did not verify")
             items, notes, quests, completed, attachments = map(int, receipt.groups())
             client.last_game = response
             client.control.event("native_guest_ui_projected", items=items, notes=notes, quests=quests,
                                  completed=completed, attachments=attachments)
+            return True
         finally:
             if path is not None:
                 with contextlib.suppress(FileNotFoundError, PermissionError):

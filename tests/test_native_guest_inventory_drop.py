@@ -171,13 +171,13 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
 
         client.gameplay_action.return_value = {native_inventory.STORE_KEY: dict(receipt, displaced="-")}
         await drop.settle_stock_action(*args)
-        client.guest_ui.refresh.assert_awaited_once_with(client, force=True)
+        client.guest_ui.refresh.assert_awaited_once_with(client, layout_sequence="5")
 
         client.guest_ui.refresh.reset_mock()
         client.gameplay_action.side_effect = ValueError("refused")
         with self.assertRaisesRegex(RuntimeError, "refused"):
             await drop.settle_stock_action(*args)
-        client.guest_ui.refresh.assert_awaited_once_with(client, force=True)
+        client.guest_ui.refresh.assert_awaited_once_with(client, layout_sequence="5")
 
     async def test_stock_unequip_returns_host_round_count_to_the_exact_open_screen(self):
         client = self.client()

@@ -3587,7 +3587,7 @@ class Bridge:
         return status
 
     async def guest_ui_command(self, target: str, *, payload: bytes | None = None,
-                               timeout: float = 4) -> tuple[dict, bytes | None]:
+                               layout_sequence: str | None = None, timeout: float = 4) -> tuple[dict, bytes | None]:
         """Exchange one scoped stock view on the resident command ticket."""
         if self.local_bridge is None:
             raise RuntimeError("The guest UI memory command requires the resident game bridge")
@@ -3602,7 +3602,12 @@ class Bridge:
 
         action = "native-guest-ui-read-memory" if payload is None else "native-guest-ui-project-memory"
         nonce = uuid.uuid4().hex
-        request = f"{nonce}\t{action}\t{target}\n".encode("ascii")
+        fields = (nonce, action, target)
+        if layout_sequence is not None:
+            if payload is None or not re.fullmatch(r"[1-9][0-9]{0,15}", layout_sequence) or int(layout_sequence) >= 2**53:
+                raise ValueError("Invalid resident inventory layout sequence")
+            fields += (layout_sequence,)
+        request = ("\t".join(fields) + "\n").encode("ascii")
         if payload is not None:
             request += checked_body(payload)
 

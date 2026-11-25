@@ -7,6 +7,7 @@ local native_world = require("native_world")
 local guest_weapon = require("native_guest_weapon")
 local quest_catalog = require("native_quest_catalog")
 local players = require("players")
+local inventory_view = require("native_inventory_view")
 local statics = "/Script/Engine.Default__GameplayStatics"
 local save_class = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local item_class = "/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"
@@ -196,9 +197,12 @@ local function item_row(columns)
         [item.no_drop] = integer(columns[8], 0, 1) == 1, [item.guid] = guid}
 end
 
-local function project(state, phase, character, path, raw)
+local function project(state, phase, character, path, raw, sequence)
     local old, pawn, id = scope.bind_guest(state, phase)
     if not old or character:gsub("-", "") ~= id then error("The co-op view belongs to another guest", 0) end
+    if not inventory_view.accept_layout_projection(pawn, sequence) then
+        return "stock personal inventory update pending"
+    end
     if path then
         local file = io.open(path, "rb")
         if not file then error("The co-op view mailbox is unavailable", 0) end
@@ -435,7 +439,8 @@ function guest_ui.command(fields, state, phase, bridge)
     local op, target, token = fields[2], fields[3], fields[4]
     if op == "native-guest-health-project" then return project_health(fields, state, phase) end
     if op ~= "native-guest-ui-read" and op ~= "native-guest-ui-project" then return end
-    if #fields ~= 4 or not token or #token ~= 32 or not token:match("^[a-f0-9]+$") then
+    if (#fields ~= 4 and (#fields ~= 5 or op ~= "native-guest-ui-project"))
+        or not token or #token ~= 32 or not token:match("^[a-f0-9]+$") then
         error("Invalid co-op view request", 0)
     end
     local path = bridge .. "/native-guest-ui-" .. token .. ".tsv"
@@ -447,7 +452,7 @@ function guest_ui.command(fields, state, phase, bridge)
         if not file:close() or not written then error("The co-op view was not written", 0) end
         return "captured co-op guest view"
     end
-    return project(state, phase, target, path)
+    return project(state, phase, target, path, nil, fields[5])
 end
 
 function guest_ui.is_memory_command(operation)
@@ -455,7 +460,8 @@ function guest_ui.is_memory_command(operation)
 end
 
 function guest_ui.memory_command(fields, state, phase, payload)
-    if #fields ~= 3 or #fields[1] ~= 32 or not fields[1]:match("^[a-f0-9]+$") then
+    if (#fields ~= 3 and (#fields ~= 4 or fields[2] ~= "native-guest-ui-project-memory"))
+        or #fields[1] ~= 32 or not fields[1]:match("^[a-f0-9]+$") then
         error("Invalid resident co-op view request", 0)
     end
     if fields[2] == "native-guest-ui-read-memory" and payload == "" then
@@ -463,7 +469,7 @@ function guest_ui.memory_command(fields, state, phase, payload)
     end
     if fields[2] == "native-guest-ui-project-memory" and payload and #payload > 0 and #payload <= max_size
         and payload:sub(-1) == "\n" and not payload:find("[^\t\n -~]") then
-        return project(state, phase, fields[3], nil, payload)
+        return project(state, phase, fields[3], nil, payload, fields[4])
     end
     error("Invalid resident co-op view payload", 0)
 end

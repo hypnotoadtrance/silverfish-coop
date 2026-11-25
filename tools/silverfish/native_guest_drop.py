@@ -251,7 +251,7 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
             if layout_preview is None:
                 await client.guest_ui.refresh(client)
             else:
-                await client.guest_ui.refresh(client, force=True)
+                await client.guest_ui.refresh(client, layout_sequence=sequence)
         accepted = True
     except (KeyError, TypeError, ValueError) as error:
         raise RuntimeError(f"The stock guest backpack could not refresh: {error}") from error
@@ -259,7 +259,7 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
         if not accepted:
             if layout_preview is not None and client.zone_epoch == epoch and client.last_game.get("map") == area:
                 with suppress(OSError, RuntimeError, ValueError):
-                    await client.guest_ui.refresh(client, force=True)
+                    await client.guest_ui.refresh(client, layout_sequence=sequence)
             with suppress(OSError, RuntimeError, ValueError):
                 await client.bridge.command(*finish, "refused", timeout=3)
     client.last_game = await client.bridge.command(*finish, *committed, timeout=5)

@@ -250,6 +250,22 @@ class ResidentGuestUIBridgeTests(unittest.IsolatedAsyncioTestCase):
         guest_bridge.command.assert_not_awaited()
         self.assertIs(client.last_game, guest_receipt)
 
+    async def test_pending_layout_defers_an_ordinary_inventory_projection(self):
+        owner = str(self.character)
+        game = {"state": "connected", "map": self.area, "save_scope": self.character.hex,
+                runtime.GUEST_UI_MEMORY: True}
+        deferred = dict(game, ack={"message": "stock personal inventory update pending"})
+        accepted = dict(game, ack={"message": "stock co-op inventory and Journal projected 0 0 0 0 0"})
+        bridge = SimpleNamespace(local_bridge=object(),
+                                 guest_ui_command=AsyncMock(side_effect=[(deferred, None), (accepted, None)]))
+        client = SimpleNamespace(last_game=game, bridge=bridge, control=Mock())
+        view = native_guest_ui.GuestView()
+        self.assertFalse(await view.project(client, owner, self.body.decode()))
+        self.assertIs(client.last_game, game)
+        self.assertTrue(await view.project(client, owner, self.body.decode(), layout_sequence="5"))
+        bridge.guest_ui_command.assert_awaited_with(owner, payload=self.body, layout_sequence="5")
+        self.assertIs(client.last_game, accepted)
+
 
 class NativeGuestStockPickupViewTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
