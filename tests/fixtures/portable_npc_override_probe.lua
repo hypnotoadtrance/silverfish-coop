@@ -1890,6 +1890,9 @@ local function run(action, actor_path)
         return ("%.6f"):format(garage_view.worker.Health)
     elseif action == "dock-garage-shot-witness" then
         return garage_view and garage_view.last_shot or "none"
+    elseif action == "dock-garage-contact-resolution" then
+        assert(host and type(SilverfishReadFixtureShotContact) == "function")
+        return SilverfishReadFixtureShotContact()
     elseif action == "dock-garage-projectile-trace" then
         local from_text, to_text = actor_path:match("^([^;]+);([^;]+)$")
         local from, to = position(from_text), position(to_text)

@@ -1272,7 +1272,16 @@ namespace
 
     // A round can hit and destroy its projectile during the same Blueprint call.
     // Count the exact actor when it starts play, before stock impact processing.
-    void reconcile_projectile_contact(Unreal::AActor* projectile, Unreal::UObject* pawn, const ShotView& view);
+    std::string_view reconcile_projectile_contact(Unreal::AActor* projectile, Unreal::UObject* pawn,
+                                                  const ShotView& view, bool single_projectile);
+    thread_local std::string_view fixture_shot_contact;
+
+    int read_fixture_shot_contact(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 0) return 0;
+        lua.set_string(fixture_shot_contact);
+        return 1;
+    }
 
     struct TapBirths
     {
@@ -1280,6 +1289,7 @@ namespace
         Unreal::UObject* pawn;
         Unreal::UClass* projectile;
         const ShotView* view;
+        bool single_projectile{};
         int count{};
         bool owned{true};
     };
@@ -1296,7 +1306,7 @@ namespace
     };
 
     void count_guest_projectile(Unreal::AActor* actor, Unreal::UObject* pawn, int& count, bool& owned,
-                                const ShotView* view)
+                                const ShotView* view, bool single_projectile)
     {
         if (!pawn) return;
         const auto* owner = object(actor, STR("Owner"));
@@ -1306,7 +1316,10 @@ namespace
         if (owner != pawn && instigator != pawn) return;
         ++count;
         owned = owned && authority(actor) && owner == pawn && instigator == pawn;
-        if (owned && view && view->contact) reconcile_projectile_contact(actor, pawn, *view);
+        const auto result = owned && view && view->contact
+            ? reconcile_projectile_contact(actor, pawn, *view, single_projectile) : "no_contact";
+        static const bool record_contact = env("SILVERFISH_COOP_NATIVE_FIXTURES") && env("SILVERFISH_COOP_HEADLESS");
+        if (record_contact) fixture_shot_contact = result;
     }
 
     bool install_tap_birth_hook()
@@ -1316,7 +1329,7 @@ namespace
             [](Hook::TCallbackIterationData<void>&, Unreal::AActor* actor) {
                 auto* shot = active_tap;
                 if (!shot || !actor || actor->GetClassPrivate() != shot->projectile || actor->GetWorld() != shot->world) return;
-                count_guest_projectile(actor, shot->pawn, shot->count, shot->owned, shot->view);
+                count_guest_projectile(actor, shot->pawn, shot->count, shot->owned, shot->view, shot->single_projectile);
             }, {false, false, STR("SilverfishCoopNative"), STR("Count stock guest tap projectiles before impact")});
         return tap_birth_hook != Hook::ERROR_ID;
     }
@@ -1553,70 +1566,108 @@ namespace
         return 0;
     }
 
-    void reconcile_projectile_contact(Unreal::AActor* projectile, Unreal::UObject* pawn, const ShotView& view)
+    struct HostShotLane
     {
-        if (!view.contact || view.contact_actor.empty()) return;
-        auto* velocity_field = field<Unreal::FStructProperty>(projectile, STR("Velocity"));
-        if (!aim_vector_field(velocity_field, aim_vector_type)) return;
-        const auto origin = actor_aim_vector(projectile, STR("/Script/Engine.Actor:K2_GetActorLocation"));
-        const auto velocity = read_aim_vector(velocity_field, projectile);
-        if (!origin || !velocity) return;
-        const double speed = std::sqrt(squared_length(*velocity));
-        const double distance = std::sqrt(squared_length(difference(*view.contact, *origin)));
-        const auto remaining_life = projectile_real(projectile, STR("Life"));
-        const auto gravity = std::abs(projectile_real(projectile, STR("Gravity")));
-        // Bound the flight by the stock muzzle speed, acceleration and lifetime.
-        // The projectile still performs its own collision, drag and damage checks.
-        const auto sight = stock_sight_range(pawn);
-        const auto flight_range = (speed + .5 * gravity * remaining_life) * remaining_life;
-        if (speed < 1 || remaining_life <= 0.0 || !std::isfinite(flight_range) || !std::isfinite(distance) ||
-            sight <= 0.0 || distance < 1 || distance > std::min(sight, flight_range)) return;
-        const AimVector direction{(*velocity)[0] / speed, (*velocity)[1] / speed, (*velocity)[2] / speed};
-        if (squared_length(difference(ahead(*origin, direction, distance), *view.contact)) > 75 * 75) return;
-
-        const auto end = ahead(*origin, direction, distance + 100);
-        std::array<Unreal::UObject*, 2 + max_contact_barriers> exclusions{pawn, object(pawn, STR("EquipedItem"))};
-        auto excluded = std::span{exclusions};
-        std::size_t count = 2;
+        std::array<Unreal::UObject*, 2 + max_contact_barriers> ignored;
+        std::size_t count{2};
         Unreal::UObject* target{};
+        bool obstructed{};
+    };
+
+    HostShotLane host_shot_lane(Unreal::AActor* projectile, Unreal::UObject* pawn, const ShotView& view,
+                               const AimVector& origin, const AimVector& end)
+    {
+        HostShotLane lane{{pawn, object(pawn, STR("EquipedItem"))}};
         const auto number = contact_number(view.contact_actor);
         const auto reported_actor = number ? RC::StringType{} : RC::to_generic_string(view.contact_actor);
-        // A damageable actor may be the reported contact, but must still block
-        // the shot if it lies in front of a different reported actor.
-        while (const auto hit = trace_shot(projectile, *origin, end, projectile_trace, excluded.first(count)))
+        while (const auto hit = trace_shot(projectile, origin, end, projectile_trace, std::span{lane.ignored}.first(lane.count)))
         {
             auto* actor = hit->actor;
-            if (!hit->hit || !live(actor) || !authority(actor)) return;
+            if (!hit->hit) break;
+            if (!live(actor) || !authority(actor))
+            {
+                lane.obstructed = true;
+                break;
+            }
             const bool damageable = takes_projectile_damage(actor);
             const bool matches = number ? contact_reference(actor) == number :
                 actor->GetPathName() == reported_actor && !silverfish::campaign_npc::is_spawned_stock_npc(actor);
-            if (matches)
+            if (matches && damageable && squared_length(difference(hit->point, *view.contact)) <= 100 * 100 &&
+                available_projectile_target(actor, projectile->GetWorld()))
             {
-                if (count == 2 || !damageable || squared_length(difference(hit->point, *view.contact)) > 100 * 100 ||
-                    !available_projectile_target(actor, projectile->GetWorld())) return;
-                target = actor;
+                lane.target = actor;
                 break;
             }
-            if (count == exclusions.size() || damageable ||
-                std::ranges::find(excluded.first(count), actor) != excluded.first(count).end()) return;
-            exclusions[count++] = actor;
+            // Preserve health-bearing cover and other targets in front of the reported hit.
+            const auto ignored = std::span{lane.ignored}.first(lane.count);
+            if (lane.count == lane.ignored.size() || damageable || std::ranges::find(ignored, actor) != ignored.end())
+            {
+                lane.obstructed = true;
+                break;
+            }
+            lane.ignored[lane.count++] = actor;
         }
-        if (!target) return;
-        auto* health = field<Unreal::FDoubleProperty>(target, STR("Health"));
-        const auto current_health = health ? health->GetPropertyValueInContainer(target) : 0.0;
-        if (!std::isfinite(current_health) || current_health <= 0) return;
+        return lane;
+    }
+
+    std::string_view reconcile_projectile_contact(Unreal::AActor* projectile, Unreal::UObject* pawn,
+                                                  const ShotView& view, bool single_projectile)
+    {
+        if (!view.contact || view.contact_actor.empty()) return "no_contact";
+        auto* velocity_field = field<Unreal::FStructProperty>(projectile, STR("Velocity"));
+        if (!aim_vector_field(velocity_field, aim_vector_type)) return "velocity_schema";
+        const auto origin = actor_aim_vector(projectile, STR("/Script/Engine.Actor:K2_GetActorLocation"));
+        const auto velocity = read_aim_vector(velocity_field, projectile);
+        if (!origin || !velocity) return "velocity_unavailable";
+        const auto offset = difference(*view.contact, *origin);
+        const double speed = std::sqrt(squared_length(*velocity));
+        const double distance = std::sqrt(squared_length(offset));
+        const auto remaining_life = projectile_real(projectile, STR("Life"));
+        const auto gravity = std::abs(projectile_real(projectile, STR("Gravity")));
+        const auto sight = stock_sight_range(pawn);
+        const auto flight_range = (speed + .5 * gravity * remaining_life) * remaining_life;
+        if (speed < 1 || remaining_life <= 0.0 || !std::isfinite(flight_range) || !std::isfinite(distance) ||
+            sight <= 0.0 || distance < 1 || distance > std::min(sight, flight_range)) return "outside_flight_range";
+
+        const AimVector direction{(*velocity)[0] / speed, (*velocity)[1] / speed, (*velocity)[2] / speed};
+        if (squared_length(difference(ahead(*origin, direction, distance), *view.contact)) > 75 * 75)
+            return "outside_stock_spread";
+        auto lane = host_shot_lane(projectile, pawn, view, *origin, ahead(*origin, direction, distance + 100));
+        if (lane.obstructed) return "host_damageable_cover";
+        if (lane.count == 2) return lane.target ? "stock_contact" : "stock_miss";
+
+        std::optional<AimVector> corrected_velocity;
+        if (!lane.target && single_projectile)
+        {
+            // The host's random spread can miss the exact actor seen on the guest's
+            // centerline after a host-only obstacle. Require a real stock collision
+            // with that same actor before aligning this round to the reported ray.
+            const auto contact_end = ahead(*view.contact, offset, 100.0 / distance);
+            auto contact_lane = host_shot_lane(projectile, pawn, view, *origin, contact_end);
+            if (contact_lane.obstructed || !contact_lane.target) return "guest_contact_unmatched";
+            // Keep exclusions for the final ray only, so its own collision stays intact.
+            lane = contact_lane;
+            corrected_velocity = ahead(AimVector{}, offset, speed / distance);
+        }
+        if (!lane.target) return "stock_spread_miss";
+        auto* health = field<Unreal::FDoubleProperty>(lane.target, STR("Health"));
+        const auto current_health = health ? health->GetPropertyValueInContainer(lane.target) : 0.0;
+        if (!std::isfinite(current_health) || current_health <= 0) return "target_unavailable";
 
         auto* ignored = field<Unreal::FArrayProperty>(projectile, STR("Actors to Ignore"));
         auto* actor = ignored ? Unreal::CastField<Unreal::FObjectProperty>(ignored->GetInner()) : nullptr;
-        if (!actor || actor->GetOffset_Internal() != 0) return;
+        if (!actor || actor->GetOffset_Internal() != 0) return "collision_schema";
         Unreal::FScriptArrayHelper actors(ignored, ignored->ContainerPtrToValuePtr<void>(projectile));
-        for (auto* barrier : excluded.subspan(2, count - 2))
+        for (auto* barrier : std::span{lane.ignored}.subspan(2, lane.count - 2))
         {
             bool present = false;
             for (int index = 0; index < actors.Num() && !present; ++index)
                 present = actor->GetObjectPropertyValue(actors.GetRawPtr(index)) == barrier;
             if (!present) actor->SetObjectPropertyValue(actors.GetRawPtr(actors.AddValue()), barrier);
         }
+        if (corrected_velocity)
+            std::memcpy(velocity_field->ContainerPtrToValuePtr<void>(projectile), corrected_velocity->data(), sizeof(AimVector));
+        return corrected_velocity ? "matched_guest_ray" : "matched_stock_ray";
     }
 
     struct GuestMuzzleAim
@@ -1804,7 +1855,7 @@ namespace
 
         Unreal::FWeakObjectPtr held_actor;
         held_actor = actor;
-        TapBirths projectiles{context.world, context.pawn, projectile, &shot_view};
+        TapBirths projectiles{context.world, context.pawn, projectile, &shot_view, expected_projectiles == 1};
         // Pose the authoritative muzzle for the stock launch. The remote pawn's first-person
         // weapon animation does not run on this seat.
         GuestMuzzleAim aim;
@@ -2353,7 +2404,8 @@ namespace
         auto& smg_hold = *shot_hold;
         if (smg_hold.shot_before < 0 ||
             actor->GetClassPrivate() != smg_hold.projectile.Get() || actor->GetWorld() != smg_hold.world.Get()) return;
-        count_guest_projectile(actor, smg_hold.pawn.Get(), smg_hold.shot_births, smg_hold.owned_birth, &smg_hold.view);
+        count_guest_projectile(actor, smg_hold.pawn.Get(), smg_hold.shot_births, smg_hold.owned_birth,
+                               &smg_hold.view, smg_hold.round->projectile_count == 1);
     }
 
     void hold_post(HoldHook&, Unreal::UObject* receiver, Unreal::FFrame& frame, void*)
@@ -3981,6 +4033,8 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
     lua.register_function("SilverfishSettleNativeGuestLockpick", settle_lockpick);
     lua.register_function("SilverfishBindNativeShotTarget", bind_contact_reference);
+    if (env("SILVERFISH_COOP_NATIVE_FIXTURES") && env("SILVERFISH_COOP_HEADLESS"))
+        lua.register_function("SilverfishReadFixtureShotContact", read_fixture_shot_contact);
     if (env("SILVERFISH_COOP_NATIVE_INTERACT_INPUT"))
     {
         lua.register_function("SilverfishProjectNativeLokiRound", project_loki_round);

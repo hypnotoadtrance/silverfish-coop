@@ -3023,7 +3023,9 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
                     await asyncio.sleep(.05)
         except TimeoutError as error:
             witness = await command(host, "dock-garage-shot-witness")
-            raise AssertionError(dict(host_projectile=witness, shot=event, worker_health=expected_health)) from error
+            decision = await command(host, "dock-garage-contact-resolution")
+            raise AssertionError(dict(host_projectile=witness, contact_resolution=decision,
+                                      shot=event, worker_health=expected_health)) from error
         if should_hit is False:
             await asyncio.sleep(.35)
             observed = float(await command(host, "dock-garage-health"))
@@ -3151,16 +3153,22 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         blocked, after_blocked = await shoot(distant_health, should_hit=False)
         assert not blocked["native_guest_trigger_view"].get("contact"), blocked
 
-        assert await command(guest, f"dock-garage-long-clear\t{barrier}") == "clear"
-        observed = "unavailable"
-        try:
-            async with asyncio.timeout(8):
-                while (observed := await command(guest, aim)) != "worker":
-                    await asyncio.sleep(.05)
-        except TimeoutError as error:
-            raise AssertionError(dict(distant_guest_trace=observed, firing_position=eye, worker_position=target)) from error
-        assert await command(host, aim) == "blocked"
-        assert await command(host, f"dock-garage-projectile-trace\t{eye};{target}") == host_collision
+        # Reproduce the two views of the same door. It is behind the guest's
+        # muzzle and in front of that same firing position on the host.
+        eye_point = tuple(map(float, eye.split(",")))
+        target_point = tuple(map(float, target.split(",")))
+        barrier_point = tuple(map(float, barrier.split(",")))
+        length = math.dist(eye_point, target_point)
+        forward = tuple((end - start) / length for start, end in zip(eye_point, target_point))
+        muzzle = ",".join(f"{start + 560 * axis:.3f}" for start, axis in zip(eye_point, forward))
+        host_barrier = ",".join(f"{point + 470 * axis:.3f}" for point, axis in zip(barrier_point, forward))
+        assert await command(host, f"dock-garage-long-block\t{host_barrier}") == "blocked"
+        assert await command(guest, aim) == "blocked"
+        actual_muzzle = await command(guest, f"dock-garage-offset-muzzle\t{muzzle}")
+        assert math.dist(tuple(map(float, actual_muzzle.split(","))), tuple(map(float, muzzle.split(",")))) < 1
+        muzzle_trace = f"dock-garage-projectile-trace\t{muzzle};{target}"
+        assert await command(guest, muzzle_trace) == "NPC_Survivor_Worker_C_2"
+        assert await command(host, muzzle_trace) == host_collision
         accepted, after_hit = await shoot(after_blocked, should_hit=True, contact_required=True)
         geometry = accepted["native_guest_trigger_view"]
         distance = math.dist(tuple(map(float, geometry["muzzle"].split(","))),
@@ -3168,10 +3176,15 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         assert distance > 5000 and after_hit > 0, (distance, after_hit, accepted)
         witness = await command(host, "dock-garage-shot-witness")
         assert host_collision in witness.rsplit(";", 1)[-1].split(","), witness
+        decision = await command(host, "dock-garage-contact-resolution")
+        assert decision in {"matched_stock_ray", "matched_guest_ray"}, decision
         evidence["tutorial_dock_distant_contact"] = {
             "meters": round(distance / 100, 2), "health": [distant_health, after_blocked, after_hit],
             "blocked_shot": blocked, "accepted_shot": accepted, "host_only_barrier": host_collision,
+            "contact_resolution": decision,
         }
+        assert await command(host, f"dock-garage-long-block\t{barrier}") == "blocked"
+        assert await command(guest, f"dock-garage-long-clear\t{barrier}") == "clear"
 
         board = "Dest_WoodPlank_BP_C_1"
         stage = f"dock-garage-plank\t{eye};{target}"
