@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock
@@ -18,9 +19,12 @@ class StockDoorActionTests(unittest.IsolatedAsyncioTestCase):
             party={"wipe": None, "players": {"guest": {"downed": False}}, "receipts": {}},
         )
         self.bridge = SimpleNamespace(command=AsyncMock(), wait_for=AsyncMock())
+        self.actions = door.Interactions()
 
-    async def interact(self):
-        return await door.interact(self.host, self.bridge, "guest", f"{self.epoch}@{self.actor}", self.operation)
+    async def interact(self, future=None):
+        if future is None:
+            future = asyncio.get_running_loop().create_future()
+        return await self.actions.dispatch(self.host, self.bridge, "guest", f"{self.epoch}@{self.actor}", self.operation, future)
 
     async def test_close_is_acknowledged_even_when_periodic_sample_already_says_closed(self):
         self.bridge.command.return_value = {
@@ -42,19 +46,33 @@ class StockDoorActionTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.command.assert_awaited_once()
         self.assertEqual(self.host.party["receipts"]["guest"], [])
 
-    async def test_readback_wait_does_not_accept_a_pre_dispatch_frame(self):
+    async def test_pending_motion_releases_dispatch_and_deduplicates_until_authoritative_frame(self):
         reply = {**self.host.last_game, "sequence": 11,
                  "ack": {"message": "stock hinged door interaction dispatched closed"}}
         self.bridge.command.return_value = reply
         opened = {**self.closed, "open": True, "yaw": 90}
         frame = {**reply, "sequence": 12, door.KEY: {self.actor: opened}}
 
-        async def readback(predicate, timeout, *, interval):
-            self.assertLess(interval, .05)
-            self.assertFalse(predicate(dict(frame, sequence=10)))
-            self.assertFalse(predicate(reply))
-            self.assertTrue(predicate(frame))
-            return frame
+        pending, duplicate = (asyncio.get_running_loop().create_future() for _ in range(2))
+        self.assertIsNone(await self.interact(pending))
+        self.assertIsNone(await self.interact(duplicate))
+        for unfinished in (dict(frame, sequence=10), reply):
+            self.host.last_game = unfinished
+            self.actions.settle(self.host)
+            self.assertFalse(pending.done())
+        self.host.last_game = frame
+        self.actions.settle(self.host)
+        self.assertIs((await pending)[door.RESULT]["open"], True)
+        self.assertEqual(await pending, await duplicate)
+        self.bridge.command.assert_awaited_once()
+        self.bridge.wait_for.assert_not_awaited()
 
-        self.bridge.wait_for.side_effect = readback
-        self.assertIs((await self.interact())[door.RESULT]["open"], True)
+    async def test_travel_refuses_pending_motion_before_it_can_confirm_in_another_visit(self):
+        self.bridge.command.return_value = {**self.host.last_game, "sequence": 11,
+                                            "ack": {"message": "stock hinged door interaction dispatched closed"}}
+        pending = asyncio.get_running_loop().create_future()
+        self.assertIsNone(await self.interact(pending))
+        self.host.zone_epoch = "c" * 32
+        self.actions.settle(self.host)
+        self.assertEqual(await pending, {"ok": False, "error": "stock_door_scope_unavailable"})
+        self.assertFalse(self.host.party["receipts"]["guest"])

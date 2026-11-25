@@ -1,5 +1,7 @@
 """Share stock hinged door locks and collision poses in the current world."""
 
+import asyncio
+from dataclasses import dataclass
 import math
 import re
 import time
@@ -142,25 +144,105 @@ async def project(bridge, game, frame, epoch):
     return result
 
 
-async def interact(host, bridge, character, requested, operation):
-    epoch, _, actor = requested.partition("@") if isinstance(requested, str) else ("", "", "")
-    game = host.last_game
-    area = game.get("map")
-    member = host.native_recipients().get(character, {})
-    if (not epoch or epoch != host.zone_epoch or not area or actor_map(actor) != area
-            or game.get("state") != "hosting" or host.transitioning or host.stopping or host.native_checkpoint_unsafe
-            or not member.get("connected") or host.party["wipe"] or host.party["players"][character]["downed"]
-            or not party.REQUEST_ID.fullmatch(operation)):
-        raise party.RuleError("stock_door_scope_unavailable")
-    fingerprint = [ACTION, requested, None]
-    receipts = host.party["receipts"].setdefault(character, [])
-    for receipt in receipts:
-        if receipt["id"] == operation:
-            if receipt["request"] != fingerprint:
-                raise party.RuleError("operation_id_conflict")
-            return receipt["result"]
+@dataclass
+class DoorMotion:
+    area: str
+    epoch: str
+    actor: str
+    character: str
+    operation: str
+    fingerprint: list
+    sequence: int
+    opens: bool
+    deadline: float
+    replies: list[asyncio.Future]
+
+    def settled(self, game):
+        row = game.get(KEY, {}).get(self.actor, {})
+        return ((game.get("state"), game.get("map")) == ("hosting", self.area)
+                and game.get("sequence", 0) >= self.sequence and row.get("locked") is False
+                and row.get("open") is self.opens)
+
+    def result(self, host, game):
+        result = {RESULT: {"actor": self.actor, "open": self.opens}, DELTA: frame(game, self.epoch, self.actor)}
+        receipts = host.party["receipts"].setdefault(self.character, [])
+        receipts.append({"id": self.operation, "request": self.fingerprint, "result": result})
+        del receipts[:-party.RECENT_ACTIONS]
+        return result
+
+    def respond(self, reply):
+        for future in self.replies:
+            if not future.done():
+                future.set_result(reply)
+
+
+class Interactions:
+    """Dispatch on the host loop and settle from ordinary world snapshots."""
+
+    def __init__(self):
+        self.pending = {}
+
+    async def dispatch(self, host, bridge, character, requested, operation, future):
+        epoch, _, actor = requested.partition("@") if isinstance(requested, str) else ("", "", "")
+        game = host.last_game
+        area = game.get("map")
+        member = host.native_recipients().get(character, {})
+        if (not epoch or epoch != host.zone_epoch or not area or actor_map(actor) != area
+                or game.get("state") != "hosting" or host.transitioning or host.stopping or host.native_checkpoint_unsafe
+                or not member.get("connected") or host.party["wipe"] or host.party["players"][character]["downed"]
+                or not party.REQUEST_ID.fullmatch(operation)):
+            raise party.RuleError("stock_door_scope_unavailable")
+        fingerprint = [ACTION, requested, None]
+        receipts = host.party["receipts"].setdefault(character, [])
+        for receipt in receipts:
+            if receipt["id"] == operation:
+                if receipt["request"] != fingerprint:
+                    raise party.RuleError("operation_id_conflict")
+                return receipt["result"]
+        for motion in self.pending.values():
+            if (motion.character, motion.operation) == (character, operation):
+                if motion.fingerprint != fingerprint:
+                    raise party.RuleError("operation_id_conflict")
+                motion.replies[:] = [reply for reply in motion.replies if not reply.done()]
+                if len(motion.replies) >= 8:
+                    raise party.RuleError("stock_door_in_motion")
+                motion.replies.append(future)
+                return None
+        if actor in self.pending or len(self.pending) >= 8:
+            raise party.RuleError("stock_door_in_motion")
+        motion, reply = await _start_motion(host, bridge, character, member["pawn"], area, epoch, actor, operation, fingerprint, future)
+        if motion.settled(reply):
+            return motion.result(host, reply)
+        self.pending[actor] = motion
+
+    def settle(self, host):
+        if not self.pending:
+            return
+        now, game = time.monotonic(), host.last_game
+        for actor, motion in tuple(self.pending.items()):
+            in_visit = ((host.zone_epoch, game.get("state"), game.get("map")) == (motion.epoch, "hosting", motion.area)
+                        and not (host.stopping or host.transitioning or host.party["wipe"]))
+            if in_visit and motion.settled(game):
+                # The door moved even if its guest disconnected. Keep its receipt for a rejoin.
+                response = {"ok": True, **motion.result(host, game)}
+            elif not in_visit:
+                response = {"ok": False, "error": "stock_door_scope_unavailable"}
+            elif motion.deadline <= now:
+                response = {"ok": False, "error": "stock_door_motion_unverified"}
+            else:
+                continue
+            del self.pending[actor]
+            motion.respond(response)
+
+    def close(self):
+        for motion in self.pending.values():
+            motion.respond({"ok": False, "error": "stock_door_scope_unavailable"})
+        self.pending.clear()
+
+
+async def _start_motion(host, bridge, character, pawn, area, epoch, actor, operation, fingerprint, future):
     try:
-        reply = await bridge.command(TAG + "-guest-interact", actor, member["pawn"], timeout=4)
+        reply = await bridge.command(TAG + "-guest-interact", actor, pawn, timeout=4)
     except RuntimeError as error:
         if str(error) == "stock_door_locked" or str(error).startswith("stock_door_guest_"):
             raise party.RuleError(str(error)) from error
@@ -172,21 +254,10 @@ async def interact(host, bridge, character, requested, operation):
             or (reply.get("state"), reply.get("map")) != ("hosting", area)
             or type(sequence) is not int or sequence <= 0):
         raise RuntimeError("The host did not report the door state at dispatch")
-    expected_open = before == "closed"
-
-    def toggled(snapshot):
-        observed = snapshot.get(KEY, {}).get(actor, {})
-        return ((snapshot.get("state"), snapshot.get("map")) == ("hosting", area)
-                and snapshot.get("sequence", 0) >= sequence and observed.get("locked") is False
-                and observed.get("open") is expected_open)
-
-    host.last_game = reply if toggled(reply) else await bridge.wait_for(toggled, timeout=2, interval=.02)
-    host.last_seen = time.monotonic()
-    result = {RESULT: {"actor": actor, "open": host.last_game[KEY][actor]["open"]},
-              DELTA: frame(host.last_game, epoch, actor)}
-    receipts.append({"id": operation, "request": fingerprint, "result": result})
-    del receipts[:-party.RECENT_ACTIONS]
-    return result
+    now = time.monotonic()
+    host.last_game, host.last_seen = reply, now
+    return DoorMotion(area, epoch, actor, character, operation, fingerprint, sequence,
+                      before == "closed", now + 2, [future]), reply
 
 
 async def pry(host, bridge, character, requested, operation, kind):

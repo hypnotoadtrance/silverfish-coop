@@ -356,6 +356,7 @@ class Host:
         self.fall_origin = None
         self.native_pickup = NativePickup()
         self.native_requests = asyncio.Queue(maxsize=8)
+        self.stock_doors = native_stock_door.Interactions()
         self.prepared_guest_leaves: dict[str, GuestLeave] = {}
         self.confirmed_guest_leaves: set[str] = set()
         self.session_stop_reason: str | None = None
@@ -2286,7 +2287,9 @@ class Host:
                 async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                     result = await native_loot.use_vehicle_pry_tool(self, bridge, character, target, request["operation_id"], action)
             elif action == native_stock_door.ACTION:
-                result = await native_stock_door.interact(self, bridge, character, target, request["operation_id"])
+                result = await self.stock_doors.dispatch(self, bridge, character, target, request["operation_id"], future)
+                if result is None:
+                    return
             elif action == native_stock_switch.ACTION:
                 result = await native_stock_switch.interact(self, bridge, character, target, request["operation_id"])
             elif action in native_stock_door.PRY_ACTIONS.values():
@@ -4197,6 +4200,7 @@ class Host:
         try:
             await self.run_session(bridge, transport, invites, pause_exit=pause_exit)
         finally:
+            self.stock_doors.close()
             if self.smg_holds:
                 await self.smg_holds.close()
             self.prop_carry_bridge = None
@@ -4259,6 +4263,7 @@ class Host:
             if bridge.process.poll() is not None:
                 raise RuntimeError(f"Host game exited with code {bridge.process.returncode}")
             await self.observe(bridge, transport)
+            self.stock_doors.settle(self)
             if self.mindcore_carry:
                 self.mindcore_carry.maintain()
             try:
@@ -4327,6 +4332,8 @@ class Host:
                 await self.service_native_zones(bridge, transport, now)
                 if not self.stopping:
                     await self.advance_dream(bridge, transport)
+            if not self.stopping and not self.native_checkpoint_unsafe:
+                await self.service_guest_native_requests(bridge)
             if self.native_loot_input:
                 try:
                     await native_loot.retire_replenished(self, bridge)
@@ -4340,8 +4347,6 @@ class Host:
                     await native_loot.restore_key_unlocks(self, bridge)
                 except (OSError, ValueError, RuntimeError) as error:
                     self.control.event("native_loot_key_restore_unavailable", reason=str(error))
-            if not self.stopping and not self.native_checkpoint_unsafe:
-                await self.service_guest_native_requests(bridge)
             if not self.stopping:
                 if not self.transitioning:
                     with contextlib.suppress(OSError, RuntimeError, TimeoutError):
@@ -4493,6 +4498,7 @@ class Host:
                     snapshot = await loot_view.sync(self.last_game, rolls, claim_crate)
                     if snapshot is not self.last_game:
                         self.last_game, self.last_seen = snapshot, time.monotonic()
+            self.stock_doors.settle(self)
             self.publish_host_status(transport, bridge)
             await bridge.wait_for_interaction(
                 .25, wake_if=lambda: not self.native_checkpoint_unsafe and not self.native_requests.empty(),
@@ -5224,6 +5230,7 @@ class Client:
         self.crate_lids = native_loot.GuestCrateProjection()
         self.last_lockpick_result = 0
         self.pending_lockpick_unlocks = set()
+        self.stock_door_requests = {}
         self.last_broker_intent = 0
         self.wire_board = native_wire_board.WireBoardView(bridge, control) if invite.get("native_wire_board") else None
         self.dead_drop_projection = (None, 0.0)
@@ -6715,11 +6722,22 @@ class Client:
         return None
 
     async def run_stock_interactions(self) -> None:
-        # Preserve the order of ordinary Interact presses while container requests settle independently.
-        while not self.stopping:
-            if self.bridge.stock_interaction_ready(crates=False):
-                await self.service_stock_interactions(self.stock_interaction_scope())
-            await asyncio.sleep(.012)
+        try:
+            while not self.stopping:
+                for actor, request in tuple(self.stock_door_requests.items()):
+                    if request.done():
+                        del self.stock_door_requests[actor]
+                        await request
+                if self.bridge.stock_interaction_ready(crates=False):
+                    await self.service_stock_interactions(self.stock_interaction_scope())
+                await asyncio.sleep(.012)
+        finally:
+            for request in self.stock_door_requests.values():
+                request.cancel()
+            for request in self.stock_door_requests.values():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await request
+            self.stock_door_requests.clear()
 
     async def run_stock_crates(self) -> None:
         next_lids = 0
@@ -6735,20 +6753,31 @@ class Client:
         for operation, target in self.bridge.interactions():
             if scope is None or self.stock_interaction_scope() != scope:
                 break
-            started = time.monotonic()
-            try:
-                result = await self.apply_stock_interaction(scope, operation, target)
-            except (ValueError, OSError, RuntimeError) as error:
-                self.control.event("interaction_rejected", operation_id=operation, reason=str(error))
-                if (self.stock_interaction_scope() == scope
-                        and (target in native_authored_pickup.SOURCES or native_loose_pickup.target_path(target)
-                             or native_world_loot.target_parts(target) or native_guest_drop_projection.target_parts(target))):
-                    with contextlib.suppress(OSError, RuntimeError, TimeoutError):
-                        await self.bridge.command("native-pickup-cancel-preview", target,
-                                                  timeout=.75, update_status=False)
-            else:
-                self.control.event("local_interaction", operation_id=operation,
-                                   elapsed_ms=round((time.monotonic() - started) * 1000, 1), **result)
+            if self.bridge.local_bridge is not None and (actor := native_stock_door.target_actor(target)):
+                if actor not in self.stock_door_requests and len(self.stock_door_requests) < 4:
+                    self.stock_door_requests[actor] = asyncio.create_task(self.finish_stock_interaction(scope, operation, target))
+                    await asyncio.sleep(0)
+                else:
+                    self.control.event("interaction_rejected", operation_id=operation, reason="stock_door_in_motion")
+                continue
+            await self.finish_stock_interaction(scope, operation, target)
+
+    async def finish_stock_interaction(self, scope, operation, target) -> None:
+        if self.stock_interaction_scope() != scope:
+            return
+        started = time.monotonic()
+        try:
+            result = await self.apply_stock_interaction(scope, operation, target)
+        except (ValueError, OSError, RuntimeError) as error:
+            self.control.event("interaction_rejected", operation_id=operation, reason=str(error))
+            if (self.stock_interaction_scope() == scope
+                    and (target in native_authored_pickup.SOURCES or native_loose_pickup.target_path(target)
+                         or native_world_loot.target_parts(target) or native_guest_drop_projection.target_parts(target))):
+                with contextlib.suppress(OSError, RuntimeError, TimeoutError):
+                    await self.bridge.command("native-pickup-cancel-preview", target, timeout=.75, update_status=False)
+        else:
+            self.control.event("local_interaction", operation_id=operation,
+                               elapsed_ms=round((time.monotonic() - started) * 1000, 1), **result)
 
     async def apply_stock_interaction(self, scope, operation, target):
         if loot := native_world_loot.target_parts(target):

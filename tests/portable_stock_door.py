@@ -1,5 +1,6 @@
 """Exercise stock hinged doors and their guest previews in portable co-op."""
 
+import asyncio
 import math
 import time
 
@@ -7,6 +8,7 @@ from live_multi_smoke import campaign_save_hashes
 from portable_guest_world_start import resident_events, wait_resident_status
 from portable_weather_travel import enter_crossroads
 from tools.silverfish import native_stock_door as door
+from tools.silverfish.authored_loot import full_name
 from tools.silverfish.control import submit
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
@@ -16,7 +18,7 @@ DOCK_GATE = f"Door_Bars_01_BP_C {DOCK}.Tut_Dock_P:PersistentLevel.Door_Bars_01_B
 WOOD_DOOR = f"Door_Wood_04_BP_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Door_Wood_04_BP_C_1719"
 
 
-async def toggle_door(host, guest, actor, pawn, expected_open):
+async def toggle_door(host, guest, actor, pawn, expected_open, *, inspect_during_motion=None):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
 
     def observed(frame):
@@ -30,7 +32,7 @@ async def toggle_door(host, guest, actor, pawn, expected_open):
         moved = await host.bridge.restore("guest", {"location": [x + dx, y + dy, z]})
         assert moved["pawns"]["guest"]["name"] == pawn
         point = moved["pawns"]["guest"]["location"]
-        await wait_resident_status(guest_run, lambda frame:
+        guest_view = await wait_resident_status(guest_run, lambda frame:
             math.dist(frame["game"].get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), point) < 55)
         started = time.time()
         try:
@@ -44,6 +46,21 @@ async def toggle_door(host, guest, actor, pawn, expected_open):
     else:
         raise RuntimeError(f"No stock approach reached the stock hinge knob: {attempts}")
 
+    inspected = None
+    if inspect_during_motion:
+        async with asyncio.timeout(3):
+            while True:
+                events = await resident_events(guest_run, guest_view)
+                if any(event.get("time_unix", 0) >= started and event.get("event") == "native_stock_door_motion_played"
+                       and event.get("actor") == actor and event.get("opens") is expected_open for event in events):
+                    break
+                await asyncio.sleep(.015)
+        probe_start = time.monotonic()
+        inspection = await submit(guest_run, "native-loot-inspect", target=inspect_during_motion)
+        assert inspection["ok"], inspection
+        inspected = {"actor": inspect_during_motion, "completed_at": time.time(),
+                     "roundtrip_ms": round((time.monotonic() - probe_start) * 1000)}
+
     authority = observed(await wait_resident_status(host_run, lambda frame:
         observed(frame).get("open") is expected_open and observed(frame).get("locked") is False))
     replica = await wait_resident_status(guest_run, lambda frame: door.matches(observed(frame), authority))
@@ -52,6 +69,9 @@ async def toggle_door(host, guest, actor, pawn, expected_open):
                and event.get(door.RESULT, {}).get("actor") == actor]
     receipt, = actions
     assert receipt[door.RESULT]["open"] is expected_open
+    if inspected:
+        assert inspected["completed_at"] < receipt["time_unix"], (inspected, receipt)
+        receipt["independent_inspection"] = inspected
     motion, = [event for event in await resident_events(guest_run, replica)
                if event.get("time_unix", 0) >= started and event.get("event") == "native_stock_door_motion_played"
                and event.get("actor") == actor and event.get("opens") is expected_open]
@@ -106,7 +126,8 @@ async def verify_stock_crossroads_door(host, guest, pawn):
         observed(frame).get("open") is True and observed(frame).get("locked") is False)
     await wait_resident_status(guest_run, lambda frame: door.matches(observed(frame), observed(opened)))
 
-    closed, close_motion, close_preview = await toggle_door(host, guest, WOOD_DOOR, pawn, False)
+    crate = full_name(CROSSROADS, "LootCrate_Small_BP_C_9")
+    closed, close_motion, close_preview = await toggle_door(host, guest, WOOD_DOOR, pawn, False, inspect_during_motion=crate)
     assert await panel(host, query) and await panel(guest, query)
     reopened, reopen_motion, reopen_preview = await toggle_door(host, guest, WOOD_DOOR, pawn, True)
     assert not await panel(host, query) and not await panel(guest, query)
@@ -119,6 +140,7 @@ async def verify_stock_crossroads_door(host, guest, pawn):
                                      "guest_confirm_ms": [closed["elapsed_ms"], reopened["elapsed_ms"]],
                                      "guest_movement_start_ms": [close_motion, reopen_motion],
                                      "guest_preview_start_ms": [close_preview, reopen_preview],
+                                     "independent_inspection": closed["independent_inspection"],
                                      "close_replay_preserved_open_door": True,
                                      "collision_verified_both_seats": True, "campaign_unchanged": True}}
 

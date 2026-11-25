@@ -73,6 +73,27 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
                 client.bridge.command.assert_awaited_once_with("native-pickup-cancel-preview", target,
                                                                timeout=.75, update_status=False)
 
+    async def test_pickup_dispatches_while_stock_door_is_waiting_for_its_final_pose(self):
+        client = self.guest(AsyncMock())
+        actor = f"Door_BP_C {OBSERVATORY}.Observitory_P:PersistentLevel.Door_BP_C_1"
+        scope, started, settle = ("session", "epoch", OBSERVATORY, "pawn"), asyncio.Event(), asyncio.Event()
+        client.stock_interaction_scope = Mock(return_value=scope)
+        client.bridge.interactions.return_value = [("door", native_stock_door.TARGET_PREFIX + actor), ("pick", None)]
+
+        async def interaction(_scope, operation, _target):
+            if operation == "door":
+                started.set()
+                await settle.wait()
+            return {}
+
+        client.apply_stock_interaction = AsyncMock(side_effect=interaction)
+        await client.service_stock_interactions(scope)
+        await asyncio.wait_for(started.wait(), .5)
+        self.assertFalse(client.stock_door_requests[actor].done())
+        client.apply_stock_interaction.assert_any_await(scope, "pick", None)
+        settle.set()
+        await client.stock_door_requests[actor]
+
     async def test_queued_stock_interactions_dispatch_before_delayed_flashlight_projection(self):
         session, epoch, operation = "a" * 32, "b" * 32, "c" * 32
         pawn = f"Player_FP_C {OBSERVATORY}.Observitory_P:PersistentLevel.Player_FP_C_0"
