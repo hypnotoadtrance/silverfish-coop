@@ -5951,6 +5951,27 @@ async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str, *, large
             "stash_page_files_seen": False, "saves_unchanged_before_checkpoint": True}
 
 
+def instrument_crate_host_action(script: str) -> str:
+    marker = "function actions.command(fields, state, phase)"
+    assert script.count(marker) == 1
+    start = script.replace(marker, "local function run_action(fields, state, phase)", 1)
+    return start.replace("\nreturn actions\n", '''
+function actions.command(fields, state, phase)
+    if phase ~= "hosting" or fields[2] ~= "native-loot-open" then return run_action(fields, state, phase) end
+    local started = SilverfishBridgeProfileStamp()
+    local result = run_action(fields, state, phase)
+    local finished = SilverfishBridgeProfileStamp()
+    local path = os.getenv("SILVERFISH_COOP_BRIDGE") .. "/portable-crate-host.tsv"
+    local output = assert(io.open(path, "ab"))
+    output:write(fields[4], "\\t", started, "\\t", finished, "\\n")
+    output:close()
+    return result
+end
+
+return actions
+''', 1)
+
+
 def instrument_crate_loot_presentation(script: str) -> str:
     marker = "            local pickable = ok and not item.moving\n"
     assert script.count(marker) == 1
@@ -6051,12 +6072,20 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
         reply_ms = (received["time_unix"] * 1_000_000 - pressed_wall_us) / 1000
         first_ms = (min(first_views.values()) - pressed_us) / 1000
         last_ms = (max(first_views.values()) - pressed_us) / 1000
+        host_timing = host.bridge.directory / "portable-crate-host.tsv"
+        action, = [row.split("\t")[1:] for row in host_timing.read_text(encoding="ascii").splitlines()
+                   if row.startswith(crate + "\t")]
+        started, finished = map(int, action)
+        assert pressed_us <= started <= finished
         assert 0 <= committed_ms <= reply_ms < 6000 and 0 <= first_ms <= last_ms < 6000, (
             committed_ms, reply_ms, first_ms, last_ms)
         timings = {"press_to_host_roll_ms": round(committed_ms, 2), "press_to_guest_reply_ms": round(reply_ms, 2),
                    "press_to_first_world_item_ms": first_ms, "press_to_last_world_item_ms": last_ms,
                    "guest_reply_to_last_world_item_ms": round(last_ms - reply_ms, 2),
-                   "world_items_presented": len(items)}
+                   "world_items_presented": len(items),
+                   "press_to_stock_action_ms": round((started - pressed_us) / 1000, 2),
+                   "stock_action_ms": round((finished - started) / 1000, 2),
+                   "stock_action_to_host_roll_ms": round(committed_ms - (finished - pressed_us) / 1000, 2)}
     assert save_fingerprints() == before
     return {
         "local_bridge": {"host": host_state["local_bridge"], "guest": guest_state["local_bridge"]},
@@ -7023,6 +7052,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 for game in games:
                     probes.enter_context(portable_script_overlay(game, "native_guest_drop_projection.lua",
                                                                   instrument_crate_loot_presentation))
+                    probes.enter_context(portable_script_overlay(game, "native_loot_actions.lua",
+                                                                  instrument_crate_host_action))
             proof["crossroads_input_overlays"] = [
                 probes.enter_context(portable_script_overlay(game, "players.lua", instrument_input_mappings))
                 for game in games

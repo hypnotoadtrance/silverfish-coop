@@ -472,53 +472,24 @@ function loot.expire_loose_fixture(state, phase, path)
 end
 
 -- Each address comes from an exact owned child's stock SpawnLoot out parameter.
-function loot.results(state, phase, scope, item_addresses)
-    local profile = type(scope) == "table" and scope.profile
-    local host, world, instance, stock = host_context(state, phase, profile)
-    if not same(scope.world, world) or not same(scope.instance, instance)
-        or not same(scope.stock, stock) or not same(find_crate(world, profile), scope.crate)
-        or not authority(scope.pawn, world) or not same(scope.pawn.Save, scope.save)
-        or not (same(scope.pawn, host) or guest_save.matches(scope.pawn))
-        or scope.crate.Looted ~= true or type(item_addresses) ~= "table" or #item_addresses > profile.capacity then
-        error("native_loot_result_scope_unavailable", 0)
-    end
-    local expected = {}
-    for index, address in pairs(item_addresses) do
-        if type(index) ~= "number" or not math.tointeger(index) or index < 1 or index > #item_addresses
-            or type(address) ~= "number" or not math.tointeger(address) or address <= 0 or expected[address] then
-            error("native_loot_result_identity_invalid", 0)
-        end
-        expected[address] = index
-    end
-    local result = {}
-    if #item_addresses == 0 then return result end
-    local class = StaticFindObject(item_class)
-    if not valid(class) then error("native_loot_item_class_unavailable", 0) end
-    for _, actor in ipairs(FindAllOf("Item_Master_BP_C") or {}) do
-        if authority(actor, world) and actor:IsA(class) then
-            local address = actor:GetAddress()
-            local index = expected[address]
-            if index then
-                if result[index] then error("native_loot_result_item_ambiguous", 0) end
-                local path = actor:GetClass():GetFullName():match("^%S+ (/Game/%S+)$")
-                if not path then error("native_loot_result_item_class_unavailable", 0) end
-                local location, rotation, scale = actor:K2_GetActorLocation(), actor:K2_GetActorRotation(),
-                    actor:GetActorScale3D()
-                if not location or not rotation or not scale then error("native_loot_spawn_transform_unavailable", 0) end
-                local transform = { location.X, location.Y, location.Z, rotation.Pitch, rotation.Yaw, rotation.Roll,
-                    scale.X, scale.Y, scale.Z }
-                for axis = 1, 9 do
-                    if not finite(transform[axis]) then error("native_loot_spawn_transform_unavailable", 0) end
-                end
-                result[index] = { address = address, actor = actor:GetFullName(), class_path = path, object = actor,
-                    transform = transform, ammo = math.tointeger(actor.Ammo) or 0 }
+function loot.results(scope, outputs)
+    local receipt = SilverfishDescribeNativeLootRoll(scope.crate:GetAddress(), table.unpack(outputs))
+    if type(receipt) ~= "table" then error("native_loot_result_scope_unavailable", 0) end
+
+    local items = {}
+    for slot, address in ipairs(outputs) do
+        if address > 0 then
+            local item = receipt[slot]
+            local path = item and item.actor:match("^%S+ (.+)$")
+            local actor = path and StaticFindObject(path)
+            if not authority(actor, scope.world) or actor:GetAddress() ~= address then
+                error("native_loot_result_item_unavailable", 0)
             end
+            item.object = actor
+            items[#items + 1] = item
         end
     end
-    for index = 1, #item_addresses do
-        if not result[index] then error("native_loot_result_item_unavailable", 0) end
-    end
-    return result
+    return items
 end
 
 return loot

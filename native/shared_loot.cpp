@@ -1200,6 +1200,81 @@ namespace
         return result(lua, ok, ok ? detail : scope.problem, looted, address(first), address(second), traits, true, extra);
     }
 
+    int describe_loot_roll(const Lua& lua)
+    {
+        using namespace silverfish::shared_loot;
+        const auto argc = lua.get_stack_size();
+        if (!Unreal::IsInGameThreadRaw() || argc < 2 || argc > max_container_slots + 1 || !lua.is_integer(1))
+            return 0;
+        const auto crate = lua.get_integer();
+        if (crate <= 0) return 0;
+        const auto slots = static_cast<std::size_t>(argc - 1);
+        ContainerAddresses addresses{};
+        for (auto& value : std::span{addresses}.first(slots))
+        {
+            if (!lua.is_integer(1)) return 0;
+            const auto input = lua.get_integer();
+            if (input < 0) return 0;
+            value = static_cast<Address>(input);
+        }
+        EscrowOwner owner;
+        ContainerActors actors{};
+        auto* base = find<Unreal::UClass>(item_class);
+        if (!base || !verified_escrow_roll(static_cast<Address>(crate), addresses, slots, owner, actors, false))
+            return 0;
+
+        struct Item
+        {
+            std::string name, class_path;
+            std::array<double, 9> transform{};
+            std::int32_t ammo{};
+        };
+        std::array<Item, max_container_slots> items;
+        for (std::size_t i = 0; i < slots; ++i)
+        {
+            auto* object = actors[i];
+            if (!object) continue;
+            if (!authority(object, owner.world) || !object->IsA(base)) return 0;
+            auto* actor = static_cast<Unreal::AActor*>(object);
+            const auto location = actor->K2_GetActorLocation();
+            const auto rotation = actor->K2_GetActorRotation();
+            const auto scale = actor->GetActorScale3D();
+            auto& item = items[i];
+            item.transform = {location.X(), location.Y(), location.Z(), rotation.GetPitch(), rotation.GetYaw(),
+                              rotation.GetRoll(), scale.X(), scale.Y(), scale.Z()};
+            if (!std::ranges::all_of(item.transform, [](double value) { return std::isfinite(value); })) return 0;
+            item.name = RC::to_utf8_string(actor->GetFullName());
+            item.class_path = RC::to_utf8_string(actor->GetClassPrivate()->GetPathName());
+            if (!item.class_path.starts_with("/Game/")) return 0;
+            if (auto* ammo = field<Unreal::FIntProperty>(actor, STR("Ammo")))
+                item.ammo = ammo->GetPropertyValueInContainer(actor);
+        }
+
+        auto* stack = lua.get_lua_state();
+        lua_createtable(stack, static_cast<int>(slots), 0);
+        for (std::size_t i = 0; i < slots; ++i)
+        {
+            if (!actors[i]) continue;
+            const auto& item = items[i];
+            lua_createtable(stack, 0, 4);
+            lua.set_string(item.name);
+            lua_setfield(stack, -2, "actor");
+            lua.set_string(item.class_path);
+            lua_setfield(stack, -2, "class_path");
+            lua.set_integer(item.ammo);
+            lua_setfield(stack, -2, "ammo");
+            lua_createtable(stack, static_cast<int>(item.transform.size()), 0);
+            for (std::size_t component = 0; component < item.transform.size(); ++component)
+            {
+                lua.set_number(item.transform[component]);
+                lua_rawseti(stack, -2, static_cast<lua_Integer>(component + 1));
+            }
+            lua_setfield(stack, -2, "transform");
+            lua_rawseti(stack, -2, static_cast<lua_Integer>(i + 1));
+        }
+        return 1;
+    }
+
     int seed_result(const Lua& lua, bool ok, std::string_view detail)
     {
         lua.set_bool(ok);
@@ -1719,6 +1794,7 @@ namespace silverfish::shared_loot
     {
         if (!enabled()) return;
         lua.register_function("SilverfishOpenNativeLootCrate", open_crate);
+        lua.register_function("SilverfishDescribeNativeLootRoll", describe_loot_roll);
         if (env_flag("SILVERFISH_COOP_NATIVE_FIXTURES"))
             lua.register_function("SilverfishSeedNativeLootLuckyLooter", seed_lucky_looter);
     }

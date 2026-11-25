@@ -346,6 +346,7 @@ function actions.command(fields, state, phase)
     end
     local slot = fields[5]
     if type(SilverfishOpenNativeLootCrate) ~= "function"
+        or type(SilverfishDescribeNativeLootRoll) ~= "function"
         or type(SilverfishCaptureNativeLootEscrow) ~= "function" or type(SilverfishVerifyNativeLootEscrow) ~= "function"
         or not valid_slot(slot) then
         result.status = "native_loot_crate_hook_unavailable"
@@ -378,16 +379,14 @@ function actions.command(fields, state, phase)
             if reply.n ~= 7 + math.max(0, capacity - 2) or capacity == 1 and reply[5] ~= 0 then
                 error("native_loot_unexpected_child_output", 0)
             end
-            local addresses = {}
             for index = 1, capacity do
                 local address = reply[index <= 2 and index + 3 or index + 5]
                 if math.type(address) ~= "integer" or address < 0 then
                     error("native_loot_unverified_child_output", 0)
                 end
                 outputs[index] = address
-                if address > 0 then addresses[#addresses + 1] = address end
             end
-            return loot.results(state, phase, scope, addresses)
+            return loot.results(scope, outputs)
         end)
         local saved, problem = false, items
         if verified then saved, problem = pcall(capture, scope, slot, outputs, items, pending) end
