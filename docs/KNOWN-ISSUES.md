@@ -10,6 +10,8 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 | Rejoin after a guest crash | The Steam re-invite authenticated the returning guest after the old avatar timed out. The host then returned to the menu when attachment of the retained guest save failed. The development fix keeps the detached save reachable through Unreal's game instance and closes only the joining guest's route if attachment fails. Rejoining the original Steam session with unsaved inventory still needs a two-PC retest. |
 | Worn gear | The guest still could not unequip body armor and reported a crash to desktop when attempting to equip a Face Mask. A muted Direct IP check on `rc-5cf912e` passed body armor removal, both worn-slot swaps, and equipping a Face Mask picked up from the host. The live crash is still open. |
 | Live Frog | The guest successfully ate a frog during the two-PC retest. |
+| Dedicated melee slot | The guest could equip melee weapons in other slots but could not equip them in the dedicated melee slot. |
+| Candle and Oil Lamp | The two-PC retest confirmed that candle lighting and extinguishing synchronized. The Oil Lamp's lit state still did not synchronize. |
 
 ## `rc-161145a` playtest
 

@@ -549,8 +549,9 @@ end
 
 local function verify_retention_fixture(state, phase, step)
     local host = participants(state, phase)
-    if not enabled or not host or os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1"
-        or os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") ~= "1" then
+    local fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
+        or os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+    if not enabled or not host or not fixtures or os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" then
         error("The retained save fixture is unavailable", 0)
     end
     local statics, class = stock_save_objects()
