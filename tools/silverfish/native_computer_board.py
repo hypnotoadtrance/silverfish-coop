@@ -136,12 +136,13 @@ async def _command(host, bridge, spec: CollectionContract, action: str, pawn: st
             "hosting", area, verb, area, pawn, BOARDS[area], spec.quest_id, area == spec.redeem_map):
         raise RuntimeError(f"The stock {spec.title} report did not match the exact board and player")
     reputation = proof.get("reputation", {})
+    steps = STEPS | {-7} if spec is MISSING_CONTACT else STEPS
     if (not isinstance(reputation, dict) or reputation.keys() != spec.factions
             or type(proof.get("can_turn_in")) is not bool
             or any(not isinstance(row, dict) or type(row.get("before")) is not int or type(row.get("after")) is not int
                    for row in reputation.values())
             or any(field not in proof or proof[field] is not None and
-                   (type(proof[field]) is not int or proof[field] not in STEPS) for field in ("step_before", "step_after"))
+                   (type(proof[field]) is not int or proof[field] not in steps) for field in ("step_before", "step_after"))
             or any(type(proof.get(field)) is not int for field in ("cash_before", "cash_after", "xp_before", "xp_after"))):
         raise RuntimeError(f"The stock {spec.title} report omitted the authoritative quest balances")
     guid, owner = proof.get("objective_guid"), proof.get("objective_owner")

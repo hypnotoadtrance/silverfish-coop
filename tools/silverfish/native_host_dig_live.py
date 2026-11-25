@@ -132,11 +132,11 @@ def escrow_frames(data: dict, members=None) -> list[dict]:
     custody = data.get(CUSTODY)
     if custody is None:
         return []
-    if type(custody) is not dict or custody.get("state") not in ("escrowed", "owned"):
+    if type(custody) is not dict or custody.get("state") not in ("escrowed", "owned", "opened"):
         raise ValueError("Invalid stock sealed package custody")
     state = custody["state"]
     fields = _CUSTODY_FIELDS | ({"escrow"} if state == "escrowed" else set())
-    if state == "owned" and "owner" in custody:
+    if state in ("owned", "opened") and "owner" in custody:
         owner = custody["owner"]
         if (not character_id(owner) or owner == "host" or owner not in data.get("players", {})
                 or members is not None and owner not in members):
@@ -147,7 +147,7 @@ def escrow_frames(data: dict, members=None) -> list[dict]:
             or not valid_guid(custody["spade_guid"]) or not valid_guid(custody["package_guid"])
             or not isinstance(custody["material"], str) or not _valid_contact(custody["contact"], custody["material"])):
         raise ValueError("Invalid stock sealed package identity")
-    if state == "owned":
+    if state in ("owned", "opened"):
         return []
     frame = custody["escrow"]
     if type(frame) is not dict or frame.get("map") != CROSSROADS or not isinstance(frame.get("slot"), str) or not _FRAME_SLOT.fullmatch(frame["slot"]):
@@ -272,6 +272,17 @@ def advance_dropped_package_owner(data: dict, drop: dict, recipient: str) -> Non
         custody.pop("owner", None)
     else:
         custody["owner"] = recipient
+
+
+def may_open_package(data: dict, guid: str, opener: str) -> bool:
+    custody = data.get(CUSTODY, {})
+    return custody.get("package_guid") != guid or (custody.get("state"), custody.get("owner", "host")) == ("owned", opener)
+
+
+def opened_package(data: dict, guid: str, opener: str) -> None:
+    custody = data.get(CUSTODY, {})
+    if custody.get("package_guid") == guid and may_open_package(data, guid, opener):
+        custody["state"] = "opened"
 
 
 def package_identity(guid: str) -> str:
@@ -412,6 +423,9 @@ async def settle(host, bridge) -> bool:
     report = _report(host)
     state = report.get("state")
     prior = host.party.get(CUSTODY)
+    if prior and prior["state"] == "opened":
+        # The resident shovel receipt outlives its inventory item in this visit.
+        return False
     if state is None:
         return bool(prior and prior["state"] == "escrowed")
     if state == "failed":

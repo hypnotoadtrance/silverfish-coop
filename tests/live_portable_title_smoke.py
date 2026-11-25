@@ -6623,6 +6623,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  lab_terminal_check=None,
                  oil_lamps_check=None,
                  mail_packages_check=None,
+                 missing_contact_open_check=None,
                  zone_lease_preflight: bool = False,
                  resident_cabinet_archive: Path | None = None,
                  resident_cabinet_checkpoint: Path | None = None,
@@ -7271,12 +7272,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     if evidence is None:
                         return
                     started = time.perf_counter()
+                    name = "stock_missing_contact_reconnect_and_" + ("open" if missing_contact_open_check else "turn_in")
                     try:
-                        await verify_stock_shovel_reconnect(host, guest, evidence)
+                        await verify_stock_shovel_reconnect(host, guest, evidence, open_package=missing_contact_open_check)
                     except Exception as error:
-                        finish_check("stock_missing_contact_reconnect_and_turn_in", started, error)
+                        finish_check(name, started, error)
                     else:
-                        finish_check("stock_missing_contact_reconnect_and_turn_in", started)
+                        finish_check(name, started, evidence=evidence.get("stock_package_opened"))
 
                 async def check_personal_reconnect(guest, _started):
                     evidence = gameplay.get("stock_personal_consumable")

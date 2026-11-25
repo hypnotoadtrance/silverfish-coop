@@ -9,6 +9,7 @@ import uuid
 
 from . import party
 from .native_gold import valid_guid
+from .native_host_dig import PACKAGE_CLASS as MISSING_CONTACT_CLASS
 
 
 ACTION = "native-guest-bandage"
@@ -23,6 +24,9 @@ BROWN_MUSHROOM = "native-guest-brown-mushroom"
 BROWN_MUSHROOM_CLASS = "/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C"
 STARTER_BAG = "native-guest-starter-bag"
 MAIL_PACKAGE = "native-guest-mail-package"
+MISSING_CONTACT = "native-guest-missing-contact-package"
+MISSING_CONTACT_ENTRY = "use-missing-contact-package"
+MISSING_CONTACT_QUEST = "Note_Farmhouse"
 MAIL_CLASSES = frozenset({
     "/Game/Classes/Items/Package_Mail.Package_Mail_C",
     "/Game/Classes/Items/Package_Mail_Small.Package_Mail_Small_C",
@@ -96,7 +100,8 @@ MEDICINE = {
 STOCK_CONSUMABLES = MEALS | MEDICINE
 COMMANDS = {BANDAGE_CLASS: ACTION, **{profile.class_path: action for action, profile in STOCK_CONSUMABLES.items()},
             **dict.fromkeys(STARTER_BAGS.values(), STARTER_BAG), **dict.fromkeys(MAIL_CLASSES, MAIL_PACKAGE)}
-RESULT = {**{action: action.replace("-", "_") for action in COMMANDS.values()}, PERSONAL: PERSONAL_KEY}
+RESULT = {**{action: action.replace("-", "_") for action in COMMANDS.values()}, PERSONAL: PERSONAL_KEY,
+          MISSING_CONTACT: MISSING_CONTACT.replace("-", "_")}
 
 
 def _personal_identity(guid, item_class, quantity):
@@ -431,8 +436,29 @@ def parse_mail_package(fields: list[str]) -> dict:
             "quantity_before": 1, "quantity_after": 0}
 
 
-async def use(host, bridge, character: str, guid: str, operation_id: str, *, action: str = ACTION) -> dict:
+def parse_missing_contact_package(fields: list[str]) -> dict:
+    if len(fields) != 11:
+        raise ValueError("Invalid Missing Contact package report size")
+    action, state, area, pawn, guid, awarded, previous, *balances = fields
+    awards = awarded.split(",")
+    if (action != MISSING_CONTACT or state != "used" or not valid_guid(guid) or len(pawn) > 512
+            or not pawn.startswith("Player_FP_C " + area + ".") or len(awards) != 2 or not starter_awards(guid, awards)
+            or previous != "-" and previous not in ("0", "1", "2", "-7", "-10")
+            or any(len(value) > 11 or _INTEGER.fullmatch(value) is None for value in balances)):
+        raise ValueError("Invalid Missing Contact package receipt")
+    cash_before, cash, rep_before, rep = map(int, balances)
+    if (any(not -2**31 <= value < 2**31 for value in (cash_before, cash, rep_before, rep))
+            or cash > cash_before or (rep != rep_before if previous == "-" else rep >= rep_before)):
+        raise ValueError("Invalid Missing Contact failure balances")
+    return {"state": state, "map": area, "pawn": pawn, "guid": guid, "class_path": MISSING_CONTACT_CLASS,
+            "quantity_before": 1, "quantity_after": 0, "awarded_guids": awards,
+            "step_before": None if previous == "-" else int(previous), "step": -7, "xp": 1,
+            "wallet_before": cash_before, "wallet": cash, "reputation_before": rep_before, "reputation": rep}
+
+
+async def use(host, bridge, character: str, target: str, operation_id: str, *, action: str = ACTION) -> dict:
     from .native_inventory import retain_guest_save
+    from . import native_host_dig_live, native_rewards
 
     if action not in RESULT:
         raise party.RuleError("native_guest_consumable_unavailable")
@@ -441,7 +467,9 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
     meal = STOCK_CONSUMABLES.get(action)
     starter = action == STARTER_BAG
     mail = action == MAIL_PACKAGE
-    if not valid_guid(guid):
+    sealed = action == MISSING_CONTACT
+    guid, separator, confirmed = target.partition("|") if sealed and isinstance(target, str) else (target, "", "")
+    if not valid_guid(guid) or sealed and (not separator or confirmed not in ("0", "1")):
         raise party.RuleError(f"invalid_{kind}_guid")
     if not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
         raise party.RuleError("invalid_operation_id")
@@ -453,7 +481,7 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
     player = host.party["players"].get(character)
     if not owner or not owner["connected"] or not player:
         raise party.RuleError("guest_not_active")
-    fingerprint = [action, guid, None]
+    fingerprint = [action, target, None]
     for receipt in host.party["receipts"].get(character, []):
         if receipt["id"] == operation_id:
             if receipt["request"] != fingerprint:
@@ -463,16 +491,19 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
         raise party.RuleError(f"guest_{kind}_refused_downed_or_respawning")
     if starter and host.last_game.get("native_paired_save_capture") is not True:
         raise party.RuleError("guest_starter_bag_refused_checkpoint")
+    if sealed and not native_host_dig_live.may_open_package(host.party, guid, character):
+        raise party.RuleError("guest_missing_contact_package_refused_custody")
     area, pawn = host.last_game["map"], owner["pawn"]
     deferred = await retain_guest_save(host, bridge, character, pawn)
     if not deferred:
-        if action in MEDICINE or mail:
+        if action in MEDICINE or mail or sealed:
             raise party.RuleError(f"guest_{kind}_refused_working_save_unavailable")
         await host.checkpoint_native(bridge)
     host.native_checkpoint_unsafe = True
     try:
         try:
-            snapshot = await bridge.command(action, pawn, guid, timeout=6)
+            arguments = (guid, confirmed) if sealed else (guid,)
+            snapshot = await bridge.command(action, pawn, *arguments, timeout=6)
         except RuntimeError as error:
             if str(error).startswith(f"guest_{kind}_refused_"):
                 host.native_checkpoint_unsafe = False
@@ -492,6 +523,11 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
         elif mail:
             if before != 1 or proof.get("class_path") not in MAIL_CLASSES:
                 raise RuntimeError("The native mail package did not verify its stock class")
+        elif sealed:
+            if (before != 1 or proof.get("class_path") != MISSING_CONTACT_CLASS
+                    or not starter_awards(guid, proof.get("awarded_guids")) or proof.get("step") != -7
+                    or snapshot.get("native_wallet") != proof.get("wallet")):
+                raise RuntimeError("The Missing Contact package and shared failure were not verified")
         elif (any(type(value) not in (int, float) for value in (hp, regen, maximum, proof.get("regen_before"), proof.get("health_after")))
                 or not 0 < hp <= maximum or not 25 <= regen <= maximum or not 0 <= proof["regen_before"] <= maximum
                 or type(proof.get("hemophilia")) is not bool
@@ -506,6 +542,21 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
         candidate = party.load_party(host.party)
         if meal is None or after == 0:
             candidate["players"][character].get("native_inventory", {}).pop(guid, None)
+        if sealed:
+            native_host_dig_live.opened_package(candidate, guid, character)
+            recipients = sorted(set(host.roles().values()) & candidate["players"].keys())
+            for recipient in recipients:
+                member = candidate["players"][recipient]
+                member["quest_xp"] = member.get("quest_xp", 0) + proof["xp"]
+                if recipient != "host":
+                    native_rewards.queue(member, proof["xp"])
+            candidate["economy"].update(wallet=proof["wallet"], native_wallet_active=True)
+            candidate.setdefault("native_quests", {})[MISSING_CONTACT_QUEST] = {
+                "quest_id": MISSING_CONTACT_QUEST, "actor": character, "step": proof["step"],
+                "consumed_package": guid, "wallet": proof["wallet"], "reputation": {"8": proof["reputation"]},
+                "recipients": recipients, "xp": proof["xp"],
+            }
+            host.pending_host_save = bool(host.pending_host_save)
         result = {key: proof}
         recent = candidate["receipts"].setdefault(character, [])
         recent.append({"id": operation_id, "request": fingerprint, "result": result})
@@ -522,7 +573,7 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
     if meal is None or after == 0:
         host.native_pickup.forget_committed_row(character, guid)
     host.native_checkpoint_unsafe = False
-    details = {"awarded_guids": proof["awarded_guids"]} if starter else {} if mail else {"regen": regen}
+    details = {"awarded_guids": proof["awarded_guids"]} if starter or sealed else {} if mail else {"regen": regen}
     if meal is not None:
         details.update(food=proof["food_after"], intoxication=proof["intox_after"])
     host.control.event(f"{key}_{'accepted' if deferred else 'committed'}", character_id=character, operation_id=operation_id,

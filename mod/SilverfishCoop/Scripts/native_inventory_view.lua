@@ -1122,20 +1122,50 @@ function inventory_view.command(fields, state, phase)
         local second = split(first, assert(integer(fields[5], 2147483647)))
         return first .. "," .. second
     end
+    local sealed_fixture = fields[4] == "sealed-drag" or fields[4] == "sealed-context"
+        or fields[4] == "sealed-confirm" or fields[4] == "sealed-cancel" or fields[4] == "sealed-journal"
     if operation == "native-inventory-stock-use-click-fixture"
-        and (#fields == 3 or #fields == 4 and (fields[4] == "drag" or fields[4] == "take-ammo"))
+        and (#fields == 3 or #fields == 4 and (fields[4] == "drag" or fields[4] == "take-ammo" or sealed_fixture))
         and headless and stock_session and not stock_drop
         and (os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" or (mre_enabled and #fields == 3) or fields[4] == "take-ammo"
             and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1") then
         local screen = stock_session.screen
         local cards, manager = screen.BackpackPanel.Cards, screen.ItemManager
+        if fields[4] == "sealed-journal" then
+            local key, quests = FName("Note_Farmhouse"), stock_session.save.ActiveQuests
+            local row = quests:Contains(key) and quests:Find(key):get()
+            return row and tostring(row.Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A) or "-"
+        end
+        local stack = current.controller.MenuStack
+        local function confirmation()
+            local modal = widget_at(stack, stack:GetArrayNum())
+            local expected = StaticFindObject("/Game/Classes/GUI/New/ConfirmationScreen.ConfirmationScreen_C")
+            if valid(modal) and same(modal:GetClass(), expected) then return modal end
+        end
+        if fields[4] == "sealed-confirm" or fields[4] == "sealed-cancel" then
+            local modal = confirmation()
+            if not modal then error("The stock package warning did not open", 0) end
+            if fields[4] == "sealed-confirm" then
+                modal:BndEvt__ConfirmationScreen_Button_Confirm_K2Node_ComponentBoundEvent_2_Pressed__DelegateSignature()
+            else
+                modal:BndEvt__ConfirmationScreen_Button_Cancel_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
+            end
+            sync_stock(current, state, phase, true)
+            if fields[4] == "sealed-confirm" and stock_drop and stock_drop.guid == fields[3] then
+                return "verified confirmed stock package use"
+            end
+            if fields[4] == "sealed-cancel" and not stock_drop and not confirmation() and manager.HoldingItem == false then
+                return "verified canceled stock package use"
+            end
+            error("The stock package confirmation did not settle its input", 0)
+        end
         local card = fields[4] == "take-ammo" and stock_equipped_card(screen, fields[3]) or nil
         for index = 1, not card and cards:GetArrayNum() or 0 do
             local candidate = widget_at(cards, index)
             if stock_card_guid(candidate) == fields[3] then card = candidate; break end
         end
         if card then
-            if fields[4] == "drag" then
+            if fields[4] == "drag" or fields[4] == "sealed-drag" then
                 manager.HoveredCard = card
                 manager:InitiateItemTake()
                 manager:FinalTakeItem()
@@ -1151,6 +1181,9 @@ function inventory_view.command(fields, state, phase)
             else
                 manager:OpenContextMenu(card)
                 manager:ActionUse()
+            end
+            if sealed_fixture and confirmation() and manager.HoldingItem == true then
+                return "verified native quest-item warning"
             end
             sync_stock(current, state, phase, true)
             if stock_drop and stock_drop.guid == fields[3] then return "verified stock use click" end

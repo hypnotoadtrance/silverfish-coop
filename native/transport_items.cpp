@@ -325,6 +325,7 @@ namespace
         Unreal::FWeakObjectPtr source;
         std::optional<int> source_slot;
         bool nearby{};
+        Unreal::FWeakObjectPtr confirmation;
     };
 
     std::optional<Entries> entries;
@@ -341,6 +342,7 @@ namespace
     thread_local std::int64_t host_drop_sequence{};
     thread_local StashScreen stash_screen;
     thread_local GuestUseCursor guest_use_cursor;
+    thread_local Unreal::UObject* opening_package_confirmation{};
     thread_local PersonalPreview* personal_preview{};
 
     constexpr std::string_view personal_use = "use-personal-consumable";
@@ -919,7 +921,8 @@ namespace
         return false;
     }
 
-    [[nodiscard]] bool exact_drop_screen(Unreal::UObject* manager, Unreal::UObject* screen, Unreal::UObject* panel)
+    [[nodiscard]] bool exact_drop_screen(Unreal::UObject* manager, Unreal::UObject* screen, Unreal::UObject* panel,
+                                         bool top_only = true)
     {
         auto* floor = object_field(screen, STR("FloorPanel"));
         return live(manager) && exact_class(manager, manager_path) && live(screen) &&
@@ -927,7 +930,7 @@ namespace
                live(floor) && exact_class(floor, panel_path) && floor != panel &&
                object_field(manager, STR("ParentScreen")) == screen && object_field(screen, STR("ItemManager")) == manager &&
                object_field(screen, STR("BackpackPanel")) == panel && object_field(manager, STR("DropLocation")) == floor &&
-               array_has_widget(scope.controller.Get(), STR("MenuStack"), screen, true) &&
+               array_has_widget(scope.controller.Get(), STR("MenuStack"), screen, top_only) &&
                same_widget_player(manager) && same_widget_player(screen) && same_widget_player(panel);
     }
 
@@ -1501,6 +1504,40 @@ namespace
                                            now + request_lease, manager, screen, panel, "drag_to_floor"};
     }
 
+    constexpr std::string_view missing_contact_use = "use-missing-contact-package";
+    constexpr auto confirmation_path = STR("/Game/Classes/GUI/New/ConfirmationScreen.ConfirmationScreen_C");
+
+    std::optional<bool> stock_use_is_quest_objective(Unreal::UObject* save, Unreal::FMapProperty* map, Unreal::UClass* item);
+    bool start_stock_cursor(Unreal::UObject* manager, const ItemView& selected, bool partial = false);
+    void clear_stash_cursor(Unreal::UObject* manager);
+
+    // Return true if handling must stop here, either for the stock confirmation
+    // or because the current stock quest state could not be verified.
+    bool show_missing_contact_confirmation(Unreal::UObject* manager, Unreal::UObject* save, const ItemView& item,
+                                           Unreal::UClass* type, const Guid& guid, bool held)
+    {
+        auto* defaults = type->GetClassDefaultObject().Get();
+        auto* category = field<Unreal::FByteProperty>(defaults, STR("ItemType"));
+        auto* important = field<Unreal::FBoolProperty>(defaults, STR("Important"));
+        if (!category || category->GetPropertyValueInContainer(defaults) != 1 || !important ||
+            !important->GetPropertyValueInContainer(defaults)) return true;
+        const auto matched = stock_use_is_quest_objective(save, field<Unreal::FMapProperty>(save, STR("ActiveQuests")), type);
+        if (!matched) return true;
+        if (!*matched) return false;
+        auto* use = stock_no_args(manager, entries->use_held);
+        if (!use || (!held && !start_stock_cursor(manager, item, true))) return true;
+        if (!held) guest_use_cursor = {manager, {}, guid, item.panel};
+        // The exact stock quest classifier will open the game's warning.
+        // The cursor is a copy and the confirm and cancel handlers consume it.
+        opening_package_confirmation = manager;
+        manager->ProcessEvent(use, nullptr);
+        opening_package_confirmation = nullptr;
+        auto* modal = top_stock_menu();
+        if (exact_class(modal, confirmation_path)) guest_use_cursor.confirmation = modal;
+        else clear_stash_cursor(manager);
+        return true;
+    }
+
     [[nodiscard]] std::string_view stock_backpack_use(Unreal::UObject* item_class)
     {
         if (!item_class) return {};
@@ -1511,6 +1548,8 @@ namespace
             return "use-starter-bag";
         if (silverfish::native_guest_consumable::qualifies_mail_package(Unreal::Cast<Unreal::UClass>(item_class)))
             return "use-mail-package";
+        if (silverfish::native_guest_consumable::qualifies_missing_contact_package(Unreal::Cast<Unreal::UClass>(item_class)))
+            return missing_contact_use;
         for (const auto& consumable : silverfish::native_guest_consumable::consumables)
             if (path == consumable.path) return consumable.entry;
         return silverfish::native_guest_consumable::qualifies_personal_consumable(Unreal::Cast<Unreal::UClass>(item_class))
@@ -1689,6 +1728,8 @@ namespace
             (unload && !silverfish::native_guest_item::take_ammo_supported(item_class, saved_ammo)) ||
             !exact_canonical_drop_row(save, candidate, guid, saved_ammo, item_class, equipped_index,
                                       !using_item && action != "equip" && !unequipping && !unload)) return;
+        if (action == missing_contact_use && show_missing_contact_confirmation(
+                manager, save, candidate, Unreal::Cast<Unreal::UClass>(item_class), guid, false)) return;
         Unreal::UObject* prior_held{};
         if (unequipping) prior_held = selected_unequip_actor(save, item_class, *equipped_index);
         else if (!unload && equipped_index && (!worn_drop || scope.host))
@@ -1972,7 +2013,7 @@ namespace
         if (auto* clear = stock_no_args(manager, entries->clear_held)) manager->ProcessEvent(clear, nullptr);
     }
 
-    bool start_stock_cursor(Unreal::UObject* manager, const ItemView& selected, bool partial = false)
+    bool start_stock_cursor(Unreal::UObject* manager, const ItemView& selected, bool partial)
     {
         auto* taking = field<Unreal::FBoolProperty>(manager, STR("IsTakingItem"));
         auto* holding = field<Unreal::FBoolProperty>(manager, STR("HoldingItem"));
@@ -2421,11 +2462,51 @@ namespace
             : (target_slot && *target_slot < 8 ? target_slot : std::nullopt);
         const auto action = destination ? std::string_view{"equip"}
             : item_class && matches_player && !worn ? stock_backpack_use(item_class) : std::string_view{};
+        if (action == missing_contact_use && guid == guest_use_cursor.held &&
+            show_missing_contact_confirmation(manager, save, item, Unreal::Cast<Unreal::UClass>(item_class), guid, true))
+        {
+            if (!guest_use_cursor.confirmation.Get()) clear_stash_cursor(manager);
+            return true;
+        }
         if (!action.empty() && guid == guest_use_cursor.held)
             host_drop_request = HostDropRequest{guid, 1, ++host_drop_sequence, false, now + request_lease,
                                                 manager, screen, panel, action, destination ? *destination + 1 : 0};
         guest_use_cursor = {};
         clear_stash_cursor(manager);
+        return true;
+    }
+
+    bool intercept_package_confirmation(Iteration& iteration, Unreal::UObject* manager, Unreal::UFunction* function)
+    {
+        static const Unreal::FName abort_use{STR("AbortUseItem")};
+        const auto name = function->GetNamePrivate();
+        if ((name != entries->confirm_use && name != abort_use) || scope.host ||
+            guest_use_cursor.manager.Get() != manager || !guest_use_cursor.confirmation.Get() ||
+            stock_no_args(manager, name) != function) return false;
+        iteration.PreventOriginalFunctionCall();
+        if (!iteration.OriginalFunctionCallPrevented()) return true;
+        const auto now = Clock::now();
+        auto* screen = object_field(manager, STR("ParentScreen"));
+        auto* panel = object_field(screen, STR("BackpackPanel"));
+        auto* save = canonical_host_save();
+        if (name == entries->confirm_use && top_stock_menu() == guest_use_cursor.confirmation.Get() &&
+            exact_drop_screen(manager, screen, panel, false) && qualified_drop_seat(false) &&
+            host_drop_scope_matches(save) && now < host_drop_scope.expires && host_drop_sequence < max_drop_sequence &&
+            (!host_drop_request || now >= host_drop_request->expires))
+        {
+            const auto item = inventory_item(manager, STR("HeldItem"));
+            Guid guid{};
+            auto* type = Unreal::Cast<Unreal::UClass>(exact_guest_cursor_item(save, item, guid));
+            auto* pawn = scope.pawn.Get();
+            auto* dead = field<Unreal::FBoolProperty>(pawn, STR("Dead"));
+            auto* underwater = field<Unreal::FBoolProperty>(pawn, STR("HeadUnderWater"));
+            if (guid == guest_use_cursor.held && silverfish::native_guest_consumable::qualifies_missing_contact_package(type) &&
+                dead && !dead->GetPropertyValueInContainer(pawn) && underwater && !underwater->GetPropertyValueInContainer(pawn))
+                host_drop_request = HostDropRequest{guid, 1, ++host_drop_sequence, false, now + request_lease,
+                    manager, screen, panel, missing_contact_use, 1};
+        }
+        clear_stash_cursor(manager);
+        guest_use_cursor = {};
         return true;
     }
 
@@ -2436,6 +2517,8 @@ namespace
             return;
         }
         const auto name = function->GetNamePrivate();
+        if (context == opening_package_confirmation && name == entries->use_held) return;
+        if (intercept_package_confirmation(iteration, context, function)) return;
         if (personal_preview)
         {
             auto& preview = *personal_preview;
@@ -2895,7 +2978,7 @@ namespace
         return live(args.result) && args.result->GetClassPrivate() == save_class ? args.result : nullptr;
     }
 
-    bool personal_use_has_no_quest_confirmation(Unreal::UObject* save, Unreal::FMapProperty* map, Unreal::UClass* item)
+    std::optional<bool> stock_use_is_quest_objective(Unreal::UObject* save, Unreal::FMapProperty* map, Unreal::UClass* item)
     {
         auto* key = map ? Unreal::CastField<Unreal::FNameProperty>(map->GetKeyProp()) : nullptr;
         auto* row = map ? Unreal::CastField<Unreal::FStructProperty>(map->GetValueProp()) : nullptr;
@@ -2903,25 +2986,25 @@ namespace
         auto* objectives = field<Unreal::FArrayProperty>(type, STR("Objective_Items_56_9FD46BE9431873A188AED4B08F0AF083"));
         auto* objective = objectives ? Unreal::CastField<Unreal::FClassProperty>(objectives->GetInner()) : nullptr;
         if (!key || !row || !objective || key->GetOffset_Internal() != 0 || objective->GetOffset_Internal() != 0)
-            return false;
+            return {};
         const auto layout = Unreal::FScriptMap::GetScriptLayout(
             key->GetSize(), key->GetMinAlignment(), row->GetSize(), row->GetMinAlignment());
-        if (row->GetOffset_Internal() != layout.ValueOffset) return false;
+        if (row->GetOffset_Internal() != layout.ValueOffset) return {};
         const auto* quests = map->ContainerPtrToValuePtr<Unreal::FScriptMap>(save);
         const int extent = quests->GetMaxIndex();
-        if (quests->Num() < 0 || quests->Num() > extent || extent > inventory_limit) return false;
+        if (quests->Num() < 0 || quests->Num() > extent || extent > inventory_limit) return {};
         for (int index = 0; index < extent; ++index)
         {
             if (!quests->IsValidIndex(index)) continue;
             const auto* entry = quests->GetData(index, layout);
-            if (!entry) return false;
+            if (!entry) return {};
             const auto* quest = row->ContainerPtrToValuePtr<void>(entry);
             Unreal::FScriptArrayHelper requested(objectives, objectives->ContainerPtrToValuePtr<void>(quest));
-            if (requested.Num() < 0 || requested.Num() > inventory_limit) return false;
+            if (requested.Num() < 0 || requested.Num() > inventory_limit) return {};
             for (int position = 0; position < requested.Num(); ++position)
-                if (objective->GetObjectPropertyValue(requested.GetRawPtr(position)) == item) return false;
+                if (objective->GetObjectPropertyValue(requested.GetRawPtr(position)) == item) return true;
         }
-        return true;
+        return false;
     }
 
     std::optional<std::array<int, 3>> personal_preview_flags(Unreal::FMapProperty* flags, Unreal::UObject* save,
@@ -3052,7 +3135,7 @@ namespace
             return refuse("personal_preview_schema");
         // This stock branch opens a later ConfirmUseItem action instead of
         // applying the effect on the current stack. Leave it outside this preview.
-        if (!personal_use_has_no_quest_confirmation(save, quests, type)) return refuse("personal_preview_quest_objective");
+        if (stock_use_is_quest_objective(save, quests, type) != false) return refuse("personal_preview_quest_objective");
 
         auto* scratch = make_personal_preview_save(save->GetClassPrivate());
         if (!scratch || scratch == save) return refuse("personal_preview_save");
@@ -3187,6 +3270,7 @@ namespace
         lua.set_integer(request.count);
         lua.set_string(request.entry);
         if (request.entry == "split" || request.entry == "take-ammo" || request.entry == "equip" || request.entry == "unequip" ||
+            request.entry == missing_contact_use ||
             request.entry.starts_with("worn_drop_"))
         {
             lua.set_integer(request.expected);

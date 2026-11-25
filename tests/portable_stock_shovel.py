@@ -48,7 +48,7 @@ def sealed_packages(items):
     return [row for row in items if row["class_path"] == native_host_dig.PACKAGE_CLASS]
 
 
-async def verify_stock_shovel_reconnect(host, guest, evidence):
+async def verify_stock_shovel_reconnect(host, guest, evidence, *, open_package=None):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     await wait_resident_status(guest_run, lambda frame: frame.get("state") == "connected"
                                and frame.get("gameplay_fresh") is True
@@ -118,6 +118,9 @@ async def verify_stock_shovel_reconnect(host, guest, evidence):
     await press("start", "starting")
     accepted = await step(1)
     await wait_resident_status(guest_run, lambda frame: not frame.get("game", {}).get("native_wire_board_stock"))
+    if open_package:
+        evidence["stock_package_opened"] = await open_package(host, guest, packages[0]["guid"], saves)
+        return
     await open_board()
     await press("turnin", "redeeming")
     completed = await step(-10)

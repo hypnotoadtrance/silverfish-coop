@@ -283,7 +283,8 @@ local function progress(spec, context)
     local row = wire_check(spec, wire.stock_row, context.save.ActiveQuests, context.key)
     local step = row and row[keys.step] or "-"
     if row then recipe(spec, row) end
-    if step ~= "-" and step ~= 1 and step ~= 2 and step ~= -10 then refuse(spec, "quest_step_unqualified") end
+    if step ~= "-" and step ~= 1 and step ~= 2 and step ~= -10
+        and not (spec.id == "Note_Farmhouse" and step == -7) then refuse(spec, "quest_step_unqualified") end
     local advantage = {}
     if spec.advantage_flags then
         local library = characters(spec)

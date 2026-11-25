@@ -222,7 +222,8 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
             if action == native_guest_consumable.PERSONAL:
                 receipt = await native_guest_consumable.settle_personal_preview(client, area, epoch, operation, guid, sequence)
             else:
-                receipt = (await client.gameplay_action(action, operation, guid)).get(key)
+                target = f"{guid}|{expected}" if action == native_guest_consumable.MISSING_CONTACT else guid
+                receipt = (await client.gameplay_action(action, operation, target)).get(key)
             if not isinstance(receipt, dict):
                 raise RuntimeError("The host did not return a stock consumable receipt")
             remaining, before = receipt.get("quantity_after"), receipt.get("quantity_before")
@@ -231,6 +232,9 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                     or meal is not None and receipt.get("class_path") != meal.class_path
                     or action == native_guest_consumable.MAIL_PACKAGE
                     and (before != 1 or receipt.get("class_path") not in native_guest_consumable.MAIL_CLASSES)
+                    or action == native_guest_consumable.MISSING_CONTACT
+                    and (before != 1 or receipt.get("class_path") != native_guest_consumable.MISSING_CONTACT_CLASS
+                         or receipt.get("step") != -7 or not native_guest_consumable.starter_awards(guid, receipt.get("awarded_guids")))
                     or action == native_guest_consumable.STARTER_BAG
                     and (before != 1 or receipt.get("class_path") not in native_guest_consumable.STARTER_BAGS.values()
                          or not native_guest_consumable.starter_awards(guid, receipt.get("awarded_guids")))):

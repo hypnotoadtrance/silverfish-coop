@@ -2256,11 +2256,15 @@ class Bridge:
                                                    "regen_before": _finite(fields[7]), "regen_after": _finite(fields[8]),
                                                    "health_before": _finite(fields[9]), "health_after": _finite(fields[10]),
                                                    "max_health": _finite(fields[11]), "hemophilia": fields[12] == "1"}
-                elif fields[0] in STOCK_CONSUMABLES or fields[0] in (STARTER_BAG, native_guest_consumable.MAIL_PACKAGE):
+                elif fields[0] in STOCK_CONSUMABLES or fields[0] in (
+                    STARTER_BAG, native_guest_consumable.MAIL_PACKAGE, native_guest_consumable.MISSING_CONTACT
+                ):
                     if fields[0] == STARTER_BAG:
                         proof = parse_starter_bag(fields)
                     elif fields[0] == native_guest_consumable.MAIL_PACKAGE:
                         proof = native_guest_consumable.parse_mail_package(fields)
+                    elif fields[0] == native_guest_consumable.MISSING_CONTACT:
+                        proof = native_guest_consumable.parse_missing_contact_package(fields)
                     else:
                         proof = parse_meal(fields)
                     key = CONSUMABLE_RESULT[fields[0]]

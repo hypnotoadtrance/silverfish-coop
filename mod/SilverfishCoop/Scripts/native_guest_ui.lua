@@ -13,6 +13,7 @@ local save_class = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local item_class = "/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"
 local texture_class = "/Script/Engine.Texture2D"
 local quest_photos = "/Game/Classes/GUI/GUI_Elements/QuestPhotos/"
+local missing_contact_package = "/Game/Classes/Items/Key_Items/Package_Item_FarmHouse.Package_Item_FarmHouse_C"
 local item = {
     class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81",
     ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788",
@@ -35,6 +36,7 @@ local quest = {
     images = "Images_ByStep_92_0AB9A29B482457A8FB719ABB327DDD56",
     step = "Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A",
     final = "Objective_FinalStep_57_F5A16DBF4E231A030BBD9F864F62A14B",
+    objectives = "Objective_Items_56_9FD46BE9431873A188AED4B08F0AF083",
 }
 local slots = { backpack = "PlayerBackpack", equipment = "PlayerEquipment",
     armor = "PlayerArmor", helmet = "PlayerHelmet" }
@@ -284,6 +286,11 @@ local function project(state, phase, character, path, raw, sequence)
             if step == completed_step then completed = completed + 1 end
             if icon then attachments = attachments + 1 end
             local entry = quests:Find(key):get()
+            if row[2]:lower() == "note_farmhouse" then
+                -- The stock inventory checks the objective class before opening its quest warning.
+                local package = StaticFindObject(missing_contact_package)
+                if valid(package) then entry[quest.objectives][1] = package end
+            end
             local descriptions, images = entry[quest.descriptions], entry[quest.images]
             for i = 10, #row do descriptions[i - 9] = decode(row[i]) end
             if row[9] ~= "" then

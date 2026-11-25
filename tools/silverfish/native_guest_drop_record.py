@@ -6,7 +6,7 @@ import re
 from .authored_loot import valid_item_transform
 from .authored_routes import MAPS as NORMAL_CAMPAIGN_MAPS
 from .guest_weapon_profiles import MAX_TAKE_AMMO_ROUNDS, NINE_MM_BALL, STOCK_AMMO
-from .native_guest_consumable import MEALS, RESULT as CONSUMABLE_RESULTS
+from .native_guest_consumable import MEALS, MISSING_CONTACT_ENTRY, RESULT as CONSUMABLE_RESULTS
 from .native_gold import valid_guid
 from .party import REQUEST_ID
 from .travel import AUTHORED_MAPS, CROSSROADS, OBSERVATORY
@@ -64,7 +64,8 @@ def parse_stock_action(fields, game):
             or (mode == "equip" and not 0 <= before <= 10)
             or (mode == "unequip" and not 1 <= before <= 10)
             or (mode == "worn-drop" and (amount != 1 or before not in (9, 10)))
-            or (mode not in ("split", "unload", "equip", "unequip", "worn-drop") and before != 0)):
+            or (mode not in ("split", "unload", "equip", "unequip", "worn-drop")
+                and before not in ((0, 1) if entry == MISSING_CONTACT_ENTRY else (0,)))):
         raise ValueError("Invalid stock backpack operation")
     result = dict(area=area, pawn=pawn, epoch=epoch, sequence=int(sequence), entry=entry, guid=guid,
                   count=amount, expected=before, mode=mode)

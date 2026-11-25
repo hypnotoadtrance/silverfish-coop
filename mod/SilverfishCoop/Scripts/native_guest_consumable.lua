@@ -6,6 +6,7 @@ local use_presentation = require("native_weapon_fire_view")
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
 local starter_bag = "native-guest-starter-bag"
 local mail_package = "native-guest-mail-package"
+local missing_contact_package = "native-guest-missing-contact-package"
 local mail_classes = {
     regular = "/Game/Classes/Items/Package_Mail.Package_Mail_C",
     small = "/Game/Classes/Items/Package_Mail_Small.Package_Mail_Small_C",
@@ -13,6 +14,12 @@ local mail_classes = {
 local personal_consumable = "native-guest-personal-consumable"
 local cooked_meal = "native-guest-cooked-meal"
 local observation
+local missing_contact = {
+    quest = "Note_Farmhouse",
+    step = "Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A",
+    penalty = "FailPenalty_36_53777B2F407AD61DE139B3815A07F47F",
+    class = "/Game/Classes/Items/Key_Items/Package_Item_FarmHouse.Package_Item_FarmHouse_C",
+}
 
 local function valid(value)
     return value ~= nil and value:IsValid()
@@ -24,6 +31,47 @@ end
 
 local function finite(value)
     return type(value) == "number" and value == value and value > -math.huge and value < math.huge
+end
+
+local function settle_missing_contact(fields, state, pawn, detached, stock)
+    local prefix = "guest_missing_contact_package_refused_"
+    if type(SilverfishOpenNativeGuestMissingContactPackage) ~= "function" then error(prefix .. "addon_unavailable", 0) end
+    local instance = state.world.OwningGameInstance
+    if not valid(instance) or not valid(instance.SaveSlot_Ref) or instance.SaveSlot_Ref:GetAddress() ~= stock:GetAddress()
+        or (fields[5] ~= "0" and fields[5] ~= "1") then error(prefix .. "scope", 0) end
+    local wire = require("native_wire_quest")
+    local key = FName(missing_contact.quest, EFindName.FNAME_Find)
+    if key:GetComparisonIndex() == 0 or key:ToString():lower() ~= missing_contact.quest:lower() then
+        error(prefix .. "quest", 0)
+    end
+    local function read()
+        local row = wire.stock_row(stock.ActiveQuests, key)
+        return {step = row and math.tointeger(row[missing_contact.step]), penalty = row and math.tointeger(row[missing_contact.penalty]),
+            wallet = wire.stock_flag(instance, "Player_Cash"), xp = wire.stock_flag(instance, "Player_Xp"),
+            reputation = wire.stock_flag(instance, "Rep_Freelancer")}
+    end
+    local scope_ok, before = pcall(read)
+    if not scope_ok then error(prefix .. "quest_readback", 0) end
+    if before.step ~= nil and fields[5] ~= "1" then error(prefix .. "confirmation_required", 0) end
+    local called, used, status, kind, awards = pcall(SilverfishOpenNativeGuestMissingContactPackage,
+        pawn:GetAddress(), detached:GetAddress(), stock:GetAddress(), fields[4])
+    if called and used == false and type(status) == "string"
+        and (status:match("^guest_missing_contact_package_refused_[a-z0-9_]+$")
+            or status:match("^mutation_unverified_guest_missing_contact_package_[a-z0-9_]+$")) then error(status, 0) end
+    if not called or used ~= true or status ~= "used" or kind ~= "sealed" or type(awards) ~= "string" then
+        error("mutation_unverified_guest_missing_contact_package_contents", 0)
+    end
+    local after = read()
+    local penalty = before.penalty or after.penalty
+    if after.step ~= -7 or not penalty or after.wallet ~= before.wallet - penalty or after.xp ~= before.xp + 1
+        or (before.step and after.reputation >= before.reputation or not before.step and after.reputation ~= before.reputation) then
+        error("mutation_unverified_guest_missing_contact_package_quest", 0)
+    end
+    observation = {map = state.map, pawn = fields[3], guid = fields[4], sealed = true, awards = awards,
+        step_before = before.step or "-", wallet_before = before.wallet, wallet_after = after.wallet,
+        reputation_before = before.reputation, reputation_after = after.reputation}
+    pcall(use_presentation.consumed, pawn, missing_contact.class, false)
+    return "native guest Missing Contact package opened"
 end
 
 local function settle_personal(fields, state, pawn, detached, stock)
@@ -76,16 +124,19 @@ function consumable.command(fields, state, phase)
         if not applied then error("guest_cooked_meal_refused_scope", 0) end
         return ("cooked meal %.17g %.17g %.17g %d %d"):format(food, health, regen, fatigue, intox)
     end
-    if action ~= "native-guest-bandage" and action ~= starter_bag and action ~= mail_package
+    if action ~= "native-guest-bandage" and action ~= starter_bag and action ~= mail_package and action ~= missing_contact_package
         and action ~= personal_consumable then return end
     observation = nil
     local name, guid = fields[3], fields[4]
     local bag = action == starter_bag
     local mail = action == mail_package
+    local sealed = action == missing_contact_package
     local personal = action == personal_consumable
     local prefix = personal and "guest_personal_consumable_refused_"
-        or bag and "guest_starter_bag_refused_" or mail and "guest_mail_package_refused_" or "guest_bandage_refused_"
-    local valid_count = personal and (#fields == 10 or #fields == 12 or #fields == 13) or not personal and #fields == 4
+        or bag and "guest_starter_bag_refused_" or mail and "guest_mail_package_refused_"
+        or sealed and "guest_missing_contact_package_refused_" or "guest_bandage_refused_"
+    local valid_count = personal and (#fields == 10 or #fields == 12 or #fields == 13)
+        or sealed and #fields == 5 or not personal and not sealed and #fields == 4
     if not enabled or not valid_count or phase ~= "hosting" or not state.listening or not exact_guid(guid) then
         error(prefix .. "scope", 0)
     end
@@ -98,6 +149,7 @@ function consumable.command(fields, state, phase)
         error(prefix .. "exact_detached_save", 0)
     end
     if personal then return settle_personal(fields, state, pawn, detached, stock) end
+    if sealed then return settle_missing_contact(fields, state, pawn, detached, stock) end
     if mail then
         if type(SilverfishOpenNativeGuestMailPackage) ~= "function" then error(prefix .. "addon_unavailable", 0) end
         local called, used, status, kind = pcall(SilverfishOpenNativeGuestMailPackage,
@@ -194,6 +246,10 @@ function consumable.rows(state, phase, status_row)
     end
     if row.mail_class then
         return {status_row(mail_package, "used", row.map, row.pawn, row.guid, row.mail_class)}
+    end
+    if row.sealed then
+        return {status_row(missing_contact_package, "used", row.map, row.pawn, row.guid, row.awards,
+            row.step_before, row.wallet_before, row.wallet_after, row.reputation_before, row.reputation_after)}
     end
     return {
         status_row("native-guest-bandage", "used", row.map, row.pawn, row.guid, row.before, row.after,
