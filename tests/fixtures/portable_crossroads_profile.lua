@@ -3,6 +3,7 @@ local prefix = bridge .. "/crossroads-profile-"
 local capture, complete, previous, previous_cycles, last
 local stamp = SilverfishBridgeProfileStamp
 local window_us = 3000000
+local coarse_window_us = 5000000
 
 local function record(active, tag, wall_ms, cycles)
     local rows = active.rows[tag]
@@ -28,9 +29,36 @@ local function measured(active, tag, started, started_cycles, ...)
 end
 
 function probe.call(tag, operation, ...)
-    if not capture then return operation(...) end
+    if not capture or capture.coarse and tag ~= "write_status" and tag ~= "tick" then return operation(...) end
     local started, started_cycles = stamp()
     return measured(capture, tag, started, started_cycles, operation(...))
+end
+
+function probe.status_mark(tag, rows, bytes)
+    local active = capture
+    if not active then return end
+    local heap = collectgarbage("count")
+    local now, cycles = stamp()
+    if tag then
+        local wall, used_cycles = (now - active.status_at) / 1000, cycles - active.status_cycles
+        local delta = heap - active.status_heap
+        record(active, tag, wall, used_cycles)
+        local longest = active.status_peaks[tag]
+        if not longest or wall > longest.wall then
+            active.status_peaks[tag] = {wall = wall, cycles = used_cycles, heap_delta = delta}
+        end
+        local call = active.calls[tag]
+        if call then
+            call.wall, call.cycles = call.wall + wall, call.cycles + used_cycles
+        else
+            active.calls[tag] = {wall = wall, cycles = used_cycles}
+        end
+        if rows then
+            active.max_status_rows = math.max(active.max_status_rows, rows)
+            active.max_status_bytes = math.max(active.max_status_bytes, bytes)
+        end
+    end
+    active.status_at, active.status_cycles, active.status_heap = now, cycles, heap
 end
 
 local function percentiles(samples)
@@ -55,7 +83,11 @@ local function result()
             peak[#peak + 1] = (";%s,%.4f,%d"):format(tag, call.wall, call.cycles)
         end
     end
-    return ("%.5f"):format(complete.elapsed) .. table.concat(rows) .. table.concat(peak)
+    local status = {("^%d,%d"):format(complete.max_status_rows, complete.max_status_bytes)}
+    for tag, sample in pairs(complete.status_peaks) do
+        status[#status + 1] = (";%s,%.4f,%d,%.3f"):format(tag, sample.wall, sample.cycles, sample.heap_delta)
+    end
+    return ("%.5f"):format(complete.elapsed) .. table.concat(rows) .. table.concat(peak) .. table.concat(status)
 end
 
 local function compare_rows()
@@ -124,12 +156,15 @@ LoopInGameThreadWithDelay(50, function()
     local ticket, action = text:match("^(%x+)\t([a-z]+)$")
     if not ticket or #ticket ~= 32 then return end
     local message
-    if action == "arm" and not capture then
+    if (action == "arm" or action == "coarse") and not capture then
         local now, cycles
         if type(stamp) == "function" then now, cycles = stamp() end
         if type(now) == "number" and type(cycles) == "number" then
+            local coarse = action == "coarse"
             capture, previous, previous_cycles, complete = {
-                rows = {}, calls = {}, peak = 0, peak_calls = {}, started = now, deadline = now + window_us,
+                rows = {}, calls = {}, peak = 0, peak_calls = {}, started = now,
+                coarse = coarse, deadline = now + (coarse and coarse_window_us or window_us),
+                status_peaks = {}, max_status_rows = 0, max_status_bytes = 0,
                 original_mirror = status_publication.mirror,
             }, nil, nil, nil
             -- Keep the private launch flags, and time the installed memory-only gameplay path.

@@ -27,6 +27,24 @@ def instrument_profile(source):
                            + ("" if rest[m.end()] == ")" else ", "), rest)
     if protected < 10 or direct < 20:
         raise ValueError("The gameplay timing anchors changed")
+    status_code, boundary, after_status = rest.partition("\nlocal function observe_session()")
+    assert boundary
+    mark = "status_publication.profile.status_mark"
+    for needle, call in (
+        ("    sequence = sequence + 1\n", f"    {mark}()\n"),
+        ("    if not failure then\n", f'    {mark}("status_base_rows")\n'),
+        ("        local crate_rows\n", f'        {mark}("status_gameplay_rows")\n'),
+        ('    rows[#rows + 1] = ""\n', f'    {mark}("status_world_rows")\n'),
+        ('    local frame = table.concat(rows, "\\n")\n', None),
+        ("    if resident_title and status_publication.installed and status_publication.memory_live",
+         f'    {mark}("status_native_publish")\n'),
+    ):
+        assert status_code.count(needle) == 1, needle
+        if call is None:
+            status_code = status_code.replace(needle, needle + f'    {mark}("status_concat", #rows - 1, #frame)\n')
+        else:
+            status_code = status_code.replace(needle, call + needle)
+    rest = status_code + boundary + after_status
     mailbox = 'io.open(command_path, "rb")'
     assert before.count(mailbox) == 1
     before = before.replace(mailbox, f'{wrapper}("command_mailbox", io.open, command_path, "rb")')
@@ -282,6 +300,7 @@ end
 
 
 def read_comparison(raw):
+    raw, status = raw.split("^")
     summary, slow_frame = raw.split("!")
     duration, *sections = summary.split(";")
     totals = {}
@@ -298,7 +317,16 @@ def read_comparison(raw):
     for entry in calls:
         name, wall, cycles = entry.split(",")
         slow_calls[name], call_cycles[name] = float(wall), int(cycles)
-    return {"seconds": float(duration), "timings": totals,
+    frame_size, *stages = status.split(";")
+    max_rows, max_bytes = map(int, frame_size.split(","))
+    status_peaks = {}
+    for entry in stages:
+        name, wall, cycles, heap_delta = entry.split(",")
+        status_peaks[name] = {"elapsed_ms": float(wall), "thread_cycles": int(cycles),
+                              "lua_heap_delta_kib": float(heap_delta)}
+    assert max_bytes > 0 and max_rows > 0 and "status_native_publish" in status_peaks, status
+    return {"seconds": float(duration), "timings": totals, "status_sections": status_peaks,
+            "max_status_bytes": max_bytes, "max_status_rows": max_rows,
             "slowest_interval": {"elapsed_ms": float(elapsed), "inclusive_calls_ms": slow_calls,
                                  "thread_cycles": int(peak_cycles), "inclusive_call_cycles": call_cycles}}
 
@@ -326,8 +354,8 @@ async def profile_world(host, guest, area, probe):
         response = await probe(seat.bridge, "crossroads-profile", action, reply_end="|end")
         return response.removesuffix("|end")
 
-    async def arm():
-        assert await asyncio.gather(*(command(seat, "arm") for seat in seats.values())) == ["armed", "armed"]
+    async def arm(action="arm"):
+        assert await asyncio.gather(*(command(seat, action) for seat in seats.values())) == ["armed", "armed"]
 
     async def read(seat):
         async with asyncio.timeout(7):
@@ -386,19 +414,31 @@ async def profile_world(host, guest, area, probe):
     await arm()
     idle = await collect()
     after_idle = await transport()
+    async def walk(laps):
+        movement = []
+        # Use normal guest movement with short pulses near the stock arrival point.
+        for x, y in ((1, 0), (0, 1), (-1, 0), (0, -1)) * laps:
+            reply = await submit(guest_run, "walk", x=x, y=y, milliseconds=550, continuous=True)
+            assert reply["ok"] and reply["movement_scheduled"], reply
+            await asyncio.sleep(.58)
+            point = position(await current_status(guest_run))
+            if point:
+                movement.append(math.dist(point, position(baseline)))
+        assert movement and max(movement) >= 40, movement
+        return max(movement)
+
     await arm()
-    # Use normal guest movement with short pulses near the stock arrival point.
-    movement = []
-    for x, y in ((1, 0), (0, 1), (-1, 0), (0, -1)):
-        reply = await submit(guest_run, "walk", x=x, y=y, milliseconds=550, continuous=True)
-        assert reply["ok"] and reply["movement_scheduled"], reply
-        await asyncio.sleep(.58)
-        point = position(await current_status(guest_run))
-        if point:
-            movement.append(math.dist(point, position(baseline)))
+    displacement = await walk(1)
     moving = await collect()
-    assert movement and max(movement) >= 40, movement
     after_movement = await transport()
+    coarse = {}
+    if area == CROSSROADS:
+        await arm("coarse")
+        coarse_displacement = await walk(2)
+        samples = await asyncio.gather(*(read(seat) for seat in seats.values()))
+        assert all(sample["seconds"] >= 5 for sample in samples), samples
+        coarse = {"coarse_guest_walking": dict(zip(seats, samples, strict=True)),
+                  "coarse_guest_displacement_cm": coarse_displacement}
     settled = await wait_resident_status(guest_run, pawns_here)
     comparison = await asyncio.gather(*(compare_vitals(seat) for seat in seats.values()))
     rows = await asyncio.gather(*(compare_rows(seat) for seat in seats.values()))
@@ -415,10 +455,10 @@ async def profile_world(host, guest, area, probe):
         await journal_action("close", "native_host_invite_journal_closed")
         await wait_resident_status(runs["host"], lambda frame: "native_host_invite_journal" not in frame["game"])
         journal = {"journal_open_and_close": view["game"][native_package_handoff_journal.JOURNAL]}
-    return {"idle": idle, "guest_walking": moving, "guest_max_displacement_cm": max(movement),
+    return {"idle": idle, "guest_walking": moving, "guest_max_displacement_cm": displacement,
             "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(after_idle, after_movement),
             "row_format_comparison": dict(zip(seats, rows, strict=True)),
             "zone_walls": {seat: frame["game"]["native_zone_wall"]
                            for seat, frame in zip(seats, wall_status, strict=True)},
             "guest_roster": {slot: row["name"] for slot, row in settled["game"]["pawns"].items()},
-            "vitals_comparison": dict(zip(seats, comparison, strict=True)), **journal}
+            "vitals_comparison": dict(zip(seats, comparison, strict=True)), **coarse, **journal}

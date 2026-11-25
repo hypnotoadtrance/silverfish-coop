@@ -70,6 +70,8 @@ Development candidate `rc-5de6301` reads stock mushroom patch membership and nea
 
 `rc-0d06181` prepares mushroom status rows during the paced patch sweep. Publishing now reuses those rows and checks for destroyed actors. A focused check verified that publication starts no scan and hides a destroyed actor before the next sweep. In one short Crossroads walking sample, mushroom publication peaked at 0.004 ms, compared with a 17 ms outlier in the previous build. The full host interval still reached 56 ms, with 45 ms in overall status publication. Two muted Direct IP launches passed the cold crate, Observatory crossing and weather, placed loot and cash, and harvest and regrowth. The original saves were preserved. Rendered frame pacing and Steam behavior still need playtesting.
 
+A follow-up on the same ZIP profiled status assembly in two muted Direct IP launches. In a five-second Crossroads walking sample with per-function tracing disabled, a guest interval reached 31.7 ms, including 23.5 ms in status publication. Concatenation took 9.8 ms while the Lua heap shrank by about 30 MiB. The measured native bridge handoff stayed below 0.06 ms across the sampled seats and maps. The detailed host walking sample also captured a 54.7 ms interval outside the timed co-op calls. Weather travel, stock door toggles, and preservation of the original saves passed. The heap change points to Lua collection during that guest hitch. The cause of the separate host interval and rendered frame pacing remain open.
+
 ## `rc-6690ff4` playtest
 
 | Area | Two-PC observation |
