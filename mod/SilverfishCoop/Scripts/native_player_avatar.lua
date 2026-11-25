@@ -552,7 +552,11 @@ local function animate_food(entry, use, lift, using, lower)
     local food, body = use.food, entry.body
     local head = body:GetSocketLocation(food.head)
     local hand = body:GetSocketTransform(food.hand, 0)
-    local aim = valid(entry.head_pivot) and entry.head_pivot:K2_GetComponentRotation() or entry.pawn:GetBaseAimRotation()
+    local facing = valid(entry.head_pivot) and entry.head_pivot:K2_GetComponentRotation() or entry.pawn:GetBaseAimRotation()
+    -- Leave room for the head to look up or down without pulling the food
+    -- into the face or back toward the waist.
+    local head_pitch = (facing.Pitch + 180) % 360 - 180
+    local aim = {Yaw = facing.Yaw, Pitch = math.max(-20, math.min(20, head_pitch)), Roll = 0}
     local forward = food.math:GetForwardVector(aim)
     local right = food.math:GetRightVector(aim)
     local reach = food.reach + 2 * math.sin(using * 2 * math.pi)
@@ -568,10 +572,12 @@ local function animate_food(entry, use, lift, using, lower)
     local hand_rotation = food.math:Quat_Rotator(hand.Rotation)
     entry.use_prop:K2_SetWorldLocationAndRotation(location, food.math:RLerp(hand_rotation, rotation, blend, true),
         false, {}, true)
+    local actual = entry.use_prop:K2_GetComponentLocation()
+    use.peak = math.max(use.peak, math.sqrt((actual.X - hold.X)^2 + (actual.Y - hold.Y)^2 + (actual.Z - hold.Z)^2))
     if blend == 1 and not use.mouth_reach then
-        local actual = entry.use_prop:K2_GetComponentLocation()
         use.mouth_reach = (actual.X - head.X) * forward.X + (actual.Y - head.Y) * forward.Y
             + (actual.Z - head.Z) * forward.Z
+        use.mouth_height, use.mouth_pitch = actual.Z - head.Z, head_pitch
     end
 end
 
@@ -598,8 +604,9 @@ function avatar.animate_use(get_world)
                 entry.use_prop:K2_SetRelativeLocationAndRotation(
                     {X = p.X * lift * (1 - lower), Y = p.Y * lift * (1 - lower), Z = z},
                     {Pitch = r.Pitch * lift, Yaw = r.Yaw * lift, Roll = r.Roll * lift}, false, {}, true)
+                local actual = entry.use_prop.RelativeLocation
+                use.peak = math.max(use.peak, math.sqrt(actual.X^2 + actual.Y^2 + actual.Z^2))
             end
-            use.peak = math.max(use.peak, math.abs(entry.use_prop.RelativeLocation.Z))
         end
     end
 end
@@ -1005,7 +1012,7 @@ function avatar.rows(row)
         if entry.last_use then
             local use = entry.last_use
             rows[#rows + 1] = row("native-avatar-use", entry.name, use.serial, use.item, use.mesh,
-                use.peak, uses[entry] and 1 or 0, use.mouth_reach or "-")
+                use.peak, uses[entry] and 1 or 0, use.mouth_reach or "-", use.mouth_height or "-", use.mouth_pitch or "-")
         end
         local recoil = weapon_view.recoil_row(entry, row)
         if recoil then rows[#rows + 1] = recoil end

@@ -175,6 +175,14 @@ local function run(action)
         assert(not pawn:HasAuthority(), "the guest meal readback requires a joined player")
         return guest_read(pawn, save, action == "guest-tick")
     end
+    if action == "guest-look-down" or action == "guest-look-up" or action == "guest-look-level" then
+        assert(not pawn:HasAuthority(), "the food pose fixture needs an enrolled guest")
+        local pitch = action == "guest-look-down" and -55 or action == "guest-look-up" and 55 or 0
+        local controller = pawn.Controller
+        controller:SetControlRotation({Pitch = pitch, Yaw = controller:GetControlRotation().Yaw, Roll = 0})
+        local facing = controller:GetControlRotation()
+        return tostring((facing.Pitch + 180) % 360 - 180)
+    end
     if action == "guest-medical-vitals" then
         assert(not pawn:HasAuthority(), "the health readback needs an enrolled guest")
         return medical_vitals(save)

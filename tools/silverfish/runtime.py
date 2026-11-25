@@ -3345,18 +3345,22 @@ class Bridge:
                             and movement is not None and 0 <= movement <= 500):
                         data.setdefault("native_avatar_melee", {})[pawn] = {
                             "serial": int(serial), "clip": clip, "weapon_hand_motion_cm": movement, "active": active == "1"}
-                elif fields[0] == "native-avatar-use" and len(fields) in (7, 8):
+                elif fields[0] == "native-avatar-use" and len(fields) in (7, 8, 10):
                     pawn, serial, item, mesh, movement, active = fields[1:7]
                     movement = _finite(movement)
                     if (pawn.startswith("Player_FP_C ") and re.fullmatch(r"[1-9][0-9]{0,14}", serial)
                             and item.startswith("/Game/Classes/Items/") and mesh.startswith("StaticMesh /Game/")
                             and active in ("0", "1") and movement is not None and 0 <= movement <= 300):
-                        data.setdefault("native_avatar_use", {})[pawn] = {
-                            "serial": int(serial), "item": item, "mesh": mesh, "hand_motion_cm": movement,
-                            "active": active == "1"}
-                        reach = _finite(fields[7]) if len(fields) == 8 else None
+                        use = {"serial": int(serial), "item": item, "mesh": mesh, "prop_displacement_cm": movement,
+                               "active": active == "1"}
+                        data.setdefault("native_avatar_use", {})[pawn] = use
+                        reach = _finite(fields[7]) if len(fields) >= 8 else None
                         if reach is not None and -100 <= reach <= 100:
-                            data["native_avatar_use"][pawn]["food_forward_of_head_cm"] = reach
+                            use["food_forward_of_head_cm"] = reach
+                            if len(fields) == 10:
+                                height, angle = map(_finite, fields[8:])
+                                if height is not None and -100 <= height <= 100 and angle is not None and -180 <= angle <= 180:
+                                    use.update(food_height_from_head_cm=height, food_head_pitch_deg=angle)
                 elif fields[0] == "native-avatar-recoil" and len(fields) == 9:
                     pawn, weapon, serial, count, peak, angle, active, restored = fields[1:]
                     peak, angle = _finite(peak), _finite(angle)

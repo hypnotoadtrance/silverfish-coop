@@ -3393,7 +3393,7 @@ async def capture_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gu
                     if avatar.get("player_id") == player_id:
                         use = game.get("native_avatar_use", {}).get(remote, {})
                         if (use.get("item") == item and use.get("serial", 0) > last_serial
-                                and use.get("active") is False and use["hand_motion_cm"] > 20):
+                                and use.get("active") is False and use["prop_displacement_cm"] > 20):
                             return use
                 return None
 
@@ -3948,7 +3948,11 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
         use = frame.get("game", {}).get("native_avatar_use", {}).get(pawn, {})
         return use if use.get("item") == class_path and use["active"] is False else None
 
+    food_pitch = {"leftovers": -55, "brown-mushroom": 55}
     for label, item in zip(cases, seeded, strict=True):
+        if label in food_pitch:
+            action = "guest-look-down" if food_pitch[label] < 0 else "guest-look-up"
+            assert math.isclose(float(await command(guest, action)), food_pitch[label], abs_tol=.1)
         verb = f"native-guest-{label}"
         profile = native_guest_consumable.STOCK_CONSUMABLES[verb]
         key = native_guest_consumable.RESULT[verb]
@@ -3986,13 +3990,16 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
                             and stim >= receipt["stim_after"] - .35):
                         break
                     await asyncio.sleep(.1)
-        if label in ("leftovers", "brown-mushroom"):
+        if label in food_pitch:
             def finished(frame):
                 return observed_use(frame, profile.class_path)
 
             use = finished(await wait_resident_status(host_run, finished, timeout=8))
-            assert 23 <= use.get("food_forward_of_head_cm", 0) <= 38 and use["hand_motion_cm"] > 20, use
+            assert 23 <= use.get("food_forward_of_head_cm", 0) <= 38 and use["prop_displacement_cm"] > 20, use
+            assert use["food_head_pitch_deg"] * math.copysign(1, food_pitch[label]) > 30, use
+            assert -21 <= use["food_height_from_head_cm"] <= 15, use
             observed_food[label] = use
+            assert math.isclose(float(await command(guest, "guest-look-level")), 0, abs_tol=.1)
         verified[label] = receipt
     remaining = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
     assert [(row["guid"], row["quantity"]) for row in remaining if row["guid"] in seeded] == [(seeded[3], 1)], remaining
@@ -6281,7 +6288,7 @@ async def verify_stock_use(host: Seat, guest: Seat, pawn: str, *, starter: bool)
         def observed_use(state):
             use = state.get("game", {}).get("native_avatar_use", {}).get(pawn, {})
             return (use.get("serial") != previous_use and use.get("item") == item["class_path"]
-                    and not use["active"] and use["hand_motion_cm"] > 20)
+                    and not use["active"] and use["prop_displacement_cm"] > 20)
         host_state = await wait(host_run, observed_use, timeout=8)
         presentation = host_state["game"]["native_avatar_use"][pawn]
         assert presentation["mesh"].endswith(".SM_Prop_Bandage_02"), presentation

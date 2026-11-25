@@ -1099,7 +1099,7 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
                 return next((use for use in state.get("game", {}).get("native_avatar_use", {}).values()
                              if use["serial"] == cue["serial"] and use["item"] == cue["item_class"]), None)
             final = await wait(guest_run, lambda state: (use := observed_use(state))
-                               and not use["active"] and use["hand_motion_cm"] > 20, timeout=8)
+                               and not use["active"] and use["prop_displacement_cm"] > 20, timeout=8)
             visual, = events(guest_run, "native_avatar_use_visual_played")
             assert visual["serial"] == cue["serial"], visual
             prop = observed_use(final)
