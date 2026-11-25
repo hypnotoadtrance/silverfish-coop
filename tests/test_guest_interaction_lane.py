@@ -113,3 +113,70 @@ class GuestInteractionLaneTests(unittest.IsolatedAsyncioTestCase):
             action_release.set()
             release_view.set()
             await asyncio.gather(view, lane)
+
+
+class GuestCombatInputLaneTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.scope = ("map", "local pawn", "A" * 32, "rusty-pistol")
+        area, pawn, guid, kind = self.scope
+        self.client = client = service.Client.__new__(service.Client)
+        client.__dict__.update(
+            guest_primary_input=True, viewer_role="guest", stopping=False, host_session="session",
+            zone_epoch="visit", expected_zone=area, needs_travel=False, server_transitioning=False,
+            transport=SimpleNamespace(connected=True), gameplay_seen=service.time.monotonic(),
+            invite={"character_id": "guest"},
+            gameplay={"players": {"guest": {"character_id": "guest", "downed": False}},
+                      "native_equipped_weapon": {"map": area, "pawn": "host replica", "guid": guid, "kind": kind}},
+            last_game={"state": "connected", "map": area, "pawns": {"local": {"name": pawn}}},
+            primary_scope=self.scope, primary_request=("session", "visit", self.scope, ()),
+            next_primary_renewal=service.time.monotonic() + 10,
+            last_primary_intent=0, melee_input=None, control=Mock(), tube_reload=None,
+            bridge=Mock(input_namespace=uuid.UUID(int=1)),
+        )
+
+    async def test_standing_input_does_not_wait_for_view_updates_and_drops_an_old_visit(self):
+        client = self.client
+        area, pawn, guid, _ = self.scope
+        waiting, resume, reloaded = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        client.bridge.snapshot.return_value = client.last_game
+        client.bridge.native_primary_input_requests.side_effect = [[(1, *self.scope), (2, *self.scope)], []]
+
+        async def fire(*_):
+            waiting.set()
+            await resume.wait()
+            return {}
+
+        async def reload(active, game):
+            self.assertFalse(active)
+            self.assertEqual(game["map"], area)
+            client.stopping = True
+            reloaded.set()
+
+        client.gameplay_action = AsyncMock(side_effect=fire)
+        client.service_reload_input = AsyncMock(side_effect=reload)
+        worker = asyncio.create_task(client.run_stock_combat_inputs())
+        try:
+            await asyncio.wait_for(waiting.wait(), 1)
+            operation = uuid.uuid5(client.bridge.input_namespace, f"session:visit:{pawn}:primary:1").hex
+            client.gameplay_action.assert_awaited_once_with("native-guest-weapon-fire", operation, guid)
+            client.service_reload_input.assert_not_awaited()
+            client.zone_epoch = "new visit"
+            resume.set()
+            await asyncio.wait_for(reloaded.wait(), 1)
+            self.assertEqual(client.last_primary_intent, 2)
+            client.gameplay_action.assert_awaited_once()
+        finally:
+            client.stopping = True
+            resume.set()
+            await asyncio.wait_for(worker, 1)
+
+    async def test_new_weapon_scope_is_requested_before_the_prior_lease_renews(self):
+        client = self.client
+        new_scope = (*self.scope[:2], "B" * 32, "revolver-9mm")
+        status = dict(zip(("map", "pawn", "guid", "kind"), new_scope, strict=True))
+        client.gameplay["native_equipped_weapon"].update(guid=new_scope[2], kind=new_scope[3])
+        client.bridge.command = AsyncMock(return_value={**client.last_game, "native_guest_primary_scope": status})
+        await client.sync_primary_scope(True)
+        await client.sync_primary_scope(True)
+        client.bridge.command.assert_awaited_once_with("native-guest-primary-scope", *new_scope, timeout=2)
+        self.assertEqual(client.primary_scope, new_scope)

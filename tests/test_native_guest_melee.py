@@ -229,17 +229,19 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
     async def test_client_primary_tap_routes_once_to_melee_action_with_scoped_guid(self):
         scope = (DEAD_BRIDGE, "local pawn", GUID, "melee")
         pending = [(4, *scope), (4, *scope)]
-        client = SimpleNamespace(guest_primary_input=True, viewer_role="guest", stopping=False, host_session="session",
-                                 zone_epoch="epoch", gameplay_seen=time.monotonic(), invite={"character_id": "member"},
-                                 gameplay={"players": {"guest": {"character_id": "member", "downed": False}},
-                                           "native_equipped_weapon": {"map": DEAD_BRIDGE, "pawn": "host pawn", "guid": GUID,
-                                                                      "kind": scope[-1]}},
-                                 last_game={"map": DEAD_BRIDGE, "pawns": {"local": {"name": scope[1]}}},
-                                 next_primary_renewal=time.monotonic() + 30, primary_scope=scope, last_primary_intent=0,
-                                 melee_input=None,
-                                 bridge=Mock(input_namespace=uuid.uuid4(), native_primary_input_requests=Mock(return_value=pending)),
-                                 control=Mock(), gameplay_action=AsyncMock(return_value={}))
-        await Client.service_primary_input(client, True)
+        client = Client.__new__(Client)
+        client.__dict__.update(
+            guest_primary_input=True, viewer_role="guest", stopping=False, host_session="session",
+            zone_epoch="epoch", expected_zone=DEAD_BRIDGE, needs_travel=False, server_transitioning=False,
+            transport=SimpleNamespace(connected=True), gameplay_seen=time.monotonic(), invite={"character_id": "member"},
+            gameplay={"players": {"guest": {"character_id": "member", "downed": False}},
+                      "native_equipped_weapon": {"map": DEAD_BRIDGE, "pawn": "host pawn", "guid": GUID, "kind": scope[-1]}},
+            last_game={"state": "connected", "map": DEAD_BRIDGE, "pawns": {"local": {"name": scope[1]}}},
+            primary_scope=scope, last_primary_intent=0, melee_input=None,
+            bridge=Mock(input_namespace=uuid.uuid4(), native_primary_input_requests=Mock(return_value=pending)),
+            control=Mock(), gameplay_action=AsyncMock(return_value={}),
+        )
+        await client.service_primary_input(True, client.last_game)
         operation_id = uuid.uuid5(client.bridge.input_namespace, "session:epoch:local pawn:primary:4").hex
         client.gameplay_action.assert_awaited_once_with(melee.SWING, operation_id, GUID)
         client.control.event.assert_called_once_with("native_guest_melee_input", operation_id=operation_id, sequence=4)

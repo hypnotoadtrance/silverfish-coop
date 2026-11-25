@@ -5253,6 +5253,7 @@ class Client:
         self.loot_view = native_loot.LootView(bridge, control) if invite.get("native_loot_input") else None
         self.world_loot = native_world_loot.Projection()
         self.primary_scope = None
+        self.primary_request = None
         self.next_primary_renewal = 0.0
         self.primary_magazine = None
         self.primary_magazine_attempt = None
@@ -5599,8 +5600,9 @@ class Client:
                     self.bridge, self.control, self.last_game, cue, self.zone_epoch, self.host_session)
         return {key: value for key, value in reply.items() if key != "ok"}
 
-    async def service_reload_input(self, active: bool) -> None:
-        intent = self.last_game.get("native_guest_reload_intent", {})
+    async def service_reload_input(self, active: bool, game: dict | None = None) -> None:
+        game = self.last_game if game is None else game
+        intent = game.get("native_guest_reload_intent", {})
         sequence = intent.get("sequence")
         fresh = type(sequence) is int and self.last_reload_intent < sequence < 2**53
         if fresh:
@@ -5608,8 +5610,8 @@ class Client:
         elif self.tube_reload is None:
             return
 
-        area = self.last_game.get("map")
-        pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
+        area = game.get("map")
+        pawn = game.get("pawns", {}).get("local", {}).get("name")
         if not active or self.stopping or not self.host_session or not self.zone_epoch or not pawn:
             self.tube_reload = None
             if fresh:
@@ -5630,11 +5632,11 @@ class Client:
         underbarrel = fresh and intent.get("barrel") == "loki"
         magazine = guest_weapon_profiles.SINGLE_RELOAD_MAGAZINES.get(kind) if not underbarrel else None
         scope = self.host_session, self.zone_epoch, area, pawn, receiver
-        primary = self.last_game.get("native_guest_primary_scope", {})
+        primary = game.get("native_guest_primary_scope", {})
         pump_trigger_held = (magazine and primary.get("pump_trigger_held")
                              and (primary.get("map"), primary.get("pawn"), primary.get("guid")) == (area, pawn, receiver))
         if magazine and (pump_trigger_held or self.gameplay.get("players", {}).get(self.viewer_role, {}).get("downed")
-                         or self.last_game.get("native_inventory_view", {}).get("state") == "stock"):
+                         or game.get("native_inventory_view", {}).get("state") == "stock"):
             self.tube_reload = None
             if fresh:
                 self.last_reload_intent = sequence
@@ -5674,10 +5676,7 @@ class Client:
             # when either the tube fills or the matching reserve is exhausted.
             self.tube_reload = scope, sequence, step + 1, time.monotonic() + 0.5
 
-    async def service_primary_input(self, active: bool) -> None:
-        if not self.guest_primary_input:
-            return
-        now = time.monotonic()
+    def primary_input_context(self, active: bool, game: dict):
         member = self.gameplay.get("players", {}).get(self.viewer_role, {})
         equipment = self.gameplay.get("native_equipped_weapon", {})
         area, host_pawn, guid, kind = (equipment.get(key) for key in ("map", "pawn", "guid", "kind"))
@@ -5685,22 +5684,33 @@ class Client:
         stock_photo = camera_quest == native_turret_photo.STOCK_SCOPE
         camera = kind == "camera" and (stock_photo or area == DEAD_BRIDGE and camera_quest == native_turret_photo.QUEST_ID)
         melee = native_guest_melee.is_equipped(equipment, area, guid)
-        pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
+        pawn = game.get("pawns", {}).get("local", {}).get("name")
         # Cooked authority and autonomous pawns have independent object names.
-        eligible = (active and not self.stopping and self.host_session and self.zone_epoch and now - self.gameplay_seen < 2
+        eligible = (active and not self.stopping and self.host_session and self.zone_epoch
+                    and time.monotonic() - self.gameplay_seen < 2
                     and member.get("character_id") == self.invite["character_id"] and member.get("downed") is False
-                    and self.gameplay.get("wipe") is None and area == self.last_game.get("map") and pawn and host_pawn
+                    and self.gameplay.get("wipe") is None and area == game.get("map") and pawn and host_pawn
                     and native_gold.valid_guid(guid) and (camera or melee or kind == native_host_dig_live.GUEST_KIND
                                                         or kind in native_loot.PRY_TOOL_ACTIONS
                                                         or kind in native_guest_weapon.FIRE_CLASSES))
-        scope = (area, pawn, guid, kind) if eligible else None
-        if (scope and now >= self.next_primary_renewal) or (not scope and self.primary_scope):
+        return ((area, pawn, guid, kind) if eligible else None), equipment
+
+    async def sync_primary_scope(self, active: bool) -> None:
+        if not self.guest_primary_input:
+            return
+        scope, equipment = self.primary_input_context(active, self.last_game)
+        kind = equipment.get("kind")
+        extra = ()
+        if scope and kind == "camera":
+            extra = (equipment["quest"],)
+        elif scope and kind in native_smg_hold.HOLD_KINDS and equipment.get("fire_mode") in native_guest_weapon.FIRE_MODES:
+            extra = (equipment["fire_mode"],)
+        request = (self.host_session, self.zone_epoch, scope, extra) if scope else None
+        now = time.monotonic()
+        if (scope and (request != self.primary_request or now >= self.next_primary_renewal)) or (not scope and self.primary_scope):
+            self.primary_request = request
             try:
-                command = ("native-guest-primary-scope", *scope) if scope else ("native-guest-primary-clear",)
-                if scope and camera:
-                    command += (camera_quest,)
-                elif scope and kind in native_smg_hold.HOLD_KINDS and equipment.get("fire_mode") in native_guest_weapon.FIRE_MODES:
-                    command += (equipment["fire_mode"],)
+                command = ("native-guest-primary-scope", *scope, *extra) if scope else ("native-guest-primary-clear",)
                 self.last_game = await self.bridge.command(*command, timeout=2)
                 observed = self.last_game.get("native_guest_primary_scope", {})
                 if scope and tuple(observed.get(key) for key in ("map", "pawn", "guid", "kind")) != scope:
@@ -5713,6 +5723,7 @@ class Client:
                 self.control.event("native_guest_primary_scope_rejected", reason=str(error))
         if not scope:
             self.primary_magazine = None
+            self.primary_request = None
         elif scope == self.primary_scope and kind in native_guest_weapon.FIRE_CLASSES:
             rounds = equipment.get("rounds")
             if type(rounds) is int and 0 <= rounds <= 4096:
@@ -5743,16 +5754,26 @@ class Client:
                         self.primary_magazine = magazine
                     except (OSError, RuntimeError) as error:
                         self.control.event("native_guest_magazine_projection_deferred", reason=str(error))
+
+    async def service_primary_input(self, active: bool, game: dict) -> None:
+        if not self.guest_primary_input:
+            return
+        scope, equipment = self.primary_input_context(active, game)
+        visit = self.host_session, self.zone_epoch
+        scope = scope if scope == self.primary_scope else None
         if self.melee_input:
-            await self.melee_input.service(self.primary_scope if eligible else None)
+            await self.melee_input.service(scope)
         inputs = self.bridge.native_primary_input_requests()
-        if shovel := self.last_game.get(native_host_dig_live.GUEST_INTENT):
+        if shovel := game.get(native_host_dig_live.GUEST_INTENT):
             inputs.append(shovel)
         for sequence, event_area, event_pawn, event_guid, event_kind, *extra in sorted(inputs, key=lambda edge: edge[0]):
             if sequence <= self.last_primary_intent:
                 continue
             self.last_primary_intent = sequence
-            if self.primary_scope != (event_area, event_pawn, event_guid, event_kind) or not eligible:
+            stock_scope = self.stock_interaction_scope()
+            if (scope != (event_area, event_pawn, event_guid, event_kind) or scope != self.primary_scope
+                    or stock_scope != (*visit, event_area, event_pawn)
+                    or self.primary_input_context(active, self.last_game)[0] != scope):
                 continue
             self.tube_reload = None
             operation = uuid.uuid5(self.bridge.input_namespace, f"{self.host_session}:{self.zone_epoch}:{event_pawn}:primary:{sequence}").hex
@@ -5761,7 +5782,8 @@ class Client:
             elif event_kind == native_host_dig_live.GUEST_KIND:
                 action, event = native_host_dig_live.GUEST_ACTION, "native_guest_dig_input"
             elif event_kind == "camera":
-                action = native_turret_photo.STOCK_SHUTTER if stock_photo else native_turret_photo.SHUTTER
+                action = (native_turret_photo.STOCK_SHUTTER if equipment.get("quest") == native_turret_photo.STOCK_SCOPE
+                          else native_turret_photo.SHUTTER)
                 event = "native_guest_camera_shutter"
             elif event_kind in native_loot.PRY_TOOL_ACTIONS:
                 if not extra:
@@ -6494,7 +6516,7 @@ class Client:
                         await self.refresh_gameplay()
                         active = self.last_game.get("state") == "connected" and not self.server_transitioning
                         self.next_primary_renewal = 0
-                        await self.service_primary_input(active)
+                        await self.sync_primary_scope(active)
                         observed = self.last_game.get("native_guest_primary_scope", {})
                     if observed.get("kind") not in native_smg_hold.HOLD_KINDS or not observed.get("pawn"):
                         raise ValueError("The held-fire fixture requires a scoped automatic weapon and a press or release")
@@ -6840,6 +6862,16 @@ class Client:
                 await self.weapon_shot_playback.sync(
                     self.bridge, self.control, self.last_game, shots, self.zone_epoch)
 
+    async def run_stock_combat_inputs(self) -> None:
+        while not self.stopping:
+            stock_scope = self.stock_interaction_scope()
+            game = self.bridge.snapshot() or self.last_game
+            pawn = game.get("pawns", {}).get("local", {}).get("name")
+            active = bool(stock_scope and game.get("state") == "connected" and stock_scope[2:] == (game.get("map"), pawn))
+            await self.service_primary_input(active, game)
+            await self.service_reload_input(active and self.stock_interaction_scope() == stock_scope, game)
+            await asyncio.sleep(.02)
+
     async def run(self) -> None:
         engine = self.bridge.process if isinstance(self.bridge.process, EmbeddedEngine) else None
         pause_exit = (native_session_exit.PauseExit(self.bridge, self.control, "guest", engine=engine)
@@ -6853,16 +6885,18 @@ class Client:
         interact = asyncio.create_task(self.run_stock_interactions()) if resident else None
         crates = (asyncio.create_task(self.run_stock_crates())
                   if resident and self.invite.get("native_loot_input") else None)
+        combat = (asyncio.create_task(self.run_stock_combat_inputs())
+                  if resident and self.guest_primary_input else None)
         cues = asyncio.create_task(self.run_weapon_cues()) if resident else None
         prop_poses = (asyncio.create_task(self.prop_carry.stream_local_poses())
                       if self.prop_carry.has_local_pose_stream else None)
         try:
             await self.run_session(pause_exit=pause_exit)
         finally:
-            for task in (interact, crates, cues):
+            for task in (interact, crates, cues, combat):
                 if task is not None:
                     task.cancel()
-            for task in (interact, crates, cues):
+            for task in (interact, crates, cues, combat):
                 if task is not None:
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
@@ -6946,8 +6980,10 @@ class Client:
             if self.mindcore_carry:
                 await self.mindcore_carry.poll(active)
             self.prop_carry.poll(active)
-            await self.service_primary_input(active)
-            await self.service_reload_input(active)
+            await self.sync_primary_scope(active)
+            if self.bridge.local_bridge is None or not self.guest_primary_input:
+                await self.service_primary_input(active, self.last_game)
+                await self.service_reload_input(active)
             if self.bridge.local_bridge is None:
                 scope = self.stock_interaction_scope()
                 await self.service_crate_interaction(scope)
