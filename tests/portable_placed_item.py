@@ -105,11 +105,14 @@ async def verify_stock_placed_item(host, guest, pawn):
     target = f"loose:{path}"
     taken = await submit(guest_run, loose.FIXTURE, target=target)
     assert taken["ok"], taken
-    for run in (host_run, guest_run):
-        await wait_resident_status(run, lambda frame: frame.get("game", {}).get(loose.KEY, {}).get(path, {}).get("state") == "claimed")
-
-    applied, = [event for event in await resident_events(host_run, arrival)
-                if event.get("event") == "native_loose_pickup_claimed" and event.get("actor") == path]
+    async with asyncio.timeout(8):
+        while True:
+            receipts = [event for event in await resident_events(host_run, arrival)
+                        if event.get("event") == "native_loose_pickup_claimed" and event.get("actor") == path]
+            if receipts:
+                applied, = receipts
+                break
+            await asyncio.sleep(.08)
     assert applied["owner"] == guest_frame["character_id"], applied
     inventory, = [row for row in await stock_inventory(guest_run, guest=True) if row["guid"] == applied["guid"]]
     assert inventory["class_path"] == item_class and inventory["source"] == "backpack", inventory

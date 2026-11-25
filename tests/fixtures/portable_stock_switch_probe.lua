@@ -29,7 +29,7 @@
         local entry = assert(find_switch(state, phase, name), "the stock warehouse device is missing")
         if television and mode == "screen" then
             local material = assert(entry.actor.PropMesh:GetMaterial(entry.actor.ScreenIndex))
-            return (entry.actor.Power and "1|" or "0|") .. material:GetBaseMaterial():GetFullName()
+            return (entry.actor.Power and "1|" or "0|") .. material:GetFullName()
         elseif radio and mode == "playback" then
             assert(type(SilverfishProbeNativeRadioPlayback) == "function", "the native media probe is missing")
             local playing, song = SilverfishProbeNativeRadioPlayback(name:match("^%S+ (.+)$"))

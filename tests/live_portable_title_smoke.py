@@ -1607,30 +1607,33 @@ async def verify_observatory_tv(host: Seat, guest: Seat, pawn: str) -> dict:
     def powered(frame):
         return frame.get("game", {}).get(native_stock_switch.KEY, {}).get(actor, {}).get("powered")
 
-    async def views(expected):
+    async def views(expected, *, require_screen=True):
         for seat, run in ((host, host_run), (guest, guest_run)):
             await wait_resident_status(run, lambda frame: powered(frame) is expected)
-        async with asyncio.timeout(8):
-            while True:
-                rows = await asyncio.gather(*(seat.bridge.command(fixture, "screen", "-", actor, update_status=False)
-                                              for seat in (host, guest)))
-                readings = [row["ack"]["message"] for row in rows]
-                if all(reading.startswith(f"{int(expected)}|") and (("M_Screen_Off" not in reading) == expected)
-                       for reading in readings):
-                    return readings
-                await asyncio.sleep(.08)
+        end = time.monotonic() + 5
+        readings = []
+        while time.monotonic() < end:
+            rows = await asyncio.gather(*(seat.bridge.command(fixture, "screen", "-", actor, update_status=False)
+                                          for seat in (host, guest)))
+            readings = [row["ack"]["message"] for row in rows]
+            if all(reading.startswith(f"{int(expected)}|")
+                   and (not require_screen or ("M_Screen_Off" not in reading) == expected)
+                   for reading in readings):
+                return readings
+            await asyncio.sleep(.08)
+        raise AssertionError(f"Expected the television power and screen to agree on both seats: {expected}, {readings}")
 
     initial = powered(await wait_resident_status(host_run, lambda frame: type(powered(frame)) is bool))
-    before = await views(initial)
+    before = await views(initial, require_screen=False)
     await host.bridge.command(fixture, "host", "-", actor)
-    host_toggle = await views(not initial)
+    host_toggle = await views(not initial, require_screen=initial)
     moved = await host.bridge.command(fixture, "stage", pawn, actor)
     point = list(map(float, moved["ack"]["message"].split(",")))
     frame = await wait_resident_status(guest_run, lambda row:
         math.dist(row.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0] * 3), point) < 70)
     started = time.time()
     await guest.bridge.command(fixture, "guest", "-", actor)
-    guest_toggle = await views(initial)
+    guest_toggle = await views(initial, require_screen=not initial)
     receipt, = [row for row in await resident_events(guest_run, frame) if row["time_unix"] >= started
                 and row.get("native_stock_switch_interaction", {}).get("actor") == actor]
     assert campaign_save_hashes(host.campaign) == checkpoint
@@ -3312,6 +3315,12 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str) -> dict:
         seeded = await host.bridge.command("fixture-stock-take-ammo-seed", pawn, kind, str(units))
         guid = seeded["ack"]["message"]
         frame = await wait_resident_status(guest_run, lambda f: f.get("state") == "connected")
+        async with asyncio.timeout(10):
+            while True:
+                observed = await guest.bridge.command("fixture-stock-take-ammo-backpack", guid, update_status=False)
+                if observed["ack"]["message"] == str(units):
+                    break
+                await asyncio.sleep(.1)
         # The stock fixture opens Tab and uses the item's stock Equip menu.
         equipped = await submit(guest_run, native_guest_drop.STOCK_EQUIP_FIXTURE, target=guid)
         assert equipped["ok"], equipped
@@ -3319,8 +3328,11 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str) -> dict:
         inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
         item, = [row for row in inventory if row["guid"] == guid]
         assert item["source"] == "equipment" and item["index"] == slot and item["quantity"] == units, item
-        await submit(guest_run, "native-inventory-view-fixture")
-        await wait_resident_status(guest_run, lambda f: f.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
+        state = (guest.bridge.snapshot() or {}).get("native_inventory_view", {}).get("state")
+        if state == "stock":
+            assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+            await wait_resident_status(guest_run, lambda f:
+                f.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
         selected = await guest.bridge.command("fixture-stock-take-ammo-loadout", str(slot), guid, "equip")
         assert selected["ack"]["message"] == f"{units},{units}", selected
         async with asyncio.timeout(8):

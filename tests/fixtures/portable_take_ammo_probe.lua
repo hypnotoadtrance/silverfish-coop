@@ -1,3 +1,13 @@
+    if fields[2] == "fixture-stock-take-ammo-backpack" and headless
+        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
+        assert(phase == "connected" and #fields == 3)
+        local save = state.local_pawn.pawn.Save
+        for index = 1, save.PlayerBackpack:GetArrayNum() do
+            local row = save.PlayerBackpack[index]
+            if item_identity(row) == fields[3] then return tostring(row[ammo_field]) end
+        end
+        return "waiting"
+    end
     if fields[2] == "fixture-stock-take-ammo-loadout" and headless
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
         assert(phase == "connected" and state.map == "/Game/Classes/Maps/Maps_OverWorld/Observitory_P" and #fields == 5)
