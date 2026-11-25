@@ -3877,6 +3877,40 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
     remaining = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
     assert [(row["guid"], row["quantity"]) for row in remaining if row["guid"] in seeded] == [(seeded[3], 1)], remaining
 
+    seed_started = time.time()
+    red = await command(host, "seed-red-mushroom")
+    stocked = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
+    async with asyncio.timeout(8):
+        while not any(row["event"] == "native_guest_ui_projected" and row["items"] == len(stocked)
+                      and row["time_unix"] >= seed_started for row in await resident_events(guest_run, guest_frame)):
+            await asyncio.sleep(.08)
+    poison_key = native_guest_consumable.RESULT["native-guest-red-mushroom"]
+    started = time.time()
+    press = await submit(guest_run, "native-inventory-stock-use-click-fixture", target=red)
+    assert press["ok"] and press["stock_action"]["guid"] == red, press
+    async with asyncio.timeout(10):
+        while True:
+            events = [row for row in await resident_events(guest_run, guest_frame) if row["time_unix"] >= started]
+            assert not [row for row in events if row["event"] == "native_stock_inventory_rejected"], events
+            results = [row[poison_key] for row in events if row["event"] == "native_stock_inventory_action"
+                       and row.get(poison_key, {}).get("guid") == red]
+            if results:
+                poison_receipt, = results
+                break
+            await asyncio.sleep(.08)
+    assert (poison_receipt["quantity_before"], poison_receipt["quantity_after"], poison_receipt["infection_dose"]) == (2, 1, 60)
+    assert math.isclose(poison_receipt["food_after"] - poison_receipt["food_before"], 3, abs_tol=.01)
+    assert math.isclose(poison_receipt["regen_after"] - poison_receipt["regen_before"], -50, abs_tol=.01)
+    async with asyncio.timeout(8):
+        while True:
+            _, guest_vitals = (await command(host, "host-medical-vitals")).split(";")
+            hp = float(guest_vitals.split(",")[0])
+            _, _, _, intox, pawn_intox = map(float, (await command(guest, "guest-personal-vitals")).split(","))
+            if 70 <= hp <= 95 and intox == pawn_intox == 70:
+                break
+            await asyncio.sleep(.08)
+    verified["red-mushroom"] = {**poison_receipt, "poisoned_guest_health": hp, "poisoned_guest_intoxication": intox}
+
     assert "Mushroom" in observed_food["brown-mushroom"]["mesh"], observed_food
     assert observed_food["leftovers"]["food_forward_of_head_cm"] > 24, observed_food
     host_vitals, _ = (await command(host, "host-medical-vitals")).split(";")

@@ -58,6 +58,7 @@ MEALS = {
     CANNED_PEACHES: Meal(CANNED_PEACHES_CLASS, 12, 0, 8),
     CANNED_BEANS: Meal(CANNED_BEANS_CLASS, 14, 0, 14),
     BROWN_MUSHROOM: Meal(BROWN_MUSHROOM_CLASS, 3.5, 0, 1),
+    "native-guest-red-mushroom": Meal("/Game/Classes/Items/Item_RedMushroom.Item_RedMushroom_C", 3, -50, 3, 60),
     "native-guest-honey-egg": Meal("/Game/Classes/Items/Item_HoneyEgg.Item_HoneyEgg_C", 5, 0, 6, fatigue=5),
     **{
         f"native-guest-{kind}": Meal(f"/Game/Classes/Items/Item_{asset}.Item_{asset}_C", food, 0, value, infection)

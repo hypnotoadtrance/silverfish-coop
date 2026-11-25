@@ -131,6 +131,12 @@ local function host_read(pawn, save, world, action)
         local dragged = stock_item(remote, frog, 1)
         return clicked .. ";" .. dragged
     end
+    if action == "seed-red-mushroom" then
+        detached.PlayerHealth, detached.PlayerRegen = 200, 200
+        detached.Flags:Add(FName("Player_Intox"), 10)
+        remote.Intoxication = 10
+        return stock_item(remote, asset("/Game/Classes/Items/Item_RedMushroom.Item_RedMushroom_C"), 2)
+    end
     if action == "seed-use-cases" then
         local ids = {}
         for index, name in ipairs(stock_cases) do

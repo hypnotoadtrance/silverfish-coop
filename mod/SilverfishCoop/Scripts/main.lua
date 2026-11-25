@@ -599,7 +599,7 @@ local function run_command(fields, state, current_phase)
         if command ~= "native-guest-clear" then native_mindcore_carry.clear() end
         native_hazard.clear("co-op session is changing")
         native_guest_consumable.reset()
-        native_guest_mre.reset()
+        native_guest_mre.reset(command ~= "native-guest-clear" or not argument)
         native_guest_regen.clear(command == "native-guest-clear" and argument or nil)
         if command ~= "native-guest-clear" then native_wipe_view.clear() end
         if command == "native-guest-clear" then native_enemy_loot.clear_fixture() else native_enemy_loot.clear() end

@@ -323,6 +323,17 @@ local function flag_value(flags, key)
     return math.tointeger(value), entry
 end
 
+function guest_save.add_intoxication(pawn, detached, stock, amount)
+    if not guest_save.matches(pawn) or not same(pawn.Save, detached) or same(detached, stock) then return end
+    local key = FName("Player_Intox", EFindName.FNAME_Find)
+    if key:ToString() ~= "Player_Intox" then return end
+    local flags = detached.Flags
+    local before, entry = flag_value(flags, key)
+    local after = math.min(math.max(before + amount, 0), 100)
+    if entry then entry:Set(after) else flags:Add(key, after) end
+    pawn.Intoxication = after
+end
+
 function guest_save.quest_xp(state, phase, pawn_full_name, delta)
     if not enabled then error("guest_quest_xp_disabled", 0) end
     if type(delta) ~= "number" or not math.tointeger(delta) or delta < 0 or delta > max_int32 then

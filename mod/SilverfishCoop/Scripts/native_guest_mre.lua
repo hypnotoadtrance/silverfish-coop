@@ -6,6 +6,7 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MRE") == "1"
 local headless_test = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local borough = "/Game/Classes/Maps/Maps_SafeZones/Borough.Borough"
+local red_mushroom = "native-guest-red-mushroom"
 local meals, labels = {}, {}
 local function register_meal(slug, asset, label, food, gain, infection, fatigue, medicine)
     local class = string.format("/Game/Classes/Items/Item_%s.Item_%s_C", asset, asset)
@@ -17,6 +18,7 @@ register_meal("mre", "MRE", "MRE", 30, 10)
 register_meal("canned-peaches", "CannedPeaches", "Canned Peaches", 12)
 register_meal("canned-beans", "CannedBeans", "Canned Beans", 14)
 register_meal("brown-mushroom", "BrownMushroom", "Brown Mushroom", 3.5)
+register_meal("red-mushroom", "RedMushroom", "Red Mushroom", 3, -50, 60)
 register_meal("canned-beef", "CannedBeef", "Canned Beef", 16, 0, 8)
 register_meal("honey-egg", "HoneyEgg", "Clyde's Honey Egg", 5, 0, 0, 5)
 register_meal("leftovers", "Leftovers", "Leftovers", 18)
@@ -37,6 +39,7 @@ register_meal("antibiotics", "Antibiotics", "Antibiotics", 0, 0, -100, nil, {ins
 function mre.label(class) return labels[class] end
 
 local observation, fixture, ready
+local poison = {}
 
 local function valid(object) return object ~= nil and object ~= false and object:IsValid() end
 local function exact_guid(value)
@@ -47,6 +50,20 @@ local function bounded(number, minimum, maximum)
 end
 local function same(first, second)
     return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
+end
+
+local function game_time(world)
+    local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+    return statics:GetTimeSeconds(world)
+end
+
+local function apply_poison(state, phase, dose)
+    if not same(state.world, dose.world) then return end
+    local pawn, detached = guest_save.exact_item_context(state, phase, dose.name)
+    local lead = state.local_pawn and state.local_pawn.pawn
+    if not valid(pawn) or not same(detached, dose.save) or not valid(lead) or pawn.Dead ~= false then return end
+    pawn:Deal_DirectDamage(120, pawn, FText("Poisoned to death by a toxic mushroom."), true)
+    guest_save.add_intoxication(pawn, detached, lead.Save, 60)
 end
 
 local function check_wound_fixture(state, pawn, detached)
@@ -63,9 +80,22 @@ function mre.sync(state, phase)
         and type(SilverfishPrepareNativeGuestMre) == "function" then
         ready = SilverfishPrepareNativeGuestMre() == true
     end
+    if phase ~= "hosting" or not next(poison) then return end
+    local now = game_time(state.world)
+    for index = #poison, 1, -1 do
+        local dose = poison[index]
+        if not same(state.world, dose.world) or dose.at <= now then
+            table.remove(poison, index)
+            local ok, err = pcall(apply_poison, state, phase, dose)
+            if not ok then print("[SilverfishCoop] Red Mushroom poison: " .. tostring(err)) end
+        end
+    end
 end
 
-function mre.reset() observation, fixture = nil, nil end
+function mre.reset(clear_delayed)
+    observation, fixture = nil, nil
+    if clear_delayed then poison = {} end
+end
 
 function mre.command(fields, state, phase)
     local verb = fields[2]
@@ -183,6 +213,10 @@ function mre.command(fields, state, phase)
     end
     if medicine and (effect_first ~= math.min(health + instant, maximum) or not bounded(effect_second, 0, math.huge)
         or effect_third ~= math.max(effect_second, medicine.stim)) then error(unverified .. "medicine_proof", 0) end
+    if verb == red_mushroom then
+        -- The stock override applies poison 0.3 seconds after its 1-second use time.
+        poison[#poison + 1] = {world = state.world, name = name, save = detached, at = game_time(state.world) + 1.3}
+    end
     observation = {verb = verb, map = state.map, name = name, guid = guid, before = before, after = after,
         food_before = food_before, food_after = food_after, regen_before = regen_before, regen_after = regen_after,
         health = health, maximum = maximum, intox_before = intox_before, intox_after = intox_after,

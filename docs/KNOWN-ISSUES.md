@@ -12,6 +12,8 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 | Live Frog | The guest successfully ate a frog during the two-PC retest. |
 | Dedicated melee slot | The guest could equip melee weapons in other slots but could not equip them in the dedicated melee slot. |
 | Candle and Oil Lamp | The two-PC retest confirmed that candle lighting and extinguishing synchronized. The Oil Lamp's lit state still did not synchronize. |
+| Mushroom consumption | The guest could eat a Brown Mushroom. Using a Red Mushroom did not work. |
+| Wandering trader confirmation | The guest opened the stock barter window and staged an offer. Clicking Trade did not complete the transaction. |
 
 ## `rc-161145a` playtest
 
