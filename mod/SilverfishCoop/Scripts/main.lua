@@ -1884,12 +1884,8 @@ local function tick(fields, pending, periodic)
         native_mindcore_carry_view.sync(state, current_phase)
         native_mindcore_view.sync(state, current_phase)
         native_wipe_view.sync(state, current_phase)
-        return native_guest_regen.sync(state, current_phase, players.is_standing_guest)
+        native_guest_regen.sync(state, current_phase, players.is_standing_guest)
     end)
-    if projected and failure then
-        state, current_phase = observe_session()
-        if not state then return end
-    end
     local pause_checked, pause_failure = pcall(native_coop_pause.sync, state, current_phase)
     if not pause_checked then native_coop_pause.clear() end
     native_guest_smg_hold.cache_context(state, current_phase)

@@ -4573,9 +4573,19 @@ async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
     assert remote_hit["remote_health"] < expected_ceiling < maximum, (remote_hit, expected_ceiling)
     assert abs(remote_hit["remote_regen"] - expected_ceiling) < .01, (remote_hit, expected_ceiling)
     assert host_observed["local_regen"] == baseline["local_regen"], (baseline, host_observed)
-    guest_recovered = await wait_for(
-        guest, lambda hit: abs(hit["local_health"] - expected_ceiling) <= .2
-        and abs(hit["local_regen"] - expected_ceiling) < .01, timeout=25)
+    def healing_pulse(frame):
+        proof = frame["game"].get("native_guest_regen", {}).get(pawn, {})
+        return proof.get("state") == "applied" and proof["health_after"] > proof["health_before"]
+
+    guest_recovered, healing_frame = await asyncio.gather(
+        wait_for(guest, lambda hit: abs(hit["local_health"] - expected_ceiling) <= .2
+                 and abs(hit["local_regen"] - expected_ceiling) < .01, timeout=25),
+        wait_resident_status(host_run, healing_pulse, timeout=25),
+    )
+    healing_game = healing_frame["game"]
+    healing = healing_game["native_guest_regen"][pawn]
+    published = healing_game["pawns"]["guest"]
+    assert published["name"] == pawn and abs(published["health"] - healing["health_after"]) < 1e-7, (published, healing)
     remote_recovered = await sample(host)
     assert abs(remote_recovered["remote_health"] - expected_ceiling) <= .2, remote_recovered
     assert abs(remote_recovered["remote_regen"] - expected_ceiling) < .01, remote_recovered
@@ -4615,6 +4625,7 @@ async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
                                   "guest_feedback": guest_heard, "guest_feedback_events": received,
                                   "stock_guest_regeneration_ceiling": expected_ceiling,
                                   "guest_recovered": guest_recovered, "authoritative_guest_recovered": remote_recovered,
+                                  "healing_pulse_status_health": published["health"], "healing_pulse": healing,
                                   "host_feedback": local_hit, "guest_observer": guest_observed,
                                   "same_tick_hits": {"health": burst_health, "guest": burst_guest,
                                                      "host": burst_host, "blunt_audio": burst_audio, "cue": burst_cues[0]},

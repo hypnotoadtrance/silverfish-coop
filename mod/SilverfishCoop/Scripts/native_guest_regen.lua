@@ -82,7 +82,11 @@ local function update(entry, guest, state, phase, standing, stock)
     end
     entry.proof = {count, total, seconds, hp_before, hp_after, ceiling, delay_before, delay_after,
         food_before, food_after, stim_before, stim_after}
-    return status == "applied"
+    -- This snapshot may intentionally suppress health when save ownership is shared.
+    if status == "applied" and guest.health ~= nil and valid(guest.save)
+        and guest.save:GetAddress() == detached:GetAddress() then
+        guest.health = hp_after
+    end
 end
 
 function regen.sync(state, phase, standing)
@@ -95,7 +99,7 @@ function regen.sync(state, phase, standing)
         if next(guests) then regen.clear() end
         return false
     end
-    local current, updated = {}, false
+    local current = {}
     for _, guest in ipairs(state.pawns) do
         if guest.kind == "guest" then
             local entry = guests[guest.name]
@@ -103,13 +107,12 @@ function regen.sync(state, phase, standing)
                 forget(entry)
                 entry = {map = state.map}
             end
-            if update(entry, guest, state, phase, standing, stock) then updated = true end
+            update(entry, guest, state, phase, standing, stock)
             current[guest.name] = entry
         end
     end
     for name, entry in pairs(guests) do if not current[name] then forget(entry) end end
     guests = current
-    return updated
 end
 
 function regen.rows(state, phase, status_row)
