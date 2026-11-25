@@ -9,5 +9,6 @@ namespace silverfish::native_host_dig
     void uninstall_hooks();
     void clear_scope();
     bool manages_buried_source(RC::Unreal::UObject* source);
+    void record_buried_product(RC::Unreal::UObject* package);
     void register_lua(RC::LuaMadeSimple::Lua&);
 }

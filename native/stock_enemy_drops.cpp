@@ -81,6 +81,7 @@ namespace
         U::FFrame* frame{};
         U::FWeakObjectPtr world, product_class;
         std::string source;
+        bool managed{};
     } buried;
     struct BoltObservation
     {
@@ -280,14 +281,14 @@ namespace
         auto* caller = frame.PreviousFrame();
         if (buried.frame || !base || !live(receiver) || !receiver->IsA(base) || frame.Object() != receiver ||
             frame.Node() != find<U::UFunction>(buried_graph) || !caller || caller->Object() != receiver ||
-            caller->Node() != find<U::UFunction>(buried_dig) ||
-            silverfish::native_host_dig::manages_buried_source(receiver)) return;
+            caller->Node() != find<U::UFunction>(buried_dig)) return;
         auto* source = static_cast<U::AActor*>(receiver);
         auto* world = source->GetWorld();
         auto* reward = field<U::FClassProperty>(source, STR("BurriedActor"));
         auto* type = reward ? reward->GetObjectPropertyValue(reward->ContainerPtrToValuePtr<void>(source)) : nullptr;
         if (!live(type) || !listen_instance(world) || !authority_in_level(source, world)) return;
-        buried = {&frame, world, type, RC::to_utf8_string(source->GetFullName())};
+        buried = {&frame, world, type, RC::to_utf8_string(source->GetFullName()),
+            silverfish::native_host_dig::manages_buried_source(receiver)};
     }
 
     void record_buried_spawn(Iteration& call, U::FFrame& frame)
@@ -298,6 +299,11 @@ namespace
         auto* world = static_cast<U::UWorld*>(scope.world.Get());
         auto* actor = finished_stock_spawn(frame);
         if (!actor || actor->GetClassPrivate() != scope.product_class.Get() || !listen_instance(world)) return;
+        if (scope.managed)
+        {
+            silverfish::native_host_dig::record_buried_product(actor);
+            return;
+        }
         auto* prop = find<U::UClass>(prop_path);
         const bool physics_prop = prop && actor->IsA(prop);
         if (physics_prop ? !authority_in_level(static_cast<U::AActor*>(actor), world) : !item_in_world(actor, world)) return;

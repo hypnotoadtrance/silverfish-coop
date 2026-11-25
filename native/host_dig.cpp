@@ -405,7 +405,6 @@ namespace
         U::FWeakObjectPtr world, pawn, driver, save, source, package, collector, collector_save;
         Clock::time_point lease{}, pickup_until{};
         LiveState state{LiveState::Arming}, before_pickup{LiveState::Unclaimed};
-        Census before{};
         Point impact{};
         std::int64_t serial{};
         bool inventory_called{}, dispatching_guest_pickup{};
@@ -667,9 +666,8 @@ namespace
             return;
         }
         live_dig.material = material_from_stock_frame(*caller);
-        live_dig.before = scene(ctx, hit);
         live_dig.impact = hit;
-        if (live_dig.material.empty() || live_dig.before.packages != 0)
+        if (live_dig.material.empty())
         {
             fail_live("stock_contact_proof_unavailable");
             call.PreventOriginalFunctionCall();
@@ -686,25 +684,17 @@ namespace
     {
         if (live_dig.state != LiveState::Contact) return;
         stock_wallet::Wallet flags;
-        const auto spawned = scene(ctx, live_dig.impact);
+        auto* package = live_dig.package.Get();
         std::string_view problem;
         if (!flags.bind(ctx.instance) || flags.flag_value(ctx.instance, buried_flag) != std::pair{1, true})
             problem = "stock_live_dig_spawn_flag_unverified";
         else if (authority(live_dig.source.Get()))
             problem = "stock_live_dig_source_retirement_unverified";
-        else if (spawned.packages != 1 || !valid_package(ctx, spawned.package))
+        else if (!exact(package, package_class) || !authority(package) ||
+                 static_cast<U::AActor*>(package)->GetWorld() != ctx.world ||
+                 static_cast<U::AActor*>(package)->GetLevel() != ctx.level)
             problem = "stock_live_dig_exact_package_unverified";
-        else if (spawned.holes != live_dig.before.holes + 1)
-            problem = "stock_live_dig_hole_unverified";
-        else if (spawned.incidental < live_dig.before.incidental || spawned.incidental > live_dig.before.incidental + 1)
-            problem = "stock_live_dig_incidental_unverified";
-        else if (!remember_package(spawned.package))
-            problem = "stock_live_dig_package_identity_unverified";
-        if (problem.empty())
-        {
-            live_dig.incidental = spawned.incidental - live_dig.before.incidental;
-            live_dig.state = LiveState::Unclaimed;
-        }
+        if (problem.empty()) live_dig.state = LiveState::Unclaimed;
         else if (Clock::now() >= live_dig.pickup_until) fail_live(problem);
     }
 
@@ -1497,6 +1487,13 @@ namespace silverfish::native_host_dig
     {
         return (ordinary && live_dig.state == LiveState::Contact && live_dig.source.Get() == source) ||
             (watch.pressed && source && source->GetPathName() == source_path);
+    }
+
+    void record_buried_product(U::UObject* package)
+    {
+        if (!ordinary || live_dig.state != LiveState::Contact || live_dig.package.Get()) return;
+        const auto ctx = bound_live();
+        if (ctx.world && valid_package(ctx, package)) remember_package(package);
     }
 
     void install_hooks()

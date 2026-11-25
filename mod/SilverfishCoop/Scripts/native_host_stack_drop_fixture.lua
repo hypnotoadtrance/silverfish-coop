@@ -69,7 +69,9 @@ local function stock_payload(item, quantity, partial)
     local path = valid(class) and class:GetFullName():match("^%S+ (/Game/%S+)$")
     if not drop_items.stock_actor_class(path) or not ammo then return end
     local defaults = class:GetCDO()
-    if not valid(defaults) or not same(defaults:GetClass(), class) or defaults.Important ~= false then return end
+    local sealed_package = path == "/Game/Classes/Items/Key_Items/Package_Item_FarmHouse.Package_Item_FarmHouse_C"
+    if not valid(defaults) or not same(defaults:GetClass(), class)
+        or (defaults.Important ~= false and not sealed_package) then return end
     if defaults.Stacks == true and (partial and ammo > quantity or not partial and ammo == quantity) then
         return class, ammo
     end
@@ -212,8 +214,9 @@ end
 function fixture.command(fields, state, phase)
     local command, guid = fields[2], fields[3]
     if command ~= menu_command and command ~= close_command then return end
-    if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") ~= "1"
-        or not maps[state.map] or phase ~= "hosting" or state.server ~= false or not state.listening
+    local testing = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+        or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
+    if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not testing or not maps[state.map] or phase ~= "hosting" or state.server ~= false or not state.listening
         or type(guid) ~= "string" or #guid ~= 32 or not guid:match("^[0-9A-F]+$") or not guid:find("[^0]") then
         error("host_stack_drop_menu_fixture_unavailable", 0)
     end

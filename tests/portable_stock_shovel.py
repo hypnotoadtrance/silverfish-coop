@@ -253,12 +253,12 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
                 host_run, lambda f: f.get("game", {}).get(dig.KEY, {}).get("state") == "escrowed", timeout=10)
         except RuntimeError as error:
             game = (await current_status(host_run)).get("game", {})
-            packages = await asyncio.gather(*(observe(seat, "quest-packages") for seat in (host, guest)))
+            probes = await asyncio.gather(*(observe(seat, "quest-packages") for seat in (host, guest)),
+                                          return_exceptions=True)
             raise AssertionError({"dig": game.get(dig.KEY), "diagnostic": game.get(dig.DIAGNOSTIC_KEY),
-                                  "stock_packages": packages, "input": result}) from error
-        finally:
-            if host_quest:
-                assert await observe(host, "host-release", "local") == "released"
+                                  "stock_packages": [str(probe) for probe in probes], "input": result}) from error
+        if host_quest:
+            assert await observe(host, "host-release", "local") == "released"
         package = settled["game"][dig.KEY]
         saved = runtime.read_json(host.campaign / "save" / "campaign.json")
         custody = saved["world"]["party"][dig.CUSTODY]
@@ -287,9 +287,9 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
             assert host_item["guid"] == owner["package_guid"], (host_item, owner)
             await wait_resident_status(guest_run, lambda frame: not projected(frame), timeout=10)
             checkpoint = campaign_save_hashes(host.campaign)
-            drop_press = await submit(host_run, native_host_stack_drop.FIXTURE,
-                                      target=f"{host_item['guid']}|1|context_menu")
-            assert drop_press["ok"], drop_press
+            drop_press = await host.bridge.command(
+                native_host_stack_drop.FIXTURE, host_item["guid"], "1", "context_menu")
+            assert drop_press["ack"]["message"] == "stock drop invoked without direct inventory mutation", drop_press
             async with asyncio.timeout(9):
                 while True:
                     current_host = await current_status(host_run)
@@ -300,6 +300,7 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
                     await asyncio.sleep(.08)
             drop, = drops
             assert not drop["error"], drop
+            await host.bridge.command(native_host_stack_drop.CLOSE_FIXTURE, host_item["guid"])
             shared = native_world_loot.player_drop_identity(drop["drop_id"])
             await wait_resident_status(guest_run, lambda frame: shared in frame["game"].get(native_world_loot.KEY, {}))
             await host.bridge.command(native_world_loot.APPROACH, shared, pawn, timeout=5)
