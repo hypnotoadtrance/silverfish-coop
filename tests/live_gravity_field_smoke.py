@@ -488,6 +488,13 @@ async def verify(work, family, observer_offering=None, *, placed_shadow=False, v
                            and not replicas[path]["collision"] and replicas[path]["role"] in (0, 1)
                            and math.dist(authority[path]["location"], replicas[path]["location"]) < 3 for path in paths)
                 assert len(family_actors(guest_frame, family)) == len(paths)
+
+                def psychic_scope_ready(view):
+                    game = view.get("game", {})
+                    pawn = game.get("pawns", {}).get("guest", {}).get("name")
+                    return game.get("native_guest_sickness", {}).get(pawn, {}).get("state") == "watching"
+
+                await wait(host, psychic_scope_ready, timeout=8)
                 try:
                     result = await verify_shadow(guest, host_box, guest_box, probe, placed=True)
                 finally:

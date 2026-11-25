@@ -6,7 +6,6 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local watching, fixture = {}, nil
-local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -14,7 +13,7 @@ end
 
 local function host_stock(state, phase)
     local host = state.local_pawn and state.local_pawn.pawn
-    local shadows = state.map == crossroads and type(SilverfishIsNativeShadowFeedbackTarget) == "function"
+    local shadows = type(SilverfishIsNativeShadowFeedbackTarget) == "function"
     if not (enabled or shadows) or phase ~= "hosting" or not state.listening or state.server == true
         or not valid(host) or not valid(state.world) or not valid(host.Save) then return end
     return host.Save
