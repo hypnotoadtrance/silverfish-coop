@@ -80,6 +80,18 @@ namespace silverfish::guest_weapon_profiles
         STR("/Game/Classes/Items/Ammo_30-06_Mine_BP.Ammo_30-06_Mine_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_30-06_Mine.Projectile_30-06_Mine_C"), 24, 1};
     inline constexpr StockAmmo thirty_06_tandem{3, STR("30-06_Tandem"),
         STR("/Game/Classes/Items/Ammo_30-06_Tandem_BP.Ammo_30-06_Tandem_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_30-06_Tandem.Projectile_30-06_Tandem_C"), 14, 3};
+    inline constexpr StockAmmo forty_mm_he{7, STR("40mm_HE"),
+        STR("/Game/Classes/Items/Ammo_40mmGrenade.Ammo_40mmGrenade_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_40mmGrenade_01.Projectile_40mmGrenade_01_C"), 1, 1};
+    inline constexpr StockAmmo forty_mm_flare{7, STR("40mm_Flare"),
+        STR("/Game/Classes/Items/Ammo_40mm_Flare.Ammo_40mm_Flare_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_40mm_Flare.Projectile_40mm_Flare_C"), 1, 1};
+    inline constexpr StockAmmo forty_mm_thermo{7, STR("40mm_Thermo"),
+        STR("/Game/Classes/Items/Ammo_40mm_Thermo.Ammo_40mm_Thermo_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_40mm_Thermo.Projectile_40mm_Thermo_C"), 1, 1};
+    inline constexpr StockAmmo forty_mm_gas{7, STR("40mm_Gas"),
+        STR("/Game/Classes/Items/Ammo_40mm_Gas.Ammo_40mm_Gas_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_40mm_Gas.Projectile_40mm_Gas_C"), 1, 1};
+    inline constexpr StockAmmo forty_mm_buckshot{7, STR("40mm_Buckshot"),
+        STR("/Game/Classes/Items/Ammo_40mm_BuckShot.Ammo_40mm_BuckShot_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_ShotGun_Pellet.Projectile_ShotGun_Pellet_C"), 1, 30};
+    inline constexpr StockAmmo forty_mm_lightning{7, STR("40mm_Lightning"),
+        STR("/Game/Classes/Items/Ammo_40mm_Lightning.Ammo_40mm_Lightning_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_40mm_Lightning.Projectile_40mm_Lightning_C"), 1, 1};
     inline constexpr std::array stock_ammo{
         &nine_mm_ball,
         &nine_mm_ap,
@@ -112,6 +124,12 @@ namespace silverfish::guest_weapon_profiles
         &thirty_06_he,
         &thirty_06_mine,
         &thirty_06_tandem,
+        &forty_mm_he,
+        &forty_mm_flare,
+        &forty_mm_thermo,
+        &forty_mm_gas,
+        &forty_mm_buckshot,
+        &forty_mm_lightning,
     };
 
     struct Profile
@@ -138,6 +156,7 @@ namespace silverfish::guest_weapon_profiles
         Profile{"nagant-scoped", STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C"), false, 0, 0, 0.0, false, nullptr, false},
         Profile{"obrez", STR("/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C"), false, 0, 0, 0.0, false, nullptr, false},
         Profile{"break-action-50", STR("/Game/Classes/Weapons/Wep_50BMP_BreakAction.Wep_50BMP_BreakAction_C"), true, 1, 1, 0.1, false, &fifty_cal_fmj, true},
+        Profile{"grenade-launcher", STR("/Game/Classes/Weapons/Wep_GrenadeLauncher_01.Wep_GrenadeLauncher_01_C"), true, 1, 1, 0.1, true, &forty_mm_he, true},
         Profile{"army-pistol", STR("/Game/Classes/Weapons/Wep_ArmyPistol.Wep_ArmyPistol_C"), true, 12, 1, 0.08, true, &nine_mm_ball, true},
         Profile{"pistol", STR("/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C"), true, 12, 1, 0.08, true, &nine_mm_ball, true},
         Profile{"rusty-pistol", STR("/Game/Classes/Weapons/Wep_RustyPistol.Wep_RustyPistol_C"), true, 8, 1, 0.1, true, &nine_mm_ball, true},

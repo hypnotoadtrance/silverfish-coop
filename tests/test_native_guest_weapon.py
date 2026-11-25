@@ -156,7 +156,7 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
             "army-pistol", "pistol", "pistol-02", "tac-pistol", "1911", "1911-fancy", "heavy-pistol",
             "rusty-pistol", "full-auto-shotgun", "full-auto-shotgun-02",
             "sg-71-a", "sg-71-b", "sg-71-a-suppressed", "model-1931", "fennec-57", "black-fox", "break-action-50",
-            "bolt-action-shotgun", "bolt-action-shotgun-suppressed", "sawn-off-shotgun",
+            "bolt-action-shotgun", "bolt-action-shotgun-suppressed", "sawn-off-shotgun", "grenade-launcher",
             "revolver-9mm", "revolver-01", "revolver-02", "revolver-03",
             *(kind for kind, *_ in (*guest_weapon_profiles.ORDINARY_WEAPONS, *guest_weapon_profiles.RELEASE_RIFLES)),
             *native_guest_weapon.LOKI_KINDS,

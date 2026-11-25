@@ -5541,6 +5541,7 @@ class Client:
                 guid, previous = weapon.get("guid"), weapon.get("before")
                 if (pawn and weapon.get("map") == area and isinstance(guid, str)
                         and native_guest_weapon.GUID.fullmatch(guid) and type(previous) is int):
+                    self.guest_ui.queue_stock_inventory(self)
                     view_mode = ("loki",) if weapon.get("status") == "underbarrel_equipped" else ()
                     try:
                         local_view = await self.bridge.command("native-guest-weapon-reload-view",
@@ -5671,8 +5672,6 @@ class Client:
         try:
             result = await self.gameplay_action("native-guest-weapon-reload", operation, target)
             self.control.event("native_guest_reload_input", operation_id=operation, sequence=sequence, **result)
-            if ammo:
-                self.guest_ui.queue_stock_inventory(self)
         except (ValueError, OSError, RuntimeError) as error:
             self.control.event("native_guest_reload_input_rejected", operation_id=operation, sequence=sequence, reason=str(error))
             return

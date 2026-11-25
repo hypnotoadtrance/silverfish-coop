@@ -85,6 +85,16 @@ MAGNUM_338_FMJ = StockAmmo("magnum_338_fmj", 5, "338Magnum_FMJ", "Ammo_338Magnum
 MAGNUM_338_AP = StockAmmo("magnum_338_ap", 5, "338Magnum_AP", "Ammo_338Magnum_AP_BP", "Projectile_338Mag_AP", 12)
 MAGNUM_338_FRAG = StockAmmo("magnum_338_frag", 5, "338Magnum_Frag", "Ammo_338Magnum_Frag_BP", "Projectile_338Mag_Frag", 12)
 MAGNUM_338_OP = StockAmmo("magnum_338_op", 5, "338Magnum_OP", "Ammo_338Magnum_OP_BP", "Projectile_338Mag_OP", 12)
+FORTY_MM_HE = StockAmmo("forty_mm_he", 7, "40mm_HE", "Ammo_40mmGrenade", "Projectile_40mmGrenade_01", 1)
+FORTY_MM_FLARE = StockAmmo("forty_mm_flare", 7, "40mm_Flare", "Ammo_40mm_Flare", "Projectile_40mm_Flare", 1)
+FORTY_MM_THERMO = StockAmmo("forty_mm_thermo", 7, "40mm_Thermo", "Ammo_40mm_Thermo", "Projectile_40mm_Thermo", 1)
+FORTY_MM_GAS = StockAmmo("forty_mm_gas", 7, "40mm_Gas", "Ammo_40mm_Gas", "Projectile_40mm_Gas", 1)
+FORTY_MM_BUCKSHOT = StockAmmo(
+    "forty_mm_buckshot", 7, "40mm_Buckshot", "Ammo_40mm_BuckShot", "Projectile_ShotGun_Pellet", 1, projectile_count=30,
+)
+FORTY_MM_LIGHTNING = StockAmmo(
+    "forty_mm_lightning", 7, "40mm_Lightning", "Ammo_40mm_Lightning", "Projectile_40mm_Lightning", 1,
+)
 STOCK_AMMO = (
     NINE_MM_BALL, NINE_MM_AP, NINE_MM_VAMP,
     FORTY_FIVE_BALL, FORTY_FIVE_HOLLOW_POINT, FORTY_FIVE_AIR_BURST, FORTY_FIVE_MICRO_FRAG,
@@ -92,6 +102,7 @@ STOCK_AMMO = (
     *SHOTGUN_AMMO, FIVE_SEVEN_AP, FIVE_SEVEN_HP, FIVE_SEVEN_INCENDIARY,
     MAGNUM_338_FMJ, MAGNUM_338_AP, MAGNUM_338_FRAG, MAGNUM_338_OP,
     FIFTY_CAL_FMJ, FIFTY_CAL_HEIAP, THIRTY_06_FMJ, THIRTY_06_INCENDIARY, THIRTY_06_HE, THIRTY_06_MINE, THIRTY_06_TANDEM,
+    FORTY_MM_HE, FORTY_MM_FLARE, FORTY_MM_THERMO, FORTY_MM_GAS, FORTY_MM_BUCKSHOT, FORTY_MM_LIGHTNING,
 )
 
 
@@ -280,6 +291,8 @@ FIREARMS = (
     Firearm("obrez", "Wep_Obrez_01"),
     Firearm("break-action-50", "Wep_50BMP_BreakAction", True,
             Magazine(1, 1, 0.1, ammo=FIFTY_CAL_FMJ, reload_first_stack=True)),
+    Firearm("grenade-launcher", "Wep_GrenadeLauncher_01", True,
+            Magazine(1, 1, 0.1, True, FORTY_MM_HE, reload_first_stack=True)),
     Firearm("army-pistol", "Wep_ArmyPistol", True, Magazine(12, 1, 0.08, True, reload_first_stack=True)),
     Firearm("pistol", "Wep_Pistol", True, Magazine(12, 1, 0.08, True, reload_first_stack=True)),
     Firearm("rusty-pistol", "Wep_RustyPistol", True, Magazine(8, 1, 0.1, True, reload_first_stack=True)),

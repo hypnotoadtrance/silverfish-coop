@@ -10,7 +10,7 @@ from tools.silverfish import native_inventory
 from tools.silverfish.control import submit
 from tools.silverfish.guest_weapon_profiles import (
     FIFTY_CAL_FMJ, FIFTY_CAL_HEIAP, FIVE_SIX_AP, FIVE_SIX_FMJ, FORTY_FIVE_BALL, FORTY_FIVE_HOLLOW_POINT,
-    NINE_MM_AP, NINE_MM_BALL, NINE_MM_VAMP, MAGNUM_338_AP, MAGNUM_338_FMJ, MAGNUM_338_OP,
+    NINE_MM_AP, NINE_MM_BALL, NINE_MM_VAMP, MAGNUM_338_AP, MAGNUM_338_FMJ, MAGNUM_338_OP, FORTY_MM_HE,
 )
 
 
@@ -33,7 +33,7 @@ async def verify_alternate_ammo(host, guest, pawn, probe):
         except TimeoutError as error:
             raise AssertionError(f"{action} returned {last!r}, expected {expected!r}") from error
 
-    async def stock_input(kind, frame, guid):
+    async def stock_input(kind, frame, guid, refusal=None):
         event = f"native_guest_{kind}_input"
         result = await submit(guest_run, f"native-guest-{kind}-input-fixture")
         assert result["ok"], result
@@ -42,9 +42,78 @@ async def verify_alternate_ammo(host, guest, pawn, probe):
             while True:
                 for row in await resident_events(guest_run, frame):
                     if row.get("sequence") == press["sequence"] and row["event"] in (event, event + "_rejected"):
+                        if refusal is not None:
+                            assert row["event"] == event + "_rejected" and row["reason"] == refusal, row
+                            return row
                         assert row["event"] == event and row["native_guest_weapon"]["guid"] == guid, row
                         return row["native_guest_weapon"]
                 await asyncio.sleep(.08)
+
+    async def verify_launcher():
+        seats = host, guest
+        assert await asyncio.gather(*(command(seat, "arm-grenade-launcher") for seat in seats)) == ["armed", "armed"]
+        guid = await command(host, "seed-peer")
+        await read(guest, "projected", guid)
+        assert await command(guest, "equip") == "selected"
+        await asyncio.gather(read(host, "peer-ready", f"{guid},1,1"), read(guest, "ready", f"{guid},1,1"))
+        await read(guest, "round", FORTY_MM_HE.item_path)
+        frame = await wait_resident_status(guest_run, lambda view: view.get("state") == "connected"
+            and view.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
+
+        reserve = await command(host, "seed-launcher-reserve")
+        reserve_guid, initial = reserve.split(",")
+        assert initial == "2", reserve
+        await read(guest, "reserve", reserve)
+        host_reserve = await command(host, "reserve")
+
+        async def fire():
+            assert await command(guest, "face-away") == "turned"
+            shot = await stock_input("primary", frame, guid)
+            assert (shot["before"], shot["after"], shot["projectiles"]) == (1, 0, 1), shot
+            await asyncio.gather(read(host, "peer-cycle-complete", f"{guid},0,0"), read(guest, "ready", f"{guid},0,0"))
+            return shot
+
+        async def inventory_receipt(key):
+            async with asyncio.timeout(10):
+                while True:
+                    for row in await resident_events(guest_run, frame):
+                        assert row["event"] != "native_stock_inventory_rejected", row
+                        result = row.get(key, {})
+                        if row["event"] == "native_stock_inventory_action" and result.get("guid") == guid:
+                            return result
+                    await asyncio.sleep(.05)
+
+        shots = [await fire()]
+        assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+        await wait_resident_status(guest_run, lambda view: view.get("game", {}).get(
+            "native_inventory_view", {}).get("state") == "stock")
+        assert await command(guest, f"launcher-unequip\t{guid}") == "launcher-unequip"
+        unequipped = await inventory_receipt(native_inventory.UNEQUIP_KEY)
+        assert (unequipped["slot"], unequipped["ammo"]) == (1, 0), unequipped
+        assert await command(guest, f"launcher-equip\t{guid}") == "launcher-equip"
+        equipped = await inventory_receipt(native_inventory.STORE_KEY)
+        assert equipped["slot"] == 1, equipped
+        assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+        await wait_resident_status(guest_run, lambda view: view.get("game", {}).get(
+            "native_inventory_view", {}).get("state") == "closed")
+        if await command(guest, "ready") == "waiting":
+            assert await command(guest, "equip") == "selected"
+        await asyncio.gather(read(host, "peer-ready", f"{guid},0,0"), read(guest, "ready", f"{guid},0,0"))
+        assert await command(host, "peer-reserve") == reserve
+        reloads = []
+        for before in (2, 1):
+            reloaded = await stock_input("reload", frame, guid)
+            assert (reloaded["before"], reloaded["after"], reloaded["reserve_before"], reloaded["reserve_after"]) == (
+                0, 1, before, before - 1), reloaded
+            reloads.append(reloaded)
+            await asyncio.gather(read(host, "peer-ready", f"{guid},1,1"), read(guest, "ready", f"{guid},1,1"))
+            expected = f"{reserve_guid},{before - 1}" if before > 1 else ""
+            await asyncio.gather(read(host, "peer-reserve", expected), read(guest, "reserve", expected))
+            shots.append(await fire())
+        empty = await stock_input("reload", frame, guid, refusal="no_matching_guest_ammo")
+        assert not await command(host, "peer-reserve") and not await command(guest, "reserve")
+        assert await command(host, "reserve") == host_reserve and campaign_save_hashes(host.campaign) == checkpoint
+        return {"shots": shots, "reloads": reloads, "unequipped": unequipped, "equipped": equipped, "empty": empty}
 
     async def verify_round(arm, base, alternate, rounds, second=None, earlier=None):
         selected, reserve_before = earlier or (alternate, alternate.fixture_units)
@@ -156,8 +225,12 @@ async def verify_alternate_ammo(host, guest, pawn, probe):
         finally:
             await asyncio.gather(command(host, "disarm"), command(guest, "disarm"), return_exceptions=True)
 
+    try:
+        launcher = await verify_launcher()
+    finally:
+        await asyncio.gather(command(host, "disarm"), command(guest, "disarm"), return_exceptions=True)
     results = [await run_case(*case) for case in cases]
     # The CSR's unloaded AP stack occupies an earlier Backpack slot than the new OP reserve.
     results.append(await run_case("arm-sniper-op", MAGNUM_338_FMJ, MAGNUM_338_OP, 10,
                                   earlier=(MAGNUM_338_AP, results[-1]["take_ammo"]["split"])))
-    return {"stock_alternate_ammo": {"pawn": pawn, "rounds": results}}
+    return {"stock_alternate_ammo": {"pawn": pawn, "rounds": results, "grenade_launcher": launcher}}

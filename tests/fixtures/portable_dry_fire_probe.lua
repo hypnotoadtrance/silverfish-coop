@@ -12,6 +12,8 @@ local reserve_9mm_ap = "/Game/Classes/Items/Ammo_9mm_AP_BP.Ammo_9mm_AP_BP_C"
 local arm_profiles = {
     arm = {"/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C", reserve_9mm, 9, 2},
     ["arm-rusty"] = {"/Game/Classes/Weapons/Wep_RustyPistol.Wep_RustyPistol_C", reserve_9mm, 9, 2},
+    ["arm-grenade-launcher"] = {"/Game/Classes/Weapons/Wep_GrenadeLauncher_01.Wep_GrenadeLauncher_01_C",
+        "/Game/Classes/Items/Ammo_40mmGrenade.Ammo_40mmGrenade_C", 1, 2},
     ["arm-light-ar"] = {"/Game/Classes/Weapons/Wep_LightAR_01.Wep_LightAR_01_C",
         "/Game/Classes/Items/Ammo_IntrRifle_BP.Ammo_IntrRifle_BP_C", 7, 3},
     ["arm-alternate"] = {"/Game/Classes/Weapons/Wep_1911.Wep_1911_C",
@@ -326,6 +328,60 @@ local function run(action, argument)
     end
     if action == "seed-local" then return seed(local_pawn, 0) end
     if action == "seed-peer" then return seed(peer, 1) end
+    if action == "seed-launcher-reserve" then
+        assert(observing() and local_pawn:HasAuthority() and peer:HasAuthority()
+            and weapon_path == arm_profiles["arm-grenade-launcher"][1] and not same(local_pawn.Save, peer.Save)
+            and read_reserve(peer) == "", "fixture requires an empty detached 40 mm reserve")
+        local class, out = asset(reserve_path), {}
+        asset(factory):MakeItemStack(class, 2, peer, out)
+        local row, pack = out.Item or out, peer.Save.PlayerBackpack
+        assert(same(row[item_class], class) and row[ammo] == 2)
+        pack[pack:GetArrayNum() + 1] = row
+        return read_reserve(peer)
+    end
+    if action == "launcher-unequip" or action == "launcher-equip" then
+        assert(observing() and not local_pawn:HasAuthority() and weapon_path == arm_profiles["arm-grenade-launcher"][1])
+        local function unwrap(value)
+            if type(value) == "userdata" and type(value.type) == "function" and value:type() == "RemoteUnrealParam" then
+                return value:get()
+            end
+            return value
+        end
+        local control = local_pawn.Controller
+        local menus = control.MenuStack
+        local screen = unwrap(menus[menus:GetArrayNum()])
+        assert(valid(screen) and same(screen:GetOwningPlayer(), control), "fixture requires the local stock backpack")
+        local manager = screen.ItemManager
+        local target = unwrap(manager.EquipSlots[slot])
+        assert(valid(target) and same(target.Target, local_pawn) and target.ItemIndex == slot - 1)
+        if action == "launcher-unequip" then
+            local card = target.ItemCard
+            assert(valid(card) and identify(card.Item) == argument and card.Item[ammo] == 0)
+            manager:OpenContextMenu(card)
+            local menu = manager.ItemContextMenu
+            assert(menu.Button_Unequip:IsVisible() and same(menu["Item Card"], card))
+            menu:BndEvt__ItemContextMenu_Button_Unequip_K2Node_ComponentBoundEvent_4_Pressed__DelegateSignature()
+        else
+            local cards = screen.BackpackPanel.Cards
+            local found = false
+            for i = 1, cards:GetArrayNum() do
+                local card = unwrap(cards[i])
+                if valid(card) and identify(card.Item) == argument then
+                    assert(card.Item[ammo] == 0)
+                    manager.HoveredCard = card
+                    manager:InitiateItemTake()
+                    manager:FinalTakeItem()
+                    assert(manager.HoldingItem and identify(manager.HeldItem) == argument)
+                    manager:InsertItem(target, 1)
+                    assert(not manager.HoldingItem)
+                    found = true
+                    break
+                end
+            end
+            assert(found, "fixture could not find the unloaded launcher in the backpack")
+        end
+        return action
+    end
     if action == "seed-alternate" then
         assert(observing() and (reserve_path == arm_profiles["arm-alternate"][2]
             or reserve_path == arm_profiles["arm-ammo-order"][2] or reserve_path == arm_profiles["arm-fifty-alt"][2]
