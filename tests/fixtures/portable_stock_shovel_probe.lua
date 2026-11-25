@@ -121,8 +121,10 @@
                 if same(context:get(), spade) then presses = presses + 1 end
             end)
             local aim = {Pitch=-86, Yaw=0, Roll=0}
-            pawn.Controller:SetControlRotation(aim)
-            pawn.Camera:K2_SetWorldRotation(aim, false, {}, true)
+            if fields[4] ~= "keep-aim" then
+                pawn.Controller:SetControlRotation(aim)
+                pawn.Camera:K2_SetWorldRotation(aim, false, {}, true)
+            end
             pawn:InpActEvt_IA_Use_Primary_K2Node_EnhancedInputActionEvent_36(library:MakeInputActionValueOfType(1, 0, 0, 0), 0, 0, input)
             pawn:InpActEvt_IA_Use_Primary_K2Node_EnhancedInputActionEvent_37(library:MakeInputActionValueOfType(0, 0, 0, 0), .05, .05, input)
             UnregisterHook(press_path, pre, post)
@@ -154,7 +156,8 @@
             assert(phase == "hosting")
             local x, y, z = geometry.X, geometry.Y, geometry.Z
             local target = assert(soil({X=x, Y=y, Z=z+55}, {X=x, Y=y, Z=z-46}), "Missing Contact stock soil was unavailable")
-            for bearing = 0, 315, 45 do
+            local first_bearing = fields[4] == "observer" and 180 or 0
+            for bearing = first_bearing, first_bearing + 315, 45 do
                 local angle = math.rad(bearing)
                 local sx, sy = x + 90 * math.cos(angle), y + 90 * math.sin(angle)
                 local floor = soil({X=sx, Y=sy, Z=z+150}, {X=sx, Y=sy, Z=z-170})
@@ -196,7 +199,8 @@
             if fields[4] == "find" or fields[4] == "next" or observing then
                 local radii = fields[4] == "next" and {400, 550, 800, 1100} or {150, 250, 400, 550, 800, 1100}
                 for _, radius in ipairs(radii) do
-                    for bearing = 0, 315, 45 do
+                    local first_bearing = fields[4] == "observer" and 180 or 0
+            for bearing = first_bearing, first_bearing + 315, 45 do
                         local dir = math.rad(bearing)
                         local x,y = origin.X+radius*math.cos(dir),origin.Y+radius*math.sin(dir)
                         local floor = soil({X=x,Y=y,Z=origin.Z+250},{X=x,Y=y,Z=origin.Z-550})

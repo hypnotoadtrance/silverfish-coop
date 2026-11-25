@@ -13,7 +13,7 @@ local tool_report
 local motions = {}
 local move_component = "/Script/Engine.KismetSystemLibrary:MoveComponentTo"
 local clock, math_library
-local motion_probe
+local motion_probe, preview
 
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -148,6 +148,15 @@ local function apply(actor, arrow, expected)
     actor.Locked, actor.LockBroken, actor.Open = expected[1], expected[2], expected[3]
 end
 
+local function clear_preview()
+    local prior = preview
+    preview = nil
+    if not prior or not valid(prior.actor) or prior.actor:IsActorBeingDestroyed() then return end
+    if valid(prior.panel) and prior.hidden then prior.panel:SetVisibility(true, false) end
+    if valid(prior.mesh) then prior.mesh:K2_DestroyComponent(prior.actor) end
+    if valid(prior.pivot) then prior.pivot:K2_DestroyComponent(prior.actor) end
+end
+
 local function animate(name, motion, now)
     if not valid(motion.arrow) or not valid(motion.actor) or motion.actor:IsActorBeingDestroyed()
         or not same(motion.actor:GetWorld(), active_world) then
@@ -170,12 +179,90 @@ local function animate(name, motion, now)
         Y = from.location.Y + (goal.location.Y - from.location.Y) * alpha,
         Z = from.location.Z + (goal.location.Z - from.location.Z) * alpha}
     motion.arrow:K2_SetRelativeLocationAndRotation(vector, angles, false, {}, true)
-    if motion_probe and name == motion_probe.name and not motion_probe.first and motion.actor.Open ~= motion.opens
+    if motion_probe and name == motion_probe.name and motion.actor.Open ~= motion.opens
         and (math.abs((angles.Yaw - from.rotation.Yaw + 180) % 360 - 180) > .5
             or math.abs(vector.Z - from.location.Z) > .5) then
-        motion_probe.first = (now - motion_probe.pressed) * 1000
+        local key = motion.pivot and "preview" or "first"
+        if not motion_probe[key] then
+            motion_probe[key] = (now - motion_probe.pressed) * 1000
+            if key == "preview" then
+                local real = pose(motion.actor, motion.actor.Arrow)
+                motion_probe.preview_safe = matches(real, motion_probe.before)
+                    and motion.panel:GetCollisionEnabled() == motion_probe.collision
+                    and motion.panel:IsVisible() == false and motion.mesh:IsVisible()
+                    and motion.mesh:GetCollisionEnabled() == 0
+            end
+        end
     end
-    if now >= motion.start + motion.duration + .15 then motions[name] = nil end
+    if not motion.pivot and now >= motion.start + motion.duration + .15 then motions[name] = nil end
+end
+
+local function preview_component(entry, field, class, parent, transform)
+    local actor = entry.actor
+    local component = actor:AddComponentByClass(stock_class(class), true, transform, true)
+    if not valid(component) then return end
+    entry[field] = component
+    if field == "mesh" then
+        component:SetCollisionEnabled(0)
+        component:SetGenerateOverlapEvents(false)
+        if not component:SetStaticMesh(entry.panel.StaticMesh) then return end
+        for index = 0, math.min(entry.panel:GetNumMaterials(), 8) - 1 do
+            local material = entry.panel:GetMaterial(index)
+            if valid(material) then component:SetMaterial(index, material) end
+        end
+    end
+    component:SetMobility(2)
+    actor:FinishAddComponent(component, true, transform)
+    if not component:K2_AttachToComponent(parent, FName("None", EFindName.FNAME_Find), 0, 0, 0, false) then return end
+    component:K2_SetRelativeTransform(transform, false, {}, true)
+    return component
+end
+
+local function start_preview(name)
+    local actor = actors and actors[name]
+    if not valid(actor) then
+        local path = name:match("^[%w_]+ (/Game/[%w_/]+%.[%w_]+:PersistentLevel%.[%w_]+)$")
+        actor = path and StaticFindObject(path)
+    end
+    if identity(actor, active_world) ~= name or actor.Locked ~= false or motions[name] then return end
+    local arrow, panel = components(actor)
+    if not arrow or not panel:IsVisible() or panel.bHiddenInGame or not valid(panel.StaticMesh) then return end
+    local opens, duration = not actor.Open, actor["Over Time"]
+    local transform = opens and actor.OpenTransform or actor.CloseTransform
+    if not transform or not finite(duration, 3) or duration < .06 then return end
+    local before = pose(actor, arrow)
+    if not before then return end
+    local rotation, location = math_library:Quat_Rotator(transform.Rotation), transform.Translation
+    if not finite(rotation.Pitch, 360) or not finite(rotation.Yaw, 360) or not finite(rotation.Roll, 360)
+        or not finite(location.X, 10000) or not finite(location.Y, 10000) or not finite(location.Z, 10000) then return end
+    local now = clock:GetRealTimeSeconds(active_world)
+    local entry = {name = name, actor = actor, panel = panel, opens = opens, start = now,
+        deadline = now + .7, duration = duration, ease = opens and 3 or 1, shortest = true,
+        from = {location = {X = before[7], Y = before[8], Z = before[9]},
+            rotation = {Pitch = before[4], Yaw = before[5], Roll = before[6]}},
+        goal = {location = {X = location.X, Y = location.Y, Z = location.Z},
+            rotation = {Pitch = rotation.Pitch, Yaw = rotation.Yaw, Roll = rotation.Roll}}}
+    preview = entry
+    local root = actor.RootComponent
+    local pivot = preview_component(entry, "pivot", "/Script/Engine.SceneComponent", root,
+        math_library:MakeRelativeTransform(arrow:K2_GetComponentToWorld(), root:K2_GetComponentToWorld()))
+    if not pivot then return end
+    entry.arrow = pivot
+    local mesh = preview_component(entry, "mesh", "/Script/Engine.StaticMeshComponent", pivot,
+        math_library:MakeRelativeTransform(panel:K2_GetComponentToWorld(), arrow:K2_GetComponentToWorld()))
+    if not mesh then return end
+    -- Only the stock panel's visibility changes. Its collision keeps the host's pose.
+    entry.hidden = true
+    panel:SetVisibility(false, false)
+    return true
+end
+
+function doors.preview_input(pawn, target)
+    local name = type(target) == "string" and target:match("^stock%-door:(.+)$")
+    if not name or preview or active_phase ~= "connected" or not same(active_world, pawn:GetWorld())
+        or not valid(clock) or not valid(math_library) then return end
+    local ok, started = pcall(start_preview, name)
+    if not ok or not started then pcall(clear_preview) end
 end
 
 function doors.play_motion(state, pawn, fields)
@@ -197,6 +284,17 @@ function doors.play_motion(state, pawn, fields)
     if (listener.X - hinge.X)^2 + (listener.Y - hinge.Y)^2 + (listener.Z - hinge.Z)^2 > 12000^2 then return false end
     local before = pose(actor, arrow)
     if not before then return false end
+    if preview and preview.name == name then
+        local goal = preview.goal
+        if preview.opens ~= opens or math.abs(goal.location.X - x) > .05 or math.abs(goal.location.Y - y) > .05
+            or math.abs(goal.location.Z - z) > .05 or math.abs((goal.rotation.Pitch - pitch + 180) % 360 - 180) > .05
+            or math.abs((goal.rotation.Yaw - yaw + 180) % 360 - 180) > .05
+            or math.abs((goal.rotation.Roll - roll + 180) % 360 - 180) > .05 then
+            clear_preview()
+        else
+            preview.deadline = math.max(preview.deadline, clock:GetRealTimeSeconds(state.world) + duration + .2)
+        end
+    end
     motions[name] = {actor = actor, arrow = arrow, opens = opens, duration = duration, ease = ease,
         shortest = shortest == "1", start = clock:GetRealTimeSeconds(state.world), from = {
             location = {X = before[7], Y = before[8], Z = before[9]},
@@ -243,7 +341,12 @@ local function project(fields, state, phase)
         end
         error("stock_door_projection_readback_unavailable", 0)
     end
-    for name in pairs(updates) do motions[name] = nil end
+    for name, row in pairs(updates) do
+        motions[name] = nil
+        if preview and preview.name == name and (row.expected[1] or row.expected[3] == preview.opens) then
+            clear_preview()
+        end
+    end
     return "stock door flags and hinge transform synchronized" .. (#deferred > 0 and "|" .. table.concat(deferred, "|") or "")
 end
 
@@ -300,6 +403,18 @@ function doors.start(report_motion)
         end)
     end
     LoopInGameThreadWithDelay(16, function()
+        if preview then
+            local ok, alive = pcall(function()
+                if active_phase ~= "connected" or not valid(active_world) or not valid(preview.pivot)
+                    or not valid(preview.actor) or preview.actor:IsActorBeingDestroyed()
+                    or not same(active_world, preview.actor:GetWorld()) then return false end
+                local now = clock:GetRealTimeSeconds(active_world)
+                if now >= preview.deadline then return false end
+                if now <= preview.start + preview.duration + .05 then animate(preview.name, preview, now) end
+                return true
+            end)
+            if not ok or not alive then pcall(clear_preview) end
+        end
         if next(motions) then
             if active_phase ~= "connected" or not valid(active_world) then
                 motions = {}
@@ -404,7 +519,8 @@ function doors.input_fixture(state, phase, target, pawn, dispatch)
     end
     require("native_loot_crate_input").stock_focus(pawn, actor.Box_Knob, function()
         if doors.focused_target(pawn) ~= "stock-door:" .. target then error("stock_door_fixture_missing_focus", 0) end
-        motion_probe = {name = target, pressed = clock:GetRealTimeSeconds(state.world)}
+        motion_probe = {name = target, pressed = clock:GetRealTimeSeconds(state.world),
+            before = pose(actor, actor.Arrow), collision = actor.DoorMesh:GetCollisionEnabled()}
         dispatch()
     end)
     return "stock door guest input dispatched"
@@ -419,7 +535,8 @@ local function fixture(fields, state, phase)
     elseif mode == "guard" and phase == "connected" and guest_fixture and actor.Locked == true then
         actor:PriedOpen_Lock()
     elseif mode == "motion" and phase == "connected" and guest_fixture and motion_probe and motion_probe.name == fields[4] then
-        return motion_probe.first and ("%.1f"):format(motion_probe.first) or "no movement before the final flag"
+        return ("%.1f|%.1f|%d"):format(motion_probe.first or -1, motion_probe.preview or -1,
+            motion_probe.preview_safe and 1 or 0)
     else
         error("stock_door_fixture_scope_unavailable", 0)
     end

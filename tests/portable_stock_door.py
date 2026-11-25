@@ -93,13 +93,14 @@ async def verify_stock_crossroads_door(host, guest, pawn):
                    and event.get("actor") == WOOD_DOOR and event.get("opens") is expected_open]
         assert motion["time_unix"] < receipt["time_unix"], (motion, receipt)
         measured = await guest.bridge.command(door.FIXTURE, "motion", WOOD_DOOR, update_status=False)
-        first = float(measured["ack"]["message"])
+        first, preview, collision_kept = map(float, measured["ack"]["message"].split("|"))
+        assert 0 <= preview < first and collision_kept == 1, measured
         assert await panel(host, query) is not expected_open
         assert await panel(guest, query) is not expected_open
-        return receipt, first
+        return receipt, first, preview
 
-    closed, close_motion = await toggle(False)
-    reopened, reopen_motion = await toggle(True)
+    closed, close_motion, close_preview = await toggle(False)
+    reopened, reopen_motion, reopen_preview = await toggle(True)
     replay = await submit(guest_run, door.ACTION, operation_id=closed["operation_id"], target=WOOD_DOOR)
     assert replay.get("ok") and replay[door.RESULT] == closed[door.RESULT]
     assert not await panel(host, query) and not await panel(guest, query)
@@ -108,5 +109,6 @@ async def verify_stock_crossroads_door(host, guest, pawn):
                                      "close": closed[door.RESULT], "open": reopened[door.RESULT],
                                      "guest_confirm_ms": [closed["elapsed_ms"], reopened["elapsed_ms"]],
                                      "guest_movement_start_ms": [close_motion, reopen_motion],
+                                     "guest_preview_start_ms": [close_preview, reopen_preview],
                                      "close_replay_preserved_open_door": True,
                                      "collision_verified_both_seats": True, "campaign_unchanged": True}}

@@ -6006,7 +6006,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  tutorial_dock_held_mask: bool = False, tutorial_dock_gait: bool = False,
                  tutorial_dock_shot_view: bool = False,
                  stock_bandage_revisit: bool = False, stock_shovel: bool = False, stock_shovel_loot: bool = False,
-                 stock_shovel_quest: bool = False,
+                 stock_shovel_quest: bool = False, stock_shovel_host_quest: bool = False,
                  stock_take_ammo: bool = False, stock_shotguns: bool = False, stock_alternate_ammo: bool = False,
                  stock_impact_cues: bool = False,
                  stock_avatar_tail: bool = False,
@@ -6147,7 +6147,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_crossroads_door, "crossroads", "stock_crossroads_door", verify_stock_crossroads_door),
         (stock_critters, "crossroads", "stock_critters", verify_stock_critters),
         (stock_shovel, "crossroads", "stock_shovel", lambda host, guest, pawn: verify_stock_shovel(
-            host, guest, pawn, loot=stock_shovel_loot, quest=stock_shovel_quest)),
+            host, guest, pawn, loot=stock_shovel_loot, quest=stock_shovel_quest, host_quest=stock_shovel_host_quest)),
         (stock_lingering_teleport, "crossroads" if crossroads_profile else "crossroads_anomaly", "stock_lingering_teleport",
          lambda host, guest, pawn: verify_stock_lingering_teleport(host, guest, pawn, portable_probe_command)),
         (stock_placed_item, "crossroads", "stock_placed_item", verify_stock_placed_item),
@@ -6594,7 +6594,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     "lab_east_wing_acid", "shopkeep"
                 } or stock_host_prop_observer and campaign == prop_campaign else ("save_and_quit",)
                 after_reconnect = None
-                if campaign == "crossroads" and stock_shovel_quest:
+                if campaign == "crossroads" and stock_shovel_quest and not stock_shovel_host_quest:
                     after_reconnect = check_shovel_reconnect
                 if campaign == "personal_consumable":
                     after_reconnect = check_personal_reconnect
@@ -6870,6 +6870,8 @@ if __name__ == "__main__":
                         help="also verify stock unearthed loot and props during the shovel check")
     parser.add_argument("--stock-shovel-quest", action="store_true",
                         help="verify stock guest excavation and pickup of the buried Missing Contact package")
+    parser.add_argument("--stock-shovel-host-quest", action="store_true",
+                        help="excavate the Missing Contact package as host and pick it up as guest")
     parser.add_argument("--stock-take-ammo", action="store_true",
                         help="unload guest firearms through the normal stock context menu")
     parser.add_argument("--stock-shotguns", action="store_true",
@@ -7038,6 +7040,8 @@ if __name__ == "__main__":
         parser.error("Use --stock-shovel-loot with --stock-shovel")
     if args.stock_shovel_quest and (not args.stock_shovel or args.stock_shovel_loot):
         parser.error("Use --stock-shovel-quest with --stock-shovel alone")
+    if args.stock_shovel_host_quest and not args.stock_shovel_quest:
+        parser.error("Use --stock-shovel-host-quest with --stock-shovel-quest")
     resident_check_options.add("stock_cooked_meal")
     resident_check_options.add("crossroads_profile")
     if args.crossroads_profile:
@@ -7123,7 +7127,7 @@ if __name__ == "__main__":
                        tutorial_dock_retaliation=args.tutorial_dock_retaliation, stock_bandage_revisit=args.stock_bandage_revisit,
                        stock_shovel=args.stock_shovel,
                        stock_shovel_loot=args.stock_shovel_loot,
-                       stock_shovel_quest=args.stock_shovel_quest,
+                       stock_shovel_quest=args.stock_shovel_quest, stock_shovel_host_quest=args.stock_shovel_host_quest,
                        stock_take_ammo=args.stock_take_ammo, stock_shotguns=args.stock_shotguns,
                        stock_impact_cues=args.stock_impact_cues,
                        stock_avatar_tail=args.stock_avatar_tail,

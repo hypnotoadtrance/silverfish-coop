@@ -131,7 +131,7 @@ async def verify_stock_shovel_reconnect(host, guest, evidence):
     evidence["stock_board_turn_in"] = completed
 
 
-async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False):
+async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, host_quest=False):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     current = await wait_resident_status(host_run, lambda f: f.get("game", {}).get("native_zone", {}).get("state") == "ready")
     if current["game"].get("map") != CROSSROADS:
@@ -172,12 +172,17 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False):
             staged = await observe(host, "aim", digger, "next" if advance else "find")
         # Keep the observing guest inside the stock actor's replication range.
         if host_dig:
-            staged = await observe(host, "aim", pawn, "watch-host")
+            if quest_dig:
+                staged, _ = (await observe(host, "quest-approach", pawn, "observer")).split(";", 1)
+            else:
+                staged = await observe(host, "aim", pawn, "watch-host")
         expected = tuple(map(float, staged.split(",")))
         await wait_resident_status(guest_run, lambda f: f.get("game", {}).get("pawns", {}).get("local", {}).get("location")
                                          and math.dist(f["game"]["pawns"]["local"]["location"], expected) <= 40, timeout=8)
         if quest_dig:
-            contacts = [await observe(guest, "quest-aim", site), await observe(host, "quest-aim", pawn, site)]
+            contacts = [await observe(host, "quest-aim", digger, site)]
+            if not host_dig:
+                contacts.append(await observe(guest, "quest-aim", site))
             assert all(math.dist(tuple(map(float, point.split(","))), native_host_dig.SITE) <= 45 for point in contacts)
         elif host_dig:
             contacts = [await observe(host, "aim", digger)]
@@ -186,7 +191,7 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False):
         if stock_choice:
             await observe(host, "loot", stock_choice)
         if host_dig:
-            dispatch = await observe(host, "host-press", digger)
+            dispatch = await observe(host, "host-press", digger, *(["keep-aim"] if quest_dig else []))
             assert dispatch == "pressed and released", dispatch
         else:
             tap = await submit(guest_run, "native-guest-primary-input-fixture")
@@ -234,12 +239,18 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False):
     if quest:
         ordinary = await dig_once()
         host_dig = await verify_host_dig()
-        result = await dig_once(quest_dig=True)
+        result = await dig_once(quest_dig=True, host_dig=host_quest)
+        digger_guid = item["guid"]
+        if host_quest:
+            equipped_spade, = [item for item in await stock_inventory(host_run)
+                               if item["class_path"] == native_guest_weapon.SPADE_PATH]
+            digger_guid = equipped_spade["guid"]
+        result["digger"] = "host" if host_quest else "guest"
         settled = await wait_resident_status(host_run, lambda f: f.get("game", {}).get(dig.KEY, {}).get("state") == "escrowed")
         package = settled["game"][dig.KEY]
         saved = runtime.read_json(host.campaign / "save" / "campaign.json")
         custody = saved["world"]["party"][dig.CUSTODY]
-        assert (package["spade_guid"], custody["spade_guid"]) == (item["guid"], item["guid"])
+        assert (package["spade_guid"], custody["spade_guid"]) == (digger_guid, digger_guid)
         assert (custody["source"], custody["flag_value"], custody["package_guid"]) == (
             native_host_dig.SOURCE, 1, package["escrow_guid"])
         identity = dig.package_identity(custody["package_guid"])
@@ -263,7 +274,7 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False):
         collected = await wait_resident_status(host_run, lambda f: f.get("game", {}).get(dig.KEY, {}).get("state") == "owned")
         owned = collected["game"][dig.KEY]
         assert (owned["escrow_guid"], owned["spade_guid"], owned["collector"]) == (
-            package["escrow_guid"], item["guid"], pawn), owned
+            package["escrow_guid"], digger_guid, pawn), owned
         saved = runtime.read_json(host.campaign / "save" / "campaign.json")
         owner = saved["world"]["party"][dig.CUSTODY]
         collector = shown["character_id"]
@@ -277,8 +288,9 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False):
         guest_package, = sealed_packages(guest_after)
         assert (guest_package["guid"], guest_package["source"], guest_package["quantity"]) == (
             owned["package_guid"], "backpack", 1), guest_package
+        check = "stock_missing_contact_host_dig" if host_quest else "stock_missing_contact_guest_dig"
         return {"stock_shovel": ordinary, "stock_host_shovel": host_dig,
-                "stock_missing_contact_guest_dig": {**result, "package": package, "custody": custody,
+                check: {**result, "package": package, "custody": custody,
                                                      "world_actors_before_pickup": raw_packages, "guest_pickup": owned,
                                                      "collector": collector, "guest_inventory_item": guest_package,
                                                      "host_inventory_preserved": True, "second_pickup_refused": True}}

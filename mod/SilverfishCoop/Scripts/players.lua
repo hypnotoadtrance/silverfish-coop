@@ -111,6 +111,7 @@ local function write_interaction(pawn, pickup_source, pressed_component)
     input_sequence = input_sequence + 1
     local record = "interact\t" .. tostring(input_sequence) .. (target and "\t" .. target or "") .. "\n"
     if type(SilverfishEnqueueLocalBridgeInput) == "function" and SilverfishEnqueueLocalBridgeInput(record) then
+        native_stock_door.preview_input(pawn, target)
         return target
     end
     local file = io.open(input_file, "ab")
