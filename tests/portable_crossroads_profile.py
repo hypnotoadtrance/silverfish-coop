@@ -107,7 +107,8 @@ async def profile_world(host, guest, area, probe):
         profiles = await asyncio.gather(*(read(seat) for seat in seats.values()))
         for profile in profiles:
             timings = profile["timings"]
-            assert "command_mailbox" not in timings and "crate_inline_scan" not in timings, profile
+            for operation in ("command_mailbox", "crate_inline_scan", "npc_marker_class_lookup"):
+                assert operation not in timings, (operation, timings.get(operation))
             discoveries = timings["loose_discovery"]["count"]
             assert 0 < discoveries <= math.ceil(profile["seconds"] / .125) + 1, profile
         return dict(zip(seats, profiles, strict=True))

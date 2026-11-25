@@ -89,9 +89,11 @@ local function lingering_fixture(action, point, state, phase)
         local original, rotation = pawn:K2_GetActorLocation(), pawn:K2_GetActorRotation()
         local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
         local color = {R=0, G=0, B=0, A=0}
+        -- Leave room for the stock actor to wander during the motion sample.
+        local staging_radius = 2200
         for step = 0, 7 do
             local angle = step * math.pi / 4
-            local x, y = at.X + 950*math.cos(angle), at.Y + 950*math.sin(angle)
+            local x, y = at.X + staging_radius * math.cos(angle), at.Y + staging_radius * math.sin(angle)
             local floor = {}
             if trace:LineTraceSingle(pawn, {X=x, Y=y, Z=at.Z+300}, {X=x, Y=y, Z=at.Z-600},
                 0, false, {pawn, actor}, 0, floor, true, color, color, 0) then
