@@ -33,6 +33,7 @@ MAX_DROPS = 128
 MAX_ACTIVE = 4
 MAX_QUANTITY = 200
 WORN_DROP_ENTRIES = ("worn_drop_context_menu", "worn_drop_ctrl_click", "worn_drop_drag_to_floor")
+QUICK_DROP_ENTRIES = ("quick_drop_context_menu", "quick_drop_ctrl_click", "quick_drop_drag_to_floor")
 _RECORD_FIELDS = {"owner", "guid", "quantity", "class_path", "map", "location", "claim_id"}
 _MERGE_FIELDS = {"inventory_guid", "stack_merge"}
 _CLASS = re.compile(r"/Game/Classes/(?:[A-Za-z0-9_-]+/)*([A-Za-z0-9_-]+)\.\1_C\Z")
@@ -54,6 +55,8 @@ def parse_stock_action(fields, game):
             "context_menu": "drop", "ctrl_click": "drop"}.get(entry)
     if entry in WORN_DROP_ENTRIES:
         mode = "worn-drop"
+    elif entry in QUICK_DROP_ENTRIES:
+        mode = "quick-drop"
     if mode is None and entry.startswith("use-") and f"native-guest-{entry[4:]}" in CONSUMABLE_RESULTS:
         mode = "use"
     if (mode is None or (guid != "-" and not valid_guid(guid)) or (guid == "-") != (mode == "sort")
@@ -64,7 +67,8 @@ def parse_stock_action(fields, game):
             or (mode == "equip" and not 0 <= before <= 10)
             or (mode == "unequip" and not 1 <= before <= 10)
             or (mode == "worn-drop" and (amount != 1 or before not in (9, 10)))
-            or (mode not in ("split", "unload", "equip", "unequip", "worn-drop")
+            or (mode == "quick-drop" and (amount != 1 or not 1 <= before <= 8))
+            or (mode not in ("split", "unload", "equip", "unequip", "worn-drop", "quick-drop")
                 and before not in ((0, 1) if entry == MISSING_CONTACT_ENTRY else (0,)))):
         raise ValueError("Invalid stock backpack operation")
     result = dict(area=area, pawn=pawn, epoch=epoch, sequence=int(sequence), entry=entry, guid=guid,

@@ -179,6 +179,16 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
             await drop.settle_stock_action(*args)
         client.guest_ui.refresh.assert_awaited_once_with(client, layout_sequence="5")
 
+    def test_stock_quick_drop_receipts_qualify_a_single_item_and_exact_slot(self):
+        client = self.client()
+        for entry in record.QUICK_DROP_ENTRIES:
+            envelope = [record.STOCK_ACTION_ROW, MAP, PAWN, client.zone_epoch, "5", entry, GUID]
+            intent = record.parse_stock_action([*envelope, "1", "8"], client.last_game)
+            self.assertEqual((intent["mode"], intent["expected"]), ("quick-drop", 8))
+            for count, slot in (("1", "0"), ("1", "9"), ("2", "3")):
+                with self.assertRaises(ValueError):
+                    record.parse_stock_action([*envelope, count, slot], client.last_game)
+
     async def test_stock_unequip_returns_host_round_count_to_the_exact_open_screen(self):
         client = self.client()
         client.gameplay[native_inventory.UNEQUIP_CAPABILITY] = 1

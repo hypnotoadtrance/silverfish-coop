@@ -2,6 +2,7 @@
 #include "drop_item_class.hpp"
 #include "guest_drop_items.hpp"
 #include "guest_drop_maps.hpp"
+#include "guest_item.hpp"
 #include "guest_regen.hpp"
 #include "interaction_input.hpp"
 
@@ -194,30 +195,34 @@ namespace
             return result;
         }
 
-        const void* exact_row(U::UObject* save, const Guid& id, int worn_slot) const
+        const void* exact_row(U::UObject* save, const Guid& id, int slot) const
         {
             U::FScriptArrayHelper bag(pack, pack->ContainerPtrToValuePtr<void>(save));
             U::FScriptArrayHelper belt(equipment, equipment->ContainerPtrToValuePtr<void>(save));
             if (bag.Num() < 0 || bag.Num() > max_items || belt.Num() < 0 || belt.Num() > max_items) return nullptr;
-            for (int i = 0; i < belt.Num(); ++i)
-                if (identity(belt.GetRawPtr(i)) == id) return nullptr;
             const void* result{};
+            for (int i = 0; i < belt.Num(); ++i)
+                if (identity(belt.GetRawPtr(i)) == id)
+                {
+                    if (slot != i || slot >= 8) return nullptr;
+                    result = belt.GetRawPtr(i);
+                }
             const auto* head = helmet->ContainerPtrToValuePtr<void>(save);
             const auto* chest = armor->ContainerPtrToValuePtr<void>(save);
             if (identity(head) == id)
             {
-                if (worn_slot != 8) return nullptr;
+                if (result || slot != 8) return nullptr;
                 result = head;
             }
             if (identity(chest) == id)
             {
-                if (worn_slot != 9) return nullptr;
+                if (result || slot != 9) return nullptr;
                 result = chest;
             }
             for (int i = 0; i < bag.Num(); ++i)
                 if (const auto* entry = bag.GetRawPtr(i); identity(entry) == id)
                 {
-                    if (result || worn_slot >= 0) return nullptr;
+                    if (result || slot >= 0) return nullptr;
                     result = entry;
                 }
             return result;
@@ -492,24 +497,24 @@ namespace
             (arguments != 5 && (arguments != 6 || !lua.is_integer(6))) ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3) || !lua.is_string(4) || !lua.is_integer(5))
             return reply(lua, false, "native_guest_stack_drop_scope_unavailable");
-        const auto worn_slot = arguments == 6 ? lua.get_integer(6) : -1;
+        const auto slot = arguments == 6 ? lua.get_integer(6) : -1;
         const auto pawn = lua.get_integer(), save = lua.get_integer(), frozen = lua.get_integer();
         const auto id = parse_guid(lua.get_string());
         const auto count = lua.get_integer();
         if (pawn <= 0 || save <= 0 || frozen <= 0 || frozen == save ||
             id == Guid{} || count < 1 || count > max_rounds ||
-            (arguments == 6 && ((worn_slot != 8 && worn_slot != 9) || count != 1)))
+            (arguments == 6 && (slot < 0 || slot > 9 || count != 1)))
             return reply(lua, false, "native_guest_stack_drop_arguments_unqualified");
         Inventory inventory;
         if (!inventory.bound()) return reply(lua, false, "native_guest_stack_drop_inventory_schema");
         const auto owner = owners(pawn, save, frozen, inventory);
         if (!owner.pawn) return reply(lua, false, "native_guest_stack_drop_exact_owner_unavailable");
-        const auto* row = inventory.exact_row(owner.frozen, id, static_cast<int>(worn_slot));
+        const auto* row = inventory.exact_row(owner.frozen, id, static_cast<int>(slot));
         namespace items = silverfish::native_guest_drop_items;
         auto* type = U::Cast<U::UClass>(object_value(inventory.klass, row));
         const auto stacks = silverfish::drop_item_class::stacks(type);
-        if (!stacks || (worn_slot >= 0 && *stacks) ||
-            !inventory.same_row(row, inventory.exact_row(owner.live_save, id, static_cast<int>(worn_slot))) ||
+        if (!stacks || (slot >= 0 && *stacks) ||
+            !inventory.same_row(row, inventory.exact_row(owner.live_save, id, static_cast<int>(slot))) ||
             inventory.never_drop->GetPropertyValueInContainer(row))
             return reply(lua, false, "native_guest_stack_drop_stock_item_row_unqualified");
         const bool stack = *stacks;
@@ -517,6 +522,18 @@ namespace
         const bool nine_mm = display == &items::stacks.front();
         const bool food = display && display->kind == items::StackKind::food;
         const auto stored = inventory.quantity->GetPropertyValueInContainer(row);
+        const bool quick = slot >= 0 && slot < 8;
+        const auto ammo = quick ? silverfish::native_guest_item::quick_drop_ammo(
+            owner.pawn, owner.live_save, type, static_cast<int>(slot), stored) : std::optional{stored};
+        if (!ammo) return reply(lua, false, "native_guest_stack_drop_live_equipment_unqualified");
+        Value updated;
+        if (*ammo != stored)
+        {
+            updated = copy_value(inventory.row, row);
+            if (!updated) return reply(lua, false, "native_guest_stack_drop_stock_inventory_snapshot");
+            inventory.quantity->SetPropertyValueInContainer(updated.get(), *ammo);
+            row = updated.get();
+        }
         auto* defaults = type->GetClassDefaultObject().Get();
         if ((stack && stored != count) || (!stack && count != 1))
             return reply(lua, false, food ? "native_guest_stack_drop_stock_food_row_unqualified" :
@@ -526,7 +543,7 @@ namespace
         auto* weapon = find<U::UClass>(weapon_base_path);
         auto* magazine = weapon && type->IsChildOf(weapon) ? field<U::FIntProperty>(defaults, STR("MagSize")) : nullptr;
         const auto capacity = magazine ? magazine->GetPropertyValueInContainer(defaults) : 0;
-        if (capacity > 0 && (stack || capacity > max_rounds || stored < 0 || stored > capacity ||
+        if (capacity > 0 && (stack || capacity > max_rounds || *ammo < 0 || *ammo > capacity ||
             !field<U::FIntProperty>(defaults, STR("Ammo"))))
             return reply(lua, false, "native_guest_stack_drop_stock_weapon_row_unqualified");
         auto* tick = type->GetFunctionByNameInChain(U::FName(STR("ReceiveTick")));
@@ -630,7 +647,7 @@ namespace
         if (qualification.empty() && capacity > 0)
         {
             auto* ammo_property = field<U::FIntProperty>(spawned, STR("Ammo"));
-            if (!ammo_property || ammo_property->GetPropertyValueInContainer(spawned) != stored)
+            if (!ammo_property || ammo_property->GetPropertyValueInContainer(spawned) != *ammo)
                 qualification = "native_guest_stack_drop_stock_weapon_magazine_changed";
         }
         auto reflected = qualification.empty() ? converted(inventory, spawned, owner.pawn) : Value{};
@@ -667,7 +684,8 @@ namespace
         lua.set_integer(count);
         for (auto axis : location) lua.set_number(axis);
         lua.set_string(RC::to_utf8_string(type->GetPathName()));
-        return 9;
+        if (quick) lua.set_integer(*ammo);
+        return quick ? 10 : 9;
     }
 
     int generic_drop_capability(const Lua& lua)

@@ -5367,6 +5367,51 @@ async def verify_stock_unequip(first, second, evidence):
         assert await portable_probe_command(guest.bridge, probe, "guest-worn-state") == f"{mask},-"
         evidence["guest_equipped_reclaimed_face_mask"] = equip
         assert saves() == before, "The Face Mask pickup and equip wrote a save before a checkpoint"
+
+        started = time.time()
+        assert await portable_probe_command(guest.bridge, probe, "guest-reequip-pistol") == "pressed"
+        await witness("native_stock_inventory_action", native_inventory.STORE_KEY, ids[0], since=started)
+        await close_stock()
+        started = time.time()
+        assert await portable_probe_command(guest.bridge, probe, "guest-select-pistol") == "held"
+        await witness("native_guest_equipment_selected", "native_guest_weapon", ids[0], since=started)
+        assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+        await leaves_stock_open()
+        evidence["guest_quick_drop"] = []
+        for guid, slot, gesture in ((ids[2], utility_slot, "inactive"), (ids[0], 1, "active")):
+            if gesture == "active":
+                assert await portable_probe_command(host.bridge, probe, f"remote-quick-ammo\t{pawn}") == "3,2"
+            assert await portable_probe_command(guest.bridge, probe, f"guest-drop-{gesture}\t{guid}") == "pressed"
+            accepted = await witness("native_stock_inventory_action", native_guest_drop.RESULT, guid)
+            assert accepted["stock_inventory_proof"] == f"verified stock world drop from slot {slot}", accepted
+            receipt = accepted[native_guest_drop.RESULT]
+            identity = native_world_loot.player_drop_identity(receipt["drop_id"])
+            for run in (host_run, guest_run):
+                await wait_resident_status(run, lambda frame:
+                    identity in frame.get("game", {}).get(native_world_loot.KEY, {}))
+            remaining = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
+            assert all(row["guid"] != guid for row in remaining)
+            if gesture == "active":
+                assert await portable_probe_command(guest.bridge, probe, "guest-quick-retired") == "true"
+                assert await portable_probe_command(host.bridge, probe, f"remote-quick-retired\t{pawn}") == "true"
+            host_state = await host.bridge.wait_for(lambda frame: identity in frame.get(native_world_loot.KEY, {}))
+            local_pawn = host_state["pawns"]["local"]["name"]
+            await host.bridge.command(native_world_loot.APPROACH, identity, local_pawn, timeout=5)
+            picked = await host.bridge.command(native_world_loot.FIXTURE, identity, timeout=5)
+            assert picked["ack"]["message"] == "stock world loot interaction intercepted", picked["ack"]
+            for run in (host_run, guest_run):
+                await wait_resident_status(run, lambda frame:
+                    identity not in frame.get("game", {}).get(native_world_loot.KEY, {})
+                    and receipt["drop_id"] not in frame.get("gameplay", {}).get("native_guest_stack_drops", {}))
+            host_items = (await submit(host_run, "native-inventory-list"))["native_inventory"]["items"]
+            recovered, = [row for row in host_items if row["guid"] == guid]
+            assert (recovered["source"], recovered["class_path"], recovered["quantity"]) == (
+                "backpack", receipt["class_path"], 1)
+            rounds = int(await portable_probe_command(host.bridge, probe, f"host-read-quick-drop\t{guid}"))
+            if gesture == "active":
+                assert rounds == 2, "The drop used the guest's or saved round count instead of the live host magazine"
+            evidence["guest_quick_drop"].append({"entry": gesture, "slot": slot, "receipt": receipt, "ammo": rounds})
+        assert saves() == before, "Quick-slot drops or pickup wrote a save before a checkpoint"
         await close_stock()
         action = "native-guest-save-collection-fixture"
         response = await host.bridge.command(action, "start")

@@ -764,7 +764,8 @@ sync_stock = function(current, state, phase, allowed)
     stock_drop = {context = current, screen = session.screen, save = save, epoch = session.epoch, sequence = sequence,
         guid = entry == "sort" and "-" or guid, quantity = quantity, entry = entry, expected = expected,
         sort = entry == "sort", split = (entry == "split" or entry == "take-ammo") and quantity or nil,
-        unload = entry == "take-ammo", equip = entry == "equip", worn_drop = entry:match("^worn_drop_") ~= nil, live = true}
+        unload = entry == "take-ammo", equip = entry == "equip",
+        slot_drop = entry:match("^worn_drop_") ~= nil or entry:match("^quick_drop_") ~= nil, live = true}
     -- Release the native input latch after applying a personal move. The oldest report
     -- still goes first. A world action captured behind the moves keeps the latch.
     pcall(preview_stock_layout, stock_drop)
@@ -831,12 +832,13 @@ local function finish_stock_drop(fields, current, state, phase)
         and integer(fields[6], 9)
     local rounds = source and fields[7]:match("^%-?%d+$") and math.tointeger(fields[7])
     local unequipped = source and pending.expected == source + 1 and rounds and rounds >= -1 and rounds <= 2147483647
-    local dropped_worn = pending and pending.worn_drop and remaining == 0 and (pending.expected == 9 or pending.expected == 10)
+    local dropped_slot = pending and pending.slot_drop and remaining == 0 and pending.expected
+        and pending.expected >= 1 and pending.expected <= 10
     if (not split and not equipped and not unequipped and #fields ~= 5) or not pending or not same_context(current, pending.context)
         or fields[3] ~= pending.epoch or integer(fields[4], 9007199254740991) ~= pending.sequence
         or (not sorted and not split and not equipped and not unequipped
             and (not remaining or pending.sort or pending.split or pending.equip or pending.entry == "unequip"
-                or pending.worn_drop and not dropped_worn)
+                or pending.slot_drop and not dropped_slot)
             and fields[5] ~= "refused") then
         error("The stock inventory settlement belongs to another request", 0)
     end
@@ -865,22 +867,24 @@ local function finish_stock_drop(fields, current, state, phase)
         local finished, status
         if unequipped then
             finished, status = SilverfishFinishNativeGuestDropRequest(pawn, pending.epoch, pending.sequence, rounds)
-        elseif dropped_worn then
+        elseif dropped_slot then
             finished, status = SilverfishFinishNativeGuestDropRequest(pawn, pending.epoch, pending.sequence, 0)
         else
             finished, status = SilverfishFinishNativeGuestDropRequest(pawn, pending.epoch, pending.sequence)
         end
         if pending.live and finished and status == "screen_closed" then return "verified stock inventory settlement" end
-        if dropped_worn then
+        if dropped_slot then
             local widget = widget_at(pending.screen.ItemManager.EquipSlots, pending.expected)
-            local item = pending.expected == 9 and save.PlayerHelmet or save.PlayerArmor
-            if not finished or status ~= "refreshed" or not valid(widget) or widget.InventoryIndex ~= 1
-                or widget.ItemIndex ~= pending.expected - 9 or valid(item[item_class])
+            local index = pending.expected - 1
+            local quick = index < 8
+            local item = quick and save.PlayerEquipment[pending.expected] or index == 8 and save.PlayerHelmet or save.PlayerArmor
+            if not finished or status ~= "refreshed" or not valid(widget) or widget.InventoryIndex ~= (quick and 0 or 1)
+                or widget.ItemIndex ~= (quick and index or index - 8) or valid(item[item_class])
                 or stock_card_guid(widget.ItemCard) == pending.guid
                 or not stock_cards(pending.screen, save, pending.guid, 0) then
-                error("The stock worn slot did not reflect the settled drop: " .. tostring(status), 0)
+                error("The stock equipment slot did not reflect the settled drop: " .. tostring(status), 0)
             end
-            return ("verified stock world drop from slot %d"):format(pending.expected - 1)
+            return ("verified stock world drop from slot %d"):format(index)
         end
         if unequipped then
             if not finished or status ~= "refreshed" then

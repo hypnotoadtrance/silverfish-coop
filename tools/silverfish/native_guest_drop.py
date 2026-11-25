@@ -242,7 +242,7 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
             committed = (str(remaining),)
         else:
             worn = mode == "worn-drop"
-            if entry not in (record.WORN_DROP_ENTRIES if worn else ("context_menu", "ctrl_click")) or quantity < 1:
+            if entry not in (*record.WORN_DROP_ENTRIES, *record.QUICK_DROP_ENTRIES, "context_menu", "ctrl_click") or quantity < 1:
                 raise ValueError("The native action did not select an inventory drop")
             key, remaining = RESULT, 0
             receipt = (await client.gameplay_action(DROP, operation, f"{guid}|{quantity}")).get(key)

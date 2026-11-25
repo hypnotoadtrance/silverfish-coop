@@ -3543,6 +3543,19 @@ namespace
             boolean(actor, STR("bActorIsBeingDestroyed"), false);
     }
 
+    std::optional<int> equipment_ammo(const Context& context, int slot, int stored)
+    {
+        auto* selected = field<Unreal::FIntProperty>(context.save, STR("PlayerEquipIndex"));
+        if (!selected) return {};
+        auto* held = object(context.pawn, STR("EquipedItem"));
+        if (selected->GetPropertyValueInContainer(context.save) != slot || !live(held))
+            return stored >= -1 ? std::optional{stored} : std::nullopt;
+        auto* rounds = field<Unreal::FIntProperty>(held, STR("Ammo"));
+        if (!rounds || !held_for_unequip(context, held)) return {};
+        const auto loaded = rounds->GetPropertyValueInContainer(held);
+        return loaded >= -1 ? std::optional{loaded} : std::nullopt;
+    }
+
     int settle_lockpick(const Lua& lua)
     {
         const auto refuse = [&](std::string_view reason) { return result(lua, false, reason); };
@@ -3599,8 +3612,19 @@ namespace
         return result(lua, true, "spent");
     }
 
+    template <bool drop>
     int unequip_stock_equipment(const Lua& lua)
     {
+        int expected_ammo = -1;
+        if constexpr (drop)
+        {
+            if (lua.get_stack_size() != 5 || !lua.is_integer(5))
+                return result(lua, false, "native_inventory_unequip_refused_arguments");
+            const auto expected = lua.get_integer(5);
+            if (expected < -1 || expected > INT32_MAX)
+                return result(lua, false, "native_inventory_unequip_refused_ammo");
+            expected_ammo = static_cast<int>(expected);
+        }
         Context context;
         int slot = -1;
         if (!resolve(lua, context, nullptr, nullptr, nullptr, false, &slot).empty() || slot < 0 || !ready_pawn(context) ||
@@ -3620,21 +3644,15 @@ namespace
         const auto selected = inventory.selected->GetPropertyValueInContainer(context.save);
         auto* held = object(context.pawn, STR("EquipedItem"));
         auto* held_property = field<Unreal::FObjectProperty>(context.pawn, STR("EquipedItem"));
-        auto ammo = inventory.ammo->GetPropertyValueInContainer(inventory.item);
-        if (selected == slot && live(held))
-        {
-            auto* rounds = field<Unreal::FIntProperty>(held, STR("Ammo"));
-            if (!held_for_unequip(context, held) || !rounds)
-                return result(lua, false, "native_inventory_unequip_refused_held_item");
-            ammo = rounds->GetPropertyValueInContainer(held);
-        }
-        if (ammo < -1) return result(lua, false, "native_inventory_unequip_refused_ammo");
+        const auto ammo = equipment_ammo(context, slot, inventory.ammo->GetPropertyValueInContainer(inventory.item));
+        if (!ammo || (drop && *ammo != expected_ammo))
+            return result(lua, false, "native_inventory_unequip_refused_ammo");
         auto* bag = inventory.backpack->ContainerPtrToValuePtr<void>(context.save);
         auto* slots = inventory.equipment->ContainerPtrToValuePtr<void>(context.save);
         auto* stock_bag = inventory.backpack->ContainerPtrToValuePtr<void>(context.stock);
         auto* stock_slots = inventory.equipment->ContainerPtrToValuePtr<void>(context.stock);
         Unreal::FScriptArrayHelper items(inventory.backpack, bag), equipment(inventory.equipment, slots);
-        if (items.Num() >= max_inventory || equipment.Num() < quick_slots || !held_property ||
+        if ((!drop && items.Num() >= max_inventory) || equipment.Num() < quick_slots || !held_property ||
             object(context.pawn, STR("As Game Instance FP")) != context.instance)
             return result(lua, false, "native_inventory_unequip_refused_layout");
         RemoveEquipmentCall remove;
@@ -3656,13 +3674,18 @@ namespace
         const auto host_selected = inventory.selected->GetPropertyValueInContainer(context.stock);
         Unreal::FScriptArrayHelper staged_items(inventory.backpack, proposed_bag.get());
         Unreal::FScriptArrayHelper staged_slots(inventory.equipment, proposed_slots.get());
-        auto* returned = staged_items.GetRawPtr(staged_items.AddValue());
-        inventory.type->CopyCompleteValue(returned, inventory.item);
-        if (!inventory.type->Identical(returned, inventory.item) ||
-            !payload->Identical(payload->ContainerPtrToValuePtr<void>(returned),
-                                payload->ContainerPtrToValuePtr<void>(inventory.item)) || !ownership_current(context))
+        if constexpr (!drop)
+        {
+            auto* returned = staged_items.GetRawPtr(staged_items.AddValue());
+            inventory.type->CopyCompleteValue(returned, inventory.item);
+            if (!inventory.type->Identical(returned, inventory.item) ||
+                !payload->Identical(payload->ContainerPtrToValuePtr<void>(returned),
+                                    payload->ContainerPtrToValuePtr<void>(inventory.item)))
+                return result(lua, false, "native_inventory_unequip_refused_staging");
+            inventory.ammo->SetPropertyValueInContainer(returned, *ammo);
+        }
+        if (!ownership_current(context))
             return result(lua, false, "native_inventory_unequip_refused_staging");
-        inventory.ammo->SetPropertyValueInContainer(returned, ammo);
         inventory.type->CopyCompleteValue(staged_slots.GetRawPtr(slot), empty.get());
 
         const Unreal::FWeakObjectPtr previous_held{held};
@@ -3682,15 +3705,16 @@ namespace
         // Preserve anything that stock FindNextEquipment installed.
         if (selected == slot && held && object(context.pawn, STR("EquipedItem")) == held)
             held_property->SetObjectPropertyValue(held_property->ContainerPtrToValuePtr<void>(context.pawn), nullptr);
-        inventory.backpack->CopyCompleteValue(bag, proposed_bag.get());
+        if constexpr (!drop)
+            inventory.backpack->CopyCompleteValue(bag, proposed_bag.get());
         Inventory relocated;
         if (!inventory.backpack->Identical(proposed_bag.get(), bag) || !locate(context, relocated).empty() ||
-            relocated.backpack_index != staged_items.Num() - 1)
+            (drop ? relocated.item != nullptr : relocated.backpack_index != staged_items.Num() - 1))
             return result(lua, false, "mutation_unverified_native_inventory_unequip_pack");
-        result(lua, true, "unequipped");
+        result(lua, true, drop ? "debited" : "unequipped");
         lua.set_integer(slot);
         lua.set_string(RC::to_utf8_string(context.weapon->GetPathName()));
-        lua.set_integer(ammo);
+        lua.set_integer(*ammo);
         return 5;
     }
 
@@ -4316,11 +4340,22 @@ bool silverfish::native_guest_item::take_ammo_supported(Unreal::UObject* item_cl
     return stock_bolt(weapon) && rounds <= bolt_magazine;
 }
 
+std::optional<int> silverfish::native_guest_item::quick_drop_ammo(Unreal::UObject* pawn, Unreal::UObject* save,
+                                                                  Unreal::UObject* item_class, int slot, int stored)
+{
+    Context context;
+    context.pawn = pawn;
+    context.save = save;
+    context.world = static_cast<Unreal::AActor*>(pawn)->GetWorld();
+    context.weapon = Unreal::Cast<Unreal::UClass>(item_class);
+    return equipment_ammo(context, slot, stored);
+}
+
 std::string_view silverfish::native_guest_item::finish_local_removal(Unreal::UObject* pawn, Unreal::UObject* save,
                                                                     Unreal::UObject* prior_actor, int slot,
                                                                     std::string_view identity, std::optional<int> rounds)
 {
-    if (!Unreal::IsInGameThreadRaw() || slot < 0 || slot > 9 || (!rounds && slot < quick_slots) ||
+    if (!Unreal::IsInGameThreadRaw() || slot < 0 || slot > 9 ||
         silverfish::native_interaction_input::current_guest_pawn(reinterpret_cast<std::uintptr_t>(pawn)) != pawn ||
         !live(pawn) || !live(save) || object(pawn, STR("Save")) != save) return "unequip_guest_scope_changed";
     Context context;
@@ -4337,7 +4372,7 @@ std::string_view silverfish::native_guest_item::finish_local_removal(Unreal::UOb
         if (!inventory.item || inventory.backpack_index < 0) return "unequip_backpack_item_unavailable";
         if (inventory.ammo->GetPropertyValueInContainer(inventory.item) != *rounds) return "unequip_backpack_ammunition_mismatch";
     }
-    else if (inventory.item) return "drop_worn_item_still_owned";
+    else if (inventory.item) return "dropped_equipment_still_owned";
     if (slot >= quick_slots)
     {
         const bool head = slot == 8;
@@ -4365,7 +4400,7 @@ std::string_view silverfish::native_guest_item::finish_local_removal(Unreal::UOb
 
     // A later stock input may already have holstered/replaced the actor while the host settled.
     if (!prior_actor || object(pawn, STR("EquipedItem")) != prior_actor) return {};
-    context.weapon = Unreal::Cast<Unreal::UClass>(inventory.row_class(inventory.item));
+    context.weapon = rounds ? Unreal::Cast<Unreal::UClass>(inventory.row_class(inventory.item)) : prior_actor->GetClassPrivate();
     auto* held_property = field<Unreal::FObjectProperty>(pawn, STR("EquipedItem"));
     if (!held_property || !held_for_unequip(context, prior_actor)) return "unequip_held_actor_unqualified";
     const auto next = inventory.selected->GetPropertyValueInContainer(save);
@@ -4428,7 +4463,8 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishSortLocalGuestBackpack", sort_backpack<true>);
     lua.register_function("SilverfishStoreLocalGuestEquipment", store_stock_equipment<true>);
     lua.register_function("SilverfishPreviewLocalGuestGear", preview_worn_or_unequip);
-    lua.register_function("SilverfishUnequipNativeGuestEquipment", unequip_stock_equipment);
+    lua.register_function("SilverfishUnequipNativeGuestEquipment", unequip_stock_equipment<false>);
+    lua.register_function("SilverfishDebitNativeGuestQuickDrop", unequip_stock_equipment<true>);
     lua.register_function("SilverfishSelectNativeGuestEquipment", select_stock_equipment);
     lua.register_function("SilverfishThrowNativeGuestFlare", throw_flare);
     if (env("SILVERFISH_COOP_NATIVE_FIXTURES"))

@@ -31,6 +31,8 @@ namespace silverfish::native_guest_item
     std::string local_equipped_identity(RC::Unreal::UObject* pawn, RC::Unreal::UObject* receiver);
     ShotView capture_shot_view(RC::Unreal::UObject* pawn, RC::Unreal::UObject* held, RC::Unreal::UObject* barrel = nullptr);
     bool take_ammo_supported(RC::Unreal::UObject* item_class, int rounds);
+    std::optional<int> quick_drop_ammo(RC::Unreal::UObject* pawn, RC::Unreal::UObject* save,
+                                       RC::Unreal::UObject* item_class, int slot, int stored);
     std::string_view finish_local_removal(RC::Unreal::UObject* pawn, RC::Unreal::UObject* save,
                                          RC::Unreal::UObject* prior_actor, int slot, std::string_view identity,
                                          std::optional<int> rounds);
