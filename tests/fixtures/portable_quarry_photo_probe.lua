@@ -24,10 +24,10 @@ local function sight(world)
         StaticFindObject("/Game/Classes/Actors/ActorAssets/CameraTarget_BP.CameraTarget_BP_C"))
     assert(valid(target) and same(actor:GetWorld(), world) and target.TrackedQuest.RowName:ToString() == quest)
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
-    local center, extent = {}, {}
-    trace:GetComponentBounds(actor.StaticMeshComponent, center, extent, {})
-    assert(center.Origin and extent.BoxExtent)
-    return actor, trace, center.Origin, extent.BoxExtent
+    assert(target.Targets:GetArrayNum() == 1, "stock skull primitive unavailable")
+    local primitive = target.Targets[1]
+    assert(valid(primitive), "stock skull primitive unavailable")
+    return actor, trace, primitive:K2_GetComponentLocation()
 end
 
 local function run(action, argument)
@@ -75,24 +75,25 @@ local function run(action, argument)
             items[items:GetArrayNum() + 1] = row
             return guid(row)
         end
-        local actor, trace, center, bounds = sight(world)
-        local distance = math.max(bounds.X, bounds.Y, bounds.Z) * 2.8 + 400
+        local actor, trace, center = sight(world)
         local color = {R=0,G=0,B=0,A=0}
-        for index = 0, 15 do
-            local angle = math.pi * index / 8
-            local x, y = center.X + distance * math.cos(angle), center.Y + distance * math.sin(angle)
-            local ground, hit = {}, {}
-            if trace:LineTraceSingle(pawn, {X=x,Y=y,Z=center.Z+1500}, {X=x,Y=y,Z=center.Z-3000}, 0, false,
-                {pawn,guest,actor}, 0, ground, true, color, color, 0) then
-                local floor = (ground.OutHit or ground).ImpactPoint
-                local height = guest.CapsuleComponent:GetScaledCapsuleHalfHeight()
-                local point = {X=x,Y=y,Z=floor.Z+height+4}
-                local eye = {X=x,Y=y,Z=point.Z+60}
-                local blocked = trace:LineTraceSingle(pawn, eye, center, 0, false, {pawn,guest,actor},
-                    0, hit, true, color, color, 0)
-                if not blocked and guest:K2_TeleportTo(point, {Pitch=0,Yaw=0,Roll=0}) then
-                    guest:ForceNetUpdate()
-                    return ("%.3f,%.3f,%.3f"):format(point.X,point.Y,point.Z)
+        local height = guest.CapsuleComponent:GetScaledCapsuleHalfHeight()
+        for _, distance in ipairs({800, 1300, 2000, 2800, 4200}) do
+            for index = 0, 15 do
+                local angle = math.pi * index / 8
+                local x, y = center.X + distance * math.cos(angle), center.Y + distance * math.sin(angle)
+                local ground, hit = {}, {}
+                if trace:LineTraceSingle(pawn, {X=x,Y=y,Z=center.Z+600}, {X=x,Y=y,Z=center.Z-4000}, 0, false,
+                    {pawn,guest}, 0, ground, true, color, color, 0) then
+                    local floor = (ground.OutHit or ground).ImpactPoint
+                    local point = {X=x,Y=y,Z=floor.Z+height+4}
+                    local eye = {X=x,Y=y,Z=point.Z+60}
+                    local blocked = trace:LineTraceSingle(pawn, eye, center, 0, true, {pawn,guest},
+                        0, hit, true, color, color, 0)
+                    if not blocked and guest:K2_TeleportTo(point, {Pitch=0,Yaw=0,Roll=0}) then
+                        guest:ForceNetUpdate()
+                        return ("%.3f,%.3f,%.3f"):format(point.X,point.Y,point.Z)
+                    end
                 end
             end
         end

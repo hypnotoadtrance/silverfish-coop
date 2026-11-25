@@ -24,7 +24,6 @@ local flare_fixture_paths = {
 local old_pipe_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
 local melee_folder = "/Game/Classes/Weapons/MeleeWeapons/"
 local melee_master = melee_folder .. "MeleeWep_Master_BP.MeleeWep_Master_BP_C"
-local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local observation
 local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
@@ -81,7 +80,7 @@ function guest_weapon.local_projected_selection(pawn, save, projected)
         and same(incoming[class_field], row[class_field]) then return index end
 end
 
-local function equipped_guid(pawn, save, world, area)
+local function equipped_guid(pawn, save, world)
     local held = pawn.EquipedItem
     if not held or not held:IsValid() then return nil end
     local held_class = held:GetClass()
@@ -93,7 +92,7 @@ local function equipped_guid(pawn, save, world, area)
     if not guid then return end
     local class_name = held_class:GetFullName():match("^%S+ (%S+)$")
     local melee_path = class_name and class_name:sub(1, #melee_folder) == melee_folder
-    if world and (class_name == blowtorch_path or (class_name == camera_path and area == camera_map)
+    if world and (class_name == blowtorch_path or class_name == camera_path
         or melee_path or class_name == spade_path)
         and held:HasAuthority() and not held:IsActorBeingDestroyed()
         and same(held:GetWorld(), world) and same(held:GetOwner(), pawn) and same(held.Instigator, pawn)
@@ -591,7 +590,7 @@ function guest_weapon.rows(state, phase, status_row)
         local ok, guid, kind, rounds, mode, ammo_path, shell_count, shell_path, barrel_mode = pcall(function()
             local pawn, save = guest_save.exact_item_context(state, phase, detail.name)
             if not pawn or not save then return end
-            local id, profile, row = equipped_guid(pawn, save, state.world, state.map)
+            local id, profile, row = equipped_guid(pawn, save, state.world)
             local held = row and pawn.EquipedItem
             local amount = row and row[ammo_field]
             if held and weapon_profiles.paths[profile] and amount == held.Ammo and valid_rounds(held, amount) then
