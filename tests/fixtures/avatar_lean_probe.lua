@@ -60,29 +60,33 @@ local function rig(pawn)
     return body, head, bone
 end
 
+local function record_input(run, event)
+    if #run.events >= 32 then return end
+    run.events[#run.events + 1] = table.concat({event, string.format("%.5f", os.clock() - run.start),
+        run.pawn.LeanAngle, run.pawn.Leaning == true and 1 or 0}, "\t")
+end
+
 local function install_hooks()
     if hooks_installed then return end
     for side, data in pairs(sides) do
         local wrapper = player_class .. ":InpActEvt_" .. data[1] .. "_K2Node_EnhancedInputActionEvent_"
-        RegisterHook(wrapper .. data[2], function(context)
-            local run = trial
-            if run and run.drive == "input" and run.side == side and same(context:get(), run.pawn) then
-                run.starts = run.starts + 1
-                run.started_request = run.pawn.LeanAngle
-                run.started_limit = run.pawn.Max_LeanAngle
-            end
-        end)
-        RegisterHook(wrapper .. (data[2] + 1), function(context)
-            local run = trial
-            if run and run.drive == "input" and run.side == side and same(context:get(), run.pawn) then
-                run.triggers = run.triggers + 1
-            end
-        end)
-        RegisterHook(wrapper .. (data[2] + 2), function(context)
-            local run = trial
-            if run and run.drive == "input" and run.side == side and same(context:get(), run.pawn) then run.completes = run.completes + 1 end
-        end)
+        for offset, event in ipairs({"starts", "cancels", "completes"}) do
+            RegisterHook(wrapper .. (data[2] + offset - 1), function(context)
+                local run = trial
+                if not run or run.drive ~= "input" or run.side ~= side or not same(context:get(), run.pawn) then return end
+                run[event] = run[event] + 1
+                if event == "starts" then
+                    run.started_request = run.pawn.LeanAngle
+                    run.started_limit = run.pawn.Max_LeanAngle
+                end
+                record_input(run, event)
+            end)
+        end
     end
+    RegisterHook(player_class .. ":CancelLeaning", function(context)
+        local run = trial
+        if run and run.drive == "input" and same(context:get(), run.pawn) then record_input(run, "cancel_leaning") end
+    end)
     hooks_installed = true
 end
 
@@ -149,9 +153,9 @@ local function begin(id, side, drive, now)
         and same(controller:GetWorld(), world), "the exact local lean controller is unavailable")
     local body, head, bone = rig(remote)
     local run = {id = id, side = side, drive = drive, start = now, world = world, pawn = pawn, remote = remote,
-        controller = controller, injections = 0, starts = 0, completes = 0, triggers = 0,
+        controller = controller, injections = 0, starts = 0, completes = 0, cancels = 0,
         arrow = stock_arrow(pawn), remote_arrow = stock_arrow(remote), math_api = math_api,
-        body = body, head = head, bone = bone, rows = {}}
+        body = body, head = head, bone = bone, rows = {}, events = {}}
     if drive == "input" then input_action(run) end
     return run
 end
@@ -221,10 +225,11 @@ local function sample(run, now)
     return run.up_at and now - run.up_at >= .75
 end
 
-local function answer(id, result, rows)
+local function answer(id, result, rows, events)
     local file = assert(io.open(reply, "wb"))
     file:write(id, "\t", result, "\n")
     if rows then file:write(table.concat(rows, "\n"), "\n") end
+    if events and #events > 0 then file:write(table.concat(events, "\n"), "\n") end
     file:close()
 end
 
@@ -241,9 +246,9 @@ LoopInGameThreadWithDelay(50, function()
         elseif done then
             answer(trial.id, table.concat({"ok", trial.side, trial.pawn:GetFullName(), trial.remote:GetFullName(),
                 trial.pawn.LeanAngle, #trial.rows, trial.injections, trial.starts, trial.completes, trial.drive,
-                trial.triggers, trial.started_request or "-", trial.started_limit or "-", trial.behavior or "-",
-                trial.input_method or "-"},
-                "\t"), trial.rows)
+                trial.cancels, trial.started_request or "-", trial.started_limit or "-", trial.behavior or "-",
+                trial.input_method or "-", #trial.events},
+                "\t"), trial.rows, trial.events)
         else
             return false
         end

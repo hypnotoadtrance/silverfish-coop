@@ -59,10 +59,14 @@ async def capture(seat, side, local, remote, *, drive):
             header = lines[0].split("\t") if lines else []
             if header[:2] == [ticket, "error"]:
                 raise AssertionError(" ".join(header[2:]))
-            if header[:2] == [ticket, "ok"] and len(header) == 16 and len(lines) == 1 + int(header[6]):
+            if header[:2] == [ticket, "ok"] and len(header) == 17:
                 assert header[2:5] == [side, local, remote] and header[10] == drive, header
+                count, event_count = int(header[6]), int(header[16])
+                if len(lines) != 1 + count + event_count:
+                    await asyncio.sleep(.09)
+                    continue
                 rows = []
-                for line in lines[1:]:
+                for line in lines[1:1 + count]:
                     values = line.split("\t")
                     row = dict(zip(FIELDS, (value if i == 1 else float(value)
                                            for i, value in enumerate(values)), strict=True))
@@ -71,11 +75,18 @@ async def capture(seat, side, local, remote, *, drive):
                     rows.append(row)
                 gaps = [b["seconds"] - a["seconds"] for a, b in zip(rows, rows[1:])]
                 assert all(gap > 0 for gap in gaps), rows
+                events = []
+                for line in lines[1 + count:]:
+                    event, *values = line.split("\t")
+                    assert event in {"starts", "cancels", "completes", "cancel_leaning"}, line
+                    seconds, requested, leaning = map(float, values)
+                    events.append({"event": event, "seconds": seconds, "requested": requested, "leaning": leaning == 1})
                 injections, started, completed = map(int, header[7:10])
                 return {"caller": local, "observer_for": remote, "side": side, "drive": drive, "samples": rows,
+                        "events": events,
                         "injections": injections, "input_method": header[15],
                         "stock_started": started, "stock_completed": completed,
-                        "stock_triggered": int(header[11]),
+                        "stock_canceled": int(header[11]),
                         "started_requested_degrees": float(header[12]) if header[12] != "-" else None,
                         "started_limit_degrees": float(header[13]) if header[13] != "-" else None,
                         "lean_behavior": int(header[14]) if header[14] != "-" else None,
@@ -128,13 +139,18 @@ async def verify_lean(host, guest, pawn, *, projected=True, drive="combined"):
     replication_rates = host_status["game"].get("native_replication_rates", {})
     assert all(rate["cap_hz"] == 24 for rate in replication_rates.values()), replication_rates
     input_result = {"exercised": False}
+    input_verified = False
     if drive == "combined":
-        host_input, guest_input = await asyncio.gather(
-            capture(host, "left", *host_pawns, drive="input"), capture(guest, "left", *guest_pawns, drive="input"),
-            return_exceptions=True,
-        )
-        input_result = {"exercised": True, "side": "left", "host": input_diagnostic(host_input), "guest": input_diagnostic(guest_input)}
-    input_verified = (drive == "combined" and input_result["host"]["verified"] and input_result["guest"]["verified"])
+        input_result["exercised"] = True
+        for host_side, guest_side in (("left", "right"), ("right", "left")):
+            host_input, guest_input = await asyncio.gather(
+                capture(host, host_side, *host_pawns, drive="input"),
+                capture(guest, guest_side, *guest_pawns, drive="input"),
+                return_exceptions=True,
+            )
+            input_result.setdefault(host_side, {})["host"] = input_diagnostic(host_input)
+            input_result.setdefault(guest_side, {})["guest"] = input_diagnostic(guest_input)
+        input_verified = all(input_result[side][seat]["verified"] for side in ("left", "right") for seat in ("host", "guest"))
     wave_drive = "input" if drive == "input" or input_verified else "solver"
     waves = []
     for host_side, guest_side in (("left", "right"), ("right", "left")):
