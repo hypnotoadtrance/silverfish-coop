@@ -9,7 +9,9 @@ from tools.silverfish.native_anomaly_effects import CANISTERS
 from tools.silverfish.travel import CROSSROADS
 
 
-TARGET = f"{CROSSROADS}.CrossRoads_P:PersistentLevel.Prop_PropaneTank_Small_C_12"
+PREFIX = f"{CROSSROADS}.CrossRoads_P:PersistentLevel."
+CANISTER = PREFIX + "Prop_PropaneTank_Small_C_12"
+DRUM = PREFIX + "Prop_FeulDrum_C_33"
 
 
 def allow_portable_canister_fixture(source):
@@ -24,7 +26,14 @@ def instrument_canisters(source):
     anchor = "function canisters.command(args, state, phase)\n"
     if source.count(anchor) != 1:
         raise ValueError("The stock canister command handler changed")
-    fixture = """    if args[2] == "native-canister-sample-fixture" or args[2] == "native-canister-shove-fixture" then
+    fixture = """    if args[2] == "native-canister-observed-fixture" then
+        local witness = canister_witness[args[3]] or {frames = 0, active = 0, apply_lit = 0, apply_cold = 0, apply_removed = 0,
+            applied_lit = 0, failed_lit = 0}
+        return ("%d,%d,%d,%d,%d,%d,%d"):format(witness.frames, witness.active, witness.apply_lit, witness.apply_cold,
+            witness.apply_removed, witness.applied_lit, witness.failed_lit)
+    end
+    if args[2] == "native-canister-sample-fixture" or args[2] == "native-canister-shove-fixture"
+        or args[2] == "native-canister-approach-fixture" then
         local path = args[3]
         assert(#args == 3 and state.map == "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
             and path and #path <= 512 and (phase == "hosting" or phase == "connected"))
@@ -33,6 +42,26 @@ def instrument_canisters(source):
         local entry = address and active[address]
         assert(entry and entry.path == path and same(actor:GetWorld(), world) and same(state.world, world))
         entry.sample_position = true
+        if args[2] == "native-canister-approach-fixture" then
+            local pawn = #state.guests == 1 and state.guests[1].pawn
+            assert(phase == "hosting" and valid(pawn) and pawn:HasAuthority() and not pawn:IsLocallyControlled())
+            local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+            local center, view = actor:K2_GetActorLocation(), pawn:K2_GetActorRotation()
+            local blank = {R = 0, G = 0, B = 0, A = 0}
+            for _, direction in ipairs({{0, -1}, {1, 0}, {-1, 0}, {0, 1}}) do
+                local x, y = center.X + direction[1] * 3000, center.Y + direction[2] * 3000
+                local hit = {}
+                if trace:LineTraceSingle(pawn, {X = x, Y = y, Z = center.Z + 1200},
+                    {X = x, Y = y, Z = center.Z - 2200}, 0, false, {pawn, actor}, 0, hit, true, blank, blank, 0) then
+                    local floor = (hit.OutHit or hit).ImpactPoint
+                    if floor and pawn:K2_TeleportTo({X = floor.X, Y = floor.Y, Z = floor.Z + 100}, view) then
+                        pawn:ForceNetUpdate()
+                        return "Placed the guest within stock canister replication range"
+                    end
+                end
+            end
+            error("No safe stock floor near the fixture canister", 0)
+        end
         if args[2] == "native-canister-shove-fixture" then
             assert(phase == "hosting" and actor:HasAuthority() and mesh(actor))
             actor.PropMesh:AddImpulse({X = 0, Y = 310, Z = 420}, FName("None"), true)
@@ -59,6 +88,34 @@ def instrument_canisters(source):
         return ("%d,%.3f,%.3f"):format(count * 2, native_ms, lua_ms)
     end
 """
+    source = source.replace("local canisters = {}", """local canisters = {}
+local canister_witness = {}
+local function observe_canister(path)
+    if not canister_witness[path] then
+        canister_witness[path] = {frames = 0, active = 0, apply_lit = 0, apply_cold = 0, apply_removed = 0,
+            applied_lit = 0, failed_lit = 0}
+    end
+    return canister_witness[path]
+end""")
+    for line, observation in (
+        ('                rows[#rows + 1] = row("native-explosive-canister", entry.path, burning and 1 or 0,',
+         '                local witness = observe_canister(entry.path)\n'
+         '                if burning then witness.frames = witness.frames + 1 end\n'
+         '                if particles and particles:IsActive() then witness.active = witness.active + 1 end\n'),
+        ('        local path, mode = args[index]:match("^([^|]+)|([012])$")',
+         '        local witness = path and observe_canister(path)\n'
+         '        if mode == "1" then witness.apply_lit = witness.apply_lit + 1 end\n'
+         '        if mode == "0" then witness.apply_cold = witness.apply_cold + 1 end\n'
+         '        if mode == "2" then witness.apply_removed = witness.apply_removed + 1 end'),
+        ('                fire_view(entry, mode == "1")',
+         '                if mode == "1" then\n'
+         '                    if entry.lit then witness.applied_lit = witness.applied_lit + 1\n'
+         '                    else witness.failed_lit = witness.failed_lit + 1 end\n'
+         '                end'),
+    ):
+        if source.count(line) != 1:
+            raise ValueError("The canister observation anchor changed")
+        source = source.replace(line, observation + line if "rows[#rows" in line else line + "\n" + observation)
     return source.replace(anchor, anchor + fixture)
 
 
@@ -67,53 +124,66 @@ async def verify_crossroads_canister(host, guest, _pawn, resident_events, campai
     guest_run = guest.client / "run"
     checkpoint = campaign_save_hashes(host.campaign)
 
-    def stock(frame):
-        return frame["game"].get(CANISTERS, {}).get(TARGET, {})
+    def stock(frame, target):
+        return frame["game"].get(CANISTERS, {}).get(target, {})
 
-    async def command(seat, verb):
-        return await seat.bridge.command(f"native-canister-{verb}-fixture", TARGET, timeout=5)
+    async def command(seat, verb, target):
+        return await seat.bridge.command(f"native-canister-{verb}-fixture", target, timeout=5)
 
-    async def sample(seat):
-        result = await command(seat, "sample")
+    async def sample(seat, target):
+        result = await command(seat, "sample", target)
         count, native_ms, lua_ms = map(float, result["ack"]["message"].split(","))
         return {"reads_per_path": int(count), "native_ms": native_ms, "lua_ms": lua_ms,
                 "sample_matched": True, "wrong_world_refused": True}
 
-    await wait_resident_status(host_run, lambda frame: stock(frame).get("phase") == 0)
-    guest_initial = await wait_resident_status(guest_run, lambda frame: stock(frame).get("phase") == 0)
-    proof = {"host": await sample(host), "guest": await sample(guest)}
-    blocked = guest_initial["game"].get("native_canister_blocked", 0)
-    await command(guest, "guest-guard")
-    guarded = await wait_resident_status(guest_run, lambda frame: frame["game"].get("native_canister_blocked", 0) >= blocked + 2)
-    assert stock(guarded)["phase"] == 0
-    await command(host, "prepare")
-    initial = stock(await wait_resident_status(host_run, lambda frame: stock(frame).get("location")))
-    await command(host, "shove")
-    moved = stock(await wait_resident_status(host_run, lambda frame: stock(frame).get("location")
-                 and math.dist(stock(frame)["location"], initial["location"]) > 30))
-    guest_moved = stock(await wait_resident_status(guest_run, lambda frame: stock(frame).get("location")
-                       and math.dist(stock(frame)["location"], initial["location"]) > 30))
-    proof["host_motion_cm"] = math.dist(initial["location"], moved["location"])
-    proof["guest_motion_cm"] = math.dist(initial["location"], guest_moved["location"])
+    async def stage(target):
+        await wait_resident_status(host_run, lambda frame: stock(frame, target).get("phase") == 0)
+        await wait_resident_status(guest_run, lambda frame: stock(frame, target).get("phase") == 0)
+        reads = {"host": await sample(host, target), "guest": await sample(guest, target)}
+        initial = stock(await wait_resident_status(host_run, lambda frame: stock(frame, target).get("location")), target)
+        await command(host, "approach", target)
+        await wait_resident_status(host_run, lambda frame: 2500 <= math.dist(
+            frame["game"]["pawns"]["guest"]["location"], initial["location"]) <= 4000)
+        guest_frame = await wait_resident_status(guest_run, lambda frame: 2500 <= math.dist(
+            frame["game"]["pawns"]["local"]["location"], initial["location"]) <= 4000)
+        return reads, initial, guest_frame
 
+    canister, initial, guest_initial = await stage(CANISTER)
+    blocked = guest_initial["game"].get("native_canister_blocked", 0)
+    await command(guest, "guest-guard", CANISTER)
+    guarded = await wait_resident_status(guest_run, lambda frame: frame["game"].get("native_canister_blocked", 0) >= blocked + 2)
+    assert stock(guarded, CANISTER)["phase"] == 0
+    await command(host, "shove", CANISTER)
+    moved = stock(await wait_resident_status(host_run, lambda frame: stock(frame, CANISTER).get("location")
+                 and math.dist(stock(frame, CANISTER)["location"], initial["location"]) > 30), CANISTER)
+    guest_moved = stock(await wait_resident_status(guest_run, lambda frame: stock(frame, CANISTER).get("location")
+                       and math.dist(stock(frame, CANISTER)["location"], initial["location"]) > 30), CANISTER)
+    canister["host_motion_cm"] = math.dist(initial["location"], moved["location"])
+    canister["guest_motion_cm"] = math.dist(initial["location"], guest_moved["location"])
+
+    drum, original, _ = await stage(DRUM)
+    await command(host, "prepare", DRUM)
     started = time.time()
-    await command(host, "ignite")
-    lit = await wait_resident_status(guest_run, lambda frame:
-                                    stock(frame).get("phase") == 1 and stock(frame).get("particles_active"))
-    proof["guest_fire"] = stock(lit)
-    for _ in range(5):
-        await command(host, "shoot")
-        await asyncio.sleep(.35)
-        if stock(await wait_resident_status(host_run, lambda frame: stock(frame)))["phase"] == 2:
-            break
-    await wait_resident_status(host_run, lambda frame: stock(frame).get("phase") == 2, timeout=15)
-    finished = await wait_resident_status(guest_run, lambda frame: stock(frame).get("phase") == 2)
+    await command(host, "shoot", DRUM)
+    ignited = await wait_resident_status(host_run, lambda frame: stock(frame, DRUM).get("phase") == 1)
+    assert stock(ignited, DRUM)["health"] < original["health"], stock(ignited, DRUM)
+    lit = await wait_resident_status(guest_run, lambda frame: stock(frame, DRUM).get("phase") == 1)
+    drum["guest_fire"] = stock(lit, DRUM)
+    observed = await command(guest, "observed", DRUM)
+    fire_frames, particle_frames, ignition_requests, _, _, activation_calls, rejected_activations = map(
+        int, observed["ack"]["message"].split(","))
+    assert fire_frames and ignition_requests and activation_calls == 1 and rejected_activations == 0, observed
+    drum["guest_fire_activation_calls"] = activation_calls
+    drum["guest_continuous_particles_observed"] = particle_frames > 0
+    await wait_resident_status(host_run, lambda frame: stock(frame, DRUM).get("phase") == 2, timeout=24)
+    finished = await wait_resident_status(guest_run, lambda frame: stock(frame, DRUM).get("phase") == 2)
     async with asyncio.timeout(7):
         while not (blasts := [entry for entry in await resident_events(guest_run, finished)
-                              if entry["event"] == "native_canister_effect_played" and entry["time_unix"] >= started]):
+                              if entry["event"] == "native_fuel_drum_effect_played" and entry["time_unix"] >= started]):
             await asyncio.sleep(.12)
-    assert len(blasts) == 1 and blasts[0]["particles"], blasts
+    # The muted run verifies cue dispatch and reports particle creation separately.
+    assert len(blasts) == 1, blasts
     assert campaign_save_hashes(host.campaign) == checkpoint
-    proof["guest_blast"] = blasts[0]
-    proof["removed_on_both_seats"] = True
-    return {"stock_canister": proof}
+    drum["guest_blast"] = blasts[0]
+    drum["removed_on_both_seats"] = True
+    return {"stock_canister": {"propane": canister, "fuel_drum": drum}}

@@ -12,6 +12,8 @@ The `rc-f0b1c06` Crossroads baseline used two muted Direct IP instances. During 
 
 `rc-8b1221c` starts the targeted Lua-to-C++ migration with a single native read for health, regeneration, hunger, stim, radiation, fatigue, intoxication, and sickness on each bound guest. On both seats in Observatory and Crossroads, 1,024 reads took 1 to 2 ms through the C++ reader and 8 to 10 ms through the former Lua reader. All eight values matched, and mismatched pawn and save addresses were refused. The same two muted Direct IP launches passed food and medicine, a cold stock crate, Crossroads travel and weather, critters, the Lingering Teleport, and mushrooms. The original saves were preserved. The largest Crossroads guest walking interval was still 59 ms, with 20 ms spent inside canister status gathering. Whole-frame performance and Steam latency remain open.
 
+`rc-be31b46` moves placed canister status reads into C++. In isolated Crossroads runs, the largest canister status samples were 1 ms and 5 ms, compared with 20 ms in the preceding build. Across host and guest, 1,024 native reads took 1 to 3 ms and matched the Lua reads, which took 13 to 21 ms. Both seats saw stock propane movement and a fuel drum's ignition and destruction. The guest applied the ignition and received one explosion cue. The muted test did not observe an active continuous flame or report creation of blast particles. Those effects need a rendered two-PC retest. The original saves were preserved. Crossroads still had a guest walking interval of 58 ms, and Steam latency remains open.
+
 ## `rc-1799e4b` playtest
 
 | Area | Two-PC observation |
