@@ -6835,7 +6835,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 for game in games
             ]
         if resident_weapon_cues or stock_avatar_tail or stock_avatar_binoculars:
-            for game in games if stock_avatar_tail or stock_avatar_binoculars else (first_game,):
+            for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableWeaponCueProbe",
                                                      fixture="avatar_presentation_probe.lua"))
         if resident_weapon_cues:
