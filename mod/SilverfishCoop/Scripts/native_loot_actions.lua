@@ -362,7 +362,7 @@ function actions.command(fields, state, phase)
         open_args = {false, false, sequence}
     end
     local reply = table.pack(SilverfishOpenNativeLootCrate(
-        scope.crate:GetAddress(), scope.pawn:GetAddress(), scope.box:GetAddress(),
+        scope.profile.path, scope.crate:GetAddress(), scope.pawn:GetAddress(), scope.box:GetAddress(),
         scope.save:GetAddress(), scope.stock:GetAddress(), scope.lucky_looter, table.unpack(open_args)))
     result.ok, result.status, result.looted, result.calls, result.invoked = reply[1], reply[2], reply[3], reply[6], reply[7]
     if result.ok and result.status == "unlocked" then

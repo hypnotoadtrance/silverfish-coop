@@ -7,8 +7,9 @@ end
 
 local map, name, pawn_name = "exact lab map", "exact permanent cabinet", "exact guest"
 local slot = "SFCoop_" .. ("a"):rep(32)
-local scope = {profile = {small_cabinet = true, capacity = 4}, crate = object(1), pawn = object(2),
-    box = object(3), save = object(4), stock = object(5), lucky_looter = true, lucky_source = "detached", distance = 350}
+local scope = {profile = {path = "/Game/Stock.Cabinet", small_cabinet = true, capacity = 4}, crate = object(1), pawn = object(2),
+    box = object(3), save = object(4), stock = object(5), world = object(10),
+    lucky_looter = true, lucky_source = "detached", distance = 350}
 local scratched, restored = object(6), object(7)
 local retired, writes, claims = {}, 0, 0
 local expected_outputs, expected_items = {11, 0, 33, 44}, "11,33,44"
@@ -21,26 +22,32 @@ api.SaveGameToSlot = function(_, source, expected)
     return true
 end
 api.LoadGameFromSlot = function(_, expected) assert(expected == slot); return restored end
+restored.GetFullName = function() return "StockSave /Engine/Transient.RestoredSave" end
+SilverfishRetainNativeLootEscrow = function(stock, pool) return stock == 5 and pool == 7 end
 StaticFindObject = function(path)
+    if path == "/Engine/Transient.RestoredSave" then return restored end
     if path == "/Script/Engine.Default__GameplayStatics" then return api end
     return class
 end
 
-local function results(_, _, expected, addresses)
-    assert(expected == scope and table.concat(addresses, ",") == expected_items)
+local function results(expected, addresses)
+    assert(expected == scope and table.concat(addresses, ",") == table.concat(expected_outputs, ","))
     local items = {}
     for _, address in ipairs(addresses) do
-        local actor = object(address)
-        actor.SetActorHiddenInGame = function(self, hidden) self.bHidden = hidden end
-        actor.SetActorEnableCollision = function(self, collision) self.collides = collision end
-        actor.GetActorEnableCollision = function(self) return self.collides end
-        actor.K2_DestroyActor = function() retired[#retired + 1] = address end
-        items[#items + 1] = {object = actor, actor = "stock item " .. address, class_path = "/Game/Stock.Stock_C",
-            transform = {address, 0, 0, 0, 0, 0, 1, 1, 1}}
+        if address > 0 then
+            local actor = object(address)
+            actor.SetActorHiddenInGame = function(self, hidden) self.bHidden = hidden end
+            actor.SetActorEnableCollision = function(self, collision) self.collides = collision end
+            actor.GetActorEnableCollision = function(self) return self.collides end
+            actor.K2_DestroyActor = function() retired[#retired + 1] = address end
+            items[#items + 1] = {object = actor, actor = "stock item " .. address, class_path = "/Game/Stock.Stock_C",
+                transform = {address, 0, 0, 0, 0, 0, 1, 1, 1}}
+        end
     end
     return items
 end
 
+package.loaded.guest_save = {}
 package.loaded.native_loot = {
     profile = function(area, target) if area == map and target == name then return scope.profile end end,
     qualify = function(_, _, pawn, target, allow_distant)
@@ -53,8 +60,9 @@ package.loaded.native_loot = {
 
 local ids = {("A"):rep(32), "", ("C"):rep(32), ("D"):rep(32), "", ("F"):rep(32)}
 local full_width = true
-SilverfishOpenNativeLootCrate = function(crate, pawn, box, save, stock, trait)
-    assert(crate == 1 and pawn == 2 and box == 3 and save == 4 and stock == 5 and trait == true)
+SilverfishDescribeNativeLootRoll = function() error("loot.results is mocked") end
+SilverfishOpenNativeLootCrate = function(path, crate, pawn, box, save, stock, trait)
+    assert(path == scope.profile.path and crate == 1 and pawn == 2 and box == 3 and save == 4 and stock == 5 and trait == true)
     if full_width then
         return true, "opened", true, expected_outputs[1], expected_outputs[2] or 0, 5, true, table.unpack(expected_outputs, 3)
     end
@@ -87,7 +95,7 @@ actions.command({"id", "native-loot-open", pawn_name, name, slot}, state, "hosti
 local report = rows()
 assert(report[1][6] == 1 and report[1][13] == 3 and report[1][15] == slot)
 assert(report[2][4] == ids[1] and report[3][4] == ids[3] and report[4][4] == ids[4])
-assert(writes == 1 and table.concat(retired, ",") == "11,33,44")
+assert(writes == 1 and table.concat(retired, ",") == expected_items)
 
 actions.command({"id", "native-loot-claim", pawn_name, name, ids[4], slot}, state, "hosting")
 assert(rows()[1][7] == "claimed" and claims == 1)

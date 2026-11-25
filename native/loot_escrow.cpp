@@ -312,15 +312,15 @@ namespace
         bool attached = false;
         Unreal::UObject* result = nullptr;
         Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int, int) {
-            if (!live(object)) return RC::LoopAction::Continue;
             auto* type = object->GetClassPrivate();
             auto* link = type == instance ? canonical : type == pawn ? assigned : nullptr;
-            if (link && reinterpret_cast<Address>(link->GetObjectPropertyValue(link->ContainerPtrToValuePtr<void>(object))) == address)
+            if (link && live(object) &&
+                reinterpret_cast<Address>(link->GetObjectPropertyValue(link->ContainerPtrToValuePtr<void>(object))) == address)
             {
                 attached = true;
                 return RC::LoopAction::Break;
             }
-            if (type == inventory.save_class && reinterpret_cast<Address>(object) == address)
+            if (reinterpret_cast<Address>(object) == address && type == inventory.save_class && live(object))
                 result = object;
             return RC::LoopAction::Continue;
         });

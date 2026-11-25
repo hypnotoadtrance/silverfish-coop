@@ -326,9 +326,12 @@ namespace
         return qualify_opener(pawn, save, stock, context).empty();
     }
 
-    std::string_view qualify(Address crate, Address pawn, Address box, Address save, Address stock, Context& context)
+    std::string_view qualify(const Unreal::TCHAR* crate_path, Address crate, Address pawn, Address box,
+                             Address save, Address stock, Context& context)
     {
-        context.crate = live_object_at(crate);
+        context.crate = find<Unreal::UObject>(crate_path);
+        if (!context.crate || address(context.crate) != crate)
+            return "exact_stock_crate_unavailable";
         context.profile = silverfish::shared_loot::authored_profile(context.crate);
         context.world = silverfish::shared_loot::authored_crate_world(context.crate);
         if (!context.profile || !context.world ||
@@ -1058,25 +1061,30 @@ namespace
         if (!Unreal::IsInGameThreadRaw() || !installed.load(std::memory_order_acquire) || opening)
             return result(lua, false, "native_loot_scope_unavailable");
         const auto argc = lua.get_stack_size();
-        if (argc < 6 || argc > 9 || !lua.is_bool(6) || (argc >= 7 && !lua.is_bool(7)) ||
-            (argc >= 8 && !lua.is_bool(8)) || (argc == 9 && !lua.is_integer(9)))
+        if (argc < 7 || argc > 10 || !lua.is_string(1) || !lua.is_bool(7) || (argc >= 8 && !lua.is_bool(8)) ||
+            (argc >= 9 && !lua.is_bool(9)) || (argc == 10 && !lua.is_integer(10)))
             return result(lua, false, "native_loot_exact_open_arguments_required");
+        const auto crate_path = lua.get_string();
         std::array<Address, 5> addresses{};
-        if (!read_addresses(lua, addresses)) return result(lua, false, "native_loot_exact_open_arguments_required");
+        if (!crate_path.starts_with("/Game/") || crate_path.size() > 1024 || crate_path.find('\0') != std::string::npos ||
+            !read_addresses(lua, addresses))
+            return result(lua, false, "native_loot_exact_open_arguments_required");
         latest_roll = {};
         Context context;
         context.lucky = lua.get_bool();
-        const bool force_nonempty = argc >= 7 && lua.get_bool();
-        const bool pried = argc >= 8 && lua.get_bool();
-        const std::int64_t power_receipt = argc == 9 ? lua.get_integer() : 0;
+        const bool force_nonempty = argc >= 8 && lua.get_bool();
+        const bool pried = argc >= 9 && lua.get_bool();
+        const std::int64_t power_receipt = argc == 10 ? lua.get_integer() : 0;
         const bool powered = power_receipt > 0;
-        if (power_receipt < 0 || (argc == 9 && (!powered || force_nonempty || pried)))
+        if (power_receipt < 0 || (argc == 10 && (!powered || force_nonempty || pried)))
             return result(lua, false, "stock_electronic_power_receipt_unavailable");
         if (force_nonempty && pried) return result(lua, false, "stock_loot_pry_fixture_scope_unavailable");
         if (force_nonempty && !seeded_fixture_enabled())
             return result(lua, false, "stock_loot_fixture_seed_unavailable");
-        if (const auto failure = qualify(addresses[0], addresses[1], addresses[2], addresses[3], addresses[4], context);
-            !failure.empty()) return result(lua, false, failure);
+        const auto stock_path = RC::to_generic_string(crate_path);
+        if (const auto failure = qualify(stock_path.c_str(), addresses[0], addresses[1], addresses[2],
+                                         addresses[3], addresses[4], context); !failure.empty())
+            return result(lua, false, failure);
         Unreal::UClass* key{};
         if (!pried && !powered && context.profile->stock_class->pry_entry && read_bool(context.crate, STR("Locked"), true))
         {

@@ -5954,16 +5954,41 @@ async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str, *, large
 def instrument_crate_host_action(script: str) -> str:
     marker = "function actions.command(fields, state, phase)"
     assert script.count(marker) == 1
-    start = script.replace(marker, "local function run_action(fields, state, phase)", 1)
+    start = '''
+local durations
+local function profiled(label, action, ...)
+    if not durations then return action(...) end
+    local started = SilverfishBridgeProfileStamp()
+    local result = table.pack(action(...))
+    durations[label] = SilverfishBridgeProfileStamp() - started
+    return table.unpack(result, 1, result.n)
+end
+
+''' + script.replace(marker, "local function run_action(fields, state, phase)", 1)
+    for needle, replacement in (
+        ("pcall(inspect, state, phase", 'pcall(profiled, "qualify", inspect, state, phase'),
+        ("table.pack(SilverfishOpenNativeLootCrate(", 'table.pack(profiled("open", SilverfishOpenNativeLootCrate,'),
+        ("return loot.results(scope, outputs)", 'return profiled("describe", loot.results, scope, outputs)'),
+        ("pending and actions.create_pending_escrow(scope.stock",
+         'pending and profiled("retain", actions.create_pending_escrow, scope.stock'),
+        ("table.pack(SilverfishCaptureNativeLootEscrow(", 'table.pack(profiled("capture", SilverfishCaptureNativeLootEscrow,'),
+    ):
+        assert start.count(needle) == 1, needle
+        start = start.replace(needle, replacement)
     return start.replace("\nreturn actions\n", '''
 function actions.command(fields, state, phase)
     if phase ~= "hosting" or fields[2] ~= "native-loot-open" then return run_action(fields, state, phase) end
     local started = SilverfishBridgeProfileStamp()
-    local result = run_action(fields, state, phase)
+    durations = {}
+    local ok, result = pcall(run_action, fields, state, phase)
     local finished = SilverfishBridgeProfileStamp()
+    local measured = durations
+    durations = nil
+    if not ok then error(result, 0) end
     local path = os.getenv("SILVERFISH_COOP_BRIDGE") .. "/portable-crate-host.tsv"
     local output = assert(io.open(path, "ab"))
-    output:write(fields[4], "\\t", started, "\\t", finished, "\\n")
+    output:write(table.concat({fields[4], started, finished, measured.qualify or 0, measured.open or 0,
+        measured.describe or 0, measured.retain or 0, measured.capture or 0}, "\\t"), "\\n")
     output:close()
     return result
 end
@@ -6075,7 +6100,9 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
         host_timing = host.bridge.directory / "portable-crate-host.tsv"
         action, = [row.split("\t")[1:] for row in host_timing.read_text(encoding="ascii").splitlines()
                    if row.startswith(crate + "\t")]
-        started, finished = map(int, action)
+        started, finished, *steps = map(int, action)
+        steps_ms = dict(zip(("qualify", "open", "describe", "retain", "capture"),
+                            (round(micros / 1000, 2) for micros in steps), strict=True))
         assert pressed_us <= started <= finished
         assert 0 <= committed_ms <= reply_ms < 6000 and 0 <= first_ms <= last_ms < 6000, (
             committed_ms, reply_ms, first_ms, last_ms)
@@ -6085,6 +6112,7 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
                    "world_items_presented": len(items),
                    "press_to_stock_action_ms": round((started - pressed_us) / 1000, 2),
                    "stock_action_ms": round((finished - started) / 1000, 2),
+                   "stock_action_steps_ms": steps_ms,
                    "stock_action_to_host_roll_ms": round(committed_ms - (finished - pressed_us) / 1000, 2)}
     assert save_fingerprints() == before
     return {
