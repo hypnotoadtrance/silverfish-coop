@@ -10,6 +10,8 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 
 The `rc-f0b1c06` Crossroads baseline used two muted Direct IP instances. During the short guest-walking sample, the longest observed intervals were 24 ms for the host and 23 ms for the guest. Status publication took 11 ms and 16 ms inside those intervals. The guest measured about 2 ms of loopback keepalive RTT and reported no expired or evicted relay frames. These samples guide the next game-thread and network measurements. Weather, critters, the Lingering Teleport, placed loot, and mushrooms passed. The shared cash notification check timed out and remains open.
 
+`rc-8b1221c` starts the targeted Lua-to-C++ migration with a single native read for health, regeneration, hunger, stim, radiation, fatigue, intoxication, and sickness on each bound guest. On both seats in Observatory and Crossroads, 1,024 reads took 1 to 2 ms through the C++ reader and 8 to 10 ms through the former Lua reader. All eight values matched, and mismatched pawn and save addresses were refused. The same two muted Direct IP launches passed food and medicine, a cold stock crate, Crossroads travel and weather, critters, the Lingering Teleport, and mushrooms. The original saves were preserved. The largest Crossroads guest walking interval was still 59 ms, with 20 ms spent inside canister status gathering. Whole-frame performance and Steam latency remain open.
+
 ## `rc-1799e4b` playtest
 
 | Area | Two-PC observation |
