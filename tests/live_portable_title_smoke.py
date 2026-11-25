@@ -1122,6 +1122,7 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
             assert await command(guest, f"face-melee\t{center}") == "ready"
             await asyncio.sleep(.25)
             assert await command(host, f"align-melee\t{center}") == "true"
+            host_view, guest_view = await asyncio.gather(*(command(seat, "melee-view") for seat in (host, guest)))
             before = await command(host, f"melee-state\t{center}")
             assert before == f"true;false;7.000;{name}", before
             tap = await submit(guest_run, "native-guest-primary-input-fixture")
@@ -1143,7 +1144,9 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
         proof = event[native_guest_melee.SWING_KEY]
         contact = await command(host, "melee-contact")
         after = await command(host, f"melee-state\t{center}")
-        result = {"stock_input": tap, "host_damage": proof}
+        geometry = {"host_before": host_view, "guest_before": guest_view,
+                    "host_contact": await command(host, "melee-contact-view")}
+        result = {"stock_input": tap, "host_damage": proof, "contact_geometry": geometry}
         if verify_observer:
             assert proof["pawn"] == actor
             try:
@@ -1160,9 +1163,10 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
                 raise AssertionError(f"Guest swing did not animate for host: {observer(host_frame)}, {avatar}, {proof}") from error
         if not (native_guest_melee.verified_miss(proof) and after == before and contact == "sphere_empty"):
             break
-        misses.append({"stock_input": tap, "host_receipt": proof, "contact": contact, "fixture_target_position": center})
+        misses.append({"stock_input": tap, "host_receipt": proof, "contact": contact,
+                       "fixture_target_position": center, "contact_geometry": geometry})
     assert proof["target"] == name and proof["enemy_health_after"] <= 0 and native_guest_melee.verified_damage(proof), (
-        proof, contact, before, after, result.get("host_observer_swing"))
+        proof, contact, before, after, result.get("host_observer_swing"), misses, geometry)
     if misses:
         result["fixture_misses"] = misses
     if grip_error is not None:

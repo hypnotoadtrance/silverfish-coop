@@ -1890,6 +1890,16 @@ local function run(action, actor_path)
         if not valid(target) then return "absent" end
         return ("%s;%s;%.3f;%s"):format(tostring(target.Alive), tostring(target.Mesh:IsAnySimulatingPhysics()),
             target.Health, target:GetFullName())
+    elseif action == "melee-view" then
+        local owner = host and authoritative_guest(world) or pawn
+        local eye, forward = owner.Camera:K2_GetComponentLocation(), owner.Camera:GetForwardVector()
+        return ("%.7f,%.7f,%.7f,%.7f,%.7f,%.7f"):format(eye.X, eye.Y, eye.Z, forward.X, forward.Y, forward.Z)
+    elseif action == "melee-contact-view" then
+        assert(host, "the authoritative contact runs on the host")
+        if type(SilverfishReadNativeGuestMeleeContactGeometry) ~= "function" then return "unavailable" end
+        local x, y, z, dx, dy, dz, reach, radius = SilverfishReadNativeGuestMeleeContactGeometry()
+        if not x then return "unavailable" end
+        return ("%.7f,%.7f,%.7f,%.7f,%.7f,%.7f,%.7f,%.7f"):format(x, y, z, dx, dy, dz, reach, radius)
     elseif action == "melee-contact" then
         assert(host, "the authoritative contact runs on the host")
         return SilverfishReadNativeGuestMeleeContactStatus()

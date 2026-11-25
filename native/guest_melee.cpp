@@ -624,6 +624,13 @@ namespace
     };
 
     Swing swing;
+    std::optional<TraceDiagnostic> headless_contact;
+
+    bool headless_contact_enabled()
+    {
+        static const bool enabled = env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_TITLE_FIXTURES");
+        return enabled;
+    }
     struct PipeFence { U::FWeakObjectPtr pipe, contact; };
     std::vector<PipeFence> fenced_pipes;
     std::int64_t serial{};
@@ -1052,8 +1059,10 @@ namespace
                 health(swing.canonical.Get()) != swing.host_health || health(swing.save.Get()) != swing.guest_health)))
             return refuse("mutation_unverified_guest_melee_damage_scope");
         TraceDiagnostic diagnostic;
+        const bool capture = headless_contact_enabled();
         auto trace = stock_trace(receiver, swing.pawn.Get(), ordinary ? nullptr : enemy, &swing.damage.contact_status,
-            swing.fixture ? &diagnostic : nullptr, swing.range, swing.radius);
+            swing.fixture || capture ? &diagnostic : nullptr, swing.range, swing.radius);
+        if (capture) headless_contact = diagnostic;
         if (ordinary && trace) enemy = trace->first->GetOuterPrivate();
         if (trace) swing.damage.contact_candidate = enemy;
         bool allowed = trace && (!ordinary || combat_target(enemy, world, true, &swing.damage.contact_status));
@@ -1526,6 +1535,7 @@ namespace
         candidate.status = "pending";
         candidate.pending = true;
         swing = std::move(candidate);
+        headless_contact.reset();
         if constexpr (input)
         {
             apply_input_edge(true);
@@ -1696,7 +1706,16 @@ void silverfish::native_guest_melee::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishStartNativeGuestMeleeInput", start<SwingMode::ordinary, true>);
     lua.register_function("SilverfishApplyNativeGuestMeleeInputEdge", input_edge);
     lua.register_function("SilverfishReadNativeGuestMeleeInput", read_input);
-    if (env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_TITLE_FIXTURES"))
+    if (headless_contact_enabled())
+    {
+        lua.register_function("SilverfishReadNativeGuestMeleeContactGeometry", [](const Lua& state) {
+            if (!headless_contact || !headless_contact->origin || !headless_contact->direction) return 0;
+            for (auto axis : *headless_contact->origin) state.set_number(axis);
+            for (auto axis : *headless_contact->direction) state.set_number(axis);
+            state.set_number(swing.range);
+            state.set_number(swing.radius);
+            return 8;
+        });
         lua.register_function("SilverfishReadNativeGuestMeleeContactStatus", [](const Lua& state) {
             auto cause = std::string{swing.damage.contact_status};
             auto* candidate = swing.damage.contact_candidate.Get();
@@ -1704,6 +1723,7 @@ void silverfish::native_guest_melee::register_lua(RC::LuaMadeSimple::Lua& lua)
             state.set_string(cause);
             return 1;
         });
+    }
     if (fixture_enabled())
     {
         lua.register_function("SilverfishStartNativeGuestMeleeCanary", start<SwingMode::surface_fixture>);
