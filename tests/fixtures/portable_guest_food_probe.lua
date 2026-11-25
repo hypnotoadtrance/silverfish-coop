@@ -50,6 +50,8 @@ local function eat_all(pawn, save, empty)
         fire.Food_AmmountReady = 20
     end
     local controller = pawn.Controller
+    local stack = controller.MenuStack
+    assert(stack:GetArrayNum() == 0, "the guest already has a stock menu open")
     local menu = asset("/Script/UMG.Default__WidgetBlueprintLibrary"):Create(controller,
         asset("/Game/Classes/GUI/Menu_Cook_Widget.Menu_Cook_Widget_C"), controller)
     assert(valid(menu) and same(menu:GetOwningPlayer(), controller), "could not create the stock Cook menu")
@@ -57,7 +59,10 @@ local function eat_all(pawn, save, empty)
     controller:AddMenu(menu)
     local before = cooking_stats(save)
     menu:BndEvt__Menu_Cook_Widget_Button_Eat_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
-    return before .. ";" .. cooking_stats(save) .. ";" .. tostring(fire.Food_AmmountReady)
+    local proof = before .. ";" .. cooking_stats(save) .. ";" .. tostring(fire.Food_AmmountReady)
+    if stack:GetArrayNum() == 1 and same(stack[1], menu) then controller:CloseMenu({}) end
+    assert(stack:GetArrayNum() == 0, "Eat All fixture left the stock Cook menu open")
+    return proof
 end
 
 local function stock_item(remote, class, quantity)
