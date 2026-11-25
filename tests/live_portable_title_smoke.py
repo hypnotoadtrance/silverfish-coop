@@ -336,6 +336,25 @@ def stock_split_refusal_overlay(game: Path):
     return portable_script_overlay(game, "native_inventory_view.lua", add_refusal_fixture)
 
 
+def stock_ammo_selector_overlay(game: Path):
+    def add_hold_fixture(script):
+        marker = "function reload_input.command(fields, state, phase)\n"
+        assert script.count(marker) == 1
+        fixture = """
+    if fields[2] == "native-guest-reload-input-fixture" and #fields == 4 and fields[4] == "hold" then
+        local local_pawn = state.local_pawn
+        assert(fixtures and phase == "connected" and state.server == true and local_pawn
+            and local_pawn.name == fields[3] and local_pawn.pawn:IsValid(), "fixture needs the connected guest")
+        local ok, message = SilverfishProbeNativeGuestReloadInput(local_pawn.pawn:GetAddress(), "hold")
+        assert(ok, message)
+        return message
+    end
+"""
+        return script.replace(marker, marker + fixture, 1)
+
+    return portable_script_overlay(game, "native_guest_reload_input.lua", add_hold_fixture)
+
+
 def warehouse_switch_overlay(game: Path):
     fixture = (Path(__file__).with_name("fixtures") / "portable_stock_switch_probe.lua").read_text(encoding="utf-8")
 
@@ -7063,6 +7082,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableFootstepProbe",
                                                      fixture="portable_footstep_probe.lua"))
+        if stock_alternate_ammo:
+            proof["stock_ammo_selector_overlays"] = [probes.enter_context(stock_ammo_selector_overlay(game)) for game in games]
         if resident_weapon_cues or stock_light_ar or stock_fire_mode_reopen or stock_alternate_ammo:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableDryFireProbe",

@@ -116,6 +116,9 @@ async def verify_alternate_ammo(host, guest, pawn, probe):
             old_reserve = units(await command(host, "peer-reserve"))
             new_reserve = units(await command(host, "peer-second-reserve"))
             pressed = time.time()
+            opened = await guest.bridge.command("native-guest-reload-input-fixture",
+                                                frame["game"]["pawns"]["local"]["name"], "hold")
+            assert opened["ack"]["message"] == "stock_selector_opened", opened["ack"]
             assert await command(guest, f"ammo-selector\t{NINE_MM_AP.item_path}") == "stock alternate ammo selected"
             async with asyncio.timeout(12):
                 while switched is None:

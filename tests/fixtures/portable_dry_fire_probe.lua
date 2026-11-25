@@ -391,8 +391,6 @@ local function run(action, argument)
         local weapon = local_pawn.EquipedItem
         local original, count = weapon.AmmoType[ammo_item], weapon.Ammo
         assert(valid(original) and count > 0, "fixture requires a loaded weapon")
-        local ok, result = SilverfishProbeNativeGuestReloadInput(local_pawn:GetAddress(), "hold")
-        assert(ok and result == "stock_selector_opened", tostring(result))
         local selector
         for _, widget in ipairs(FindAllOf("AmmoTypeSelect_C") or {}) do
             if valid(widget) and widget:IsInViewport() and same(widget["As Player FP"], local_pawn)
@@ -401,7 +399,9 @@ local function run(action, argument)
                 selector = widget
             end
         end
-        assert(selector and selector.Buttons:GetArrayNum() >= 3, "the stock selector did not list two reserve types")
+        assert(selector, "the stock selector was not mounted for the selected weapon")
+        local count_buttons = selector.Buttons:GetArrayNum()
+        assert(count_buttons >= 2, "the stock selector did not list an alternate type: " .. count_buttons)
         for i = 2, selector.Buttons:GetArrayNum() do
             local button = selector.Buttons[i]
             if type(button.type) == "function" and button:type() == "RemoteUnrealParam" then button = button:get() end

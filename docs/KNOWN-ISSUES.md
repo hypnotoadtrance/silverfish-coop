@@ -53,9 +53,14 @@ The `rc-f0b1c06` Crossroads baseline used two muted Direct IP instances. During 
 | Guest melee swings | The guest can swing once. Switching to another weapon and back allows one more swing. |
 | Lamp activation | Players still disagree on whether a lamp is lit. |
 | Trading | The guest successfully traded with a Wanderer, a regular trader, and NPCs offering barter. |
-| Ammunition selection | Holding R on the guest does not show the stock ammunition selector. The guest reload hook consumes the stock event that opens it. The stock selector also returns the previous load and starts a reload when a new type is selected. Both steps need to settle on the host. |
+| Ammunition selection | Holding R on the guest does not show the stock ammunition selector. The guest reload hook consumes the stock event that opens it. The stock selector also returns the previous load and starts a reload when a new type is selected. In `rc-b36f53f`, the guest opened the stock selector from a held R input and chose 9 mm AP with a loaded Vampire magazine. Both seats agreed on AP, all Vampire rounds returned to the backpack, and the ammunition reserve fell from 24 AP to 12. Six alternate-ammunition cases passed in the same two muted Direct IP launches, and the original saves were preserved. Retest the selector with physical input over Steam. Grenade launcher reload and ammunition returning are tracked below. |
 | Grenade launcher reload | Most guns reload for the guest. Tap R does not reload the grenade launcher, while a dry fire can trigger its stock reload. |
+| Guest ammunition returns after reload | The guest reports ammunition eventually returns in both the magazine and backpack. Unequipping and equipping the grenade launcher restores its chamber to 1/1. The launcher is absent from the current host firearm profiles. Verify magazine and backpack counts on both seats across repeated shots, reloads, and equipment switches. |
 | Friendly fire | Co-op currently blocks damage attributed to a teammate. A host setting to allow it is queued. |
+| Guest lockpicking | The guest can start the animation on a locked door. No success or failure message appears, and the lockpick count remains unchanged on reopening the backpack. Verify a hinged door's completion path separately from the locker checks. |
+| Buried artifact package | The guest dug up the wheat-field package, saw it in the world, and picked it up. They could not open it from the resulting inventory item. |
+| Drops from equipment slots | The guest cannot drop directly from a quick equipment slot. Unequipping into the backpack and dropping from there works. |
+| Stardust handoff | The guest's use was refused as expected for a teleport consumable. They handed the Stardust to the host, who also could not consume it. Check the stock host use path after a guest inventory transfer. |
 
 ## `rc-1799e4b` playtest
 
