@@ -118,7 +118,8 @@ LoopInGameThreadWithDelay(25, function()
     end
     local output = io.open(reply, "wb")
     if output then
-        output:write(ticket, "\t", ok and "ok" or "error", "\t", tostring(result):gsub("[\r\n\t]", " "))
+        local message = tostring(result):gsub("[\r\n\t]", " ")
+        output:write(ticket, "\t", ok and "ok" or "error", "\t", message)
         output:close()
     end
 end)
