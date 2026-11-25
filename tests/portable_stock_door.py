@@ -1,4 +1,4 @@
-"""Exercise a stock hinged door in one portable Crossroads campaign."""
+"""Exercise stock hinged doors and their guest previews in portable co-op."""
 
 import math
 import time
@@ -11,7 +11,55 @@ from tools.silverfish.control import submit
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
 
+DOCK = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
+DOCK_GATE = f"Door_Bars_01_BP_C {DOCK}.Tut_Dock_P:PersistentLevel.Door_Bars_01_BP_C_1"
 WOOD_DOOR = f"Door_Wood_04_BP_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Door_Wood_04_BP_C_1719"
+
+
+async def toggle_door(host, guest, actor, pawn, expected_open):
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+
+    def observed(frame):
+        return frame.get("game", {}).get(door.KEY, {}).get(actor, {})
+
+    attempts = []
+    current = observed(await wait_resident_status(host_run, lambda frame:
+        observed(frame).get("open") is not expected_open and bool(observed(frame))))
+    x, y, z = current["knob_location"]
+    for dx, dy in ((110, 0), (0, 110), (-110, 0), (0, -110)):
+        moved = await host.bridge.restore("guest", {"location": [x + dx, y + dy, z]})
+        assert moved["pawns"]["guest"]["name"] == pawn
+        point = moved["pawns"]["guest"]["location"]
+        await wait_resident_status(guest_run, lambda frame:
+            math.dist(frame["game"].get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), point) < 55)
+        started = time.time()
+        try:
+            await guest.bridge.command(door.INPUT_FIXTURE, actor)
+        except RuntimeError as error:
+            if "stock_fixture_focus_unavailable" not in str(error):
+                raise
+            attempts.append(str(error))
+        else:
+            break
+    else:
+        raise RuntimeError(f"No stock approach reached the stock hinge knob: {attempts}")
+
+    authority = observed(await wait_resident_status(host_run, lambda frame:
+        observed(frame).get("open") is expected_open and observed(frame).get("locked") is False))
+    replica = await wait_resident_status(guest_run, lambda frame: door.matches(observed(frame), authority))
+    actions = [event for event in await resident_events(guest_run, replica)
+               if event.get("time_unix", 0) >= started and event.get("event") == "local_interaction"
+               and event.get(door.RESULT, {}).get("actor") == actor]
+    receipt, = actions
+    assert receipt[door.RESULT]["open"] is expected_open
+    motion, = [event for event in await resident_events(guest_run, replica)
+               if event.get("time_unix", 0) >= started and event.get("event") == "native_stock_door_motion_played"
+               and event.get("actor") == actor and event.get("opens") is expected_open]
+    assert motion["time_unix"] < receipt["time_unix"], (motion, receipt)
+    measured = await guest.bridge.command(door.FIXTURE, "motion", actor, update_status=False)
+    first, preview, collision_kept = map(float, measured["ack"]["message"].split("|"))
+    assert 0 <= preview < first and collision_kept == 1, measured
+    return receipt, first, preview
 
 
 async def verify_stock_crossroads_door(host, guest, pawn):
@@ -29,6 +77,7 @@ async def verify_stock_crossroads_door(host, guest, pawn):
         and frame["game"].get("native_guest_save", {}).get("state") == "bound"
         and observed(frame).get("locked") is True, timeout=60)
     epoch = arrival["zone_epoch"]
+    pawn = arrival["game"]["native_guest_save"]["pawn"]
     initial = observed(arrival)
     await wait_resident_status(guest_run, lambda frame:
         frame.get("zone_epoch") == epoch and door.matches(observed(frame), initial))
@@ -57,50 +106,10 @@ async def verify_stock_crossroads_door(host, guest, pawn):
         observed(frame).get("open") is True and observed(frame).get("locked") is False)
     await wait_resident_status(guest_run, lambda frame: door.matches(observed(frame), observed(opened)))
 
-    async def toggle(expected_open):
-        attempts = []
-        current = observed(await wait_resident_status(host_run, lambda frame:
-            observed(frame).get("open") is not expected_open and bool(observed(frame))))
-        x, y, z = current["knob_location"]
-        for dx, dy in ((110, 0), (0, 110), (-110, 0), (0, -110)):
-            moved = await host.bridge.restore("guest", {"location": [x + dx, y + dy, z]})
-            assert moved["pawns"]["guest"]["name"] == arrival["game"]["native_guest_save"]["pawn"]
-            point = moved["pawns"]["guest"]["location"]
-            await wait_resident_status(guest_run, lambda frame:
-                math.dist(frame["game"].get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), point) < 55)
-            started = time.time()
-            try:
-                await guest.bridge.command(door.INPUT_FIXTURE, WOOD_DOOR)
-            except RuntimeError as error:
-                if "stock_fixture_focus_unavailable" not in str(error):
-                    raise
-                attempts.append(str(error))
-            else:
-                break
-        else:
-            raise RuntimeError(f"No stock approach reached the Crossroads hinge knob: {attempts}")
-
-        authority = observed(await wait_resident_status(host_run, lambda frame:
-            observed(frame).get("open") is expected_open and observed(frame).get("locked") is False))
-        replica = await wait_resident_status(guest_run, lambda frame: door.matches(observed(frame), authority))
-        actions = [event for event in await resident_events(guest_run, replica)
-                   if event.get("time_unix", 0) >= started and event.get("event") == "local_interaction"
-                   and event.get(door.RESULT, {}).get("actor") == WOOD_DOOR]
-        receipt, = actions
-        assert receipt[door.RESULT]["open"] is expected_open
-        motion, = [event for event in await resident_events(guest_run, replica)
-                   if event.get("time_unix", 0) >= started and event.get("event") == "native_stock_door_motion_played"
-                   and event.get("actor") == WOOD_DOOR and event.get("opens") is expected_open]
-        assert motion["time_unix"] < receipt["time_unix"], (motion, receipt)
-        measured = await guest.bridge.command(door.FIXTURE, "motion", WOOD_DOOR, update_status=False)
-        first, preview, collision_kept = map(float, measured["ack"]["message"].split("|"))
-        assert 0 <= preview < first and collision_kept == 1, measured
-        assert await panel(host, query) is not expected_open
-        assert await panel(guest, query) is not expected_open
-        return receipt, first, preview
-
-    closed, close_motion, close_preview = await toggle(False)
-    reopened, reopen_motion, reopen_preview = await toggle(True)
+    closed, close_motion, close_preview = await toggle_door(host, guest, WOOD_DOOR, pawn, False)
+    assert await panel(host, query) and await panel(guest, query)
+    reopened, reopen_motion, reopen_preview = await toggle_door(host, guest, WOOD_DOOR, pawn, True)
+    assert not await panel(host, query) and not await panel(guest, query)
     replay = await submit(guest_run, door.ACTION, operation_id=closed["operation_id"], target=WOOD_DOOR)
     assert replay.get("ok") and replay[door.RESULT] == closed[door.RESULT]
     assert not await panel(host, query) and not await panel(guest, query)
@@ -112,3 +121,27 @@ async def verify_stock_crossroads_door(host, guest, pawn):
                                      "guest_preview_start_ms": [close_preview, reopen_preview],
                                      "close_replay_preserved_open_door": True,
                                      "collision_verified_both_seats": True, "campaign_unchanged": True}}
+
+
+async def verify_stock_dock_gate(host, guest):
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+
+    def observed(frame):
+        return frame.get("game", {}).get(door.KEY, {}).get(DOCK_GATE, {})
+
+    arrival = await wait_resident_status(host_run, lambda frame:
+        frame["game"].get("map") == DOCK and not frame.get("awaiting_zone_guest")
+        and frame["game"].get("native_guest_save", {}).get("state") == "bound"
+        and observed(frame).get("locked") is False, timeout=30)
+    pawn = arrival["game"]["native_guest_save"]["pawn"]
+    initial = observed(arrival)
+    await wait_resident_status(guest_run, lambda frame:
+        frame.get("zone_epoch") == arrival["zone_epoch"] and door.matches(observed(frame), initial))
+    checkpoint = campaign_save_hashes(host.campaign)
+    poses = []
+    for expected_open in (not initial["open"], initial["open"]):
+        receipt, motion, preview = await toggle_door(host, guest, DOCK_GATE, pawn, expected_open)
+        poses.append({"open": expected_open, "motion_ms": motion, "preview_ms": preview,
+                      "confirmation_ms": receipt["elapsed_ms"]})
+    assert campaign_save_hashes(host.campaign) == checkpoint
+    return {"stock_dock_gate": {"actor": DOCK_GATE, "poses": poses, "campaign_unchanged": True}}
