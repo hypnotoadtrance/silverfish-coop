@@ -7,7 +7,8 @@ from unittest.mock import ANY, AsyncMock, Mock, call, patch
 import uuid
 
 from tools.silverfish import (
-    native_flashlight, native_loot, native_player_avatar, native_stock_door, native_world_loot, runtime, service,
+    gameplay_snapshot, native_flashlight, native_loot, native_player_avatar, native_stock_door, native_world_loot,
+    runtime, service,
 )
 from tools.silverfish.travel import OBSERVATORY, PLAYTEST_MAPS
 
@@ -57,6 +58,57 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.gameplay, {"players": {}})
         self.assertEqual(client.gameplay_seen, 100.0)
+
+    async def test_snapshot_delta_preserves_host_state_and_recovers_from_a_missed_reply(self):
+        gameplay = {"host_world": {"clock": 8}, "actors": {"door": False}, "players": {}, "cue": "old"}
+        host = SimpleNamespace(stopping=False, native_guest=False, transitioning=False, zone_epoch="epoch",
+                               gameplay_snapshots=gameplay_snapshot.HostSnapshots(),
+                               authenticated_guest=Mock(return_value=("guest", "character")))
+        host.snapshot_for_guest = lambda *_: {
+            "ok": True, "gameplay": dict(gameplay), "zone_epoch": host.zone_epoch, "zone": OBSERVATORY,
+            "viewer_role": "guest", "travel_in_progress": False,
+        }
+        replies = []
+        lose_next = False
+
+        async def request(payload, *, timeout):
+            nonlocal lose_next
+            result = service.Host.guest_request(host, "peer", payload)
+            replies.append(result)
+            if lose_next:
+                lose_next = False
+                raise TimeoutError
+            return result
+
+        client = self.guest(AsyncMock(side_effect=request))
+
+        async def refresh():
+            client.next_snapshot = 0
+            await client.refresh_gameplay(project=False)
+
+        await refresh()
+        self.assertEqual(replies[-1][gameplay_snapshot.REVISION], "")
+        await refresh()
+        client.gameplay["actors"]["door"] = True  # Optimistic local projection.
+        gameplay["host_world"]["clock"] = 9
+        del gameplay["cue"]
+        await refresh()
+        self.assertEqual(replies[-1][gameplay_snapshot.DELTA],
+                         {"changed": {"host_world": {"clock": 9}}, "removed": ["cue"]})
+        self.assertEqual(client.gameplay, gameplay)
+        self.assertFalse(client.gameplay["actors"]["door"])
+
+        lose_next = True
+        await refresh()
+        self.assertIn(gameplay_snapshot.DELTA, replies[-1])
+        await refresh()
+        self.assertIn("gameplay", replies[-1])
+        self.assertEqual(client.gameplay, gameplay)
+
+        host.zone_epoch = "new"
+        await refresh()
+        self.assertIn("gameplay", replies[-1])
+        self.assertTrue(client.needs_travel)
 
     async def test_refused_projected_pickups_release_only_their_local_preview(self):
         client = self.guest(AsyncMock())

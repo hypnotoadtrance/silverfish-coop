@@ -15,7 +15,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 
-from . import guest_weapon_profiles, native_board_contract
+from . import gameplay_snapshot, guest_weapon_profiles, native_board_contract
 from . import (direct_ip, link, matrix_service, native_authored_pickup, native_blue, native_broker, native_computer_board, native_dialogue, native_downed_markers,
                native_dream, native_enemy_loot, native_enemy_shells, native_finite_shop, native_flood_jammer, native_lenny,
                native_gold, native_green, native_guest_armor, native_guest_clock, native_guest_consumable, native_guest_npc, native_guest_stack_drop,
@@ -380,6 +380,7 @@ class Host:
         self.marker_ready = False
         self.next_projection = 0.0
         self.zone_epoch = uuid.uuid4().hex
+        self.gameplay_snapshots = gameplay_snapshot.HostSnapshots()
         self.transitioning = False
         self.loading_zone: str | None = None
         self.zone_fade_from: str | None = None
@@ -2123,6 +2124,7 @@ class Host:
         if request.get("action") == "snapshot" and request.keys() <= {
             "action", "voice_events", "avatar_aim", "sprinting", "zone_epoch", native_guest_clock.WORLD_START,
             native_flashlight.GUEST_SOURCE, native_player_avatar.GUEST_LIGHTER, native_player_avatar.GUEST_VISOR,
+            gameplay_snapshot.BASE,
         }:
             if request.get("zone_epoch") == self.zone_epoch and not self.transitioning:
                 member = self.native_recipients().get(character) if self.native_guest else None
@@ -2146,7 +2148,9 @@ class Host:
             if (request.get(native_guest_clock.WORLD_START) is True and reply.get("travel_in_progress") is False
                     and (start := self.guest_world_start_frame(request.get("zone_epoch"))) is not None):
                 reply[native_guest_clock.WORLD_START] = start
-            return reply
+            if "gameplay" not in reply or request.get(native_guest_clock.WORLD_START) is True:
+                return reply
+            return self.gameplay_snapshots.encode(guest_id, character, request.get(gameplay_snapshot.BASE), reply)
         action = request.get("action")
         if action in (link.GUEST_LEAVE, link.GUEST_LEAVE_CONFIRM):
             operation, epoch = request.get("operation_id"), request.get("target")
@@ -5173,6 +5177,7 @@ class Client:
         self.source_fade: tuple[tuple[str, str, str], str, float] | None = None
         self.last_game = {}
         self.gameplay = {}
+        self.gameplay_snapshots = gameplay_snapshot.ClientSnapshots()
         self.zone_epoch = None
         self.viewer_role = "guest"
         self.expected_zone = None
@@ -5258,6 +5263,7 @@ class Client:
 
     async def connect(self, timeout: float = 6, *, queue: bool = False) -> dict:
         await self.cancel_gameplay_snapshot()
+        self.gameplay_snapshots.clear()
         request = {key: self.invite[key] for key in ("guest_id", "credential", "character_id", "game_build")}
         request["protocol_version"] = PROTOCOL
         if isinstance(self.transport.runtime_id, str):
@@ -6194,6 +6200,8 @@ class Client:
             return
         self.next_snapshot = now + 0.5
         request = {"action": "snapshot"}
+        if self.gameplay_snapshots.base is not None:
+            request[gameplay_snapshot.BASE] = self.gameplay_snapshots.base
         if active:
             if events := native_voice.client_events(self.last_game):
                 request.update(voice_events=events, zone_epoch=self.zone_epoch)
@@ -6231,7 +6239,7 @@ class Client:
                     return
                 self.snapshot_request = None
                 if reply.get("ok"):
-                    self.gameplay = reply["gameplay"]
+                    self.gameplay = self.gameplay_snapshots.read(reply)
                     viewer = reply.get("viewer_role")
                     if viewer in ("guest", "guest2", "guest3", "guest4"):
                         self.viewer_role = viewer

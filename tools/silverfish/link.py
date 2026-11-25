@@ -31,6 +31,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from .native_guest_consumable import RESULT as GUEST_CONSUMABLE_ACTIONS
+from .gameplay_snapshot import DELTA as GAMEPLAY_DELTA
 from .udp_ownership import verify_loopback_socket
 
 __all__ = [
@@ -385,6 +386,7 @@ class _TransportStatistics:
     reassembly_max_pending_packets: int = 0
     snapshot_responses_encoded: int = 0
     snapshot_responses_compressed: int = 0
+    snapshot_delta_responses: int = 0
     snapshot_plaintext_bytes: int = 0
     snapshot_encoded_bytes: int = 0
     snapshot_encode_total_ns: int = 0
@@ -410,6 +412,7 @@ def _encode_response(result: Action, *, snapshot: bool, stats: _TransportStatist
         assert stats is not None
         elapsed = perf_counter_ns() - started
         stats.snapshot_responses_encoded += 1
+        stats.snapshot_delta_responses += GAMEPLAY_DELTA in result
         stats.snapshot_responses_compressed += len(frame) < plaintext_size
         stats.snapshot_plaintext_bytes += plaintext_size
         stats.snapshot_encoded_bytes += len(frame)
