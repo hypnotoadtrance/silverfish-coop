@@ -122,13 +122,8 @@ authority.server = false
 local opened = authority.world.doors[1]
 opened.Open = true
 guest.ActorBeingLookedAt = object()
-guest.InteractionTarget_Component = opened.Box_Knob
-guest.CanInteract = true
-package.loaded.native_loot_crate_input = {stock_focus = function(pawn, knob, dispatch, refusal)
-    assert(pawn == guest and knob == opened.Box_Knob)
-    if pawn.CanInteract ~= true or pawn.InteractionTarget_Component ~= knob then error(refusal, 0) end
-    return true, dispatch()
-end}
+guest.InteractionTarget_Component = object()
+guest.CanInteract = false
 function opened:SendInteractionToActor(pawn, knob)
     assert(pawn == guest and knob == self.Box_Knob)
     self.Open = not self.Open
@@ -136,9 +131,9 @@ end
 
 local close = {"request", "native-stock-door-guest-interact", opened.name, "guest pawn"}
 assert(doors.command(close, authority, "hosting") == "stock hinged door interaction dispatched open" and not opened.Open,
-    "the stock F trace can close the exact open door even when the visibility trace hits a wall")
-opened.Open = true
-guest.InteractionTarget_Component = object()
+    "host focus may disagree with the knob captured on the guest's stock press")
+assert(doors.command(close, authority, "hosting") == "stock hinged door interaction dispatched closed" and opened.Open,
+    "the exact qualified door can reopen")
+opened.Locked = true
 local ok, reason = pcall(doors.command, close, authority, "hosting")
-assert(not ok and reason == "stock_door_guest_out_of_reach" and opened.Open,
-    "guest authority must still refuse an obstructed interaction knob")
+assert(not ok and reason == "stock_door_locked" and opened.Open, "the host's live lock still prevents the toggle")

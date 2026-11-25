@@ -64,13 +64,30 @@ async def toggle_door(host, guest, actor, pawn, expected_open, *, inspect_during
         inspected = {"actor": inspect_during_motion, "completed_at": completed_at,
                      "roundtrip_ms": round((completed_at - probe_start) * 1000)}
 
+    # Read the guest receipt before waiting on world state. A rejected input
+    # has a reason in the short-lived event ring and will not change the host.
+    events = []
+    try:
+        async with asyncio.timeout(5):
+            while True:
+                events = [event for event in await resident_events(guest_run, guest_view)
+                          if event.get("time_unix", 0) >= started]
+                for event in events:
+                    if event.get("event") == "interaction_rejected" and "stock_door_" in event.get("reason", ""):
+                        raise AssertionError(f"Stock door press rejected: {event}")
+                actions = [event for event in events if event.get("event") == "local_interaction"
+                           and event.get(door.RESULT, {}).get("actor") == actor]
+                if actions:
+                    receipt, = actions
+                    break
+                await asyncio.sleep(.015)
+    except TimeoutError:
+        recent = [event for event in events if event.get("event") in
+                  {"interaction_rejected", "local_interaction", "native_stock_door_motion_played"}]
+        raise AssertionError(f"No stock door receipt for {actor}: {recent}") from None
     authority = observed(await wait_resident_status(host_run, lambda frame:
         observed(frame).get("open") is expected_open and observed(frame).get("locked") is False))
     replica = await wait_resident_status(guest_run, lambda frame: door.matches(observed(frame), authority))
-    actions = [event for event in await resident_events(guest_run, replica)
-               if event.get("time_unix", 0) >= started and event.get("event") == "local_interaction"
-               and event.get(door.RESULT, {}).get("actor") == actor]
-    receipt, = actions
     assert receipt[door.RESULT]["open"] is expected_open
     if inspected:
         assert inspected["completed_at"] < receipt["time_unix"], (inspected, receipt)
