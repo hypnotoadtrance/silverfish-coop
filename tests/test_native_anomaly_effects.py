@@ -28,6 +28,8 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
         with patch("tools.silverfish.service.time.monotonic", return_value=50):
             view = Host.snapshot_for_guest(host, "peer", "guest")["gameplay"]
             self.assertEqual(view[KEY], {"map": area, "epoch": epoch, "cues": cues})
+            host.native_guest = False
+            self.assertEqual(Host.snapshot_for_guest(host, "peer", "guest")["gameplay"][KEY], view[KEY])
             self.assertNotIn(KEY, Host.snapshot_for_guest(host, "peer", "guest2")["gameplay"])
             host.transitioning = True
             self.assertNotIn(KEY, Host.snapshot_for_guest(host, "peer", "guest")["gameplay"])

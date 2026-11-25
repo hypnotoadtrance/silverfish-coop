@@ -1985,7 +1985,7 @@ class Host:
             gameplay[native_downed_markers.KEY] = native_downed_markers.frame(
                 gameplay, positions, self.last_game["map"], self.zone_epoch, character)
         current_world = not self.transitioning and time.monotonic() - self.last_seen < 2
-        if (self.native_guest and character and current_world and self.last_game.get("state") == "hosting"
+        if (character and current_world and self.last_game.get("state") == "hosting"
                 and (cues := self.last_game.get(native_anomaly_effects.KEY))):
             # World effects are available to authenticated guests during visits
             # that temporarily suspend their personal stock saves.
