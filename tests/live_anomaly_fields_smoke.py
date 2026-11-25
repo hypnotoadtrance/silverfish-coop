@@ -20,6 +20,8 @@ from tools.silverfish.control import submit
 from tools.silverfish.travel import CISTERN, CROSSROADS, EAST_WING, LAB_E206
 
 PLACED = {
+    "stone-maze": ("/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P", "spinning-ball",
+                   "SpinningBall_Anomaly_C_1", 1),
     "cistern-gravity": (CISTERN, "gravity", "GravityAnomaly_BP_C_1", 1),
     "lab-e206": (LAB_E206, "burner", "BurnerTrap_BP_C_1", 2),
     "perdition": ("/Game/Classes/Maps/Maps_Dungeons/Perdition_01_P", "starburst", "Starburst_BP_C_5", 5),
@@ -322,9 +324,14 @@ async def verify(work, vanilla, activate, placed, generated, glass_web=False):
         for target in targets.values():
             result = await submit(guest, fixture, target=target)
             assert result["ok"], result
-        expected_vetoes = 3 if placed and "electrode" in traps else len(traps)
+        expected_vetoes = 3 if placed and "electrode" in traps else 2 if "spinning-ball" in traps else len(traps)
         vetoed = await wait(guest, lambda row: scene(row).get(counter, 0) >= prior + expected_vetoes)
-        assert scene(vetoed)["live"] == scene(peer)["live"], vetoed
+        if "spinning-ball" in traps:
+            # Stock field actors in Stone Maze can arrive after the placed trap.
+            assert sum(item["kind"] == "spinning-ball" for item in positions(vetoed)) == 1
+            assert vetoed["game"]["pawns"]["local"]["health"] == peer["game"]["pawns"]["local"]["health"]
+        else:
+            assert scene(vetoed)["live"] == scene(peer)["live"], scene(vetoed)
         proof[counter] = scene(vetoed)[counter] - prior
         assert (await submit(guest, "drop-link"))["ok"]
         await wait(guest, lambda row: row.get("reconnect_suspended") and not row.get("link_connected"))
@@ -343,6 +350,23 @@ async def verify(work, vanilla, activate, placed, generated, glass_web=False):
             guest_health = first["game"]["pawns"]["guest"]["health"]
             assert health > 0 and guest_health > 0, first["game"]["pawns"]
             for kind, target in targets.items():
+                if kind == "spinning-ball":
+                    def rads(frame, seat):
+                        game = frame.get("game", {})
+                        pawn = game.get("pawns", {}).get(seat, {}).get("name")
+                        return game.get("native_guest_vitals", {}).get(pawn, {}).get("rads", -1)
+
+                    baseline = await wait(host, lambda row: rads(row, "guest") >= 0)
+                    starting_rads = rads(baseline, "guest")
+                    assert (await submit(host, "native-anomaly-trigger-fixture", target=target))["ok"]
+                    radiated = await wait(host, lambda row: rads(row, "guest") > starting_rads, timeout=8)
+                    received = await wait(guest, lambda row: rads(row, "local") > starting_rads, timeout=8)
+                    assert math.isclose(rads(received, "local"), rads(radiated, "guest"), abs_tol=.01)
+                    proof["spinning_ball_guest_radiation"] = {
+                        "before": starting_rads, "host_guest_rads": rads(radiated, "guest"),
+                        "projected_guest_rads": rads(received, "local"),
+                    }
+                    continue
                 if kind == "electrode":
                     armed = await wait(host, lambda row: electrode_phase(row, 1))
                     proof["host_electrode_armed"] = electrode_phase(armed, 1)

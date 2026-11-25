@@ -18,6 +18,7 @@ local classes = {
     burner = "/Game/Classes/Anomalies/BurnerTrap_BP.BurnerTrap_BP_C",
     vortex = "/Game/Classes/Anomalies/VortexTrap_BP.VortexTrap_BP_C",
     gravity = "/Game/Classes/Anomalies/GravityAnomaly_BP.GravityAnomaly_BP_C",
+    ["spinning-ball"] = "/Game/Classes/Anomalies/SpinningBall_Anomaly.SpinningBall_Anomaly_C",
     electrode = "/Game/Classes/Anomalies/Electrode_BP.Electrode_BP_C",
     ["wandering-teleport"] = "/Game/Classes/Anomalies/Wandering_Teleport_BP.Wandering_Teleport_BP_C",
     ["lingering-teleport"] = "/Game/Classes/Anomalies/Lingering_Teleport_BP1.Lingering_Teleport_BP1_C",
@@ -90,6 +91,37 @@ local function placement(actor)
     end
 end
 
+local function spinning_radiation(actor)
+    local mount = actor.RadSource_BP
+    local source = valid(mount) and mount.ChildActor
+    if valid(source) and same(mount:GetOwner(), actor) and same(source:GetParentComponent(), mount)
+        and source:GetClass():GetFullName() == "BlueprintGeneratedClass /Game/Classes/Anomalies/RadSource_BP.RadSource_BP_C" then
+        return source
+    end
+end
+
+local function trigger_enabled(actor, kind)
+    if kind == "spinning-ball" then
+        local sphere, source = actor.Sphere, spinning_radiation(actor)
+        local radiation = source and source.Sphere
+        return valid(sphere) and sphere:GetGenerateOverlapEvents()
+            or valid(radiation) and radiation:GetGenerateOverlapEvents()
+    end
+    return actor:GetActorEnableCollision()
+end
+
+local function suppress_trigger(actor, kind)
+    if kind == "spinning-ball" then
+        -- Keep the mesh and its stock photo target available on both seats.
+        local sphere, source = actor.Sphere, spinning_radiation(actor)
+        if valid(sphere) then sphere:SetGenerateOverlapEvents(false) end
+        if source and valid(source.Sphere) then source.Sphere:SetGenerateOverlapEvents(false) end
+        return
+    end
+    actor:SetActorEnableCollision(false)
+    if disables_replica_tick(kind) then actor:SetActorTickEnabled(false) end
+end
+
 local function recover_family()
     local job = recovery
     if not job or not same(job.world, world) then
@@ -107,16 +139,13 @@ local function recover_family()
             local address = actor:GetAddress()
             if not active[address] and not pending[address] then
                 local kind = trap_kind(actor, actor:GetClass():GetFullName())
-                if kind and (job.rook or disables_replica_tick(kind)) then
+                if kind and (job.rook or disables_replica_tick(kind) or kind == "spinning-ball") then
                     local placed, local_copy = placement(actor)
                     local host = job.phase == "hosting" and actor:HasAuthority()
                         and (placed or actor:ActorHasTag(FName("Anomaly")))
                     local guest = job.phase == "connected" and (local_copy or replica(actor))
                     if host or guest then
-                        if guest then
-                            actor:SetActorEnableCollision(false)
-                            if disables_replica_tick(kind) then actor:SetActorTickEnabled(false) end
-                        end
+                        if guest then suppress_trigger(actor, kind) end
                         pending[address] = {actor = actor, kind = kind, placed = placed}
                     end
                 end
@@ -305,9 +334,15 @@ function fields.start(role, current)
             end
         elseif class == "BlueprintGeneratedClass " .. classes["glass-thread"] then
             actor:SetActorEnableCollision(false)
-        elseif trap_kind(actor, class) or class == fire_jet then
-            local _, local_copy = placement(actor)
-            if local_copy or replica(actor) then actor:SetActorEnableCollision(false) end
+        else
+            local kind = trap_kind(actor, class)
+            if kind or class == fire_jet then
+                local _, local_copy = placement(actor)
+                if local_copy or replica(actor) then
+                    if kind == "spinning-ball" then suppress_trigger(actor, kind)
+                    else actor:SetActorEnableCollision(false) end
+                end
+            end
         end
     end)
     RegisterBeginPlayPostHook(function(context)
@@ -353,9 +388,8 @@ function fields.start(role, current)
             return
         end
         if seat == "client" then
-            actor:SetActorEnableCollision(false)
+            suppress_trigger(actor, kind)
             if kind == "electrode" then electrodes.suspend(actor) end
-            if disables_replica_tick(kind) then actor:SetActorTickEnabled(false) end
         end
         local address = actor:GetAddress()
         if class == fire_jet then
@@ -484,15 +518,27 @@ function fields.command(args, state, phase)
         if guest_probe then
             local pawn = state.local_pawn and state.local_pawn.pawn
             if phase ~= "connected" or not in_world(pawn, state.world) or not pawn:IsLocallyControlled()
-                or not valid(pawn.CapsuleComponent) or trap:GetActorEnableCollision() ~= false then
+                or not valid(pawn.CapsuleComponent) or trigger_enabled(trap, kind) then
                 error("Placed trap guest overlap probe unavailable", 0)
             end
             local callback = kind == "electrode" and electrode_overlap
                 or kind == "wandering-teleport" and wandering_overlap or overlap
+            local before
+            if kind == "spinning-ball" then
+                local _, blocked = SilverfishReadNativeAnomalySkips(state.world:GetAddress())
+                before = blocked
+            end
             trap[callback](trap, trigger, pawn, pawn.CapsuleComponent, 0, false, {})
             if kind == "electrode" then
                 trap:ReceiveBeginPlay()
                 trap:Burst(2)
+            elseif kind == "spinning-ball" then
+                local source = spinning_radiation(trap)
+                if not source or not trap:GetActorEnableCollision() or not valid(trap.PlanetCreame)
+                    or not trap:IsActorTickEnabled() then error("Spinning Ball presentation unavailable", 0) end
+                source:FireDmg_Actor(pawn)
+                local _, blocked = SilverfishReadNativeAnomalySkips(state.world:GetAddress())
+                if blocked ~= before + 2 then error("Spinning Ball guest callbacks were not vetoed", 0) end
             end
             return "Stock placed trap guest overlap invoked"
         end
@@ -514,6 +560,16 @@ function fields.command(args, state, phase)
             -- authentication and teleport without depending on the gate's timer.
             trap:Authenticate_Target(guest)
             return "Stock wandering teleport invoked on the host"
+        end
+        if kind == "spinning-ball" then
+            local source = spinning_radiation(trap)
+            if not source or not source:HasAuthority() then error("Stock Spinning Ball radiation unavailable", 0) end
+            -- The placed ball sits over a separate Gravity Well. Isolate its stock damage callback.
+            local host_save = state.local_pawn.pawn.Save
+            local before = host_save.PlayerRads
+            source:FireDmg_Actor(guest)
+            if host_save.PlayerRads ~= before then error("The stock pulse changed the host radiation", 0) end
+            return "The stock Spinning Ball applied radiation to the enrolled guest"
         end
         local center = trigger:K2_GetComponentLocation()
         if not guest:K2_TeleportTo({X = center.X, Y = center.Y, Z = center.Z + 45}, guest:K2_GetActorRotation()) then
@@ -578,15 +634,15 @@ function fields.rows(state, phase, row)
         -- Initial replicated actors can finish BeginPlay while the new driver is still pending.
         if state.map == rook then
             recovery = {world = world, phase = phase, index = 1, rook = true,
-                names = {"GravityAnomaly_BP_C", "VortexTrap_BP_C"}}
+                names = {"GravityAnomaly_BP_C", "VortexTrap_BP_C", "SpinningBall_Anomaly_C"}}
         elseif phase == "connected" and state.map == crossroads then
-            local names = {"GravityAnomaly_BP_C", "Pyrogeist_BP_C", "Lingering_Teleport_BP1_C"}
+            local names = {"GravityAnomaly_BP_C", "Pyrogeist_BP_C", "Lingering_Teleport_BP1_C", "SpinningBall_Anomaly_C"}
             if shadows.enabled then names[#names + 1] = "ShadowSphere_BP_C" end
             if lamps.enabled then names[#names + 1] = "AnglerLamp_BP_C" end
             if observers.enabled then names[#names + 1] = "Observers_BP_C" end
             recovery = {world = world, phase = phase, index = 1, names = names, pyrogeist = true}
         else
-            local names = {"GravityAnomaly_BP_C"}
+            local names = {"GravityAnomaly_BP_C", "SpinningBall_Anomaly_C"}
             if shadows.enabled then names[#names + 1] = "ShadowSphere_BP_C" end
             recovery = {world = world, phase = phase, index = 1, names = names}
         end
@@ -605,21 +661,19 @@ function fields.rows(state, phase, row)
         local actor = entry.actor
         if in_world(actor, world) then
             if phase == "connected" then
-                if replica(actor) then
-                    actor:SetActorEnableCollision(false)
-                    if disables_replica_tick(entry.kind) then actor:SetActorTickEnabled(false) end
-                end
+                if replica(actor) then suppress_trigger(actor, entry.kind) end
                 if entry.kind == "glass-thread" then
                     if replica(actor) then glass_live[address] = entry end
-                elseif actor:GetActorEnableCollision() == false then
+                elseif not trigger_enabled(actor, entry.kind) then
                     active[address] = entry
                 end
             elseif entry.placed or entry.travel_source or actor:ActorHasTag(FName("Anomaly")) then
                 -- SpawnField applies its stock tag after finishing the spawned actor's BeginPlay.
                 actor.NetUpdateFrequency = math.min(actor.NetUpdateFrequency, 5)
                 actor:SetReplicates(true)
-                actor:SetReplicateMovement(true)
-                if actor.bReplicates and actor.bReplicateMovement then
+                local moving = entry.kind ~= "spinning-ball" or not entry.placed
+                actor:SetReplicateMovement(moving)
+                if actor.bReplicates and actor.bReplicateMovement == moving then
                     if entry.kind == "vortex" then
                         local sensor = vortex_sensor(actor)
                         if sensor then sensor:SetIsReplicated(true) end
@@ -658,12 +712,12 @@ function fields.rows(state, phase, row)
         local actor = entry.actor
         if valid(actor) and not actor:IsActorBeingDestroyed() and valid(actor.RootComponent) then
             if phase == "hosting" and entry.kind == "starburst" then effects.observe_charge(entry) end
-            if phase == "connected" and entry.placed and actor:GetActorEnableCollision() then
-                actor:SetActorEnableCollision(false)
+            if phase == "connected" and entry.placed and trigger_enabled(actor, entry.kind) then
+                suppress_trigger(actor, entry.kind)
             end
             live = live + 1
             local position = actor:K2_GetActorLocation()
-            local collision = actor:GetActorEnableCollision() and 1 or 0
+            local collision = trigger_enabled(actor, entry.kind) and 1 or 0
             rows[#rows + 1] = row("native-anomaly-position", entry.kind, position.X, position.Y, position.Z, collision)
             if entry.placed then
                 rows[#rows + 1] = row("native-placed-anomaly", entry.placed, entry.kind, position.X, position.Y, position.Z,

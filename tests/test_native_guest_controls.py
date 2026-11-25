@@ -342,7 +342,7 @@ class NativeGuestHealthViewTests(unittest.IsolatedAsyncioTestCase):
             self.body.update(health=float(health), max_health=float(maximum))
             if vitals:
                 view = self.game.setdefault(native_guest_ui.VITALS, {}).setdefault(name, {})
-                for field, value in zip(("food", "regen", "stim", "fatigue", "intox"), vitals):
+                for field, value in zip(("food", "regen", "stim", "fatigue", "intox", "sickness", "rads"), vitals):
                     if value != "-":
                         view[field] = float(value)
             return self.game
@@ -378,6 +378,17 @@ class NativeGuestHealthViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("food", frame)
         self.assertNotIn("regen", frame)
         self.assertNotIn("stim", frame)
+
+    async def test_radiation_can_change_and_clear_without_changing_health(self):
+        self.frame["rads"] = 1.7
+        await self.view.sync_health(self.client, True)
+        view = self.game[native_guest_ui.VITALS][self.pawn]
+        self.assertEqual(view, {"rads": 1.7})
+        self.frame["rads"] = 0
+        self.client.gameplay_seen = time.monotonic()
+        await self.view.sync_health(self.client, True)
+        self.assertEqual(view, {"rads": 0})
+        self.assertEqual(self.bridge.command.await_count, 2)
 
     async def test_food_and_regeneration_ceiling_update_with_unchanged_hp(self):
         self.frame.update(food=54.2, regen=112.8)

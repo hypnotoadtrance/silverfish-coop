@@ -1396,10 +1396,11 @@ local function write_status(state, current_phase, failure, fields, pending, crat
             end
             if finite(food) or finite(regen) or finite(stim) then
                 local fatigue, intox, sickness = native_save_scope.personal_flags(personal_save)
+                local rads = valid(personal_save) and personal_save.PlayerRads
                 rows[#rows + 1] = status_row("native-guest-vitals", details.name, finite(food) and food or "-",
                     finite(regen) and regen or "-", finite(stim) and stim or "-",
                     math.type(fatigue) == "integer" and fatigue or "-", math.type(intox) == "integer" and intox or "-",
-                    math.type(sickness) == "integer" and sickness or "-")
+                    math.type(sickness) == "integer" and sickness or "-", finite(rads) and rads or "-")
             end
         end
     end

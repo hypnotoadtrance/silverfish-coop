@@ -29,7 +29,7 @@ def bounded_health(health, maximum):
 
 def _vital_values(frame, maximum):
     values = {}
-    for field, limit in (("food", 200), ("regen", maximum), ("stim", 1_000_000)):
+    for field, limit in (("food", 200), ("regen", maximum), ("stim", 1_000_000), ("rads", 1_000_000)):
         value = frame.get(field)
         if type(value) in (int, float) and 0 <= value <= limit:
             values[field] = value
@@ -188,7 +188,9 @@ class GuestView:
                 and (current is None or _matches_vital(current, health)) and current_maximum == maximum
                 and all(_matches_vital(current_vitals.get(field), value) for field, value in vitals.items())):
             return
-        if "sickness" in vitals:
+        if "rads" in vitals:
+            fields = ("food", "regen", "stim", "fatigue", "intox", "sickness", "rads")
+        elif "sickness" in vitals:
             fields = ("food", "regen", "stim", "fatigue", "intox", "sickness")
         elif "fatigue" in vitals or "intox" in vitals:
             fields = ("food", "regen", "stim", "fatigue", "intox")

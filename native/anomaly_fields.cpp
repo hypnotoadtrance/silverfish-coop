@@ -43,6 +43,8 @@ namespace
     constexpr auto electrode_class = STR("/Game/Classes/Anomalies/Electrode_BP.Electrode_BP_C");
     constexpr auto acid_pool_class = STR("/Game/Classes/Anomalies/AcidPool_BP.AcidPool_BP_C");
     constexpr auto acid_dot_class = STR("/Game/Classes/Actors/StatusEffect_Actors/DotVolume.DotVolume_C");
+    constexpr auto spinning_class = STR("/Game/Classes/Anomalies/SpinningBall_Anomaly.SpinningBall_Anomaly_C");
+    constexpr auto radiation_class = STR("/Game/Classes/Anomalies/RadSource_BP.RadSource_BP_C");
     constexpr auto gravity_class = STR("/Game/Classes/Anomalies/GravityAnomaly_BP.GravityAnomaly_BP_C");
     constexpr auto pyrogeist_class = STR("/Game/Classes/Anomalies/Pyrogeist_BP.Pyrogeist_BP_C");
     constexpr auto directed_jet_class = STR("/Game/Classes/Anomalies/Fire_Jet_Directed_BP.Fire_Jet_Directed_BP_C");
@@ -71,7 +73,7 @@ namespace
         STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_FuelDrum.Prop_FuelDrum_C"),
         standing_tank_class,
     };
-    constexpr std::array<std::wstring_view, 7> replicated_classes{
+    constexpr std::array<std::wstring_view, 8> replicated_classes{
         STR("/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C"),
         STR("/Game/Classes/Anomalies/BurnerTrap_BP.BurnerTrap_BP_C"),
         vortex_class,
@@ -79,10 +81,12 @@ namespace
         electrode_class,
         roaming_teleport_class,
         glass_web_class,
+        spinning_class,
     };
     std::array<H::GlobalCallbackId, 5> hooks{H::ERROR_ID, H::ERROR_ID, H::ERROR_ID, H::ERROR_ID, H::ERROR_ID};
     U::FName spawn_field, overlap, electrode, roaming_teleport, fixed_prop_name, update_storm_track;
     U::FName gravity, gravity_graph, gravity_add_actors;
+    U::FName radiation_source, radiation_graph, radiation_damage;
     U::FName glass_web, glass_thread, glass_generate, glass_overlap, glass_break;
     U::FName pyrogeist, pyrogeist_graph, directed_jet, fire_graph, fire_damage;
     U::FName shadow, shadow_graph;
@@ -515,6 +519,16 @@ namespace
         // A guest can enter stock BeginPlay before the new world's driver has been published.
         auto* pending = loading.driver.Get();
         return loading.context && (!driver || driver == pending) && server_connection(pending, loading.connection.Get());
+    }
+
+    bool spinning_radiation(U::UObject* actor, U::UClass* type)
+    {
+        if (type->GetFName() != radiation_source || type->GetPathName() != radiation_class) return false;
+        auto* parent = property<U::FWeakObjectProperty>(actor, STR("ParentComponent"));
+        auto* mount = parent ? parent->GetPropertyValueInContainer(actor).Get() : nullptr;
+        auto* owner = mount ? mount->GetOuterPrivate() : nullptr;
+        return owner && owner->GetClassPrivate() && owner->GetClassPrivate()->GetPathName() == spinning_class &&
+            object(owner, STR("RadSource_BP")) == mount;
     }
 
     U::UWorld* stock_acid_pool(U::UObject* actor)
@@ -966,6 +980,7 @@ namespace
             std::find(electrode_events.begin(), electrode_events.end(), name) != electrode_events.end();
         const bool roaming_event = std::ranges::find(roaming_events, name) != roaming_events.end();
         const bool gravity_event = name == gravity_graph || name == gravity_add_actors;
+        const bool radiation_event = name == radiation_graph || name == radiation_damage;
         const bool pyrogeist_event = name == pyrogeist_graph;
         const bool fire_event = name == fire_graph || name == fire_damage;
         const bool shadow_event = shadow_replication && name == shadow_graph;
@@ -977,7 +992,7 @@ namespace
         const bool patch_event = std::ranges::find(patch_events, name) != patch_events.end();
         if ((!field && !trap && !roaming_event && !gravity_event && !pyrogeist_event && !fire_event &&
             !shadow_event && !angler_event && !observer_event && !prop_event && !fixed_event && !destructible_event &&
-            !patch_event) || !U::IsInGameThreadRaw() ||
+            !patch_event && !radiation_event) || !U::IsInGameThreadRaw() ||
             call.OriginalFunctionCallPrevented() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return;
         auto* type = actor->GetClassPrivate();
         if (!type) return;
@@ -1005,6 +1020,8 @@ namespace
              (class_name == lingering_teleport && type->GetPathName() == lingering_class));
         const bool gravity_well = gravity_event && class_name == gravity && type->GetPathName() == gravity_class;
         auto* binding = function->GetOuterPrivate();
+        const bool ball_radiation = radiation_event && binding == type && function->GetNumParms() == 1 &&
+            !function->GetReturnProperty() && spinning_radiation(actor, type);
         if (destructible_event && binding && binding->GetFName() == destructible_name &&
             binding->GetPathName() == destructible && type->IsChildOf(static_cast<U::UClass*>(binding)) &&
             actor->HasAnyFlags(U::RF_WasLoaded))
@@ -1024,7 +1041,7 @@ namespace
         const bool fixed = fixed_event && binding && binding->GetFName() == fixed_prop_name &&
             binding->GetPathName() == fixed_prop && type->IsChildOf(static_cast<U::UClass*>(binding));
         if (!field && !trap && !roaming && !gravity_well && !pyrogeist_body && !pyrogeist_jet &&
-            !shadow_sphere && !angler_lamp && !observing && !canister && !fixed) return;
+            !shadow_sphere && !angler_lamp && !observing && !canister && !fixed && !ball_radiation) return;
         auto* world = static_cast<U::AActor*>(actor)->GetWorld();
         if (canister)
         {
@@ -1046,7 +1063,7 @@ namespace
         {
             if (!world || world->GetPathName() != crossroads_world) return;
         }
-        else if (!canister && !fixed && !roaming && !gravity_well && !shadow_sphere &&
+        else if (!canister && !fixed && !roaming && !gravity_well && !shadow_sphere && !ball_radiation &&
                  (function->GetNumParms() != 6 || !trap_class(type))) return;
         if (!guest_world(world)) return;
 
@@ -1181,6 +1198,9 @@ namespace silverfish::native_anomaly_fields
             U::FName{STR("LoadMushrooms"), U::FNAME_Add},
         };
         overlap = U::FName{trap_overlap, U::FNAME_Add};
+        radiation_source = U::FName{STR("RadSource_BP_C"), U::FNAME_Add};
+        radiation_graph = U::FName{STR("ExecuteUbergraph_RadSource_BP"), U::FNAME_Add};
+        radiation_damage = U::FName{STR("FireDmg_Actor"), U::FNAME_Add};
         electrode = U::FName{STR("Electrode_BP_C"), U::FNAME_Add};
         roaming_teleport = U::FName{STR("Wandering_Teleport_BP_C"), U::FNAME_Add};
         lingering_teleport = U::FName{STR("Lingering_Teleport_BP1_C"), U::FNAME_Add};

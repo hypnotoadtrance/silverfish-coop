@@ -375,7 +375,8 @@ local function project_health(fields, state, phase)
     local health, maximum = tonumber(fields[8]), tonumber(fields[9])
     local food, regen, stim = tonumber(fields[10]), tonumber(fields[11]), tonumber(fields[12])
     local fatigue, intox, sickness = math.tointeger(fields[13]), math.tointeger(fields[14]), math.tointeger(fields[15])
-    if (#fields ~= 9 and #fields ~= 11 and #fields ~= 12 and #fields ~= 14 and #fields ~= 15)
+    local rads = tonumber(fields[16])
+    if (#fields ~= 9 and #fields ~= 11 and #fields ~= 12 and #fields ~= 14 and #fields ~= 15 and #fields ~= 16)
         or phase ~= "connected" or state.map ~= area or scope.selected() ~= token
         or not health or not maximum or not (1 <= maximum and maximum <= 1000000 and 0 <= health and health <= maximum)
         or #fields >= 11 and ((fields[10] ~= "-" and not (food and 0 <= food and food <= 200))
@@ -383,7 +384,8 @@ local function project_health(fields, state, phase)
         or #fields >= 12 and fields[12] ~= "-" and not (stim and 0 <= stim and stim <= 1000000)
         or #fields >= 14 and ((fields[13] ~= "-" and not (fatigue and 0 <= fatigue and fatigue <= 100))
             or (fields[14] ~= "-" and not (intox and 0 <= intox and intox <= 100)))
-        or #fields == 15 and fields[15] ~= "-" and not (sickness and -2^31 <= sickness and sickness < 2^31)
+        or #fields >= 15 and fields[15] ~= "-" and not (sickness and -2^31 <= sickness and sickness < 2^31)
+        or #fields == 16 and fields[16] ~= "-" and not (rads and 0 <= rads and rads <= 1000000)
         or type(SilverfishReadNativeClientDamageScope) ~= "function" then
         error("The authenticated stock health view is unavailable", 0)
     end
@@ -410,16 +412,19 @@ local function project_health(fields, state, phase)
     if food_changed then save.PlayerFood = food end
     if regen ~= nil and not matches_health(save.PlayerRegen, regen) then save.PlayerRegen = regen end
     if stim ~= nil and not matches_health(save.PlayerStim, stim) then save.PlayerStim = stim end
+    local radiation_changed = rads ~= nil and not matches_health(save.PlayerRads, rads)
+    if radiation_changed then save.PlayerRads = rads end
     if not matches_health(pawn.MaxHealth, maximum) or not matches_health(save.PlayerHealth, health)
         or food ~= nil and not matches_health(save.PlayerFood, food)
         or regen ~= nil and not matches_health(save.PlayerRegen, regen)
         or stim ~= nil and not matches_health(save.PlayerStim, stim)
+        or rads ~= nil and not matches_health(save.PlayerRads, rads)
         or fatigue ~= nil and current_fatigue ~= fatigue
         or sickness ~= nil and current_sickness ~= sickness
         or intox ~= nil and (current_intox ~= intox or pawn.Intoxication ~= intox) then
         error("The stock health view failed readback", 0)
     end
-    if food_changed or fatigue_changed or intox_changed or sickness_changed then
+    if food_changed or fatigue_changed or intox_changed or sickness_changed or radiation_changed then
         local info = stock_player_info(state)
         if valid(info) then info:UpdateStats() end
     end

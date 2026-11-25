@@ -2874,7 +2874,7 @@ class Bridge:
                     # Map-loaded guest actors can have ROLE_None until they enter replication range.
                     if (area.startswith("/Game/Classes/Maps/") and path.startswith(f"{area}.{area.rsplit('/', 1)[-1]}:")
                             and len(path) <= 512 and len(placed) < 1024
-                            and kind in {"starburst", "burner", "vortex", "gravity", "electrode", "wandering-teleport", "shadow-sphere"}
+                            and kind in {"starburst", "burner", "vortex", "gravity", "electrode", "wandering-teleport", "shadow-sphere", "spinning-ball"}
                             and collision in {"0", "1"} and role in {"0", "1", "3"}):
                         placed[path] = {"kind": kind, "location": [_finite(axis) for axis in (x, y, z)],
                                         "collision": collision == "1", "role": int(role)}
@@ -3034,7 +3034,7 @@ class Bridge:
                     positions = data.setdefault("native_anomaly_positions", [])
                     if (len(positions) < 1024 and fields[1] in {
                             "starburst", "burner", "vortex", "electrode", "wandering-teleport", "lingering-teleport", "gravity",
-                            "pyrogeist", "shadow-sphere", "angler-lamp", "observer", "glass-thread",
+                            "pyrogeist", "shadow-sphere", "angler-lamp", "observer", "glass-thread", "spinning-ball",
                         }
                             and fields[5] in {"0", "1"}):
                         positions.append({"kind": fields[1], "location": [_finite(value) for value in fields[2:5]],
@@ -3287,16 +3287,18 @@ class Bridge:
                                                "location": [_finite(axis) for axis in fields[4:7]],
                                                "controller": fields[7],
                                                "max_health": _finite(fields[8]) if len(fields) == 9 else None}
-                elif (fields[0] == "native-guest-vitals" and len(fields) in (4, 5, 7, 8)
+                elif (fields[0] == "native-guest-vitals" and len(fields) in (4, 5, 7, 8, 9)
                       and data.get("state") in ("hosting", "connected") and fields[1].startswith("Player_FP_C ")):
                     vitals = dict(zip(("food", "regen", "stim"), map(_finite, fields[2:5])))
                     for key, value in zip(("fatigue", "intox"), fields[5:7]):
                         if value.isascii() and value.isdecimal() and len(value) <= 3 and int(value) <= 100:
                             vitals[key] = int(value)
-                    if len(fields) == 8 and re.fullmatch(r"-?[0-9]{1,10}", fields[7]):
+                    if len(fields) >= 8 and re.fullmatch(r"-?[0-9]{1,10}", fields[7]):
                         sickness = int(fields[7])
                         if -2**31 <= sickness < 2**31:
                             vitals["sickness"] = sickness
+                    if len(fields) == 9 and (rads := _finite(fields[8])) is not None and 0 <= rads <= 1_000_000:
+                        vitals["rads"] = rads
                     data.setdefault("native_guest_vitals", {})[fields[1]] = vitals
                 elif fields[0] == "native-player-avatar" and len(fields) in (5, 8, 10, 11, 14):
                     area, pawn, status, diagnostic = fields[1:5]
