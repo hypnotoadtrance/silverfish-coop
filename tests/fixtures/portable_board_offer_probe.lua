@@ -18,10 +18,6 @@ local tracked = {
     Sab_Fuel_01 = {flag = "Kill_ForestTank", threshold = 7, progress = 6},
     Sab_Factory = {flag = "PB_Factory_Kill", threshold = 5, progress = 4},
 }
-local turnin_variants = {
-    Asn_Panzer_01 = {ping = "Coup_HuntPlayer", consumes = false},
-    Photo_BrnzQuarry = {ping = "None", consumes = true},
-}
 local followup_count, followup_hook = 0, false
 local last
 
@@ -92,24 +88,23 @@ local function run(action, quest)
         assert(pawn.Save.Flags:Contains(flag) and pawn.Save.Flags:Find(flag):get() == expected.progress)
         return tostring(expected.progress)
     end
-    if action == "stage-turnin-variant" then
+    if action == "stage-turnin-followup" then
         local instance = world.OwningGameInstance
         assert(pawn:HasAuthority() and same(pawn.Save, instance.SaveSlot_Ref))
-        local expected = assert(turnin_variants[quest])
+        assert(quest == "Asn_Panzer_01")
         local key = FName(quest, EFindName.FNAME_Find)
         local active = pawn.Save.ActiveQuests
         assert(not active:Contains(key), "This stock contract must start absent")
         instance:AddQuest_ByName(key)
         local row = active:Find(key):get()
         assert(row and row[step] == 1 and row[final] >= 1 and row[objective_items]:GetArrayNum() == 0
-            and row[consumes_items] == expected.consumes and text(row[ping]) == expected.ping)
+            and row[consumes_items] == false and text(row[ping]) == "Coup_HuntPlayer")
         row[step] = row[final]
         assert(active:Find(key):get()[step] == row[final], "Could not stage the completed objective")
-        if expected.ping ~= "None" and not followup_hook then
-            local watched = expected.ping
+        if not followup_hook then
             RegisterHook("/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.FL_CodeLib01_C:GlobalPing",
                 function(_, key_param)
-                    if text(key_param:get()) == watched then followup_count = followup_count + 1 end
+                    if text(key_param:get()) == "Coup_HuntPlayer" then followup_count = followup_count + 1 end
                 end)
             followup_hook = true
         end

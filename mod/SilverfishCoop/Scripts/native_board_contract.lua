@@ -66,8 +66,8 @@ local function shape(save, row)
         or quantity == 0 and type(ping) == "string" and #ping <= 96 and ping:match("^[A-Za-z0-9_-]+$")
     if row[keys.kind] ~= 2 or not int(step) or not int(final) or final < 1 or not int(cash) or cash < 0
         or not int(xp) or xp < 0 or not int(row[keys.redeem]) or len(row[keys.items]) ~= 0
-        or len(row[keys.chained]) ~= 0 or not ping_supported or type(consumed) ~= "boolean"
-        or not (quantity == 0 or quantity == 1 and consumed)
+        or len(row[keys.chained]) ~= 0 or not ping_supported
+        or not ((quantity == 0 and consumed == false) or (quantity == 1 and consumed == true))
         or not row[keys.flags] or #row[keys.flags] > 16 or not row[keys.rep] or #row[keys.rep] > 16 then
         refuse("specialized_recipe")
     end

@@ -3804,16 +3804,14 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
         assert campaign_save_hashes(host.campaign) == before, "Redeeming a stock board quest caused an early save"
         return receipt
 
-    variants = []
-    for quest_id, cash, expected_pings in (("Photo_BrnzQuarry", 100, 0), ("Asn_Panzer_01", 3500, 1)):
-        assert int(await command(host, "stage-turnin-variant", quest_id)) > 0
-        receipt = await settle(quest_id, cash)
-        selection = native_board_contract.menu_target(guest_frame["zone_epoch"], OBSERVATORY_BOUNTY_BOARD, quest_id)
-        replay = await submit(guest_run, "native-quest-turnin", target=selection)
-        assert replay["ok"] and replay["effect"] == "native_quest_already_settled", replay
-        assert int(await command(host, "turnin-followups")) == expected_pings
-        assert campaign_save_hashes(host.campaign) == checkpoint
-        variants.append({"quest_id": quest_id, "receipt": receipt, "stock_followups": expected_pings})
+    followup_quest = "Asn_Panzer_01"
+    assert int(await command(host, "stage-turnin-followup", followup_quest)) > 0
+    followup_receipt = await settle(followup_quest, 3500)
+    selection = native_board_contract.menu_target(guest_frame["zone_epoch"], OBSERVATORY_BOUNTY_BOARD, followup_quest)
+    replay = await submit(guest_run, "native-quest-turnin", target=selection)
+    assert replay["ok"] and replay["effect"] == "native_quest_already_settled", replay
+    assert await command(host, "turnin-followups") == "1"
+    assert campaign_save_hashes(host.campaign) == checkpoint
 
     tracked_quests = []
     for tracked, key, progress, cash, areas, actors, cue in objectives:
@@ -3834,7 +3832,7 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
     return {"resident_board_offers": {"stock_offers": sorted(offered), "guest_offers": sorted(visible),
                                       "previously_filtered_offers": sorted(previously_filtered),
                                       "accepted": quest, "journal_step": int(observed[0]),
-                                      "tracked_turnins": tracked_quests, "turnin_variants": variants,
+                                      "tracked_turnins": tracked_quests, "followup_turnin": followup_receipt,
                                       "campaign_checkpoint_unchanged": True}}
 
 

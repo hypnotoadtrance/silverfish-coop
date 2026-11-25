@@ -197,6 +197,10 @@ board.TurnIn_ID = 1
 assert(catalog()[8] == "-")
 denied("wrong_turnin", "turnin", "inspect", eye)
 board.TurnIn_ID = 2
+eye_recipe[ping] = "Coup_HuntPlayer"
+assert(catalog()[8] == "-")
+denied("specialized_recipe", "turnin", "inspect", eye)
+eye_recipe[ping] = "None"
 action("turnin", "inspect", eye)
 assert(proof()[18] == want_guid and proof()[16] == 801 and proof()[9] == 1)
 denied("objective_changed", "turnin", "apply", eye, "-")
@@ -237,9 +241,9 @@ local photo = "Photo_BrnzQuarry"
 local photo_recipe = quest(0, nil, 100)
 photo_recipe[consumed], photo_recipe[step] = true, 2
 store.ActiveQuests[photo] = photo_recipe
-assert(catalog()[8] == photo)
-action("turnin", "apply", photo, "-")
-assert(proof()[10] == -10 and proof()[13] == 3918 and proof()[18] == "-")
+assert(catalog()[8] == "-")
+denied("specialized_recipe", "turnin", "inspect", photo)
+assert(photo_recipe[step] == 2 and host_flags.Player_Cash == 3818)
 assert(store.PlayerBackpack[1] == host_stack and bag.PlayerBackpack[1] == row_item and #stock_pings == 1)
 
 local missing, display = "Note_Farmhouse", "Note_FarmHouse"
