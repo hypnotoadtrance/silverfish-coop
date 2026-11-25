@@ -3736,11 +3736,27 @@ namespace
         return 3;
     }
 
+    template <bool local>
     int split_backpack_stack(const Lua& lua)
     {
         Context context;
         StackSplit split;
-        if (const auto error = resolve(lua, context, nullptr, nullptr, &split); !error.empty())
+        if constexpr (local)
+        {
+            if (lua.get_stack_size() != 5 || !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3) ||
+                !lua.is_integer(4) || !lua.is_integer(5)) return result(lua, false, "native_inventory_split_refused_owner");
+            const auto pawn = lua.get_integer();
+            const auto save = lua.get_integer();
+            if (!parse_guid(lua.get_string(), context.guid) || !bind_local_inventory(context, pawn, save))
+                return result(lua, false, "native_inventory_split_refused_owner");
+            const auto take = lua.get_integer();
+            const auto expected = lua.get_integer();
+            if (take < 1 || expected <= take || expected > INT32_MAX)
+                return result(lua, false, "native_inventory_split_refused_quantity");
+            split.take = static_cast<std::int32_t>(take);
+            split.expected = static_cast<std::int32_t>(expected);
+        }
+        else if (const auto error = resolve(lua, context, nullptr, nullptr, &split); !error.empty())
         {
             const auto detail = error.starts_with("native_inventory_split_refused_")
                 ? error : std::string_view{"native_inventory_split_refused_owner"};
@@ -3767,26 +3783,21 @@ namespace
             !payload || payload->GetStruct().Get() != find<Unreal::UScriptStruct>(STR("/Script/StructUtils.InstancedStruct")))
             return result(lua, false, "native_inventory_split_refused_stock_stack");
 
-        auto distinct = context;
-        distinct.guid = split.created;
-        Inventory collision;
-        if (!locate(distinct, collision).empty() || collision.item)
-            return result(lua, false, "native_inventory_split_refused_guid_collision");
         auto* property = inventory.backpack;
         auto* live_array = property->ContainerPtrToValuePtr<void>(context.save);
         Unreal::FScriptArrayHelper current(property, live_array);
         const auto count = current.Num();
         if (count >= max_inventory) return result(lua, false, "native_inventory_split_refused_backpack_full");
-        auto* host_array = property->ContainerPtrToValuePtr<void>(context.stock);
+        auto* host_array = local ? nullptr : property->ContainerPtrToValuePtr<void>(context.stock);
         using Value = std::unique_ptr<void, PropertyDeleter>;
         Value original(property->AllocateAndInitializeValue(), {property});
         Value proposed(property->AllocateAndInitializeValue(), {property});
-        Value host_before(property->AllocateAndInitializeValue(), {property});
-        if (!original || !proposed || !host_before)
+        Value host_before(host_array ? property->AllocateAndInitializeValue() : nullptr, {property});
+        if (!original || !proposed || (host_array && !host_before))
             return result(lua, false, "native_inventory_split_refused_storage");
         property->CopyCompleteValue(original.get(), live_array);
         property->CopyCompleteValue(proposed.get(), live_array);
-        property->CopyCompleteValue(host_before.get(), host_array);
+        if (host_array) property->CopyCompleteValue(host_before.get(), host_array);
         Unreal::FScriptArrayHelper original_rows(property, original.get()), staged(property, proposed.get());
         const auto new_index = staged.AddValue();
         auto* remainder = staged.GetRawPtr(inventory.backpack_index);
@@ -3794,8 +3805,8 @@ namespace
         const auto* source = original_rows.GetRawPtr(inventory.backpack_index);
         const bool split_ok = silverfish::native_guest_item::split_stock_stack(
             context.pawn, inventory.type, source, split.take, created, remainder);
-        if (!ownership_current(context) || !property->Identical(original.get(), live_array) ||
-            !property->Identical(host_before.get(), host_array))
+        if (!inventory_current<local>(context) || !property->Identical(original.get(), live_array) ||
+            (host_array && !property->Identical(host_before.get(), host_array)))
             return result(lua, false, "mutation_unverified_native_inventory_split_stock_call");
         if (!split_ok) return result(lua, false, "native_inventory_split_refused_stock_result");
         const auto* stock_payload = payload->ContainerPtrToValuePtr<void>(source);
@@ -3808,15 +3819,21 @@ namespace
                 payload->Identical(stock_payload, payload->ContainerPtrToValuePtr<void>(row));
         };
         const auto stock_guid = inventory.identity(created);
-        inventory.set_identity(created, split.created);
+        if constexpr (local) split.created = stock_guid;
+        else inventory.set_identity(created, split.created);
+        auto distinct = context;
+        distinct.guid = split.created;
+        Inventory collision;
+        if (!locate(distinct, collision).empty() || collision.item)
+            return result(lua, false, "native_inventory_split_refused_guid_collision");
         if (staged.Num() != count + 1 || new_index != count || inventory.identity(remainder) != context.guid ||
             stock_guid == Guid{} || stock_guid == context.guid || inventory.identity(created) != split.created ||
             !valid_stack(remainder, remaining) || !valid_stack(created, split.take))
             return result(lua, false, "native_inventory_split_refused_staging");
         property->CopyCompleteValue(live_array, proposed.get());
-        if (!ownership_current(context) || !property->Identical(proposed.get(), live_array))
+        if (!inventory_current<local>(context) || !property->Identical(proposed.get(), live_array))
         {
-            if (ownership_current(context))
+            if (inventory_current<local>(context))
             {
                 property->CopyCompleteValue(live_array, original.get());
                 if (property->Identical(original.get(), live_array))
@@ -3827,6 +3844,12 @@ namespace
         proof(lua, true, "split", split.expected, remaining);
         lua.set_integer(split.take);
         lua.set_string(RC::to_utf8_string(item_class->GetPathName()));
+        if constexpr (local)
+        {
+            const auto& guid = split.created;
+            lua.set_string(std::format("{:08X}{:08X}{:08X}{:08X}", guid[0], guid[1], guid[2], guid[3]));
+            return 7;
+        }
         return 6;
     }
 
@@ -4316,7 +4339,8 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishFireNativeGuestUnderbarrel", run<Operation::Fire, true>);
     lua.register_function("SilverfishReloadNativeGuestWeapon", run<Operation::Reload>);
     lua.register_function("SilverfishReloadNativeGuestUnderbarrel", run<Operation::Reload, true>);
-    lua.register_function("SilverfishSplitNativeGuestAmmoStack", split_backpack_stack);
+    lua.register_function("SilverfishSplitNativeGuestAmmoStack", split_backpack_stack<false>);
+    lua.register_function("SilverfishSplitLocalGuestStack", split_backpack_stack<true>);
     lua.register_function("SilverfishTakeNativeGuestWeaponAmmo", take_ammo);
     lua.register_function("SilverfishSortNativeGuestBackpack", sort_backpack<false>);
     lua.register_function("SilverfishStoreNativeGuestEquipment", store_stock_equipment<false>);

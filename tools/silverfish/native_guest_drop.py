@@ -149,6 +149,8 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
             key = native_inventory.TAKE_AMMO_KEY if unloading else native_inventory.SPLIT_KEY
             action = native_inventory.TAKE_AMMO if unloading else native_inventory.SPLIT
             target = f"{guid}|{quantity}" if unloading else f"{guid}|{quantity}|{expected}"
+            if splitting and layout_preview is not None:
+                target = f"{target}|{layout_preview}"
             receipt = (await client.gameplay_action(action, operation, target)).get(key)
             remaining = split[2] - quantity
             if (not isinstance(receipt, dict)
@@ -158,9 +160,12 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                     or (not native_inventory.valid_take_ammo_result(receipt.get("weapon_class"), receipt.get("class_path"), quantity)
                         if unloading
                         else not native_inventory.split_class_path(receipt.get("class_path")))
-                    or not valid_guid(created := receipt.get("new_guid")) or created == guid):
+                    or not valid_guid(created := receipt.get("new_guid")) or created == guid
+                    or layout_preview is not None and created != layout_preview):
                 raise RuntimeError("The host did not verify both resulting stock stacks")
             committed = (str(remaining), created)
+            if splitting:
+                local_result = created
             if unloading:
                 client.last_game = await client.bridge.command("native-inventory-stock-project-unloaded", epoch, sequence, timeout=3)
         elif mode == "equip":
@@ -284,7 +289,8 @@ async def service_stock_view(client, active: bool) -> None:
         layout_preview = view.get("layout_preview")
         if layout_preview is not None:
             client.control.event("native_stock_inventory_local_preview", operation_id=operation,
-                                 mode=mode, guid=guid, slot=expected - 1, result=layout_preview)
+                                 mode=mode, guid=guid, slot=expected - 1 if mode in ("equip", "unequip") else -1,
+                                 result=layout_preview)
         result = await settle_stock_action(client, area, epoch, operation, mode, view["entry"],
                                            guid, count, str(sequence), str(expected), split, layout_preview)
         client.control.event("native_stock_inventory_action", operation_id=operation, **result)

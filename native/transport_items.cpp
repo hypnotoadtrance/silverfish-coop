@@ -3204,7 +3204,7 @@ namespace
             !host_drop_request->taken || host_drop_request->sequence != sequence ||
             Clock::now() >= host_drop_request->expires) return 0;
         const auto entry = host_drop_request->entry;
-        if (entry != "equip" && entry != "unequip" && entry != "sort") return 0;
+        if (entry != "equip" && entry != "unequip" && entry != "sort" && entry != "split") return 0;
         host_drop_request.reset();
         lua.set_bool(true);
         return 1;

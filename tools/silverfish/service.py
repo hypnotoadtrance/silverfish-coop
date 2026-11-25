@@ -1969,6 +1969,7 @@ class Host:
             gameplay[native_prop_carry.POSE_DATAGRAM] = True
         if self.last_game.get(native_inventory.SPLIT_CAPABILITY) == 1:
             gameplay[native_inventory.SPLIT_CAPABILITY] = 1
+            gameplay[native_inventory.SPLIT_PREVIEW_CAPABILITY] = 1
         if self.last_game.get(native_inventory.SORT_CAPABILITY) == 1:
             gameplay[native_inventory.SORT_CAPABILITY] = 1
         if self.last_game.get(native_inventory.STORE_CAPABILITY) == 1:
@@ -5933,7 +5934,9 @@ class Client:
                 if (self.guest_ui.identity != (self.host_session, self.zone_epoch, area)
                         or self.guest_ui.digest == "-" or self.guest_ui.inventory_needs_refresh(self)):
                     await self.guest_ui.refresh(self)
-                snapshot = await self.bridge.command("native-inventory-stock-open", str(sequence), self.zone_epoch, timeout=5)
+                split_preview = ("1",) if self.gameplay.get(native_inventory.SPLIT_PREVIEW_CAPABILITY) == 1 else ()
+                snapshot = await self.bridge.command("native-inventory-stock-open", str(sequence), self.zone_epoch,
+                                                     *split_preview, timeout=5)
                 proof = snapshot.get("native_inventory_view", {})
                 if (proof.get("state"), proof.get("sequence"), proof.get("map"), proof.get("pawn")) != (
                     "stock", sequence, area, pawn,

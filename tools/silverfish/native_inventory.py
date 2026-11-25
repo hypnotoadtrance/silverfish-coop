@@ -21,6 +21,7 @@ SOURCES = {"backpack", "equipment", "armor", "helmet"}
 SPLIT = "native-inventory-split"
 SPLIT_KEY = "native_inventory_split"
 SPLIT_CAPABILITY = "native_inventory_split_capability"
+SPLIT_PREVIEW_CAPABILITY = "native_inventory_split_preview_capability"
 TAKE_AMMO = "native-inventory-take-ammo"
 TAKE_AMMO_KEY = "native_inventory_take_ammo"
 TAKE_AMMO_CAPABILITY = "native_inventory_take_ammo_capability"
@@ -154,7 +155,12 @@ async def split_stack(host, bridge, character: str, target, operation: str, *, u
     action, key, capability = ((TAKE_AMMO, TAKE_AMMO_KEY, TAKE_AMMO_CAPABILITY) if unload
                                else (SPLIT, SPLIT_KEY, SPLIT_CAPABILITY))
     prefix = key
+    preview_guid = None
     selection = take_ammo_target(target) if unload else split_target(target)
+    if not unload and not selection and isinstance(target, str):
+        base, _, created = target.rpartition("|")
+        if valid_guid(created) and (parsed := split_target(base)) and created != parsed[0]:
+            selection, preview_guid = parsed, created
     if not selection or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
         raise party.RuleError(f"{prefix}_requires_guid_amount_and_expected_quantity")
     game = host.last_game
@@ -177,7 +183,7 @@ async def split_stack(host, bridge, character: str, target, operation: str, *, u
     source, take, expected = selection
     area, pawn = game["map"], owner["pawn"]
     campaign = host.store.status()["campaign_id"]
-    created = uuid.uuid5(uuid.NAMESPACE_OID, f"{action}:{campaign}:{character}:{operation}").hex.upper()
+    created = preview_guid or uuid.uuid5(uuid.NAMESPACE_OID, f"{action}:{campaign}:{character}:{operation}").hex.upper()
     amounts = (str(expected),) if unload else (str(take), str(expected))
     deferred = await retain_guest_save(host, bridge, character, pawn)
     host.native_checkpoint_unsafe = True

@@ -81,6 +81,20 @@ class StackSplitTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await inventory.split_stack(restarted, bridge, "guest", selected, OPERATION), receipt)
                 bridge.command.assert_not_awaited()
 
+    async def test_preview_keeps_stock_generated_guid_and_replays_once(self):
+        with TemporaryDirectory() as temporary, CampaignStore(temporary) as store:
+            host, bridge = self.host(store), self.bridge()
+            created = "A" * 32
+            target = f"{GUID}|4|9|{created}"
+            result = await inventory.split_stack(host, bridge, "guest", target, OPERATION)
+            self.assertEqual(result[inventory.SPLIT_KEY]["new_guid"], created)
+            self.assertEqual(await inventory.split_stack(host, bridge, "guest", target, OPERATION), result)
+            with self.assertRaisesRegex(party.RuleError, "operation_id_conflict"):
+                await inventory.split_stack(host, bridge, "guest", f"{GUID}|4|9|" + "B" * 32, OPERATION)
+            with self.assertRaisesRegex(party.RuleError, "requires_guid_amount_and_expected_quantity"):
+                await inventory.split_stack(host, bridge, "guest", f"{GUID}|4|9|{GUID}", OPERATION)
+            bridge.command.assert_awaited_once_with(inventory.SPLIT, PAWN, GUID, created, "4", "9", timeout=6)
+
     async def test_refusal_does_not_commit_and_interrupted_commit_fences_host(self):
         with TemporaryDirectory() as directory, CampaignStore(directory) as store:
             host, bridge = self.host(store), self.bridge()

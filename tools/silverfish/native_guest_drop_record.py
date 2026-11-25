@@ -71,7 +71,8 @@ def parse_stock_action(fields, game):
     if layout and layout[0]:
         preview = layout[0]
         if (mode == "sort" and preview == "sorted"
-                or mode == "equip" and 1 <= before <= 10 and (preview == "-" or valid_guid(preview) and preview != guid)):
+                or mode == "equip" and 1 <= before <= 10 and (preview == "-" or valid_guid(preview) and preview != guid)
+                or mode == "split" and valid_guid(preview) and preview != guid):
             result["layout_preview"] = preview
         elif mode == "unequip" and re.fullmatch(r"(?:-1|[0-9]{1,10})", preview) and int(preview) < 2**31:
             result["layout_preview"] = int(preview)

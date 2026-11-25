@@ -6066,7 +6066,34 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
             return proof
 
         split_proof = await stock_split_item(ammo, min(2, ammo["quantity"] - 1))
-        bandage_split = await stock_split_item(bandage, 4)
+        assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+        await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
+        pressed = await guest.bridge.command("native-inventory-stock-split-click-fixture", bandage["guid"], "4", "1")
+        split_id, nested_id = pressed["ack"]["message"].split(",")
+        assert all(re.fullmatch(r"[0-9A-F]{32}", guid) for guid in (split_id, nested_id))
+        assert len({bandage["guid"], split_id, nested_id}) == 3
+        async with asyncio.timeout(15):
+            while True:
+                frame = await wait_resident_status(guest_run, lambda row: row.get("state") == "connected")
+                entries = await resident_events(guest_run, frame)
+                receipts = [row for row in entries if row.get("event") == "native_stock_inventory_action"
+                            and row.get(native_inventory.SPLIT_KEY, {}).get("new_guid") in (split_id, nested_id)]
+                if len(receipts) == 2:
+                    break
+                await asyncio.sleep(.1)
+        previews = {row["operation_id"]: row for row in entries if row.get("event") == "native_stock_inventory_local_preview"}
+        assert [row[native_inventory.SPLIT_KEY]["new_guid"] for row in receipts] == [split_id, nested_id]
+        for receipt in receipts:
+            proof = receipt[native_inventory.SPLIT_KEY]
+            preview = previews[receipt["operation_id"]]
+            assert (preview["guid"], preview["result"]) == (proof["source_guid"], proof["new_guid"])
+            assert preview["time_unix"] <= receipt["time_unix"] and "local split" in receipt["stock_inventory_proof"]
+        bandage_split = {"first": receipts[0], "nested": receipts[1], "previews": [previews[row["operation_id"]] for row in receipts]}
+        after = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
+        wanted = {bandage["guid"]: 5, split_id: 3, nested_id: 1}
+        assert {row["guid"]: row["quantity"] for row in after["items"] if row["guid"] in wanted} == wanted
+        assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+        await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
         assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before["native_inventory"]
         assert campaign_save_hashes(host.campaign) == checkpoint
     equip_proof = None
