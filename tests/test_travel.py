@@ -106,6 +106,18 @@ class AuthoredCrossingEventTests(unittest.TestCase):
                 + event(5, overlap, "0") + event(6, overlap, str(2**53)), encoding="utf-8", newline="")
             self.assertEqual(bridge.authored_zone_requests(), [(1, door, None), (2, overlap, None), (3, overlap, 17)])
             self.assertEqual(bridge.authored_zone_requests(), [])
+            standard = f"request\t7\t{SOURCE}\t{DESTINATION}".encode()
+            pending = [event(1, door).strip().encode(), standard, event(3, overlap, "17").strip().encode(),
+                       event(4, door, "18").strip().encode()]
+            bridge.local_bridge = Mock(input_ready=lambda: bool(pending), read_input=lambda limit: [
+                pending.pop(0) for _ in range(min(limit, len(pending)))
+            ])
+            # Other collectors can drain the native FIFO first without losing either exit type.
+            self.assertEqual(bridge.native_crate_inputs(), [])
+            self.assertEqual(bridge.native_zone_requests(), [(7, SOURCE, DESTINATION, None)])
+            self.assertEqual(bridge.authored_zone_requests(), [(1, door, None), (3, overlap, 17)])
+            self.assertEqual(bridge.native_zone_requests(), [])
+            self.assertEqual(bridge.authored_zone_requests(), [])
 
 
 class DepartureGateTests(unittest.IsolatedAsyncioTestCase):

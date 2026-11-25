@@ -4,7 +4,7 @@ import asyncio
 import math
 
 from live_multi_smoke import campaign_save_hashes
-from portable_guest_world_start import wait_resident_status
+from portable_guest_world_start import resident_events, wait_resident_status
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.control import current_status
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
@@ -30,6 +30,7 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False):
         from portable_crossroads_profile import profile_world
 
         performance["observatory"] = await profile_world(host, guest, OBSERVATORY, probe)
+    before_travel = campaign_save_hashes(host.campaign)
     await enter_crossroads(host, pawn)
 
     async def applied(intensity):
@@ -59,13 +60,21 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False):
             raise RuntimeError(f"Guest missed the {intensity} rain update. Host actor {authority}, view {host_view}. "
                                f"Guest actor {local}, view {guest_view}.") from None
 
-    await wait_resident_status(host_run, lambda f: f["game"]["map"] == CROSSROADS
-                               and not f.get("awaiting_zone_guest")
-                               and f["game"].get("native_guest_save", {}).get("state") == "bound")
+    travelled = await wait_resident_status(host_run, lambda f: f["game"]["map"] == CROSSROADS
+                                          and not f.get("awaiting_zone_guest")
+                                          and f["game"].get("native_guest_save", {}).get("state") == "bound")
+    departure, = (event for event in await resident_events(host_run, travelled)
+                  if event["event"] == "native_authored_zone_request" and event["source"] == OBSERVATORY
+                  and event["destination"] == CROSSROADS and event["entrance"] == "Obsv_Etr")
+    assert departure["result"]["ok"] and departure["kind"] == "overlap" and departure["exit_crossing"], departure
+    checkpoint = campaign_save_hashes(host.campaign)
+    assert checkpoint and checkpoint != before_travel, "Travel did not commit the campaign checkpoint"
+    for seat in (host, guest):
+        for mailbox in ("native-zone-events", "native-authored-exit-events"):
+            assert not (seat.bridge.directory / mailbox).exists(), f"Travel wrote {mailbox}"
     try:
         await weather(host, "dry")
         clear = await applied(0)
-        checkpoint = campaign_save_hashes(host.campaign)
         before = await weather(guest, "localrain")
         assert math.isclose(float(before.split(";")[0]), .85, abs_tol=.001), before
 
@@ -89,6 +98,7 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False):
     finally:
         assert await weather(host, "resume") == "restored"
     result = {"stock_weather_travel": {"clear": clear, "wet": wet, "dry": dry,
+                                      "departure": departure, "exit_mailboxes": 0, "checkpoint_updated": True,
                                       "guest_local_rain_before": before, "guest_local_rain_suppressed": local,
                                       "guest_stock_siren_callbacks": 1, "guest_wet_particle_count": int(wet_particles)}}
     if performance:

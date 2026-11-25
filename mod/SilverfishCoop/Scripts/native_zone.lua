@@ -4,6 +4,7 @@ local wall = require("zone_wall")
 local routes = require("zone_maps")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
+local embedded = os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") == "1"
 local expanded = os.getenv("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES") == "1"
 local fixture_mode = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
@@ -24,6 +25,7 @@ local observed_map
 local armed
 local fixture
 local secondary_fixture
+local pending_request
 local sequence = 0
 local requests = 0
 local guest_denied = 0
@@ -76,30 +78,54 @@ local function clear()
     armed = nil
     fixture = nil
     secondary_fixture = nil
+    pending_request = nil
+end
+
+local function release_request()
+    pending_request = nil
+    SilverfishReleaseNativeZoneRequest()
+    decision = "request_unavailable"
+    return false
 end
 
 local function wait_for_scope(detail)
+    if pending_request then release_request() end
     if armed and type(SilverfishPauseNativeZoneScope) == "function" then
         SilverfishPauseNativeZoneScope()
     end
     status, failure = "arming", detail
 end
 
-local function emit(map, route)
-    if not route or not route.destination then return false end
-    local next_sequence = sequence + 1
-    local file = io.open(event_path, "ab")
-    if not file then return false end
-    local tag = route.entrance and "\t" .. route.entrance or ""
-    local written = file:write("request\t", tostring(next_sequence), "\t", map, "\t", route.destination, tag, "\n")
-    local closed = file:close()
-    if not written or not closed then return false end
-    sequence = next_sequence
+local function enqueue(line)
+    return type(SilverfishEnqueueLocalBridgeInput) == "function"
+        and SilverfishEnqueueLocalBridgeInput(line) == true
+end
+
+local function published()
+    sequence = sequence + 1
     requests = requests + 1
+    decision = "request"
     return true
 end
 
-local function handle_event(map, hosting)
+local function emit(path, fields, pawn, world)
+    table.insert(fields, 2, tostring(sequence + 1))
+    local line = table.concat(fields, "\t") .. "\n"
+    if embedded then
+        if enqueue(line) then return published() end
+        -- The native exit stays latched while the resident queue makes room.
+        pending_request = {line = line, pawn = pawn:GetAddress(), world = world:GetAddress(), expires = os.time() + 2}
+        decision = "request_pending"
+        return true
+    end
+    local file = io.open(path, "ab")
+    if not file then return release_request() end
+    local written = file:write(line)
+    if not file:close() or not written then return release_request() end
+    return published()
+end
+
+local function handle_event(map, hosting, pawn, world)
     local value = SilverfishTakeNativeZoneEvent()
     if value == nil then return true end
     decision = value
@@ -110,15 +136,9 @@ local function handle_event(map, hosting)
     elseif value == "request" or value == "door_request" or value == "secondary_request" then
         local route = routes[map]
         if value == "door_request" then route = route.door end
-        if value == "secondary_request" then
-            route = route.secondary
-            decision = "request"
-        end
-        if not hosting or not heartbeat_fresh() or not emit(map, route) then
-            SilverfishReleaseNativeZoneRequest()
-            decision = "request_unavailable"
-            return false
-        end
+        if value == "secondary_request" then route = route.secondary end
+        if not hosting or not heartbeat_fresh() or not route or not route.destination then return release_request() end
+        return emit(event_path, {"request", map, route.destination, route.entrance}, pawn, world)
     end
     return true
 end
@@ -133,31 +153,17 @@ local function handle_door_event()
     if value == "travel_requested" then door_requests = door_requests + 1 end
 end
 
-local function handle_expanded_event(map, host)
+local function handle_expanded_event(map, host, pawn, world)
     if not expanded or type(SilverfishTakeNativeAuthoredRoute) ~= "function" then return true end
     local source, destination, tag, actor, kind, travel_time, crossing = SilverfishTakeNativeAuthoredRoute()
     if not source then return true end
     if host and source == map and heartbeat_fresh() and destination and tag and actor
         and (kind == "overlap" or kind == "door") then
-        local next_sequence = sequence + 1
-        local file = io.open(expanded_event_path, "ab")
-        if file then
-            local fields = { "authored-request", tostring(next_sequence), source,
-                destination, tag, actor, kind, travel_time and tostring(travel_time) or "-" }
-            if crossing then fields[#fields + 1] = tostring(crossing) end
-            local written = file:write(table.concat(fields, "\t"), "\n")
-            local closed = file:close()
-            if written and closed then
-                sequence = next_sequence
-                requests = requests + 1
-                decision = "request"
-                return true
-            end
-        end
+        local fields = {"authored-request", source, destination, tag, actor, kind, travel_time and tostring(travel_time) or "-"}
+        if crossing then fields[#fields + 1] = tostring(crossing) end
+        return emit(expanded_event_path, fields, pawn, world)
     end
-    SilverfishReleaseNativeZoneRequest()
-    decision = "request_unavailable"
-    return false
+    return release_request()
 end
 
 function zone.start(bridge)
@@ -209,6 +215,10 @@ function zone.sync(state, phase)
         return SilverfishSetNativeZoneScope(address, remote[1] or 0, exit_address, host, accepting)
     end
     local world = local_pawn:GetWorld()
+    if pending_request and (not host or pending_request.pawn ~= local_pawn:GetAddress()
+        or pending_request.world ~= world:GetAddress() or os.time() > pending_request.expires) then
+        release_request()
+    end
     local exit = find_fixture(world, route)
     if route.fixture and not valid(exit) then
         wall.sync(state, phase, nil, false, secondary_fixture)
@@ -233,8 +243,21 @@ function zone.sync(state, phase)
     end
     armed = state.map
     handle_door_event()
-    if not handle_event(state.map, host) or not handle_expanded_event(state.map, host) then
-        status, failure = "error", "The native zone request could not be written"
+    local delivered
+    if pending_request then
+        delivered = accepting
+        if not delivered then
+            release_request()
+        elseif enqueue(pending_request.line) then
+            pending_request = nil
+            published()
+        end
+    else
+        delivered = handle_event(state.map, host, local_pawn, world)
+            and (pending_request ~= nil or handle_expanded_event(state.map, host, local_pawn, world))
+    end
+    if not delivered then
+        status, failure = "error", "The native zone request could not be delivered"
         return
     end
     status, failure = "ready", ""

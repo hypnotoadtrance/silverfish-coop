@@ -775,6 +775,8 @@ class Bridge:
         self._local_dialogue_records = deque(maxlen=64)
         self._local_crate_records = deque(maxlen=64)
         self._local_death_records = deque(maxlen=64)
+        self._local_zone_records = deque(maxlen=64)
+        self._local_authored_zone_records = deque(maxlen=64)
         self._local_stardust_records = deque(maxlen=64)
         self._local_fruiting_stardust_records = deque(maxlen=64)
         self._local_melee_records = deque(maxlen=64)
@@ -844,7 +846,8 @@ class Bridge:
     def _take_local_inputs(self, pending: deque[bytes]) -> list[bytes]:
         # Keep unread combat and travel inputs in the native FIFO until the collectors can take another batch.
         room = 64 - max(len(self._local_primary_records), len(self._local_held_fire_records),
-                        len(self._local_death_records), len(self._local_stardust_records),
+                        len(self._local_death_records), len(self._local_zone_records),
+                        len(self._local_authored_zone_records), len(self._local_stardust_records),
                         len(self._local_fruiting_stardust_records))
         if room and self.local_bridge is not None and self.local_bridge.input_ready():
             for record in self.local_bridge.read_input(room):
@@ -856,6 +859,10 @@ class Bridge:
                     self._local_crate_records.append(record)
                 elif record.startswith(b"downed\t"):
                     self._local_death_records.append(record)
+                elif record.startswith(b"request\t"):
+                    self._local_zone_records.append(record)
+                elif record.startswith(b"authored-request\t"):
+                    self._local_authored_zone_records.append(record)
                 elif record.startswith(b"stardust-request\t"):
                     self._local_stardust_records.append(record)
                 elif record.startswith(b"fruiting-stardust-request\t"):
@@ -1187,16 +1194,20 @@ class Bridge:
         return events
 
     def native_zone_requests(self) -> list[tuple[int, str, str, str | None]]:
-        try:
-            with (self.directory / "native-zone-events").open("rb") as stream:
-                stream.seek(self.zone_offset)
-                batch = stream.read(4096)
-        except OSError:
-            return []
-        end = batch.rfind(b"\n") + 1
-        self.zone_offset += end if end else len(batch) if len(batch) == 4096 else 0
+        if self.local_bridge is not None:
+            records = self._take_local_inputs(self._local_zone_records)
+        else:
+            try:
+                with (self.directory / "native-zone-events").open("rb") as stream:
+                    stream.seek(self.zone_offset)
+                    batch = stream.read(4096)
+            except OSError:
+                return []
+            end = batch.rfind(b"\n") + 1
+            self.zone_offset += end if end else len(batch) if len(batch) == 4096 else 0
+            records = batch[:end].splitlines()
         requests = []
-        for line in batch[:end].splitlines():
+        for line in records:
             fields = line.split(b"\t")
             if len(fields) not in (4, 5) or fields[0] != b"request" or not fields[1].isdigit() or len(fields[1]) > 12:
                 continue
@@ -1275,16 +1286,20 @@ class Bridge:
                 if (request := parse_matrix_request(line.decode("utf-8", errors="replace").split("\t")))]
 
     def authored_zone_requests(self) -> list[tuple[int, AuthoredRoute, int | None]]:
-        try:
-            with (self.directory / "native-authored-exit-events").open("rb") as stream:
-                stream.seek(self.authored_zone_offset)
-                batch = stream.read(8192)
-        except OSError:
-            return []
-        end = batch.rfind(b"\n") + 1
-        self.authored_zone_offset += end or (len(batch) if len(batch) == 8192 else 0)
+        if self.local_bridge is not None:
+            records = self._take_local_inputs(self._local_authored_zone_records)
+        else:
+            try:
+                with (self.directory / "native-authored-exit-events").open("rb") as stream:
+                    stream.seek(self.authored_zone_offset)
+                    batch = stream.read(8192)
+            except OSError:
+                return []
+            end = batch.rfind(b"\n") + 1
+            self.authored_zone_offset += end or (len(batch) if len(batch) == 8192 else 0)
+            records = batch[:end].splitlines()
         requests = []
-        for raw in batch[:end].splitlines():
+        for raw in records:
             fields = raw.decode("utf-8", errors="replace").split("\t")
             if len(fields) not in (8, 9) or fields[0] != "authored-request" or not fields[1].isascii() \
                     or not fields[1].isdigit() or len(fields[1]) > 12:
