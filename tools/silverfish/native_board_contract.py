@@ -19,6 +19,7 @@ BOARD_PATH = re.compile(
     r":PersistentLevel\.[A-Za-z0-9_]+"
 )
 COMPLETE = -10
+_INSPECTED_FIELDS = ("step_before", "expected_step", "cash", "xp", "remaining")
 
 
 def quest_id(value):
@@ -136,10 +137,12 @@ def _receipt(actor, before, result):
     step = before["expected_step"]
     if (result["state"], result["step_after"]) != ("applied", step):
         raise RuntimeError("The stock board action did not reach the qualified quest step")
-    for key in ("step_before", "expected_step", "guid", "units", "remaining", "cash_before", "xp_before", "cash", "xp"):
+    for key in (*_INSPECTED_FIELDS, "guid", "units"):
         if result[key] != before[key]:
             raise RuntimeError("The stock board action differs from its inspected recipe")
     cash, xp = result["cash"], result["xp"]
+    # A separate stock action can change the balance between inspection and apply.
+    # Use the game-thread balance at apply time and verify the exact reward delta.
     if (result["cash_after"] - result["cash_before"], result["xp_after"] - result["xp_before"]) != (cash, xp):
         raise RuntimeError("The stock board action did not reconcile cash and XP")
     record = {"quest_id": result["quest"], "step": step, "actor": actor}
@@ -156,6 +159,23 @@ def _receipt(actor, before, result):
             if consumed != "-":
                 record["consumed_guid"] = consumed
     return record
+
+
+def apply_arguments(proof):
+    def encode(value):
+        return "-" if value is None else str(value)
+
+    inspected = "|".join(encode(proof[key]) for key in _INSPECTED_FIELDS)
+    return proof["guid"], encode(proof["units"]), inspected
+
+
+def _present(proof):
+    step = proof["step_after"]
+    if (step is None or step != proof["step_before"] or (proof["verb"] == "turnin" and step != COMPLETE)
+            or proof["expected_step"] is not None or proof["cash"] or proof["xp"] or proof["guid"] != "-"
+            or proof["cash_after"] != proof["cash_before"] or proof["xp_after"] != proof["xp_before"]):
+        raise RuntimeError("The stock board did not confirm an unchanged quest")
+    return {"effect": "native_quest_present", "quest_id": proof["quest"], "step": step}
 
 
 async def catalog(host, bridge, actor, selected_board=None, *, specialized=(), excluded=()):
@@ -190,7 +210,7 @@ async def perform(host, bridge, actor, verb, quest, *, board=None, visit=None):
         before = await _command(host, bridge, verb, "inspect", area, pawn, board, quest)
         require_visit(host, visit)
         if before["state"] == "already":
-            return {"effect": "native_quest_present", "quest_id": quest, "step": before["step_after"]}
+            return _present(before)
         if (before["state"] != "qualified" or before["expected_step"] is None
                 or (before["expected_step"] == COMPLETE) != turning_in
                 or (before["cash_before"], before["xp_before"], before["step_before"]) !=
@@ -207,8 +227,12 @@ async def perform(host, bridge, actor, verb, quest, *, board=None, visit=None):
 
         require_visit(host, visit)
         host.native_checkpoint_unsafe = True
-        units = "-" if before["units"] is None else str(before["units"])
-        result = await _command(host, bridge, verb, "apply", area, pawn, board, quest, before["guid"], units)
+        result = await _command(host, bridge, verb, "apply", area, pawn, board, quest, *apply_arguments(before))
+        if result["state"] == "already":
+            present = _present(result)
+            host.native_checkpoint_unsafe = False
+            require_visit(host, visit)
+            return present
         require_visit(host, visit)
         record = _receipt(actor, before, result)
         if turning_in:

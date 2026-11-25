@@ -248,7 +248,7 @@ function board_contract.command(fields, state, phase)
     local verb, mode, pawn, board, quest = fields[3], fields[4], fields[5], fields[6], fields[7]
     if (verb ~= "start" and verb ~= "turnin") or (mode ~= "inspect" and mode ~= "apply")
         or type(quest) ~= "string" or #quest > 96 or not quest:match("^[A-Za-z0-9_]+$")
-        or type(board) ~= "string" or #board > 512 or #fields ~= (mode == "apply" and 9 or 7) then
+        or type(board) ~= "string" or #board > 512 or #fields ~= (mode == "apply" and 10 or 7) then
         refuse("arguments")
     end
 
@@ -304,6 +304,9 @@ function board_contract.command(fields, state, phase)
         return "Qualified current stock board contract"
     end
     if fields[8] ~= outcome.guid or fields[9] ~= tostring(outcome.units or "-") then refuse("objective_changed") end
+    local inspected = table.concat({outcome.before, outcome.expected_step, outcome.cash, outcome.xp,
+        outcome.remaining or "-"}, "|")
+    if fields[10] ~= inspected then refuse("inspection_changed") end
 
     local has_deposit = outcome.guid ~= "-"
     local guest_deposit = has_deposit and not same(context.save, context.receiving_save)

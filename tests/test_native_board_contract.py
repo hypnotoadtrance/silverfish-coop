@@ -153,6 +153,37 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(host.pending_host_save, False)
         host.checkpoint_native.assert_not_awaited()
 
+    async def test_unchanged_receipt_can_report_concurrent_stock_completion(self):
+        host = self.host()
+        already = result(UNREGISTERED_KILL, "turnin", "apply", -10, -10)
+        already[board.KEY].update(state="already", expected_step=None, cash_before=50, cash_after=50)
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+            result(UNREGISTERED_KILL, "turnin", "inspect", 2, -10, cash=3000, xp=1),
+            already,
+        ]))
+        reply = await board.perform(host, bridge, "guest", "turnin", UNREGISTERED_KILL)
+        self.assertEqual(reply, {"effect": "native_quest_present", "quest_id": UNREGISTERED_KILL, "step": -10})
+        self.assertEqual(host.party.get("native_quests", {}), {})
+        self.assertFalse(host.native_checkpoint_unsafe or host.stopping or host.transitioning)
+        host.checkpoint_native.assert_not_awaited()
+
+    async def test_refusal_can_retry_and_settle_against_the_current_wallet(self):
+        host = self.host()
+        inspected = result(UNREGISTERED_KILL, "turnin", "inspect", 2, -10, cash=3000, xp=1)
+        paid = result(UNREGISTERED_KILL, "turnin", "apply", 2, -10, cash=3000, xp=1)
+        paid[board.KEY].update(cash_before=25, cash_after=3025, xp_before=7, xp_after=8)
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+            inspected, RuntimeError("stock_board_contract_inspection_changed"), inspected, paid,
+        ]))
+        with self.assertRaisesRegex(party.RuleError, "inspection_changed"):
+            await board.perform(host, bridge, "guest", "turnin", UNREGISTERED_KILL)
+        self.assertEqual(host.party.get("native_quests", {}), {})
+        self.assertFalse(host.native_checkpoint_unsafe or host.stopping or host.transitioning)
+        reply = await board.perform(host, bridge, "guest", "turnin", UNREGISTERED_KILL)
+        self.assertEqual((reply["wallet"], reply["cash"], reply["xp"]), (3025, 3000, 1))
+        self.assertEqual(host.party["economy"]["wallet"], 3025)
+        host.checkpoint_native.assert_not_awaited()
+
     async def test_guest_deposit_preserves_the_original_stack_and_counts_one_unit(self):
         host = self.host()
         split_guid = "37" * 16
@@ -167,7 +198,7 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((paid["objective_guid"], paid["consumed_guid"]), (GUID, split_guid))
         self.assertEqual((paid["objective_units_before"], paid["objective_units_consumed"],
                           paid["objective_units_remaining"]), (2, 1, 1))
-        self.assertEqual(bridge.command.await_args.args[-2:], (GUID, "2"))
+        self.assertEqual(bridge.command.await_args.args[-3:], (GUID, "2", "1|-10|801|1|1"))
         bridge.command.reset_mock()
         replay = await board.perform(host, bridge, "guest", "turnin", EYE)
         self.assertEqual(replay["objective_units_remaining"], 1)

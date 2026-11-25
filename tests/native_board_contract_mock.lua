@@ -149,19 +149,25 @@ end
 
 local mod = require("native_board_contract")
 local state = {world = world, map = "ShopKeep"}
+local inspection
+local function proof()
+    return mod.rows(state, "hosting", table.pack)[1]
+end
+
 local function action(verb, mode, id, guid, units)
     local arguments = {"1", "native-board-contract", verb, mode, "Guest", "Board", id}
-    if mode == "apply" then arguments[8], arguments[9] = guid, units or "-" end
-    return mod.command(arguments, state, "hosting")
+    if mode == "apply" then arguments[8], arguments[9], arguments[10] = guid, units or "-", inspection end
+    local response = mod.command(arguments, state, "hosting")
+    local row = proof()
+    if mode == "inspect" and row[8] == "qualified" then
+        inspection = table.concat({row[9], row[11], row[16], row[17], row[20]}, "|")
+    end
+    return response
 end
 local function denied(reason, verb, mode, id, guid, units)
     local ok, failure = pcall(action, verb, mode, id, guid, units)
     assert(not ok and failure == "stock_board_contract_" .. reason, failure)
 end
-local function proof()
-    return mod.rows(state, "hosting", table.pack)[1]
-end
-
 denied("not_offered", "start", "inspect", eye)
 fresh = true
 local function catalog(specialist, excluded)
@@ -206,6 +212,10 @@ assert(proof()[18] == want_guid and proof()[16] == 801 and proof()[9] == 1)
 denied("objective_changed", "turnin", "apply", eye, "-")
 denied("objective_changed", "turnin", "apply", eye, want_guid, "1")
 denied("objective_changed", "turnin", "apply", eye, "00000005000000060000000700000008", "1")
+eye_recipe[cash] = 802
+denied("inspection_changed", "turnin", "apply", eye, want_guid, "2")
+assert(eye_recipe[step] == 1 and host_flags.Player_Cash == 17 and row_item[item_units] == 2)
+eye_recipe[cash] = 801
 action("turnin", "apply", eye, want_guid, "2")
 assert(proof()[10] == -10 and proof()[13] == 818 and #store.PlayerBackpack == 1)
 assert(store.PlayerBackpack[1] == host_stack and host_stack[item_units] == 3)
@@ -215,6 +225,7 @@ assert(bag.PlayerBackpack[2] == spare_stack and spare_stack[item_units] == 1)
 action("turnin", "inspect", eye)
 assert(proof()[8] == "already" and host_flags.Player_Cash == 818)
 
+action("start", "inspect", kill)
 action("start", "apply", kill, "-")
 denied("wrong_turnin", "turnin", "inspect", kill)
 board.AcceptAllGlobalContracts = true

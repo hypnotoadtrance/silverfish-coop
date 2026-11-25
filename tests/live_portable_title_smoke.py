@@ -3805,7 +3805,23 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
         return receipt
 
     followup_quest = "Asn_Panzer_01"
-    assert int(await command(host, "stage-turnin-followup", followup_quest)) > 0
+    objective_step = int(await command(host, "stage-turnin-followup", followup_quest))
+    assert objective_step > 0
+    inspected = (await host.bridge.command(native_board_contract.COMMAND, "turnin", "inspect",
+                                           pawn, OBSERVATORY_BOUNTY_BOARD, followup_quest))[native_board_contract.KEY]
+    assert inspected["state"] == "qualified" and inspected["step_before"] == objective_step, inspected
+    stale = {**inspected, "step_before": objective_step - 1}
+    try:
+        await host.bridge.command(native_board_contract.COMMAND, "turnin", "apply",
+                                  pawn, OBSERVATORY_BOUNTY_BOARD, followup_quest,
+                                  *native_board_contract.apply_arguments(stale))
+    except RuntimeError as exc:
+        assert str(exc) == "stock_board_contract_inspection_changed", exc
+    else:
+        raise AssertionError("The stock board accepted a stale quest inspection")
+    assert await command(host, "journal", followup_quest) == str(objective_step)
+    assert await command(host, "turnin-followups") == "0"
+    assert campaign_save_hashes(host.campaign) == checkpoint
     followup_receipt = await settle(followup_quest, 3500)
     selection = native_board_contract.menu_target(guest_frame["zone_epoch"], OBSERVATORY_BOUNTY_BOARD, followup_quest)
     replay = await submit(guest_run, "native-quest-turnin", target=selection)
@@ -3833,6 +3849,7 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
                                       "previously_filtered_offers": sorted(previously_filtered),
                                       "accepted": quest, "journal_step": int(observed[0]),
                                       "tracked_turnins": tracked_quests, "followup_turnin": followup_receipt,
+                                      "stale_turnin_refused_before_stock_callback": True,
                                       "campaign_checkpoint_unchanged": True}}
 
 
