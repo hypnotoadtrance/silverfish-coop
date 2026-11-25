@@ -71,6 +71,22 @@ def instrument_npc_class_discovery(source):
                           '"npc_marker_class_lookup", StaticFindObject, path)')
 
 
+def instrument_anomaly_work(source):
+    calls = (
+        "pyrogeist.apply", "shadows.project", "lamps.project", "observers.target", "observers.publish_rewards",
+        "effects.observe_spatial_cues", "canisters.rows", "drum_fire.rows", "fixed.rows", "destructibles.rows", "acid_pools.rows",
+    )
+    start, separator, rest = source.partition("function fields.rows(")
+    if not separator:
+        raise ValueError("The anomaly status timing anchor changed")
+    for call in calls:
+        anchor = call + "("
+        if rest.count(anchor) != 1:
+            raise ValueError(f"The anomaly status call changed: {call}")
+        rest = rest.replace(anchor, f'SilverfishProfileCrossroadsCall("anomalies.{call}", {call}, ')
+    return start + separator + rest
+
+
 def read_comparison(raw):
     summary, slow_frame = raw.split("!")
     duration, *sections = summary.split(";")
@@ -89,6 +105,21 @@ def read_comparison(raw):
 async def profile_world(host, guest, area, probe):
     guest_run = guest.client / "run"
     seats = {"host": host, "guest": guest}
+    runs = {"host": host.campaign / "run", "guest": guest_run}
+    counters = ("quic_datagrams_sent", "quic_payload_bytes_sent", "game_packets_queued", "game_packets_delivered",
+                "relay_queue_evicted_frames", "relay_queue_expired_frames", "snapshot_responses_encoded",
+                "snapshot_encoded_bytes", "snapshot_plaintext_bytes", "snapshot_responses_decoded", "snapshot_received_bytes")
+
+    async def transport():
+        frames = await asyncio.gather(*(current_status(run) for run in runs.values()))
+        return {seat: frame.get("transport", {}) for seat, frame in zip(runs, frames, strict=True)}
+
+    def traffic(before, after):
+        return {seat: {**{key: after[seat][key] - before[seat][key] for key in counters
+                          if key in before[seat] and key in after[seat] and before[seat][key] <= after[seat][key]},
+                       "keepalive_rtt_us": after[seat].get("keepalive_rtt_us"),
+                       "relay_queue_wait_max_ns": after[seat].get("relay_queue_wait_max_ns")}
+                for seat in runs}
 
     async def command(seat, action):
         response = await probe(seat.bridge, "crossroads-profile", action, reply_end="|end")
@@ -117,8 +148,10 @@ async def profile_world(host, guest, area, probe):
         return status.get("game", {}).get("pawns", {}).get("local", {}).get("location")
 
     baseline = await wait_resident_status(guest_run, lambda f: f["game"].get("map") == area and position(f))
+    before = await transport()
     await arm()
     idle = await collect()
+    after_idle = await transport()
     await arm()
     # Use normal guest movement with short pulses near the stock arrival point.
     movement = []
@@ -131,4 +164,5 @@ async def profile_world(host, guest, area, probe):
             movement.append(math.dist(point, position(baseline)))
     moving = await collect()
     assert movement and max(movement) >= 40, movement
-    return {"idle": idle, "guest_walking": moving, "guest_max_displacement_cm": max(movement)}
+    return {"idle": idle, "guest_walking": moving, "guest_max_displacement_cm": max(movement),
+            "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(after_idle, await transport())}

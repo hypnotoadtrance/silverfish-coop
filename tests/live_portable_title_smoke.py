@@ -3951,8 +3951,18 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
     food_pitch = {"leftovers": -55, "brown-mushroom": 55}
     for label, item in zip(cases, seeded, strict=True):
         if label in food_pitch:
+            assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+            await wait_resident_status(guest_run, lambda frame:
+                                       frame.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
             action = "guest-look-down" if food_pitch[label] < 0 else "guest-look-up"
             assert math.isclose(float(await command(guest, action)), food_pitch[label], abs_tol=.1)
+            sign = math.copysign(1, food_pitch[label])
+            async with asyncio.timeout(5):
+                while float(await command(host, "host-guest-view-pitch")) * sign <= 30:
+                    await asyncio.sleep(.08)
+            assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+            await wait_resident_status(guest_run, lambda frame:
+                                       frame.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
         verb = f"native-guest-{label}"
         profile = native_guest_consumable.STOCK_CONSUMABLES[verb]
         key = native_guest_consumable.RESULT[verb]
@@ -6645,7 +6655,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                        or resident_cabinet_archive is not None)
     try:
         if crossroads_profile:
-            from portable_crossroads_profile import (instrument_inline_crate_scan, instrument_input_mappings,
+            from portable_crossroads_profile import (instrument_anomaly_work, instrument_inline_crate_scan, instrument_input_mappings,
                                                      instrument_loose_discovery, instrument_npc_class_discovery, instrument_profile)
 
             crate_probe = ((Path(__file__).with_name("fixtures") / "portable_crate_input_probe.lua").read_text(encoding="utf-8")
@@ -6666,6 +6676,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             ]
             proof["crossroads_npc_overlays"] = [
                 probes.enter_context(portable_script_overlay(game, "native_npc_barter_identity.lua", instrument_npc_class_discovery))
+                for game in games
+            ]
+            proof["crossroads_anomaly_overlays"] = [
+                probes.enter_context(portable_script_overlay(game, "native_anomaly_fields.lua", instrument_anomaly_work))
                 for game in games
             ]
             proof["crossroads_loot_overlays"] = [

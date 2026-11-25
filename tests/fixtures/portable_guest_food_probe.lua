@@ -95,6 +95,9 @@ local function host_read(pawn, save, world, action)
     end
     local detached = remote and remote.Save
     assert(valid(detached) and not same(detached, save), "detached authoritative guest save unavailable")
+    if action == "host-guest-view-pitch" then
+        return tostring((remote:GetBaseAimRotation().Pitch + 180) % 360 - 180)
+    end
     if action == "host-read" then
         return ("%.6f,%.6f,%.6f,%.6f"):format(save.PlayerFood, save.PlayerRegen, detached.PlayerFood, detached.PlayerRegen)
     end
