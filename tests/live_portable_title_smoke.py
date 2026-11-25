@@ -6693,10 +6693,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     try:
         if crossroads_profile:
             from portable_crossroads_profile import (
-                instrument_anomaly_work, instrument_host_drop_context, instrument_inline_crate_scan,
+                instrument_anomaly_work, instrument_flashlight_scope, instrument_host_drop_context, instrument_inline_crate_scan,
                 instrument_input_mappings, instrument_journal_context,
                 instrument_loose_discovery, instrument_npc_class_discovery, instrument_profile,
-                instrument_shop_discovery, instrument_vital_reads,
+                instrument_shop_discovery, instrument_vital_reads, instrument_weather_status,
             )
 
             crate_probe = ((Path(__file__).with_name("fixtures") / "portable_crate_input_probe.lua").read_text(encoding="utf-8")
@@ -6742,6 +6742,14 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     ("native_loot_crate_input.lua", instrument_inline_crate_scan),
                     ("native_authored_pickup.lua", instrument_loose_discovery),
                     ("native_host_stack_drop.lua", instrument_host_drop_context),
+                )
+            ]
+            proof["crossroads_visual_overlays"] = [
+                probes.enter_context(portable_script_overlay(game, name, instrument))
+                for game in games
+                for name, instrument in (
+                    ("native_world_view.lua", instrument_weather_status),
+                    ("native_flashlight.lua", instrument_flashlight_scope),
                 )
             ]
         if stock_canister:

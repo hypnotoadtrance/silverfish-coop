@@ -39,11 +39,16 @@ local function scope(state, phase)
     return pawn, driver, connection
 end
 
-local function held(actor, pawn, world)
+local function item_profile(actor)
     if not valid(actor) then return end
     local class = actor:GetClass()
-    local profile = same(class, StaticFindObject(regular.class)) and regular
-        or same(class, StaticFindObject(heavy.class)) and heavy
+    if not valid(regular.actor_class) then regular.actor_class = StaticFindObject(regular.class) end
+    if same(class, regular.actor_class) then return regular end
+    if not valid(heavy.actor_class) then heavy.actor_class = StaticFindObject(heavy.class) end
+    if same(class, heavy.actor_class) then return heavy end
+end
+
+local function held(actor, pawn, world, profile)
     if profile and not actor:IsActorBeingDestroyed() and same(actor:GetWorld(), world)
         and same(actor:GetOwner(), pawn) and same(actor:GetAttachParentActor(), pawn) then return profile end
 end
@@ -76,8 +81,9 @@ local function offhand_loadout(pawn)
     return eligible.CanEquip == true or eligible[1] == true
 end
 
-local function stock_offhand(pawn, world)
-    local camera, item = pawn.Camera, pawn.OffhandEquipment
+local function stock_offhand(pawn, world, item)
+    if not item then return end
+    local camera = pawn.Camera
     if pawn.Save.PlayerOffhandingFlashlight == true and offhand_loadout(pawn)
         and exact(item, regular.class) and not item:IsActorBeingDestroyed() and item.bReplicates == false
         and same(item.User, pawn) and same(item:GetWorld(), world) and valid(camera)
@@ -109,14 +115,13 @@ local function numbers(fields, offset)
     return values
 end
 
-local function capture(state, pawn, previous, guest)
-    local equipment = pawn.EquipedItem
+local function capture(state, pawn, previous, guest, equipment, equipment_profile, offhand_item)
     local instance = state.world.OwningGameInstance
     if pawn:HasAuthority() ~= (not guest) or not valid(instance) or not same(pawn.Save, instance.SaveSlot_Ref) then return end
-    local profile = held(equipment, pawn, state.world)
+    local profile = held(equipment, pawn, state.world, equipment_profile)
     local offhand = false
     if not profile then
-        local item = stock_offhand(pawn, state.world)
+        local item = stock_offhand(pawn, state.world, offhand_item)
         if item then equipment, profile, offhand = item, regular, true end
     end
     if not profile or not equipment:HasAuthority() or not same(equipment.User, pawn)
@@ -178,7 +183,7 @@ end
 
 local function existing_beam(world, pawn, profile)
     local equipment = pawn.EquipedItem
-    if held(equipment, pawn, world) == profile then return stock_beam(equipment, world, profile) end
+    if held(equipment, pawn, world, item_profile(equipment)) == profile then return stock_beam(equipment, world, profile) end
     local output = {}
     pawn:GetAttachedActors(output, true, false)
     local attached = output.OutActors or output
@@ -186,7 +191,7 @@ local function existing_beam(world, pawn, profile)
     local spot, source
     for _, item in ipairs(attached) do
         local actor = type(item.type) == "function" and item:type() == "RemoteUnrealParam" and item:get() or item
-        if held(actor, pawn, world) == profile then
+        if held(actor, pawn, world, item_profile(actor)) == profile then
             local light, child = stock_beam(actor, world, profile)
             if light then
                 if source then return end
@@ -338,13 +343,27 @@ local function set_aim(view, prior, pitch, yaw, roll)
 end
 
 function flashlight.sync(state, phase)
+    local candidate = state.local_pawn and state.local_pawn.pawn
+    local equipment, profile, offhand
+    if (phase == "hosting" or phase == "connected") and valid(candidate) then
+        equipment, offhand = candidate.EquipedItem, candidate.OffhandEquipment
+        profile = item_profile(equipment)
+        if item_profile(offhand) ~= regular then offhand = nil end
+    end
+    if not (profile or offhand or target or peers) then
+        owner, guest_owner = nil, nil
+        return
+    end
     local pawn, driver, connection = scope(state, phase)
+    local source_available = pawn and (profile or offhand)
     local host_ok, host_source = false, nil
-    if phase == "hosting" and pawn then host_ok, host_source = pcall(capture, state, pawn, owner, false) end
+    if phase == "hosting" and source_available then
+        host_ok, host_source = pcall(capture, state, pawn, owner, false, equipment, profile, offhand)
+    end
     owner = host_ok and host_source or nil
     local guest_ok, guest_source = false, nil
-    if phase == "connected" and pawn and players.is_downed(pawn) == false then
-        guest_ok, guest_source = pcall(capture, state, pawn, guest_owner, true)
+    if phase == "connected" and source_available and players.is_downed(pawn) == false then
+        guest_ok, guest_source = pcall(capture, state, pawn, guest_owner, true, equipment, profile, offhand)
     end
     guest_owner = guest_ok and guest_source or nil
     if target and not current(target, state, phase, pawn, driver, connection) then clear_render(target); target = nil end
@@ -465,7 +484,7 @@ function flashlight.peer_rows(state, phase, row)
             if valid(pawn) and pawn:HasAuthority() and not pawn:IsLocallyControlled() and same(pawn:GetWorld(), state.world)
                 and not pawn:IsActorBeingDestroyed() then
                 local equipment = pawn.EquipedItem
-                local profile = held(equipment, pawn, state.world)
+                local profile = held(equipment, pawn, state.world, item_profile(equipment))
                 if profile and same(equipment.User, pawn) and equipment:HasAuthority() and selected_stock(pawn, equipment) then
                     local id = avatar.player_id(details)
                     if id ~= nil then

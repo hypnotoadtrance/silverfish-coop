@@ -24,6 +24,7 @@ local max_seconds = 922337203685
 local tolerance = 0.025
 local weather_tolerance = 0.0001
 local lease_seconds = 3
+local status_recheck_seconds = 0.5
 local lease, receipt, warning_receipts
 local weather_fields = {
     -- TheFog_BP blends to a stock fog density of 1.2.
@@ -402,14 +403,23 @@ function view.clear()
     return ok, failure
 end
 
-local function lease_current(state, phase)
+local function lease_time(state, phase)
     local current = lease.context
-    return phase == "connected" and state.server and state.map == current.profile.map and same(state.world, current.world)
+    if phase == "connected" and state.server and state.map == current.profile.map and same(state.world, current.world)
         and state.local_pawn and same(state.local_pawn.pawn, current.pawn)
         and same(current.world.NetDriver, current.driver) and same(current.driver.ServerConnection, current.connection)
-        and same(current.instance.SaveSlot_Ref, current.save) and same(current.pawn.Save, current.save)
-        and components_current(current) and (not lease.weather or weather_current(current, lease.weather))
-        and real_time(current) < lease.expires
+        and same(current.instance.SaveSlot_Ref, current.save) and same(current.pawn.Save, current.save) then
+        local now = real_time(current)
+        if now < lease.expires then return now end
+    end
+end
+
+local function lease_components_current()
+    return components_current(lease.context) and (not lease.weather or weather_current(lease.context, lease.weather))
+end
+
+local function lease_current(state, phase)
+    return lease_time(state, phase) ~= nil and lease_components_current()
 end
 
 function view.sync(state, phase)
@@ -500,6 +510,7 @@ function view.apply(state, phase, frame)
         local restored = view.clear()
         error(restored and report or "native_world_projection_restore_unverified", 0)
     end
+    lease.status_report, lease.status_recheck = report, now + status_recheck_seconds
     receipt = {world = current.world, connection = current.connection, epoch = frame.epoch, sequence = frame.sequence}
     return report
 end
@@ -507,12 +518,17 @@ end
 function view.status(state, phase)
     if not lease then return nil end
     local ok, report = pcall(function()
-        if not lease_current(state, phase) then return nil end
+        local now = lease_time(state, phase)
+        if not now or lease.context.day.UpdateInRealTime ~= false then return nil end
+        -- Snapshot application verifies the actual scene immediately. Between snapshots,
+        -- reuse that report and periodically check for changes in the local scene.
+        if now < lease.status_recheck then return lease.status_report end
+        if not lease_components_current() then return nil end
         local current, frame = lease.context, lease.frame
         local actual = readback(current, frame, lease.saved_seconds)
-        if current.day.UpdateInRealTime == false and actual.save_unchanged and matches_sun(actual, frame) then
-            return actual
-        end
+        lease.status_report = actual.save_unchanged and matches_sun(actual, frame) and actual or nil
+        lease.status_recheck = now + status_recheck_seconds
+        return lease.status_report
     end)
     return ok and report or nil
 end

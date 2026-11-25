@@ -111,6 +111,26 @@ def instrument_host_drop_context(source):
                           '"host_drop_context", host_save.canonical_host, state, phase)')
 
 
+def instrument_weather_status(source):
+    previous, boundary, status = source.partition("function view.status(state, phase)")
+    anchor = "local actual = readback(current, frame, lease.saved_seconds)"
+    if not boundary or status.count(anchor) != 1:
+        raise ValueError("The guest weather status timing anchor changed")
+    return previous + boundary + status.replace(
+        anchor, 'local actual = SilverfishProfileCrossroadsCall('
+        '"weather_status_readback", readback, current, frame, lease.saved_seconds)')
+
+
+def instrument_flashlight_scope(source):
+    previous, boundary, sync = source.partition("function flashlight.sync(state, phase)")
+    body, next_function, rest = sync.partition("function flashlight.command(")
+    anchor = "scope(state, phase)"
+    if not boundary or not next_function or body.count(anchor) != 1:
+        raise ValueError("The flashlight scope timing anchor changed")
+    return previous + boundary + body.replace(
+        anchor, 'SilverfishProfileCrossroadsCall("flashlight_sync_scope", scope, state, phase)') + next_function + rest
+
+
 def instrument_anomaly_work(source):
     calls = (
         "pyrogeist.apply", "shadows.project", "lamps.project", "observers.target", "observers.publish_rewards",
@@ -234,6 +254,8 @@ async def profile_world(host, guest, area, probe):
             lookups = timings.get("player_actor_query", {}).get("count", 0)
             if seat == "guest":
                 assert 0 < lookups <= math.ceil(profile["seconds"]) + 1, (area, lookups, profile["seconds"])
+                weather_reads = timings.get("weather_status_readback", {}).get("count", 0)
+                assert weather_reads <= math.ceil(profile["seconds"] / .5) + 1, (area, weather_reads)
             else:
                 assert lookups == 0, (area, lookups)
                 drop_checks = timings.get("host_drop_context", {}).get("count", 0)
