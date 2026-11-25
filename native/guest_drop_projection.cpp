@@ -1192,6 +1192,11 @@ namespace
     }
 }
 
+bool silverfish::native_actor_pose::set_location_rotation(U::AActor* actor, const Position& position, const Position& rotation)
+{
+    return update_pose(actor, position, rotation);
+}
+
 namespace silverfish::native_guest_drop_projection
 {
     bool owns_actor(U::UObject* actor)

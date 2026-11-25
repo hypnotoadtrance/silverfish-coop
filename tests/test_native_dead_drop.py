@@ -11,11 +11,19 @@ from tools.silverfish.travel import CITY
 
 EPOCH = "a" * 32
 PAWN = f"Player_FP_C {drop.WORLD}:PersistentLevel.Player_FP_C_41"
+POSE = {"position": [-17391, 16852, 474], "rotation": [3, 91, -1], "scale": [1, 1, 1]}
+NEW_POSE = {**POSE, "position": [-18641, 17108, 522]}
 
 
-def stock_game(phase, state, *, epoch=None, pawn=PAWN):
-    return {"state": phase, "map": drop.MAP, "pawns": {"local": {"name": pawn}},
-            drop.KEY: {"state": state, "map": drop.MAP, "actor": drop.ACTOR, "pawn": pawn, "epoch": epoch}}
+def axes(pose):
+    return tuple(str(axis) for name in ("position", "rotation", "scale") for axis in pose[name])
+
+
+def stock_game(phase, state, *, epoch=None, pawn=PAWN, transform=POSE):
+    report = {"state": state, "map": drop.MAP, "actor": drop.ACTOR, "pawn": pawn, "epoch": epoch}
+    if state in ("stock-active", "projected"):
+        report["transform"] = transform
+    return {"state": phase, "map": drop.MAP, "pawns": {"local": {"name": pawn}}, drop.KEY: report}
 
 
 def accepted():
@@ -30,13 +38,13 @@ def host():
 
 class DeadDropFrameTests(unittest.TestCase):
     def test_phase_epoch_map_and_exact_actor_are_required(self):
-        row = [drop.TAG, "projected", drop.MAP, drop.ACTOR, PAWN, EPOCH]
+        row = [drop.TAG, "projected", drop.MAP, drop.ACTOR, PAWN, EPOCH, *axes(POSE)]
         self.assertEqual(drop.parse(row, "connected", drop.MAP), stock_game("connected", "projected", epoch=EPOCH)[drop.KEY])
         for wrong in ("-", "0" * 32, "X" * 32):
-            row[-1] = wrong
+            row[5] = wrong
             with self.assertRaisesRegex(ValueError, "identity"):
                 drop.parse(row, "connected", drop.MAP)
-        row[-1] = EPOCH
+        row[5] = EPOCH
         for phase, area in (("hosting", drop.MAP), ("connected", CITY)):
             with self.assertRaisesRegex(ValueError, "identity"):
                 drop.parse(row, phase, area)
@@ -44,7 +52,9 @@ class DeadDropFrameTests(unittest.TestCase):
     def test_authority_requires_canonical_pose_and_committed_unclaimed_step(self):
         source = host()
         self.assertEqual(drop.frame(source), {"map": drop.MAP, "quest": drop.QUEST, "actor": drop.ACTOR,
-                                               "step": 1, "epoch": EPOCH})
+                                               "step": 1, "epoch": EPOCH, "transform": POSE})
+        source.last_game[drop.KEY]["transform"] = NEW_POSE
+        self.assertEqual(drop.frame(source)["transform"], NEW_POSE)
         source.last_game[drop.KEY]["state"] = "hidden"
         self.assertEqual(drop.frame(source), {})
         source.last_game[drop.KEY]["state"] = "stock-active"
@@ -67,24 +77,29 @@ class DeadDropProjectionTests(unittest.IsolatedAsyncioTestCase):
         projected = stock_game("connected", "projected", epoch=EPOCH)
         published = accepted()
         published[drop.FRAME] = drop.frame(host())
-        bridge = SimpleNamespace(command=AsyncMock(side_effect=[projected, projected, hidden]))
+        moved = stock_game("connected", "projected", epoch=EPOCH, transform=NEW_POSE)
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[projected, moved, moved, hidden]))
         client = SimpleNamespace(last_game=hidden, zone_epoch=EPOCH, host_session="session", needs_travel=False,
                                  server_transitioning=False, gameplay_seen=time.monotonic(), gameplay=published,
                                  dead_drop_projection=(None, 0.0), bridge=bridge)
 
         await drop.project_client(client)
-        bridge.command.assert_awaited_once_with("native-dead-drop-project", EPOCH, PAWN, timeout=3)
+        bridge.command.assert_awaited_once_with("native-dead-drop-project", EPOCH, PAWN, *axes(POSE), timeout=3)
         await drop.project_client(client)
         self.assertEqual(bridge.command.await_count, 1)
+        published[drop.FRAME]["transform"] = NEW_POSE
+        await drop.project_client(client)
+        bridge.command.assert_awaited_with("native-dead-drop-project", EPOCH, PAWN, *axes(NEW_POSE), timeout=3)
+        self.assertEqual(bridge.command.await_count, 2)
         client.dead_drop_projection = (client.dead_drop_projection[0], time.monotonic() - 1)
         await drop.project_client(client)
-        self.assertEqual(bridge.command.await_count, 2)
+        self.assertEqual(bridge.command.await_count, 3)
         published[drop.PICKUPS] = {drop.SOURCE: {"guid": "B" * 32}}
         await drop.project_client(client)
         bridge.command.assert_awaited_with("native-dead-drop-clear", timeout=3)
         self.assertEqual(client.last_game, hidden)
         await drop.project_client(client)
-        self.assertEqual(bridge.command.await_count, 3)
+        self.assertEqual(bridge.command.await_count, 4)
 
     async def test_claim_disallows_inactive_and_stale_epoch_before_checkpoint(self):
         source = host()

@@ -1144,7 +1144,7 @@ namespace
     Hook::GlobalCallbackId cooking_pre = Hook::ERROR_ID, cooking_post = Hook::ERROR_ID;
     struct LocalCook
     {
-        Unreal::FWeakObjectPtr pawn, save, eat, fatigue, intox;
+        Unreal::FWeakObjectPtr pawn, save;
         Unreal::FFrame* frame{};
         CookingEffect before;
         std::optional<int> fatigue_effect, intox_effect;
@@ -1168,17 +1168,25 @@ namespace
 
     void read_cooking_start(Hook::TCallbackIterationData<void>& iteration, Unreal::UObject* fire, Unreal::FFrame& frame, void*)
     {
-        if (!Unreal::IsInGameThreadRaw() || iteration.OriginalFunctionCallPrevented()) return;
+        auto* call = frame.Node();
+        if (!call || !Unreal::IsInGameThreadRaw() || iteration.OriginalFunctionCallPrevented()) return;
+
+        static const Unreal::FName eat_name{STR("EatFood")};
+        static const Unreal::FName fatigue_name{STR("Add_PlayerFatigue")};
+        static const Unreal::FName intox_name{STR("Apply_PlayerIntox")};
+        const auto name = call->GetFName();
         if (local_cook.frame)
         {
-            auto* call = frame.Node();
-            if (!call || !frame.Locals()) return;
-            const bool fatigue = call == local_cook.fatigue.Get();
-            const bool intox = call == local_cook.intox.Get() && fire == local_cook.pawn.Get();
-            if (!fatigue && !intox) return;
+            const bool fatigue = name == fatigue_name;
+            const bool intox = name == intox_name && fire == local_cook.pawn.Get();
+            if ((!fatigue && !intox) || !frame.Locals()) return;
             auto* ancestor = frame.PreviousFrame();
             for (int i = 0; ancestor && ancestor != local_cook.frame && i < 6; ++i) ancestor = ancestor->PreviousFrame();
             if (ancestor != local_cook.frame) return;
+            auto* owner = call->GetOuterPrivate();
+            const auto* expected = fatigue
+                ? STR("/Game/Classes/Libraries/Fuctions_Lib/FL_GameEffects.FL_GameEffects_C") : pawn_path;
+            if (!live(owner) || owner->GetPathName() != expected) return;
             auto* difference = field<Unreal::FIntProperty>(call, STR("Difference"));
             if (difference && difference->HasAnyPropertyFlags(Unreal::CPF_Parm) &&
                 difference->GetOffset_Internal() == (fatigue ? 8 : 0))
@@ -1188,12 +1196,16 @@ namespace
             }
             return;
         }
-        if (!local_cook.eat.Get() || frame.Node() != local_cook.eat.Get() || local_cook.receipts.size() >= 8) return;
+        if (name != eat_name || local_cook.receipts.size() >= 8 || !live(fire)) return;
         Scope scope;
+        if (!local_cooking_scope(scope)) return;
+        auto* owner = call->GetOuterPrivate();
+        if (!live(owner) || owner->GetPathName() != STR("/Game/Classes/Actors/CampFire_BP.CampFire_BP_C") ||
+            fire->GetClassPrivate()->GetFunctionByNameInChain(eat_name) != call ||
+            static_cast<Unreal::AActor*>(fire)->GetWorld() != scope.world) return;
         Health health;
         Intoxication flags;
-        if (!live(fire) || !local_cooking_scope(scope) || static_cast<Unreal::AActor*>(fire)->GetWorld() != scope.world ||
-            !health.bind(scope, false).empty() || !flags.bind(scope.guest)) return;
+        if (!health.bind(scope, false).empty() || !flags.bind(scope.guest)) return;
         auto* portion = field<Unreal::FDoubleProperty>(fire, STR("Food_AmmountReady"));
         if (!portion || !(portion->GetPropertyValueInContainer(fire) > 0)) return;
         local_cook.frame = &frame;
@@ -1237,15 +1249,12 @@ namespace
         if (local_cook.pawn.Get() != pawn || local_cook.save.Get() != save)
         {
             local_cook = {};
-            if (!exact(pawn, find<Unreal::UClass>(pawn_path)) || !exact(save, find<Unreal::UClass>(save_path))) return 0;
+            if (!live(pawn) || !live(save) || pawn->GetClassPrivate()->GetPathName() != pawn_path ||
+                save->GetClassPrivate()->GetPathName() != save_path) return 0;
             local_cook.pawn = pawn;
             local_cook.save = save;
         }
-        if (!local_cook.eat.Get()) local_cook.eat = find<Unreal::UFunction>(
-            STR("/Game/Classes/Actors/CampFire_BP.CampFire_BP_C:EatFood"));
-        if (!local_cook.fatigue.Get()) local_cook.fatigue = find<Unreal::UFunction>(
-            STR("/Game/Classes/Libraries/Fuctions_Lib/FL_GameEffects.FL_GameEffects_C:Add_PlayerFatigue"));
-        if (!local_cook.intox.Get()) local_cook.intox = find<Unreal::UFunction>(intox_path);
+        // Polling can run in a map with no campfire package. Qualify stock functions only from their live script frames.
         if (local_cook.receipts.empty()) return 0;
         const auto [sequence, delta] = local_cook.receipts.front();
         local_cook.receipts.pop_front();

@@ -81,8 +81,6 @@ namespace
         .world = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"),
         .actor = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.Bag_DeadDrop_CrossRoads_C_1"),
         .item_class = STR("/Game/Classes/Items/Key_Items/Bag_DeadDrop_CrossRoads.Bag_DeadDrop_CrossRoads_C"),
-        // World pose of the stock authority actor after the active quest leaves it in place.
-        .x = -15818.69, .y = 15743.97, .z = 381.31,
         .item_type = 1, .dead_drop = true,
     };
 
@@ -463,10 +461,12 @@ namespace
 
     std::uint64_t sequence{};
     Scope* fixture_scope{};
+    using DropPose = std::array<double, 9>;
     struct DropProjection
     {
         Scope scope{};
         std::string epoch;
+        DropPose pose{};
         Clock::time_point expires{};
     };
     DropProjection drop_projection{};
@@ -723,7 +723,8 @@ namespace
         if (profile.stock_cash && !loose_cash_value(actor)) return "authored_pickup_stock_cash_profile_unqualified";
         // Physics-enabled items can settle below their authored placement under vanilla simulation.
         // A claimed item may fall when collision is disabled. Its exact scoped object stays hidden.
-        if (profile.physics && !require_placement) return nullptr;
+        // The stock randomizer chooses the Dead Drop transform on each map load.
+        if (profile.dead_drop || (profile.physics && !require_placement)) return nullptr;
         auto position = item->K2_GetActorLocation();
         const auto dx = position.GetX() - profile.x;
         const auto dy = position.GetY() - profile.y;
@@ -778,11 +779,6 @@ namespace
         if (!mode || mode->GetPropertyValueInContainer(actor) != 0) return "respawn_mode";
         if (!boolean(actor, STR("DespawnIfPlayerOwns"), true)) return "owned_despawn";
         if (!boolean(actor, STR("Physics"), false)) return "physics";
-        // Both peers load this exact root at world yaw -150; the export contains its relative rotation.
-        auto facing = static_cast<U::AActor*>(actor)->K2_GetActorRotation();
-        if (!(std::abs(std::remainder(facing.GetPitch(), 360.0)) <= 0.5 &&
-              std::abs(std::remainder(facing.GetYaw() + 150.0, 360.0)) <= 0.5 &&
-              std::abs(std::remainder(facing.GetRoll(), 360.0)) <= 0.5)) return "rotation";
         return nullptr;
     }
 
@@ -791,11 +787,41 @@ namespace
         return drop_identity_fault(actor, world) == nullptr;
     }
 
+    bool valid_drop_pose(const DropPose& pose)
+    {
+        for (std::size_t axis = 0; axis < pose.size(); ++axis)
+        {
+            const double limit = axis < 3 ? 1e7 : axis < 6 ? 360.0 : 100.0;
+            if (!std::isfinite(pose[axis]) || std::abs(pose[axis]) > limit || (axis >= 6 && pose[axis] == 0))
+                return false;
+        }
+        return std::abs(pose[0]) > 1.0 || std::abs(pose[1]) > 1.0 || std::abs(pose[2] - 9999.0) > 1.0;
+    }
+
+    DropPose read_drop_pose(U::AActor* actor)
+    {
+        const auto point = actor->K2_GetActorLocation();
+        const auto angle = actor->K2_GetActorRotation();
+        const auto scale = actor->GetActorScale3D();
+        return {point.X(), point.Y(), point.Z(), angle.GetPitch(), angle.GetYaw(), angle.GetRoll(),
+            scale.X(), scale.Y(), scale.Z()};
+    }
+
+    bool same_drop_pose(const DropPose& actual, const DropPose& expected)
+    {
+        if (!valid_drop_pose(actual) || !valid_drop_pose(expected)) return false;
+        for (std::size_t axis = 0; axis < actual.size(); ++axis)
+        {
+            const double delta = actual[axis] - expected[axis];
+            const double difference = axis >= 3 && axis < 6 ? std::remainder(delta, 360.0) : delta;
+            if (std::abs(difference) > (axis < 6 ? .1 : .005)) return false;
+        }
+        return true;
+    }
+
     bool hidden_drop(U::AActor* actor)
     {
-        auto point = actor->K2_GetActorLocation();
-        return boolean(actor, STR("bHidden"), true) &&
-            std::abs(point.GetX()) <= 1.0 && std::abs(point.GetY()) <= 1.0 && std::abs(point.GetZ() - 9999.0) <= 1.0;
+        return boolean(actor, STR("bHidden"), true);
     }
 
     bool present_drop(const Scope& state)
@@ -847,8 +873,7 @@ namespace
         {
             actor->SetActorHiddenInGame(true);
             U::FHitResult ignored{};
-            if (!hidden_drop(actor))
-                actor->K2_SetActorLocation(U::FVector{0.0, 0.0, 9999.0}, false, ignored, true);
+            actor->K2_SetActorLocation(U::FVector{0.0, 0.0, 9999.0}, false, ignored, true);
             if (!hidden_drop(actor)) return false;
         }
         drop_projection = {};
@@ -2608,11 +2633,19 @@ namespace
         if (!host && drop_projection.scope.profile &&
             (!drop_gate(state) || !present_drop(state)) && !settle_drop_projection())
             return drop_diagnostic(lua, "projection_retirement", actor);
+        if (!host && actor && !drop_gate(state) && !hidden_drop(actor) && dead_drop_identity(actor, state.world.Get()))
+        {
+            // Vanilla may show its independently placed copy before the host's view arrives.
+            drop_projection.scope = state;
+            if (!settle_drop_projection()) return drop_diagnostic(lua, "stock_pose_retirement", actor);
+        }
         std::string_view shown;
         std::string_view epoch = "-";
         const auto* fault = actor ? drop_identity_fault(actor, state.world.Get()) : nullptr;
         if (!actor) shown = "absent";
         else if (fault) return drop_diagnostic(lua, fault, actor);
+        else if (host && scopes.front().actor.Get() == actor && scopes.front().claimed)
+            shown = "claimed";
         else if (hidden_drop(actor)) shown = "hidden";
         else if (host)
         {
@@ -2622,9 +2655,7 @@ namespace
                 drop_settles_at = now + drop_settle;
             }
             if (now < drop_settles_at) return 0;
-            const auto& bound = scopes.front();
-            if (bound.actor.Get() == actor && bound.claimed && boolean(actor, STR("bHidden"), true)) shown = "claimed";
-            else if (!drop_gate(state)) return drop_diagnostic(lua, "canonical_quest_inactive", actor);
+            if (!drop_gate(state)) return drop_diagnostic(lua, "canonical_quest_inactive", actor);
             else if (const auto* fault = source_fault(actor, state.world.Get(), dead_drop_profile))
                 return drop_diagnostic(lua, fault, actor);
             else if (!present_drop(state)) return drop_diagnostic(lua, "stock_world_visibility_or_box", actor);
@@ -2636,6 +2667,15 @@ namespace
             epoch = drop_projection.epoch;
         }
         if (shown.empty()) return drop_diagnostic(lua, host ? "stock_pose_or_quest_inactive" : "client_stock_pose", actor);
+        if (shown == "stock-active" || shown == "projected")
+        {
+            const auto pose = read_drop_pose(actor);
+            if (!valid_drop_pose(pose)) return drop_diagnostic(lua, "stock_objective_transform_unavailable", actor);
+            lua.set_string(shown);
+            lua.set_string(epoch);
+            for (const auto axis : pose) lua.set_number(axis);
+            return 11;
+        }
         lua.set_string(shown);
         lua.set_string(epoch);
         return 2;
@@ -2649,28 +2689,39 @@ namespace
 
     int project_drop(const Lua& lua)
     {
-        if (!ready() || lua.get_stack_size() != 2 || !lua.is_integer() || !lua.is_string(2))
+        if (!ready() || lua.get_stack_size() != 11 || !lua.is_integer() || !lua.is_string(2))
             return result(lua, false, "dead_drop_projection_arguments");
         const auto address_value = static_cast<Address>(lua.get_integer());
         const std::string epoch{lua.get_string()};
+        DropPose pose{};
+        for (auto& axis : pose)
+        {
+            if (!lua.is_number()) return result(lua, false, "dead_drop_projection_arguments");
+            axis = lua.get_number();
+        }
+        if (!valid_drop_pose(pose)) return result(lua, false, "dead_drop_projection_transform_unavailable");
         auto state = dead_drop_seat(address_value, false);
         auto* actor = static_cast<U::AActor*>(state.actor.Get());
         if (!valid_drop_epoch(epoch) || !state.profile || !dead_drop_identity(actor, state.world.Get()))
             return result(lua, false, "dead_drop_projection_scope_unavailable");
         const auto now = Clock::now();
-        if (drop_projection.epoch == epoch && drop_gate(state) && present_drop(state))
+        const bool renewing = drop_projection.epoch == epoch && drop_gate(state) && present_drop(state);
+        if (renewing && same_drop_pose(read_drop_pose(actor), pose))
         {
             drop_projection.expires = now + drop_lease;
             return result(lua, true, "renewed");
         }
-        if (!settle_drop_projection() || !hidden_drop(actor) || !actor->GetActorEnableCollision())
+        if ((!renewing && (!settle_drop_projection() || !hidden_drop(actor))) || !actor->GetActorEnableCollision())
             return result(lua, false, "dead_drop_projection_stock_pose_unavailable");
-        const auto& source = dead_drop_profile;
-        U::FHitResult ignored{};
-        drop_projection = {state, epoch, {}};
-        const bool moved = actor->K2_SetActorLocation(U::FVector{source.x, source.y, source.z}, false, ignored, true);
-        if (moved) actor->SetActorHiddenInGame(false);
-        if (!moved || !present_drop(state))
+        drop_projection = {state, epoch, pose, {}};
+        const bool moved = silverfish::native_actor_pose::set_location_rotation(
+            actor, {pose[0], pose[1], pose[2]}, {pose[3], pose[4], pose[5]});
+        if (moved)
+        {
+            actor->SetActorScale3D(U::FVector{pose[6], pose[7], pose[8]});
+            actor->SetActorHiddenInGame(false);
+        }
+        if (!moved || !present_drop(state) || !same_drop_pose(read_drop_pose(actor), pose))
         {
             const bool restored = settle_drop_projection();
             return result(lua, false, restored ? "dead_drop_projection_not_applied" : "mutation_unverified_dead_drop_projection");

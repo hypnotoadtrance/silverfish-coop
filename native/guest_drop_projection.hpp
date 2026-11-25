@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <optional>
 #include <span>
 #include <vector>
@@ -9,7 +10,13 @@ namespace RC::LuaMadeSimple
     class Lua;
 }
 
-namespace RC::Unreal { class UObject; }
+namespace RC::Unreal { class AActor; class UObject; }
+
+namespace silverfish::native_actor_pose
+{
+    bool set_location_rotation(RC::Unreal::AActor* actor, const std::array<double, 3>& position,
+                               const std::array<double, 3>& rotation);
+}
 
 namespace silverfish::native_guest_drop_projection
 {

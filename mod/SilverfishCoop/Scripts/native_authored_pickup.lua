@@ -668,12 +668,14 @@ function pickup.command(fields, state, phase)
     end
     if action == "native-dead-drop-project" then
         local detail = state.local_pawn
-        if #fields ~= 4 or phase ~= "connected" or not state.listening or state.server ~= true
+        if #fields ~= 13 or phase ~= "connected" or not state.listening or state.server ~= true
             or state.map ~= dead_drop.map or not detail or detail.name ~= fields[4] or not valid(detail.pawn)
             or type(SilverfishProjectNativeCrossroadsDeadDrop) ~= "function" then
             error("dead_drop_projection_scope_unavailable", 0)
         end
-        local applied, status = SilverfishProjectNativeCrossroadsDeadDrop(detail.pawn:GetAddress(), fields[3])
+        local pose = {}
+        for index = 1, 9 do pose[index] = tonumber(fields[index + 4]) end
+        local applied, status = SilverfishProjectNativeCrossroadsDeadDrop(detail.pawn:GetAddress(), fields[3], table.unpack(pose, 1, 9))
         if applied ~= true then error(status, 0) end
         return "verified local stock Dead Drop presentation"
     end
@@ -904,11 +906,17 @@ function pickup.rows(state, phase, status_row)
         if type(observe) ~= "function" then
             rows[#rows + 1] = status_row("native-dead-drop-diagnostic", state.map, "native_observer_unavailable")
         else
-            local shown, epoch, fault = observe(detail.pawn:GetAddress(), host)
+            local shown, epoch, x, y, z, pitch, yaw, roll, sx, sy, sz = observe(detail.pawn:GetAddress(), host)
             if shown == "diagnostic" then
-                rows[#rows + 1] = status_row("native-dead-drop-diagnostic", state.map, fault)
+                rows[#rows + 1] = status_row("native-dead-drop-diagnostic", state.map, x)
             elseif shown then
-                rows[#rows + 1] = status_row("native-dead-drop", shown, state.map, dead_drop.name .. " " .. dead_drop.path, detail.name, epoch)
+                local name = dead_drop.name .. " " .. dead_drop.path
+                if shown == "stock-active" or shown == "projected" then
+                    rows[#rows + 1] = status_row("native-dead-drop", shown, state.map, name, detail.name, epoch,
+                        x, y, z, pitch, yaw, roll, sx, sy, sz)
+                else
+                    rows[#rows + 1] = status_row("native-dead-drop", shown, state.map, name, detail.name, epoch)
+                end
             end
         end
     end

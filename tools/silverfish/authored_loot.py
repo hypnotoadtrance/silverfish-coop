@@ -569,3 +569,11 @@ def valid_item_transform(transform: object) -> bool:
                 for field, limit in (("position", 1e7), ("rotation", 360), ("scale", 100)))
         and all(axis != 0 for axis in transform["scale"])
     )
+
+
+def same_pose(first, second):
+    return (
+        all(abs(a - b) <= .1 for a, b in zip(first["position"], second["position"], strict=True))
+        and all(abs((a - b + 180) % 360 - 180) <= .1 for a, b in zip(first["rotation"], second["rotation"], strict=True))
+        and all(abs(a - b) <= .005 for a, b in zip(first["scale"], second["scale"], strict=True))
+    )

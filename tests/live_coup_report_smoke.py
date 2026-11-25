@@ -20,6 +20,7 @@ sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_dead_drop, native_dust_cabinet as stock_cabinet, native_host_save, native_savlo_locker as stock_locker
 from tools.silverfish import native_computer_board as collections
+from tools.silverfish.authored_loot import same_pose
 from tools.silverfish.authored_routes import AUTHORED_ROUTES, AuthoredRoute
 from tools.silverfish.native_authored_pickup import DEAD_END, FORT_LETO, FORT_LETO_LOCKER_KEY, SCIENTIST_BLANK_TAPE, SOURCES, STATE_KEY as PICKUPS
 from tools.silverfish.native_mosby_station_view import FIXTURE as STATION_FIXTURE, KEY as STATION_VIEW
@@ -252,7 +253,8 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
             for disconnected in (host_hidden, client_hidden):
                 assert source not in disconnected["game"].get("native_authored_pickup_sources", {}), disconnected["game"]
             refused = await action(guest, "native-authored-pickup-stock-fixture", "--pickup-source", source, accepted=False)
-            assert "source_required" in refused["error"] or "scope_unavailable" in refused["error"], refused
+            assert any(reason in refused["error"] for reason in
+                       ("source_required", "scope_unavailable", "stock_visibility_unqualified")), refused
             blocked = await action(guest, "native-authored-pickup-claim", "--target", source, accepted=False)
             expected = "authored_pickup_dead_drop_inactive" if label == "before_acceptance" else "native_authored_pickup_already_claimed"
             assert blocked["error"] == expected, blocked
@@ -265,7 +267,10 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
                                 and frame.get("gameplay", {}).get(native_dead_drop.FRAME, {}).get("epoch") == epoch)
             client_frame = await wait(client_run, lambda frame: native_dead_drop.observed(
                 frame.get("game", {}), "projected").get("epoch") == epoch)
-            previous_pawn = client_frame["game"][native_dead_drop.KEY]["pawn"]
+            authority_pose = native["game"][native_dead_drop.KEY]["transform"]
+            client_drop = client_frame["game"][native_dead_drop.KEY]
+            assert same_pose(authority_pose, client_drop["transform"]), (authority_pose, client_drop)
+            previous_pawn = client_drop["pawn"]
             dropped = await action(guest, "drop-link")
             assert dropped["link_connected"] is False, dropped
             after = await wait(client_run, lambda frame: frame.get("link_connected") is False
@@ -277,10 +282,12 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
             returned = await wait(client_run, lambda frame: frame.get("zone_epoch") == epoch and
                                   native_dead_drop.observed(frame.get("game", {}), "projected").get("pawn") == previous_pawn)
             assert returned["game"][native_dead_drop.KEY]["epoch"] == epoch, returned["game"]
+            assert same_pose(authority_pose, returned["game"][native_dead_drop.KEY]["transform"]), returned["game"]
             evidence["source_activation"] = {"authority": native["game"][native_dead_drop.KEY],
                                              "client": client_frame["game"][native_dead_drop.KEY],
                                              "lease_expired": after["game"][native_dead_drop.KEY],
                                              "reconnect": returned["game"][native_dead_drop.KEY]}
+            return authority_pose["position"]
 
         async def collect_locker_key():
             source = FORT_LETO_LOCKER_KEY
@@ -329,8 +336,7 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
                 denied = await action(guest, "native-quest-turnin", "--target", quest, accepted=False)
                 assert denied["error"] == f"{spec.key}_unavailable", denied
                 evidence["wrong_map_turn_in"] = denied["error"]
-            if plan.conditional_pickup:
-                await verify_drop_projection()
+            host_placement = await verify_drop_projection() if plan.conditional_pickup else None
             selected = ("--pickup-source", source)
             profile = plan.cabinet
             if plan.savlo_locker:
@@ -358,14 +364,14 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
                 assert opened["doors"] == replica["doors"] == "open", (opened, replica)
                 evidence["stock_pickup_cabinet"] = {"guest_stock_veto": veto, "authority": opened, "replica": replica}
             await action(host, "native-authored-pickup-approach", "--target", "guest", *selected)
-            if profile or plan.savlo_locker or plan.pickup_location:
+            if profile or plan.savlo_locker or plan.pickup_location or host_placement:
                 def near(state, role, point, radius):
                     game = state.get("game", {})
                     position = game.get("pawns", {}).get(role, {}).get("location")
                     return game.get("map") == pickup_map and position and math.dist(position, point) <= radius
 
                 placement = (profile.pickup_location if profile else
-                             plan.pickup_location or (30714.073647, -137718.505194, 2043.691163))
+                             host_placement or plan.pickup_location or (30714.073647, -137718.505194, 2043.691163))
                 approached = await wait(run, lambda state: near(state, "guest", placement, 240))
                 authority = approached["game"]["pawns"]["guest"]["location"]
                 await wait(client_run, lambda state: near(state, "local", authority, 25))

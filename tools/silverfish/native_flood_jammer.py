@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import time
 
 from . import native_loot, native_rewards, native_spratt, native_wire_quest, party
-from .authored_loot import valid_item_transform
+from .authored_loot import same_pose, valid_item_transform
 from .native_gold import valid_guid
 from .travel import BLACK_MARKET, BOROUGH, CROSSROADS, LAKE, OBSERVATORY, RAIL_YARD
 
@@ -337,14 +337,6 @@ def pose_frame(game, epoch):
     if (spec and game.get("state") == "hosting" and _pose_matches_scope(pose, spec)
             and isinstance(epoch, str) and party.REQUEST_ID.fullmatch(epoch)):
         return {**pose, "epoch": epoch}
-
-
-def same_pose(first, second):
-    return (
-        all(abs(a - b) <= .1 for a, b in zip(first["position"], second["position"], strict=True))
-        and all(abs((a - b + 180) % 360 - 180) <= .1 for a, b in zip(first["rotation"], second["rotation"], strict=True))
-        and all(abs(a - b) <= .005 for a, b in zip(first["scale"], second["scale"], strict=True))
-    )
 
 
 async def _project_pose(client, game, spec):
