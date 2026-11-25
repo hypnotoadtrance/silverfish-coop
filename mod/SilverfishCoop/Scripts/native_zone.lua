@@ -57,10 +57,9 @@ local function placed_actor(class, name, world)
     return match
 end
 
-local function find_fixture(local_pawn, route)
-    local world = local_pawn:GetWorld()
+local function find_fixture(world, route)
     if valid(fixture) and same(fixture:GetWorld(), world) then return fixture end
-    fixture = placed_actor("Level_Exit_BP_C", route.fixture, world)
+    fixture = wall.placed_actor(world, "Level_Exit_BP_C", route.fixture)
     return fixture
 end
 
@@ -209,7 +208,8 @@ function zone.sync(state, phase)
         if #remote > 1 then return false, "This native zone hook only supports one guest" end
         return SilverfishSetNativeZoneScope(address, remote[1] or 0, exit_address, host, accepting)
     end
-    local exit = find_fixture(local_pawn, route)
+    local world = local_pawn:GetWorld()
+    local exit = find_fixture(world, route)
     if route.fixture and not valid(exit) then
         wall.sync(state, phase, nil, false, secondary_fixture)
         if qualify(0, false) then armed = state.map end
@@ -218,11 +218,10 @@ function zone.sync(state, phase)
     end
 
     local accepting = host and heartbeat_fresh()
-    local world = local_pawn:GetWorld()
     if not route.secondary then
         secondary_fixture = nil
     elseif not valid(secondary_fixture) or not same(secondary_fixture:GetWorld(), world) then
-        secondary_fixture = placed_actor("Level_Exit_BP_C", route.secondary.fixture, world)
+        secondary_fixture = wall.placed_actor(world, "Level_Exit_BP_C", route.secondary.fixture)
     end
     local refreshed, reason = qualify(valid(exit) and exit:GetAddress() or 0, accepting)
     wall.sync(state, phase, exit, accepting and refreshed, secondary_fixture)

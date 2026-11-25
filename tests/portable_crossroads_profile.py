@@ -96,6 +96,14 @@ def instrument_journal_context(source):
         call, call.replace("host(state, phase)", 'SilverfishProfileCrossroadsCall("journal_host_context", host, state, phase)'))
 
 
+def instrument_host_drop_context(source):
+    anchor = "host_save.canonical_host(state, phase)"
+    if source.count(anchor) != 1:
+        raise ValueError("The host drop context timing anchor changed")
+    return source.replace(anchor, 'SilverfishProfileCrossroadsCall('
+                          '"host_drop_context", host_save.canonical_host, state, phase)')
+
+
 def instrument_anomaly_work(source):
     calls = (
         "pyrogeist.apply", "shadows.project", "lamps.project", "observers.target", "observers.publish_rewards",
@@ -221,6 +229,8 @@ async def profile_world(host, guest, area, probe):
                 assert 0 < lookups <= math.ceil(profile["seconds"]) + 1, (area, lookups, profile["seconds"])
             else:
                 assert lookups == 0, (area, lookups)
+                drop_checks = timings.get("host_drop_context", {}).get("count", 0)
+                assert 0 < drop_checks <= timings["write_status"]["count"], (area, drop_checks)
         return dict(zip(seats, profiles, strict=True))
 
     async def compare_vitals(seat):
@@ -245,6 +255,10 @@ async def profile_world(host, guest, area, probe):
                 and pawns["local"]["name"] != pawns["guest"]["name"])
 
     baseline = await wait_resident_status(guest_run, pawns_here)
+    wall_status = await asyncio.gather(*(wait_resident_status(
+        run, lambda frame: frame.get("game", {}).get("map") == area
+        and frame["game"].get("native_zone_wall", {}).get("state") == "ready"
+        and not frame["game"]["native_zone_wall"]["failure"]) for run in runs.values()))
     before = await transport()
     await arm()
     idle = await collect()
@@ -281,5 +295,7 @@ async def profile_world(host, guest, area, probe):
     return {"idle": idle, "guest_walking": moving, "guest_max_displacement_cm": max(movement),
             "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(after_idle, after_movement),
             "row_format_comparison": dict(zip(seats, rows, strict=True)),
+            "zone_walls": {seat: frame["game"]["native_zone_wall"]
+                           for seat, frame in zip(seats, wall_status, strict=True)},
             "guest_roster": {slot: row["name"] for slot, row in settled["game"]["pawns"].items()},
             "vitals_comparison": dict(zip(seats, comparison, strict=True)), **journal}

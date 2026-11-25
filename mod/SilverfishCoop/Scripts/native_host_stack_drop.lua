@@ -18,14 +18,20 @@ local function token(value, characters)
     return type(value) == "string" and #value == 32 and value:match(characters) ~= nil
 end
 
-local function context(state, phase)
+local function standing_host(state, phase)
     if not enabled or not maps[state.map] or phase ~= "hosting" or not state.listening or state.server
         or type(SilverfishSetNativeHostDropScope) ~= "function"
         or type(SilverfishClearNativeHostDropScope) ~= "function"
         or type(SilverfishTakeNativeHostDropRequest) ~= "function"
         or type(SilverfishFinishNativeHostDropRequest) ~= "function" then return end
-    local _, pawn = host_save.canonical_host(state, phase)
+    local pawn = state.local_pawn and state.local_pawn.pawn
     if valid(pawn) and pawn.Dead == false and not players.is_downed(pawn) then return pawn end
+end
+
+local function context(state, phase)
+    if not standing_host(state, phase) then return end
+    local _, pawn = host_save.canonical_host(state, phase)
+    return pawn
 end
 
 function menu_drop.clear()
@@ -35,7 +41,8 @@ end
 
 function menu_drop.sync(state, phase)
     if not binding then return end
-    local pawn = context(state, phase)
+    -- The native refresh checks the active controller, driver, and canonical save.
+    local pawn = standing_host(state, phase)
     if not same(pawn, binding.pawn) or not same(state.world, binding.world) or state.map ~= binding.map
         or SilverfishSetNativeHostDropScope(pawn:GetAddress(), binding.epoch) ~= true then
         menu_drop.clear()

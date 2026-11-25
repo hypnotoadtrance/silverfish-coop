@@ -6677,7 +6677,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     try:
         if crossroads_profile:
             from portable_crossroads_profile import (
-                instrument_anomaly_work, instrument_inline_crate_scan, instrument_input_mappings, instrument_journal_context,
+                instrument_anomaly_work, instrument_host_drop_context, instrument_inline_crate_scan,
+                instrument_input_mappings, instrument_journal_context,
                 instrument_loose_discovery, instrument_npc_class_discovery, instrument_profile,
                 instrument_shop_discovery, instrument_vital_reads,
             )
@@ -6724,6 +6725,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 for name, instrument in (
                     ("native_loot_crate_input.lua", instrument_inline_crate_scan),
                     ("native_authored_pickup.lua", instrument_loose_discovery),
+                    ("native_host_stack_drop.lua", instrument_host_drop_context),
                 )
             ]
         if stock_canister:

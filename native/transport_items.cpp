@@ -3170,11 +3170,11 @@ namespace
     {
         if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_string(2))
             return 0;
+        if (!host_drop_request || host_drop_request->taken || Clock::now() >= host_drop_request->expires)
+            return 0;
         const std::string epoch{lua.get_string(2)};
         const auto pawn = lua.get_integer(1);
-        if (!drop_argument(pawn, epoch, host) || !host_drop_request ||
-            host_drop_request->taken || Clock::now() >= host_drop_request->expires)
-            return 0;
+        if (!drop_argument(pawn, epoch, host)) return 0;
 
         auto& request = *host_drop_request;
         request.taken = true;

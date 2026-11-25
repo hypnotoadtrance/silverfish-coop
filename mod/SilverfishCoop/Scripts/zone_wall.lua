@@ -205,6 +205,15 @@ local function in_world(actor, world)
     return valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed()
 end
 
+function wall.placed_actor(world, class, name)
+    if not name or not valid(world) then return end
+    local world_path = world:GetFullName():match("^World (.+)$")
+    if not world_path then return end
+    local path = world_path .. ":PersistentLevel." .. name
+    local actor = StaticFindObject(path)
+    if in_world(actor, world) and actor:GetFullName() == class .. " " .. path then return actor end
+end
+
 local function nearby_exit(location, range, managed)
     local name, nearest = nil, range ^ 2
     for key, record in pairs(records) do
@@ -276,7 +285,6 @@ local function entrance_name(actor)
 end
 
 local function qualified_source(fixture, world, plan)
-    if fixture == false then return nil, "ambiguous placed actor" end
     if not in_world(fixture, world) then return nil, "placed actor not observed" end
     local entrance = entrance_name(fixture)
     if entrance ~= plan.entrance then return nil, "stock tag " .. tostring(entrance) .. " differs" end
@@ -292,28 +300,16 @@ local function qualified_source(fixture, world, plan)
     return fixture
 end
 
-local function scan_authored(world, map, plans)
+local function scan_authored(world, plans)
     if not same(scanned_world, world) then
         scanned_world, scanned_actors, scan_after = world, {}, 0
     end
     local now = os.time()
     if now < scan_after then return end
-    local expected = {}
-    local level = map .. "." .. map:match("/([^/]+)$") .. ":PersistentLevel."
     for _, plan in ipairs(plans) do
         if not in_world(scanned_actors[plan.actor], world) then
             local class = plan.kind == "door" and door_class or exit_class
-            expected[class] = expected[class] or {}
-            expected[class][class .. " " .. level .. plan.actor] = plan.actor
-            scanned_actors[plan.actor] = nil
-        end
-    end
-    for class, names in pairs(expected) do
-        for _, actor in ipairs(FindAllOf(class) or {}) do
-            if in_world(actor, world) then
-                local key = names[actor:GetFullName()]
-                if key then scanned_actors[key] = scanned_actors[key] == nil and actor or false end
-            end
+            scanned_actors[plan.actor] = wall.placed_actor(world, class, plan.actor)
         end
     end
     scan_after = now + 1
@@ -330,7 +326,7 @@ local function wall_sources(world, map, route, fixture, secondary)
     end
     local plans = authored_routes[map]
     if plans then
-        scan_authored(world, map, plans)
+        scan_authored(world, plans)
         for _, plan in ipairs(plans) do
             local source = sources[plan.actor] or {}
             source.fixture, source.problem = qualified_source(scanned_actors[plan.actor], world, plan)
