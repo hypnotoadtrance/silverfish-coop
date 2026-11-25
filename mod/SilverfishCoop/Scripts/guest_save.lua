@@ -19,6 +19,7 @@ local clear_death_scope
 local bindings = {}
 local retained = {}
 local slot_owners = {}
+local collection_probe
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -546,8 +547,39 @@ local function capture_retained(state, phase, character, slot)
     end)
 end
 
+local function verify_retention_fixture(state, phase, step)
+    local host = participants(state, phase)
+    if not enabled or not host or os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1"
+        or os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") ~= "1" then
+        error("The retained save fixture is unavailable", 0)
+    end
+    local statics, class = stock_save_objects()
+    local stock = host.pawn.Save
+    if step == "start" and not collection_probe then
+        local collector = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+        local detached, canary = statics:CreateSaveGameObject(class), statics:CreateSaveGameObject(class)
+        detached.PlayerHealth = 73
+        local function object_path(value) return assert(value:GetFullName():match("^%S+ (.+)$")) end
+        local paths = {detached = object_path(detached), canary = object_path(canary)}
+        assert(SilverfishReferenceNativeDetachedSave(stock:GetAddress(), detached:GetAddress(), true))
+        collection_probe = paths
+        collector:CollectGarbage()
+        return "requested save collection"
+    end
+    if step ~= "status" or not collection_probe then error("No running save collection fixture", 0) end
+    if valid(StaticFindObject(collection_probe.canary)) then return "save collection pending" end
+    local detached = StaticFindObject(collection_probe.detached)
+    assert(exact_save(detached, class) and detached.PlayerHealth == 73, "The detached save was lost during collection")
+    assert(SilverfishReferenceNativeDetachedSave(stock:GetAddress(), detached:GetAddress(), false))
+    collection_probe = nil
+    return "detached save retained through collection and released"
+end
+
 function guest_save.command(fields, state, phase)
     local command = fields[2]
+    if command == "native-guest-save-collection-fixture" and #fields == 3 then
+        return verify_retention_fixture(state, phase, fields[3])
+    end
     if command ~= "native-guest-bind" and command ~= "native-guest-bind-exact" and command ~= "native-guest-clear"
         and command ~= "native-guest-save-capture" and command ~= "native-guest-save-capture-retained"
         and command ~= "native-guest-save-release-retained" and command ~= "native-guest-save-retain" then return end

@@ -23,7 +23,6 @@ local worn_classes = {
 }
 local stored_rounds, live_rounds = 5, 3
 local seed, remote_seed, last
-local collection
 
 local function valid(o) return o and o:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -241,26 +240,6 @@ local function run(action, argument)
         and valid(pawn) and pawn:IsLocallyControlled() and pawn:HasAuthority() ~= guest and pawn.Dead == false
         and valid(control) and control:IsLocalController() and same(control.Pawn, pawn)
         and same(pawn.Save, world.OwningGameInstance.SaveSlot_Ref), "fixture exact private player scope unavailable")
-    if action == "retained-save-gc" then
-        assert(not guest and not collection, "fixture needs one private host collection")
-        local statics = asset("/Script/Engine.Default__GameplayStatics")
-        local class = asset("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C")
-        local detached, canary = statics:CreateSaveGameObject(class), statics:CreateSaveGameObject(class)
-        local function object_path(value) return assert(value:GetFullName():match("^%S+ (.+)$")) end
-        detached.PlayerHealth = 73
-        assert(SilverfishReferenceNativeDetachedSave(pawn.Save:GetAddress(), detached:GetAddress(), true))
-        collection = {detached = object_path(detached), canary = object_path(canary)}
-        asset("/Script/Engine.Default__KismetSystemLibrary"):CollectGarbage()
-        return "requested"
-    elseif action == "retained-save-status" then
-        assert(not guest and collection, "fixture collection is unavailable")
-        if valid(StaticFindObject(collection.canary)) then return "pending" end
-        local stock = StaticFindObject(collection.detached)
-        assert(valid(stock) and stock.PlayerHealth == 73, "the retained detached save was lost during collection")
-        assert(SilverfishReferenceNativeDetachedSave(pawn.Save:GetAddress(), stock:GetAddress(), false))
-        collection = nil
-        return "retained through collection and released"
-    end
     if action == "remote-seed" or action == "remote-ready" or action == "remote-ammo" or action == "remote-read"
         or action == "remote-worn-seed" then
         assert(not guest and #driver.ClientConnections == 1, "one enrolled guest required")
