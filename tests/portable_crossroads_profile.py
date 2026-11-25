@@ -6,7 +6,7 @@ import math
 import re
 
 from portable_guest_world_start import wait_resident_status
-from tools.silverfish import native_kill_volume, native_package_handoff_journal
+from tools.silverfish import native_downed_markers, native_kill_volume, native_package_handoff_journal
 from tools.silverfish.control import current_status, submit
 from tools.silverfish.travel import CROSSROADS
 
@@ -118,6 +118,9 @@ async def verify_crossroads_recovery(host, guest, _pawn):
             return host_down and effects.get("guest", {}).get("crouched") is True
 
         await wait_resident_status(guest_run, guest_observed)
+        if role == "host":
+            await wait_resident_status(guest_run, lambda frame:
+                "host" in frame["game"].get(native_downed_markers.KEY, {}).get("markers", {}))
         revived = await submit(helper_run, "native-interaction-fixture")
         assert revived["ok"] and revived["native_interaction_fixture"], revived
         after = await wait_resident_status(host_run, lambda frame:
@@ -126,6 +129,11 @@ async def verify_crossroads_recovery(host, guest, _pawn):
             and frame["game"]["pawns"][slot]["health"] > 0)
         assert after["game"]["pawns"][helper_slot]["health"] >= helper["health"], after["game"]["pawns"]
         receipts[role] = {"recovered": receipt, "revived_health": after["game"]["pawns"][slot]["health"]}
+        if role == "host":
+            await wait_resident_status(guest_run, lambda frame:
+                frame.get("gameplay", {}).get("players", {}).get("host", {}).get("downed") is False
+                and "host" not in frame["game"].get(native_downed_markers.KEY, {}).get("markers", {}))
+            receipts[role]["guest_marker_appeared_and_cleared"] = True
     return {"stock_crossroads_recovery": receipts}
 
 
