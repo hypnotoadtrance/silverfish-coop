@@ -15,6 +15,7 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 | Resting with Insomnia | The host pressed Interact at a bed with the Insomnia perk. The clock stayed at the same time of day. |
 | Radio | The guest heard the radio after the host switched it on. |
 | Wild mushrooms | The players reported that mushroom pickup worked in this session. |
+| Avatar tail seam | A rendered playtest screenshot showed a long tail floating behind an armored remote avatar. The previous smoke test verified the base bone against the body socket. The visible seam with armor still needs verification. |
 
 On development candidate `rc-7683381`, a separate muted Direct IP pair verified two stock hit presentations in the same game tick. The injured guest received both the burn and blunt impact cues, one hurt call, and the latest hit direction. The host had neither impact cue nor the guest's hit overlay. The same run exercised real campfire damage and regeneration. Both runs preserved their copied saves and used two executable launches each.
 

@@ -8,6 +8,9 @@ local turret_base = "/Game/Classes/NPCs/NPC_Assets/Turret_Master_BP.Turret_Maste
 local weapon_base = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
 local consumable_base = "/Game/Classes/Items/Consumable_Master_BP.Consumable_Master_BP_C"
 local melee_base = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Master_BP.MeleeWep_Master_BP_C"
+local projectile_base = "/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C"
+local spawn_hit_decal = "/Game/Classes/Libraries/Fuctions_Lib/FL_GameEffects.FL_GameEffects_C:Spawn_HitDecal"
+local static_mesh_component = "/Script/Engine.StaticMeshComponent"
 local melee_clips = {Melee_Slash_01 = "slash", Melee_Slash_Combo01 = "backhand", Melee_Charged_Smash_01 = "overhead"}
 local melee_clip_root = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Assets/MeleWep_Anim/"
 local cycle_clip_root = "/Game/Classes/Weapons/Wep_Assets/Wep_Anim/"
@@ -28,7 +31,7 @@ local sound_types = {SoundCue = true, SoundWave = true, MetaSoundSource = true}
 local maximum, range = 36, 30000
 local current, hooked, melee_hooked, recoil_hooked, cycle_hooked, visit, last_played, last_round
 local serial, pending = 0, {}
-local use_hooked, location_sound_hooked, turret_hooked
+local use_hooked, location_sound_hooked, turret_hooked, decal_hooked
 
 local function valid(object) return object and object:IsValid() end
 local function same(first, second)
@@ -60,10 +63,39 @@ local function bounded(n, minimum, maximum)
     return type(n) == "number" and n >= minimum and n <= maximum
 end
 
-local function stock_npc_impact(path)
+local function stock_impact(path)
     if type(path) ~= "string" or #path > 192 then return false end
     local package, name = path:match("^(/Game/Assets/Sounds/[%w_/%-]+)%.([%w_%-]+)$")
     return package and package:match("([%w_%-]+)$") == name
+end
+
+local function stock_decal(path)
+    if type(path) ~= "string" or #path > 128 then return false end
+    local package, name = path:match("^/Game/Assets/Materials/Decals/(D_BHole_[%w_]+)%.(D_BHole_[%w_]+)$")
+    return package and package == name
+end
+
+local function wall_path(path)
+    return type(path) == "string" and #path <= 320
+        and path:match("^/Game/[%w_./%-]+:PersistentLevel%.[%w_./%-]+$") ~= nil
+end
+
+local function wall_component(component, world)
+    local class = StaticFindObject(static_mesh_component)
+    if not valid(component) or not valid(class) or not component:IsA(class) or component.Mobility ~= 0 then return end
+    local owner = component:GetOwner()
+    local path = component:GetFullName():match(" (%S+)$")
+    if wall_path(path) and valid(owner) and same(owner:GetWorld(), world) and not owner:IsActorBeingDestroyed() then
+        return path
+    end
+end
+
+local function valid_decal_pose(point, rotation, size)
+    return point and rotation and size
+        and bounded(point.X, -1e7, 1e7) and bounded(point.Y, -1e7, 1e7) and bounded(point.Z, -1e7, 1e7)
+        and bounded(rotation.Pitch, -180, 180) and bounded(rotation.Yaw, -180, 180) and bounded(rotation.Roll, -180, 180)
+        and bounded(size.X, -128, 128) and math.abs(size.X) >= .02
+        and bounded(size.Y, .02, 128) and bounded(size.Z, .02, 128)
 end
 
 local function stock_consumable(path)
@@ -109,6 +141,38 @@ local function record(row)
     if #pending > maximum then table.remove(pending, 1) end
 end
 
+local function capture_decal(_, _, _, game, _, source, result)
+    if not current or not same(game:get(), current.world.OwningGameInstance) then return end
+    local projectile, decal = source:get(), result:get()
+    local base = current.projectile_class
+    if not valid(base) or not valid(projectile) or not projectile:IsA(base) or not projectile:HasAuthority()
+        or not same(projectile:GetWorld(), current.world) or not valid(decal) then return end
+
+    -- The stock library already selected the material, spread point, angle and decal size.
+    local parent, material = decal:GetAttachParent(), decal:GetDecalMaterial()
+    local surface = wall_component(parent, current.world)
+    local path = valid(material) and material:GetFullName():match(" (%S+)$")
+    if not surface or not stock_decal(path) then return end
+    local point, rotation, size = decal:K2_GetComponentLocation(), decal:K2_GetComponentRotation(), decal.DecalSize
+    if not valid_decal_pose(point, rotation, size) then return end
+    serial = serial + 1
+    record({serial, "bullet-decal", path, surface, point.X, point.Y, point.Z,
+        rotation.Pitch, rotation.Yaw, rotation.Roll, size.X, size.Y, size.Z,
+        expires = current.statics:GetRealTimeSeconds(current.world) + .25})
+end
+
+local function play_decal(state, surface, path, point, rotation, size)
+    local component = StaticFindObject(surface)
+    if wall_component(component, state.world) ~= surface then return false end
+    local statics, material, instance = StaticFindObject(statics_path), asset(path), state.world.OwningGameInstance
+    if not valid(statics) or not valid(material) or not valid(instance) then return false end
+    local decal = statics:SpawnDecalAttached(material, size, component, FName("None"), point, rotation, 1, 0)
+    if not valid(decal) then return false end
+    decal:SetFadeScreenSize(.002)
+    instance:RegisterDecal(decal)
+    return same(decal:GetAttachParent(), component)
+end
+
 function view.short_bolt(world, origin, finish, rotation, from_guest)
     if not current or not same(current.world, world) or type(SilverfishPublishLocalWeaponCue) ~= "function" then return end
     serial = serial + 1
@@ -147,26 +211,35 @@ local function capture_location_sound(_, source, sound, location, _, volume, pit
         if weapon then record_dry_fire(pawn, location:get()) end
         return
     end
-    if not sound_types[sound_class] or not stock_npc_impact(path) or not valid(actor) then return end
+    if not sound_types[sound_class] or not stock_impact(path) or not valid(actor) then return end
+    local radius, point = attenuation:get(), location:get()
+    if volume:get() ~= 1 or pitch:get() ~= 1 or start:get() ~= 0 or not point
+        or not bounded(point.X, -1e7, 1e7) or not bounded(point.Y, -1e7, 1e7)
+        or not bounded(point.Z, -1e7, 1e7) then return end
+    local melee = current.melee_class
+    if valid(melee) and actor:IsA(melee) and not valid(radius) and equipped_player(actor) then
+        -- Stock player MeleeHitFX uses the weapon as its world context and the sound asset's attenuation.
+        serial = serial + 1
+        record({serial, "melee-impact", path, point.X, point.Y, point.Z,
+            expires = current.statics:GetRealTimeSeconds(actor) + .25})
+        return
+    end
     if not valid(current.npc_class) then current.npc_class = StaticFindObject(npc_base) end
     if not valid(current.npc_class) or not actor:IsA(current.npc_class) or not actor:HasAuthority()
         or not same(actor:GetWorld(), current.world) or not same(actor.Melee_SFX, cue) then return end
-    local radius, point = attenuation:get(), location:get()
     -- ResolveMelee plays the NPC's stock cue at the verified trace contact.
-    if not valid(radius) or radius:GetFullName() ~= "SoundAttenuation " .. npc_impact_attenuation
-        or volume:get() ~= 1 or pitch:get() ~= 1 or start:get() ~= 0 or not point
-        or not bounded(point.X, -1e7, 1e7) or not bounded(point.Y, -1e7, 1e7)
-        or not bounded(point.Z, -1e7, 1e7) then return end
+    if not valid(radius) or radius:GetFullName() ~= "SoundAttenuation " .. npc_impact_attenuation then return end
     serial = serial + 1
     record({serial, "npc-impact", path, point.X, point.Y, point.Z,
         expires = current.statics:GetRealTimeSeconds(actor) + .25})
 end
 
-local function play_npc_impact(pawn, path, point)
-    local sound, radius = asset(path), asset(npc_impact_attenuation)
+local function play_impact(pawn, path, point, use_npc_attenuation)
+    local sound = asset(path)
+    local radius = use_npc_attenuation and asset(npc_impact_attenuation) or nil
     local statics = StaticFindObject(statics_path)
     if not valid(sound) or not sound_types[sound:GetFullName():match("^(%S+) ")]
-        or not valid(radius) or not valid(statics) then return false end
+        or use_npc_attenuation and not valid(radius) or not valid(statics) then return false end
     statics:PlaySoundAtLocation(pawn, sound, point, {Pitch = 0, Yaw = 0, Roll = 0},
         1, 1, 0, radius, nil, nil, nil)
     return true
@@ -400,6 +473,7 @@ function view.sync(state, phase, avatar)
         hooked = true
     end
     local swing = melee_base .. ":SwingStart"
+    if not valid(current.melee_class) then current.melee_class = StaticFindObject(melee_base) end
     if not melee_hooked and valid(StaticFindObject(swing)) then
         RegisterHook(swing, function(context) pcall(capture_melee, context) end)
         melee_hooked = true
@@ -415,6 +489,11 @@ function view.sync(state, phase, avatar)
     if not location_sound_hooked and valid(StaticFindObject(sound_at_location)) then
         RegisterHook(sound_at_location, function(...) pcall(capture_location_sound, ...) end)
         location_sound_hooked = true
+    end
+    if not valid(current.projectile_class) then current.projectile_class = StaticFindObject(projectile_base) end
+    if not decal_hooked and valid(current.projectile_class) and valid(StaticFindObject(spawn_hit_decal)) then
+        RegisterHook(spawn_hit_decal, function(...) pcall(capture_decal, ...) end)
+        decal_hooked = true
     end
 end
 
@@ -518,13 +597,28 @@ function view.command(args, state, phase, avatar)
             end
             goto next_cue
         end
-        if #values == 6 and id and id > last_played and path == "npc-impact" and stock_npc_impact(values[3]) then
+        if #values == 13 and id and id > last_played and path == "bullet-decal" and stock_decal(values[3])
+            and wall_path(values[4]) then
+            local point = {X = tonumber(values[5]), Y = tonumber(values[6]), Z = tonumber(values[7])}
+            local rotation = {Pitch = tonumber(values[8]), Yaw = tonumber(values[9]), Roll = tonumber(values[10])}
+            local size = {X = tonumber(values[11]), Y = tonumber(values[12]), Z = tonumber(values[13])}
+            if valid_decal_pose(point, rotation, size) then
+                last_played = id
+                if (origin.X - point.X)^2 + (origin.Y - point.Y)^2 + (origin.Z - point.Z)^2 <= range^2 then
+                    local ok, shown = pcall(play_decal, state, values[4], values[3], point, rotation, size)
+                    if ok and shown then receipts[#receipts + 1] = ("%d:bullet_decal"):format(id) end
+                end
+            end
+            goto next_cue
+        end
+        if #values == 6 and id and id > last_played and (path == "npc-impact" or path == "melee-impact")
+            and stock_impact(values[3]) then
             local x, y, z = tonumber(values[4]), tonumber(values[5]), tonumber(values[6])
             if bounded(x, -1e7, 1e7) and bounded(y, -1e7, 1e7) and bounded(z, -1e7, 1e7) then
                 last_played = id
                 if (origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2 <= range^2 then
-                    local ok, heard = pcall(play_npc_impact, pawn, values[3], {X = x, Y = y, Z = z})
-                    if ok and heard then receipts[#receipts + 1] = ("%d:npc_impact"):format(id) end
+                    local ok, heard = pcall(play_impact, pawn, values[3], {X = x, Y = y, Z = z}, path == "npc-impact")
+                    if ok and heard then receipts[#receipts + 1] = ("%d:%s"):format(id, path:gsub("-", "_")) end
                 end
             end
             goto next_cue

@@ -13,6 +13,11 @@ local host_fixture = mailbox and mailbox:match("[/\\]campaigns[/\\]avatar%-%x+[/
 local portable_fixture = mailbox
     and mailbox:match("[/\\]portable%-title%-%x+[/\\]first[/\\]titles[/\\]local[/\\]run[/\\]game%-bridge[/\\]%x+$")
     and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
+local portable_guest = mailbox
+    and mailbox:match("[/\\]portable%-title%-%x+[/\\]second[/\\]titles[/\\]local[/\\]run[/\\]game%-bridge[/\\]%x+$")
+    and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
+pose_fixture = pose_fixture or portable_fixture or portable_guest
+guest_fixture = guest_fixture or portable_guest
 local wipe_fixture = mailbox and mailbox:match("[/\\]clients[/\\]stock%-wipe%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
     and os.getenv("SILVERFISH_COOP_WIPE_AIM_PROBE") == "1"
 local wipe_host = mailbox and mailbox:match("[/\\]campaigns[/\\]stock%-wipe%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
@@ -22,7 +27,7 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1"
     or not (guest_fixture or host_fixture or portable_fixture or wipe_fixture or wipe_host) then return end
 
 local command, reply = mailbox .. "/avatar-probe-command.tsv", mailbox .. "/avatar-probe-reply.tsv"
-local map = (portable_fixture or wipe_fixture or wipe_host) and "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
+local map = (portable_fixture or portable_guest or wipe_fixture or wipe_host) and "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
     or "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
 local mesh_root = "/Game/Classes/Player/PlayerAssets/HelmetMeshes/"
 local inventory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
@@ -137,7 +142,9 @@ local function rig(pawn)
         if valid(component) and same(component:GetAttachParent(), body) then
             local name = component:GetAttachSocketName():ToString()
             if name == "Head" or name == "HeadSocket" then pivot = component end
-            if name == "TailSocket_01" then tail = component end
+            if name == "TailSocket_01" or name == "Hips" and component:IsA(asset("/Script/Engine.SkeletalMeshComponent")) then
+                tail = component
+            end
         end
     end
     assert(valid(pivot) and valid(tail), "avatar_probe_rig_pending")
@@ -153,16 +160,24 @@ local function rig(pawn)
     local base, location = pawn:GetBaseTranslationOffset(), pawn.Mesh.RelativeLocation
     local tail_at, tail_rot = tail.RelativeLocation, tail.RelativeRotation
     local skeletal_tail = tail:IsA(asset("/Script/Engine.SkeletalMeshComponent"))
-    local tail_base = tail:K2_GetComponentLocation()
+    local math_library = asset("/Script/Engine.Default__KismetMathLibrary")
+    local tail_gap
     if skeletal_tail then
-        local bone = FName("Tail_01", EFindName.FNAME_Find)
-        if tail:GetBoneIndex(bone) < 0 then bone = tail:GetBoneName(0) end
-        tail_base = tail:GetSocketLocation(bone)
+        assert(same(tail.SkinnedAsset, asset(tail_model))
+            and body.SkinnedAsset:GetFullName():match("%.Armor_HunterJacket$"), "avatar_probe_rig_pending")
+        -- Measured from the stock render mesh and Hunter Jacket's rear surface.
+        local seam = math_library:TransformLocation(tail:K2_GetComponentToWorld(), {X = -44, Y = 0, Z = 82})
+        local hip = body:GetSocketTransform(FName("Hips", EFindName.FNAME_Find), 0)
+        local posterior = math_library:TransformLocation(hip, {X = -15, Y = 9, Z = 0})
+        tail_gap = distance(seam, posterior)
+        local inside = math_library:InverseTransformLocation(hip, seam)
+        assert(inside.X > -15, "avatar_probe_tail_seam_outside_armor")
+    else
+        tail_gap = distance(tail:K2_GetComponentLocation(),
+            body:GetSocketLocation(FName("TailSocket_01", EFindName.FNAME_Find)))
     end
-    local tail_gap = distance(tail_base, body:GetSocketLocation(FName("TailSocket_01", EFindName.FNAME_Find)))
     local neck = body:GetSocketLocation(head_bone)
     local helmet = body:GetSocketTransform(helmet_socket, 0)
-    local math_library = asset("/Script/Engine.Default__KismetMathLibrary")
     local expected = math_library:InverseTransformLocation(helmet, neck)
     local actual = head.RelativeLocation
     local expected_location = { X = -expected.X, Y = -expected.Y, Z = -expected.Z }
@@ -415,7 +430,8 @@ local function run(operation)
         end
         return pawn.Aiming and "aiming" or "lowered"
     end
-    assert(not portable_fixture or operation == "consume", "avatar_probe_unknown_portable_operation")
+    assert(not portable_fixture or operation == "consume" or operation == "rig" or operation == "style"
+        or operation == "turn" or operation == "jump", "avatar_probe_unknown_portable_operation")
     local movement_operation = sprint_fixture and movement_operations[operation]
         or aim_movement_fixture and aim_movement_operations[operation]
     if guest_fixture then
@@ -594,7 +610,7 @@ LoopInGameThreadWithDelay(sprint_fixture and 16 or pose_fixture and 40 or 250, f
     local success, issue = pcall(run, operation)
     local output = io.open(reply, "wb")
     if output then
-        local result = success and (issue and "ok\t" .. issue or "ok") or ("error\t" .. tostring(issue))
+        local result = success and ("ok\t" .. (issue or "")) or ("error\t" .. tostring(issue))
         output:write(id .. "\t" .. result .. "\n")
         output:close()
     end

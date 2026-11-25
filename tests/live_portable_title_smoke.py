@@ -75,6 +75,7 @@ WAREHOUSE_DOCK = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
 # when an unrelated fixture on the same map has failed.
 INDEPENDENT_RESIDENT_MAPS = {
     "stock_food": {OBSERVATORY}, "stock_cooked_meal": {OBSERVATORY}, "stock_melee_edges": {OBSERVATORY},
+    "stock_avatar_tail": {OBSERVATORY}, "stock_impact_cues": {OBSERVATORY},
     "stock_critters": {CROSSROADS}, "stock_lingering_teleport": {CROSSROADS}, "stock_mushrooms": {CROSSROADS},
     "stock_placed_item": {CROSSROADS}, "stock_weather_travel": {OBSERVATORY},
     "stock_warehouse_switch": {OBSERVATORY, WAREHOUSE_DOCK}, "stock_warehouse_radio": {OBSERVATORY, WAREHOUSE_DOCK},
@@ -3229,7 +3230,40 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gue
     return evidence
 
 
-async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns: bool = False) -> dict:
+async def verify_stock_avatar_tail(host: Seat, guest: Seat, _pawn: str) -> dict:
+    async def command(seat, action):
+        return (await portable_probe_command(seat.bridge, "avatar-probe", action + "\n")).strip()
+
+    async def observe(seat, predicate):
+        async with asyncio.timeout(12):
+            while True:
+                try:
+                    row = list(map(float, (await command(seat, "rig")).split("\t")))
+                except AssertionError as error:
+                    if not str(error).rstrip().endswith("avatar_probe_rig_pending"):
+                        raise
+                else:
+                    if predicate(row):
+                        assert row[0] < .01 and row[1] < 3 and row[2] < .15, row
+                        assert row[12] < (5 if row[11] else .15), row
+                        return {"yaw": row[9], "airborne": bool(row[10]), "long_tail": bool(row[11]),
+                                "seam_distance_cm": row[12], "body_offset_cm": row[1]}
+                await asyncio.sleep(.025)
+
+    await command(host, "style")
+    initial, docked = await asyncio.gather(observe(guest, lambda row: row[11] == 1 and row[10] == 0),
+                                          observe(host, lambda row: row[11] == 0 and row[10] == 0))
+    await command(host, "turn")
+    turned = await observe(guest, lambda row: abs((row[9] - initial["yaw"] + 180) % 360 - 180) > 60)
+    await command(host, "jump")
+    airborne = await observe(guest, lambda row: row[10] == 1)
+    landed = await observe(guest, lambda row: row[10] == 0)
+    return {"stock_avatar_tail": {"armored": initial, "docked": docked, "turned": turned,
+                                  "airborne": airborne, "landed": landed}}
+
+
+async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns: bool = False,
+                                 impact_cues: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_inventory = (await submit(host_run, "native-inventory-list"))["native_inventory"]
     checkpoint = campaign_save_hashes(host.campaign)
@@ -3257,6 +3291,24 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
     async def stock_input(name, count=1):
         return await wait_input(name, await start_input(name), count)
 
+    async def impact_probe(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-impact", action)
+
+    async def verify_decals(started, pellet_count):
+        async with asyncio.timeout(8):
+            while True:
+                host_rows, guest_rows = await asyncio.gather(impact_probe(host, "decals"), impact_probe(guest, "decals"))
+                host_marks = host_rows.split("|") if host_rows else []
+                guest_marks = guest_rows.split("|") if guest_rows else []
+                played = [event for event in await resident_events(guest_run, guest_frame)
+                          if event["time_unix"] >= started and event["event"] == "native_bullet_decal_played"]
+                if len(guest_marks) >= pellet_count and len(played) >= pellet_count:
+                    assert len(host_marks) == len(guest_marks) == len(played) == pellet_count
+                    assert len(set(host_marks)) == pellet_count and sorted(host_marks) == sorted(guest_marks), (
+                        host_marks, guest_marks)
+                    return {"host": host_marks, "guest": guest_marks, "pellets": pellet_count}
+                await asyncio.sleep(.08)
+
     profiles = {profile.kind: profile.magazine for profile in FIREARMS}
     cases = (("revolver-9mm", "backpack", None), ("break-action-50", "stored_equipment", None),
              ("obrez", "backpack", None), ("obrez", "equipped", THIRTY_06_INCENDIARY),
@@ -3267,6 +3319,8 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
                  "bolt-action-shotgun", "cult-shotgun")
         cases = (("full-auto-shotgun-02", "equipped", None), *(
             (kind, "equipped", alternate) for kind, alternate in zip(kinds, (None, *SHOTGUN_AMMO[1:]), strict=True)))
+    if impact_cues:
+        cases = (("bolt-action-shotgun-suppressed", "equipped", None),)
     for kind, source, alternate in cases:
         seed_started = time.time()
         tube = profiles[kind] and profiles[kind].single_reload
@@ -3422,11 +3476,17 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
                 assert 1 < shot["rounds"] == expected_rounds - remaining < expected_rounds
                 assert shot["projectiles"] == shot["rounds"] * expected.projectile_count, shot
             else:
+                if impact_cues:
+                    assert await asyncio.gather(*(impact_probe(seat, "arm") for seat in (host, guest))) == ["armed", "armed"]
+                    assert await read_loadout("aim-at-floor") == "aimed"
+                    impact_started = time.time()
                 shot, = await stock_input("primary")
                 remaining = expected_rounds - 1
                 assert (shot["guid"], shot["before"], shot["after"], shot["projectiles"]) == (
                     guid, expected_rounds, remaining, expected.projectile_count,
                 ), shot
+                if impact_cues:
+                    proof["impact_decals"] = await verify_decals(impact_started, expected.projectile_count)
             async with asyncio.timeout(8):
                 while await read_loadout() != f"{remaining},{remaining}":
                     await asyncio.sleep(.15)
@@ -5823,6 +5883,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_bandage_revisit: bool = False, stock_shovel: bool = False, stock_shovel_loot: bool = False,
                  stock_shovel_quest: bool = False,
                  stock_take_ammo: bool = False, stock_shotguns: bool = False, stock_alternate_ammo: bool = False,
+                 stock_impact_cues: bool = False,
+                 stock_avatar_tail: bool = False,
                  stock_loki_control: bool = False, stock_loki_guest: bool = False,
                  stock_light_ar: bool = False, stock_fire_mode_reopen: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
@@ -5903,6 +5965,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_stock_host_prop_observer(host, guest, pawn, proof.setdefault("host_prop_observer", {}))),
         (stock_flashlights, "observatory", "stock_flashlights", verify_stock_flashlights),
         (stock_melee_edges, "observatory", "stock_melee_edges", verify_stock_melee_edges_only),
+        (stock_avatar_tail, "observatory", "stock_avatar_tail", verify_stock_avatar_tail),
         (stock_melee_family, "observatory", "stock_melee_family", verify_stock_melee_family),
         (stock_throwables, "observatory", "stock_throwables",
          lambda host, guest, pawn: verify_stock_throwables(host, guest, pawn, stock_throwables)),
@@ -5937,6 +6000,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_take_ammo, "observatory", "stock_take_ammo", verify_stock_take_ammo),
         (stock_shotguns, "observatory", "stock_shotguns",
          lambda host, guest, pawn: verify_stock_take_ammo(host, guest, pawn, shotguns=True)),
+        (stock_impact_cues, "observatory", "stock_impact_cues",
+         lambda host, guest, pawn: verify_stock_take_ammo(host, guest, pawn, impact_cues=True)),
         (stock_loki_control, "observatory", "stock_loki_control", verify_stock_loki_control),
         (stock_loki_guest, "observatory", "stock_loki_guest", verify_guest_loki),
         (stock_alternate_ammo, "observatory", "stock_alternate_ammo",
@@ -6082,10 +6147,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if stock_split:
             proof["stock_split_overlay"] = [probes.enter_context(
                 guest_weapon_fixture_overlay(game, "portable_stock_split_probe.lua")) for game in games]
-        if stock_take_ammo or stock_shotguns or stock_loki_guest or resident_held_queue:
+        if stock_take_ammo or stock_shotguns or stock_impact_cues or stock_loki_guest or resident_held_queue:
             proof["stock_take_ammo_overlays"] = [
                 probes.enter_context(guest_weapon_fixture_overlay(game, "portable_take_ammo_probe.lua")) for game in games
             ]
+        if stock_impact_cues:
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableImpactProbe", fixture="portable_impact_probe.lua"))
         if stock_loki_control or stock_loki_guest:
             proof["stock_loki_control_overlays"] = [
                 probes.enter_context(guest_weapon_fixture_overlay(game, "portable_loki_control_probe.lua")) for game in games
@@ -6170,9 +6238,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(portable_script_overlay(game, "native_guest_ui.lua", add_stale_quick_slot_witness))
                 for game in games
             ]
+        if resident_weapon_cues or stock_avatar_tail:
+            for game in games if stock_avatar_tail else (first_game,):
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableWeaponCueProbe",
+                                                     fixture="avatar_presentation_probe.lua"))
         if resident_weapon_cues:
-            probes.enter_context(installed_probe(first_game, mod="SilverfishPortableWeaponCueProbe",
-                                                 fixture="avatar_presentation_probe.lua"))
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableFootstepProbe",
                                                      fixture="portable_footstep_probe.lua"))
@@ -6676,6 +6746,10 @@ if __name__ == "__main__":
                         help="unload guest firearms through the normal stock context menu")
     parser.add_argument("--stock-shotguns", action="store_true",
                         help="verify guest shotgun Take Ammo, reload, and fire for each stock 12-gauge round")
+    parser.add_argument("--stock-impact-cues", action="store_true",
+                        help="verify the guest's suppressed shotgun receives the host's individual stock impact decals")
+    parser.add_argument("--stock-avatar-tail", action="store_true",
+                        help="verify the armored stock tail seam through turning and jumping")
     parser.add_argument("--stock-loki-control", action="store_true",
                         help="verify stock Loki mode, reload, and fire on the three host receiver mounts")
     parser.add_argument("--stock-loki-guest", action="store_true",
@@ -6798,7 +6872,7 @@ if __name__ == "__main__":
                               "tutorial_dock_shot_view",
                               "tutorial_dock_melee", "stock_npc_rivalry",
                               "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_shovel_quest", "stock_take_ammo",
-                              "stock_shotguns", "stock_loki_control", "stock_loki_guest",
+                              "stock_shotguns", "stock_impact_cues", "stock_avatar_tail", "stock_loki_control", "stock_loki_guest",
                               "stock_host_corpse_carry", "stock_host_prop_observer", "stock_flashlights", "stock_simmi_jammers",
                               "stock_weather_travel", "stock_lightning", "stock_crossroads_door",
                               "stock_storm_ambience",
@@ -6840,6 +6914,7 @@ if __name__ == "__main__":
     if any((args.stock_food, args.stock_cooked_meal, args.stock_personal_consumable, args.stock_wipe_chooser,
             args.stock_campfire, args.stock_npc_override, args.stock_board_offers, args.tutorial_dock_melee,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo, args.stock_shotguns,
+            args.stock_impact_cues, args.stock_avatar_tail,
             args.stock_loki_control, args.stock_loki_guest,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
             args.crossroads_profile, args.stock_lightning, args.stock_crossroads_door,
@@ -6919,6 +6994,8 @@ if __name__ == "__main__":
                        stock_shovel_loot=args.stock_shovel_loot,
                        stock_shovel_quest=args.stock_shovel_quest,
                        stock_take_ammo=args.stock_take_ammo, stock_shotguns=args.stock_shotguns,
+                       stock_impact_cues=args.stock_impact_cues,
+                       stock_avatar_tail=args.stock_avatar_tail,
                        stock_loki_control=args.stock_loki_control, stock_loki_guest=args.stock_loki_guest,
                        stock_alternate_ammo=args.stock_alternate_ammo,
                        stock_light_ar=args.stock_light_ar,

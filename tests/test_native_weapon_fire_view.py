@@ -100,6 +100,27 @@ class ItemUseCueTests(unittest.IsolatedAsyncioTestCase):
                                                f"2|npc-impact|{sound}|80.0|-15.0|105.0", timeout=1.5)
         control.event.assert_called_once_with("native_npc_impact_played", serial=2, sound=sound, position=[80, -15, 105])
 
+    async def test_stock_pellet_marks_keep_their_individual_wall_transforms(self):
+        material = "/Game/Assets/Materials/Decals/D_BHole_Metal01.D_BHole_Metal01"
+        surface = f"{self.area}.Observitory_P:PersistentLevel.StaticMeshActor_16.StaticMeshComponent0"
+        rows = [f"{serial}|bullet-decal|{material}|{surface}|200|{serial / 3}|105|0|180|17|-3|2|2"
+                for serial in range(1, 10)]
+        malformed = rows[0].replace("|105|", "|nan|") + "\n" + rows[1].replace(":PersistentLevel.", ":Transient.")
+        area, cues = _captured(f"{self.area}\n" + "\n".join([*rows, malformed]) + "\n")
+        self.assertEqual(len(cues), 9)
+        bridge = SimpleNamespace(command=AsyncMock(return_value={"ack": {"message": "9:bullet_decal"}}))
+        control = SimpleNamespace(event=Mock())
+        observer = Playback()
+        packets = [json.dumps([area, self.epoch, cue]) for cue in reversed(cues)]
+        await observer.sync(bridge, control, {"map": area}, packets, self.epoch)
+        await observer.sync(bridge, control, {"map": area}, packets, self.epoch)
+        self.assertEqual(bridge.command.await_count, 1)
+        sent = bridge.command.call_args.args[3:]
+        self.assertEqual(len(sent), 9)
+        self.assertEqual(sent[-1], f"9|bullet-decal|{material}|{surface}|200.0|3.0|105.0|0.0|180.0|17.0|-3.0|2.0|2.0")
+        control.event.assert_called_once_with("native_bullet_decal_played", serial=9, material=material, surface=surface,
+                                              position=[200, 3, 105])
+
     async def test_resident_relay_reads_only_its_memory_queue_and_refuses_the_wrong_map(self):
         host = self.host()
         path = MagicMock(spec=Path)

@@ -29,6 +29,12 @@
             local facing = pawn.Controller:GetControlRotation()
             pawn.Controller:SetControlRotation({Pitch = 70, Yaw = facing.Yaw, Roll = 0})
         end
+        if fields[5] == "aim-at-floor" then
+            assert(equipped_guid(pawn, save) == fields[4])
+            local facing = pawn.Controller:GetControlRotation()
+            pawn.Controller:SetControlRotation({Pitch = -80, Yaw = facing.Yaw, Roll = 0})
+            return "aimed"
+        end
         local guid = equipped_guid(pawn, save)
         if fields[5] == "ammo" then
             if guid ~= fields[4] then return "waiting" end

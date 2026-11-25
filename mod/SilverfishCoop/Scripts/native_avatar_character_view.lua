@@ -18,6 +18,7 @@ local npc_root = "/Game/Classes/NPCs/NPC_Assets/"
 local material_root = npc_root .. "NPC_Materials/"
 local model_root = "/Game/Classes/Player/PlayerAssets/HelmetMeshes/"
 local eye_tracker = npc_root .. "NPM_EyeTracker_BP.NPM_EyeTracker_BP_C"
+local long_tail = npc_root .. "NPC_Tails/SK_Tail_01.SK_Tail_01"
 
 local function valid(object)
     return object ~= nil and object:IsValid()
@@ -252,9 +253,18 @@ function view.apply(entry, cosmetics, model, asset, add_component)
             set_mesh(add_component(entry, "tail_static", entry.body, "TailSocket_01"), tail_static, false)
             tint(entry.tail_static, colors)
         elseif tail_skeletal then
-            local component = add_component(entry, "tail_skeletal", entry.body, "TailSocket_01", true)
+            local stock_tail = paths[5] == long_tail
+            local component = add_component(entry, "tail_skeletal", entry.body, stock_tail and "Hips" or "TailSocket_01", true)
             set_mesh(component, tail_skeletal, true)
-            entry.tail_pending = true
+            if stock_tail then
+                -- The stock mesh seam is near (-44, 0, 82), behind its first bone.
+                -- Unroll the stock hip basis and place the seam inside the rear of
+                -- the pelvis, about 12 cm back and 9 cm down from the hip bone.
+                component:K2_SetRelativeLocationAndRotation({X = 32, Y = 91, Z = 0},
+                    {Pitch = 0, Yaw = 0, Roll = -90}, false, {}, true)
+            else
+                entry.tail_pending = true
+            end
             tint(component, colors)
         end
     end

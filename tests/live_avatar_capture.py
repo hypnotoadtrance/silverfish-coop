@@ -780,12 +780,11 @@ async def verify_pose(host_run, guest_run):
     def aligned(row, *, skeletal):
         assert row["base_cm"] < .01 and row["body_cm"] < 3, row
         assert row["neck_error_cm"] < .15 and row["head_offset_error_cm"] < .15 and abs(row["head_roll"]) < .1, row
-        assert row["skeletal_tail"] == int(skeletal) and row["tail_gap_cm"] < .15, row
-        assert math.isclose(row["tail_yaw"], -10 if skeletal else 0, abs_tol=.02), row
+        assert row["skeletal_tail"] == int(skeletal) and row["tail_gap_cm"] < (5 if skeletal else .15), row
+        assert math.isclose(row["tail_yaw"], 0, abs_tol=.02), row
 
     await avatar_probe(host_run, "style")
-    initial = await observe(guest_run, lambda row: row["skeletal_tail"] == 1 and row["tail_yaw"] < -9
-                            and row["falling"] == 0, timeout=15)
+    initial = await observe(guest_run, lambda row: row["skeletal_tail"] == 1 and row["falling"] == 0, timeout=15)
     stationary = await observe(host_run, lambda row: row["skeletal_tail"] == 0 and row["falling"] == 0, timeout=15)
     aligned(initial, skeletal=True)
     aligned(stationary, skeletal=False)

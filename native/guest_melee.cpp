@@ -619,6 +619,7 @@ namespace
             bool requested{};
             bool fenced_miss{};
             bool destructible{};
+            bool physics_prop{};
             bool blocked_by_obstacle{};
         } damage;
     };
@@ -675,6 +676,15 @@ namespace
 
     constexpr auto destructible_class = STR("/Game/Assets/StaticMeshes/Destructable/Static_DestructableObject_Master_BP.Static_DestructableObject_Master_BP_C");
     constexpr auto destructible_damage = STR("/Game/Assets/StaticMeshes/Destructable/Static_DestructableObject_Master_BP.Static_DestructableObject_Master_BP_C:DealDamage");
+    constexpr auto physics_prop_class = STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C");
+    constexpr auto physics_prop_damage = STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C:DealDamage");
+
+    bool physics_prop_target(U::UObject* candidate)
+    {
+        auto* base = find<U::UClass>(physics_prop_class);
+        return base && live(candidate) && candidate->GetClassPrivate()->IsChildOf(base) &&
+            boolean(candidate, STR("BeingHeld"), false);
+    }
 
     bool placed_destructible(U::UObject* candidate, U::UWorld* world)
     {
@@ -717,7 +727,8 @@ namespace
         if (!live(world) || !live(candidate)) return reject("target_class_unqualified");
         const auto* base = find<U::UClass>(npc_class);
         const bool npc = base && candidate->GetClassPrivate()->IsChildOf(base);
-        if (!npc && !placed_destructible(candidate, world)) return reject("target_class_unqualified");
+        if (!npc && !placed_destructible(candidate, world) && !physics_prop_target(candidate))
+            return reject("target_class_unqualified");
         auto* actor = static_cast<U::AActor*>(candidate);
         auto* role = field<U::FByteProperty>(actor, STR("Role"));
         if (actor->GetWorld() != world || !role || role->GetPropertyValueInContainer(actor) != 3)
@@ -729,15 +740,16 @@ namespace
     }
 
     // Ordinary attacks can reach Blueprint children that override the stock damage graph.
-    U::UFunction* combat_damage(U::UObject* actor, bool destructible)
+    U::UFunction* combat_damage(U::UObject* actor, bool destructible, bool physics_prop)
     {
         const U::FName name{STR("DealDamage")};
         auto* definition = find<U::UFunction>(destructible ? destructible_damage
+            : physics_prop ? physics_prop_damage
             : STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:DealDamage"));
         auto* call = actor ? actor->GetFunctionByNameInChain(name) : nullptr;
         if (!definition || !call || call->GetNumParms() != 7 || call->GetReturnProperty() ||
             call->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return nullptr;
-        if (destructible) return call == definition ? call : nullptr;
+        if (destructible || physics_prop) return call == definition ? call : nullptr;
         for (auto* inherited = static_cast<U::UStruct*>(call); inherited; inherited = inherited->GetSuperStruct())
             if (inherited == definition) return call;
         return nullptr;
@@ -1127,7 +1139,9 @@ namespace
         if (ordinary)
         {
             const bool destructible = placed_destructible(enemy, world);
-            auto* deal = combat_damage(enemy, destructible);
+            const bool physics_prop = physics_prop_target(enemy);
+            auto* deal = combat_damage(enemy, destructible, physics_prop);
+            if (physics_prop && object(enemy, STR("PropMesh")) != trace->first) deal = nullptr;
             if (!deal)
             {
                 swing.damage.contact_status = "damage_function_unqualified";
@@ -1141,6 +1155,7 @@ namespace
             swing.damage.target = enemy;
             swing.damage.deal = deal;
             swing.damage.destructible = destructible;
+            swing.damage.physics_prop = physics_prop;
             swing.damage.target_name = RC::to_utf8_string(enemy->GetFullName());
         }
         swing.damage.contact_frame = &frame;
@@ -1247,6 +1262,18 @@ namespace
             auto* amount = total ? output(frame, total) : nullptr;
             auto* dead = lethal ? output(frame, lethal) : nullptr;
             proof.after = enemy_health(receiver);
+            if (proof.physics_prop)
+            {
+                // The stock sweep owns the impulse and the prop may break during its damage call.
+                const double dealt = amount ? total->GetPropertyValue(amount) : -1.0;
+                if (call.OriginalFunctionCallPrevented() || receiver != frame.Object() || !amount || !dead ||
+                    !std::isfinite(proof.after) || !std::isfinite(dealt) || proof.after > proof.before ||
+                    std::abs(proof.before - proof.after - dealt) > 1e-6)
+                    return finish("mutation_unverified_guest_melee_stock_prop_readback");
+                proof.total = proof.before - proof.after;
+                proof.blocked_by_obstacle = proof.total == 0.0;
+                return;
+            }
             if (proof.destructible)
             {
                 // The stock obstacle graph reports remaining Health and may destroy its actor
