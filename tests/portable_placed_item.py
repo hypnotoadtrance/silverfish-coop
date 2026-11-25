@@ -17,6 +17,16 @@ def placed_item_overlay(game, overlay):
         anchor = '    if mode == "sample" and #fields == 4 then'
         assert source.count(gate) == source.count(anchor) == 1
         source = source.replace(gate, gate + '\n    or headless and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"')
+        approach = """                if api:LineTraceSingle(guest, eye, target, 1, true, {guest, fixture_actor}, 0, {}, true, color, color, 0) == false
+                    and fixture_actor:K2_SetActorLocation(target, false, {}, true) == true then"""
+        assert source.count(approach) == 1
+        source = source.replace(approach, """                local ignored, ground = {guest, fixture_actor}, {}
+                local below = {X = target.X, Y = target.Y, Z = origin.Z - 140}
+                local supported = api:LineTraceSingle(guest, target, below, 0, true, ignored, 0, ground, true, color, color, 0)
+                ground = ground.OutHit or ground
+                if supported and point(ground.ImpactNormal) and ground.ImpactNormal.Z >= .8
+                    and api:LineTraceSingle(guest, eye, target, 1, true, ignored, 0, {}, true, color, color, 0) == false
+                    and fixture_actor:K2_SetActorLocation(target, false, {}, true) == true then""")
         return source.replace(anchor, """    if mode == "placed-visibility" and #fields == 4 then
         local actor = StaticFindObject(fields[4])
         if not valid(actor) or actor:IsActorBeingDestroyed() then return "absent" end
