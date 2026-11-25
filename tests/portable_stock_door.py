@@ -24,30 +24,7 @@ async def toggle_door(host, guest, actor, pawn, expected_open, *, inspect_during
     def observed(frame):
         return frame.get("game", {}).get(door.KEY, {}).get(actor, {})
 
-    attempts = []
-    current = observed(await wait_resident_status(host_run, lambda frame:
-        observed(frame).get("open") is not expected_open and bool(observed(frame))))
-    x, y, z = current["knob_location"]
-    for dx, dy in ((110, 0), (0, 110), (-110, 0), (0, -110)):
-        moved = await host.bridge.restore("guest", {"location": [x + dx, y + dy, z]})
-        assert moved["pawns"]["guest"]["name"] == pawn
-        point = moved["pawns"]["guest"]["location"]
-        guest_view = await wait_resident_status(guest_run, lambda frame:
-            math.dist(frame["game"].get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), point) < 55)
-        started = time.time()
-        try:
-            await guest.bridge.command(door.INPUT_FIXTURE, actor)
-        except RuntimeError as error:
-            if "stock_fixture_focus_unavailable" not in str(error):
-                raise
-            attempts.append(str(error))
-        else:
-            break
-    else:
-        raise RuntimeError(f"No stock approach reached the stock hinge knob: {attempts}")
-
-    inspected = None
-    if inspect_during_motion:
+    async def inspect_after_preview(guest_view, started):
         async with asyncio.timeout(3):
             while True:
                 events = await resident_events(guest_run, guest_view)
@@ -58,13 +35,44 @@ async def toggle_door(host, guest, actor, pawn, expected_open, *, inspect_during
         probe_start = time.time()
         inspection = await submit(guest_run, "native-loot-inspect", target=inspect_during_motion)
         assert inspection["ok"], inspection
-        # Use the controller's response write time. The observer polls the
-        # response file every 200 ms and may read it after the door settles.
+        # The controller polls response files. Measure from the response write.
         completed_at = (guest_run / "responses" / f"{inspection['id']}.json").stat().st_mtime
-        inspected = {"actor": inspect_during_motion, "completed_at": completed_at,
-                     "roundtrip_ms": round((completed_at - probe_start) * 1000)}
+        proof = {"actor": inspect_during_motion, "completed_at": completed_at,
+                 "roundtrip_ms": round((completed_at - probe_start) * 1000)}
         if native_loot.INSPECTION_BYTES in inspection:
-            inspected["reply_bytes"] = inspection[native_loot.INSPECTION_BYTES]
+            proof["reply_bytes"] = inspection[native_loot.INSPECTION_BYTES]
+        return proof
+
+    attempts = []
+    inspected = None
+    current = observed(await wait_resident_status(host_run, lambda frame:
+        observed(frame).get("open") is not expected_open and bool(observed(frame))))
+    x, y, z = current["knob_location"]
+    for dx, dy in ((110, 0), (0, 110), (-110, 0), (0, -110)):
+        moved = await host.bridge.restore("guest", {"location": [x + dx, y + dy, z]})
+        assert moved["pawns"]["guest"]["name"] == pawn
+        point = moved["pawns"]["guest"]["location"]
+        guest_view = await wait_resident_status(guest_run, lambda frame:
+            math.dist(frame["game"].get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), point) < 55)
+        started = time.time()
+        watcher = asyncio.create_task(inspect_after_preview(guest_view, started)) if inspect_during_motion else None
+        try:
+            await guest.bridge.command(door.INPUT_FIXTURE, actor)
+        except RuntimeError as error:
+            if "stock_fixture_focus_unavailable" not in str(error):
+                raise
+            attempts.append(str(error))
+        else:
+            if watcher:
+                inspected = await watcher
+            break
+        finally:
+            if watcher:
+                if not watcher.done():
+                    watcher.cancel()
+                await asyncio.gather(watcher, return_exceptions=True)
+    else:
+        raise RuntimeError(f"No stock approach reached the stock hinge knob: {attempts}")
 
     # Read the guest receipt before waiting on world state. A rejected input
     # has a reason in the short-lived event ring and will not change the host.

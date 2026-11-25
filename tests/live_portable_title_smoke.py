@@ -7000,6 +7000,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_stock_lightning(host, guest, pawn, portable_probe_command)),
         (storm_trial, "storm", "stock_storm_ambience",
          storm_trial.joined if storm_trial else None),
+        (stock_placed_item, "crossroads", "stock_placed_item", verify_stock_placed_item),
+        (stock_placed_item, "crossroads", "stock_cash_popup",
+         lambda host, guest, pawn: verify_stock_cash_popup(host, guest, pawn, portable_probe_command, campaign_save_hashes)),
         (stock_crossroads_door, "crossroads", "stock_crossroads_door",
          lambda host, guest, pawn: verify_stock_crossroads_door(
              host, guest, pawn, lockpick=verify_stock_lockpicks if stock_interaction_feedback else None)),
@@ -7012,9 +7015,6 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             open_package=missing_contact_untracked_check, open_package_quest=False)),
         (stock_lingering_teleport, "crossroads" if crossroads_profile else "crossroads_anomaly", "stock_lingering_teleport",
          lambda host, guest, pawn: verify_stock_lingering_teleport(host, guest, pawn, portable_probe_command)),
-        (stock_placed_item, "crossroads", "stock_placed_item", verify_stock_placed_item),
-        (stock_placed_item, "crossroads", "stock_cash_popup",
-         lambda host, guest, pawn: verify_stock_cash_popup(host, guest, pawn, portable_probe_command, campaign_save_hashes)),
         (stock_mushrooms, "crossroads", "stock_mushrooms", verify_stock_mushrooms),
         (stock_crossroads_recovery, "crossroads", "stock_crossroads_recovery", verify_crossroads_recovery),
         (stock_canister, "crossroads", "stock_canister", lambda host, guest, pawn:
