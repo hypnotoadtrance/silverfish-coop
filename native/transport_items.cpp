@@ -2922,24 +2922,24 @@ namespace
         return true;
     }
 
-    std::optional<std::array<int, 2>> personal_preview_flags(Unreal::FMapProperty* flags, Unreal::UObject* save,
+    std::optional<std::array<int, 3>> personal_preview_flags(Unreal::FMapProperty* flags, Unreal::UObject* save,
                                                             Unreal::UObject* scratch)
     {
         auto* before = flags->ContainerPtrToValuePtr<Unreal::FScriptMap>(save);
         auto* after = flags->ContainerPtrToValuePtr<Unreal::FScriptMap>(scratch);
-        if (flags->Identical(before, after)) return std::array{0, 0};
+        if (flags->Identical(before, after)) return std::array{0, 0, 0};
         auto* key = Unreal::CastField<Unreal::FNameProperty>(flags->GetKeyProp());
         auto* number = Unreal::CastField<Unreal::FIntProperty>(flags->GetValueProp());
         if (!key || !number || key->GetOffset_Internal() != 0 || !key->HasAnyPropertyFlags(Unreal::CPF_HasGetValueTypeHash) ||
             before->Num() < 0 || before->Num() > before->GetMaxIndex() || before->GetMaxIndex() > inventory_limit ||
-            after->Num() < before->Num() || after->Num() > before->Num() + 2 ||
+            after->Num() < before->Num() || after->Num() > before->Num() + 3 ||
             after->Num() > after->GetMaxIndex() || after->GetMaxIndex() > inventory_limit)
             return {};
         const auto layout = Unreal::FScriptMap::GetScriptLayout(
             key->GetSize(), key->GetMinAlignment(), number->GetSize(), number->GetMinAlignment());
         if (number->GetOffset_Internal() != layout.ValueOffset) return {};
 
-        const Unreal::FName fatigue{STR("Player_Fatigue")}, intox{STR("Player_Intox")};
+        const Unreal::FName fatigue{STR("Player_Fatigue")}, intox{STR("Player_Intox")}, sickness{STR("Sickness")};
         const auto find = [&](Unreal::FScriptMap* entries, const Unreal::FName& name) {
             return entries->FindValue(&name, layout,
                 [&](const void* value) { return key->GetValueTypeHash(value); },
@@ -2948,7 +2948,7 @@ namespace
         // The stock graph may add an explicit zero to an absent personal flag.
         // Every unrelated flag must still have its original key and value.
         int preserved = 0;
-        std::array<int, 2> differences{};
+        std::array<int, 3> differences{};
         for (int index = 0; index < after->GetMaxIndex(); ++index)
         {
             if (!after->IsValidIndex(index)) continue;
@@ -2963,6 +2963,12 @@ namespace
             {
                 if (original < 0 || original > 100 || actual < 0 || actual > 100) return {};
                 differences[name == fatigue ? 0 : 1] = actual - original;
+            }
+            else if (name == sickness)
+            {
+                const auto delta = static_cast<std::int64_t>(actual) - original;
+                if (delta < -120 || delta > 120) return {};
+                differences[2] = static_cast<int>(delta);
             }
             else if (!previous || actual != original)
                 return {};
@@ -3156,7 +3162,7 @@ namespace
         lua.set_integer(remaining);
         for (const auto delta : deltas) lua.set_number(delta);
         for (const auto delta : *flags_delta) lua.set_integer(delta);
-        return 11;
+        return 12;
     }
 
     template <bool host>

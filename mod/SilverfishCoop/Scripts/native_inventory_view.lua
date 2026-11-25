@@ -742,13 +742,14 @@ local function preview_personal_consumable(fields, current, state, phase)
     local class_path = class:GetFullName():match(" (%S+)$")
     local menu = manager.ItemContextMenu
     if not valid(menu) or not same(menu["Item Card"], card) then manager:OpenContextMenu(card) end
-    local ok, status, preview_class, before, after, food, health, regen, stim, fatigue, intox =
+    local ok, status, preview_class, before, after, food, health, regen, stim, fatigue, intox, sickness =
         SilverfishPreviewNativeGuestPersonalConsumable(pawn, pending.epoch, pending.sequence)
-    if not ok or not class_path or preview_class ~= class_path or not same(current.pawn.Save, save) then
+    if not ok or not class_path or preview_class ~= class_path or not same(current.pawn.Save, save)
+        or math.type(sickness) ~= "integer" then
         error("The game could not preview the personal consumable: " .. tostring(status), 0)
     end
     pending.preview = {class_path, before, after, string.format("%.17g", food), string.format("%.17g", health),
-        string.format("%.17g", regen), string.format("%.17g", stim), fatigue, intox}
+        string.format("%.17g", regen), string.format("%.17g", stim), fatigue, intox, sickness}
     return "measured personal consumable use"
 end
 

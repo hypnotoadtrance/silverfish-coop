@@ -22,7 +22,7 @@ def use_preview(item=MODDED, before="2", after="1", food="4.25"):
 class PersonalConsumableTests(unittest.IsolatedAsyncioTestCase):
     def test_preview_requires_one_unrecognized_typed_use_and_bounded_vitals(self):
         preview = consumable.parse_personal(use_preview(), preview=True)
-        self.assertEqual(consumable.personal_target(EPOCH, preview), f"{EPOCH}@{GUID}|{MODDED}|2|4.25,6,-1,2")
+        self.assertEqual(consumable.personal_target(EPOCH, preview), f"{EPOCH}@{GUID}|{MODDED}|2|4.25,6,-1,2,0,0,0")
         for malformed in (use_preview(item=consumable.MRE_CLASS), use_preview(after="0"),
                           use_preview(food="nan"), use_preview(food="200.01")):
             with self.assertRaises(ValueError):
@@ -75,17 +75,18 @@ class PersonalConsumableTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(accepted, replay)
         self.assertEqual(accepted[consumable.PERSONAL_KEY], dict(proof, owner=CHARACTER, epoch=EPOCH))
         retain.assert_awaited_once_with(host, bridge, CHARACTER, PAWN)
-        bridge.command.assert_awaited_once_with(consumable.PERSONAL, PAWN, GUID, MODDED, "2", "4.25", "6", "-1", "2", timeout=6)
+        bridge.command.assert_awaited_once_with(consumable.PERSONAL, PAWN, GUID, MODDED, "2", "4.25", "6", "-1", "2",
+                                                "0", "0", "0", timeout=6)
         host.checkpoint_native.assert_not_awaited()
 
     async def test_lua_double_fields_round_trip_through_the_host_command(self):
         host = self.host()
-        exact_deltas = ("1.2345678901234567", "-2.2250738585072014e-308", "4.9406564584124654e-324", "-0")
+        exact_deltas = ("1.2345678901234567", "-2.2250738585072014e-308", "4.9406564584124654e-324", "-0", "0", "0", "3")
         preview = consumable.parse_personal([*use_preview()[:-4], *exact_deltas], preview=True)
         target = consumable.personal_target(EPOCH, preview)
         self.assertEqual(target.rsplit("|", 1)[1], ",".join(exact_deltas))
 
-        exact_vitals = ("1.2345678901234567", "1.0000000000000002", "2.2250738585072014e-308", "0")
+        exact_vitals = ("1.2345678901234567", "1.0000000000000002", "2.2250738585072014e-308", "0", "0", "0", "3")
         proof = consumable.parse_personal([consumable.PERSONAL, "used", OBSERVATORY, PAWN, GUID, MODDED,
                                           "2", "1", *exact_vitals])
         bridge = SimpleNamespace(command=AsyncMock(return_value={**host.last_game, consumable.PERSONAL_KEY: proof}))
@@ -95,6 +96,14 @@ class PersonalConsumableTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.assert_awaited_once_with(consumable.PERSONAL, PAWN, GUID, MODDED, "2", *exact_deltas, timeout=6)
         self.assertEqual(tuple(format(result[consumable.PERSONAL_KEY]["vitals"][name], ".17g")
                                for name in consumable.PERSONAL_VITALS), exact_vitals)
+
+    def test_personal_use_refuses_an_out_of_bounds_infection_delta_or_receipt(self):
+        for sickness in ("121", "-121", "3.5"):
+            with self.assertRaisesRegex(ValueError, "(?i)personal consumable vitals"):
+                consumable.parse_personal([*use_preview(), "0", "0", sickness], preview=True)
+        with self.assertRaisesRegex(ValueError, "Personal consumable vitals"):
+            consumable.parse_personal([consumable.PERSONAL, "used", OBSERVATORY, PAWN, GUID, MODDED,
+                                       "2", "1", "31", "23", "29", "0", "0", "0", "2147483648"])
 
     async def test_refuses_a_stale_visit_or_unretained_save_without_a_mutation(self):
         host = self.host()

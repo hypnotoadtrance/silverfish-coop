@@ -7,6 +7,7 @@ local map = "World /Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P
 local camp = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.CampFire_02_BP_C_1"
 local meal_path = "/Game/Classes/Items/Item_MRE.Item_MRE_C"
 local weta_path = "/Game/Classes/Items/Item_LiveWeta.Item_LiveWeta_C"
+local frog_path = "/Game/Classes/Items/Item_LiveFrog.Item_LiveFrog_C"
 local health_effects = "/Game/Classes/Items/HealthItem_Master_BP.HealthItem_Master_BP_C:ApplyItemEffects"
 local factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
@@ -123,6 +124,12 @@ local function host_read(pawn, save, world, action)
         detached.Flags:Add(FName("Player_Intox"), 25)
         remote.Intoxication = 25
         return unsupported .. ";" .. spare .. ";" .. known
+    end
+    if action == "seed-frogs" then
+        local frog = asset(frog_path)
+        local clicked = stock_item(remote, frog, 1)
+        local dragged = stock_item(remote, frog, 1)
+        return clicked .. ";" .. dragged
     end
     if action == "seed-use-cases" then
         local ids = {}

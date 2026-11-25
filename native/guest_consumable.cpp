@@ -150,11 +150,13 @@ namespace
 
         auto* defaults = type->GetClassDefaultObject().Get();
         auto* timed = field<Unreal::FMapProperty>(defaults, STR("TempEffects/Hours"));
+        auto* infection = field<Unreal::FIntProperty>(defaults, STR("Infection"));
         if (!defaults || !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) ||
-            defaults->GetClassPrivate() != type || !timed ||
-            timed->ContainerPtrToValuePtr<Unreal::FScriptMap>(defaults)->Num() != 0 ||
-            !number_is<Unreal::FIntProperty>(defaults, STR("Infection"), 0))
+            defaults->GetClassPrivate() != type || !timed || !infection ||
+            timed->ContainerPtrToValuePtr<Unreal::FScriptMap>(defaults)->Num() != 0)
             return nullptr;
+        const auto dose = infection->GetPropertyValueInContainer(defaults);
+        if (dose < -120 || dose > 120) return nullptr;
         return defaults;
     }
 
@@ -630,13 +632,14 @@ namespace
             return result(lua, false, std::string("guest_personal_consumable_refused_").append(reason));
         };
         const auto arguments = lua.get_stack_size();
-        if (!enabled() || !Unreal::IsInGameThreadRaw() || (arguments != 10 && arguments != 12) ||
+        if (!enabled() || !Unreal::IsInGameThreadRaw() || (arguments != 10 && arguments != 12 && arguments != 13) ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3) ||
             !lua.is_string(4) || !lua.is_string(5) || !lua.is_integer(6))
             return refuse("arguments");
         for (int index = 7; index <= 10; ++index)
             if (!lua.is_number(index)) return refuse("arguments");
-        if (arguments == 12 && (!lua.is_integer(11) || !lua.is_integer(12))) return refuse("arguments");
+        for (int index = 11; index <= arguments; ++index)
+            if (!lua.is_integer(index)) return refuse("arguments");
 
         const auto pawn = lua.get_integer(), detached = lua.get_integer(), canonical = lua.get_integer();
         Guid guid{};
@@ -649,8 +652,9 @@ namespace
         delta.health = lua.get_number();
         delta.regen = lua.get_number();
         delta.stim = lua.get_number();
-        const auto fatigue_change = arguments == 12 ? lua.get_integer() : 0;
-        const auto intox_change = arguments == 12 ? lua.get_integer() : 0;
+        const auto fatigue_change = arguments >= 12 ? lua.get_integer() : 0;
+        const auto intox_change = arguments >= 12 ? lua.get_integer() : 0;
+        const auto sickness_change = arguments == 13 ? lua.get_integer() : 0;
         if (!path.starts_with('/') || !path.ends_with("_C") || path.size() > 512 ||
             observed_count < 1 || observed_count > INT32_MAX || !delta.finite() ||
             fatigue_change < -100 || fatigue_change > 100 || intox_change < -100 || intox_change > 100)
@@ -672,6 +676,8 @@ namespace
             return count == observed_count && (stackable || count == 1);
         });
         if (!locate.empty()) return refuse("owned_consumable_stack");
+        const auto dose = field<Unreal::FIntProperty>(defaults, STR("Infection"))->GetPropertyValueInContainer(defaults);
+        if (sickness_change < std::min(dose, 0) || sickness_change > std::max(dose, 0)) return refuse("infection_delta");
 
         Health health;
         constexpr double max_resource = 1'000'000.0;
@@ -702,6 +708,9 @@ namespace
         auto* stock_flags = stock.data(scope.stock);
         const auto fatigue_before = personal.read(guest_flags, fatigue_flag());
         const auto intox_before = personal.read(guest_flags);
+        const Unreal::FName sickness{STR("Sickness"), Unreal::FNAME_Find};
+        if (sickness.IsNone()) return refuse("sickness_schema");
+        const auto sickness_before = personal.read(guest_flags, sickness);
         const auto pawn_before = pawn_intox->GetPropertyValueInContainer(scope.pawn);
         if (fatigue_before < 0 || fatigue_before > 100 || intox_before < 0 || intox_before > 100)
             return refuse("personal_flags");
@@ -712,6 +721,9 @@ namespace
         const int fatigue_after = fatigue_change ?
             std::clamp(fatigue_before + static_cast<int>(fatigue_change), trauma > 0 ? 15 : 0, 100) : fatigue_before;
         const int intox_after = std::clamp(intox_before + static_cast<int>(intox_change), 0, 100);
+        const auto next_sickness = static_cast<std::int64_t>(sickness_before) + sickness_change;
+        if (next_sickness < INT32_MIN || next_sickness > INT32_MAX) return refuse("sickness_value");
+        const auto sickness_after = static_cast<int>(next_sickness);
         const int pawn_after = intox_change ? intox_after : pawn_before;
         const auto before_rows = copy_value(bag, rows);
         const auto next_rows = copy_value(bag, rows);
@@ -723,7 +735,8 @@ namespace
             return refuse("snapshot");
         auto* prepared_flags = static_cast<Unreal::FScriptMap*>(guest_flags_after.get());
         if ((fatigue_change && !personal.write(prepared_flags, fatigue_flag(), fatigue_after)) ||
-            (intox_change && !personal.write(prepared_flags, intox_after))) return refuse("prepared_flags");
+            (intox_change && !personal.write(prepared_flags, intox_after)) ||
+            (sickness_change && !personal.write(prepared_flags, sickness, sickness_after))) return refuse("prepared_flags");
         const auto protected_unchanged = [&] {
             return scope.current() && health.read(scope.stock) == stock_vitals &&
                 health.maximum->GetPropertyValueInContainer(scope.pawn) == health.max_health &&
@@ -764,7 +777,7 @@ namespace
 
         health.write(scope.guest, after);
         bag->CopyCompleteValue(rows, next_rows.get());
-        if (fatigue_change || intox_change) flags->CopyCompleteValue(guest_flags, prepared_flags);
+        if (fatigue_change || intox_change || sickness_change) flags->CopyCompleteValue(guest_flags, prepared_flags);
         if (intox_change) pawn_intox->SetPropertyValueInContainer(scope.pawn, pawn_after);
         if (!verified(after, next_rows.get(), prepared_flags, pawn_after))
         {
@@ -789,7 +802,8 @@ namespace
         lua.set_number(after.stim);
         lua.set_integer(fatigue_after);
         lua.set_integer(intox_after);
-        return 10;
+        lua.set_integer(sickness_after);
+        return 11;
     }
 
     int use(const Lua& lua)

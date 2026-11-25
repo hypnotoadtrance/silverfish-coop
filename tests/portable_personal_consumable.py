@@ -12,6 +12,7 @@ from tools.silverfish.native_gold import valid_guid
 
 
 LIVE_WETA = "/Game/Classes/Items/Item_LiveWeta.Item_LiveWeta_C"
+LIVE_FROG = "/Game/Classes/Items/Item_LiveFrog.Item_LiveFrog_C"
 FALLBACK_RECEIPT = "native_guest_personal_consumable"
 
 
@@ -159,3 +160,40 @@ async def verify_personal_consumable_reconnect(host, guest, proof, probe):
     assert campaign_save_hashes(host.campaign) == saves, "Stock drag caused an early checkpoint"
     await stock_inventory_open(run, False)
     proof["stock_drag_after_reconnect"] = dragged
+
+    assert LIVE_FROG not in native_guest_consumable.COMMANDS
+    async def command(seat, action):
+        return await probe(seat.bridge, "portable-guest-food", action)
+
+    def sickness(vitals):
+        return int(vitals.split(",")[3])
+
+    canonical_before, detached_before = (await command(host, "host-medical-vitals")).split(";")
+    previous_sickness = sickness(detached_before)
+    previous_food = dragged["vitals"]["food"]
+    frogs = (await command(host, "seed-frogs")).split(";")
+    assert len(set(frogs)) == 2 and all(map(valid_guid, frogs)), frogs
+    async with asyncio.timeout(10):
+        while True:
+            page = await submit(run, "native-inventory-list")
+            rows = {row["guid"]: row["class_path"] for row in page.get("native_inventory", {}).get("items", ())}
+            if all(rows.get(guid) == LIVE_FROG for guid in frogs):
+                break
+            await asyncio.sleep(.1)
+
+    results = {}
+    for action, guid in zip(("context", "drag"), frogs, strict=True):
+        used = await use_stock_item(run, frame, guid, FALLBACK_RECEIPT, drag=action == "drag")
+        assert (used["class_path"], used["quantity_before"], used["quantity_after"]) == (LIVE_FROG, 1, 0), used
+        fed, sick = used["vitals"]["food"], used["vitals"]["sickness"]
+        assert math.isclose(fed - previous_food, 8, abs_tol=1) and 1 <= sick - previous_sickness <= 3, used
+        canonical, detached = (await command(host, "host-medical-vitals")).split(";")
+        assert sickness(canonical) == sickness(canonical_before) and sickness(detached) == sick, (canonical, detached)
+        async with asyncio.timeout(8):
+            while sickness(await command(guest, "guest-medical-vitals")) != sick:
+                await asyncio.sleep(.08)
+        previous_food, previous_sickness = fed, sick
+        results[action] = used
+    await stock_inventory_open(run, False)
+    assert campaign_save_hashes(host.campaign) == saves, "Frog consumption wrote an early checkpoint"
+    proof["frog_consumption"] = results

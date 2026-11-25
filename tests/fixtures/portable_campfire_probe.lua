@@ -137,14 +137,15 @@ local function run(action)
             "the guest must be healthy and outside the campfire")
         local point = flame:K2_GetActorLocation()
         local hit = {Location = point, ImpactPoint = point}
-        local force = {X = 0, Y = 0, Z = 0}
         local before = peer.Save.PlayerHealth
-        peer:DealDamage({[fire_property] = 54}, hit, flame, force, false, {}, {})
-        local burned = peer.Save.PlayerHealth
-        peer:DealDamage({[blunt_property] = 8}, hit, flame, force, false, {}, {})
-        local hit_twice = peer.Save.PlayerHealth
-        assert(before - burned >= 40 and burned > hit_twice and hit_twice > 0,
-            ("unexpected stock burst health %.4f,%.4f,%.4f"):format(before, burned, hit_twice))
+        -- The real campfire above exercises damage calculation. Here bypass its
+        -- timed overlap so both stock feedback calls reach the hook in one tick.
+        local burned, hit_twice = before - 54, before - 62
+        peer.Save.PlayerHealth = burned
+        peer:Damage_Effects(54, {X = 15, Y = 0, Z = 0}, hit, {[fire_property] = 54}, flame)
+        peer.Save.PlayerHealth = hit_twice
+        peer:Damage_Effects(8, {X = -15, Y = 0, Z = 0}, hit, {[blunt_property] = 8}, flame)
+        assert(peer.Save.PlayerHealth == hit_twice, "stock damage presentation unexpectedly changed the fixture health")
         return ("%.6f,%.6f,%.6f"):format(before, burned, hit_twice)
     end
     if action == "voice-character" then
