@@ -856,6 +856,21 @@ namespace
         return 0;
     }
 
+    int lua_has_scoped_hit(const Lua& lua)
+    {
+        bool hit = false;
+        if (Unreal::IsInGameThreadRaw() && ready() && lua.get_stack_size() == 1 && lua.is_integer(1))
+        {
+            const auto token = lua.get_integer();
+            const auto generation = bridge_generation.load(std::memory_order_acquire);
+            hit = token > 0 && std::ranges::any_of(death_hits, [token, generation](const DeathHit& pending) {
+                return pending.token == token && pending.generation == generation;
+            });
+        }
+        lua.set_bool(hit);
+        return 1;
+    }
+
     int lua_take_scoped_hit(const Lua& lua)
     {
         bool hit = false;
@@ -1802,6 +1817,7 @@ namespace
                 lua.register_function("SilverfishSetNativeDeathScope", lua_set_scope);
                 lua.register_function("SilverfishSetNativeDeathRoster", lua_set_roster);
                 lua.register_function("SilverfishClearNativeDeathScope", lua_clear_scope);
+                lua.register_function("SilverfishHasScopedNativeDeathHit", lua_has_scoped_hit);
                 lua.register_function("SilverfishTakeScopedNativeDeathHit", lua_take_scoped_hit);
                 lua.register_function("SilverfishFriendlyFireBlockedCount", lua_friendly_fire_count);
                 lua.register_function("SilverfishReadNativeFallStatus", lua_read_fall_status);

@@ -7,6 +7,7 @@ local vitals = require("vitals")
 local zones = require("zone_maps")
 
 local configured_mode = os.getenv("SILVERFISH_COOP_NATIVE_DEATH")
+local embedded = os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") == "1"
 local scoped = configured_mode == "cpp" and os.getenv("SILVERFISH_COOP_NATIVE_EVENTS") == "1"
 local backend = configured_mode == "1" and "overlay" or configured_mode == "cpp" and "cpp" or nil
 if scoped then backend = "cpp-scoped" end
@@ -105,15 +106,35 @@ local function update_cpp_status()
 end
 
 local function emit(slot, record)
-    local file = io.open(file_path, "ab")
-    if not file then return false end
     local next_sequence = sequence + 1
-    local written = file:write("downed\t", slot, "\t", tostring(next_sequence), "\t", record.name, "\n")
-    local closed = file:close()
-    if not written or not closed then return false end
+    if embedded then
+        if type(SilverfishEnqueueLocalBridgeInput) ~= "function"
+            or SilverfishEnqueueLocalBridgeInput(table.concat({"downed", slot, next_sequence, record.name}, "\t") .. "\n") ~= true then
+            return false
+        end
+    else
+        local file = io.open(file_path, "ab")
+        if not file then return false end
+        local written = file:write("downed\t", slot, "\t", tostring(next_sequence), "\t", record.name, "\n")
+        local closed = file:close()
+        if not written or not closed then return false end
+    end
     sequence = next_sequence
     record.emitted = true
     record.pending_native = nil
+    return true
+end
+
+local function retain_event(slot, record)
+    record.pending_native = true
+    outbound[#outbound + 1] = { slot = slot, record = record }
+end
+
+local function publish_event(slot, record)
+    if record.pending_native then return true end
+    if not outbound[1] and emit(slot, record) then return true end
+    if not embedded then return false end
+    retain_event(slot, record)
     return true
 end
 
@@ -124,13 +145,9 @@ end
 local function remember_restored_host(state, phase, record)
     if not authored_routes or not record or record.restored_save or record.emitted then return end
     local pawn = record.pawn
-    local save = pawn.Save
-    if pawn.Dead ~= false or not valid(save) or not finite(save.PlayerHealth) then return end
     -- The regular capture replaces the restore receipt. Retain its exact pawn/save identity until revival.
-    local restore = host_save.rows(state, phase, function(_, kind, slot, map, owner)
-        return kind == "restored" and map == state.map and owner == record.name and slot
-    end)
-    if type(restore[1]) == "string" then record.restored_save = save end
+    local save = host_save.restored_save(state, phase, pawn)
+    if valid(save) and pawn.Dead == false and finite(save.PlayerHealth) then record.restored_save = save end
 end
 
 local function restored_owner(state, record, save)
@@ -222,17 +239,16 @@ local function enrolled_scope(current, count)
 end
 
 local function drain_scope()
-    for slot, record in pairs(scope_records) do
-        local observed, hit = pcall(SilverfishTakeScopedNativeDeathHit, record.address, scope_token)
-        if not observed then return false end
-        if hit == true and not record.emitted and not record.pending_native then
-            record.pending_native = true
-            outbound[#outbound + 1] = { slot = slot, record = record }
+    if scope_token and (type(SilverfishHasScopedNativeDeathHit) ~= "function" or SilverfishHasScopedNativeDeathHit(scope_token)) then
+        for slot, record in pairs(scope_records) do
+            local observed, hit = pcall(SilverfishTakeScopedNativeDeathHit, record.address, scope_token)
+            if not observed then return false end
+            if hit == true and not record.emitted and not record.pending_native then retain_event(slot, record) end
         end
     end
     while outbound[1] do
         local event = outbound[1]
-        if not emit(event.slot, event.record) then return false end
+        if not emit(event.slot, event.record) then return embedded end
         table.remove(outbound, 1)
     end
     return true
@@ -328,7 +344,7 @@ function native_death.publish_kill_volume_down(state, phase, pawn, save, project
             if record.emitted then return health <= 0 end
             save.PlayerHealth = 0
             local at_emission = save.PlayerHealth
-            if at_emission == 0 and emit(slot, record) then return true, at_emission end
+            if at_emission == 0 and publish_event(slot, record) then return true, at_emission end
             save.PlayerHealth = health
             return false
         end
@@ -425,8 +441,7 @@ local function invoke_death_path(slot, record, invoke)
         if not cleared then error("Could not clear the C++ diagnostic scope", 0) end
         if not called then error(failure, 0) end
         if not observed or hit ~= true then error("The C++ scope observed no qualified native hit", 0) end
-        record.pending_native = true
-        if not emit(slot, record) then error("Could not deliver the scoped native death event", 0) end
+        if not publish_event(slot, record) then error("Could not deliver the scoped native death event", 0) end
         return
     end
 

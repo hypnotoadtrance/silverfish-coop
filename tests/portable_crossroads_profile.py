@@ -121,6 +121,14 @@ def instrument_weather_status(source):
         '"weather_status_readback", readback, current, frame, lease.saved_seconds)')
 
 
+def instrument_death_poll(source):
+    anchor = "pcall(SilverfishTakeScopedNativeDeathHit, record.address, scope_token)"
+    if source.count(anchor) != 2:
+        raise ValueError("The scoped death receipt timing anchor changed")
+    return source.replace(anchor, 'pcall(SilverfishProfileCrossroadsCall, "death_pawn_receipt", '
+                          'SilverfishTakeScopedNativeDeathHit, record.address, scope_token)', 1)
+
+
 def instrument_flashlight_scope(source):
     previous, boundary, sync = source.partition("function flashlight.sync(state, phase)")
     body, next_function, rest = sync.partition("function flashlight.command(")
@@ -247,6 +255,7 @@ async def profile_world(host, guest, area, probe):
         for seat, profile in zip(seats, profiles, strict=True):
             timings = profile["timings"]
             for operation in ("command_mailbox", "crate_inline_scan", "npc_marker_class_lookup", "journal_host_context",
+                              "death_pawn_receipt",
                               "player_actor_fallback"):
                 assert operation not in timings, (operation, timings.get(operation))
             discoveries = timings["loose_discovery"]["count"]

@@ -107,6 +107,23 @@ class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(bridge.native_crate_inputs(), [])
             self.assertEqual(list(bridge.directory.iterdir()), [])
 
+    async def test_death_ring_records_are_consumed_once_and_keep_other_inputs(self):
+        with TemporaryDirectory() as temporary:
+            bridge = runtime.Bridge(Path(temporary), None)
+            bridge.local_bridge = Mock()
+            bridge.local_bridge.input_ready.side_effect = [True, False, False]
+            bridge.local_bridge.read_input.return_value = [
+                b"downed\tguest\t21\tPlayer_FP_C guest\n", b"interact\t8",
+                b"downed\tlocal\t22\tPlayer_FP_C host\n",
+            ]
+            self.assertEqual(bridge.interactions(), [(uuid.uuid5(bridge.input_namespace, "8").hex, None)])
+            self.assertEqual(bridge.native_deaths(), [
+                (slot, uuid.uuid5(bridge.input_namespace, f"death{sequence}").hex, f"Player_FP_C {slot_pawn}")
+                for slot, sequence, slot_pawn in (("guest", 21, "guest"), ("local", 22, "host"))
+            ])
+            self.assertEqual(bridge.native_deaths(), [])
+            self.assertEqual(list(bridge.directory.iterdir()), [])
+
     async def test_bad_embedded_receipt_does_not_fall_back_to_replay(self):
         with TemporaryDirectory() as temporary:
             bridge = runtime.Bridge(Path(temporary), None)

@@ -62,6 +62,7 @@ async def verify_stock_wipe_chooser(host, guest, pawn, probe, *, first):
         (await wait_resident_status(run, lambda frame: chooser(frame, "selecting")))["game"]["native_wipe_view"]
         for run in (host_run, guest_run)
     ]
+    assert not (host.bridge.directory / "death.tsv").exists(), "The resident downed events wrote a mailbox"
     assert host_view["id"] == guest_view["id"] and host_view["owner"] == "host" and guest_view["owner"] == character
 
     async def press(seat, view, action, state):
@@ -116,5 +117,6 @@ async def verify_stock_wipe_chooser(host, guest, pawn, probe, *, first):
                                   "retained_guid": retained, "host_pause_closed": True, "guest_journal_closed": True,
                                   "confirmed_view_reopened": accepted, "first_confirmation": first,
                                   "both_confirmations_required": True, "guest_aim_released_on_down": True,
+                                  "native_death_mailbox_absent": True,
                                   "weapon_before_wipe": before, "host_view_after_respawn": after_host,
                                   "guest_view_after_respawn": after_guest}}

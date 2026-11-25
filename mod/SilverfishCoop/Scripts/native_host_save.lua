@@ -185,6 +185,19 @@ function host_save.prepare(state, phase, slot, carry_text)
     return "canonical stock host save prepared before travel"
 end
 
+local function prepared_owner_matches(instance)
+    return receipt.instance == instance:GetAddress() and receipt.save == instance.SaveSlot_Ref:GetAddress()
+        and (receipt.carry == nil or eather_remainder(instance) == receipt.carry)
+end
+
+function host_save.restored_save(state, phase, expected_pawn)
+    if not receipt or receipt.kind ~= "prepared" then return end
+    local instance, pawn = host_save.canonical_host(state, phase)
+    if instance and same(pawn, expected_pawn) and prepared_owner_matches(instance) then
+        return instance.SaveSlot_Ref
+    end
+end
+
 function host_save.rows(state, phase, status_row)
     if not receipt then return {} end
     local kind, pawn_name = receipt.kind, receipt.pawn or ""
@@ -195,11 +208,10 @@ function host_save.rows(state, phase, status_row)
                 kind = "changed"
             end
         elseif phase == "hosting" then
-            local instance = owner(state)
-            local _, pawn = host_save.canonical_host(state, phase)
+            local instance, pawn = host_save.canonical_host(state, phase)
+            instance = instance or owner(state)
             receipt.arrival_seen = receipt.arrival_seen or os.time()
-            if instance and (receipt.instance ~= instance:GetAddress() or receipt.save ~= instance.SaveSlot_Ref:GetAddress()
-                or (receipt.carry ~= nil and eather_remainder(instance) ~= receipt.carry)) then
+            if instance and not prepared_owner_matches(instance) then
                 kind = "changed"
             elseif pawn then
                 kind, pawn_name = "restored", pawn:GetFullName()

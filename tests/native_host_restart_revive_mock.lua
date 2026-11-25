@@ -8,6 +8,9 @@ local environment = {
     SILVERFISH_COOP_NATIVE_ZONE = "1",
 }
 local restore_kind, projected, damage_pending = "restored", false, false
+local embedded = arg[1] == "embedded"
+local fifo_available, fifo_attempts = not embedded, 0
+if embedded then environment.SILVERFISH_COOP_EMBEDDED_ENGINE = "1" end
 local world, controller, pawn, guest
 local regenerated_health = 1.3552319555
 local stock_health, damage_events, replications = regenerated_health, 0, 0
@@ -16,6 +19,7 @@ local token = 1
 
 os.getenv = function(key) return environment[key] end
 io.open = function(path, mode)
+    assert(not embedded, "Embedded death receipts must stay in memory")
     if path:find("native-events-heartbeat", 1, true) and mode == "rb" then
         return { read = function() return tostring(os.time()) end, close = function() return true end }
     end
@@ -28,6 +32,18 @@ io.open = function(path, mode)
         end,
         close = function() return true end,
     }
+end
+
+function SilverfishReadLocalNativeEventsHeartbeat()
+    if embedded then return true, os.time() end
+end
+
+function SilverfishEnqueueLocalBridgeInput(row)
+    assert(embedded and row == "downed\tlocal\t1\tcanonical host pawn\n")
+    fifo_attempts = fifo_attempts + 1
+    if not fifo_available then return false end
+    damage_events = damage_events + 1
+    return true
 end
 
 local function object(address, name, data)
@@ -87,14 +103,19 @@ function SilverfishTakeScopedNativeDeathHit(address, expected_token)
     return false
 end
 
+function SilverfishHasScopedNativeDeathHit(expected_token)
+    assert(expected_token == token)
+    return damage_pending
+end
+
 package.loaded.zone_maps = { [map] = { entrance = "ShortRoad" } }
 package.loaded.vitals = {}
 package.loaded.guest_save = { matches = function(candidate) return candidate == guest end }
 package.loaded.players = { is_downed = function(candidate) return projected and candidate == pawn end }
 package.loaded.native_host_save = {
-    rows = function(state, phase, status_row)
-        assert(state.local_pawn.pawn == pawn and phase == "hosting")
-        return { status_row("native-host-save", restore_kind, "SFCoop_exact_pending_slot", map, pawn:GetFullName()) }
+    restored_save = function(state, phase, expected)
+        assert(state.local_pawn.pawn == pawn and phase == "hosting" and expected == pawn)
+        if restore_kind == "restored" then return canonical end
     end,
 }
 
@@ -140,8 +161,19 @@ assert(stock_health == 25 and replications == 1 and damage_events == 0)
 
 stock_health, damage_pending = 0, true
 native.sync(state, "hosting")
+if embedded then
+    assert(fifo_attempts == 1 and damage_events == 0 and native.has_pair(pawn, guest))
+    fifo_available = true
+    native.sync(state, "hosting")
+    native.sync(state, "hosting")
+    assert(fifo_attempts == 2)
+end
 native.project_host(state, "hosting", "standing")
 assert(stock_health == 25 and detached.PlayerHealth == 250 and replications == 2 and damage_events == 1)
+if embedded then
+    print("native restored host revive and in-memory backpressure proof passed")
+    return
+end
 local host_heartbeat = require("native_event_heartbeat")
 local file_reads, file_stamp = 0, "1234\n"
 os.time = function() return 1234 end

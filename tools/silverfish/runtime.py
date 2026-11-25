@@ -741,6 +741,7 @@ class Bridge:
         self._local_board_records = deque(maxlen=64)
         self._local_dialogue_records = deque(maxlen=64)
         self._local_crate_records = deque(maxlen=64)
+        self._local_death_records = deque(maxlen=64)
         self._local_melee_records = deque(maxlen=64)
         self._local_cooked_meals = deque(maxlen=16)
         self._local_primary_records = deque(maxlen=64)
@@ -795,8 +796,8 @@ class Bridge:
             await asyncio.sleep(min(.025, remaining))
 
     def _take_local_inputs(self, pending: deque[bytes]) -> list[bytes]:
-        # Leave backpressured input in the native FIFO until each weapon collector can keep another batch.
-        room = min(64 - len(self._local_primary_records), 64 - len(self._local_held_fire_records))
+        # Keep unread combat inputs in the native FIFO until their collectors can take another batch.
+        room = 64 - max(len(self._local_primary_records), len(self._local_held_fire_records), len(self._local_death_records))
         if room and self.local_bridge is not None and self.local_bridge.input_ready():
             for record in self.local_bridge.read_input(room):
                 if record.startswith(b"wire-board\t"):
@@ -805,6 +806,8 @@ class Bridge:
                     self._local_dialogue_records.append(record)
                 elif record.startswith((b"loot-crate-open\t", b"loot-lockpick\t")):
                     self._local_crate_records.append(record)
+                elif record.startswith(b"downed\t"):
+                    self._local_death_records.append(record)
                 elif record.startswith(b"native-guest-melee-edge\t"):
                     self._local_melee_records.append(record)
                 elif record.startswith(b"native-guest-cooked-meal\t"):
@@ -1107,17 +1110,21 @@ class Bridge:
                 if (event := native_mosby_station_view.parse_intent(raw.decode("utf-8", errors="replace").split("\t")))]
 
     def native_deaths(self) -> list[tuple[str, str, str | None]]:
-        try:
-            with (self.directory / "death.tsv").open("rb") as stream:
-                stream.seek(self.death_offset)
-                batch = stream.read(4096)
-        except OSError:
-            return []
-        end = batch.rfind(b"\n") + 1
-        self.death_offset += end if end else len(batch) if len(batch) == 4096 else 0
+        if self.local_bridge is not None:
+            records = self._take_local_inputs(self._local_death_records)
+        else:
+            try:
+                with (self.directory / "death.tsv").open("rb") as stream:
+                    stream.seek(self.death_offset)
+                    batch = stream.read(4096)
+            except OSError:
+                return []
+            end = batch.rfind(b"\n") + 1
+            self.death_offset += end if end else len(batch) if len(batch) == 4096 else 0
+            records = batch[:end].splitlines()
         events = []
-        for line in batch[:end].splitlines():
-            fields = line.split(b"\t")
+        for line in records:
+            fields = line.rstrip(b"\r\n").split(b"\t")
             if (len(fields) in (3, 4) and fields[0] == b"downed"
                     and (fields[1] in (b"local", b"guest") or (len(fields) == 4 and fields[1] in (b"guest2", b"guest3", b"guest4")))
                     and fields[2].isdigit() and len(fields[2]) <= 12):
