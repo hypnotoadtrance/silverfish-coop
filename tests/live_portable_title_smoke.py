@@ -4994,6 +4994,13 @@ async def verify_stock_unequip(first, second, evidence):
         evidence["guest_equipped_reclaimed_face_mask"] = equip
         assert saves() == before, "The Face Mask pickup and equip wrote a save before a checkpoint"
         await close_stock()
+        assert await portable_probe_command(host.bridge, probe, "retained-save-gc") == "requested"
+        async with asyncio.timeout(20):
+            while (retained_result := await portable_probe_command(host.bridge, probe, "retained-save-status")) == "pending":
+                await asyncio.sleep(.15)
+        assert retained_result == "retained through collection and released", retained_result
+        evidence["host_detached_save_collection"] = retained_result
+        assert saves() == before, "Retaining a detached save through collection wrote a campaign file"
         return {"selected_and_inactive_slots_checked": True, "guest_duplicate_clicks_rejected": True,
                 "guest_worn_slots_checked": True, "guest_equipped_host_drop": True,
                 "saves_unchanged_before_checkpoint": True}

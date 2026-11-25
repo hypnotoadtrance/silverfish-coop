@@ -85,6 +85,36 @@ class LegacyGuestWipeRosterTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GuestExpiryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_attachment_failure_aborts_only_the_joining_guest(self):
+        failed = SimpleNamespace(guest_id="peer1", character_id="scout", role="guest", ready=False, disconnected_at=None)
+        ready = SimpleNamespace(guest_id="peer2", role="guest2", ready=True, disconnected_at=None)
+        frame = {"sequence": 7}
+        error = RuntimeError("The retained guest save is unavailable")
+        host = SimpleNamespace(
+            members=SimpleNamespace(members=(failed, ready), observe=Mock(return_value=SimpleNamespace(state="ready", reason=None)),
+                                    match_pawns=Mock(return_value={"guest": object(), "guest2": object()})),
+            last_game=frame, party=party.new_party(), control=Mock(), stopping=False,
+            recover_joining_pawn=AsyncMock(return_value=False), _refresh_pending_return=AsyncMock(),
+            _expire_return_handshake=AsyncMock(), _retire_expired_guests=AsyncMock(),
+            _attach_member=AsyncMock(side_effect=error), _reserve_next_return=Mock(),
+        )
+        bridge = Mock()
+        bridge.snapshot.return_value = frame
+
+        async def abort(guest_id):
+            self.assertEqual(guest_id, failed.guest_id)
+            failed.disconnected_at = 1
+
+        transport = SimpleNamespace(abort_guest_route=AsyncMock(side_effect=abort))
+        await MultiHost.observe(host, bridge, transport)
+        await MultiHost.observe(host, bridge, transport)
+
+        transport.abort_guest_route.assert_awaited_once_with(failed.guest_id)
+        host.control.event.assert_called_once_with("native_guest_attachment_failed", character_id=failed.character_id,
+                                                 reason=str(error))
+        self.assertTrue(ready.ready)
+        self.assertFalse(host.stopping)
+
     async def test_retirement_releases_only_guests_whose_native_connections_cleared(self):
         first = SimpleNamespace(guest_id="peer1")
         second = SimpleNamespace(guest_id="peer2")

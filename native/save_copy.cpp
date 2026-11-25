@@ -153,6 +153,8 @@ namespace
         return 2;
     }
 
+    bool update_save_reference(Unreal::UObject* instance, Unreal::UObject* save, bool retain);
+
     int reference_detached_save(const Lua& lua)
     {
         const auto arguments = lua.get_stack_size();
@@ -173,7 +175,8 @@ namespace
         {
             if (owned != retained_saves.end())
             {
-                pair.guest->ClearRootSet();
+                if (!update_save_reference(pair.instance, pair.guest, false))
+                    return result(lua, false, "detached_save_reference_unavailable");
                 retained_saves.erase(owned);
             }
             return result(lua, true, "detached_save_released");
@@ -183,21 +186,18 @@ namespace
             return result(lua, false, "detached_save_already_retained");
         }
         retained_saves.emplace_back(pair.guest);
-        if (!pair.guest->IsRootSet())
-        {
-            pair.guest->SetRootSet();
-        }
-        if (!pair.guest->IsRootSet())
+        if (!update_save_reference(pair.instance, pair.guest, true))
         {
             retained_saves.pop_back();
-            return result(lua, false, "detached_save_reference_mismatch");
+            return result(lua, false, "detached_save_reference_unavailable");
         }
+        if (newly_constructed && pair.guest->IsRootSet()) pair.guest->ClearRootSet();
         return result(lua, true, "detached_save_retained");
     }
 
     // The reflected UGameInstance array is visited by the engine's garbage
     // collector. Setting the internal root flag alone does not register a root.
-    bool update_escrow_reference(Unreal::UObject* instance, Unreal::UObject* save, bool retain)
+    bool update_save_reference(Unreal::UObject* instance, Unreal::UObject* save, bool retain)
     {
         auto* references = Unreal::CastField<Unreal::FArrayProperty>(
             instance->GetPropertyByNameInChain(STR("ReferencedObjects")));
@@ -230,7 +230,7 @@ namespace
             return result(lua, false, "loot_escrow_not_transient");
         const auto address = reinterpret_cast<std::uintptr_t>(pair.guest);
         if (std::ranges::any_of(retained_escrows, [address](const auto& row) { return row.address == address; }) ||
-            !update_escrow_reference(pair.instance, pair.guest, true))
+            !update_save_reference(pair.instance, pair.guest, true))
             return result(lua, false, "loot_escrow_reference_unavailable");
         retained_escrows.push_back({address, Unreal::FWeakObjectPtr(pair.instance), Unreal::FWeakObjectPtr(pair.guest)});
         return result(lua, true, "loot_escrow_retained");
@@ -248,7 +248,7 @@ namespace
         if (owned == retained_escrows.end()) return result(lua, false, "loot_escrow_not_retained");
         auto* instance = owned->instance.Get();
         auto* save = owned->save.Get();
-        if (instance && save && !update_escrow_reference(instance, save, false))
+        if (instance && save && !update_save_reference(instance, save, false))
             return result(lua, false, "loot_escrow_reference_unavailable");
         retained_escrows.erase(owned);
         return result(lua, true, "loot_escrow_released");

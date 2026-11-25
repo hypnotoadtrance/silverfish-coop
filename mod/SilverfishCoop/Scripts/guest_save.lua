@@ -438,9 +438,11 @@ local function bind(state, phase, name, raw_health, slot, proof)
     if previous then
         detached = previous.detached
         if not (same(previous.world, state.world) and same(previous.host, host.pawn)
-            and same(previous.owner, owner) and same(previous.stock, stock)
-            and exact_save(detached, class) and not same(detached, stock) and finite(detached.PlayerHealth)) then
+            and same(previous.owner, owner) and same(previous.stock, stock)) then
             error("The retained guest save belongs to a different live campaign", 0)
+        end
+        if not exact_save(detached, class) or same(detached, stock) or not finite(detached.PlayerHealth) then
+            error("The retained guest save is unavailable", 0)
         end
         health = math.min(maximum, detached.PlayerHealth)
     else

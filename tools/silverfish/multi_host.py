@@ -422,13 +422,15 @@ class MultiHost(Host):
         participants = self.members.match_pawns(self.last_game)
         for member in self.members.members:
             observation = participants.get(member.role)
-            if observation and not member.ready:
+            if observation and not member.ready and member.disconnected_at is None:
                 try:
                     await self._attach_member(bridge, member, observation)
-                except RuntimeError as error:
+                except (RuntimeError, TimeoutError) as error:
                     self.control.event("native_guest_attachment_failed", character_id=member.character_id,
                                        reason=str(error)[:256])
-                    raise
+                    # Abort only the joining peer. Leave retirement to the native
+                    # census so a second admission cannot reuse an occupied pawn.
+                    await transport.abort_guest_route(member.guest_id)
         self._reserve_next_return()
 
     async def _retire_expired_guests(self, transport) -> None:
