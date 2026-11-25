@@ -775,6 +775,8 @@ class Bridge:
         self._local_dialogue_records = deque(maxlen=64)
         self._local_crate_records = deque(maxlen=64)
         self._local_death_records = deque(maxlen=64)
+        self._local_stardust_records = deque(maxlen=64)
+        self._local_fruiting_stardust_records = deque(maxlen=64)
         self._local_melee_records = deque(maxlen=64)
         self._local_cooked_meals = deque(maxlen=16)
         self._local_primary_records = deque(maxlen=64)
@@ -829,8 +831,10 @@ class Bridge:
             await asyncio.sleep(min(.025, remaining))
 
     def _take_local_inputs(self, pending: deque[bytes]) -> list[bytes]:
-        # Keep unread combat inputs in the native FIFO until their collectors can take another batch.
-        room = 64 - max(len(self._local_primary_records), len(self._local_held_fire_records), len(self._local_death_records))
+        # Keep unread combat and travel inputs in the native FIFO until the collectors can take another batch.
+        room = 64 - max(len(self._local_primary_records), len(self._local_held_fire_records),
+                        len(self._local_death_records), len(self._local_stardust_records),
+                        len(self._local_fruiting_stardust_records))
         if room and self.local_bridge is not None and self.local_bridge.input_ready():
             for record in self.local_bridge.read_input(room):
                 if record.startswith(b"wire-board\t"):
@@ -841,6 +845,10 @@ class Bridge:
                     self._local_crate_records.append(record)
                 elif record.startswith(b"downed\t"):
                     self._local_death_records.append(record)
+                elif record.startswith(b"stardust-request\t"):
+                    self._local_stardust_records.append(record)
+                elif record.startswith(b"fruiting-stardust-request\t"):
+                    self._local_fruiting_stardust_records.append(record)
                 elif record.startswith(b"native-guest-melee-edge\t"):
                     self._local_melee_records.append(record)
                 elif record.startswith(b"native-guest-cooked-meal\t"):
@@ -1212,19 +1220,24 @@ class Bridge:
         return requests
 
     def native_cube_requests(self, cube: str) -> list[GoldRequest]:
-        offset = self.transport_offsets[cube]
-        filename = "native-transport-events" if cube == "gold" else f"native-{cube}-events"
-        try:
-            with (self.directory / filename).open("rb") as stream:
-                stream.seek(offset)
-                batch = stream.read(4096)
-        except OSError:
-            return []
-        end = batch.rfind(b"\n") + 1
-        self.transport_offsets[cube] = offset + (end or (len(batch) if len(batch) == 4096 else 0))
+        if self.local_bridge is not None and cube in ("stardust", "fruiting-stardust"):
+            pending = self._local_stardust_records if cube == "stardust" else self._local_fruiting_stardust_records
+            lines = self._take_local_inputs(pending)
+        else:
+            offset = self.transport_offsets[cube]
+            filename = "native-transport-events" if cube == "gold" else f"native-{cube}-events"
+            try:
+                with (self.directory / filename).open("rb") as stream:
+                    stream.seek(offset)
+                    batch = stream.read(4096)
+            except OSError:
+                return []
+            end = batch.rfind(b"\n") + 1
+            self.transport_offsets[cube] = offset + (end or (len(batch) if len(batch) == 4096 else 0))
+            lines = batch[:end].splitlines()
         requests = []
-        for line in batch[:end].splitlines():
-            fields = line.decode("utf-8", errors="replace").split("\t")
+        for line in lines:
+            fields = line.rstrip(b"\n").decode("utf-8", errors="replace").split("\t")
             if len(fields) != 9 or fields[0] != f"{cube}-request" or not fields[1].isascii() \
                     or not fields[1].isdigit() or len(fields[1]) > 12:
                 continue

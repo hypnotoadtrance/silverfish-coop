@@ -128,16 +128,16 @@ local function qualify_id(actor, profile)
     return id
 end
 
-local function default_wipe_start(level, id)
-    -- Stock can fill RespawnLevel on save before the player has used a bed.
+local function default_rest_start(level, id)
+    -- Stock and fresh co-op campaigns can name the Observatory before a player has used a bed.
     return level == "" or id == "" and (level == profiles[observatory].level or level == observatory)
 end
 
-function bed.source(state, phase, wiping)
+function bed.source(state, phase)
     local _, _, world, _, save = host_context(state, phase)
     local level = text(save.RespawnLevel)
     local id = level ~= "" and text(save.Bed) or ""
-    if level == "" or (wiping and default_wipe_start(level, id)) then
+    if default_rest_start(level, id) then
         local profile = profiles[observatory]
         if state.map == observatory then qualify_id(rest_actor(observatory, world, profile), profile) end
         return { source = state.map, destination = observatory, bed_id = "", actor = profile.actor, fallback = true }
@@ -223,7 +223,7 @@ function bed.wipe_fallback(state, phase)
     local pawn, controller, world, _, save = host_context(state, phase)
     local level = text(save.RespawnLevel)
     local id = level ~= "" and text(save.Bed) or ""
-    if state.map ~= observatory or not default_wipe_start(level, id) then
+    if state.map ~= observatory or not default_rest_start(level, id) then
         error("The default stock game-over arrival requires an empty Observatory rest selection", 0)
     end
     local expected = actor_name(observatory, profiles[observatory], "PlayerStart", "PlayerStart_4")

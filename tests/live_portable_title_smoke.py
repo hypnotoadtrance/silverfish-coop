@@ -6733,6 +6733,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  lab_terminal_check=None,
                  oil_lamps_check=None,
                  mail_packages_check=None,
+                 stardust_handoff_check=None,
                  missing_contact_open_check=None,
                  missing_contact_untracked_check=None,
                  zone_lease_preflight: bool = False,
@@ -6877,6 +6878,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (lab_terminal_check, "lab_terminal", "stock_lab_terminal", lab_terminal_check),
         (oil_lamps_check, "oil_lamps", "stock_oil_lamps", oil_lamps_check),
         (mail_packages_check, "observatory", "stock_mail_packages", mail_packages_check),
+        (stardust_handoff_check, "stardust_handoff", "stock_stardust_handoff", stardust_handoff_check),
         (stock_crate_ring and crossroads_profile, "crossroads", "stock_crate_ring",
          lambda host, guest, pawn: verify_stock_crate_ring(host, guest, pawn, memory_positions=True, cold=True)),
         (stock_weather_travel, "crossroads", "stock_weather_travel",
@@ -7084,6 +7086,12 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if stock_shovel_quest:
             for game in games:
                 probes.enter_context(stock_board_approach_overlay(game))
+        if stardust_handoff_check:
+            for game in games:
+                probes.enter_context(guest_weapon_fixture_overlay(game, "portable_stardust_handoff_probe.lua"))
+                probes.enter_context(portable_script_overlay(game, "native_dream.lua", lambda script:
+                    script.replace('local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"',
+                                   'local fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"', 1)))
         if stock_split:
             proof["stock_split_overlay"] = [probes.enter_context(
                 guest_weapon_fixture_overlay(game, "portable_stock_split_probe.lua")) for game in games]
@@ -7163,6 +7171,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 or stock_bandage_revisit or stock_shovel or stock_buried_placements
                 or stock_simmi_jammers or stock_weather_travel or stock_lightning
                 or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_friendly_fire
+                or stardust_handoff_check
                 or stock_critters or stock_placed_item
                 or stock_crossroads_door or stock_dock_gate
                 or stock_board_offers or stock_quarry_photo or stock_eye_stacks or stock_lingering_teleport or stock_acid_pool or stock_mushrooms):
@@ -7440,7 +7449,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     "tutorial_dock_melee", "tutorial_dock_late_join", "dock_population",
                     "crossroads", "crossroads_anomaly", "quarry_photo", "buried_placements",
                     "lab_east_wing_acid", "lab_terminal", "oil_lamps", "shopkeep", "simmi", "missing_contact_untracked",
-                    "friendly_fire_enabled", "friendly_fire_default"
+                    "friendly_fire_enabled", "friendly_fire_default", "stardust_handoff"
                 } or stock_host_prop_observer and campaign == prop_campaign else ("save_and_quit",)
                 after_reconnect = None
                 if campaign == "crossroads" and stock_shovel_quest and not stock_shovel_host_quest and not missing_contact_open_check:

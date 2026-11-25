@@ -146,6 +146,37 @@ class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(bridge.native_deaths(), [])
             self.assertEqual(list(bridge.directory.iterdir()), [])
 
+    async def test_resident_stardust_drains_in_memory_and_keeps_other_inputs(self):
+        with TemporaryDirectory() as temporary:
+            bridge = runtime.Bridge(Path(temporary), None)
+            bridge.local_bridge = Mock()
+            bridge.local_bridge.input_ready.side_effect = [True, False, False, False]
+            guid = "A" * 32
+            suffix = f"\tCrossRoads\tPlayer_FP_C host\t{guid}\taction_use\t1\t2\t3\n".encode()
+            bridge.local_bridge.read_input.return_value = [
+                b"fruiting-stardust-request\t1" + suffix,
+                b"interact\t8",
+                b"stardust-request\t2" + suffix,
+                b"stardust-request\tbroken" + suffix,
+                b"stardust-request\t3" + suffix,
+            ]
+            self.assertEqual([r.sequence for r in bridge.native_cube_requests("stardust")], [2, 3])
+            fruiting, = bridge.native_cube_requests("fruiting-stardust")
+            self.assertEqual((fruiting.sequence, fruiting.guid, fruiting.location), (1, guid, (1, 2, 3)))
+            self.assertEqual(bridge.native_cube_requests("stardust"), [])
+            self.assertEqual(bridge.interactions(), [(uuid.uuid5(bridge.input_namespace, "8").hex, None)])
+            self.assertEqual(list(bridge.directory.iterdir()), [])
+
+    async def test_legacy_stardust_still_reads_the_file_bridge_once(self):
+        with TemporaryDirectory() as temporary:
+            bridge = runtime.Bridge(Path(temporary), None)
+            guid = "B" * 32
+            (bridge.directory / "native-stardust-events").write_text(
+                f"stardust-request\t1\tCrossRoads\tPlayer_FP_C host\t{guid}\taction_use\t1\t2\t3\n")
+            request, = bridge.native_cube_requests("stardust")
+            self.assertEqual((request.sequence, request.guid, request.location), (1, guid, (1, 2, 3)))
+            self.assertEqual(bridge.native_cube_requests("stardust"), [])
+
     async def test_bad_embedded_receipt_does_not_fall_back_to_replay(self):
         with TemporaryDirectory() as temporary:
             bridge = runtime.Bridge(Path(temporary), None)

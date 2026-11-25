@@ -2,6 +2,7 @@ local stardust = {}
 local transport = require("native_transport")
 
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local embedded = os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") == "1"
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 local kinds = {
     stardust = { label = "Stardust", asset = "Art_DreamDust", payload = "stock-default-v1", sequence = 0 },
@@ -25,6 +26,10 @@ local function matches(record, state, host)
 end
 
 local function emit(kind, pending)
+    if embedded then
+        return type(SilverfishEnqueueLocalBridgeInput) == "function"
+            and SilverfishEnqueueLocalBridgeInput(pending.line) == true
+    end
     local file = bridge and io.open(bridge .. "/native-" .. kind .. "-events", "ab")
     if not file then return false end
     local written = file:write(pending.line)

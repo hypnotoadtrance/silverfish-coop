@@ -816,7 +816,7 @@ local function run_command(fields, state, current_phase)
         elseif restoring then
             last_blue_route = native_bed.restore(state, current_phase, fields[4], fields[5])
         else
-            last_blue_route = native_bed.source(state, current_phase, command == "native-wipe-route")
+            last_blue_route = native_bed.source(state, current_phase)
         end
         last_blue_route.pawn = host.name
         return "qualified stock rest route"

@@ -1186,7 +1186,8 @@ class Host:
                           matrix_plan: dict | None = None, authored_plan: AuthoredRoute | None = None,
                           respawn_plan: dict | None = None, source_flushed: bool = False,
                           recheck_party: bool = False, exit_crossing: int | None = None) -> dict:
-        if holds := getattr(self, "smg_holds", None):
+        # Stardust departure settles the trigger before opening its debit and travel transaction.
+        if (holds := getattr(self, "smg_holds", None)) and not (dream_plan and dream_plan["phase"] == "departing"):
             await holds.settle(bridge, stop_all=True)
         source_frame = self.last_game
         current = source_frame["map"]
@@ -1813,6 +1814,8 @@ class Host:
         try:
             if not trip or trip["phase"] != "departing" or self.last_game.get("map") != trip["source"]:
                 raise RuntimeError("The committed Stardust departure is out of scope")
+            if holds := self.smg_holds:
+                await holds.settle(bridge, stop_all=True)
             self.native_checkpoint_unsafe = True
             guid, kind, destination = trip["guid"], trip["kind"], trip["destination"]
             if recovery and trip["before"] > 1:
