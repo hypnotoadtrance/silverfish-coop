@@ -1276,6 +1276,13 @@ namespace
                                                   const ShotView& view, bool single_projectile);
     thread_local std::string_view fixture_shot_contact;
 
+    bool fixture_shot_contact_enabled()
+    {
+        static const bool enabled = env("SILVERFISH_COOP_HEADLESS") &&
+            (env("SILVERFISH_COOP_NATIVE_FIXTURES") || env("SILVERFISH_COOP_TITLE_FIXTURES"));
+        return enabled;
+    }
+
     int read_fixture_shot_contact(const Lua& lua)
     {
         if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 0) return 0;
@@ -1318,8 +1325,7 @@ namespace
         owned = owned && authority(actor) && owner == pawn && instigator == pawn;
         const auto result = owned && view && view->contact
             ? reconcile_projectile_contact(actor, pawn, *view, single_projectile) : "no_contact";
-        static const bool record_contact = env("SILVERFISH_COOP_NATIVE_FIXTURES") && env("SILVERFISH_COOP_HEADLESS");
-        if (record_contact) fixture_shot_contact = result;
+        if (fixture_shot_contact_enabled()) fixture_shot_contact = result;
     }
 
     bool install_tap_birth_hook()
@@ -4033,7 +4039,7 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
     lua.register_function("SilverfishSettleNativeGuestLockpick", settle_lockpick);
     lua.register_function("SilverfishBindNativeShotTarget", bind_contact_reference);
-    if (env("SILVERFISH_COOP_NATIVE_FIXTURES") && env("SILVERFISH_COOP_HEADLESS"))
+    if (fixture_shot_contact_enabled())
         lua.register_function("SilverfishReadFixtureShotContact", read_fixture_shot_contact);
     if (env("SILVERFISH_COOP_NATIVE_INTERACT_INPUT"))
     {
