@@ -1,5 +1,59 @@
     if fields[2]:match("^fixture%-spade%-") and
         os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
+        if fields[2] == "fixture-spade-authored-buried" then
+            assert(phase == "hosting" and state.listening == true and (#fields == 3 or #fields == 4))
+            local sources = {}
+            for _, source in ipairs(FindAllOf("BurriedItem_BP_C") or {}) do
+                if valid(source) and not source:IsActorBeingDestroyed() and source:HasAuthority()
+                    and same(source:GetWorld(), state.world) and source:HasAnyFlags(EObjectFlags.RF_WasLoaded)
+                    and valid(source.BurriedActor) then
+                    local name = source:GetFullName()
+                    local path = assert(name:match("^%S+ (%S+)$"))
+                    local reward = assert(source.BurriedActor:GetFullName():match("^%S+ (%S+)$"))
+                    local at = source:K2_GetActorLocation()
+                    if fields[3] == path then
+                        local host = state.local_pawn.pawn
+                        local guest
+                        for _, member in ipairs(state.pawns) do
+                            if member.name == fields[4] then guest = member.pawn break end
+                        end
+                        assert(valid(guest) and same(guest:GetWorld(), state.world))
+                        local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+                        local no_color = {R=0,G=0,B=0,A=0}
+                        local function ground(x, y)
+                            local result = {}
+                            if trace:LineTraceSingle(host, {X=x,Y=y,Z=at.Z+400}, {X=x,Y=y,Z=at.Z-450},
+                                0, true, {host, guest, source}, 0, result, true, no_color, no_color, 0) then
+                                local hit = result.OutHit or result
+                                if hit.ImpactNormal.Z >= .7 then return hit.ImpactPoint end
+                            end
+                        end
+                        local function approach(pawn, first_bearing)
+                            for bearing = first_bearing, first_bearing + 315, 45 do
+                                local angle = math.rad(bearing)
+                                local pos = ground(at.X+350*math.cos(angle), at.Y+350*math.sin(angle))
+                                if pos then
+                                    pos.Z = pos.Z + pawn.CapsuleComponent:GetScaledCapsuleHalfHeight() + 2
+                                    if pawn:K2_TeleportTo(pos, pawn:K2_GetActorRotation()) then
+                                        pawn:ForceNetUpdate()
+                                        return true
+                                    end
+                                end
+                            end
+                        end
+                        local spot = assert(ground(at.X, at.Y), "No ground at the authored dig")
+                        assert(approach(host, 0) and approach(guest, 180), "No approach near the authored dig")
+                        -- Exercise the stock spawn using the contact point found on the authored terrain.
+                        source:DigForItem(spot)
+                        return name .. "|" .. reward
+                    end
+                    sources[#sources+1] = ("%s|%s|%.3f,%.3f,%.3f"):format(path, reward, at.X, at.Y, at.Z)
+                end
+            end
+            assert(fields[3] == "list", "The exact authored buried source is unavailable")
+            table.sort(sources)
+            return table.concat(sources, ";")
+        end
         assert(state.map == map and (phase == "hosting" or phase == "connected"), "Crossroads dig fixtures require a co-op session")
         if fields[2] == "fixture-spade-sight" then
             assert(phase == "connected" and #fields == 3)

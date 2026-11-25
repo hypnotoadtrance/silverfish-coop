@@ -62,7 +62,7 @@ from portable_weather_travel import verify_weather_travel
 from portable_lightning import verify_stock_lightning
 from portable_storm import StockStormTrial
 from portable_stock_door import verify_stock_crossroads_door, verify_stock_dock_gate
-from portable_stock_shovel import verify_stock_shovel, verify_stock_shovel_reconnect
+from portable_stock_shovel import verify_stock_buried_placements, verify_stock_shovel, verify_stock_shovel_reconnect
 from portable_mushrooms import verify_stock_mushrooms
 from portable_placed_item import placed_item_overlay, verify_stock_placed_item
 from portable_pickup_preview import pickup_preview_overlay, verified_drop_preview
@@ -6170,6 +6170,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  tutorial_dock_shot_view: bool = False,
                  stock_bandage_revisit: bool = False, stock_shovel: bool = False, stock_shovel_loot: bool = False,
                  stock_shovel_quest: bool = False, stock_shovel_host_quest: bool = False,
+                 stock_buried_placements: bool = False,
                  stock_take_ammo: bool = False, stock_shotguns: bool = False, stock_alternate_ammo: bool = False,
                  stock_impact_cues: bool = False,
                  stock_avatar_tail: bool = False,
@@ -6325,6 +6326,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_placed_item, "crossroads", "stock_cash_popup",
          lambda host, guest, pawn: verify_stock_cash_popup(host, guest, pawn, portable_probe_command, campaign_save_hashes)),
         (stock_mushrooms, "crossroads", "stock_mushrooms", verify_stock_mushrooms),
+        (stock_buried_placements, "buried_placements" if stock_shovel_quest else "crossroads",
+         "stock_buried_placements", verify_stock_buried_placements),
         (stock_simmi_jammers, "simmi", "stock_simmi_jammers",
          lambda host, guest, pawn: verify_stock_simmi_jammers(host, guest, pawn, portable_probe_command)),
         (stock_acid_pool, "lab_east_wing_acid", "stock_acid_pool",
@@ -6450,7 +6453,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["stock_nearby_overlays"] = [probes.enter_context(stock_nearby_overlay(game)) for game in games]
         if stock_bandage_revisit:
             proof["loose_revisit_overlays"] = [probes.enter_context(loose_revisit_overlay(game)) for game in games]
-        if stock_shovel:
+        if stock_shovel or stock_buried_placements:
             proof["stock_shovel_overlays"] = [probes.enter_context(stock_shovel_overlay(game)) for game in games]
         if stock_shovel_quest:
             for game in games:
@@ -6522,7 +6525,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
                                                      fixture="portable_npc_override_probe.lua"))
-        if (tutorial_dock_combat or tutorial_dock_melee or stock_bandage_revisit or stock_shovel or stock_simmi_jammers or stock_weather_travel or stock_lightning
+        if (tutorial_dock_combat or tutorial_dock_melee or stock_bandage_revisit or stock_shovel or stock_buried_placements
+                or stock_simmi_jammers or stock_weather_travel or stock_lightning
                 or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_critters or stock_placed_item
                 or stock_crossroads_door or stock_dock_gate
                 or stock_board_offers or stock_quarry_photo or stock_eye_stacks or stock_lingering_teleport or stock_acid_pool or stock_mushrooms):
@@ -6783,7 +6787,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 exit_actions = ("prompt", "confirm") if campaign in {
                     "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_shot_view", "tutorial_dock_buckshot",
                     "tutorial_dock_melee", "tutorial_dock_late_join",
-                    "crossroads", "crossroads_anomaly", "quarry_photo",
+                    "crossroads", "crossroads_anomaly", "quarry_photo", "buried_placements",
                     "lab_east_wing_acid", "shopkeep"
                 } or stock_host_prop_observer and campaign == prop_campaign else ("save_and_quit",)
                 after_reconnect = None
@@ -7059,6 +7063,8 @@ if __name__ == "__main__":
                         help="compare the stock identity of a replicated dynamically spawned NPC trader")
     parser.add_argument("--stock-critters", action="store_true",
                         help="verify a Crossroads frog hops and can be picked up by the guest")
+    parser.add_argument("--stock-buried-placements", action="store_true",
+                        help="verify authored buried rewards in Ruin Fields and Beach in the same pair")
     parser.add_argument("--stock-shovel", action="store_true",
                         help="verify stock shovel digs from both co-op seats")
     parser.add_argument("--stock-shovel-loot", action="store_true",
@@ -7200,8 +7206,8 @@ if __name__ == "__main__":
                               "tutorial_dock_held_mask", "tutorial_dock_gait",
                               "tutorial_dock_shot_view",
                               "tutorial_dock_melee", "stock_npc_rivalry",
-                              "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_shovel_quest",
-                              "stock_shovel_host_quest", "stock_take_ammo",
+                              "stock_bandage_revisit", "stock_buried_placements", "stock_shovel", "stock_shovel_loot",
+                              "stock_shovel_quest", "stock_shovel_host_quest", "stock_take_ammo",
                               "stock_shotguns", "stock_impact_cues", "stock_avatar_tail", "stock_interaction_feedback",
                               "stock_loki_control", "stock_loki_guest",
                               "stock_host_corpse_carry", "stock_host_prop_observer", "stock_flashlights", "stock_simmi_jammers",
@@ -7246,7 +7252,8 @@ if __name__ == "__main__":
         resident_check_options.add("stock_crate_ring")
     if any((args.stock_food, args.stock_cooked_meal, args.stock_personal_consumable, args.stock_wipe_chooser,
             args.stock_campfire, args.stock_npc_override, args.stock_board_offers, args.stock_quarry_photo, args.tutorial_dock_melee,
-            args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo, args.stock_shotguns,
+            args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_buried_placements,
+            args.stock_take_ammo, args.stock_shotguns,
             args.stock_impact_cues, args.stock_avatar_tail, args.stock_interaction_feedback,
             args.stock_loki_control, args.stock_loki_guest,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
@@ -7325,7 +7332,7 @@ if __name__ == "__main__":
                        tutorial_dock_held_mask=args.tutorial_dock_held_mask, tutorial_dock_gait=args.tutorial_dock_gait,
                        tutorial_dock_shot_view=args.tutorial_dock_shot_view,
                        tutorial_dock_retaliation=args.tutorial_dock_retaliation, stock_bandage_revisit=args.stock_bandage_revisit,
-                       stock_shovel=args.stock_shovel,
+                       stock_shovel=args.stock_shovel, stock_buried_placements=args.stock_buried_placements,
                        stock_shovel_loot=args.stock_shovel_loot,
                        stock_shovel_quest=args.stock_shovel_quest, stock_shovel_host_quest=args.stock_shovel_host_quest,
                        stock_take_ammo=args.stock_take_ammo, stock_shotguns=args.stock_shotguns,

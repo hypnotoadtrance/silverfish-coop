@@ -23,7 +23,7 @@ from tools.silverfish import (
 )
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.control import current_status, submit
-from tools.silverfish.travel import BLACK_MARKET, CROSSROADS, LAKE
+from tools.silverfish.travel import BEACH, BLACK_MARKET, CROSSROADS, LAKE, RUIN_FIELDS
 
 SPADE = CROSSROADS + ".CrossRoads_P:PersistentLevel.MeleeWep_Spade_C_3"
 NUGGET = "/Game/Classes/Items/Item_GoldNugget.Item_GoldNugget_C"
@@ -133,6 +133,68 @@ async def verify_stock_shovel_reconnect(host, guest, evidence):
     assert replay["effect"] == "native_quest_already_settled" and replay["wallet"] == expected_wallet, replay
     assert campaign_save_hashes(host.campaign) == saves, "The board wrote a checkpoint during quest settlement"
     evidence["stock_board_turn_in"] = completed
+
+
+async def verify_stock_buried_placements(host, guest, _pawn):
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    proof = {}
+    frame = await wait_resident_status(host_run, lambda f: f.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
+    for destination in (CROSSROADS, RUIN_FIELDS, BEACH):
+        source = frame["game"]["map"]
+        if source != destination:
+            route, = [row for row in AUTHORED_ROUTES if (row.source, row.destination) == (source, destination)]
+            pawn = frame["game"]["native_guest_save"]["pawn"]
+            for actor, placement in ((pawn, "near"), ("local", "near"), ("local", "inside")):
+                await host.bridge.command("native-exit-position", actor, placement, route.entrance, route.actor)
+            epoch = frame["zone_epoch"]
+            frame = await wait_resident_status(host_run, lambda f: f.get("game", {}).get("map") == destination
+                and not f.get("awaiting_zone_guest") and f.get("zone_epoch") != epoch
+                and f["game"].get("native_zone", {}).get("state") == "ready"
+                and f["game"].get("native_guest_save", {}).get("state") == "bound", timeout=65)
+        await wait_resident_status(guest_run, lambda f: f.get("game", {}).get("map") == destination
+                                   and f.get("state") == "connected" and f.get("gameplay_fresh") is True, timeout=35)
+        if destination == CROSSROADS:
+            continue
+
+        command = "fixture-spade-authored-buried"
+        listed = await host.bridge.command(command, "list", update_status=False)
+        sources = [row.split("|") for row in listed["ack"]["message"].split(";") if row]
+        assert sources, (destination, listed)
+        origin = frame["game"]["pawns"]["local"]["location"]
+        candidates = [row for row in sources if "/Classes/Items/" in row[1] or "/Classes/Equipment/" in row[1]]
+        assert candidates, (destination, sources)
+        path, reward, _ = min(candidates, key=lambda row: math.dist(origin, map(float, row[2].split(","))))
+        checkpoint = campaign_save_hashes(host.campaign)
+        before = sum(row["quantity"] for row in await stock_inventory(guest_run, guest=True)
+                     if row["class_path"] == reward)
+        pawn = frame["game"]["native_guest_save"]["pawn"]
+        fired = await host.bridge.command(command, path, pawn, update_status=False)
+        observed_source, configured_reward = fired["ack"]["message"].split("|")
+        assert observed_source.endswith(" " + path) and configured_reward == reward, fired
+
+        def banked(events):
+            return next((event for event in events if event["event"] == "native_stock_enemy_loot_banked"
+                         and event.get("source") == path and event.get("class_path") == reward), None)
+
+        async with asyncio.timeout(15):
+            while not (bank := banked(await resident_events(host_run, frame))):
+                await asyncio.sleep(.08)
+        identity = native_world_loot.stock_enemy_identity(bank["guid"], bank.get("visual_id"))
+        for run in (host_run, guest_run):
+            await wait_resident_status(run, lambda f: identity in f["game"].get(native_world_loot.KEY, {}), timeout=15)
+        await host.bridge.command(native_world_loot.APPROACH, identity, pawn, timeout=8)
+        await wait_resident_status(guest_run, lambda f: math.dist(
+            f["game"]["pawns"]["local"]["location"], bank["transform"]["position"]) < 180, timeout=8)
+        picked = await submit(guest_run, native_world_loot.FIXTURE, target=identity)
+        assert picked["ok"], picked
+        for run in (host_run, guest_run):
+            await wait_resident_status(run, lambda f: identity not in f["game"].get(native_world_loot.KEY, {}), timeout=12)
+        after = sum(row["quantity"] for row in await stock_inventory(guest_run, guest=True)
+                    if row["class_path"] == reward)
+        assert after == before + 1 and bank["revision"] is None and checkpoint == campaign_save_hashes(host.campaign), (
+            before, after, bank)
+        proof[destination] = {"placed_sources": len(sources), "source": path, "reward": reward, "guid": bank["guid"]}
+    return {"stock_buried_placements": proof}
 
 
 async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, host_quest=False):
