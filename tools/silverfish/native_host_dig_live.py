@@ -260,6 +260,20 @@ def _matches(prior, report, guid_field):
         prior["package_guid"] == report.get(guid_field))
 
 
+def advance_dropped_package_owner(data: dict, drop: dict, recipient: str) -> None:
+    """Follow the exact quest package through a normal player drop and reclaim."""
+    if drop.get("class_path") != stock.PACKAGE_CLASS:
+        return
+    custody = data.get(CUSTODY, {})
+    if ((custody.get("state"), custody.get("package_guid"), custody.get("owner", "host"))
+            != ("owned", drop["guid"], drop["owner"])):
+        return
+    if recipient == "host":
+        custody.pop("owner", None)
+    else:
+        custody["owner"] = recipient
+
+
 def package_identity(guid: str) -> str:
     return uuid.uuid5(uuid.NAMESPACE_OID, f"native-missing-contact-package:{guid}").hex
 

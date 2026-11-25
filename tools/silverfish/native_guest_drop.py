@@ -71,9 +71,11 @@ def _near(host, character: str, row: dict) -> bool:
 
 
 def _qualified_item(row: dict, guid: str, count: int, item: str) -> bool:
+    from .native_host_dig import PACKAGE_CLASS
+
     stackable = row.get("stackable")
     return ((row.get("guid"), row.get("quantity"), row.get("class_path"), row.get("source"))
-            == (guid, count, item, "backpack") and row.get("important") is False
+            == (guid, count, item, "backpack") and (row.get("important") is False or item == PACKAGE_CLASS)
             and type(stackable) is bool and stackable == record.STACKABLE.get(item, stackable)
             and (stackable or count == 1))
 
@@ -453,6 +455,9 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         row = candidate[record.STATE][target]
         row.update(claim_id=operation, claimed_by=character)
         row.pop("escrow")
+        from .native_host_dig_live import advance_dropped_package_owner
+
+        advance_dropped_package_owner(candidate, row, character)
         return await _settle(host, bridge, character, action, target, target, operation, escrow, None, candidate, scope, defer=defer)
 
     selected = _SELECTION.fullmatch(target) if isinstance(target, str) else None

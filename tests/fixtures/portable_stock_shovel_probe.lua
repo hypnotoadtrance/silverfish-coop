@@ -130,7 +130,25 @@
                 if same(context:get(), spade) then presses = presses + 1 end
             end)
             local aim = {Pitch=-86, Yaw=0, Roll=0}
-            if fields[4] ~= "keep-aim" then
+            if fields[4] == "keep-aim" then
+                local x, y, z = fields[5]:match("^([%d%.%-]+),([%d%.%-]+),([%d%.%-]+)$")
+                local ground = {X=tonumber(x), Y=tonumber(y), Z=tonumber(z)}
+                local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+                local started = ctx.statics:GetRealTimeSeconds(ctx.world)
+                local pending
+                local function keep_camera()
+                    if not valid(pawn) or not same(pawn:GetWorld(), ctx.world)
+                        or not same(pawn.EquipedItem, spade) or ctx.statics:GetRealTimeSeconds(ctx.world) - started > 1.1 then
+                        if pending then CancelDelayedAction(pending) end
+                        return
+                    end
+                    local rotation = math_api:FindLookAtRotation(pawn.Camera:K2_GetComponentLocation(), ground)
+                    pawn.Controller:SetControlRotation(rotation)
+                    pawn.Camera:K2_SetWorldRotation(rotation, false, {}, true)
+                end
+                keep_camera()
+                pending = LoopInGameThreadWithDelay(16, keep_camera)
+            else
                 pawn.Controller:SetControlRotation(aim)
                 pawn.Camera:K2_SetWorldRotation(aim, false, {}, true)
             end
@@ -185,7 +203,8 @@
             local first_bearing = fields[4] == "observer" and 180 or 0
             for bearing = first_bearing, first_bearing + 315, 45 do
                 local angle = math.rad(bearing)
-                local sx, sy = x + 90 * math.cos(angle), y + 90 * math.sin(angle)
+                local distance = fields[4] == "observer" and 110 or 75
+                local sx, sy = x + distance * math.cos(angle), y + distance * math.sin(angle)
                 local floor = soil({X=sx, Y=sy, Z=z+150}, {X=sx, Y=sy, Z=z-170})
                 if floor and floor.ImpactNormal.Z >= .7 then
                     local stand = {X=sx, Y=sy, Z=floor.ImpactPoint.Z + pawn.CapsuleComponent:GetScaledCapsuleHalfHeight()+2}
@@ -225,8 +244,7 @@
             if fields[4] == "find" or fields[4] == "next" or observing then
                 local radii = fields[4] == "next" and {400, 550, 800, 1100} or {150, 250, 400, 550, 800, 1100}
                 for _, radius in ipairs(radii) do
-                    local first_bearing = fields[4] == "observer" and 180 or 0
-            for bearing = first_bearing, first_bearing + 315, 45 do
+                    for bearing = 0, 315, 45 do
                         local dir = math.rad(bearing)
                         local x,y = origin.X+radius*math.cos(dir),origin.Y+radius*math.sin(dir)
                         local floor = soil({X=x,Y=y,Z=origin.Z+250},{X=x,Y=y,Z=origin.Z-550})

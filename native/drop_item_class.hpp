@@ -30,8 +30,12 @@ namespace silverfish::drop_item_class
             if (!property || property->GetArrayDim() != 1) return {};
             return property->GetPropertyValueInContainer(defaults);
         };
-        if (flag(STR("Important")) != false || flag(STR("DespawnIfPlayerOwns")) != false ||
-            flag(STR("bReplicates")) != false) return {};
+        const bool sealed_package =
+            path == STR("/Game/Classes/Items/Key_Items/Package_Item_FarmHouse.Package_Item_FarmHouse_C");
+        // The sealed package is a movable stock inventory item. The caller still
+        // checks NeverDrop on the exact row and transfers quest custody with it.
+        if ((!sealed_package && flag(STR("Important")) != false) ||
+            flag(STR("DespawnIfPlayerOwns")) != false || flag(STR("bReplicates")) != false) return {};
         return flag(STR("Stacks"));
     }
 }

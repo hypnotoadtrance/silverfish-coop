@@ -9,6 +9,7 @@ from tools.silverfish import (
     native_board_contract,
     native_computer_board as board,
     native_guest_weapon,
+    native_host_stack_drop,
     native_host_dig,
     native_host_dig_live as dig,
     native_loose_pickup as loose,
@@ -191,7 +192,7 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
         if stock_choice:
             await observe(host, "loot", stock_choice)
         if host_dig:
-            dispatch = await observe(host, "host-press", digger, *(["keep-aim"] if quest_dig else []))
+            dispatch = await observe(host, "host-press", digger, *(["keep-aim", site] if quest_dig else []))
             assert dispatch == ("pressed" if quest_dig else "pressed and released"), dispatch
         else:
             tap = await submit(guest_run, "native-guest-primary-input-fixture")
@@ -239,12 +240,13 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
     if quest:
         ordinary = await dig_once()
         host_dig = await verify_host_dig()
-        result = await dig_once(quest_dig=True, host_dig=host_quest)
         digger_guid = item["guid"]
         if host_quest:
             equipped_spade, = [item for item in await stock_inventory(host_run)
                                if item["class_path"] == native_guest_weapon.SPADE_PATH]
             digger_guid = equipped_spade["guid"]
+        result = await dig_once(quest_dig=True, host_dig=host_quest)
+        result["guid"] = digger_guid
         result["digger"] = "host" if host_quest else "guest"
         try:
             settled = await wait_resident_status(
@@ -276,6 +278,44 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
         host_before = await stock_inventory(host_run)
         guest_before = await stock_inventory(guest_run, guest=True)
         assert not sealed_packages(host_before) and not sealed_packages(guest_before)
+        if host_quest:
+            assert await observe(host, "quest-collect", "local") == "stock_started"
+            picked = await wait_resident_status(
+                host_run, lambda frame: frame["game"].get(dig.KEY, {}).get("state") == "owned", timeout=10)
+            owner = picked["game"][dig.KEY]
+            host_item, = sealed_packages(await stock_inventory(host_run))
+            assert host_item["guid"] == owner["package_guid"], (host_item, owner)
+            await wait_resident_status(guest_run, lambda frame: not projected(frame), timeout=10)
+            checkpoint = campaign_save_hashes(host.campaign)
+            drop_press = await submit(host_run, native_host_stack_drop.FIXTURE,
+                                      target=f"{host_item['guid']}|1|context_menu")
+            assert drop_press["ok"], drop_press
+            async with asyncio.timeout(9):
+                while True:
+                    current_host = await current_status(host_run)
+                    drops = [event for event in await resident_events(host_run, current_host)
+                             if event["event"] == "native_host_stock_drop" and event.get("guid") == host_item["guid"]]
+                    if drops:
+                        break
+                    await asyncio.sleep(.08)
+            drop, = drops
+            assert not drop["error"], drop
+            shared = native_world_loot.player_drop_identity(drop["drop_id"])
+            await wait_resident_status(guest_run, lambda frame: shared in frame["game"].get(native_world_loot.KEY, {}))
+            await host.bridge.command(native_world_loot.APPROACH, shared, pawn, timeout=5)
+            await wait_resident_status(guest_run, lambda frame: math.dist(
+                frame["game"]["pawns"]["local"]["location"], drop["location"]) < 180, timeout=7)
+            press = await submit(guest_run, native_world_loot.FIXTURE, target=shared)
+            assert press["ok"], press
+            await wait_resident_status(guest_run, lambda frame: shared not in frame["game"].get(native_world_loot.KEY, {}))
+            guest_item, = sealed_packages(await stock_inventory(guest_run, guest=True))
+            assert guest_item["guid"] == host_item["guid"], (host_item, guest_item)
+            assert not sealed_packages(await stock_inventory(host_run))
+            assert campaign_save_hashes(host.campaign) == checkpoint, "Dropping or reclaiming the package wrote a save"
+            return {"stock_shovel": ordinary, "stock_host_shovel": host_dig,
+                    "stock_missing_contact_host_dig": {**result, "package": package, "custody": custody,
+                        "world_actors_before_pickup": raw_packages, "host_package": host_item,
+                        "guest_package": guest_item, "shared_drop": drop, "redrop_checkpoint_unchanged": True}}
         press = await submit(guest_run, native_world_loot.FIXTURE, target=identity)
         if not press["ok"]:
             sight = await observe(guest, "sight", replica["actor"].split(" ", 1)[1])

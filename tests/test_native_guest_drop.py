@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record
 from tools.silverfish import native_guest_stack_drop as probe, native_host_save, native_world_loot, party
+from tools.silverfish import native_host_dig, native_host_dig_live
 
 
 MAP = record.OBSERVATORY
@@ -98,6 +99,25 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.command.await_args.args[-4:], (GUID, "9", record.ITEM, "pending"))
         self.assertNotIn("escrow", host.party[record.STATE][DROP])
         bridge.command.assert_awaited_once()
+        host.checkpoint_native.assert_not_awaited()
+
+    async def test_reclaim_transfers_exact_sealed_package_custody_without_a_save(self):
+        host, _, _, _, _, _ = self.make_world()
+        host.last_game[probe.MEMORY_CAPABILITY] = True
+        package = native_host_dig.PACKAGE_CLASS
+        custody = {"state": "owned", "package_guid": GUID, "owner": OWNER}
+        host.party[native_host_dig_live.CUSTODY] = custody
+        bridge = SimpleNamespace(command=AsyncMock())
+        birth = {probe.KEY: {"location": POS, "class_path": package}}
+        with (patch.object(probe, "perform", AsyncMock(return_value=birth)),
+              patch.object(drop.native_inventory, "retain_guest_save", AsyncMock(return_value=True))):
+            await drop.perform(host, bridge, OWNER, drop.DROP, GUID + "|1", DROP)
+            pending = host.party[record.STATE][DROP]["escrow"]
+            bridge.command.return_value = self.reply(host, "reclaim", pending, recipient=OTHER)
+            reclaimed = await drop.perform(host, bridge, OTHER, drop.RECLAIM, DROP, CLAIM)
+        self.assertEqual(reclaimed[drop.RESULT]["guid"], GUID)
+        self.assertEqual(host.party[native_host_dig_live.CUSTODY], {**custody, "owner": OTHER})
+        self.assertNotIn("escrow", host.party[record.STATE][DROP])
         host.checkpoint_native.assert_not_awaited()
 
     async def test_reclaim_refuses_inactive_guest_wrong_map_and_distance_before_bridge(self):
