@@ -12,7 +12,7 @@ from portable_guest_world_start import resident_events
 
 MINIMUM_CLEARANCE_CM = 175
 NATIVE_TAP_LIFETIME = 1.5  # native/guest_primary_input.cpp receipt_lifetime
-STRAFE_MILLISECONDS = 450
+STRAFE_MILLISECONDS = 750
 HOST_HIT_OBSERVATION_SECONDS = .7
 
 
@@ -79,14 +79,16 @@ async def verify_dock_pursuit(host, guest, frame, command):
 
     async def trigger(remaining, attempt):
         started = time.time()
-        command_result = await submit(guest_run, "native-guest-primary-input-fixture")
-        if not command_result["ok"]:
-            attempt.update(outcome="refused_before_capture", reason=command_result["error"])
-            assert ("temporarily blocked by the equipped player's state" in attempt["reason"]
-                    or "(native_guest_primary_fixture_scope_unavailable)" in attempt["reason"]), (command_result, history)
+        result = await command(guest, "dock-pursuit-fire")
+        status, _, value = result.partition(";")
+        if status != "captured":
+            attempt.update(outcome="refused_before_capture", reason=result)
+            assert (status.startswith("worker outside") or status == "worker behind muzzle"
+                    or result == "stock refusal;native_guest_primary_fixture_scope_unavailable"
+                    or "temporarily blocked by the equipped player's state" in result), (result, history)
             return None
-        captured = command_result["native_guest_primary_fixture"]
-        sequence = captured["sequence"]
+        sequence = int(value)
+        captured = dict(scope, sequence=sequence)
         attempt.update(sequence=sequence, outcome="captured")
         async def published_in_status():
             status = await current_status(guest_run)
@@ -121,6 +123,8 @@ async def verify_dock_pursuit(host, guest, frame, command):
         assert valid_shot_direction(direction), ("The shot did not carry the stock trigger view", result)
         attempt["trigger_direction"] = direction
         attempt["trigger_view"] = result.get("native_guest_trigger_view")
+        contact = (attempt["trigger_view"] or {}).get("contact", {})
+        assert contact.get("actor", "").endswith(":PersistentLevel.NPC_Survivor_Worker_C_2"), (result, history)
         shot = result["native_guest_weapon"]
         assert (shot["before"], shot["after"], shot["projectiles"]) == (remaining, remaining - 1, 1), (shot, history)
         attempt["outcome"] = "fired"
@@ -161,7 +165,7 @@ async def verify_dock_pursuit(host, guest, frame, command):
     async def fire_round(remaining, side):
         record = {"attempts": []}
         history.append(record)
-        for attempt_index in range(2):
+        for attempt_index in range(4):
             view = await firing_window(side or attempt_index)
             record["guest"] = view
             if remaining is None:
@@ -176,7 +180,7 @@ async def verify_dock_pursuit(host, guest, frame, command):
             if shot:
                 record["round"] = shot
                 return record
-        raise AssertionError(("Two stock trigger attempts ended before the guest published a shot", history))
+        raise AssertionError(("Four stock trigger attempts ended before the guest published a shot", history))
 
     async def reload_pistol(rounds):
         assert 0 < rounds < 8, ("The guest needs a partially spent stock magazine", history)

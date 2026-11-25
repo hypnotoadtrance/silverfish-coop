@@ -1486,6 +1486,40 @@ local function pursuit_frame(pawn, world, host, aim)
         angles(camera:K2_GetComponentRotation()), angles(barrel), weapon.Ammo, table.concat(blockers, ","), cover}, ";")
 end
 
+local function fire_pursuing_worker(pawn, world)
+    local actor = dock_worker(world, live_worker)
+    if not valid(actor) or not actor.Alive then return "worker unavailable" end
+    assert(pawn:IsLocallyControlled() and not pawn:HasAuthority())
+    local weapon, camera = pawn.EquipedItem, pawn.Camera
+    if not valid(weapon) or not valid(camera) or not valid(weapon.Arrow_Muzzle) then return "weapon unavailable" end
+    track_pursuit()
+    local eye = camera:K2_GetComponentLocation()
+    local forward = camera:GetForwardVector()
+    local center = actor:K2_GetActorLocation()
+    local range = math.sqrt((center.X-eye.X)^2 + (center.Y-eye.Y)^2 + (center.Z-eye.Z)^2) + 100
+    local ahead = {X=eye.X+range*forward.X, Y=eye.Y+range*forward.Y, Z=eye.Z+range*forward.Z}
+    local ignored = {pawn, weapon}
+    local aim = line_hit(pawn, eye, ahead, ignored, 1)
+    local component = aim and aim.Component and aim.Component:Get()
+    if not valid(component) or not same(component:GetOwner(), actor) then return "worker outside sight" end
+
+    local muzzle = weapon.Arrow_Muzzle:K2_GetComponentLocation()
+    local point = aim.ImpactPoint
+    local dx, dy, dz = point.X-muzzle.X, point.Y-muzzle.Y, point.Z-muzzle.Z
+    local distance = math.sqrt(dx*dx + dy*dy + dz*dz)
+    if distance < 1 or dx*forward.X + dy*forward.Y + dz*forward.Z < 1 then return "worker behind muzzle" end
+    local scale = 1 + 100 / distance
+    local endpoint = {X=muzzle.X+scale*dx, Y=muzzle.Y+scale*dy, Z=muzzle.Z+scale*dz}
+    local contact = line_hit(pawn, muzzle, endpoint, ignored, 2)
+    component = contact and contact.Component and contact.Component:Get()
+    if not valid(component) or not same(component:GetOwner(), actor) then return "worker outside muzzle line" end
+
+    local ok, status, sequence, wrappers = SilverfishProbeNativeGuestPrimaryInput(pawn:GetAddress())
+    if not ok then return "stock refusal;" .. tostring(status) end
+    assert(status == "stock_pressed" and wrappers == 2 and sequence >= 1)
+    return "captured;" .. sequence
+end
+
 local function dock_swing(world, host, action)
     local actor = dock_worker(world, dock_attacker)
     assert(valid(actor), "the swing probe requires the mapped worker")
@@ -1815,6 +1849,9 @@ local function run(action, actor_path)
         return point_string(close)
     elseif action == "dock-natural-position" then
         return live_worker_position(world)
+    elseif action == "dock-pursuit-fire" then
+        assert(not host)
+        return fire_pursuing_worker(pawn, world)
     elseif action == "dock-pursuit-view" or action == "dock-pursuit-aim" then
         return pursuit_frame(pawn, world, host, action == "dock-pursuit-aim")
     elseif action == "dock-pursuit-launches" then
