@@ -94,7 +94,7 @@ SOURCES = {
                              "/Game/Classes/Items/Key_Items/KeyCard_NFTA_Old_BP.KeyCard_NFTA_Old_BP_C"),
     FORT_LETO_LOCKER_KEY: (FORT_LETO, f"LockerKey_543_C {FORT_LETO}.FortLeto_01_P:PersistentLevel.LockerKey_543_C_1",
                           "/Game/Classes/Items/Key_Items/LockerKey_543.LockerKey_543_C"),
-    DEAD_DROP: (native_dead_drop.MAP, native_dead_drop.ACTOR, native_dead_drop.CLASS),
+    **{drop.source: (drop.map, drop.actor, drop.class_path) for drop in native_dead_drop.BY_MAP.values()},
     native_black_box.SOURCE: (native_black_box.MAP, native_black_box.ACTOR, native_black_box.CLASS),
     STOLEN_BAG: (FOREST, f"Brokers_ArtifactsBag_C {FOREST}.Forest_01_P:PersistentLevel.Brokers_ArtifactsBag_C_1",
                  "/Game/Classes/Items/Key_Items/Brokers_ArtifactsBag.Brokers_ArtifactsBag_C"),
@@ -124,7 +124,8 @@ FIXTURE_ENTRIES = {FIXTURE: "fixture", STOCK_FIXTURE: "stock"}
 def select_source(area: str | None, requested: str | None) -> str:
     sources = MAP_SOURCES.get(area, ())
     if requested is None:
-        defaults = [source for source in sources if source not in (DEAD_DROP, OLD_PIPE, PROTOTYPE_DRILL, CROSSROADS_LOCKPICK,
+        defaults = [source for source in sources if source not in native_dead_drop.BY_SOURCE
+                    and source not in (OLD_PIPE, PROTOTYPE_DRILL, CROSSROADS_LOCKPICK,
                                                                  CITY_BEANS, CRASH_SITE_BEANS, CROSSROADS_MUSHROOM, GOLD_BAG)
                     and source not in STOCK_SUPPLIES and source not in STOCK_CASH]
         if len(defaults) == 1:
@@ -161,7 +162,7 @@ async def project(service, bridge, pickups: dict, *, gold_bag=None) -> None:
                 raise RuntimeError("Scav Bar gold bag projection did not verify")
             service.last_game = snapshot
     for source in MAP_SOURCES.get(area, ()):
-        if source in (DEAD_DROP, GOLD_BAG) and phase == "connected":
+        if (source in native_dead_drop.BY_SOURCE or source == GOLD_BAG) and phase == "connected":
             continue
         if source not in pickups or _displayed(service.last_game, source).get("state") != "available":
             continue
@@ -172,7 +173,8 @@ async def project(service, bridge, pickups: dict, *, gold_bag=None) -> None:
 
 
 def _needs_epoch(source: str) -> bool:
-    return source in STOCK_SUPPLIES or source in STOCK_CASH or source in (DEAD_DROP, PROTOTYPE_DRILL, LAB_E206_BLANK_TAPE, GOLD_BAG)
+    return (source in STOCK_SUPPLIES or source in STOCK_CASH or source in native_dead_drop.BY_SOURCE
+            or source in (PROTOTYPE_DRILL, LAB_E206_BLANK_TAPE, GOLD_BAG))
 
 
 def request_target(target: str | None, epoch: str | None) -> str | None:
@@ -311,7 +313,7 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
             return receipt["result"]
     if target in host.party.get(STATE_KEY, {}):
         raise party.RuleError("native_authored_pickup_already_claimed")
-    if target == DEAD_DROP and not native_dead_drop.frame(host):
+    if target in native_dead_drop.BY_SOURCE and not native_dead_drop.frame(host):
         raise party.RuleError("authored_pickup_dead_drop_inactive")
     if target == SAVLO_KEYCARD and not native_savlo_locker.observed(host.last_game, "opened"):
         raise party.RuleError("native_authored_pickup_savlo_locker_closed")
@@ -342,7 +344,7 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
                 or _current_pawn(host, character) != pawn or host.party["wipe"] is not None
                 or character in host.party["pending_spawns"] or host.party["players"].get(character, {}).get("downed")):
             raise party.RuleError("native_authored_pickup_owner_or_source_changed")
-    if target == DEAD_DROP and not native_dead_drop.frame(host):
+    if target in native_dead_drop.BY_SOURCE and not native_dead_drop.frame(host):
         raise party.RuleError("authored_pickup_dead_drop_inactive")
     amount = _displayed(host.last_game, target).get("wallet_value") if is_cash else None
     if is_cash and not valid_cash_amount(target, amount):

@@ -69,7 +69,7 @@ namespace
         double stack_weight{};
         int stack_value{};
         bool stock_cash{};
-        bool dead_drop{};
+        const U::TCHAR* dead_drop{};
         bool stock_bandage{};
         bool discovered{};
 
@@ -81,7 +81,15 @@ namespace
         .world = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"),
         .actor = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.Bag_DeadDrop_CrossRoads_C_1"),
         .item_class = STR("/Game/Classes/Items/Key_Items/Bag_DeadDrop_CrossRoads.Bag_DeadDrop_CrossRoads_C"),
-        .item_type = 1, .dead_drop = true,
+        .item_type = 1, .dead_drop = STR("DeadDrop_CrossRoads"),
+    };
+
+    constexpr Profile metro_drop_profile{
+        .source = "metro-dead-drop-bag",
+        .world = STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
+        .actor = STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.Bag_DeadDrop_Metro_C_1"),
+        .item_class = STR("/Game/Classes/Items/Key_Items/Bag_DeadDrop_Metro.Bag_DeadDrop_Metro_C"),
+        .item_type = 1, .dead_drop = STR("DeadDrop_Metro"),
     };
 
     constexpr std::string_view drill_head_source = "scientist-tunnel-drill-head";
@@ -90,6 +98,7 @@ namespace
 
     constexpr std::array profiles{
         dead_drop_profile,
+        metro_drop_profile,
         Profile{
             "observatory-comp-board",
             STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"),
@@ -270,7 +279,8 @@ namespace
 #include "authored_cash_profiles.inc"
 #include "authored_supply_profiles.inc"
     };
-    static_assert(profiles.front().dead_drop);
+    constexpr std::size_t dead_drop_count = 2;
+    static_assert(profiles[0].dead_drop && profiles[1].dead_drop && !profiles[2].dead_drop);
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto interact_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:SendInteractionToActor");
     constexpr auto money_base = STR("/Game/Classes/Items/Item_Money_Master.Item_Money_Master_C");
@@ -466,7 +476,6 @@ namespace
     {
         Scope scope{};
         std::string epoch;
-        DropPose pose{};
         Clock::time_point expires{};
     };
     DropProjection drop_projection{};
@@ -748,11 +757,20 @@ namespace
             value == object(actor, STR("RootComponent")) ? value : nullptr;
     }
 
-    const char* placed_drop_fault(U::UObject* actor, U::UObject* world)
+    const Profile* dead_drop_in_world(U::UObject* world)
     {
-        const auto& profile = dead_drop_profile;
+        if (!live(world)) return nullptr;
+        const auto path = world->GetPathName();
+        const auto end = profiles.begin() + dead_drop_count;
+        const auto match = std::find_if(profiles.begin(), end, [&](const auto& profile) { return path == profile.world; });
+        return match == end ? nullptr : &*match;
+    }
+
+    const char* placed_drop_fault(U::UObject* actor, U::UObject* world, const Profile& profile)
+    {
         if (!live(actor)) return "actor_not_live";
-        if (!exact(actor, profile.item_class) || actor->GetPathName() != profile.actor) return "actor_identity";
+        if (actor->GetClassPrivate()->GetPathName() != profile.item_class || actor->GetPathName() != profile.actor)
+            return "actor_identity";
         if (!actor->HasAnyFlags(U::RF_WasLoaded)) return "actor_not_loaded";
         if (!boolean(actor, STR("bActorIsBeingDestroyed"), false)) return "actor_being_destroyed";
         if (!live(world) || world->GetPathName() != profile.world) return "world_identity";
@@ -761,19 +779,14 @@ namespace
         return nullptr;
     }
 
-    bool placed_dead_drop(U::UObject* actor, U::UObject* world)
+    const char* drop_identity_fault(U::UObject* actor, U::UObject* world, const Profile& profile)
     {
-        return placed_drop_fault(actor, world) == nullptr;
-    }
-
-    const char* drop_identity_fault(U::UObject* actor, U::UObject* world)
-    {
-        if (const auto* fault = placed_drop_fault(actor, world)) return fault;
+        if (const auto* fault = placed_drop_fault(actor, world, profile)) return fault;
         if (!boolean(actor, STR("bReplicates"), false)) return "replication";
         if (!boolean(actor, STR("Stacks"), false)) return "stacking";
         if (!source_box(actor)) return "root_box";
         auto* quest = field<U::FNameProperty>(actor, STR("Quest_ID"));
-        const U::FName key{STR("DeadDrop_CrossRoads"), U::FNAME_Find};
+        const U::FName key{profile.dead_drop, U::FNAME_Find};
         if (!quest || key.IsNone() || quest->GetPropertyValueInContainer(actor) != key) return "quest_id";
         auto* mode = field<U::FByteProperty>(actor, STR("Item_RespawnMode"));
         if (!mode || mode->GetPropertyValueInContainer(actor) != 0) return "respawn_mode";
@@ -782,9 +795,9 @@ namespace
         return nullptr;
     }
 
-    bool dead_drop_identity(U::UObject* actor, U::UObject* world)
+    bool dead_drop_identity(const Scope& state)
     {
-        return drop_identity_fault(actor, world) == nullptr;
+        return state.profile && !drop_identity_fault(state.actor.Get(), state.world.Get(), *state.profile);
     }
 
     bool valid_drop_pose(const DropPose& pose)
@@ -827,8 +840,8 @@ namespace
     bool present_drop(const Scope& state)
     {
         auto* actor = static_cast<U::AActor*>(state.actor.Get());
-        return dead_drop_identity(actor, state.world.Get()) && state.box.Get() == source_box(actor) &&
-            exact_source(actor, state.world.Get(), dead_drop_profile) &&
+        return dead_drop_identity(state) && state.box.Get() == source_box(actor) &&
+            exact_source(actor, state.world.Get(), *state.profile) &&
             boolean(actor, STR("bHidden"), false) && actor->GetActorEnableCollision();
     }
 
@@ -839,10 +852,11 @@ namespace
         if (state.host)
         {
             auto* save = object(object(state.world.Get(), STR("OwningGameInstance")), STR("SaveSlot_Ref"));
-            return env("SILVERFISH_COOP_NATIVE_GUEST_SAVE") &&
-                drop_settled_actor.Get() == state.actor.Get() && Clock::now() >= drop_settles_at &&
+            auto* actor = state.actor.Get();
+            return env("SILVERFISH_COOP_NATIVE_GUEST_SAVE") && actor &&
+                drop_settled_actor.Get() == actor && Clock::now() >= drop_settles_at &&
                 object(state.pawn.Get(), STR("Save")) == save &&
-                silverfish::native_quest_rewards::active_crossroads_dead_drop(save);
+                silverfish::native_quest_rewards::active_dead_drop(save, actor->GetClassPrivate());
         }
         const auto& bound = drop_projection.scope;
         return Clock::now() < drop_projection.expires && state.actor.Get() == bound.actor.Get() &&
@@ -852,9 +866,14 @@ namespace
 
     bool drop_fence(U::UObject* actor)
     {
-        if (!exact(actor, dead_drop_profile.item_class) || actor->GetPathName() != dead_drop_profile.actor) return false;
+        if (!live(actor)) return false;
+        static const U::FName crossroads{STR("Bag_DeadDrop_CrossRoads_C")};
+        static const U::FName metro{STR("Bag_DeadDrop_Metro_C")};
+        const auto name = actor->GetClassPrivate()->GetFName();
+        if (name != crossroads && name != metro) return false;
         auto* world = static_cast<U::AActor*>(actor)->GetWorld();
-        if (!placed_dead_drop(actor, world)) return false;
+        const auto* profile = dead_drop_in_world(world);
+        if (!profile || placed_drop_fault(actor, world, *profile)) return false;
         auto* driver = object(world, STR("NetDriver"));
         auto* field_server = field<U::FObjectProperty>(driver, STR("ServerConnection"));
         auto* server = read(field_server, driver);
@@ -866,10 +885,11 @@ namespace
     bool settle_drop_projection()
     {
         drop_projection.expires = {};
-        scopes.front().observed = {};
         auto* actor = static_cast<U::AActor*>(drop_projection.scope.actor.Get());
         auto* world = drop_projection.scope.world.Get();
-        if (placed_dead_drop(actor, world))
+        const auto* profile = drop_projection.scope.profile;
+        if (profile) scopes[profile - profiles.data()].observed = {};
+        if (profile && !placed_drop_fault(actor, world, *profile))
         {
             actor->SetActorHiddenInGame(true);
             U::FHitResult ignored{};
@@ -2594,9 +2614,11 @@ namespace
     {
         auto* pawn = local_pickup_pawn(address_value, host);
         auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
-        auto* actor = find<U::AActor>(dead_drop_profile.actor);
+        const auto* profile = dead_drop_in_world(world);
+        if (!profile) return {};
+        auto* actor = find<U::AActor>(profile->actor);
         Scope candidate{world, pawn, actor, source_box(actor), object(pawn, STR("Controller")),
-            object(world, STR("NetDriver")), &dead_drop_profile, host};
+            object(world, STR("NetDriver")), profile, host};
         return local_scope(candidate) ? candidate : Scope{};
     }
 
@@ -2633,7 +2655,7 @@ namespace
         if (!host && drop_projection.scope.profile &&
             (!drop_gate(state) || !present_drop(state)) && !settle_drop_projection())
             return drop_diagnostic(lua, "projection_retirement", actor);
-        if (!host && actor && !drop_gate(state) && !hidden_drop(actor) && dead_drop_identity(actor, state.world.Get()))
+        if (!host && actor && !drop_gate(state) && !hidden_drop(actor) && dead_drop_identity(state))
         {
             // Vanilla may show its independently placed copy before the host's view arrives.
             drop_projection.scope = state;
@@ -2641,10 +2663,11 @@ namespace
         }
         std::string_view shown;
         std::string_view epoch = "-";
-        const auto* fault = actor ? drop_identity_fault(actor, state.world.Get()) : nullptr;
+        const auto* fault = actor ? drop_identity_fault(actor, state.world.Get(), *state.profile) : nullptr;
+        const auto& bound = scopes[state.profile - profiles.data()];
         if (!actor) shown = "absent";
         else if (fault) return drop_diagnostic(lua, fault, actor);
-        else if (host && scopes.front().actor.Get() == actor && scopes.front().claimed)
+        else if (host && bound.actor.Get() == actor && bound.claimed)
             shown = "claimed";
         else if (hidden_drop(actor)) shown = "hidden";
         else if (host)
@@ -2656,7 +2679,7 @@ namespace
             }
             if (now < drop_settles_at) return 0;
             if (!drop_gate(state)) return drop_diagnostic(lua, "canonical_quest_inactive", actor);
-            else if (const auto* fault = source_fault(actor, state.world.Get(), dead_drop_profile))
+            else if (const auto* fault = source_fault(actor, state.world.Get(), *state.profile))
                 return drop_diagnostic(lua, fault, actor);
             else if (!present_drop(state)) return drop_diagnostic(lua, "stock_world_visibility_or_box", actor);
             else shown = "stock-active";
@@ -2702,7 +2725,7 @@ namespace
         if (!valid_drop_pose(pose)) return result(lua, false, "dead_drop_projection_transform_unavailable");
         auto state = dead_drop_seat(address_value, false);
         auto* actor = static_cast<U::AActor*>(state.actor.Get());
-        if (!valid_drop_epoch(epoch) || !state.profile || !dead_drop_identity(actor, state.world.Get()))
+        if (!valid_drop_epoch(epoch) || !dead_drop_identity(state))
             return result(lua, false, "dead_drop_projection_scope_unavailable");
         const auto now = Clock::now();
         const bool renewing = drop_projection.epoch == epoch && drop_gate(state) && present_drop(state);
@@ -2713,7 +2736,7 @@ namespace
         }
         if ((!renewing && (!settle_drop_projection() || !hidden_drop(actor))) || !actor->GetActorEnableCollision())
             return result(lua, false, "dead_drop_projection_stock_pose_unavailable");
-        drop_projection = {state, epoch, pose, {}};
+        drop_projection = {state, epoch, {}};
         const bool moved = silverfish::native_actor_pose::set_location_rotation(
             actor, {pose[0], pose[1], pose[2]}, {pose[3], pose[4], pose[5]});
         if (moved)
@@ -3066,9 +3089,9 @@ namespace silverfish::native_authored_pickup
         lua.register_function("SilverfishTakeNativeAuthoredPickupPress", take_press);
         lua.register_function("SilverfishProjectNativeAuthoredPickup", project);
         lua.register_function("SilverfishReadNativeAuthoredPickup", status);
-        lua.register_function("SilverfishObserveNativeCrossroadsDeadDrop", observe_drop);
-        lua.register_function("SilverfishProjectNativeCrossroadsDeadDrop", project_drop);
-        lua.register_function("SilverfishClearNativeCrossroadsDeadDrop", clear_drop);
+        lua.register_function("SilverfishObserveNativeDeadDrop", observe_drop);
+        lua.register_function("SilverfishProjectNativeDeadDrop", project_drop);
+        lua.register_function("SilverfishClearNativeDeadDrop", clear_drop);
         lua.register_function("SilverfishStockAuthoredPickupCallback", stock_pickup_callback);
         lua.register_function("SilverfishCaptureNativeAuthoredPickup", capture);
         lua.register_function("SilverfishClaimNativeAuthoredCash", claim_cash);

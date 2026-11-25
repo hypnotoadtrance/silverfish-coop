@@ -402,7 +402,7 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
             evidence["turn_in_without_item"] = refused["error"]
 
         if plan.conditional_pickup:
-            assert plan.accept_before_pickup and start_area == pickup_map and source == native_dead_drop.SOURCE
+            assert plan.accept_before_pickup and start_area == pickup_map and source in native_dead_drop.BY_SOURCE
             await verify_drop_hidden("before_acceptance")
             inactive_epoch = current["zone_epoch"]
         elif plan.accept_before_pickup:

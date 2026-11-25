@@ -37,6 +37,7 @@ QUESTS = {
                          native_computer_board.SAVLO_RING.quest_id}),
     BLACK_MARKET: frozenset({native_computer_board.BRANDY.quest_id, native_computer_board.PUMP_ROOM.quest_id,
                             native_computer_board.STOLEN_BAG.quest_id, native_computer_board.DEAD_DROP.quest_id,
+                            native_computer_board.METRO_DEAD_DROP.quest_id,
                             native_computer_board.BLACK_BOX.quest_id, native_computer_board.MISSING_CONTACT.quest_id,
                             LAKE_JAMMER.quest, LENNY.quest, SPRATT.quest}),
 }

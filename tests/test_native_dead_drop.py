@@ -49,6 +49,24 @@ class DeadDropFrameTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "identity"):
                 drop.parse(row, phase, area)
 
+    def test_metro_uses_its_own_stock_actor_and_active_quest(self):
+        metro = drop.METRO_DROP
+        pawn = f"Player_FP_C {metro.world}:PersistentLevel.Player_FP_C_41"
+        row = [drop.TAG, "stock-active", metro.map, metro.actor, pawn, "-", *axes(NEW_POSE)]
+        report = drop.parse(row, "hosting", metro.map)
+        source = host()
+        source.last_game = {"state": "hosting", "map": metro.map,
+                            "pawns": {"local": {"name": pawn}}, drop.KEY: report}
+        self.assertEqual(drop.frame(source), {})
+        source.party["native_quests"][metro.quest] = {"quest_id": metro.quest, "step": 1}
+        self.assertEqual(drop.frame(source), metro.frame(EPOCH, NEW_POSE))
+        self.assertEqual(pickup.request_target(metro.source, EPOCH), f"{metro.source}@{EPOCH}")
+        row[3] = drop.CROSSROADS_DROP.actor
+        with self.assertRaisesRegex(ValueError, "identity"):
+            drop.parse(row, "hosting", metro.map)
+        source.party[drop.PICKUPS] = {metro.source: {}}
+        self.assertEqual(drop.frame(source), {})
+
     def test_authority_requires_canonical_pose_and_committed_unclaimed_step(self):
         source = host()
         self.assertEqual(drop.frame(source), {"map": drop.MAP, "quest": drop.QUEST, "actor": drop.ACTOR,

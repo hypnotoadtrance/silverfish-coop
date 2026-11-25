@@ -274,6 +274,7 @@ def parser() -> argparse.ArgumentParser:
         "native-stolen-bag-preflight", "native-stolen-bag-approach", "native-stolen-bag-xp-fixture",
         "native-black-box-preflight", "native-black-box-approach", "native-black-box-xp-fixture",
         "native-dead-drop-preflight", "native-dead-drop-approach", "native-dead-drop-xp-fixture",
+        "native-metro-dead-drop-preflight", "native-metro-dead-drop-approach", "native-metro-dead-drop-xp-fixture",
         "native-pocket-watch-preflight", "native-pocket-watch-approach",
         "native-savlo-ring-preflight", "native-savlo-ring-approach", "native-savlo-ring-xp-fixture",
         "native-molasses-preflight", "native-molasses-approach",

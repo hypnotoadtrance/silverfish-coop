@@ -3,7 +3,7 @@
 import time
 from dataclasses import dataclass
 
-from . import native_authored_pickup, native_black_box, native_inventory, native_loot, native_rewards, native_wire_quest, party
+from . import native_authored_pickup, native_black_box, native_dead_drop, native_inventory, native_loot, native_rewards, native_wire_quest, party
 from .native_gold import valid_guid
 from .native_host_dig import KEY as DIG_RECORD, FLAG as DIG_FLAG, SOURCE as DIG_SOURCE
 from .native_host_dig_live import CUSTODY as DIG_CUSTODY
@@ -69,6 +69,9 @@ MISSING_CONTACT = CollectionContract("Note_Farmhouse", "native-missing-contact",
 DEAD_DROP = CollectionContract("DeadDrop_CrossRoads", "native-dead-drop", "CrossRoads Dead Drop", BLACK_MARKET,
                                "black_market_redemption_required", 300, frozenset({"4", "8"}), "consumed_bag",
                                native_authored_pickup.DEAD_DROP, frozenset({BLACK_MARKET, OBSERVATORY}), fixture_xp=1)
+METRO_DEAD_DROP = CollectionContract(native_dead_drop.METRO_DROP.quest, "native-metro-dead-drop", "Metro Dead Drop",
+                                     BLACK_MARKET, "black_market_redemption_required", 600, frozenset({"4", "8"}),
+                                     "consumed_bag", native_dead_drop.METRO_DROP.source, frozenset({BLACK_MARKET}), fixture_xp=2)
 STOLEN_BAG = CollectionContract("Clt_StolenBag", "native-stolen-bag", "Stolen Goods", BLACK_MARKET,
                                 "black_market_redemption_required", 1200, frozenset({"5", "8"}), "consumed_bag",
                                 native_authored_pickup.STOLEN_BAG, frozenset({BLACK_MARKET}), fixture_xp=5)
@@ -92,7 +95,7 @@ BLACK_BOX = CollectionContract(native_black_box.QUEST, native_black_box.PREFIX, 
                               native_black_box.SOURCE, frozenset({OBSERVATORY, BLACK_MARKET}), fixture_xp=12)
 CONTRACTS = {spec.quest_id: spec for spec in (
     COMPUTER_BOARD, COUP_REPORT, DEPOT_DOCUMENTS, BRANDY, STOLEN_BAG, POCKET_WATCH, SAVLO_RING, PUMP_ROOM, MOLASSES, SAVLO_KEYCARD,
-    DEAD_DROP, BLACK_BOX, MISSING_CONTACT,
+    DEAD_DROP, METRO_DEAD_DROP, BLACK_BOX, MISSING_CONTACT,
 )}
 PREFIXES = {spec.prefix: spec for spec in CONTRACTS.values()}
 PREFLIGHTS = {spec.command("preflight"): spec for spec in CONTRACTS.values()}

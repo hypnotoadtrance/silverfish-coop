@@ -1,25 +1,53 @@
-"""Share the host-selected placement of the active stock Crossroads Dead Drop."""
+"""Share the host-selected placement of the active stock Dead Drop bags."""
 
+from dataclasses import dataclass
 import re
 import time
 
 from .authored_loot import same_pose, valid_item_transform
-from .travel import CROSSROADS
+from .travel import CITY, CROSSROADS
 
 
-MAP = CROSSROADS
-QUEST = "DeadDrop_CrossRoads"
-SOURCE = "crossroads-dead-drop-bag"
-CLASS = "/Game/Classes/Items/Key_Items/Bag_DeadDrop_CrossRoads.Bag_DeadDrop_CrossRoads_C"
-WORLD = f"{MAP}.CrossRoads_P"
-ACTOR = f"Bag_DeadDrop_CrossRoads_C {WORLD}:PersistentLevel.Bag_DeadDrop_CrossRoads_C_1"
+@dataclass(frozen=True)
+class DeadDrop:
+    map: str
+    quest: str
+    source: str
+
+    @property
+    def world(self):
+        return f"{self.map}.{self.map.rsplit('/', 1)[1]}"
+
+    @property
+    def class_path(self):
+        return f"/Game/Classes/Items/Key_Items/Bag_{self.quest}.Bag_{self.quest}_C"
+
+    @property
+    def actor(self):
+        name = f"Bag_{self.quest}_C"
+        return f"{name} {self.world}:PersistentLevel.{name}_1"
+
+    def matches_pawn(self, pawn: str) -> bool:
+        return isinstance(pawn, str) and re.fullmatch(
+            re.escape(f"Player_FP_C {self.world}:PersistentLevel.Player_FP_C_") + r"[0-9]+", pawn) is not None
+
+    def frame(self, epoch: str, transform: dict) -> dict:
+        return {"map": self.map, "quest": self.quest, "actor": self.actor, "step": 1,
+                "epoch": epoch, "transform": transform}
+
+
+CROSSROADS_DROP = DeadDrop(CROSSROADS, "DeadDrop_CrossRoads", "crossroads-dead-drop-bag")
+METRO_DROP = DeadDrop(CITY, "DeadDrop_Metro", "metro-dead-drop-bag")
+BY_MAP = {drop.map: drop for drop in (CROSSROADS_DROP, METRO_DROP)}
+BY_SOURCE = {drop.source: drop for drop in BY_MAP.values()}
+MAP, QUEST, SOURCE = CROSSROADS_DROP.map, CROSSROADS_DROP.quest, CROSSROADS_DROP.source
+CLASS, WORLD, ACTOR = CROSSROADS_DROP.class_path, CROSSROADS_DROP.world, CROSSROADS_DROP.actor
 TAG = "native-dead-drop"
 KEY = "native_dead_drop"
 FRAME = "native_dead_drop_frame"
 PICKUPS = "native_authored_pickups"
 REFRESH_SECONDS = 0.65
 FRAME_MAX_AGE = 1.5
-_PAWN = re.compile(re.escape(f"Player_FP_C {WORLD}:PersistentLevel.Player_FP_C_") + r"[0-9]+")
 _EPOCH = re.compile(r"[0-9a-f]{32}")
 _STATES = {"hosting": {"absent", "hidden", "stock-active", "claimed"},
            "connected": {"absent", "hidden", "projected"}}
@@ -31,69 +59,73 @@ def valid_epoch(value: object) -> bool:
 
 def parse(fields: list[str], phase: str | None, area: str | None) -> dict:
     if len(fields) not in (6, 15):
-        raise ValueError("Invalid CrossRoads Dead Drop report size")
+        raise ValueError("Invalid Dead Drop report size")
     tag, state, reported_map, actor, pawn, epoch, *axes = fields
-    if (tag != TAG or area != MAP or reported_map != area or actor != ACTOR or _PAWN.fullmatch(pawn) is None
+    drop = BY_MAP.get(area)
+    if (tag != TAG or not drop or reported_map != area or actor != drop.actor or not drop.matches_pawn(pawn)
             or state not in _STATES.get(phase, ())
             or (not valid_epoch(epoch) if state == "projected" else epoch != "-")):
-        raise ValueError("Invalid CrossRoads Dead Drop identity")
+        raise ValueError("Invalid Dead Drop identity")
     report = {"state": state, "map": area, "actor": actor, "pawn": pawn,
               "epoch": epoch if state == "projected" else None}
     if state in ("stock-active", "projected"):
         values = [float(axis) for axis in axes]
         pose = {"position": values[:3], "rotation": values[3:6], "scale": values[6:]}
         if not valid_item_transform(pose):
-            raise ValueError("Invalid CrossRoads Dead Drop transform")
+            raise ValueError("Invalid Dead Drop transform")
         report["transform"] = pose
     elif axes:
-        raise ValueError("Unexpected inactive CrossRoads Dead Drop transform")
+        raise ValueError("Unexpected inactive Dead Drop transform")
     return report
 
 
 def observed(game: dict, state: str) -> dict:
+    drop = BY_MAP.get(game.get("map"))
     report = game.get(KEY, {})
     pawn = game.get("pawns", {}).get("local", {}).get("name")
-    if (game.get("map") == MAP and (report.get("state"), report.get("map"), report.get("actor"), report.get("pawn"))
-            == (state, MAP, ACTOR, pawn) and isinstance(pawn, str) and _PAWN.fullmatch(pawn)):
+    if (drop and (report.get("state"), report.get("map"), report.get("actor"), report.get("pawn"))
+            == (state, drop.map, drop.actor, pawn) and drop.matches_pawn(pawn)):
         return report
     return {}
 
 
-def active(party: dict) -> bool:
-    quest = party.get("native_quests", {}).get(QUEST, {})
+def active(party: dict, drop: DeadDrop) -> bool:
+    quest = party.get("native_quests", {}).get(drop.quest, {})
     step = quest.get("step")
-    return quest.get("quest_id") == QUEST and type(step) is int and step == 1 and SOURCE not in party.get(PICKUPS, {})
+    return (quest.get("quest_id") == drop.quest and type(step) is int and step == 1
+            and drop.source not in party.get(PICKUPS, {}))
 
 
 def frame(host) -> dict:
+    drop = BY_MAP.get(host.last_game.get("map"))
     report = observed(host.last_game, "stock-active")
     transform = report.get("transform")
     if (not host.native_guest or not host.native_zones or not host.native_profile or host.stopping or host.transitioning
-            or host.native_checkpoint_unsafe or not active(host.party) or not valid_epoch(host.zone_epoch)
+            or host.native_checkpoint_unsafe or not drop or not active(host.party, drop) or not valid_epoch(host.zone_epoch)
             or time.monotonic() - host.last_seen >= FRAME_MAX_AGE or host.last_game.get("state") != "hosting"
             or not valid_item_transform(transform)):
         return {}
-    return {"map": MAP, "quest": QUEST, "actor": ACTOR, "step": 1, "epoch": host.zone_epoch, "transform": transform}
+    return drop.frame(host.zone_epoch, transform)
 
 
 async def project_client(client) -> None:
     game, epoch = client.last_game, client.zone_epoch
-    if game.get("state") != "connected" or game.get("map") != MAP:
+    drop = BY_MAP.get(game.get("map"))
+    if game.get("state") != "connected" or not drop:
         return
     projected = observed(game, "projected")
     now = time.monotonic()
     frame = client.gameplay.get(FRAME)
     transform = frame.get("transform") if isinstance(frame, dict) else None
     allowed = (valid_epoch(epoch) and client.host_session and not client.needs_travel and not client.server_transitioning
-               and now - client.gameplay_seen < FRAME_MAX_AGE and active(client.gameplay)
+               and now - client.gameplay_seen < FRAME_MAX_AGE and active(client.gameplay, drop)
                and valid_item_transform(transform) and type(frame.get("step")) is int
-               and frame == {"map": MAP, "quest": QUEST, "actor": ACTOR, "step": 1, "epoch": epoch,
-                             "transform": transform})
+               and frame == drop.frame(epoch, transform))
     if not allowed:
         if projected:
             snapshot = await client.bridge.command("native-dead-drop-clear", timeout=3)
             if not observed(snapshot, "hidden") and not observed(snapshot, "absent"):
-                raise RuntimeError("CrossRoads Dead Drop did not retire to its stock hidden pose")
+                raise RuntimeError("Dead Drop did not retire to its stock hidden pose")
             client.last_game = snapshot
         return
     current = projected or observed(game, "hidden")
@@ -110,6 +142,6 @@ async def project_client(client) -> None:
     proof = observed(snapshot, "projected")
     if (not proof or (proof["epoch"], proof["pawn"]) != (epoch, current["pawn"])
             or not same_pose(proof["transform"], transform)):
-        raise RuntimeError("CrossRoads Dead Drop did not verify the local stock actor and epoch")
+        raise RuntimeError("Dead Drop did not verify the local stock actor and epoch")
     client.last_game = snapshot
     client.dead_drop_projection = (identity, now)

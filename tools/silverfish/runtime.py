@@ -2529,7 +2529,7 @@ class Bridge:
                     data["native_savlo_locker_diagnostic"] = fields[2]
                 elif fields[0] == native_dead_drop.TAG:
                     if native_dead_drop.KEY in data:
-                        raise ValueError("Repeated stock CrossRoads Dead Drop report")
+                        raise ValueError("Repeated stock Dead Drop report")
                     data[native_dead_drop.KEY] = native_dead_drop.parse(fields, data.get("state"), data.get("map"))
                 elif fields[0] == "native-loose-pickup-capability" and len(fields) == 3:
                     data[native_loose_pickup.CAPABILITY] = int(fields[1])

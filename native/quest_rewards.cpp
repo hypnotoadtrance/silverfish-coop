@@ -701,6 +701,9 @@ namespace
         .item = missing_contact_package, .cash = 450, .display_alias = STR("Note_FarmHouse")};
     constexpr ObjectiveQuest dead_drop_objective{"dead_drop", PartyWorld::black_market, dead_drop_quest_id,
         dead_drop_item_path, 300};
+    constexpr ObjectiveQuest metro_drop_objective{"metro_dead_drop", PartyWorld::black_market, STR("DeadDrop_Metro"),
+        STR("/Game/Classes/Items/Key_Items/Bag_DeadDrop_Metro.Bag_DeadDrop_Metro_C"), 600};
+    constexpr std::array dead_drop_objectives{&dead_drop_objective, &metro_drop_objective};
     constexpr ObjectiveQuest stolen_bag_objective{"stolen_bag", PartyWorld::black_market, STR("Clt_StolenBag"),
         stolen_bag_item_path, 1200};
     constexpr ObjectiveQuest black_box_objective{"black_box", PartyWorld::observatory, STR("Clct_Radio_Scar"),
@@ -1711,11 +1714,14 @@ namespace
     }
 }
 
-bool silverfish::native_quest_rewards::active_crossroads_dead_drop(RC::Unreal::UObject* canonical_save)
+bool silverfish::native_quest_rewards::active_dead_drop(U::UObject* canonical_save, U::UClass* item)
 {
-    auto* item = find<U::UClass>(dead_drop_item_path);
-    return item && exact(canonical_save, find<U::UClass>(save_path)) &&
-        objective_recipe(canonical_save, dead_drop_quest_id, item, 300, nullptr, nullptr, WirePhase::active, 2, 1, 1);
+    if (!live(item) || !exact(canonical_save, find<U::UClass>(save_path))) return false;
+    const auto path = item->GetPathName();
+    const auto quest = std::ranges::find_if(dead_drop_objectives, [&](const auto* objective) { return path == objective->item; });
+    return quest != dead_drop_objectives.end() &&
+        objective_recipe(canonical_save, (*quest)->id, item, (*quest)->cash, nullptr, nullptr,
+            WirePhase::active, 2, (*quest)->xp, 1);
 }
 
 bool silverfish::native_quest_rewards::active_missing_contact(RC::Unreal::UObject* canonical_save)
@@ -1739,6 +1745,7 @@ void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishStageStolenBagObjective", stage_objective<stolen_bag_objective>);
     lua.register_function("SilverfishStageBlackBoxObjective", stage_objective<black_box_objective>);
     lua.register_function("SilverfishStageCrossroadsDeadDropObjective", stage_objective<dead_drop_objective>);
+    lua.register_function("SilverfishStageMetroDeadDropObjective", stage_objective<metro_drop_objective>);
     lua.register_function("SilverfishStagePocketWatchObjective", stage_objective<pocket_watch_objective>);
     lua.register_function("SilverfishStageSavloRingObjective", stage_objective<savlo_ring_objective>);
     lua.register_function("SilverfishStageMolassesObjective", stage_objective<molasses_objective>);

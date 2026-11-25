@@ -17,7 +17,7 @@ local molasses, keycard = "Clt_Molasis", "Clct_SavloKey"
 local wire, computer, photo = "Clt_Wire", "Clt_ComputerBoard", "Photo_DB_Turrets"
 local report, depot, brandy = "Clt_CoupReport_01", "DepotDocs", "Clt_Brandy"
 local stolen_bag = "Clt_StolenBag"
-local dead_drop = "DeadDrop_CrossRoads"
+local dead_drop, metro_drop = "DeadDrop_CrossRoads", "DeadDrop_Metro"
 local missing_contact = "Note_Farmhouse"
 local black_box = "Clct_Radio_Scar"
 local pocket_watch = "Clt_Watch"
@@ -44,13 +44,14 @@ local profiles = {
     [scientist] = board_profile(scientist, "Shop_Scientist_01", "2", 4, {computer, readings, prototype}),
     [scav_bar] = board_profile(scav_bar, "Shop_ScavBar_P", "2", 10, {depot, pocket_watch, ring}, true),
     [black_market] = board_profile(black_market, "Shop_BlackMarket_01", "0", 1, {brandy, pump_room, lake_jammer, lenny,
-        stolen_bag, dead_drop, black_box, missing_contact, spratt}, true),
+        stolen_bag, dead_drop, metro_drop, black_box, missing_contact, spratt}, true),
 }
 local titles = {[molasses] = "Get Molasses", [keycard] = "Hall Pass", [wire] = "Copper Stop", [computer] = "Find a Computer Board", [photo] = "Dead Bridge Turret Photos",
     [report] = "Northern Passage", [depot] = "Depot Documents", [brandy] = "Fine Vintage", [readings] = "Stone Maze Readings",
     [pocket_watch] = "Pocket Watch", [ring] = "Savlo's Ring", [pump_room] = "Pump Room", [lake_jammer] = "Signal Jammer: Black Lake",
     [lenny] = "Lenny's House", [flood_control] = "Flood Control", [stolen_bag] = "Stolen Goods",
-    [dead_drop] = "CrossRoads Dead Drop", [black_box] = "Black Box", [missing_contact] = "Missing Contact",
+    [dead_drop] = "CrossRoads Dead Drop", [metro_drop] = "Metro Dead Drop",
+    [black_box] = "Black Box", [missing_contact] = "Missing Contact",
     [spratt] = "Kill Spratt", [prototype] = "Prototype Drill", [crossroads_jammer] = "Signal Jammer: Crossroads"}
 local board_class = "/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C"
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
@@ -93,6 +94,11 @@ local contract_prompt = {
         elsewhere = "Deliver the sealed bag to the Black Market bounty board.",
         missing = "Bring the sealed bag in your backpack.\nInteract to check the contract again.",
         ready = "Turn in the bag for 300 shared cash.\nInteract again to turn it in.",
+    },
+    [metro_drop] = {
+        offer = "Collect the sealed bag in Metropol.\nInteract again to accept the contract.",
+        missing = "Bring the sealed bag in your backpack.\nInteract to check the contract again.",
+        ready = "Turn in the bag for 600 shared cash.\nInteract again to turn it in.",
     },
     [stolen_bag] = {
         offer = "Recover the Broker's bag from the Forest.\nInteract again to accept the contract.",

@@ -35,17 +35,21 @@ local northeast_rail = "/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P"
 local trench = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P"
 local cistern = "/Game/Classes/Maps/Maps_Dungeons/Cistern_P"
 local fort_leto = "/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P"
-local dead_drop = {
-    map = crossroads,
-    source = "crossroads-dead-drop-bag",
-    path = crossroads .. ".CrossRoads_P:PersistentLevel.Bag_DeadDrop_CrossRoads_C_1",
-    class = "/Game/Classes/Items/Key_Items/Bag_DeadDrop_CrossRoads.Bag_DeadDrop_CrossRoads_C",
-    name = "Bag_DeadDrop_CrossRoads_C",
-    authority_sight = true,
-    quest_source = true,
+local function dead_drop_profile(area, source, bag)
+    local level = area:match("/([^/]+)$")
+    local name = bag .. "_C"
+    return {map = area, source = source, name = name,
+        path = area .. "." .. level .. ":PersistentLevel." .. name .. "_1",
+        class = "/Game/Classes/Items/Key_Items/" .. bag .. "." .. name,
+        authority_sight = true, quest_source = true}
+end
+local dead_drops = {
+    [crossroads] = dead_drop_profile(crossroads, "crossroads-dead-drop-bag", "Bag_DeadDrop_CrossRoads"),
+    [city] = dead_drop_profile(city, "metro-dead-drop-bag", "Bag_DeadDrop_Metro"),
 }
 local profiles = {
-    dead_drop,
+    dead_drops[crossroads],
+    dead_drops[city],
     drill_head.profile,
     {
         map = observatory,
@@ -669,22 +673,22 @@ function pickup.command(fields, state, phase)
     if action == "native-dead-drop-project" then
         local detail = state.local_pawn
         if #fields ~= 13 or phase ~= "connected" or not state.listening or state.server ~= true
-            or state.map ~= dead_drop.map or not detail or detail.name ~= fields[4] or not valid(detail.pawn)
-            or type(SilverfishProjectNativeCrossroadsDeadDrop) ~= "function" then
+            or not dead_drops[state.map] or not detail or detail.name ~= fields[4] or not valid(detail.pawn)
+            or type(SilverfishProjectNativeDeadDrop) ~= "function" then
             error("dead_drop_projection_scope_unavailable", 0)
         end
         local pose = {}
         for index = 1, 9 do pose[index] = tonumber(fields[index + 4]) end
-        local applied, status = SilverfishProjectNativeCrossroadsDeadDrop(detail.pawn:GetAddress(), fields[3], table.unpack(pose, 1, 9))
+        local applied, status = SilverfishProjectNativeDeadDrop(detail.pawn:GetAddress(), fields[3], table.unpack(pose, 1, 9))
         if applied ~= true then error(status, 0) end
         return "verified local stock Dead Drop presentation"
     end
     if action == "native-dead-drop-clear" then
         if #fields ~= 2 or phase ~= "connected" or not state.listening or state.server ~= true
-            or state.map ~= dead_drop.map or type(SilverfishClearNativeCrossroadsDeadDrop) ~= "function" then
+            or not dead_drops[state.map] or type(SilverfishClearNativeDeadDrop) ~= "function" then
             error("dead_drop_projection_scope_unavailable", 0)
         end
-        local cleared, status = SilverfishClearNativeCrossroadsDeadDrop()
+        local cleared, status = SilverfishClearNativeDeadDrop()
         if cleared ~= true then error(status, 0) end
         return "cleared local stock Dead Drop presentation"
     end
@@ -901,8 +905,9 @@ function pickup.rows(state, phase, status_row)
         rows[#rows + 1] = status_row("native-authored-pickup-memory", 1)
     end
     local detail = state.local_pawn
-    if state.map == dead_drop.map and state.listening and (host or client) and detail and valid(detail.pawn) then
-        local observe = SilverfishObserveNativeCrossroadsDeadDrop
+    local dead_drop = dead_drops[state.map]
+    if dead_drop and state.listening and (host or client) and detail and valid(detail.pawn) then
+        local observe = SilverfishObserveNativeDeadDrop
         if type(observe) ~= "function" then
             rows[#rows + 1] = status_row("native-dead-drop-diagnostic", state.map, "native_observer_unavailable")
         else

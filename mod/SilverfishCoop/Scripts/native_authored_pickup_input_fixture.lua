@@ -13,6 +13,7 @@ local cistern_locker = "cistern-old-nfta-locker"
 local crossroads_lockpick = "crossroads-lockpick"
 local coup_report = "dead-end-coup-report"
 local gold_bag = "scav-bar-gold-bag"
+local dead_drop, metro_drop = "crossroads-dead-drop-bag", "metro-dead-drop-bag"
 local sources = {
     [coup_report] = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P",
     [gold_bag] = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P",
@@ -25,7 +26,8 @@ local sources = {
     ["scientist-blank-data-tape"] = scientist,
     [lab_blank_tape] = "/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P",
     ["crossroads-pocket-watch"] = crossroads,
-    ["crossroads-dead-drop-bag"] = crossroads,
+    [dead_drop] = crossroads,
+    [metro_drop] = city,
     [crossroads_lockpick] = crossroads,
     ["savlo-estate-evil-eye-ring"] = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P",
     ["borough-mre"] = "/Game/Classes/Maps/Maps_SafeZones/Borough",
@@ -49,7 +51,6 @@ local savlo_keycard = "trench-savlo-keycard"
 local savlo_locker = "trench-savlo-locker"
 local fort_leto_key = "fort-leto-locker-key-543"
 local stolen_bag = "forest-brokers-artifacts-bag"
-local dead_drop = "crossroads-dead-drop-bag"
 local black_box = "gorge-insurrectionist-recorder"
 local city_shelf_supply = city .. ".City_01_P:PersistentLevel.Ammo_Magnum_BP_C_1"
 local precise_distances = {
@@ -65,6 +66,7 @@ local precise_distances = {
     [fort_leto_key] = {120, 155, 185, 220},
     [stolen_bag] = {85, 115, 145, 175, 210},
     [dead_drop] = {85, 115, 145, 175, 210},
+    [metro_drop] = {85, 115, 145, 175, 210},
     [black_box] = {65, 85, 110, 140, 175, 205},
     [drill_head] = {85, 115, 145, 175, 210},
     [lab_blank_tape] = {80, 110, 140, 175, 205},
@@ -220,7 +222,7 @@ end
 
 function input.authority_sight(state, phase, profile, pawn, actor)
     local cash = cash_sources[profile.source] == profile
-    local sight_profile = ((profile.source == stolen_bag or profile.source == dead_drop
+    local sight_profile = ((profile.source == stolen_bag or profile.source == dead_drop or profile.source == metro_drop
         or profile.source == black_box or profile.source == lab_blank_tape or profile.source == cistern_keycard
         or profile.source == crossroads_lockpick or profile.source == gold_bag or profile.source == coup_report)
         and profile.map == sources[profile.source] and profile.authority_sight == true)
@@ -400,7 +402,7 @@ function input.precise_approach(state, phase, profile, pawn, actor)
     end
     local forest_locker_top = profile.source == stolen_bag
     local nested_floor = profile.source == molasses or profile.source == shelf_source or forest_locker_top
-        or profile.source == dead_drop or profile.source == black_box or profile.source == lab_blank_tape or drill_catwalk
+        or profile.source == dead_drop or profile.source == metro_drop or profile.source == black_box or profile.source == lab_blank_tape or drill_catwalk
         or profile.source == "city-large-stack-1" or profile.source == "crossroads-small-stack-1"
     -- The bag sits above the stock locker bank, about 248 units above the room floor.
     -- The Drill Head sits about 264 units above its catwalk, beside the drill assembly.
