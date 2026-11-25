@@ -16,6 +16,8 @@ The `rc-f0b1c06` Crossroads baseline used two muted Direct IP instances. During 
 
 `rc-3ae5434` batches stock jammer transforms in C++. Each 1,024-read comparison took 4 to 6 ms natively and 40 to 110 ms in Lua. All nine pose values matched for both seats in Crossroads and Black Lake, and mismatched world addresses were rejected. On the same two muted Direct IP launches, the party accepted and turned in both Simmi quests with matching journals and shared payouts. Crossroads weather travel, critters, mushrooms, and stock canister state and cue dispatch also passed. The largest jammer status sample was 1 ms. The largest overall Crossroads intervals were still 67 ms on host and 55 ms on guest, so frame pacing remains open. The test preserved the original saves.
 
+`rc-47b0a75` releases the in-process bridge lock before copying status and command replies. Pose and footstep readers can retry on their next update when the bridge is busy. A standalone C++ test held the lock while checking that behavior, retained queued poses, and verified that concurrently copied status data matched its revision. The first two muted launches passed lean projection and release, footstep audio in both directions, prop carry and impacts, and Crossroads weather travel. The guest's stock lean key input was inconclusive. Food initially reached a guest marked downed or respawning after the impact fixture. A second pair passed both checks using separate campaigns in the same processes. Both runs preserved the original saves. The longest Crossroads intervals were 79 ms on host and 59 ms on guest, so overall frame pacing remains open.
+
 ## `rc-1799e4b` playtest
 
 | Area | Two-PC observation |

@@ -6535,6 +6535,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     shot_view_campaign = "tutorial_dock_shot_view" if tutorial_dock_pursuit else weapon_campaign
     dock_world_checks = stock_bandage_revisit or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_dock_gate
     prop_campaign = "tutorial_dock" if dock_world_checks else "observatory"
+    if prop_campaign == "observatory" and (stock_food or stock_cooked_meal):
+        # The impact and consumable fixtures both alter health and recovery state.
+        prop_campaign = "observatory_prop_impacts"
     stock_radio_media = stock_warehouse_switch and all(
         next((game / "SilverFish/Content/Music/Radio").glob("*.wav"), None) for game in games)
     if resident_held_queue:
@@ -6546,6 +6549,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                          "tutorial_dock_retaliation" if tutorial_dock_retaliation else
                          "stock_grounded_gait" if tutorial_dock_gait else "tutorial_dock_combat")
     for enabled, campaign, name, check in (
+        (stock_avatar_lean, "observatory", "stock_avatar_lean", check_lean),
+        (stock_footsteps, "observatory", "stock_footsteps", check_footsteps),
         (stock_campfire, "observatory", "stock_campfire", verify_resident_campfire),
         (stock_npc_override and not resident_weapon_cues, "observatory", "stock_npc_override", verify_resident_npc_override),
         (stock_board_offers, "observatory", "stock_board_offers", verify_resident_board_offers),
@@ -6558,8 +6563,6 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_melee_edges, "observatory", "stock_melee_edges", verify_stock_melee_edges_only),
         (stock_avatar_tail, "observatory", "stock_avatar_tail", verify_stock_avatar_tail),
         (stock_avatar_binoculars, "observatory", "stock_avatar_binoculars", verify_stock_avatar_binoculars),
-        (stock_avatar_lean, "observatory", "stock_avatar_lean", check_lean),
-        (stock_footsteps, "observatory", "stock_footsteps", check_footsteps),
         (stock_interaction_feedback, "observatory", "stock_lockpicks", verify_stock_lockpicks),
         (stock_interaction_feedback, "observatory", "stock_observatory_tv", verify_observatory_tv),
         (stock_melee_family, "observatory", "stock_melee_family", verify_stock_melee_family),
