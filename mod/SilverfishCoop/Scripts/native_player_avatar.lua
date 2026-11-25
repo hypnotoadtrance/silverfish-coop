@@ -283,7 +283,11 @@ local function refresh_pose_when_hidden(entry)
 end
 
 local function apply_locomotion(entry, aim, outfit)
-    if swings[entry] then return end
+    local swing = swings[entry]
+    if swing then
+        if swing.parts == entry.weapon_parts then return end
+        swings[entry] = nil
+    end
     local pawn, body = entry.pawn, entry.body
     local movement = pawn.CharacterMovement
     local crouched = pawn.bIsCrouched == true
@@ -411,13 +415,20 @@ local function remove(entry)
     end
 end
 
+local function swing_body_ready(entry, world)
+    local pawn, body = entry.pawn, entry.body
+    return valid(pawn) and not pawn:IsActorBeingDestroyed() and not pawn.Dead
+        and same(pawn:GetWorld(), world) and valid(body) and not body:IsAnySimulatingPhysics()
+        and not (valid(entry.movement_mesh) and entry.movement_mesh:IsAnySimulatingPhysics())
+end
+
 function avatar.play_melee(world, id, kind, serial, duration, start_fraction)
     local name = melee_clips[kind]
     if not name then return end
     for _, entry in pairs(avatars) do
-        if entry.id == id and entry.status == "default_body" and valid(entry.pawn)
-            and entry.pawn:GetWorld():GetAddress() == world:GetAddress()
-            and valid(entry.body) and entry.weapon_parts and #entry.weapon_parts > 0 then
+        if entry.id == id and entry.status == "default_body" and entry.firearm_class == "-"
+            and not uses[entry] and valid(entry.weapon_parts and entry.weapon_parts[1])
+            and swing_body_ready(entry, world) then
             local clip = asset(animation_root .. name .. "." .. name)
             local mesh = entry.body.SkinnedAsset
             if not valid(clip) or not valid(clip.Skeleton) or not valid(mesh) or not valid(mesh.Skeleton)
@@ -433,10 +444,13 @@ function avatar.play_melee(world, id, kind, serial, duration, start_fraction)
             -- run on the observing player's replica.
             local first = start_fraction * length
             entry.body:SetPosition(first, false)
-            entry.pose_animation, entry.pose_mesh = name, mesh:GetAddress()
+            entry.gait_blend, entry.pose_request, entry.pose_transition = nil, nil, nil
+            entry.pose_animation, entry.pose_mesh, entry.pose_asset = name, mesh:GetAddress(), clip:GetAddress()
+            entry.pose_is_blend = nil
             local hand = FName("Weapon_Socket01", EFindName.FNAME_Find)
             local position = entry.body:GetSocketTransform(hand, 2).Translation
             local swing = {serial = serial, clip = name, world = world:GetAddress(), start = clock:GetRealTimeSeconds(world),
+                parts = entry.weapon_parts, body = entry.body,
                 first = first, length = length, duration = duration, hand = hand,
                 x = position.X, y = position.Y, z = position.Z, peak = 0}
             swings[entry], entry.last_melee = swing, swing
@@ -453,17 +467,21 @@ function avatar.animate_melee(get_world)
     if not valid(clock) then return end
     local now, scope = clock:GetRealTimeSeconds(world), world:GetAddress()
     for entry, swing in pairs(swings) do
-        local mesh = valid(entry.body) and entry.body.SkinnedAsset
-        if swing.world ~= scope or not valid(mesh) or mesh:GetAddress() ~= entry.pose_mesh
-            or now - swing.start >= swing.duration then
+        if swing.world ~= scope or not same(swing.body, entry.body) or not swing_body_ready(entry, world) then
             swings[entry] = nil
-            restore_locomotion(entry)
         else
-            local position = entry.body:GetSocketTransform(swing.hand, 2).Translation
-            swing.peak = math.max(swing.peak,
-                math.sqrt((position.X - swing.x)^2 + (position.Y - swing.y)^2 + (position.Z - swing.z)^2))
-            local fraction = math.max(0, now - swing.start) / swing.duration
-            entry.body:SetPosition(swing.first + fraction * (swing.length - swing.first), false)
+            local mesh = entry.body.SkinnedAsset
+            if swing.parts ~= entry.weapon_parts or not valid(mesh)
+                or mesh:GetAddress() ~= entry.pose_mesh or now - swing.start >= swing.duration then
+                swings[entry] = nil
+                restore_locomotion(entry)
+            else
+                local position = entry.body:GetSocketTransform(swing.hand, 2).Translation
+                swing.peak = math.max(swing.peak,
+                    math.sqrt((position.X - swing.x)^2 + (position.Y - swing.y)^2 + (position.Z - swing.z)^2))
+                local fraction = math.max(0, now - swing.start) / swing.duration
+                entry.body:SetPosition(swing.first + fraction * (swing.length - swing.first), false)
+            end
         end
     end
 end
