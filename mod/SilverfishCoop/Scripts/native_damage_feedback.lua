@@ -247,11 +247,20 @@ local function show_psyche(state, pawn, amount)
     return true
 end
 
+local function overlay_matches(actor, pawn, direction, amount)
+    return same(actor.Player, pawn) and valid(actor.PostProcess_FX) and actor.PostProcess_FX.bEnabled == true
+        and actor.Ammount == amount and actor.HitDirection.X == direction.X
+        and actor.HitDirection.Y == direction.Y and actor.HitDirection.Z == direction.Z
+end
+
 local function show_overlay(state, pawn, direction, amount)
     if active_overlay and same(active_overlay.world, state.world) and same(active_overlay.pawn, pawn)
         and valid(active_overlay.actor) and not active_overlay.actor:IsActorBeingDestroyed() then
-        active_overlay.actor:Reset(direction, amount)
-        return true
+        local actor = active_overlay.actor
+        actor:Reset(direction, amount)
+        if valid(actor) and overlay_matches(actor, pawn, direction, amount) then return true end
+        if valid(actor) and not actor:IsActorBeingDestroyed() then actor:K2_DestroyActor() end
+        active_overlay = nil
     end
     local statics, class = StaticFindObject(statics_path), StaticFindObject(damage_path)
     if not valid(class) then
@@ -268,8 +277,7 @@ local function show_overlay(state, pawn, direction, amount)
     overlay_controller = state.controller
     local ok, finished = pcall(statics.FinishSpawningActor, statics, actor, transform, 0)
     overlay_controller = nil
-    if not ok or not same(finished, actor) or not same(actor.Player, pawn) or not valid(actor.PostProcess_FX)
-        or actor.PostProcess_FX.bEnabled ~= true then
+    if not ok or not same(finished, actor) or not overlay_matches(actor, pawn, direction, amount) then
         actor:K2_DestroyActor()
         return false
     end

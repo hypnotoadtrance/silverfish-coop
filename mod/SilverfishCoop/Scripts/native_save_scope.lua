@@ -121,9 +121,10 @@ end
 function scope.personal_flags(save)
     if not valid(save) or not save.Flags then return end
     local flags = save.Flags
-    local fatigue, intox = FName("Player_Fatigue"), FName("Player_Intox")
+    local fatigue, intox, sickness = FName("Player_Fatigue"), FName("Player_Intox"), FName("Sickness")
     return flags:Contains(fatigue) and flags:Find(fatigue):get() or 0,
-        flags:Contains(intox) and flags:Find(intox):get() or 0
+        flags:Contains(intox) and flags:Find(intox):get() or 0,
+        flags:Contains(sickness) and flags:Find(sickness):get() or 0
 end
 
 function scope.guest_vitals(state, phase)

@@ -4291,16 +4291,17 @@ async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
     burst_host_before = await sample(host)
     burst_started = time.time()
     burst_health = list(map(float, (await command(host, "burst-peer")).split(",")))
-    burst_guest = await wait_for(guest, lambda hit: hit["overlays"] > 0 and hit["hurt_voices"] > 0)
+    burst_guest = await wait_for(guest, lambda hit: hit["burn_hits"] > 0 and hit["hurt_voices"] > 0)
     burst_host = await sample(host)
     burst_audio = await asyncio.gather(command(host, "burst-audio"), command(guest, "burst-audio"))
     assert burst_audio == ["0,1", "1,0"], burst_audio
-    assert burst_guest["overlays"] == burst_guest["burn_hits"] == burst_guest["hurt_voices"] == 1, burst_guest
+    assert burst_guest["burn_hits"] == burst_guest["hurt_voices"] == 1, burst_guest
     assert burst_host["overlays"] == burst_host["burn_hits"] == burst_host["hurt_voices"] == 0, burst_host
     assert burst_host["muted_remote_burn_hits"] == 1 and burst_host["local_health"] >= burst_host_before["local_health"], burst_host
     burst_cues = [entry for entry in await resident_events(guest_run, guest_frame)
                   if entry["event"] == "native_guest_hurt_played" and entry["time_unix"] >= burst_started]
-    assert len(burst_cues) == 1 and burst_cues[0]["sound_mask"] == 6, burst_cues
+    assert len(burst_cues) == 1 and burst_cues[0]["sound_mask"] == 6 and burst_cues[0]["damage"] == 8, burst_cues
+    assert burst_cues[0]["hit_direction"] == [-15, 0, 0], burst_cues
     assert campaign_save_hashes(host.campaign) == checkpoint, "Campfire damage triggered an early save"
     return {"resident_stock_voices": voices, "resident_campfire": {"guest_authority_damage": remote_hit, "host_observer": host_observed,
                                   "guest_feedback": guest_heard, "guest_feedback_events": received,

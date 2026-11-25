@@ -142,7 +142,7 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.command.await_args_list, [psychic, physical, psychic])
         self.assertEqual(control.event.call_args_list, [
             call("native_guest_hurt_unavailable", reason="overlay unavailable"),
-            call("native_guest_hurt_played", serial=4, damage=12, sound_mask=6),
+            call("native_guest_hurt_played", serial=4, damage=12, sound_mask=6, hit_direction=[39, -30, 8]),
         ])
 
     async def test_glass_thread_snap_requires_stock_geometry_and_plays_once(self):

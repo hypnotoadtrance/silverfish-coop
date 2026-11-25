@@ -3269,12 +3269,16 @@ class Bridge:
                                                "location": [_finite(axis) for axis in fields[4:7]],
                                                "controller": fields[7],
                                                "max_health": _finite(fields[8]) if len(fields) == 9 else None}
-                elif (fields[0] == "native-guest-vitals" and len(fields) in (4, 5, 7)
+                elif (fields[0] == "native-guest-vitals" and len(fields) in (4, 5, 7, 8)
                       and data.get("state") in ("hosting", "connected") and fields[1].startswith("Player_FP_C ")):
                     vitals = dict(zip(("food", "regen", "stim"), map(_finite, fields[2:5])))
                     for key, value in zip(("fatigue", "intox"), fields[5:7]):
                         if value.isascii() and value.isdecimal() and len(value) <= 3 and int(value) <= 100:
                             vitals[key] = int(value)
+                    if len(fields) == 8 and re.fullmatch(r"-?[0-9]{1,10}", fields[7]):
+                        sickness = int(fields[7])
+                        if -2**31 <= sickness < 2**31:
+                            vitals["sickness"] = sickness
                     data.setdefault("native_guest_vitals", {})[fields[1]] = vitals
                 elif fields[0] == "native-player-avatar" and len(fields) in (5, 8, 10, 11, 14):
                     area, pawn, status, diagnostic = fields[1:5]

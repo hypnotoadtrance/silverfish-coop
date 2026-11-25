@@ -2,6 +2,19 @@
 
 Project Silverfish Co-op is a proof of concept under active development. This list summarizes reports from release-candidate playtests. Check the notes for the specific ZIP you installed. Fixes verified in development can still need a live two-PC retest. [Release notes](https://github.com/hypnotoadtrance/silverfish-coop/releases)
 
+## `rc-161145a` playtest
+
+| Area | Two-PC observation |
+| --- | --- |
+| Live Frog | The guest picked up a frog. Both Use in the stock context menu and dragging it onto their character failed to consume it. The stock frog's infection effect excluded it from the general guest consumable path. |
+| Shotgun wall decals | The host saw the wall impacts and spread from the guest's suppressed shotgun. The firing guest reported no visible decals. |
+| Intro metal gate | The guest saw the open and closed positions, with an instant change between them. |
+| Guest melee impacts | The host heard the guest's melee hits. The guest reported missing the impact sound and the effect on physics objects. |
+| Candle extinguish | The guest extinguished a lit candle. The host still saw it burning. |
+| Shared cash pickup popup | The party balance updated correctly. Only the player who picked up the cash saw the stock receipt popup. |
+| Resting with Insomnia | The host pressed Interact at a bed with the Insomnia perk. The clock stayed at the same time of day. |
+| Radio | The guest heard the radio after the host switched it on. |
+
 ## Being worked on
 
 | Area | Known issue |

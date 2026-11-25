@@ -37,6 +37,9 @@ def _vital_values(frame, maximum):
         value = frame.get(field)
         if type(value) is int and 0 <= value <= 100:
             values[field] = value
+    sickness = frame.get("sickness")
+    if type(sickness) is int and -2**31 <= sickness < 2**31:
+        values["sickness"] = sickness
     return values
 
 
@@ -181,7 +184,9 @@ class GuestView:
                 and (current is None or _matches_vital(current, health)) and current_maximum == maximum
                 and all(_matches_vital(current_vitals.get(field), value) for field, value in vitals.items())):
             return
-        if "fatigue" in vitals or "intox" in vitals:
+        if "sickness" in vitals:
+            fields = ("food", "regen", "stim", "fatigue", "intox", "sickness")
+        elif "fatigue" in vitals or "intox" in vitals:
             fields = ("food", "regen", "stim", "fatigue", "intox")
         else:
             fields = ("food", "regen", "stim") if "stim" in vitals else ("food", "regen") if vitals else ()

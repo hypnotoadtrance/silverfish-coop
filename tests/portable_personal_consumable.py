@@ -68,13 +68,15 @@ async def verify_stock_personal_consumable(host, guest, pawn, probe):
     starting_host = await inventory(host_run)
     seeded_at = time.time()
     weta, spare, mre = (await command(host, "seed-personal-compatibility")).split(";")
-    assert len({weta, spare, mre}) == 3 and all(map(valid_guid, (weta, spare, mre)))
+    frogs = (await command(host, "seed-frogs")).split(";")
+    assert len({weta, spare, mre, *frogs}) == 5 and all(map(valid_guid, (weta, spare, mre, *frogs)))
     baseline, native_guest = (await command(host, "host-medical-vitals")).split(";")
     assert float(native_guest.split(",")[1]) == 110
     items = await inventory(guest_run)
     assert all((items[guid]["class_path"], items[guid]["source"], items[guid]["quantity"]) == (LIVE_WETA, "backpack", 1)
                for guid in (weta, spare))
     assert items[mre]["class_path"] == native_guest_consumable.MRE_CLASS and items[mre]["quantity"] == 1
+    assert all(items[guid]["class_path"] == LIVE_FROG and items[guid]["quantity"] == 1 for guid in frogs), items
 
     frame = await wait_resident_status(guest_run, lambda row: row.get("gameplay_fresh") and row.get("character_id"))
     async with asyncio.timeout(10):
@@ -127,7 +129,7 @@ async def verify_stock_personal_consumable(host, guest, pawn, probe):
     await stock_inventory_open(guest_run, False)
     return {"stock_personal_consumable": {
         "pawn": pawn, "character_id": frame["character_id"], "guid": spare, "remaining": 1, "food": food, "regen": regen,
-        "fatigue": fatigue, "intox": intox,
+        "fatigue": fatigue, "intox": intox, "frog_guids": frogs,
         "fallback": fallback, "ordinary_recipe": registered, "original_host_state_unchanged": True,
         "deferred_save": True,
     }}
@@ -158,7 +160,6 @@ async def verify_personal_consumable_reconnect(host, guest, proof, probe):
     remaining = await submit(run, "native-inventory-list")
     assert remaining["ok"] and all(row["guid"] != proof["guid"] for row in remaining["native_inventory"]["items"]), remaining
     assert campaign_save_hashes(host.campaign) == saves, "Stock drag caused an early checkpoint"
-    await stock_inventory_open(run, False)
     proof["stock_drag_after_reconnect"] = dragged
 
     assert LIVE_FROG not in native_guest_consumable.COMMANDS
@@ -171,18 +172,8 @@ async def verify_personal_consumable_reconnect(host, guest, proof, probe):
     canonical_before, detached_before = (await command(host, "host-medical-vitals")).split(";")
     previous_sickness = sickness(detached_before)
     previous_food = dragged["vitals"]["food"]
-    frogs = (await command(host, "seed-frogs")).split(";")
-    assert len(set(frogs)) == 2 and all(map(valid_guid, frogs)), frogs
-    async with asyncio.timeout(10):
-        while True:
-            page = await submit(run, "native-inventory-list")
-            rows = {row["guid"]: row["class_path"] for row in page.get("native_inventory", {}).get("items", ())}
-            if all(rows.get(guid) == LIVE_FROG for guid in frogs):
-                break
-            await asyncio.sleep(.1)
-
     results = {}
-    for action, guid in zip(("context", "drag"), frogs, strict=True):
+    for action, guid in zip(("context", "drag"), proof["frog_guids"], strict=True):
         used = await use_stock_item(run, frame, guid, FALLBACK_RECEIPT, drag=action == "drag")
         assert (used["class_path"], used["quantity_before"], used["quantity_after"]) == (LIVE_FROG, 1, 0), used
         fed, sick = used["vitals"]["food"], used["vitals"]["sickness"]

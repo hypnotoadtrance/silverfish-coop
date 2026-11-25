@@ -133,6 +133,13 @@ class GameplayStatusTests(unittest.TestCase):
         self.assertEqual(parsed["pawns"]["local"]["health"], 120)
         self.assertNotIn("native_guest_vitals", bridge._parse_status(header.format("ready") + rows))
 
+        extended = f"native-guest-vitals\t{pawn}\t54.2\t210.75\t0\t0\t0\t3\n"
+        parsed = bridge._parse_status(header.format("connected") + extended)
+        self.assertEqual(parsed["native_guest_vitals"][pawn]["sickness"], 3)
+        overflow = extended.replace("\t3\n", "\t2147483648\n")
+        parsed = bridge._parse_status(header.format("connected") + overflow)
+        self.assertNotIn("sickness", parsed["native_guest_vitals"][pawn])
+
     def test_explosive_drum_status_accepts_authored_alias_and_keeps_old_blast_counts(self):
         bridge = runtime.Bridge(Path("unused"), None)
         area = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"

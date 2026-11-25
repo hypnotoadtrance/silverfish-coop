@@ -82,5 +82,6 @@ class Playback:
             if message in {"guest hurt feedback played", "guest hurt feedback already played"}:
                 self.last[psyche] = serial
             if message == "guest hurt feedback played":
-                control.event("native_guest_hurt_played", serial=serial, damage=amount, sound_mask=mask)
+                control.event("native_guest_hurt_played", serial=serial, damage=amount, sound_mask=mask,
+                              hit_direction=[x, y, z])
         return game

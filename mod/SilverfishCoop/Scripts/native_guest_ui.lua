@@ -374,15 +374,16 @@ local function project_health(fields, state, phase)
     local area, session, epoch, token, name = fields[3], fields[4], fields[5], fields[6], fields[7]
     local health, maximum = tonumber(fields[8]), tonumber(fields[9])
     local food, regen, stim = tonumber(fields[10]), tonumber(fields[11]), tonumber(fields[12])
-    local fatigue, intox = math.tointeger(fields[13]), math.tointeger(fields[14])
-    if (#fields ~= 9 and #fields ~= 11 and #fields ~= 12 and #fields ~= 14)
+    local fatigue, intox, sickness = math.tointeger(fields[13]), math.tointeger(fields[14]), math.tointeger(fields[15])
+    if (#fields ~= 9 and #fields ~= 11 and #fields ~= 12 and #fields ~= 14 and #fields ~= 15)
         or phase ~= "connected" or state.map ~= area or scope.selected() ~= token
         or not health or not maximum or not (1 <= maximum and maximum <= 1000000 and 0 <= health and health <= maximum)
         or #fields >= 11 and ((fields[10] ~= "-" and not (food and 0 <= food and food <= 200))
             or (fields[11] ~= "-" and not (regen and 0 <= regen and regen <= maximum)))
         or #fields >= 12 and fields[12] ~= "-" and not (stim and 0 <= stim and stim <= 1000000)
-        or #fields == 14 and ((fields[13] ~= "-" and not (fatigue and 0 <= fatigue and fatigue <= 100))
+        or #fields >= 14 and ((fields[13] ~= "-" and not (fatigue and 0 <= fatigue and fatigue <= 100))
             or (fields[14] ~= "-" and not (intox and 0 <= intox and intox <= 100)))
+        or #fields == 15 and fields[15] ~= "-" and not (sickness and -2^31 <= sickness and sickness < 2^31)
         or type(SilverfishReadNativeClientDamageScope) ~= "function" then
         error("The authenticated stock health view is unavailable", 0)
     end
@@ -395,12 +396,14 @@ local function project_health(fields, state, phase)
     if not valid(save) or owner ~= token or bound:GetAddress() ~= pawn:GetAddress() then
         error("The isolated stock health view is unavailable", 0)
     end
-    local old_fatigue, old_intox = scope.personal_flags(save)
+    local old_fatigue, old_intox, old_sickness = scope.personal_flags(save)
     local fatigue_changed, intox_changed = fatigue ~= nil and fatigue ~= old_fatigue, intox ~= nil and intox ~= old_intox
+    local sickness_changed = sickness ~= nil and sickness ~= old_sickness
     if fatigue_changed then save.Flags:Add(FName("Player_Fatigue"), fatigue) end
     if intox_changed then save.Flags:Add(FName("Player_Intox"), intox) end
+    if sickness_changed then save.Flags:Add(FName("Sickness"), sickness) end
     if intox ~= nil and pawn.Intoxication ~= intox then pawn.Intoxication = intox end
-    local current_fatigue, current_intox = scope.personal_flags(save)
+    local current_fatigue, current_intox, current_sickness = scope.personal_flags(save)
     if not matches_health(pawn.MaxHealth, maximum) then pawn.MaxHealth = maximum end
     if not matches_health(save.PlayerHealth, health) then save.PlayerHealth = health end
     local food_changed = food ~= nil and not matches_health(save.PlayerFood, food)
@@ -412,10 +415,11 @@ local function project_health(fields, state, phase)
         or regen ~= nil and not matches_health(save.PlayerRegen, regen)
         or stim ~= nil and not matches_health(save.PlayerStim, stim)
         or fatigue ~= nil and current_fatigue ~= fatigue
+        or sickness ~= nil and current_sickness ~= sickness
         or intox ~= nil and (current_intox ~= intox or pawn.Intoxication ~= intox) then
         error("The stock health view failed readback", 0)
     end
-    if food_changed or fatigue_changed or intox_changed then
+    if food_changed or fatigue_changed or intox_changed or sickness_changed then
         local info = stock_player_info(state)
         if valid(info) then info:UpdateStats() end
     end
