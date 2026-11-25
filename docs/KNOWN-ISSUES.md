@@ -60,6 +60,8 @@ Development build `rc-cc42674` resolves the crate by its authored path and check
 
 Development build `rc-0d64597` reuses unchanged ground-fire status and skips the engine clock lookup on the host. A Lua test exercised new fields, particle removal, and expiration. The host's median ground-fire status read was 0.005â€“0.006 ms in two short Crossroads samples, compared with 0.012 ms on `rc-5554248`. The same muted Direct IP pair passed weather travel, frog pickup, the Lingering Teleport, propane movement, and fuel drum ignition, destruction, and blast cue dispatch. The guest received one ignition call. The renderer was disabled, and neither continuous fire nor blast particles were observed. The original saves were preserved. The largest sampled host interval while the guest walked was 16 ms. The guest reached 30 ms, with 10 ms spent in zone synchronization during that interval.
 
+`rc-469f5b6` reuses a guest's verified transition walls for up to half a second. World or pawn changes and invalid walls trigger an immediate refresh. In a short Crossroads walking sample, the guest refreshed wall sources six times during 26 zone updates. Median zone synchronization took 0.062 ms, compared with 0.238 ms on `rc-0d64597`. One muted Direct IP pair passed travel and weather, stock door toggles, the Lingering Teleport, and fall recovery and revival for both players. The original saves were preserved. The largest guest interval during the short Crossroads walking sample was 10 ms, compared with 30 ms in the previous pair. Both are headless samples, so rendered frame pacing and Steam latency remain open.
+
 ## `rc-6690ff4` playtest
 
 | Area | Two-PC observation |
