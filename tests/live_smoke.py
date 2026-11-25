@@ -2287,7 +2287,7 @@ async def smoke():
                 note("authored_return_exit_uses_destination_marker", {
                     "map": expected_map, "entrance": "DB_CR", "host": returned["game"]["pawns"]["local"]["location"],
                 })
-        if args.rook_motion:
+        if args.rook_motion and args.native_guest:
             # The dream return runs stock rest. Take the restored pawn's
             # current health instead of the value from the earlier revive.
             restored = await wait(run, lambda state: state["game"].get("map") == expected_map
