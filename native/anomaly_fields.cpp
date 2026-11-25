@@ -52,7 +52,6 @@ namespace
     constexpr auto observer_class = STR("/Game/Classes/Anomalies/Observers_BP.Observers_BP_C");
     constexpr auto item_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto crossroads_world = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P");
-    constexpr auto rook_world = STR("/Game/Classes/Maps/Dreams/TheRook_P.TheRook_P");
     constexpr auto vortex_class = STR("/Game/Classes/Anomalies/VortexTrap_BP.VortexTrap_BP_C");
     constexpr auto roaming_teleport_class = STR("/Game/Classes/Anomalies/Wandering_Teleport_BP.Wandering_Teleport_BP_C");
     constexpr auto lingering_class = STR("/Game/Classes/Anomalies/Lingering_Teleport_BP1.Lingering_Teleport_BP1_C");
@@ -72,10 +71,11 @@ namespace
         STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_FuelDrum.Prop_FuelDrum_C"),
         standing_tank_class,
     };
-    constexpr std::array<std::wstring_view, 6> replicated_classes{
+    constexpr std::array<std::wstring_view, 7> replicated_classes{
         STR("/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C"),
         STR("/Game/Classes/Anomalies/BurnerTrap_BP.BurnerTrap_BP_C"),
         vortex_class,
+        gravity_class,
         electrode_class,
         roaming_teleport_class,
         glass_web_class,
@@ -473,25 +473,21 @@ namespace
         auto* entry = roster ? U::CastField<U::FClassProperty>(roster->GetInner()) : nullptr;
         if (!entry) return false;
         U::FScriptArrayHelper classes(roster, roster->ContainerPtrToValuePtr<void>(field));
-        if (classes.Num() == 2 && world && world->GetPathName() == rook_world &&
-            field->HasAnyFlags(U::RF_WasLoaded) && field->GetOuterPrivate() == object(world, STR("PersistentLevel")))
+        if (classes.Num() == 0) return false;
+        // Only suppress a guest's roll if the host publishes every possible result.
+        for (int index = 0; index < classes.Num(); ++index)
         {
-            auto* first = entry->GetObjectPropertyValue(classes.GetRawPtr(0));
-            auto* second = entry->GetObjectPropertyValue(classes.GetRawPtr(1));
-            if (!first || !second) return false;
-            const auto a = first->GetPathName(), b = second->GetPathName();
-            return (a == gravity_class && b == vortex_class) || (a == vortex_class && b == gravity_class);
+            auto* type = entry->GetObjectPropertyValue(classes.GetRawPtr(index));
+            if (trap_class(type)) continue;
+            if (!type || !world || world->GetPathName() != crossroads_world) return false;
+            const auto name = type->GetFName();
+            if (name == pyrogeist && type->GetPathName() == pyrogeist_class) continue;
+            if (angler_replication && name == angler && type->GetPathName() == angler_class) continue;
+            if (observer_enabled && name == observer && type->GetPathName() == observer_class) continue;
+            if (shadow_replication && name == shadow && type->GetPathName() == shadow_class) continue;
+            return false;
         }
-        if (classes.Num() != 1) return false;
-        auto* type = entry->GetObjectPropertyValue(classes.GetRawPtr(0));
-        if (trap_class(type)) return true;
-        if (!type || !world || world->GetPathName() != crossroads_world) return false;
-        const auto name = type->GetFName();
-        if (name == gravity) return type->GetPathName() == gravity_class;
-        if (name == pyrogeist) return type->GetPathName() == pyrogeist_class;
-        if (angler_replication && name == angler) return type->GetPathName() == angler_class;
-        if (observer_enabled && name == observer) return type->GetPathName() == observer_class;
-        return shadow_replication && name == shadow && type->GetPathName() == shadow_class;
+        return true;
     }
 
     bool passive_directed_jet(U::UObject* actor, U::UObject* type, U::UObject* binding)
@@ -1007,17 +1003,12 @@ namespace
             // Keep arming, blast creation, and queued graph continuations on the host.
             if (type->GetPathName() != electrode_class) return;
         }
-        else if (gravity_well || pyrogeist_body || pyrogeist_jet || shadow_sphere || angler_lamp || observing)
+        else if (pyrogeist_body || pyrogeist_jet || shadow_sphere || angler_lamp || observing)
         {
-            if (!world) return;
-            const auto path = world->GetPathName();
-            if (path != crossroads_world)
-            {
-                auto* role = property<U::FByteProperty>(actor, STR("Role"));
-                if (!gravity_well || path != rook_world || !role || role->GetPropertyValueInContainer(actor) != 1) return;
-            }
+            if (!world || world->GetPathName() != crossroads_world) return;
         }
-        else if (!canister && !fixed && !roaming && (function->GetNumParms() != 6 || !trap_class(type))) return;
+        else if (!canister && !fixed && !roaming && !gravity_well &&
+                 (function->GetNumParms() != 6 || !trap_class(type))) return;
         if (!guest_world(world)) return;
 
         if (observed_world.Get() != world)

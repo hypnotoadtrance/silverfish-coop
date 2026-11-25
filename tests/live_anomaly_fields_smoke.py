@@ -17,9 +17,10 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from tools.silverfish.control import submit
-from tools.silverfish.travel import CROSSROADS, EAST_WING, LAB_E206
+from tools.silverfish.travel import CISTERN, CROSSROADS, EAST_WING, LAB_E206
 
 PLACED = {
+    "cistern-gravity": (CISTERN, "gravity", "GravityAnomaly_BP_C_1", 1),
     "lab-e206": (LAB_E206, "burner", "BurnerTrap_BP_C_1", 2),
     "perdition": ("/Game/Classes/Maps/Maps_Dungeons/Perdition_01_P", "starburst", "Starburst_BP_C_5", 5),
     "funnel": ("/Game/Classes/Maps/Maps_Dungeons/Funnel_01_P", "vortex", "VortexTrap_BP_C_9", 12),

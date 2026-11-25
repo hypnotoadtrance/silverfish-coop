@@ -17,12 +17,12 @@ local classes = {
     starburst = "/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C",
     burner = "/Game/Classes/Anomalies/BurnerTrap_BP.BurnerTrap_BP_C",
     vortex = "/Game/Classes/Anomalies/VortexTrap_BP.VortexTrap_BP_C",
+    gravity = "/Game/Classes/Anomalies/GravityAnomaly_BP.GravityAnomaly_BP_C",
     electrode = "/Game/Classes/Anomalies/Electrode_BP.Electrode_BP_C",
     ["wandering-teleport"] = "/Game/Classes/Anomalies/Wandering_Teleport_BP.Wandering_Teleport_BP_C",
     ["lingering-teleport"] = "/Game/Classes/Anomalies/Lingering_Teleport_BP1.Lingering_Teleport_BP1_C",
     ["glass-thread"] = "/Game/Classes/Anomalies/GlassThread_BP.GlassThread_BP_C",
 }
-local gravity = "BlueprintGeneratedClass /Game/Classes/Anomalies/GravityAnomaly_BP.GravityAnomaly_BP_C"
 local kinds = {}
 for kind, path in pairs(classes) do kinds["BlueprintGeneratedClass " .. path] = kind end
 local fire_jet = "BlueprintGeneratedClass /Game/Classes/Anomalies/Fire_Jet_BP.Fire_Jet_BP_C"
@@ -76,14 +76,12 @@ local function bind_wandering_effect(kind)
 end
 
 local function trap_kind(actor, class)
-    if class == gravity or class == pyrogeist.body or shadows.enabled and class == shadows.class
+    if class == pyrogeist.body or shadows.enabled and class == shadows.class
         or lamps.enabled and class == lamps.class or observers.enabled and class == observers.class then
         local at = actor:GetWorld()
         if not valid(at) then return end
         local name = at:GetFullName()
-        if class == gravity and name == "World " .. rook .. ".TheRook_P" then return "gravity" end
         if name == "World " .. crossroads .. ".CrossRoads_P" then
-            if class == gravity then return "gravity" end
             if class == pyrogeist.body then return "pyrogeist" end
             if class == observers.class then return "observer" end
             return class == shadows.class and "shadow-sphere" or "angler-lamp"
@@ -106,6 +104,15 @@ local function replica(actor)
     return valid(server) and same(driver.World, current) and same(server.Driver, driver)
 end
 
+local function placement(actor)
+    if type(SilverfishQualifyNativePlacedTrap) ~= "function" then return end
+    local path = actor:GetFullName():match("^%S+ (.+)$")
+    if path then
+        local placed, guest = SilverfishQualifyNativePlacedTrap(path)
+        if placed then return path, guest end
+    end
+end
+
 local function recover_family()
     local job = recovery
     if not job or not same(job.world, world) then
@@ -122,27 +129,25 @@ local function recover_family()
         if in_world(actor, world) then
             local address = actor:GetAddress()
             if not active[address] and not pending[address] then
-                local host = job.phase == "hosting" and actor:HasAuthority() and actor:ActorHasTag(FName("Anomaly"))
-                local guest = job.phase == "connected" and replica(actor)
-                if host or guest then
-                    local kind = trap_kind(actor, actor:GetClass():GetFullName())
-                    if kind and (job.rook or disables_replica_tick(kind)) then
-                        pending[address] = {actor = actor, kind = kind}
+                local kind = trap_kind(actor, actor:GetClass():GetFullName())
+                if kind and (job.rook or disables_replica_tick(kind)) then
+                    local placed, local_copy
+                    if kind == "gravity" then placed, local_copy = placement(actor) end
+                    local host = job.phase == "hosting" and actor:HasAuthority()
+                        and (placed or actor:ActorHasTag(FName("Anomaly")))
+                    local guest = job.phase == "connected" and (local_copy or replica(actor))
+                    if host or guest then
+                        if guest and kind == "gravity" then
+                            actor:SetActorEnableCollision(false)
+                            actor:SetActorTickEnabled(false)
+                        end
+                        pending[address] = {actor = actor, kind = kind, placed = placed}
                     end
                 end
             end
         end
     end
     job.index = job.index + 1
-end
-
-local function placement(actor)
-    if type(SilverfishQualifyNativePlacedTrap) ~= "function" then return end
-    local path = actor:GetFullName():match("^%S+ (.+)$")
-    if path then
-        local placed, guest = SilverfishQualifyNativePlacedTrap(path)
-        if placed then return path, guest end
-    end
 end
 
 local function vortex_sensor(actor)
@@ -487,6 +492,14 @@ function fields.command(args, state, phase)
                 if entry.placed == args[3] then trap, kind = entry.actor, entry.kind; break end
             end
         end
+        if kind == "gravity" and guest_probe and #args == 3 and headless and phase == "connected"
+            and in_world(trap, state.world) and not trap:GetActorEnableCollision() and not trap:IsActorTickEnabled() then
+            trap:ReceiveBeginPlay()
+            if trap:GetActorEnableCollision() or trap:IsActorTickEnabled() then
+                error("The guest Gravity Well resumed simulation", 0)
+            end
+            return "Stock placed Gravity Well initialization invoked"
+        end
         local trigger = in_world(trap, state.world) and (kind == "vortex" and vortex_sensor(trap)
             or kind == "wandering-teleport" and trap.Capsule or trap.Sphere)
         if #args ~= 3 or not headless or not valid(trigger) then
@@ -594,6 +607,8 @@ function fields.rows(state, phase, row)
             if lamps.enabled then names[#names + 1] = "AnglerLamp_BP_C" end
             if observers.enabled then names[#names + 1] = "Observers_BP_C" end
             recovery = {world = world, phase = phase, index = 1, names = names, pyrogeist = true}
+        else
+            recovery = {world = world, phase = phase, index = 1, names = {"GravityAnomaly_BP_C"}}
         end
     end
     if phase == "hosting" and type(SilverfishTakeNativeLingeringTeleport) == "function" then
