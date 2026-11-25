@@ -120,6 +120,17 @@ local function run(action)
         remote_offset = 0
         return "cleared"
     end
+    if action == "voice-character" then
+        local authority = local_pawn:HasAuthority()
+        local guest = authority and peer or local_pawn
+        local save = guest.Save
+        assert(valid(save) and (not authority or not same(save, local_pawn.Save)), "detached guest voice save unavailable")
+        local character = save.Character
+        character["VoxRef_97_E223354141E070B2E1F41F9E2CB7BD58"] = FName("Fem_02", EFindName.FNAME_Find)
+        character["Vox_Pitch_100_3439A01A4F568098E2FC93ADB75FE9D7"] = .94
+        guest:Compile_VoxSetup()
+        return "voice selected"
+    end
     if action == "voice-read" then
         assert(not failure, failure)
         return table.concat(voice_replays, "|")

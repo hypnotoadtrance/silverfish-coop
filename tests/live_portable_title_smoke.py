@@ -4077,6 +4077,7 @@ async def verify_resident_voices(host, guest, command):
         return local and remote and minimum <= math.dist(local, remote) <= maximum
 
     receipts = {}
+    assert await asyncio.gather(*(command(seat, "voice-character") for seat in (host, guest))) == ["voice selected"] * 2
     await move("voice-near")
     try:
         audible = await host.bridge.wait_for(lambda frame: at_distance(frame, 2800, 3300)
@@ -4085,6 +4086,8 @@ async def verify_resident_voices(host, guest, command):
         for sender, listener, role, kind in ((host, guest, "local", "hurt"), (guest, host, "guest", "cough")):
             profile = audible["native_voice_speakers"][audible["pawns"][role]["name"]]
             assert len(profile) == 3, profile
+            if role == "guest":
+                assert profile[0] == "Fem_02" and abs(profile[1] - .94) < .001, profile
             assert await asyncio.gather(*(command(seat, "voice-clear") for seat in (host, guest))) == ["cleared", "cleared"]
             await sender.bridge.command("native-voice-fixture", kind)
             async with asyncio.timeout(6):
@@ -4094,7 +4097,8 @@ async def verify_resident_voices(host, guest, command):
             assert await command(listener, "voice-read") == heard and not await command(sender, "voice-read")
             cue, gain, pitch, x, y, z = heard.split(",")
             point = [float(x), float(y), float(z)]
-            assert cue.startswith("SoundCue /Game/Assets/Sounds/CUEs/") and float(gain) == 2
+            asset = f"PV_{profile[0].replace('_', '')}_{kind.title()}_Cue"
+            assert cue == f"SoundCue /Game/Assets/Sounds/Voclas/Player_Vocals/{asset}.{asset}" and float(gain) == 2, heard
             assert abs(float(pitch) - profile[1]) < .001 and math.dist(point, profile[2]) < 35, (profile, heard)
             receipts[kind] = {"cue": cue, "gain": float(gain), "pitch": float(pitch), "origin": point,
                               "listener_distance_cm": math.dist(audible["pawns"]["local"]["location"],
