@@ -578,30 +578,51 @@ namespace
         return 4;
     }
 
+    struct MushroomChildren
+    {
+        const Unreal::FScriptMap* map;
+        Unreal::FObjectProperty* key;
+        Unreal::FStructProperty* value;
+        Unreal::FScriptMapLayout layout;
+    };
+
+    MushroomChildren mushroom_children(Unreal::UObject* patch, Unreal::UClass* item_base)
+    {
+        auto* property = field<Unreal::FMapProperty>(patch, STR("SpawnedShrooms"));
+        auto* key = property ? Unreal::CastField<Unreal::FObjectProperty>(property->GetKeyProp()) : nullptr;
+        auto* value = property ? Unreal::CastField<Unreal::FStructProperty>(property->GetValueProp()) : nullptr;
+        if (!item_base || !key || key->GetPropertyClass().Get() != item_base ||
+            key->GetOffset_Internal() != 0 || !value || value->GetSize() != sizeof(Guid) ||
+            value->GetStruct().Get() != find<Unreal::UScriptStruct>(guid_struct_path)) return {};
+        const auto layout = Unreal::FScriptMap::GetScriptLayout(
+            key->GetSize(), key->GetMinAlignment(), value->GetSize(), value->GetMinAlignment());
+        if (value->GetOffset_Internal() != layout.ValueOffset) return {};
+        const auto* map = property->ContainerPtrToValuePtr<Unreal::FScriptMap>(patch);
+        if (map->Num() < 0 || map->Num() > map->GetMaxIndex() || map->GetMaxIndex() > 256) return {};
+        return {map, key, value, layout};
+    }
+
+    Unreal::UObject* persistent_level(Unreal::UObject* world)
+    {
+        const auto* level = field<Unreal::FObjectProperty>(world, STR("PersistentLevel"));
+        return level ? level->GetObjectPropertyValue(level->ContainerPtrToValuePtr<void>(world)) : nullptr;
+    }
+
     Unreal::UObject* mushroom_source(const Owner& owner, const std::wstring& patch_path,
                                     const std::wstring& actor_path, const Guid& expected)
     {
         auto* patch = find<Unreal::UObject>(patch_path.c_str());
         auto* actor = find<Unreal::UObject>(actor_path.c_str());
-        auto* level = field<Unreal::FObjectProperty>(owner.world, STR("PersistentLevel"));
-        auto* persistent = level ? level->GetObjectPropertyValue(level->ContainerPtrToValuePtr<void>(owner.world)) : nullptr;
+        auto* persistent = persistent_level(owner.world);
+        auto* item_base = find<Unreal::UClass>(item_base_path);
         if (!live(patch) || !live(actor) || !live(persistent) || patch->GetPathName() != patch_path ||
             actor->GetPathName() != actor_path || patch->GetOuterPrivate() != persistent || actor->GetOuterPrivate() != persistent ||
             !patch->HasAnyFlags(Unreal::RF_WasLoaded) || actor->HasAnyFlags(Unreal::RF_WasLoaded) ||
             patch->GetClassPrivate() != find<Unreal::UClass>(mushroom_patch_path) ||
-            !actor->IsA(find<Unreal::UClass>(item_base_path))) return nullptr;
+            !item_base || !actor->IsA(item_base)) return nullptr;
 
-        auto* property = field<Unreal::FMapProperty>(patch, STR("SpawnedShrooms"));
-        auto* key = property ? Unreal::CastField<Unreal::FObjectProperty>(property->GetKeyProp()) : nullptr;
-        auto* value = property ? Unreal::CastField<Unreal::FStructProperty>(property->GetValueProp()) : nullptr;
-        if (!key || key->GetPropertyClass().Get() != find<Unreal::UClass>(item_base_path) ||
-            key->GetOffset_Internal() != 0 || !value || value->GetSize() != sizeof(Guid) ||
-            value->GetStruct().Get() != find<Unreal::UScriptStruct>(guid_struct_path)) return nullptr;
-        const auto layout = Unreal::FScriptMap::GetScriptLayout(
-            key->GetSize(), key->GetMinAlignment(), value->GetSize(), value->GetMinAlignment());
-        if (value->GetOffset_Internal() != layout.ValueOffset) return nullptr;
-        const auto* map = property->ContainerPtrToValuePtr<Unreal::FScriptMap>(patch);
-        if (map->Num() < 1 || map->Num() > map->GetMaxIndex() || map->GetMaxIndex() > 256) return nullptr;
+        const auto [map, key, value, layout] = mushroom_children(patch, item_base);
+        if (!map) return nullptr;
         for (int index = 0; index < map->GetMaxIndex(); ++index)
         {
             if (!map->IsValidIndex(index)) continue;
@@ -610,6 +631,85 @@ namespace
             if (expected == *value->ContainerPtrToValuePtr<Guid>(entry)) return actor;
         }
         return nullptr;
+    }
+
+    bool mushroom_authority(Unreal::UObject* actor)
+    {
+        auto* role = field<Unreal::FByteProperty>(actor, STR("Role"));
+        auto* destroying = field<Unreal::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
+        return role && role->GetPropertyValueInContainer(actor) == 3 &&
+            destroying && !destroying->GetPropertyValueInContainer(actor);
+    }
+
+    int sample_mushroom_patch(const Lua& lua)
+    {
+        const auto arguments = lua.get_stack_size();
+        if (!Unreal::IsInGameThreadRaw() || arguments < 3 || arguments > 3 + max_party * 3 ||
+            (arguments - 3) % 3 || !lua.is_integer(1) || !lua.is_string(2) || !lua.is_number(3)) return 0;
+        const auto world_address = static_cast<Address>(lua.get_integer());
+        const auto path = RC::to_generic_string(lua.get_string());
+        const auto radius_squared = lua.get_number();
+        if (!world_address || path.size() > 256 || !path.starts_with(STR("/Game/Classes/Maps/")) ||
+            !std::isfinite(radius_squared) || radius_squared <= 0) return 0;
+        std::array<std::array<double, 3>, max_party> roster{};
+        const auto count = (arguments - 3) / 3;
+        for (auto& player : std::span{roster}.first(count))
+        {
+            for (auto& coordinate : player)
+            {
+                if (!lua.is_number()) return 0;
+                coordinate = lua.get_number();
+                if (!std::isfinite(coordinate)) return 0;
+            }
+        }
+
+        auto* patch = find<Unreal::AActor>(path.c_str());
+        if (!live(patch) || patch->GetClassPrivate() != find<Unreal::UClass>(mushroom_patch_path) ||
+            patch->GetPathName() != path || !mushroom_authority(patch)) return 0;
+        auto* world = patch->GetWorld();
+        if (!live(world) || reinterpret_cast<Address>(world) != world_address) return 0;
+        auto* level = persistent_level(world);
+        if (!live(level) || patch->GetOuterPrivate() != level) return 0;
+        auto* item_base = find<Unreal::UClass>(item_base_path);
+        const auto [map, key, value, layout] = mushroom_children(patch, item_base);
+        if (!map || map->Num() > 128) return 0;
+
+        std::string rows;
+        for (int index = 0; index < map->GetMaxIndex(); ++index)
+        {
+            if (!map->IsValidIndex(index)) continue;
+            const auto* entry = map->GetData(index, layout);
+            auto* object = entry ? key->GetObjectPropertyValue(entry) : nullptr;
+            if (!live(object) || object->GetOuterPrivate() != level || !object->IsA(item_base) ||
+                !mushroom_authority(object)) continue;
+            auto* actor = static_cast<Unreal::AActor*>(object);
+            if (actor->GetWorld() != world) continue;
+            const auto& guid = *value->ContainerPtrToValuePtr<Guid>(entry);
+            // Stock regrowth can emit zero IDs. The existing Lua path pairs
+            // them with the saved rows before either copy may be published.
+            if (guid == Guid{}) return 0;
+            const auto point = actor->K2_GetActorLocation();
+            double distance = std::numeric_limits<double>::infinity();
+            for (const auto& position : std::span{roster}.first(count))
+            {
+                const auto dx = point.X() - position[0], dy = point.Y() - position[1], dz = point.Z() - position[2];
+                distance = std::min(distance, dx * dx + dy * dy + dz * dz);
+            }
+            if (distance > radius_squared) continue;
+            const auto item = RC::to_utf8_string(actor->GetClassPrivate()->GetPathName());
+            const auto name = RC::to_utf8_string(actor->GetPathName());
+            auto* ammo = field<Unreal::FIntProperty>(actor, STR("Ammo"));
+            if (!ammo || !item.starts_with("/Game/Classes/") || !name.starts_with("/Game/") ||
+                item.find_first_of("\r\n\t") != std::string::npos || name.find_first_of("\r\n\t") != std::string::npos)
+                continue;
+            const auto angle = actor->K2_GetActorRotation();
+            const auto scale = actor->GetActorScale3D();
+            rows += std::format("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", distance,
+                print_guid(guid), name, item, ammo->GetPropertyValueInContainer(actor), point.X(), point.Y(), point.Z(),
+                angle.GetPitch(), angle.GetYaw(), angle.GetRoll(), scale.X(), scale.Y(), scale.Z());
+        }
+        lua.set_string(rows);
+        return 1;
     }
 
     int capture_mushroom(const Lua& lua)
@@ -1120,6 +1220,7 @@ namespace silverfish::loot_escrow
         lua.register_function("SilverfishCaptureNativeEnemyLootEscrow", capture<true>);
         lua.register_function("SilverfishCaptureStockEnemyDrop", capture_stock_enemy_drop);
         lua.register_function("SilverfishCaptureNativeMushroom", capture_mushroom);
+        lua.register_function("SilverfishSampleNativeMushroomPatch", sample_mushroom_patch);
         lua.register_function("SilverfishClaimNativeEnemyLootEscrow", claim<true>);
     }
 }

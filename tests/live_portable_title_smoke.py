@@ -63,7 +63,7 @@ from portable_lightning import verify_stock_lightning
 from portable_storm import StockStormTrial
 from portable_stock_door import verify_stock_crossroads_door, verify_stock_dock_gate
 from portable_stock_shovel import verify_stock_buried_placements, verify_stock_shovel, verify_stock_shovel_reconnect
-from portable_mushrooms import verify_stock_mushrooms
+from portable_mushrooms import instrument_mushroom_sampler, verify_stock_mushrooms
 from portable_placed_item import placed_item_overlay, verify_stock_placed_item
 from portable_pickup_preview import pickup_preview_overlay, verified_drop_preview
 from portable_cash_popup import cash_pickup_overlay, verify_stock_cash_popup
@@ -7269,6 +7269,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableCashPopupProbe",
                                                      fixture="portable_cash_popup_probe.lua"))
         if stock_mushrooms:
+            proof["mushroom_sampler_overlays"] = [
+                probes.enter_context(portable_script_overlay(game, "native_mushrooms.lua", instrument_mushroom_sampler))
+                for game in games
+            ]
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableMushroomRegrowthProbe",
                                                  fixture="mushroom_regrowth_probe.lua"))
         if stock_lingering_teleport:

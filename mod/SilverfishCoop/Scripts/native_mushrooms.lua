@@ -159,16 +159,36 @@ end
 local function begin_sample(state, radius)
     local base = StaticFindObject(item_class)
     if not valid(base) then return end
-    local roster = {}
+    local roster, points = {}, {}
     for _, member in ipairs(state.pawns) do
         if valid(member.pawn) and member.pawn.Dead == false then
             roster[#roster + 1] = {X = member.x, Y = member.y, Z = member.z}
+            points[#points + 1], points[#points + 2], points[#points + 3] = member.x, member.y, member.z
         end
     end
-    return {state = state, base = base, roster = roster, radius_squared = radius^2, values = {}}
+    return {state = state, base = base, roster = roster, points = points, world_address = state.world:GetAddress(),
+        radius_squared = radius^2, values = {}}
 end
 
-local function sample_patch(search, path, patch)
+local function sample_native(search, path)
+    local scan = SilverfishSampleNativeMushroomPatch
+    if type(scan) ~= "function" then return false end
+    local rows = scan(search.world_address, path, search.radius_squared, table.unpack(search.points))
+    if type(rows) ~= "string" then return false end
+    for line in rows:gmatch("[^\n]+") do
+        local entry = {}
+        for value in line:gmatch("[^\t]+") do entry[#entry + 1] = value end
+        local actor = StaticFindObject(entry[3])
+        if valid(actor) then
+            entry[1], entry.actor = tonumber(entry[1]), actor
+            table.insert(entry, 2, path)
+            search.values[#search.values + 1] = entry
+        end
+    end
+    return true
+end
+
+local function sample_lua(search, path, patch)
     if not valid(patch) or patch:IsActorBeingDestroyed() then return end
 
     local function collect(child, guid)
@@ -200,6 +220,10 @@ local function sample_patch(search, path, patch)
     if #pending > 0 and assign_patch_ids(search.state, patch, pending, used) then
         for _, entry in ipairs(pending) do collect(entry.item, entry.hex) end
     end
+end
+
+local function sample_patch(search, path, patch)
+    if not sample_native(search, path) then sample_lua(search, path, patch) end
 end
 
 local function publish_sample(search)

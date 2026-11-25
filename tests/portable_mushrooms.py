@@ -1,6 +1,7 @@
 """Harvest stock Crossroads mushrooms in a running portable campaign."""
 
 import math
+from pathlib import Path
 
 from live_multi_smoke import campaign_save_hashes
 from live_native_mushrooms_smoke import stock_regrowth
@@ -10,6 +11,15 @@ from portable_weather_travel import enter_crossroads
 from tools.silverfish import native_mushrooms as mushrooms, native_world_loot as loot
 from tools.silverfish.control import submit
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
+
+
+def instrument_mushroom_sampler(source):
+    anchor = "function mushrooms.command(fields, state, phase)"
+    assert source.count(anchor) == 1
+    fixture = (Path(__file__).with_name("fixtures") / "mushroom_sampler_probe.lua").read_text(encoding="utf-8")
+    return source.replace(anchor, fixture + "\n" + anchor +
+                          '\n    if fields[2] == "native-mushroom-compare-fixture" then'
+                          '\n        return compare_mushroom_samplers(fields, state, phase)\n    end')
 
 
 async def verify_stock_mushrooms(host, guest, pawn):
@@ -41,6 +51,10 @@ async def verify_stock_mushrooms(host, guest, pawn):
     host_pick = next(iter(rows))
     guest_pick = next((key for key, row in rows.items() if key != host_pick and row["patch"] == rows[host_pick]["patch"]), None)
     assert guest_pick, f"No second mushroom near the first stock patch ({rows[host_pick]['patch']})"
+    comparison = await host.bridge.command("native-mushroom-compare-fixture", rows[host_pick]["patch"], timeout=8)
+    children, reads, native_ms, lua_ms = comparison["ack"]["message"].removeprefix("mushroom samplers ").split()
+    sampler = {"children_matched": int(children), "reads_per_path": int(reads),
+               "native_ms": float(native_ms), "lua_ms": float(lua_ms), "different_world_refused": True}
 
     async def host_fixture(action, key, target):
         source = rows[key]
@@ -90,4 +104,5 @@ async def verify_stock_mushrooms(host, guest, pawn):
                                "guest_stock_spawn_suppression": joined["game"][mushrooms.SUPPRESSION],
                                "guest_local_pawn": joined["game"]["pawns"]["local"]["name"],
                                "both_removed_for_both_players": True, "stock_regrowth": growth,
+                               "native_sampler_comparison": sampler,
                                "checkpoint_unchanged": True}}
