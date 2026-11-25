@@ -6,6 +6,7 @@ import time
 
 from live_multi_smoke import campaign_save_hashes
 from portable_guest_world_start import resident_events, wait_resident_status
+from portable_pickup_preview import verified_drop_preview
 from tools.silverfish import (
     native_board_contract,
     native_computer_board as board,
@@ -321,10 +322,12 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
             guest_item, = sealed_packages(await stock_inventory(guest_run, guest=True))
             assert guest_item["guid"] == host_item["guid"], (host_item, guest_item)
             assert not sealed_packages(await stock_inventory(host_run))
+            preview = await verified_drop_preview(guest, shared)
             assert campaign_save_hashes(host.campaign) == checkpoint, "Dropping or reclaiming the package wrote a save"
             return {"stock_missing_contact_host_dig": {**result, "package": package, "custody": custody,
                         "world_actors_before_pickup": raw_packages, "host_package": host_item,
-                        "guest_package": guest_item, "shared_drop": drop, "redrop_checkpoint_unchanged": True}}
+                        "guest_package": guest_item, "shared_drop": drop, "pickup_preview": preview,
+                        "redrop_checkpoint_unchanged": True}}
         press = await submit(guest_run, native_world_loot.FIXTURE, target=identity)
         if not press["ok"]:
             sight = await observe(guest, "sight", replica["actor"].split(" ", 1)[1])

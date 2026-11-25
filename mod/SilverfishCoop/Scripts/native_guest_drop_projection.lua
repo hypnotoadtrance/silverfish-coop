@@ -97,14 +97,16 @@ function projection.take_press(pawn)
     if not identifier(epoch) or not identifier(id) then return end
     local item = world_items[id]
     if item and item.epoch == epoch and same(item.pawn, pawn) then
-        local active, observed_epoch, observed_id, _, sequence = SilverfishReadNativeGuestDropProjection(item.slot)
+        local active, observed_epoch, observed_id, actor, sequence = SilverfishReadNativeGuestDropProjection(item.slot)
         if active and observed_epoch == epoch and observed_id == id and math.type(sequence) == "integer" and sequence > 0 then
-            return "world-loot:" .. epoch .. ":" .. id .. ":" .. tostring(sequence)
+            local qualified = drop_items.actor_path(item.class, item.map, maps[item.map], actor)
+            return "world-loot:" .. epoch .. ":" .. id .. ":" .. tostring(sequence), qualified and actor or nil
         end
         return
     end
     if current and same(pawn, current.pawn) and current.epoch == epoch and current.id == id then
-        return "stack-drop:" .. epoch .. ":" .. id
+        local actor = proof()
+        return "stack-drop:" .. epoch .. ":" .. id, actor
     end
 end
 

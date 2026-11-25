@@ -603,11 +603,11 @@ local arguments = {
 
 function pickup.command(fields, state, phase)
     local action = fields[2]
-    if action == "native-loose-pickup-cancel-preview" then
+    if action == "native-pickup-cancel-preview" then
         if phase ~= "connected" or #fields ~= 3 or not binding or binding.host
-            or not same(binding.world, state.world) then error("loose_pickup_preview_scope_unavailable", 0) end
+            or not same(binding.world, state.world) then error("pickup_preview_scope_unavailable", 0) end
         restore_preview(fields[3])
-        return "loose pickup preview released"
+        return "pickup preview released"
     end
     if action == "native-cistern-nfta-locker-fixture" then
         return stock_input_fixture.cistern_nfta_locker(fields, state, phase)
@@ -840,14 +840,16 @@ function pickup.command(fields, state, phase)
     return "authored loose pickup stock interaction intercepted"
 end
 
-function pickup.preview_input(pawn, target)
+function pickup.preview_input(pawn, target, projected_actor)
     if not binding or binding.host or not same(binding.pawn, pawn) or type(target) ~= "string"
         or previews[target] then return end
     local profile = binding.active and binding.active[target]
     local path = profile and profile.path
         or target:match("^loose:(/Game/Classes/Maps/[%w_/]+%.[%w_]+:PersistentLevel%.[%w_]+)$")
+        or projected_actor and projected_actor:match("^%S+ (/Game/[%w_./:%-]+)$")
     local actor = path and StaticFindObject(path)
-    if not valid(actor) or actor.bHidden or actor:IsActorBeingDestroyed()
+    if not valid(actor) or (projected_actor and actor:GetFullName() ~= projected_actor)
+        or actor.bHidden or actor:IsActorBeingDestroyed()
         or not same(actor:GetWorld(), binding.world) or not same(actor:GetOuter(), binding.world.PersistentLevel) then return end
     if not valid(mesh_class) then mesh_class = StaticFindObject("/Script/Engine.MeshComponent") end
     if not valid(mesh_class) then return end

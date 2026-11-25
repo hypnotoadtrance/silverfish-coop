@@ -64,6 +64,7 @@ from portable_stock_door import verify_stock_crossroads_door, verify_stock_dock_
 from portable_stock_shovel import verify_stock_shovel, verify_stock_shovel_reconnect
 from portable_mushrooms import verify_stock_mushrooms
 from portable_placed_item import placed_item_overlay, verify_stock_placed_item
+from portable_pickup_preview import pickup_preview_overlay, verified_drop_preview
 from portable_cash_popup import cash_pickup_overlay, verify_stock_cash_popup
 from portable_world_view_receipt import patch_world_view_receipts, verify_world_view_receipt
 from tools.silverfish.title_session import STATUS_FILE as TITLE_STATUS_FILE
@@ -2763,6 +2764,7 @@ async def verify_dock_enemy_drop(host: Seat, guest: Seat, arrival: dict) -> dict
     assert refused.get("error") == "stock_enemy_loot_already_claimed", refused
     assert campaign_save_hashes(host.campaign) == checkpoint, "Stock enemy drop pickup wrote the campaign before a save"
     return {"item": item["class_path"], "stock_source": item["source"], "inventory_guid": guid,
+            "pickup_preview": await verified_drop_preview(guest, identity),
             "duplicate": refused["error"], "checkpoint_unchanged": True}
 
 
@@ -6446,6 +6448,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["roaming_barter_overlays"] = [probes.enter_context(roaming_barter_overlay(game)) for game in games]
         if stock_critters:
             proof["stock_critter_overlays"] = [probes.enter_context(stock_critter_overlay(game)) for game in games]
+        projected_drops = stock_shovel_host_quest or tutorial_dock_pursuit
+        if stock_placed_item or projected_drops:
+            for game in games:
+                probes.enter_context(pickup_preview_overlay(game, portable_script_overlay,
+                                                           projected_drops=projected_drops))
         if stock_placed_item:
             proof["stock_placed_item_overlays"] = [
                 probes.enter_context(placed_item_overlay(game, portable_script_overlay)) for game in games

@@ -58,6 +58,22 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.gameplay, {"players": {}})
         self.assertEqual(client.gameplay_seen, 100.0)
 
+    async def test_refused_projected_pickups_release_only_their_local_preview(self):
+        client = self.guest(AsyncMock())
+        epoch, item, operation = "a" * 32, "b" * 32, "c" * 32
+        scope = ("session", epoch, OBSERVATORY, "guest pawn")
+        client.service_crate_interaction = AsyncMock()
+        client.stock_interaction_scope = Mock(return_value=scope)
+        client.apply_stock_interaction = AsyncMock(side_effect=ValueError("item_already_claimed"))
+        client.bridge.command = AsyncMock()
+        for target in (f"world-loot:{epoch}:{item}:2", f"stack-drop:{epoch}:{item}"):
+            with self.subTest(target=target):
+                client.bridge.command.reset_mock()
+                client.bridge.interactions.return_value = [(operation, target)]
+                await client.service_stock_interactions(scope)
+                client.bridge.command.assert_awaited_once_with("native-pickup-cancel-preview", target,
+                                                               timeout=.75, update_status=False)
+
     async def test_queued_stock_interactions_dispatch_before_delayed_flashlight_projection(self):
         session, epoch, operation = "a" * 32, "b" * 32, "c" * 32
         pawn = f"Player_FP_C {OBSERVATORY}.Observitory_P:PersistentLevel.Player_FP_C_0"

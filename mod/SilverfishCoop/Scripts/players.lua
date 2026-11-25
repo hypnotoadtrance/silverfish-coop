@@ -101,7 +101,7 @@ local function sync_guest_sprints(state, slots, phase)
     end
 end
 
-local function write_interaction(pawn, pickup_source, pressed_component)
+local function write_interaction(pawn, pickup_source, pressed_component, projected_actor)
     if not input_file or not local_player or desired[local_player.name] or not same(pawn, local_player.pawn)
         or not pawn:IsLocallyControlled() then return end
     local target = pickup_source or native_stock_door.focused_target(pawn, pressed_component)
@@ -112,7 +112,7 @@ local function write_interaction(pawn, pickup_source, pressed_component)
     local record = "interact\t" .. tostring(input_sequence) .. (target and "\t" .. target or "") .. "\n"
     if type(SilverfishEnqueueLocalBridgeInput) == "function" and SilverfishEnqueueLocalBridgeInput(record) then
         native_stock_door.preview_input(pawn, target)
-        if pickup_source then pcall(native_authored_pickup.preview_input, pawn, pickup_source) end
+        if pickup_source then pcall(native_authored_pickup.preview_input, pawn, pickup_source, projected_actor) end
         return target
     end
     local file = io.open(input_file, "ab")
@@ -132,8 +132,8 @@ local function drain_native_interact()
         if not source then break end
         write_interaction(pawn, source)
     end
-    local stack_drop = native_guest_drop_projection.take_press(pawn)
-    if stack_drop then write_interaction(pawn, stack_drop) end
+    local drop, projected_actor = native_guest_drop_projection.take_press(pawn)
+    if drop then write_interaction(pawn, drop, nil, projected_actor) end
     local valve = SilverfishTakeNativeSubwayValvePress
     if type(valve) == "function" and valve(address) then write_interaction(pawn, "subway-valve") end
     local lantern = SilverfishTakeNativeLanternPress
