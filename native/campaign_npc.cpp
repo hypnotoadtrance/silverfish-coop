@@ -771,20 +771,27 @@ namespace
             dynamic_stock_npc(actor);
     }
 
-    bool local_npc_weapon(U::UObject* weapon, U::UWorld* world)
+    bool local_npc_weapon(U::AActor* weapon, U::UWorld* world)
     {
         const auto* base = find<U::UClass>(npc_weapon_base);
-        return base && in_level(weapon, world) && weapon->IsA(base) &&
+        return base && live(weapon) && weapon->GetWorld() == world && weapon->IsA(base) &&
             !weapon->HasAnyFlags(U::RF_WasLoaded) && byte_field(weapon, STR("Role")) == 3 &&
-            bool_field(weapon, STR("bReplicates"), false) &&
-            bool_field(weapon, STR("HeldByPlayer"), false) && byte_field(weapon, STR("Item_RespawnMode")) == 0;
+            bool_field(weapon, STR("bReplicates"), false);
+    }
+
+    U::AActor* npc_weapon(U::AActor* npc, U::UWorld* world)
+    {
+        auto* weapon = U::Cast<U::AActor>(object(npc, STR("Weapon_Ranged")));
+        if (!local_npc_weapon(weapon, world) || object(weapon, STR("Owner")) != npc ||
+            object(weapon, STR("Instigator")) != npc) return nullptr;
+        auto* mount = object(object(weapon, STR("RootComponent")), STR("AttachParent"));
+        return !mount || mount->GetOuterPrivate() == npc ? weapon : nullptr;
     }
 
     void queue_retiring_weapon(U::AActor* npc, const Network& active)
     {
-        auto* weapon = object(npc, STR("Weapon_Ranged"));
-        if (!weapon || !local_npc_weapon(weapon, active.world) ||
-            object(weapon, STR("Owner")) != npc || object(weapon, STR("Instigator")) != npc ||
+        auto* weapon = npc_weapon(npc, active.world);
+        if (!weapon ||
             std::ranges::any_of(retiring_weapons, [weapon](const auto& row) { return row.weapon.Get() == weapon; })) return;
         retiring_weapons.push_back({weapon, npc, active.world, active.driver});
     }
@@ -795,7 +802,7 @@ namespace
         batch.swap(retiring_weapons);
         for (const auto& row : batch)
         {
-            auto* weapon = row.weapon.Get();
+            auto* weapon = U::Cast<U::AActor>(row.weapon.Get());
             if (!live(weapon)) continue;
             const auto active = network(static_cast<U::UWorld*>(row.world.Get()), true, true);
             if (active.seat != Seat::Client || active.driver != row.driver.Get() ||
@@ -808,7 +815,7 @@ namespace
                 (mount && mount->GetOuterPrivate() != npc)) continue;
             // Destruction can detach the stock gun or clear its owner before
             // this tick. Check its weak identity and any new owner first.
-            static_cast<U::AActor*>(weapon)->K2_DestroyActor();
+            weapon->K2_DestroyActor();
         }
     }
 
@@ -827,7 +834,7 @@ namespace
             const auto active = network(npc->GetWorld(), true, true);
             if (active.seat == Seat::Client)
             {
-                queue_retiring_weapon(npc, active);
+                if (auto* weapon = npc_weapon(npc, active.world)) weapon->K2_DestroyActor();
                 npc->K2_DestroyActor();
             }
             else if (active.seat == Seat::Host && (!bool_field(actor, STR("bReplicates"), true) ||

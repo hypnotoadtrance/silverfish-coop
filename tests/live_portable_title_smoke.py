@@ -2866,7 +2866,8 @@ async def verify_dock_npc_population(host: Seat, guest: Seat, command) -> dict:
                 while (observed := await command(guest, "dock-population-weapons")) != "empty":
                     await asyncio.sleep(.08)
         except TimeoutError as error:
-            raise AssertionError(f"Stock weapons outlived their NPCs on the guest: {observed}") from error
+            details = await command(guest, "dock-population-weapon-details")
+            raise AssertionError(f"Stock weapons outlived their NPCs on the guest: {observed}. {details}") from error
 
     try:
         local_points = await command(guest, "dock-population-spawn")

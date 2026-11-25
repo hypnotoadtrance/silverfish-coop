@@ -816,7 +816,7 @@ local function population_weapon(actor)
     local root = valid(weapon) and weapon.RootComponent
     local mount = valid(root) and root:GetAttachParent()
     assert(valid(weapon) and same(weapon:GetOwner(), actor) and same(weapon.Instigator, actor)
-        and valid(mount) and same(mount:GetOwner(), actor)
+        and valid(mount) and same(mount:GetOwner(), actor) and same(mount:GetOuter(), actor)
         and weapon:HasAuthority() and weapon.bReplicates == false and weapon.Item_RespawnMode == 0,
         "stock NPC did not equip a local rifle")
     return weapon
@@ -873,6 +873,20 @@ local function tracked_population_weapons(world)
     end
     table.sort(remaining)
     return #remaining > 0 and table.concat(remaining, ",") or "empty"
+end
+
+local function population_weapon_details()
+    local records = {}
+    for kind, weapon in pairs(population_weapons) do
+        if valid(weapon) and not weapon:IsActorBeingDestroyed() then
+            local owner, instigator, root = weapon:GetOwner(), weapon.Instigator, weapon.RootComponent
+            local mount = valid(root) and root:GetAttachParent()
+            records[#records + 1] = table.concat({kind, weapon:GetFullName(), weapon:GetLocalRole(), tostring(weapon.bReplicates),
+                tostring(weapon.HeldByPlayer), valid(owner) and owner:GetFullName() or "-",
+                valid(instigator) and instigator:GetFullName() or "-", valid(mount) and mount:GetFullName() or "-"}, "|")
+        end
+    end
+    return table.concat(records, ";")
 end
 
 local function dock_population_at(world, points, include_paths)
@@ -1663,6 +1677,9 @@ local function run(action, actor_path)
     elseif action == "dock-population-weapons" then
         assert(world:GetFullName() == "World " .. dock)
         return tracked_population_weapons(world)
+    elseif action == "dock-population-weapon-details" then
+        assert(world:GetFullName() == "World " .. dock)
+        return population_weapon_details()
     elseif action == "dock-population-cleanup" then
         for _, actor in pairs(population_fixture) do
             if valid(actor) and not actor:IsActorBeingDestroyed() then actor:K2_DestroyActor() end
