@@ -24,6 +24,8 @@ The `rc-f0b1c06` Crossroads baseline used two muted Direct IP instances. During 
 
 `rc-b0fe29f` checks the active stock menu before qualifying the Journal's host and viewport, and reuses formatted canister rows when their live state is unchanged. The grouped run passed guest crate opening, critters, mushrooms, propane movement, and fuel drum ignition, destruction, and blast cue dispatch. The muted test still reported no continuous flame or blast particle creation. The stock Journal opened and closed on a focused follow-up pair after correcting the fixture entry point. No closed-menu sample reached the full Journal context check. The largest sampled Journal update was 0.008 ms, and canister rows peaked at 0.112 ms. Both pairs preserved the original saves. Crossroads still reached a 69 ms host interval, and live Steam invite verification remains open.
 
+`rc-333b0bf` reuses the guest's player roster between actor construction notifications and refreshes it periodically to catch missed notifications. The guest made two or three current-world player queries per three-second sample while publishing 21 to 32 status updates. Both pawns remained visible in Observatory and after travel to Crossroads. Two muted Direct IP launches also passed stock campfire damage, avatar tail attachment, guest crate opening, weather travel, critter pickup, and mushroom harvesting and regrowth. The original saves were preserved. Crossroads still recorded an 89 ms idle host interval and a 78 ms moving guest interval. Host stack-drop synchronization and guest zone synchronization were among the largest timed calls in those intervals. Rendered frame pacing and live Steam latency remain open.
+
 ## `rc-1799e4b` playtest
 
 | Area | Two-PC observation |
