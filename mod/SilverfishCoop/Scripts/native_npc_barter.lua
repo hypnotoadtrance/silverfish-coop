@@ -320,7 +320,10 @@ local function guest_command(action, fields, state, phase)
     local context = local_context(state, phase)
     local sequence = math.tointeger(tonumber(fields[3]))
     local refresh = action == "native-npc-barter-refresh"
-    if not session or sequence ~= session.sequence then fail("view_sequence") end
+    local recover = action == "native-npc-barter-recover"
+    if not session or sequence ~= session.sequence or recover and session.state ~= "confirming" then
+        fail("view_sequence")
+    end
     if refresh then
         if session.state ~= "ready" or not context or not top(context, session.screen)
             or #session.screen.PlayerOffer ~= 0 or #session.screen.TraderOffer ~= 0 or session.screen.PlayerCashOffer ~= 0 then
@@ -360,7 +363,7 @@ local function guest_command(action, fields, state, phase)
         end
     end
 
-    if not refresh then close_stock(session.state == "confirming") end
+    if not refresh then close_stock(session.state == "confirming" and not recover) end
     local save, pawn = guest_scope.bind_guest(state, phase)
     local stock_before = amounts(entries)
     if refresh then
@@ -497,7 +500,8 @@ end
 
 function barter.command(fields, state, phase)
     local action = fields[2]
-    if action == "native-npc-barter-project" or action == "native-npc-barter-refresh" or action == "native-npc-barter-close" then
+    if action == "native-npc-barter-project" or action == "native-npc-barter-refresh"
+        or action == "native-npc-barter-recover" or action == "native-npc-barter-close" then
         return guest_command(action, fields, state, phase)
     end
     if action ~= "native-npc-barter-open" and action ~= "native-npc-barter-exchange" then return end

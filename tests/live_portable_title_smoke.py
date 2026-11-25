@@ -2316,14 +2316,15 @@ async def verify_roaming_barter(host: Seat, guest: Seat, _pawn: str) -> dict:
     identity = host_before["mod_identity"]
     assert identity != "-" and identity == guest_before["mod_identity"], (host_before, guest_before)
     assert host_before["stock_trader_id"] != guest_before["stock_trader_id"], (host_before, guest_before)
-    host_item, item, target = (await operate(host, "prepare", point)).split(",", 2)
-    assert host_item != item and all(re.fullmatch(r"[0-9A-F]{32}", key) for key in (host_item, item))
+    host_item, item, contested, target = (await operate(host, "prepare", point)).split(",", 3)
+    seeded = {host_item, item, contested}
+    assert len(seeded) == 3 and all(re.fullmatch(r"[0-9A-F]{32}", key) for key in seeded)
     location = list(map(float, target.split(",")))
     await wait_resident_status(guest_run, lambda frame: math.dist(
         frame.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), location) < 55)
     host_stock = await inspect(host, point)
-    assert {host_item, item}.issubset(host_stock["stock_items"].split("|"))
-    assert {host_item, item}.isdisjoint(guest_before["stock_items"].split("|"))
+    assert seeded.issubset(host_stock["stock_items"].split("|"))
+    assert seeded.isdisjoint(guest_before["stock_items"].split("|"))
     checkpoint = campaign_save_hashes(host.campaign)
     opacity, enabled = (await operate(guest, "open", point)).split(",")
     assert float(opacity) == 0 and enabled == "false", (opacity, enabled)
@@ -2367,8 +2368,28 @@ async def verify_roaming_barter(host: Seat, guest: Seat, _pawn: str) -> dict:
     host_updated = await screen(host, point)
     assert host_updated == {**host_browsing, "wallet": updated["wallet"] - cash,
                             "cards": host_browsing["cards"] - {item}}, (host_browsing, host_updated)
+    assert int(await operate(guest, "stage", point, contested)) > 0
+    last_host_payment = int(await operate(host, "buy", point, contested))
+    async with asyncio.timeout(8):
+        while contested in (await inspect(host, point))["stock_items"].split("|"):
+            await asyncio.sleep(.08)
+    disputed_at = time.time()
+    assert await operate(guest, "confirm", point) == "confirmed"
+    recovered = await wait_resident_status(guest_run, lambda frame: scope(frame).get("state") == "ready"
+                                           and scope(frame).get("sequence", 0) > scope(new_view)["sequence"])
+    recoveries = [entry for entry in await resident_events(guest_run, recovered)
+                  if entry["time_unix"] >= disputed_at and entry["event"] == "native_npc_barter_refused"]
+    refusal, = recoveries
+    assert refusal["reason"] == "barter_refused_stock_selection" and refusal["catalogue_restored"] is True, refusal
+    screen_after_refusal = await screen(guest, point)
+    assert screen_after_refusal["visible"] and screen_after_refusal["cards"] == host_updated["cards"] - {contested}
+    assert screen_after_refusal["wallet"] == host_updated["wallet"] - last_host_payment, screen_after_refusal
+    final_host = await wait_resident_status(host_run, lambda frame: frame.get("state") == "hosting")
+    assert not [entry for entry in await resident_events(host_run, final_host)
+                if entry["event"] == "native_npc_barter_committed" and entry["time_unix"] >= disputed_at]
     assert await operate(guest, "close", point) == "0"
-    assert await operate(host, "close", point) == "0"
+    if await screen(host, point):
+        assert await operate(host, "close", point) == "0"
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"stock_roaming_barter": {"stock_ids": [host_before["stock_trader_id"], guest_before["stock_trader_id"]],
                                      "late_merchant_registration": True,
@@ -2376,6 +2397,8 @@ async def verify_roaming_barter(host: Seat, guest: Seat, _pawn: str) -> dict:
                                      "host_purchase_refreshed_same_guest_widget": True,
                                      "guest_purchase_refreshed_same_host_widget": True,
                                      "wallet": [guest_screen["wallet"], updated["wallet"], host_updated["wallet"]],
+                                     "contested_offer_refused": refusal["reason"],
+                                     "recovered_guest_wallet": screen_after_refusal["wallet"],
                                      "native_checkpoint_unchanged": True}}
 
 

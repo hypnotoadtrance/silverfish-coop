@@ -16,11 +16,16 @@ OPEN = "native-npc-barter-open"
 EXCHANGE = "native-npc-barter-exchange"
 PROJECT = "native-npc-barter-project"
 REFRESH = "native-npc-barter-refresh"
+RECOVER = "native-npc-barter-recover"
 CLOSE = "native-npc-barter-close"
 STOCK = "native_npc_barter"
 VIEW = "native_npc_barter_view"
 STOCK_VERSION = "native_npc_barter_stock_version"
 REFRESH_SECONDS = 3
+REQUOTE_REFUSALS = frozenset({
+    "barter_refused_stock_selection", "barter_refused_stock_bounds",
+    "barter_refused_wallet", "barter_refused_native_balance",
+})
 MAX_ITEMS = 128
 MAX_CASH = 2**31 - 1
 REPUTATION_FLAG = re.compile(r"Rep_[A-Za-z0-9_ -]{1,120}")
@@ -306,8 +311,17 @@ class View:
             operation = uuid.uuid5(client.bridge.input_namespace, f"{client.host_session}:{epoch}:{trader}:{sequence}").hex
             self.next_refresh = time.monotonic() + REFRESH_SECONDS
         try:
+            refusal = None
             if not refresh:
-                reply = await client.gameplay_action(action, operation, target)
+                try:
+                    reply = await client.gameplay_action(action, operation, target)
+                except ValueError as error:
+                    if action != EXCHANGE or str(error) not in REQUOTE_REFUSALS:
+                        raise
+                    refusal = str(error)
+                    reply = await self.read_stock(client, f"{epoch}@{trader}")
+                    if reply is None:
+                        raise
             version = reply.get(STOCK_VERSION)
             if version is not None and (not isinstance(version, str) or not STOCK_DIGEST.fullmatch(version)):
                 raise ValueError("The host NPC returned an invalid stock version")
@@ -318,15 +332,19 @@ class View:
                 raise ValueError("The host NPC returned invalid barter stock")
             items = ["|".join((row["guid"], row["class_path"], str(row["ammo"]), str(row["weight"]),
                                 str(row["value"]), str(int(row["never_drop"])))) for row in catalog["stock"]]
-            if action == EXCHANGE:
+            if action == EXCHANGE and refusal is None:
                 client.guest_ui.digest = "-"
                 await client.guest_ui.refresh(client)
             preferences = [f"p|{path}|{weight}" for path, weight in catalog["preferences"].items()]
             client.last_game = await client.bridge.command(
-                REFRESH if refresh else PROJECT, str(sequence), trader, str(catalog["cash"]), str(catalog["seed"]),
+                REFRESH if refresh else RECOVER if refusal else PROJECT, str(sequence), trader,
+                str(catalog["cash"]), str(catalog["seed"]),
                 str(catalog["minimum_weapon_value"]), str(int(catalog["accepts_cash"])), *items, *preferences, timeout=4)
             if not refresh or client.last_game.get("ack", {}).get("message") == "exact stock NPC barter screen shown":
                 self.version = version or stock_version(catalog)
+                if refusal:
+                    client.control.event("native_npc_barter_refused", action=action, sequence=sequence,
+                                         reason=refusal, catalogue_restored=True)
                 if refresh:
                     client.control.event("native_npc_barter_stock_refreshed", trader=trader, entries=len(items), cash=catalog["cash"])
         except (OSError, RuntimeError, ValueError, KeyError) as error:

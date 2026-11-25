@@ -71,7 +71,7 @@ local function roaming_probe(fields, state, phase)
                         local class = load(asset)
                         assert(valid(class))
                         local ids = {}
-                        for index = 1, 2 do
+                        for index = 1, 3 do
                             local output = {}
                             actor:GenerateItem(class, 1, output)
                             local item = output.Item or output
@@ -102,7 +102,13 @@ local function roaming_probe(fields, state, phase)
                         local wallet = pawn.Save.Flags:Find(FName("Player_Cash"))
                         return table.concat({tostring(screen:GetAddress()), tostring(wallet:get()), tostring(screen:GetIsEnabled()),
                             tostring(screen:GetRenderOpacity()), table.concat(ids, "|")}, ",")
-                    elseif mode == "buy" then
+                    elseif mode == "confirm" and phase == "connected" then
+                        local screen = state.controller.MenuStack[1]
+                        assert(exact(screen, barter_screen) and same(screen.Trader, actor)
+                            and screen.Button_Confirm:GetIsEnabled() and screen.TraderOffer:GetArrayNum() == 1)
+                        screen:BndEvt__BarterScreen_Button_Confirm_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
+                        return "confirmed"
+                    elseif mode == "buy" or mode == "stage" and phase == "connected" then
                         local screen = state.controller.MenuStack[1]
                         assert(exact(screen, barter_screen) and same(screen.Trader, actor) and screen:GetIsEnabled()
                             and screen:GetRenderOpacity() == 1 and actor.Save == (phase == "hosting"))
@@ -126,8 +132,10 @@ local function roaming_probe(fields, state, phase)
                         assert(offered.Success and screen.TraderOffer:GetArrayNum() == 1)
                         screen.PlayerCashOffer = price
                         screen:UpdateBalance()
-                        assert(screen.Button_Confirm:GetIsEnabled(), "stock guest trade confirmation unavailable")
-                        screen:BndEvt__BarterScreen_Button_Confirm_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
+                        assert(screen.Button_Confirm:GetIsEnabled(), "stock trade confirmation unavailable")
+                        if mode == "buy" then
+                            screen:BndEvt__BarterScreen_Button_Confirm_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
+                        end
                         return tostring(price)
                     end
                     error("unknown roaming barter fixture operation", 0)

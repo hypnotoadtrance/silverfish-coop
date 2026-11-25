@@ -171,3 +171,33 @@ class BarterViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(view.version, changed_version)
         self.assertEqual(bridge.command.await_args.args[:4], (barter.REFRESH, "2", TRADER, "31"))
         client.control.event.assert_called_once_with("native_npc_barter_stock_refreshed", trader=TRADER, entries=1, cash=31)
+
+    async def test_a_contested_confirmation_recovers_the_stock_menu_without_committing(self):
+        stock = barter.parse(*exchange())
+        stock["stock"] = []
+        frame = {"map": OBSERVATORY, "pawns": {"local": {"name": PAWN}}, barter.VIEW: {
+            "map": OBSERVATORY, "pawn": PAWN, "state": "confirming", "sequence": 3, "trader": TRADER,
+            "give": "-", "receive": f"{OFFER}:1", "cash": 20,
+        }}
+        bridge = SimpleNamespace(input_namespace=uuid.uuid4(), command=AsyncMock(return_value={
+            **frame, "ack": {"message": "exact stock NPC barter screen shown"},
+        }))
+        client = SimpleNamespace(
+            host_session="host", zone_epoch=EPOCH, bridge=bridge, last_game=frame, control=SimpleNamespace(event=Mock()),
+            guest_ui=SimpleNamespace(digest="unchanged", refresh=AsyncMock()),
+            gameplay_action=AsyncMock(side_effect=[ValueError("barter_refused_stock_selection"), {barter.STOCK: stock}]),
+        )
+        view = barter.View()
+
+        await view.sync(client, True)
+
+        confirm, quote = client.gameplay_action.await_args_list
+        self.assertEqual(confirm.args[0], barter.EXCHANGE)
+        self.assertEqual(quote.args[0], barter.OPEN)
+        self.assertEqual(quote.args[2], f"{EPOCH}@{TRADER}")
+        self.assertEqual(bridge.command.await_args.args[:4], (barter.RECOVER, "3", TRADER, "30"))
+        self.assertEqual(view.version, barter.stock_version(stock))
+        client.guest_ui.refresh.assert_not_awaited()
+        self.assertEqual(client.guest_ui.digest, "unchanged")
+        client.control.event.assert_called_once_with("native_npc_barter_refused", action=barter.EXCHANGE,
+            sequence=3, reason="barter_refused_stock_selection", catalogue_restored=True)
