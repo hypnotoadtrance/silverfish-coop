@@ -48,7 +48,7 @@ def sealed_packages(items):
     return [row for row in items if row["class_path"] == native_host_dig.PACKAGE_CLASS]
 
 
-async def verify_stock_shovel_reconnect(host, guest, evidence, *, open_package=None):
+async def verify_stock_shovel_reconnect(host, guest, evidence):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     await wait_resident_status(guest_run, lambda frame: frame.get("state") == "connected"
                                and frame.get("gameplay_fresh") is True
@@ -114,11 +114,6 @@ async def verify_stock_shovel_reconnect(host, guest, evidence, *, open_package=N
     before = await wait_resident_status(host_run, lambda frame: type(frame.get("game", {}).get("native_wallet")) is int)
     expected_wallet = before["game"]["native_wallet"] + contract.cash
     await host.bridge.command(contract.command("approach"), arrived["game"]["native_guest_save"]["pawn"])
-    if open_package:
-        await action(guest_run, "native-quest-start", target=contract.quest_id)
-        await step(1)
-        evidence["stock_package_opened"] = await open_package(host, guest, packages[0]["guid"], saves)
-        return
     await open_board()
     await press("start", "starting")
     accepted = await step(1)
@@ -202,7 +197,8 @@ async def verify_stock_buried_placements(host, guest, _pawn):
     return {"stock_buried_placements": proof}
 
 
-async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, host_quest=False):
+async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, host_quest=False,
+                              open_package=None, open_package_quest=True):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     current = await wait_resident_status(host_run, lambda f: f.get("game", {}).get("native_zone", {}).get("state") == "ready")
     if current["game"].get("map") != CROSSROADS:
@@ -315,9 +311,11 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
             equipped_spade, = [row for row in await stock_inventory(host_run)
                                if row["class_path"] == native_guest_weapon.SPADE_PATH]
             digger_guid = equipped_spade["guid"]
-        else:
+        elif not open_package:
             ordinary = await dig_once()
             host_dig = await verify_host_dig()
+            digger_guid = item["guid"]
+        else:
             digger_guid = item["guid"]
         result = await dig_once(quest_dig=True, host_dig=host_quest)
         result["guid"] = digger_guid
@@ -417,6 +415,11 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
         guest_package, = sealed_packages(guest_after)
         assert (guest_package["guid"], guest_package["source"], guest_package["quantity"]) == (
             owned["package_guid"], "backpack", 1), guest_package
+        if open_package:
+            if open_package_quest:
+                assert await observe(host, "quest-activate") == "staged the stock Missing Contact quest"
+            return {"stock_missing_contact_package_open": await open_package(
+                host, guest, guest_package["guid"], campaign_save_hashes(host.campaign))}
         return {"stock_shovel": ordinary, "stock_host_shovel": host_dig,
                 "stock_missing_contact_guest_dig": {**result, "package": package, "custody": custody,
                                                      "world_actors_before_pickup": raw_packages, "guest_pickup": owned,

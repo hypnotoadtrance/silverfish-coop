@@ -6624,6 +6624,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  oil_lamps_check=None,
                  mail_packages_check=None,
                  missing_contact_open_check=None,
+                 missing_contact_untracked_check=None,
                  zone_lease_preflight: bool = False,
                  resident_cabinet_archive: Path | None = None,
                  resident_cabinet_checkpoint: Path | None = None,
@@ -6778,7 +6779,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_crossroads_door, "crossroads", "stock_crossroads_door", verify_stock_crossroads_door),
         (stock_critters, "crossroads", "stock_critters", verify_stock_critters),
         (stock_shovel, "crossroads", "stock_shovel", lambda host, guest, pawn: verify_stock_shovel(
-            host, guest, pawn, loot=stock_shovel_loot, quest=stock_shovel_quest, host_quest=stock_shovel_host_quest)),
+            host, guest, pawn, loot=stock_shovel_loot, quest=stock_shovel_quest, host_quest=stock_shovel_host_quest,
+            open_package=missing_contact_open_check)),
+        (missing_contact_untracked_check, "missing_contact_untracked", "stock_untracked_package",
+         lambda host, guest, pawn: verify_stock_shovel(host, guest, pawn, quest=True,
+            open_package=missing_contact_untracked_check, open_package_quest=False)),
         (stock_lingering_teleport, "crossroads" if crossroads_profile else "crossroads_anomaly", "stock_lingering_teleport",
          lambda host, guest, pawn: verify_stock_lingering_teleport(host, guest, pawn, portable_probe_command)),
         (stock_placed_item, "crossroads", "stock_placed_item", verify_stock_placed_item),
@@ -7272,13 +7277,12 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     if evidence is None:
                         return
                     started = time.perf_counter()
-                    name = "stock_missing_contact_reconnect_and_" + ("open" if missing_contact_open_check else "turn_in")
                     try:
-                        await verify_stock_shovel_reconnect(host, guest, evidence, open_package=missing_contact_open_check)
+                        await verify_stock_shovel_reconnect(host, guest, evidence)
                     except Exception as error:
-                        finish_check(name, started, error)
+                        finish_check("stock_missing_contact_reconnect_and_turn_in", started, error)
                     else:
-                        finish_check(name, started, evidence=evidence.get("stock_package_opened"))
+                        finish_check("stock_missing_contact_reconnect_and_turn_in", started)
 
                 async def check_personal_reconnect(guest, _started):
                     evidence = gameplay.get("stock_personal_consumable")
@@ -7318,10 +7322,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_shot_view", "tutorial_dock_buckshot",
                     "tutorial_dock_melee", "tutorial_dock_late_join", "dock_population",
                     "crossroads", "crossroads_anomaly", "quarry_photo", "buried_placements",
-                    "lab_east_wing_acid", "lab_terminal", "oil_lamps", "shopkeep", "simmi"
+                    "lab_east_wing_acid", "lab_terminal", "oil_lamps", "shopkeep", "simmi", "missing_contact_untracked"
                 } or stock_host_prop_observer and campaign == prop_campaign else ("save_and_quit",)
                 after_reconnect = None
-                if campaign == "crossroads" and stock_shovel_quest and not stock_shovel_host_quest:
+                if campaign == "crossroads" and stock_shovel_quest and not stock_shovel_host_quest and not missing_contact_open_check:
                     after_reconnect = check_shovel_reconnect
                 if campaign == "personal_consumable":
                     after_reconnect = check_personal_reconnect

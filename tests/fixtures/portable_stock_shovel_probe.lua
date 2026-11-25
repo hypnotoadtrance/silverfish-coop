@@ -55,6 +55,18 @@
             return table.concat(sources, ";")
         end
         assert(state.map == map and (phase == "hosting" or phase == "connected"), "Crossroads dig fixtures require a co-op session")
+        if fields[2] == "fixture-spade-quest-activate" then
+            assert(phase == "hosting" and #fields == 2)
+            local instance = state.world.OwningGameInstance
+            local pawn, key = state.local_pawn.pawn, FName("Note_Farmhouse")
+            assert(valid(instance) and same(instance.SaveSlot_Ref, pawn.Save) and pawn:HasAuthority())
+            local quests = pawn.Save.ActiveQuests
+            assert(not quests:Contains(key), "The Missing Contact setup needs a fresh campaign")
+            instance:AddQuest_ByName(key)
+            local active = quests:Find(key):get()
+            assert(active.Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A == 1)
+            return "staged the stock Missing Contact quest"
+        end
         if fields[2] == "fixture-spade-sight" then
             assert(phase == "connected" and #fields == 3)
             local pawn = state.local_pawn.pawn
