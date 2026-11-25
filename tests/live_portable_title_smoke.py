@@ -6333,7 +6333,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     try:
         if crossroads_profile:
             from portable_crossroads_profile import (instrument_inline_crate_scan, instrument_input_mappings,
-                                                     instrument_loose_discovery, instrument_profile)
+                                                     instrument_loose_discovery, instrument_npc_class_discovery, instrument_profile)
 
             crate_probe = ((Path(__file__).with_name("fixtures") / "portable_crate_input_probe.lua").read_text(encoding="utf-8")
                            if stock_crate_ring else None)
@@ -6349,6 +6349,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             ]
             proof["crossroads_input_overlays"] = [
                 probes.enter_context(portable_script_overlay(game, "players.lua", instrument_input_mappings))
+                for game in games
+            ]
+            proof["crossroads_npc_overlays"] = [
+                probes.enter_context(portable_script_overlay(game, "native_npc_barter_identity.lua", instrument_npc_class_discovery))
                 for game in games
             ]
             proof["crossroads_loot_overlays"] = [

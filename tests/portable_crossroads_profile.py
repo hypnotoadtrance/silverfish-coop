@@ -63,6 +63,14 @@ def instrument_loose_discovery(source):
                           'SilverfishDiscoverLoosePickups, pawn:GetAddress(), current.host)')
 
 
+def instrument_npc_class_discovery(source):
+    anchor = "local class = StaticFindObject(path)"
+    if source.count(anchor) != 1:
+        raise ValueError("The NPC marker class lookup anchor changed")
+    return source.replace(anchor, 'local class = SilverfishProfileCrossroadsCall('
+                          '"npc_marker_class_lookup", StaticFindObject, path)')
+
+
 def read_comparison(raw):
     summary, slow_frame = raw.split("!")
     duration, *sections = summary.split(";")
