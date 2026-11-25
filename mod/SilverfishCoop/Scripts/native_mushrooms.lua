@@ -10,7 +10,8 @@ local saved_child_guid = "ID_7_18CBAA0D44A4F0AA53DF3C9CF2E59420"
 local saved_child_class = "Class_6_B3FAD7924D55642D659E8C891A0A53C6"
 local saved_child_transform = "Transform_8_BD0C0F504E8E7DC44D04E59C402D9537"
 local guid_words = {"A", "B", "C", "D"}
-local world, patches, samples, proof, next_sample, sweep
+local scope, world, patches, samples, proof, next_sample, sweep
+local status_row, capability_row
 local title_fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and
     (title_fixtures or os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1")
@@ -223,7 +224,12 @@ local function sample_lua(search, path, patch)
 end
 
 local function sample_patch(search, path, patch)
+    local first = #search.values + 1
     if not sample_native(search, path) then sample_lua(search, path, patch) end
+    for index = first, #search.values do
+        local entry = search.values[index]
+        entry.row = status_row("native-mushroom", search.state.map, table.unpack(entry, 2))
+    end
 end
 
 local function publish_sample(search)
@@ -239,14 +245,43 @@ local function sample_fixture(state)
     publish_sample(search)
 end
 
-function mushrooms.update(current_world)
-    local search = sweep
-    if not search then return end
-    if not same(world, current_world()) then
-        sweep = nil
+function mushrooms.start(row)
+    status_row = row
+    capability_row = row("native-mushroom-capability", 1)
+end
+
+function mushrooms.sync(state, phase)
+    if phase ~= "hosting" or not state.listening or state.server ~= false or not valid(state.world)
+        or type(SilverfishCaptureNativeMushroom) ~= "function" then
+        scope, world, patches, samples, proof, next_sample, sweep = nil, nil, nil, nil, nil, nil, nil
         return
     end
-    local started = os.clock()
+    if not scope or scope.map ~= state.map or not same(world, state.world) then
+        world, patches, samples, proof, next_sample, sweep = state.world, nil, {}, nil, 0, nil
+    end
+    scope = state
+end
+
+function mushrooms.update(current_world)
+    if not scope then return end
+    local now = os.clock()
+    if not sweep and now < next_sample then return end
+    if not same(world, current_world()) then
+        scope, sweep = nil, nil
+        return
+    end
+    if not sweep then
+        next_sample = now + 0.3
+        if not patches then
+            census(scope)
+            if patches and next(patches) then next_sample = now end
+            return
+        end
+        if not next(patches) then return end
+        sweep = begin_sample(scope, 2300)
+        if not sweep then return end
+    end
+    local search = sweep
     for _ = 1, 8 do
         local path, patch = next(patches, search.cursor)
         if not path then
@@ -256,7 +291,7 @@ function mushrooms.update(current_world)
         end
         search.cursor = path
         sample_patch(search, path, patch)
-        if os.clock() - started >= 0.002 then break end
+        if os.clock() - now >= 0.002 then break end
     end
 end
 
@@ -273,28 +308,17 @@ function mushrooms.rows(state, phase, row)
     if phase == "connected" and state.server == true and type(SilverfishReadNativeMushroomSkips) == "function" then
         return {row("native-mushroom-suppression", SilverfishReadNativeMushroomSkips(state.world:GetAddress()))}
     end
-    if phase ~= "hosting" or state.server ~= false or type(SilverfishCaptureNativeMushroom) ~= "function" then
-        sweep = nil
-        return {}
-    end
-    if not same(world, state.world) then
-        world, patches, samples, proof, next_sample, sweep = state.world, nil, {}, nil, 0, nil
-    end
-    local rows = {row("native-mushroom-capability", 1)}
-    local now = os.clock()
-    if now >= next_sample and not sweep then
-        if not patches then census(state) end
-        if patches and next(patches) then sweep = begin_sample(state, 2300) end
-        next_sample = now + 0.3
-    end
+    if phase ~= "hosting" or state.server ~= false or not scope or scope.map ~= state.map
+        or not same(world, state.world) then return {} end
+    local rows = {capability_row}
     for _, entry in ipairs(samples) do
         -- Stock pickup can destroy an actor while the next sample is assembling.
         if valid(entry.actor) and not entry.actor:IsActorBeingDestroyed() then
-            rows[#rows + 1] = row("native-mushroom", state.map, table.unpack(entry, 2))
+            rows[#rows + 1] = entry.row
             if #rows == 129 then break end
         end
     end
-    if proof then rows[#rows + 1] = row("native-mushroom-claim", state.map, table.unpack(proof)) end
+    if proof then rows[#rows + 1] = proof end
     return rows
 end
 
@@ -340,8 +364,8 @@ local function claim(fields, state, phase)
     if exact_source(state, path, guid) or saved(patch, guid) ~= 0 then
         error("mutation_unverified_native_mushroom_removal", 0)
     end
-    proof = {path, guid, requested, child_path, item_guid, units, outcome, amount or 0, before or 0, after or 0,
-        inventory_guid or "-"}
+    proof = status_row("native-mushroom-claim", state.map, path, guid, requested, child_path, item_guid, units,
+        outcome, amount or 0, before or 0, after or 0, inventory_guid or "-")
     remove_from_sample(path, guid)
     next_sample = 0
     return "stock mushroom harvested from the host patch"

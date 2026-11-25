@@ -1923,6 +1923,7 @@ local function tick(fields, pending, periodic)
         end
     end
     local projected, failure = pcall(function()
+        native_mushrooms.sync(state, current_phase)
         vitals.sync(state, current_phase)
         native_enemy_shell_view.sync(state, current_phase)
         players.sync(state, current_phase)
@@ -1953,6 +1954,7 @@ end
 
 players.start(bridge)
 native_loot_crate_input.start()
+native_mushrooms.start(status_row)
 native_stock_door.start(native_weapon_fire_view.door_motion)
 native_stock_switch.start()
 native_enemy_shell_view.start(players.is_downed)
