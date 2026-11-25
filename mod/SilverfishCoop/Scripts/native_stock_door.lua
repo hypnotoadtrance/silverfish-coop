@@ -1,5 +1,6 @@
 local doors = {}
 local guest_save = require("guest_save")
+local preview_component = require("native_preview_component")
 
 local base_path = "/Game/Assets/StaticMeshes/Doors/BasicDoor_Master.BasicDoor_Master_C"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
@@ -197,27 +198,6 @@ local function animate(name, motion, now)
     if not motion.pivot and now >= motion.start + motion.duration + .15 then motions[name] = nil end
 end
 
-local function preview_component(entry, field, class, parent, transform)
-    local actor = entry.actor
-    local component = actor:AddComponentByClass(stock_class(class), true, transform, true)
-    if not valid(component) then return end
-    entry[field] = component
-    if field == "mesh" then
-        component:SetCollisionEnabled(0)
-        component:SetGenerateOverlapEvents(false)
-        if not component:SetStaticMesh(entry.panel.StaticMesh) then return end
-        for index = 0, math.min(entry.panel:GetNumMaterials(), 8) - 1 do
-            local material = entry.panel:GetMaterial(index)
-            if valid(material) then component:SetMaterial(index, material) end
-        end
-    end
-    component:SetMobility(2)
-    actor:FinishAddComponent(component, true, transform)
-    if not component:K2_AttachToComponent(parent, FName("None", EFindName.FNAME_Find), 0, 0, 0, false) then return end
-    component:K2_SetRelativeTransform(transform, false, {}, true)
-    return component
-end
-
 local function start_preview(name)
     local actor = actors and actors[name]
     if not valid(actor) then
@@ -244,12 +224,12 @@ local function start_preview(name)
             rotation = {Pitch = rotation.Pitch, Yaw = rotation.Yaw, Roll = rotation.Roll}}}
     preview = entry
     local root = actor.RootComponent
-    local pivot = preview_component(entry, "pivot", "/Script/Engine.SceneComponent", root,
+    local pivot = preview_component(entry, "pivot", stock_class("/Script/Engine.SceneComponent"), root,
         math_library:MakeRelativeTransform(arrow:K2_GetComponentToWorld(), root:K2_GetComponentToWorld()))
     if not pivot then return end
     entry.arrow = pivot
-    local mesh = preview_component(entry, "mesh", "/Script/Engine.StaticMeshComponent", pivot,
-        math_library:MakeRelativeTransform(panel:K2_GetComponentToWorld(), arrow:K2_GetComponentToWorld()))
+    local mesh = preview_component(entry, "mesh", stock_class("/Script/Engine.StaticMeshComponent"), pivot,
+        math_library:MakeRelativeTransform(panel:K2_GetComponentToWorld(), arrow:K2_GetComponentToWorld()), panel)
     if not mesh then return end
     -- Only the stock panel's visibility changes. Its collision keeps the host's pose.
     entry.hidden = true

@@ -168,6 +168,15 @@ local function status_case(installed, headless, resident)
     local env = setmetatable({
         require = function(name)
             if name == "native_loot_crate_input" then return input end
+            if name == "native_flashlight" then
+                return setmetatable({rows = function() end}, {__index = modules})
+            end
+            if name == "players" then
+                return setmetatable({critters = {row = function() end}}, {__index = modules})
+            end
+            if name == "native_stash_view" then
+                return setmetatable({memory_body_limit = function() return 32768 end}, {__index = modules})
+            end
             if name == "native_cubes" then return {new = function() return modules end} end
             if name == "native_stock_creator" then
                 return setmetatable({rows = function() collections = collections + 1; return {} end}, {__index = modules})

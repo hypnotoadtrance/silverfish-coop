@@ -5767,6 +5767,10 @@ class Client:
             except (ValueError, OSError, RuntimeError) as error:
                 self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, operation_id=operation,
                                    crate=crate, input_source=source, reason=str(error))
+                if self.bridge.local_bridge is not None and self.stock_interaction_scope() == scope:
+                    with contextlib.suppress(OSError, RuntimeError, TimeoutError):
+                        await self.bridge.command("native-loot-crate-preview-cancel", crate, str(sequence),
+                                                  timeout=.3, update_status=False)
             else:
                 roll = self.gameplay.get(native_loot.STATE_KEY, {}).get(crate)
                 if (self.bridge.local_bridge is not None and self.stock_interaction_scope() == scope

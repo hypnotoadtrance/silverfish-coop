@@ -1,6 +1,7 @@
 local loot = require("native_loot")
 local input = {}
 local alarm = require("native_loot_alarm")
+local lid_preview = require("native_loot_crate_preview")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_LOOT") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
@@ -41,6 +42,7 @@ local function power_box_audio(crate)
 end
 
 local function reset_world(world)
+    lid_preview.clear()
     bindings, fixture_sequences, active_world = {}, {}, world
     sampler, tool_report = nil, nil
     receipt_frame, published = nil, {}
@@ -290,6 +292,18 @@ local function open_poses(profile, second, angle)
     return {open_rotation}
 end
 
+local function preview_open(state, profile, sequence)
+    if not state.server or not state.listening then return end
+    local current = input.update(state, "connected", profile)
+    if not current or current.crate.Looted ~= false or (profile.lockable and current.crate.Locked ~= false) then return end
+    local door, box, second = scene(current)
+    if not door or not box then return end
+    local random = profile.random_lid
+    local direction = random and (random[2] + random[3]) / 2
+    local opened = open_poses(profile, second, direction)
+    if opened then lid_preview.start(current, sequence, {door, second}, opened, profile.door_locations or {}) end
+end
+
 local function matches_pose(door, rotation, location)
     if not matches_rotation(door, rotation) then return false end
     if not location then return true end
@@ -536,6 +550,14 @@ end
 
 function input.command(fields, state, phase)
     local command = fields[2]
+    if command == "native-loot-crate-preview-cancel" then
+        local sequence = math.tointeger(tonumber(fields[4]))
+        if enabled and phase == "connected" and #fields == 4 and sequence and sequence > 0
+            and same(active_world, state.world) and loot.profile(state.map, fields[3]) then
+            lid_preview.resolve(fields[3], sequence)
+        end
+        return "stock crate preview released"
+    end
     if command == "native-loot-stock-alarm-project" then
         if not enabled or phase ~= "connected" or fields[3] ~= state.map
             or #fields < 6 or #fields > 75 or (#fields - 3) % 3 ~= 0 then
@@ -637,8 +659,13 @@ function input.command(fields, state, phase)
     if not current then error("native_loot_crate_input_scope_unavailable", 0) end
     if command == "native-loot-crate-fixture" and (#fields == 2 or #fields == 3) then return fixture(current) end
     if command == "native-loot-crate-project" and fields[3] == "exhausted" then
-        if current.profile.random_lid and #fields == 5 then return project(current, tonumber(fields[5])) end
-        if not current.profile.random_lid and (#fields == 3 or #fields == 4) then return project(current) end
+        local result
+        if current.profile.random_lid and #fields == 5 then result = project(current, tonumber(fields[5])) end
+        if not current.profile.random_lid and (#fields == 3 or #fields == 4) then result = project(current) end
+        if result then
+            lid_preview.resolve(current.profile.name)
+            return result
+        end
     end
     error("native_loot_crate_input_arguments", 0)
 end
@@ -775,6 +802,7 @@ local function publish_receipts(frame)
             published[index] = sequence
             -- Status remains the fallback if the in-process input ring is detached or full.
             SilverfishEnqueueLocalBridgeInput(status_row("loot-crate-open", state.map, profile.name, pawn, sequence) .. "\n")
+            pcall(preview_open, state, profile, sequence)
         end
     end)
 end
@@ -784,6 +812,7 @@ function input.start()
     local fast = type(SilverfishEnqueueLocalBridgeInput) == "function"
     LoopInGameThreadWithDelay(16, function()
         if fast and receipt_frame and not pcall(publish_receipts, receipt_frame) then receipt_frame = nil end
+        lid_preview.tick(active_world)
         if sampler then pcall(sample_slice) end
     end)
     periodic_sampling = true
