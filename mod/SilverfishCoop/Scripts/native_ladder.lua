@@ -22,9 +22,10 @@ local function anchor(box)
     return ("%.0f,%.0f,%.0f"):format(point.X, point.Y, point.Z)
 end
 
-function ladder.focused_target(pawn, box)
-    if pawn.OnLadder ~= true or pawn:HasAuthority() or local_mount then return end
-    box = valid(box) and box or pawn.InteractionTarget_Component
+function ladder.focused_target(pawn, pressed_component)
+    if pawn.OnLadder ~= true or pawn:HasAuthority() or local_mount
+        or type(pressed_component) ~= "string" or #pressed_component == 0 or #pressed_component > 512 then return end
+    local box = StaticFindObject(pressed_component)
     local actor = valid(box) and box:GetOwner()
     if not stock(actor, box, pawn:GetWorld()) or not attached(actor, pawn) then return end
     local_mount = {pawn = pawn, world = pawn:GetWorld(), id = anchor(box)}
