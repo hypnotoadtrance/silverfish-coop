@@ -31,7 +31,7 @@ local function split_stack(fields, state, phase)
     end
     split = {map = state.map, pawn = name, source = source, created = created, class = class,
         before = before, remaining = remaining, taken = taken}
-    return "native guest ammo stack split verified"
+    return "native guest stock stack split verified"
 end
 
 local function take_ammo(fields, state, phase)

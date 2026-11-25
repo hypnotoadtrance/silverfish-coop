@@ -1,5 +1,6 @@
 #include "guest_item.hpp"
 #include "campaign_npc.hpp"
+#include "drop_item_class.hpp"
 #include "guest_melee.hpp"
 #include "guest_weapon_registry.hpp"
 #include "interaction_input.hpp"
@@ -959,16 +960,6 @@ namespace
                 weight->GetPropertyValueInContainer(row) == units * unit_weight;
         }
 
-        bool source_totals_match(Unreal::UClass* item_class, const void* row, std::int32_t units) const
-        {
-            if (totals_match(row, units)) return true;
-            // MakeDefaultItem copies unit totals for a fresh stock stack,
-            // including ammo in a character preset. Accept that exact stock
-            // representation and calculate the totals of both resulting rows.
-            auto* defaults = item_class->GetClassDefaultObject().Get();
-            auto* default_ammo = field<Unreal::FIntProperty>(defaults, STR("Ammo"));
-            return default_ammo && default_ammo->GetPropertyValueInContainer(defaults) == units && totals_match(row, 1);
-        }
     };
 
     int seed(const Lua& lua, const Context& context, const Inventory& inventory, Unreal::UClass* item_class,
@@ -3351,7 +3342,7 @@ namespace
         return 3;
     }
 
-    int split_ammo(const Lua& lua)
+    int split_backpack_stack(const Lua& lua)
     {
         Context context;
         StackSplit split;
@@ -3368,9 +3359,7 @@ namespace
         if (!locate(context, inventory).empty() || inventory.backpack_index < 0 || !inventory.item)
             return result(lua, false, "native_inventory_split_refused_source");
         auto* item_class = Unreal::Cast<Unreal::UClass>(inventory.row_class(inventory.item));
-        if (!item_class || (item_class != find<Unreal::UClass>(profiles::nine_mm_ball.item) &&
-            item_class != find<Unreal::UClass>(profiles::forty_five_ball.item) &&
-            item_class != find<Unreal::UClass>(profiles::twelve_gauge_buck.item)))
+        if (!silverfish::drop_item_class::stacks(item_class).value_or(false))
             return result(lua, false, "native_inventory_split_refused_class");
         if (inventory.ammo->GetPropertyValueInContainer(inventory.item) != split.expected)
             return result(lua, false, "native_inventory_split_refused_stale_quantity");
@@ -3378,11 +3367,10 @@ namespace
         auto* never_drop = field<Unreal::FBoolProperty>(row_type,
             STR("NeverDrop_21_57B44A714ED0B2B1776A5DA7627B4A8D"));
         auto* payload = field<Unreal::FStructProperty>(row_type, payload_name);
-        AmmoStackSchema stack;
-        if (!never_drop || never_drop->GetPropertyValueInContainer(inventory.item) ||
-            !payload || payload->GetStruct().Get() != find<Unreal::UScriptStruct>(STR("/Script/StructUtils.InstancedStruct")) ||
-            !stack.read(item_class, inventory) || !stack.qualifies(split.expected) ||
-            !stack.source_totals_match(item_class, inventory.item, split.expected))
+        auto* value = field<Unreal::FIntProperty>(row_type, value_name);
+        auto* weight = field<Unreal::FDoubleProperty>(row_type, weight_name);
+        if (!never_drop || never_drop->GetPropertyValueInContainer(inventory.item) || !value || !weight ||
+            !payload || payload->GetStruct().Get() != find<Unreal::UScriptStruct>(STR("/Script/StructUtils.InstancedStruct")))
             return result(lua, false, "native_inventory_split_refused_stock_stack");
 
         auto distinct = context;
@@ -3395,33 +3383,41 @@ namespace
         Unreal::FScriptArrayHelper current(property, live_array);
         const auto count = current.Num();
         if (count >= max_inventory) return result(lua, false, "native_inventory_split_refused_backpack_full");
+        auto* host_array = property->ContainerPtrToValuePtr<void>(context.stock);
         using Value = std::unique_ptr<void, PropertyDeleter>;
         Value original(property->AllocateAndInitializeValue(), {property});
         Value proposed(property->AllocateAndInitializeValue(), {property});
-        if (!original || !proposed) return result(lua, false, "native_inventory_split_refused_storage");
+        Value host_before(property->AllocateAndInitializeValue(), {property});
+        if (!original || !proposed || !host_before)
+            return result(lua, false, "native_inventory_split_refused_storage");
         property->CopyCompleteValue(original.get(), live_array);
         property->CopyCompleteValue(proposed.get(), live_array);
-        Unreal::FScriptArrayHelper staged(property, proposed.get());
+        property->CopyCompleteValue(host_before.get(), host_array);
+        Unreal::FScriptArrayHelper original_rows(property, original.get()), staged(property, proposed.get());
         const auto new_index = staged.AddValue();
         auto* remainder = staged.GetRawPtr(inventory.backpack_index);
         auto* created = staged.GetRawPtr(new_index);
-        inventory.type->CopyCompleteValue(created, inventory.item);
-        const auto* stock_payload = payload->ContainerPtrToValuePtr<void>(inventory.item);
-        if (!inventory.type->Identical(remainder, inventory.item) || !inventory.type->Identical(created, inventory.item) ||
-            !payload->Identical(stock_payload, payload->ContainerPtrToValuePtr<void>(remainder)) ||
-            !payload->Identical(stock_payload, payload->ContainerPtrToValuePtr<void>(created)))
-            return result(lua, false, "native_inventory_split_refused_payload");
-        inventory.set_identity(created, split.created);
+        const auto* source = original_rows.GetRawPtr(inventory.backpack_index);
+        const bool split_ok = silverfish::native_guest_item::split_stock_stack(
+            context.pawn, inventory.type, source, split.take, created, remainder);
+        if (!ownership_current(context) || !property->Identical(original.get(), live_array) ||
+            !property->Identical(host_before.get(), host_array))
+            return result(lua, false, "mutation_unverified_native_inventory_split_stock_call");
+        if (!split_ok) return result(lua, false, "native_inventory_split_refused_stock_result");
+        const auto* stock_payload = payload->ContainerPtrToValuePtr<void>(source);
         const auto remaining = split.expected - split.take;
-        inventory.ammo->SetPropertyValueInContainer(remainder, remaining);
-        inventory.ammo->SetPropertyValueInContainer(created, split.take);
-        stack.set_totals(remainder, remaining);
-        stack.set_totals(created, split.take);
+        const auto valid_stack = [&](const void* row, int quantity) {
+            const double mass = weight->GetPropertyValueInContainer(row);
+            return inventory.row_class(row) == item_class && inventory.ammo->GetPropertyValueInContainer(row) == quantity &&
+                value->GetPropertyValueInContainer(row) >= 0 && mass >= 0 && mass <= 100000 &&
+                never_drop->GetPropertyValueInContainer(row) == false &&
+                payload->Identical(stock_payload, payload->ContainerPtrToValuePtr<void>(row));
+        };
+        const auto stock_guid = inventory.identity(created);
+        inventory.set_identity(created, split.created);
         if (staged.Num() != count + 1 || new_index != count || inventory.identity(remainder) != context.guid ||
-            inventory.identity(created) != split.created || inventory.row_class(remainder) != item_class ||
-            inventory.row_class(created) != item_class || !stack.totals_match(remainder, remaining) ||
-            !stack.totals_match(created, split.take) || !ownership_current(context) ||
-            !property->Identical(original.get(), live_array))
+            stock_guid == Guid{} || stock_guid == context.guid || inventory.identity(created) != split.created ||
+            !valid_stack(remainder, remaining) || !valid_stack(created, split.take))
             return result(lua, false, "native_inventory_split_refused_staging");
         property->CopyCompleteValue(live_array, proposed.get());
         if (!ownership_current(context) || !property->Identical(proposed.get(), live_array))
@@ -3923,7 +3919,7 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishFireNativeGuestUnderbarrel", run<Operation::Fire, true>);
     lua.register_function("SilverfishReloadNativeGuestWeapon", run<Operation::Reload>);
     lua.register_function("SilverfishReloadNativeGuestUnderbarrel", run<Operation::Reload, true>);
-    lua.register_function("SilverfishSplitNativeGuestAmmoStack", split_ammo);
+    lua.register_function("SilverfishSplitNativeGuestAmmoStack", split_backpack_stack);
     lua.register_function("SilverfishTakeNativeGuestWeaponAmmo", take_ammo);
     lua.register_function("SilverfishSortNativeGuestBackpack", sort_backpack);
     lua.register_function("SilverfishStoreNativeGuestEquipment", store_stock_equipment);

@@ -8,8 +8,8 @@ import uuid
 
 from . import native_host_save, party
 from .guest_weapon_profiles import (
-    AMMO_BY_PATH, BOLT_ACTION_AMMO, BOLT_ACTION_UNLOAD_CAPACITY, BOLT_ACTION_UNLOADS, FORTY_FIVE_BALL,
-    MAX_TAKE_AMMO_ROUNDS, NINE_MM_BALL, TAKE_AMMO_MAGAZINES, TWELVE_GAUGE_BUCK,
+    AMMO_BY_PATH, BOLT_ACTION_AMMO, BOLT_ACTION_UNLOAD_CAPACITY, BOLT_ACTION_UNLOADS,
+    MAX_TAKE_AMMO_ROUNDS, TAKE_AMMO_MAGAZINES,
     compatible_magazine_round,
 )
 from .native_gold import valid_guid
@@ -21,7 +21,6 @@ SOURCES = {"backpack", "equipment", "armor", "helmet"}
 SPLIT = "native-inventory-split"
 SPLIT_KEY = "native_inventory_split"
 SPLIT_CAPABILITY = "native_inventory_split_capability"
-SPLIT_CLASSES = frozenset(ammo.item_path for ammo in (NINE_MM_BALL, FORTY_FIVE_BALL, TWELVE_GAUGE_BUCK))
 TAKE_AMMO = "native-inventory-take-ammo"
 TAKE_AMMO_KEY = "native_inventory_take_ammo"
 TAKE_AMMO_CAPABILITY = "native_inventory_take_ammo_capability"
@@ -102,9 +101,13 @@ def split_target(value):
     return None
 
 
+def split_class_path(path):
+    return isinstance(path, str) and len(path) <= 256 and ".." not in path and _STOCK_CLASS.fullmatch(path) is not None
+
+
 def splittable(row):
     quantity = row.get("quantity")
-    return (row.get("source") == "backpack" and row.get("class_path") in SPLIT_CLASSES
+    return (row.get("source") == "backpack" and split_class_path(row.get("class_path"))
             and row.get("stackable") is True and row.get("important") is False
             and type(quantity) is int and 1 < quantity < 2**31)
 
@@ -185,7 +188,7 @@ async def split_stack(host, bridge, character: str, target, operation: str, *, u
         proof = snapshot.get(key, {})
         ammo_class = proof.get("class_path")
         qualified = (valid_take_ammo_result(proof.get("weapon_class"), ammo_class, expected)
-                     if unload else ammo_class in SPLIT_CLASSES)
+                     if unload else split_class_path(ammo_class))
         if ((snapshot.get("state"), snapshot.get("map")) != ("hosting", area)
                 or tuple(proof.get(key) for key in ("map", "pawn", "source_guid", "new_guid", "quantity_before",
                                                    "remaining", "split")) != (area, pawn, source, created, expected, expected - take, take)
@@ -343,7 +346,7 @@ async def service_split_view(client, active: bool) -> None:
     area, pawn, source, expected, item_class = (view.get(key) for key in ("map", "pawn", "guid", "count", "class_path"))
     if (not active or client.stopping or not client.host_session or not client.zone_epoch
             or client.gameplay.get(SPLIT_CAPABILITY) != 1 or time.monotonic() - client.gameplay_seen >= 3
-            or area != client.last_game.get("map") or item_class not in SPLIT_CLASSES
+            or area != client.last_game.get("map") or not split_class_path(item_class)
             or not pawn or pawn != client.last_game.get("pawns", {}).get("local", {}).get("name")
             or not valid_guid(source) or type(expected) is not int or not 1 < expected < 2**31):
         return

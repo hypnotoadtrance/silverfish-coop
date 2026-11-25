@@ -2401,7 +2401,7 @@ class Bridge:
                     data[native_inventory.SPLIT_CAPABILITY] = 1
                 elif (fields[0] == native_inventory.SPLIT and len(fields) == 9 and data.get("map") == fields[1]
                       and valid_guid(fields[3]) and valid_guid(fields[4]) and fields[3] != fields[4]
-                      and fields[5] in native_inventory.SPLIT_CLASSES):
+                      and native_inventory.split_class_path(fields[5])):
                     data[native_inventory.SPLIT_KEY] = dict(
                         map=fields[1], pawn=fields[2], source_guid=fields[3], new_guid=fields[4], class_path=fields[5],
                         quantity_before=int(fields[6]), remaining=int(fields[7]), split=int(fields[8]),
@@ -2426,7 +2426,7 @@ class Bridge:
                       and fields[1].isascii() and fields[1].isdigit() and len(fields[1]) <= 16
                       and 0 < (sequence := int(fields[1])) < 2**53
                       and fields[2] == data.get("map") and 0 < len(fields[3]) <= 512 and valid_guid(fields[4])
-                      and fields[5] in native_inventory.SPLIT_CLASSES and fields[6] in {"confirming", "splitting", "split", "refused"}
+                      and native_inventory.split_class_path(fields[5]) and fields[6] in {"confirming", "splitting", "split", "refused"}
                       and fields[7].isascii() and fields[7].isdigit() and len(fields[7]) <= 10
                       and 1 < (count := int(fields[7])) < 2**31):
                     data["native_guest_inventory_split_view"] = dict(sequence=sequence, map=fields[2], pawn=fields[3],

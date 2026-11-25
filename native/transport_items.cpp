@@ -1596,10 +1596,7 @@ namespace
         auto* units = field<Unreal::FIntProperty>(candidate.structure, item_ammo_name);
         auto* type = object_value(field<Unreal::FClassProperty>(candidate.structure, item_class_name), candidate.value);
         if (candidate.panel != panel || !fields.valid() || !units || !type) return;
-        namespace profiles = silverfish::guest_weapon_profiles;
-        const auto path = type->GetPathName();
-        if (path != profiles::nine_mm_ball.item && path != profiles::forty_five_ball.item &&
-            path != profiles::twelve_gauge_buck.item) return;
+        if (!silverfish::drop_item_class::stacks(Unreal::Cast<Unreal::UClass>(type)).value_or(false)) return;
         const auto guid = fields.read(candidate.value);
         const auto expected = units->GetPropertyValueInContainer(candidate.value);
         if (guid == Guid{} || take >= expected || !exact_canonical_drop_row(save, candidate, guid, expected, type)) return;

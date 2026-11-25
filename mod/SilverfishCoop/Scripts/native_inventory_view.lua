@@ -37,11 +37,6 @@ local pry_tool_paths = {
     ["/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Crowbar.MeleeWep_Crowbar_C"] = true,
 }
 local body_armor = require("native_guest_armor")
-local split_ammo = {
-    [drop_items.ammo] = true,
-    ["/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C"] = true,
-    ["/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"] = true,
-}
 local sources = {backpack = "Backpack", equipment = "Equipment", armor = "Armor", helmet = "Helmet"}
 local keys = {up = "PageUp", down = "PageDown", confirm = "Home", back = "End", drop = "Delete"}
 local input_keys, held = {}, {}
@@ -221,7 +216,7 @@ local function page(fields)
         local consumable = class == bandage_path and "Bandage" or starter_bags[class] or mre_enabled and meals.label(class)
         local usable = source == "backpack" and consumable ~= false and consumable ~= nil
         local splittable = options == "split" or options == "split,drop"
-        if splittable and (source ~= "backpack" or not split_ammo[class] or quantity <= 1) then
+        if splittable and (source ~= "backpack" or not drop_items.stock_actor_class(class) or quantity <= 1) then
             error("The authenticated inventory split row did not qualify", 0)
         end
         local droppable = options == "drop" or options == "split,drop"
@@ -560,7 +555,9 @@ local function stock_action_fixture(screen, current, save, epoch, item, use, spl
     local class = valid(item_type) and item_type:GetFullName():match("^BlueprintGeneratedClass (.+)$")
     local rows, ammo = save.PlayerBackpack:GetArrayNum(), card.Item[item_ammo]
     if split then
-        if not split_ammo[class] or math.type(ammo) ~= "integer" or ammo <= split then
+        local defaults = valid(item_type) and item_type:GetCDO()
+        if not valid(defaults) or defaults.Stacks ~= true or defaults.Important ~= false
+            or math.type(ammo) ~= "integer" or ammo <= split then
             error("The stock guest item has no eligible stack to split", 0)
         end
         -- The context-menu action moves the OS cursor before calling this

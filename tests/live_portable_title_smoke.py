@@ -5319,31 +5319,42 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
             remaining = [row["quantity"] for row in contents["native_inventory"]["items"]
                          if row["guid"] == selected["guid"]]
             assert remaining == ([proof["quantity_after"]] if proof["quantity_after"] else []), contents
-    split_proof = None
+    split_proof, bandage_split = None, None
     if stock_split:
-        before = await submit(guest_run, "native-inventory-list")
         host_run = host.campaign / "run"
+        checkpoint = campaign_save_hashes(host.campaign)
+        seeded = (await host.bridge.command("fixture-stock-split-bandage"))["ack"]["message"]
+        before = await submit(guest_run, "native-inventory-list")
         host_before = await submit(host_run, "native-inventory-list")
         assert before["ok"] and host_before["ok"], (before, host_before)
-        inventory = before["native_inventory"]
-        stack = next((row for row in inventory["items"] if native_inventory.splittable(row)), None)
-        assert stack is not None, inventory
-        guid, quantity = stack["guid"], stack["quantity"]
-        take = min(2, quantity - 1)
-        stale = await submit(guest_run, native_guest_drop.STOCK_SPLIT_FIXTURE, target=f"{guid}|{take}|{quantity + 1}")
-        assert not stale["ok"] and "stack changed" in stale["error"], stale
-        assert (await submit(guest_run, "native-inventory-list"))["native_inventory"] == inventory
-        split = await submit(guest_run, native_guest_drop.STOCK_SPLIT_FIXTURE, target=f"{guid}|{take}|{quantity}")
-        assert split["ok"] and re.fullmatch(r"verified two stock stacks in an open backpack with \d+ cards",
-                                           split.get("stock_inventory_proof", "")), split
-        split_proof = split[native_inventory.SPLIT_KEY]
-        after = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
-        by_guid = {row["guid"]: row for row in after["items"]}
-        new_guid = split_proof["new_guid"]
-        assert (by_guid[guid]["quantity"], by_guid[new_guid]["quantity"]) == (quantity - take, take), after
-        assert by_guid[guid]["class_path"] == by_guid[new_guid]["class_path"] == stack["class_path"], after
-        assert len(after["items"]) == len(inventory["items"]) + 1, after
+        items = before["native_inventory"]["items"]
+        ammo = next(row for row in items if row["class_path"].endswith("/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C")
+                    and native_inventory.splittable(row))
+        bandage = next(row for row in items if row["guid"] == seeded)
+        assert native_inventory.splittable(bandage) and bandage["quantity"] == 9
+
+        async def stock_split_item(stack, take):
+            inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
+            guid, quantity = stack["guid"], stack["quantity"]
+            stale = await submit(guest_run, native_guest_drop.STOCK_SPLIT_FIXTURE, target=f"{guid}|{take}|{quantity + 1}")
+            assert not stale["ok"] and "stack changed" in stale["error"], stale
+            assert (await submit(guest_run, "native-inventory-list"))["native_inventory"] == inventory
+            split = await submit(guest_run, native_guest_drop.STOCK_SPLIT_FIXTURE, target=f"{guid}|{take}|{quantity}")
+            assert split["ok"] and re.fullmatch(r"verified two stock stacks in an open backpack with \d+ cards",
+                                               split.get("stock_inventory_proof", "")), split
+            proof = split[native_inventory.SPLIT_KEY]
+            after = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
+            by_guid = {row["guid"]: row for row in after["items"]}
+            new_guid = proof["new_guid"]
+            assert (by_guid[guid]["quantity"], by_guid[new_guid]["quantity"]) == (quantity - take, take), after
+            assert by_guid[guid]["class_path"] == by_guid[new_guid]["class_path"] == stack["class_path"], after
+            assert len(after["items"]) == len(inventory["items"]) + 1, after
+            return proof
+
+        split_proof = await stock_split_item(ammo, min(2, ammo["quantity"] - 1))
+        bandage_split = await stock_split_item(bandage, 4)
         assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before["native_inventory"]
+        assert campaign_save_hashes(host.campaign) == checkpoint
     equip_proof = None
     if stock_equip:
         before = await submit(guest_run, "native-inventory-list")
@@ -5475,7 +5486,7 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
             **({"guest_stock_nearby_pickup": nearby_proof} if nearby_proof else {}),
             **({"guest_stock_nearby_drop_reclaim": drop_reclaim_proof} if drop_reclaim_proof else {}),
             **({"normal_tab_use": normal_tab_proof} if normal_tab_proof else {}),
-            **({"guest_stock_menu_split": split_proof} if split_proof else {}),
+            **({"guest_stock_menu_split": split_proof, "guest_stock_bandage_split": bandage_split} if split_proof else {}),
             **({"guest_stock_menu_equip": equip_proof} if equip_proof else {}),
             **({"guest_stock_menu_drop": stock_drop_proof, "guest_stock_menu_use": stock_use_proofs,
                 "guest_stock_menu_sort": stock_sort_proof}
@@ -6050,6 +6061,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if stock_shovel_quest:
             for game in games:
                 probes.enter_context(stock_board_approach_overlay(game))
+        if stock_split:
+            proof["stock_split_overlay"] = probes.enter_context(
+                guest_weapon_fixture_overlay(first_game, "portable_stock_split_probe.lua"))
         if stock_take_ammo or stock_shotguns or stock_loki_guest or resident_held_queue:
             proof["stock_take_ammo_overlays"] = [
                 probes.enter_context(guest_weapon_fixture_overlay(game, "portable_take_ammo_probe.lua")) for game in games
