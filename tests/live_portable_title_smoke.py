@@ -3117,6 +3117,40 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         assert await command(host, aim) == await command(guest, aim) == "blocked"
         blocked, after_blocked = await shoot(distant_health, should_hit=False)
         assert not blocked["native_guest_trigger_view"].get("contact"), blocked
+
+        # The door is behind the guest's muzzle, but still occludes their camera.
+        # Move the same door into the host's muzzle lane to exercise contact reconciliation.
+        eye_point = tuple(map(float, eye.split(",")))
+        target_point = tuple(map(float, target.split(",")))
+        barrier_point = tuple(map(float, barrier.split(",")))
+        length = math.dist(eye_point, target_point)
+        forward = tuple((end - start) / length for start, end in zip(eye_point, target_point))
+        muzzle = ",".join(f"{start + 560 * axis:.3f}" for start, axis in zip(eye_point, forward))
+        host_barrier = ",".join(f"{point + 470 * axis:.3f}" for point, axis in zip(barrier_point, forward))
+        assert await command(host, f"dock-garage-long-block\t{host_barrier}") == "blocked"
+        assert await command(guest, aim) == "blocked"
+        actual_muzzle = await command(guest, f"dock-garage-offset-muzzle\t{muzzle}")
+        assert math.dist(tuple(map(float, actual_muzzle.split(","))), tuple(map(float, muzzle.split(",")))) < 1
+        muzzle_trace = f"dock-garage-projectile-trace\t{muzzle};{target}"
+        assert await command(guest, muzzle_trace) == "NPC_Survivor_Worker_C_2"
+        assert await command(host, muzzle_trace) == host_collision
+        behind, after_behind = await shoot(after_blocked, should_hit=True, contact_required=True)
+        geometry = behind["native_guest_trigger_view"]
+        witness = await command(host, "dock-garage-shot-witness")
+        launch, velocity, ignored = witness.split(";")
+        origin_error = math.dist(tuple(map(float, launch.split(","))), tuple(map(float, geometry["muzzle"].split(","))))
+        sight_target = tuple(map(float, geometry["target"].split(",")))
+        assert math.dist(sight_target, eye_point) < 560 and origin_error < 1, (geometry, witness)
+        velocity = tuple(map(float, velocity.split(",")))
+        aim_agreement = sum(axis * component for axis, component in zip(forward, velocity)) / math.hypot(*velocity)
+        assert aim_agreement > math.cos(math.radians(3)) and host_collision in ignored.split(","), (geometry, witness)
+        evidence["tutorial_dock_camera_obstruction_behind_muzzle"] = {
+            "health": [after_blocked, after_behind], "launch_error_cm": origin_error,
+            "launch_angle_degrees": math.degrees(math.acos(min(1, aim_agreement))),
+            "shot": behind, "host_projectile": witness,
+        }
+
+        assert await command(host, f"dock-garage-long-block\t{barrier}") == "blocked"
         assert await command(guest, f"dock-garage-long-clear\t{barrier}") == "clear"
         observed = "unavailable"
         try:
@@ -3127,7 +3161,7 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
             raise AssertionError(dict(distant_guest_trace=observed, firing_position=eye, worker_position=target)) from error
         assert await command(host, aim) == "blocked"
         assert await command(host, f"dock-garage-projectile-trace\t{eye};{target}") == host_collision
-        accepted, after_hit = await shoot(after_blocked, should_hit=True, contact_required=True)
+        accepted, after_hit = await shoot(after_behind, should_hit=True, contact_required=True)
         geometry = accepted["native_guest_trigger_view"]
         distance = math.dist(tuple(map(float, geometry["muzzle"].split(","))),
                              tuple(map(float, geometry["contact"]["point"].split(","))))
@@ -3135,7 +3169,7 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         witness = await command(host, "dock-garage-shot-witness")
         assert host_collision in witness.rsplit(";", 1)[-1].split(","), witness
         evidence["tutorial_dock_distant_contact"] = {
-            "meters": round(distance / 100, 2), "health": [distant_health, after_blocked, after_hit],
+            "meters": round(distance / 100, 2), "health": [distant_health, after_blocked, after_behind, after_hit],
             "blocked_shot": blocked, "accepted_shot": accepted, "host_only_barrier": host_collision,
         }
 

@@ -1840,6 +1840,11 @@ local function run(action, actor_path)
         return restore_garage_fixture()
     elseif action == "dock-garage-aim" then
         return set_garage_aim(pawn, world, host, actor_path)
+    elseif action == "dock-garage-offset-muzzle" then
+        assert(not host and garage_aim and same(garage_aim.muzzle, pawn.EquipedItem.Arrow_Muzzle))
+        local point = position(actor_path)
+        garage_aim.muzzle:K2_SetWorldLocation(point, false, {}, true)
+        return point_string(garage_aim.muzzle:K2_GetComponentLocation())
     elseif action == "dock-garage-dynamic-name" then
         local point, kind = actor_path:match("^([^;]+);(%a+)$")
         local actor = garage_npc(world, position(point), kind)

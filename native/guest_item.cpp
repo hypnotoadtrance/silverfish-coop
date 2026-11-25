@@ -1458,6 +1458,17 @@ namespace
         return vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2];
     }
 
+    AimVector shot_axis(const AimVector& muzzle, const AimVector& target, const AimVector& view_forward)
+    {
+        const auto toward = difference(target, muzzle);
+        const auto forward_distance = toward[0] * view_forward[0] + toward[1] * view_forward[1] +
+            toward[2] * view_forward[2];
+        // An obstruction between the eye and muzzle cannot make the round travel backward.
+        if (forward_distance < 1.0) return view_forward;
+        const double length = std::sqrt(squared_length(toward));
+        return {toward[0] / length, toward[1] / length, toward[2] / length};
+    }
+
     double stock_sight_range(Unreal::UObject* pawn)
     {
         auto* range = field<Unreal::FDoubleProperty>(pawn, STR("SightRange"));
@@ -1651,42 +1662,48 @@ namespace
                    Unreal::UObject* barrel = nullptr)
         {
             previous_location.reset();
-            auto* camera = shot_component(pawn, STR("Camera"), camera_component);
             auto* muzzle = shot_component(barrel ? barrel : weapon, STR("Arrow_Muzzle"), muzzle_component);
-            if (!camera || !muzzle) return false;
+            if (!muzzle) return false;
             auto* relative = field<Unreal::FStructProperty>(muzzle, STR("RelativeRotation"));
             if (!aim_vector_field(relative, aim_rotator_type)) return false;
             const auto old = read_aim_vector(relative, muzzle);
-            const auto origin = actor_aim_vector(muzzle, component_location);
-            const auto eye = actor_aim_vector(camera, component_location);
-            const auto direction = view.direction != AimVector{} ? std::optional{view.direction}
-                : actor_aim_vector(camera, component_forward);
-            if (!old || !origin || !eye || !direction ||
-                std::abs(std::hypot((*direction)[0], (*direction)[1], (*direction)[2]) - 1.0) > 0.001) return false;
+            if (!old) return false;
+
+            auto position = view.muzzle;
             auto target = view.target;
-            if (!target)
+            auto direction = view.direction;
+            auto origin = position;
+            if (!position || !target)
             {
-                const auto aim = guest_aim_point(pawn, weapon, *eye, *direction);
-                if (!aim) return false;
-                target = aim->point;
+                // Direction-only and eye-only inputs predate an exact guest muzzle capture.
+                auto* camera = shot_component(pawn, STR("Camera"), camera_component);
+                if (!camera) return false;
+                const auto eye = actor_aim_vector(camera, component_location);
+                origin = actor_aim_vector(muzzle, component_location);
+                if (!eye || !origin) return false;
+                if (direction == AimVector{})
+                {
+                    const auto forward = actor_aim_vector(camera, component_forward);
+                    if (!forward) return false;
+                    direction = *forward;
+                }
+                if (!target)
+                {
+                    const auto aim = guest_aim_point(pawn, weapon, view.eye.value_or(*eye), direction);
+                    if (!aim) return false;
+                    target = aim->point;
+                }
+                if (!position && view.eye) position = ahead(*view.eye, difference(*origin, *eye), 1.0);
             }
-            std::optional<AimVector> position;
-            if (view.eye)
+            if (std::abs(std::hypot(direction[0], direction[1], direction[2]) - 1.0) > 0.001) return false;
+            if (position)
             {
                 auto* relative_location = field<Unreal::FStructProperty>(muzzle, STR("RelativeLocation"));
                 if (!aim_vector_field(relative_location, aim_vector_type)) return false;
                 previous_location = read_aim_vector(relative_location, muzzle);
                 if (!previous_location) return false;
-                position = view.muzzle.value_or(AimVector{
-                    (*view.eye)[0] + (*origin)[0] - (*eye)[0],
-                    (*view.eye)[1] + (*origin)[1] - (*eye)[1],
-                    (*view.eye)[2] + (*origin)[2] - (*eye)[2]});
             }
-            const auto& launch = position ? *position : *origin;
-            AimVector toward{(*target)[0] - launch[0], (*target)[1] - launch[1], (*target)[2] - launch[2]};
-            // A surface can lie between the camera and muzzle. Keep the shot facing forward in that case.
-            if (toward[0] * (*direction)[0] + toward[1] * (*direction)[1] + toward[2] * (*direction)[2] < 1.0)
-                toward = *direction;
+            const auto toward = shot_axis(position ? *position : *origin, *target, direction);
             constexpr double degrees = 180.0 / std::numbers::pi;
             const AimVector rotation{std::atan2(toward[2], std::hypot(toward[0], toward[1])) * degrees,
                                      std::atan2(toward[1], toward[0]) * degrees, 0.0};
@@ -3837,39 +3854,39 @@ silverfish::native_guest_item::ShotView silverfish::native_guest_item::capture_s
     if (!direction || std::abs(std::hypot((*direction)[0], (*direction)[1], (*direction)[2]) - 1.0) > 0.001)
         return view;
     view.direction = *direction;
-    if (const auto eye = actor_aim_vector(camera, component_location))
+    const auto eye = actor_aim_vector(camera, component_location);
+    if (!eye) return view;
+    const auto aim = guest_aim_point(pawn, held, *eye, view.direction);
+    if (auto* muzzle = shot_component(barrel ? barrel : held, STR("Arrow_Muzzle"), muzzle_component))
+        view.muzzle = actor_aim_vector(muzzle, component_location);
+
+    const auto range = stock_sight_range(pawn);
+    if (!aim && !view.muzzle) return view;
+    view.eye = eye;
+    // Keep the guest's origin even when its camera trace cannot resolve a target.
+    view.target = aim ? aim->point : ahead(*view.muzzle, view.direction, std::max(1.0, range));
+    if (!view.muzzle || range <= 0.0) return view;
+
+    const auto axis = shot_axis(*view.muzzle, *view.target, view.direction);
+    // A foreground sight obstruction can be behind the muzzle. Trace forward
+    // from the muzzle in that case, using the same centerline as the stock launch.
+    const auto target_offset = difference(*view.target, *view.muzzle);
+    const auto target_distance = target_offset[0] * axis[0] + target_offset[1] * axis[1] + target_offset[2] * axis[2];
+    // When the sight hits a capsule, allow another meter to reach its projectile collision.
+    const auto distance = target_distance >= 1.0 ? target_distance + 100.0 : range;
+    const auto end = ahead(*view.muzzle, axis, distance);
+    const auto hit = trace_shot(pawn, *view.muzzle, end, projectile_trace, std::array{held});
+    const auto world = static_cast<Unreal::AActor*>(pawn)->GetWorld();
+    if (hit && hit->hit && available_projectile_target(hit->actor, world) && takes_projectile_damage(hit->actor))
     {
-        if (const auto aim = guest_aim_point(pawn, held, *eye, view.direction))
+        const auto number = contact_reference(hit->actor);
+        auto path = number ? std::format("npc:{}", number) :
+            silverfish::campaign_npc::is_spawned_stock_npc(hit->actor) ? std::string{} :
+            RC::to_utf8_string(hit->actor->GetPathName());
+        if (valid_contact_path(path))
         {
-            view.eye = eye;
-            view.target = aim->point;
-            if (auto* muzzle = shot_component(barrel ? barrel : held, STR("Arrow_Muzzle"), muzzle_component))
-                view.muzzle = actor_aim_vector(muzzle, component_location);
-            if (view.muzzle)
-            {
-                const auto ray = difference(aim->point, *view.muzzle);
-                const double span = std::sqrt(squared_length(ray));
-                // Reuse the stock aim point to trace from the actual muzzle on the projectile channel.
-                if (std::isfinite(span) && span > 1)
-                {
-                    // Visibility can first hit the capsule, in front of the projectile's hit on the mesh.
-                    const auto end = ahead(aim->point, ray, 100.0 / span);
-                    const auto hit = trace_shot(pawn, *view.muzzle, end, projectile_trace, std::array{held});
-                    const auto world = static_cast<Unreal::AActor*>(pawn)->GetWorld();
-                    if (hit && hit->hit && available_projectile_target(hit->actor, world) && takes_projectile_damage(hit->actor))
-                    {
-                        const auto number = contact_reference(hit->actor);
-                        auto path = number ? std::format("npc:{}", number) :
-                            silverfish::campaign_npc::is_spawned_stock_npc(hit->actor) ? std::string{} :
-                            RC::to_utf8_string(hit->actor->GetPathName());
-                        if (valid_contact_path(path))
-                        {
-                            view.contact_actor = std::move(path);
-                            view.contact = hit->point;
-                        }
-                    }
-                }
-            }
+            view.contact_actor = std::move(path);
+            view.contact = hit->point;
         }
     }
     return view;
