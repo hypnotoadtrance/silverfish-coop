@@ -10,6 +10,10 @@ local active_world, active_phase, scanned_at, actors, door_parts
 local sampler, pending_census, periodic_sampling
 local trace_report
 local tool_report
+local motions = {}
+local move_component = "/Script/Engine.KismetSystemLibrary:MoveComponentTo"
+local clock, math_library
+local motion_probe
 
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -144,11 +148,68 @@ local function apply(actor, arrow, expected)
     actor.Locked, actor.LockBroken, actor.Open = expected[1], expected[2], expected[3]
 end
 
+local function animate(name, motion, now)
+    if not valid(motion.arrow) or not valid(motion.actor) or motion.actor:IsActorBeingDestroyed()
+        or not same(motion.actor:GetWorld(), active_world) then
+        motions[name] = nil
+        return
+    end
+    local alpha = math.min(1, math.max(0, (now - motion.start) / motion.duration))
+    if alpha < 1 then
+        if motion.ease == 3 then
+            alpha = alpha < .5 and 2 * alpha * alpha or 1 - 2 * (1 - alpha)^2
+        elseif motion.ease == 2 then
+            alpha = 1 - (1 - alpha)^2
+        elseif motion.ease == 1 then
+            alpha = alpha^2
+        end
+    end
+    local from, goal = motion.from, motion.goal
+    local angles = math_library:RLerp(from.rotation, goal.rotation, alpha, motion.shortest)
+    local vector = {X = from.location.X + (goal.location.X - from.location.X) * alpha,
+        Y = from.location.Y + (goal.location.Y - from.location.Y) * alpha,
+        Z = from.location.Z + (goal.location.Z - from.location.Z) * alpha}
+    motion.arrow:K2_SetRelativeLocationAndRotation(vector, angles, false, {}, true)
+    if motion_probe and name == motion_probe.name and not motion_probe.first and motion.actor.Open ~= motion.opens
+        and (math.abs((angles.Yaw - from.rotation.Yaw + 180) % 360 - 180) > .5
+            or math.abs(vector.Z - from.location.Z) > .5) then
+        motion_probe.first = (now - motion_probe.pressed) * 1000
+    end
+    if now >= motion.start + motion.duration + .15 then motions[name] = nil end
+end
+
+function doors.play_motion(state, pawn, fields)
+    if not state.server or not same(state.world, active_world) or active_phase ~= "connected" then return false end
+    local name, opens, duration, ease, shortest = fields[3], tonumber(fields[4]), tonumber(fields[5]),
+        math.tointeger(tonumber(fields[6])), fields[7]
+    local x, y, z, pitch, yaw, roll = tonumber(fields[8]), tonumber(fields[9]), tonumber(fields[10]),
+        tonumber(fields[11]), tonumber(fields[12]), tonumber(fields[13])
+    if #fields ~= 13 or (opens ~= 0 and opens ~= 1) or not finite(duration, 3) or duration < .06
+        or not ease or ease < 0 or ease > 3 or (shortest ~= "1" and shortest ~= "0")
+        or not finite(x, 10000) or not finite(y, 10000) or not finite(z, 10000)
+        or not finite(pitch, 360) or not finite(yaw, 360) or not finite(roll, 360) then return false end
+    local actor = target_door(state, "connected", name)
+    local arrow = valid(actor) and components(actor)
+    opens = opens == 1
+    if not arrow or actor.Open == opens or actor.Locked or not valid(pawn)
+        or not valid(clock) or not valid(math_library) then return false end
+    local listener, hinge = pawn:K2_GetActorLocation(), arrow:K2_GetComponentLocation()
+    if (listener.X - hinge.X)^2 + (listener.Y - hinge.Y)^2 + (listener.Z - hinge.Z)^2 > 12000^2 then return false end
+    local before = pose(actor, arrow)
+    if not before then return false end
+    motions[name] = {actor = actor, arrow = arrow, opens = opens, duration = duration, ease = ease,
+        shortest = shortest == "1", start = clock:GetRealTimeSeconds(state.world), from = {
+            location = {X = before[7], Y = before[8], Z = before[9]},
+            rotation = {Pitch = before[4], Yaw = before[5], Roll = before[6]}},
+        goal = {location = {X = x, Y = y, Z = z}, rotation = {Pitch = pitch, Yaw = yaw, Roll = roll}}}
+    return true
+end
+
 local function project(fields, state, phase)
     if phase ~= "connected" or fields[3] ~= state.map or #fields < 4 or #fields > 27 then
         error("stock_door_projection_scope_unavailable", 0)
     end
-    local known, updates = census(state, phase), {}
+    local known, updates, deferred = census(state, phase), {}, {}
     for index = 4, #fields do
         local name, locked, broken, open, pitch, yaw, roll, x, y, z =
             fields[index]:match("^([^|]+)|([01])|([01])|([01])|([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
@@ -161,8 +222,14 @@ local function project(fields, state, phase)
             or not finite(x, 10000) or not finite(y, 10000) or not finite(z, 10000) then
             error("stock_door_projection_pose_unavailable", 0)
         end
-        updates[name] = {actor = actor, arrow = arrow, before = before,
-            expected = {locked == "1", broken == "1", open == "1", pitch, yaw, roll, x, y, z}}
+        local expected = {locked == "1", broken == "1", open == "1", pitch, yaw, roll, x, y, z}
+        local motion = motions[name]
+        if motion and before[1] == expected[1] and before[2] == expected[2] and expected[3] ~= motion.opens then
+            -- A snapshot made during the stock movement still has the old Open flag.
+            deferred[#deferred + 1] = tostring(index - 3)
+        else
+            updates[name] = {actor = actor, arrow = arrow, before = before, expected = expected}
+        end
     end
     local applied = pcall(function()
         for _, row in pairs(updates) do
@@ -176,7 +243,8 @@ local function project(fields, state, phase)
         end
         error("stock_door_projection_readback_unavailable", 0)
     end
-    return "stock door flags and hinge transform synchronized"
+    for name in pairs(updates) do motions[name] = nil end
+    return "stock door flags and hinge transform synchronized" .. (#deferred > 0 and "|" .. table.concat(deferred, "|") or "")
 end
 
 local function sample_door(scan, name)
@@ -207,9 +275,41 @@ local function sample_slice(scan, deadline)
     end
 end
 
-function doors.start()
+function doors.start(report_motion)
     if type(SilverfishStockDoorGuardAvailable) ~= "function" then return end
+    clock = StaticFindObject(statics_path)
+    math_library = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+    if type(report_motion) == "function" and valid(StaticFindObject(move_component)) then
+        RegisterHook(move_component, function(_, part, location, rotation, out_ease, in_ease, seconds, shortest, action, latent)
+            if active_phase ~= "hosting" then return end
+            pcall(function()
+                local arrow = part:get()
+                local actor = valid(arrow) and arrow:GetOwner()
+                local name = identity(actor, active_world)
+                if not name or not actor:HasAuthority() or not same(arrow, actor.Arrow) or action:get() ~= 0 then return end
+                local call = latent:get()
+                -- These are the stock callbacks for the open and close MoveComponentTo calls.
+                local opens = call.Linkage == 163
+                if not (opens or call.Linkage == 15) or not same(call.CallbackTarget, actor) then return end
+                local duration, p, r = seconds:get(), location:get(), rotation:get()
+                if not finite(duration, 3) or duration < .06 or not p or not r then return end
+                local ease = (in_ease:get() and 1 or 0) + (out_ease:get() and 2 or 0)
+                report_motion(active_world, name, opens and 1 or 0, duration, ease, shortest:get() and 1 or 0,
+                    p.X, p.Y, p.Z, r.Pitch, r.Yaw, r.Roll)
+            end)
+        end)
+    end
     LoopInGameThreadWithDelay(16, function()
+        if next(motions) then
+            if active_phase ~= "connected" or not valid(active_world) then
+                motions = {}
+            else
+                local now = clock:GetRealTimeSeconds(active_world)
+                for name, motion in pairs(motions) do
+                    if not pcall(animate, name, motion, now) then motions[name] = nil end
+                end
+            end
+        end
         local deadline = os.clock() + .002
         if pending_census and not pcall(census_slice, pending_census, deadline) then pending_census = nil end
         local scan = sampler
@@ -304,6 +404,7 @@ function doors.input_fixture(state, phase, target, pawn, dispatch)
     end
     require("native_loot_crate_input").stock_focus(pawn, actor.Box_Knob, function()
         if doors.focused_target(pawn) ~= "stock-door:" .. target then error("stock_door_fixture_missing_focus", 0) end
+        motion_probe = {name = target, pressed = clock:GetRealTimeSeconds(state.world)}
         dispatch()
     end)
     return "stock door guest input dispatched"
@@ -317,6 +418,8 @@ local function fixture(fields, state, phase)
         actor:PriedOpen_Lock()
     elseif mode == "guard" and phase == "connected" and guest_fixture and actor.Locked == true then
         actor:PriedOpen_Lock()
+    elseif mode == "motion" and phase == "connected" and guest_fixture and motion_probe and motion_probe.name == fields[4] then
+        return motion_probe.first and ("%.1f"):format(motion_probe.first) or "no movement before the final flag"
     else
         error("stock_door_fixture_scope_unavailable", 0)
     end

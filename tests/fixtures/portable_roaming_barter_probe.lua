@@ -43,7 +43,7 @@ local function roaming_probe(fields, state, phase)
                 local point = npc:K2_GetActorLocation()
                 local distance = math.sqrt((point.X-x)^2 + (point.Y-y)^2 + (point.Z-z)^2)
                 candidates[#candidates+1] = ("%s %.1f alive=%s"):format(npc:GetFName():ToString(), distance, tostring(npc.Alive))
-                if distance < 250 and npc.Alive then
+                if distance < 250 and (npc.Alive or mode == "deadopen") then
                     local actor = npc.BarterRef
                     if not valid(actor) then return "waiting-barter" end
                     local key = trader_identity(actor, state)
@@ -71,7 +71,7 @@ local function roaming_probe(fields, state, phase)
                         local class = load(asset)
                         assert(valid(class))
                         local ids = {}
-                        for index = 1, 3 do
+                        for index = 1, 4 do
                             local output = {}
                             actor:GenerateItem(class, 1, output)
                             local item = output.Item or output
@@ -80,6 +80,11 @@ local function roaming_probe(fields, state, phase)
                             actor.Inventory[actor.Inventory:GetArrayNum() + 1] = item
                         end
                         return table.concat(ids, ",") .. "," .. ("%f,%f,%f"):format(target.X,target.Y,target.Z)
+                    elseif mode == "deadopen" and phase == "connected" then
+                        assert(npc.Alive == false, "the dead stock NPC was not in scope")
+                        actor:SendInteractionToActor(pawn, actor.Box)
+                        local screen = state.controller.MenuStack[1]
+                        return exact(screen, barter_screen) and screen:GetIsEnabled() and "available" or "refused"
                     elseif mode == "open" then
                         actor:SendInteractionToActor(pawn, actor.Box)
                         local screen = state.controller.MenuStack[1]
@@ -108,7 +113,7 @@ local function roaming_probe(fields, state, phase)
                             and screen.Button_Confirm:GetIsEnabled() and screen.TraderOffer:GetArrayNum() == 1)
                         screen:BndEvt__BarterScreen_Button_Confirm_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
                         return "confirmed"
-                    elseif mode == "buy" or mode == "stage" and phase == "connected" then
+                    elseif mode == "buy" or (mode == "stage" or mode == "dieconfirm") and phase == "connected" then
                         local screen = state.controller.MenuStack[1]
                         assert(exact(screen, barter_screen) and same(screen.Trader, actor) and screen:GetIsEnabled()
                             and screen:GetRenderOpacity() == 1 and actor.Save == (phase == "hosting"))
@@ -133,7 +138,15 @@ local function roaming_probe(fields, state, phase)
                         screen.PlayerCashOffer = price
                         screen:UpdateBalance()
                         assert(screen.Button_Confirm:GetIsEnabled(), "stock trade confirmation unavailable")
-                        if mode == "buy" then
+                        if mode == "dieconfirm" then
+                            local cash = pawn.Save.Flags:Find(FName("Player_Cash")):get()
+                            local count = pawn.Save.PlayerBackpack:GetArrayNum()
+                            npc.Alive = false
+                            screen:CompleteTrade()
+                            assert(screen.TraderOffer:GetArrayNum() == 1 and pawn.Save.PlayerBackpack:GetArrayNum() == count
+                                and pawn.Save.Flags:Find(FName("Player_Cash")):get() == cash, "dead barter exchanged stock")
+                            return "declined"
+                        elseif mode == "buy" then
                             screen:BndEvt__BarterScreen_Button_Confirm_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
                         end
                         return tostring(price)

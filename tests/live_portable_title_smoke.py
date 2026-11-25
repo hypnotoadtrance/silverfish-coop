@@ -2407,9 +2407,9 @@ async def verify_roaming_barter(host: Seat, guest: Seat, _pawn: str) -> dict:
     identity = host_before["mod_identity"]
     assert identity != "-" and identity == guest_before["mod_identity"], (host_before, guest_before)
     assert host_before["stock_trader_id"] != guest_before["stock_trader_id"], (host_before, guest_before)
-    host_item, item, contested, target = (await operate(host, "prepare", point)).split(",", 3)
-    seeded = {host_item, item, contested}
-    assert len(seeded) == 3 and all(re.fullmatch(r"[0-9A-F]{32}", key) for key in seeded)
+    host_item, item, contested, unbought, target = (await operate(host, "prepare", point)).split(",", 4)
+    seeded = {host_item, item, contested, unbought}
+    assert len(seeded) == 4 and all(re.fullmatch(r"[0-9A-F]{32}", key) for key in seeded)
     location = list(map(float, target.split(",")))
     await wait_resident_status(guest_run, lambda frame: math.dist(
         frame.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), location) < 55)
@@ -2478,9 +2478,12 @@ async def verify_roaming_barter(host: Seat, guest: Seat, _pawn: str) -> dict:
     final_host = await wait_resident_status(host_run, lambda frame: frame.get("state") == "hosting")
     assert not [entry for entry in await resident_events(host_run, final_host)
                 if entry["event"] == "native_npc_barter_committed" and entry["time_unix"] >= disputed_at]
-    assert await operate(guest, "close", point) == "0"
     if await screen(host, point):
         assert await operate(host, "close", point) == "0"
+    assert await operate(guest, "dieconfirm", point, unbought) == "declined"
+    assert await operate(guest, "deadopen", point) == "refused"
+    await wait_resident_status(guest_run, lambda frame: not scope(frame))
+    assert unbought in (await inspect(host, point))["stock_items"].split("|")
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"stock_roaming_barter": {"stock_ids": [host_before["stock_trader_id"], guest_before["stock_trader_id"]],
                                      "late_merchant_registration": True,
@@ -2489,6 +2492,8 @@ async def verify_roaming_barter(host: Seat, guest: Seat, _pawn: str) -> dict:
                                      "guest_purchase_refreshed_same_host_widget": True,
                                      "wallet": [guest_screen["wallet"], updated["wallet"], host_updated["wallet"]],
                                      "contested_offer_refused": refusal["reason"],
+                                     "death_during_confirmation_kept_inventory_and_cash": True,
+                                     "dead_trader_open_refused": True,
                                      "recovered_guest_wallet": screen_after_refusal["wallet"],
                                      "native_checkpoint_unchanged": True}}
 

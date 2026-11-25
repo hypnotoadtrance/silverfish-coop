@@ -2,6 +2,7 @@ local view = {}
 local npc_melee = require("native_npc_melee_view")
 local weapon_view = require("native_avatar_weapon_view")
 local bolt_view = require("native_short_bolt_view")
+local door_view = require("native_stock_door")
 
 local npc_base = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local turret_base = "/Game/Classes/NPCs/NPC_Assets/Turret_Master_BP.Turret_Master_BP_C"
@@ -140,6 +141,13 @@ end
 local function record(row)
     pending[#pending + 1] = row
     if #pending > maximum then table.remove(pending, 1) end
+end
+
+function view.door_motion(world, actor, opens, duration, ease, shortest, x, y, z, pitch, yaw, roll)
+    if not current or not same(current.world, world) then return end
+    serial = serial + 1
+    record({serial, "door-motion", actor, opens, duration, ease, shortest, x, y, z, pitch, yaw, roll,
+        expires = current.statics:GetRealTimeSeconds(world) + .25})
 end
 
 local function capture_decal(_, decal_material, decal_size, attach_to, _, location, orientation, placement, lifetime)
@@ -577,6 +585,12 @@ function view.command(args, state, phase, avatar)
         local values = {}
         for field in (args[index] .. "|"):gmatch("([^|]*)|") do values[#values + 1] = field end
         local id, path = math.tointeger(tonumber(values[1])), values[2]
+        if #values == 13 and id and id > last_played and path == "door-motion" then
+            last_played = id
+            local ok, shown = pcall(door_view.play_motion, state, pawn, values)
+            if ok and shown then receipts[#receipts + 1] = ("%d:door_motion"):format(id) end
+            goto next_cue
+        end
         if #values == 11 and id and id > last_played and path == "bolt-flight" then
             local shot = {}
             for axis = 3, 11 do

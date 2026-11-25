@@ -1,4 +1,4 @@
-"""Relay short-lived cosmetic cues from host-authoritative weapon actions."""
+"""Relay short-lived presentation cues from the authoritative host."""
 
 import asyncio
 import json
@@ -7,6 +7,7 @@ import re
 import time
 
 from .native_guest_drop_record import valid_id, valid_position
+from .native_stock_door import actor_map as door_map
 
 
 LIMIT = 36
@@ -98,6 +99,16 @@ def valid_bullet_decal(cue):
             and all(type(size) in (int, float) and .02 <= size <= 128 for size in cue[11:]))
 
 
+def valid_door_motion(cue, area):
+    return (type(cue) is list and len(cue) == 13 and type(cue[0]) is int and 0 < cue[0] < 10**15
+            and cue[1] == "door-motion" and isinstance(area, str) and door_map(cue[2]) == area
+            and all(type(value) is int and 0 <= value <= limit
+                    for value, limit in zip((cue[3], cue[5], cue[6]), (1, 3, 1), strict=True))
+            and type(cue[4]) in (float, int) and .06 <= cue[4] <= 3
+            and all(type(value) in (int, float) and abs(value) <= 10000 for value in cue[7:10])
+            and all(type(value) in (int, float) and abs(value) <= 360 for value in cue[10:13]))
+
+
 def valid_use(cue):
     return (type(cue) is list and len(cue) in (6, 7) and type(cue[0]) is int and 0 < cue[0] < 10**15
             and cue[1] == "consume" and type(cue[2]) is str and len(cue[2]) <= 160
@@ -165,6 +176,15 @@ def _captured(data):
             except ValueError:
                 continue
             if valid_bullet_decal(cue):
+                cues.append(cue)
+            continue
+        if len(fields) == 13 and fields[1] == "door-motion":
+            try:
+                cue = [int(fields[0]), fields[1], fields[2], int(fields[3]), float(fields[4]),
+                       int(fields[5]), int(fields[6]), *map(float, fields[7:])]
+            except ValueError:
+                continue
+            if valid_door_motion(cue, area):
                 cues.append(cue)
             continue
         if len(fields) not in (11, 12, 19):
@@ -235,6 +255,8 @@ async def relay(host, bridge, transport, *, footsteps=None):
                 payload = cue[:3] + [round(value, 2) for value in cue[3:6]] + cue[6:]
             elif cue[1] == "bullet-decal":
                 payload = cue[:4] + [round(value, 2) for value in cue[4:]]
+            elif cue[1] == "door-motion":
+                payload = cue[:7] + [round(value, 3) for value in cue[7:]]
             else:
                 payload = cue[:2] + [round(axis, 2) for axis in cue[2:]]
             frames.append(json.dumps([area, epoch, payload], separators=(",", ":")).encode("ascii"))
@@ -263,14 +285,14 @@ class Playback:
                 cue = decoded[2]
                 if (valid_cycle(cue) or valid_melee(cue) or valid_npc_melee(cue) or valid_impact(cue)
                         or valid_use(cue) or valid_dry_fire(cue) or valid_bolt_flight(cue)
-                        or valid_bullet_decal(cue) or valid_shot(cue)) and cue[0] > self.last_played:
+                        or valid_bullet_decal(cue) or valid_door_motion(cue, scope[0]) or valid_shot(cue)) and cue[0] > self.last_played:
                     selected[cue[0]] = cue[1:]
         if not selected:
             return game
         arguments = []
         for serial, (path, *parameters) in sorted(selected.items())[-LIMIT:]:
             values = (map(str, parameters) if path in ("melee", "npc-melee", "npc-impact", "melee-impact",
-                                                       "bullet-decal", "cycle", "consume")
+                                                       "bullet-decal", "cycle", "consume", "door-motion")
                       else (f"{value:.2f}" for value in parameters))
             arguments.append("|".join((str(serial), path, *values)))
         try:
@@ -312,6 +334,10 @@ class Playback:
             if hit and hit[2] == "bullet_decal" and (source := selected.get(int(hit[1]))) and source[0] == "bullet-decal":
                 control.event("native_bullet_decal_played", serial=int(hit[1]), material=source[1], surface=source[2],
                               position=source[3:6])
+                continue
+            if hit and hit[2] == "door_motion" and (source := selected.get(int(hit[1]))) and source[0] == "door-motion":
+                control.event("native_stock_door_motion_played", serial=int(hit[1]), actor=source[1],
+                              opens=bool(source[2]), duration=source[3])
                 continue
             if hit and (source := selected.get(int(hit[1]))) and source[0] == "melee" and MELEE_CLIPS[source[2]] == hit[2]:
                 control.event("native_avatar_melee_played", serial=int(hit[1]), player_id=source[1], clip=hit[2])

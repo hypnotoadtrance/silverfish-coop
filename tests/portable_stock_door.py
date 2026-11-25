@@ -88,12 +88,18 @@ async def verify_stock_crossroads_door(host, guest, pawn):
                    and event.get(door.RESULT, {}).get("actor") == WOOD_DOOR]
         receipt, = actions
         assert receipt[door.RESULT]["open"] is expected_open
+        motion, = [event for event in await resident_events(guest_run, replica)
+                   if event.get("time_unix", 0) >= started and event.get("event") == "native_stock_door_motion_played"
+                   and event.get("actor") == WOOD_DOOR and event.get("opens") is expected_open]
+        assert motion["time_unix"] < receipt["time_unix"], (motion, receipt)
+        measured = await guest.bridge.command(door.FIXTURE, "motion", WOOD_DOOR, update_status=False)
+        first = float(measured["ack"]["message"])
         assert await panel(host, query) is not expected_open
         assert await panel(guest, query) is not expected_open
-        return receipt
+        return receipt, first
 
-    closed = await toggle(False)
-    reopened = await toggle(True)
+    closed, close_motion = await toggle(False)
+    reopened, reopen_motion = await toggle(True)
     replay = await submit(guest_run, door.ACTION, operation_id=closed["operation_id"], target=WOOD_DOOR)
     assert replay.get("ok") and replay[door.RESULT] == closed[door.RESULT]
     assert not await panel(host, query) and not await panel(guest, query)
@@ -101,5 +107,6 @@ async def verify_stock_crossroads_door(host, guest, pawn):
     return {"stock_crossroads_door": {"actor": WOOD_DOOR, "authoritative_lock_refusal": True,
                                      "close": closed[door.RESULT], "open": reopened[door.RESULT],
                                      "guest_confirm_ms": [closed["elapsed_ms"], reopened["elapsed_ms"]],
+                                     "guest_movement_start_ms": [close_motion, reopen_motion],
                                      "close_replay_preserved_open_door": True,
                                      "collision_verified_both_seats": True, "campaign_unchanged": True}}

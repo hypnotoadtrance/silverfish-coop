@@ -47,6 +47,24 @@ class ItemUseCueTests(unittest.IsolatedAsyncioTestCase):
         control.event.assert_any_call("native_avatar_use_sound_played", serial=1, item_class=self.item)
         control.event.assert_any_call("native_avatar_use_visual_played", serial=1, item_class=self.item, player_id=257)
 
+    async def test_door_movement_uses_the_placed_door_and_host_visit(self):
+        actor = f"Door_Wood_04_BP_C {self.area}.Observitory_P:PersistentLevel.Door_Wood_04_BP_C_7"
+        valid = f"1|door-motion|{actor}|1|0.65|3|1|5|6|0|0|-90|0"
+        other = valid.replace("1|door-motion", "2|door-motion", 1).replace(self.area, self.area + "_other")
+        invalid = valid.replace("1|door-motion", "3|door-motion", 1).replace("0.65", "inf")
+        area, cues = _captured(f"{self.area}\n{valid}\n{other}\n{invalid}\n")
+        self.assertEqual(cues, [[1, "door-motion", actor, 1, .65, 3, 1, 5.0, 6.0, 0.0, 0.0, -90.0, 0.0]])
+        result = {"ack": {"message": "1:door_motion"}}
+        bridge = SimpleNamespace(command=AsyncMock(return_value=result))
+        control = SimpleNamespace(event=Mock())
+        payload = [json.dumps([area, self.epoch, cues[0]])]
+        observer = Playback()
+        await observer.sync(bridge, control, {"map": area}, payload, "2" * 32)
+        bridge.command.assert_not_called()
+        self.assertEqual(await observer.sync(bridge, control, {"map": area}, payload, self.epoch), result)
+        control.event.assert_called_once_with("native_stock_door_motion_played", serial=1, actor=actor,
+                                              opens=True, duration=.65)
+
     async def test_dry_fire_has_only_a_deduplicated_sound_receipt(self):
         mailbox = f"{self.area}\n3|dry|121|-59|2.05\n4|dry|inf|0|0\n"
         area, cues = _captured(mailbox)

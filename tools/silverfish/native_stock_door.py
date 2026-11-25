@@ -130,8 +130,14 @@ async def project(bridge, game, frame, epoch):
                        *(str(row[key]) for key in (*_ANGLES, *_OFFSET)))) for name, row in batch)
     result = await bridge.command(TAG + "-project", area, *args, timeout=4)
     after = result.get(KEY, {})
+    message = result.get("ack", {}).get("message", "")
+    suffix = message.split("|")[1:] if message.startswith("stock door flags and hinge transform synchronized|") else []
+    deferred = {int(index) for index in suffix if index.isascii() and index.isdigit() and len(index) <= 2}
+    if len(deferred) != len(suffix) or any(not 1 <= index <= len(batch) for index in deferred):
+        raise RuntimeError("Stock hinged door projection returned invalid pending movement")
     if (result.get("state"), result.get("map")) != ("connected", area) or any(
-            not matches(after.get(name, {}), row) for name, row in batch):
+            index not in deferred and not matches(after.get(name, {}), row)
+            for index, (name, row) in enumerate(batch, 1)):
         raise RuntimeError("Stock hinged door projection did not match the host")
     return result
 
