@@ -60,7 +60,6 @@ namespace
     constexpr auto dig_function = STR("/Game/Classes/Actors/BurriedItem_BP.BurriedItem_BP_C:DigForItem");
     constexpr auto spade_graph = STR("/Game/Classes/Equipment/MeleeWep_Spade.MeleeWep_Spade_C:ExecuteUbergraph_MeleeWep_Spade");
     constexpr auto spade_primary = STR("/Game/Classes/Equipment/MeleeWep_Spade.MeleeWep_Spade_C:PrimaryPress");
-    constexpr auto melee_graph = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Master_BP.MeleeWep_Master_BP_C:ExecuteUbergraph_MeleeWep_Master_BP");
     constexpr auto buried_flag = STR("BurriedItem_BP_C_1-CrossRoads_P-");
     constexpr auto item_interact = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:SendInteractionToActor");
     constexpr auto put_item = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:PutInInventory");
@@ -403,13 +402,13 @@ namespace
 
     struct LiveDig
     {
-        U::FWeakObjectPtr world, pawn, driver, save, held, source, package, collector, collector_save;
-        Clock::time_point lease{}, press_until{}, pickup_until{};
+        U::FWeakObjectPtr world, pawn, driver, save, source, package, collector, collector_save;
+        Clock::time_point lease{}, pickup_until{};
         LiveState state{LiveState::Arming}, before_pickup{LiveState::Unclaimed};
         Census before{};
         Point impact{};
         std::int64_t serial{};
-        bool spade_called{}, inventory_called{}, dispatching_guest_pickup{};
+        bool inventory_called{}, dispatching_guest_pickup{};
         int wallet{}, artifact_value{}, incidental{};
         std::string spade_guid, package_name, package_guid, escrow_guid, material;
         std::wstring package_flag;
@@ -620,23 +619,22 @@ namespace
             return;
         }
         const auto standing = bound_live(true, true);
-        const bool host_pressed = standing.world && standing.spade == caller->Object() &&
-            standing.spade == live_dig.held.Get() && now < live_dig.press_until && live_dig.spade_called;
+        const bool host_contact = standing.world && standing.spade == caller->Object();
         auto* dig_save = ctx.save;
-        if (!host_pressed)
+        std::string expected_spade;
+        if (!host_contact)
         {
             const auto guest = std::ranges::find_if(guest_digs, [&](const auto& attempt) {
                 return attempt.frame == caller && attempt.spade.Get() == caller->Object() && now < attempt.expires;
             });
-            if (guest == guest_digs.end() || live_serial >= (std::int64_t{1} << 53) - 1 ||
+            if (guest == guest_digs.end() ||
                 !silverfish::native_guest_regen::qualifies_detached_guest(guest->pawn.Get(), guest->save.Get(), ctx.save))
             {
                 call.PreventOriginalFunctionCall();
                 return;
             }
             dig_save = guest->save.Get();
-            live_dig.serial = ++live_serial;
-            live_dig.spade_guid = guest->guid;
+            expected_spade = guest->guid;
         }
         auto* input = field<U::FStructProperty>(function, STR("DigLocation"));
         auto* vector = find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector"));
@@ -659,8 +657,9 @@ namespace
         }
         stock_wallet::Wallet flags;
         std::string now_spade, owned;
-        if (!flags.bind(ctx.instance) || flags.flag_value(ctx.instance, buried_flag).second ||
-            !loot_escrow::stock_spade_guid(dig_save, now_spade) || now_spade != live_dig.spade_guid ||
+        if (live_serial >= (std::int64_t{1} << 53) - 1 || !flags.bind(ctx.instance) ||
+            flags.flag_value(ctx.instance, buried_flag).second || !loot_escrow::stock_spade_guid(dig_save, now_spade) ||
+            (!host_contact && now_spade != expected_spade) ||
             !loot_escrow::sealed_package_guid(ctx.save, owned) || !owned.empty())
         {
             fail_live("stock_live_dig_contact_ownership_unverified");
@@ -670,14 +669,17 @@ namespace
         live_dig.material = material_from_stock_frame(*caller);
         live_dig.before = scene(ctx, hit);
         live_dig.impact = hit;
-        if (live_dig.serial == 0 || live_dig.material.empty() || live_dig.before.packages != 0)
+        if (live_dig.material.empty() || live_dig.before.packages != 0)
         {
             fail_live("stock_contact_proof_unavailable");
             call.PreventOriginalFunctionCall();
             return;
         }
+        live_dig.serial = ++live_serial;
+        live_dig.spade_guid = std::move(now_spade);
+        live_dig.issue = {};
         live_dig.state = LiveState::Contact;
-        live_dig.pickup_until = Clock::now() + std::chrono::seconds(3);
+        live_dig.pickup_until = now + std::chrono::seconds(3);
     }
 
     void settle_live_spawn(const Context& ctx)
@@ -745,21 +747,6 @@ namespace
             call.OriginalFunctionCallPrevented()) return;
         sync_hole_begin_play(call, receiver, function);
         if (!args || watch.pressed || call.OriginalFunctionCallPrevented()) return;
-        if (receiver == live_dig.pawn.Get() && live_dig.state == LiveState::Arming &&
-            Clock::now() < live_dig.lease && Clock::now() >= live_dig.press_until &&
-            native_guest_primary_input::matches_stock_spade_started(receiver, function, args))
-        {
-            const auto ctx = bound_live(true, true);
-            auto* source = live_dig.source.Get();
-            if (!ctx.world || !qualified_source(ctx, source) || squared_distance(location(receiver), source_position) > 450.0 * 450.0 ||
-                live_serial >= (std::int64_t{1} << 53) - 1 || !loot_escrow::stock_spade_guid(ctx.save, live_dig.spade_guid)) return;
-            live_dig.held = ctx.spade;
-            live_dig.press_until = Clock::now() + std::chrono::milliseconds(1200);
-            live_dig.serial = ++live_serial;
-            live_dig.spade_called = false;
-            live_dig.issue = {};
-            return;
-        }
         static const U::FName interact_name{STR("SendInteractionToActor")};
         static const U::FName put_name{STR("PutInInventory")};
         static const U::FName pickup_name{STR("PickUp_Object")};
@@ -816,13 +803,6 @@ namespace
             !frame.Node() || frame.Object() != receiver) return;
         aim_guest_dig_frame(call, receiver, frame, nullptr);
         observe_live_event(call, receiver, frame.Node(), frame.Locals());
-        if (receiver == live_dig.held.Get() && live_dig.state == LiveState::Arming &&
-            Clock::now() < live_dig.press_until && frame.Node() == find<U::UFunction>(spade_primary))
-        {
-            auto* caller = frame.PreviousFrame();
-            if (caller && caller->Object() == receiver && caller->Node() && caller->Node() == find<U::UFunction>(melee_graph))
-                live_dig.spade_called = true;
-        }
         static const U::FName dig_name{STR("DigForItem")};
         if (frame.Node()->GetFName() == dig_name) begin_live_contact(call, receiver, frame);
         auto* package = live_dig.package.Get();
@@ -1218,7 +1198,7 @@ namespace
         const auto down = lua.get_bool();
         if (!live_context(ctx) || watch.pressed ||
             (down && (live_dig.state != LiveState::Arming || Clock::now() >= live_dig.lease ||
-                      Clock::now() < live_dig.press_until || !qualified_source(ctx, live_dig.source.Get()))) ||
+                      !qualified_source(ctx, live_dig.source.Get()))) ||
             !native_guest_primary_input::dispatch_crossroads_spade_fixture(ctx.pawn, ctx.spade, down))
             return result(lua, false, "stock_live_dig_fixture_dispatch_unqualified");
         return result(lua, true, down ? "stock_started" : "stock_completed");
@@ -1243,8 +1223,6 @@ namespace
                 live_dig.save = ctx.save;
             }
             live_dig.pawn = ctx.pawn;
-            live_dig.held.Reset();
-            live_dig.press_until = {};
         }
         if (live_dig.state == LiveState::Escrowed && !live_dig.package.Get())
         {
