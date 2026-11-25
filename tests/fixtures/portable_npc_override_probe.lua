@@ -1218,6 +1218,21 @@ local function dock_fight_position(pawn, actor, ignored, distance, shot_lane, co
     end
 end
 
+local function dock_melee_approach(host, guest, worker, distance)
+    local function contact()
+        local eye = guest.Camera:K2_GetComponentLocation()
+        return melee_lane(guest, worker, heading(eye, worker:K2_GetActorLocation()))
+    end
+    for _, range in ipairs({distance, 160, 195}) do
+        local close = dock_fight_position(guest, worker, {host, guest, worker}, range, true, contact)
+        if close then
+            guest.CharacterMovement:StopMovementImmediately()
+            guest:ForceNetUpdate()
+            return close
+        end
+    end
+end
+
 local function stage_live_worker(pawn, world, distance, keep_host_at_arrival)
     local actor = dock_worker(world, live_worker)
     assert(valid(actor) and actor.Alive and not valid(actor.CombatTarget) and actor.Health > 1
@@ -1232,19 +1247,13 @@ local function stage_live_worker(pawn, world, distance, keep_host_at_arrival)
     else
         assert(dock_fight_position(pawn, actor, ignored, 1800, false), "no host position away from the warehouse fight")
     end
-    local contact = distance and function()
-        return melee_lane(guest, actor, heading(guest.Camera:K2_GetComponentLocation(), actor:K2_GetActorLocation()))
-    end
     local guest_point
-    for _, approach in ipairs(distance and {distance, 160, 195} or {350}) do
-        guest_point = dock_fight_position(guest, actor, ignored, approach, true, contact)
-        if guest_point then break end
+    if distance then
+        guest_point = dock_melee_approach(pawn, guest, actor, distance)
+    else
+        guest_point = dock_fight_position(guest, actor, ignored, 350, true)
     end
     assert(guest_point, "no clear guest approach in the warehouse")
-    if contact then
-        guest.CharacterMovement:StopMovementImmediately()
-        guest:ForceNetUpdate()
-    end
     live_probe = {actor = actor, guest = guest, host = pawn, enemy_health = actor.Health,
         guest_health = guest.Save.PlayerHealth, guest_attacks = 0, host_attacks = 0}
     if keep_host_at_arrival then live_probe.launches = {} end
@@ -1638,11 +1647,32 @@ local function run(action, actor_path)
         assert(valid(worker) and worker.Alive and worker:GetLocalRole() == (host and 3 or 1),
             "the original live warehouse worker is unavailable")
         local shooter = host and authoritative_guest(world) or pawn
-        return aim_melee(world, shooter, function()
+        assert(aim_melee(world, shooter, function()
             if valid(worker) and not worker:IsActorBeingDestroyed() and same(worker:GetWorld(), world) and worker.Alive then
                 return worker:K2_GetActorLocation()
             end
-        end) and "ready" or "unavailable"
+        end), "the stock warehouse aim camera is unavailable")
+        local eye, forward = shooter.Camera:K2_GetComponentLocation(), shooter.Camera:GetForwardVector()
+        return table.concat({point_string(eye), point_string(forward), point_string(worker:K2_GetActorLocation())}, ";")
+    elseif action == "melee-view" then
+        local owner = host and authoritative_guest(world) or pawn
+        local eye, forward = owner.Camera:K2_GetComponentLocation(), owner.Camera:GetForwardVector()
+        return table.concat({point_string(eye), point_string(forward)}, ",")
+    elseif action == "melee-contact-view" or action == "dock-melee-contact-view" then
+        assert(host, "the authoritative contact runs on the host")
+        if type(SilverfishReadNativeGuestMeleeContactGeometry) ~= "function" then return "unavailable" end
+        local x, y, z, dx, dy, dz, reach, radius = SilverfishReadNativeGuestMeleeContactGeometry()
+        if not x then return "unavailable" end
+        return ("%.7f,%.7f,%.7f,%.7f,%.7f,%.7f,%.7f,%.7f"):format(x, y, z, dx, dy, dz, reach, radius)
+    elseif action == "melee-contact" or action == "dock-melee-contact" then
+        assert(host, "the authoritative contact runs on the host")
+        return SilverfishReadNativeGuestMeleeContactStatus()
+    elseif action == "dock-melee-approach" then
+        assert(host and live_probe and valid(live_probe.actor) and live_probe.actor.Alive,
+            "the dock melee retry requires the original live worker")
+        local close = assert(dock_melee_approach(pawn, live_probe.guest, live_probe.actor, 135),
+            "the live warehouse worker has no reachable melee approach")
+        return point_string(close)
     elseif action == "dock-natural-position" then
         return live_worker_position(world)
     elseif action == "dock-pursuit-view" or action == "dock-pursuit-aim" then
@@ -1890,19 +1920,6 @@ local function run(action, actor_path)
         if not valid(target) then return "absent" end
         return ("%s;%s;%.3f;%s"):format(tostring(target.Alive), tostring(target.Mesh:IsAnySimulatingPhysics()),
             target.Health, target:GetFullName())
-    elseif action == "melee-view" then
-        local owner = host and authoritative_guest(world) or pawn
-        local eye, forward = owner.Camera:K2_GetComponentLocation(), owner.Camera:GetForwardVector()
-        return ("%.7f,%.7f,%.7f,%.7f,%.7f,%.7f"):format(eye.X, eye.Y, eye.Z, forward.X, forward.Y, forward.Z)
-    elseif action == "melee-contact-view" then
-        assert(host, "the authoritative contact runs on the host")
-        if type(SilverfishReadNativeGuestMeleeContactGeometry) ~= "function" then return "unavailable" end
-        local x, y, z, dx, dy, dz, reach, radius = SilverfishReadNativeGuestMeleeContactGeometry()
-        if not x then return "unavailable" end
-        return ("%.7f,%.7f,%.7f,%.7f,%.7f,%.7f,%.7f,%.7f"):format(x, y, z, dx, dy, dz, reach, radius)
-    elseif action == "melee-contact" then
-        assert(host, "the authoritative contact runs on the host")
-        return SilverfishReadNativeGuestMeleeContactStatus()
     elseif action:match("^turret%-") then
         return turret_state(pawn, world, host, action)
     end

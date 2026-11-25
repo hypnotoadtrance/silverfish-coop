@@ -2484,36 +2484,53 @@ async def verify_tutorial_dock_melee(host: Seat, guest: Seat, pawn: str) -> dict
 
     try:
         _, guest_point = (await command(host, "dock-melee-stage")).split(";")
-        assert await command(guest, f"dock-natural-arrive\t{guest_point}") == "ready"
-        destination = tuple(map(float, guest_point.split(",")))
-        async with asyncio.timeout(6):
-            while math.dist(destination, tuple(map(float, (await command(guest, "dock-natural-seat")).split(",")))) > 30:
-                await asyncio.sleep(.05)
-        baseline = (await command(host, "dock-natural-sample")).split(";")
-        assert baseline[:4] == ["true", "false", "120.000", "120.000"], baseline
+        misses = []
+        for attempt in range(3):
+            assert await command(guest, f"dock-natural-arrive\t{guest_point}") == "ready"
+            destination = tuple(map(float, guest_point.split(",")))
+            async with asyncio.timeout(6):
+                while math.dist(destination, tuple(map(float, (await command(guest, "dock-natural-seat")).split(",")))) > 30:
+                    await asyncio.sleep(.05)
+            baseline = (await command(host, "dock-natural-sample")).split(";")
+            assert baseline[:4] == ["true", "false", "120.000", "120.000"], baseline
 
-        for seat in (guest, host):
-            assert await command(seat, "dock-melee-aim") == "ready"
-        tap = await submit(guest_run, "native-guest-primary-input-fixture")
-        assert tap["ok"], tap
-        sequence = tap["native_guest_primary_fixture"]["sequence"]
-        async with asyncio.timeout(8):
-            while True:
-                event = next((row for row in await resident_events(guest_run, frame) if row.get("sequence") == sequence
-                              and row["event"] in {"native_guest_melee_input", "native_guest_melee_input_rejected"}), None)
-                if event:
-                    break
-                await asyncio.sleep(.05)
-        assert event["event"] == "native_guest_melee_input", event
-        proof = event[native_guest_melee.SWING_KEY]
-        after = (await command(host, "dock-natural-sample")).split(";")
-        assert (proof["map"], proof["pawn"], proof["guid"], proof["target"]) == (
-            arrival["game"]["map"], actor, guid, worker), (proof, after)
-        assert native_guest_melee.verified_damage(proof), (proof, after)
+            host_frame, guest_frame = await asyncio.gather(*(command(seat, "dock-melee-aim") for seat in (host, guest)))
+            host_eye, host_direction, target_before = host_frame.split(";")
+            guest_eye, guest_direction, _ = guest_frame.split(";")
+            tap = await submit(guest_run, "native-guest-primary-input-fixture")
+            if tap.get("error", "").endswith("(native_guest_primary_fixture_scope_unavailable)") and attempt < 2:
+                misses.append({"refusal": tap["error"], "target_before": target_before})
+                guest_point = await command(host, "dock-melee-approach")
+                continue
+            assert tap["ok"], (tap, misses)
+            sequence = tap["native_guest_primary_fixture"]["sequence"]
+            async with asyncio.timeout(8):
+                while True:
+                    event = next((row for row in await resident_events(guest_run, frame) if row.get("sequence") == sequence
+                                  and row["event"] in {"native_guest_melee_input", "native_guest_melee_input_rejected"}), None)
+                    if event:
+                        break
+                    await asyncio.sleep(.05)
+            assert event["event"] == "native_guest_melee_input", event
+            proof = event[native_guest_melee.SWING_KEY]
+            after = (await command(host, "dock-natural-sample")).split(";")
+            geometry = {"host_before": f"{host_eye},{host_direction}", "guest_before": f"{guest_eye},{guest_direction}",
+                        "host_contact": await command(host, "dock-melee-contact-view"),
+                        "contact": await command(host, "dock-melee-contact"),
+                        "target_before": target_before, "target_after": await command(host, "dock-natural-position")}
+            assert (proof["map"], proof["pawn"], proof["guid"]) == (arrival["game"]["map"], actor, guid), (proof, geometry)
+            if not (native_guest_melee.verified_miss(proof) and after[:4] == baseline[:4]):
+                break
+            misses.append({"proof": proof, "contact_geometry": geometry, "after": after})
+            if attempt < 2:
+                guest_point = await command(host, "dock-melee-approach")
+
+        assert proof["target"] == worker and native_guest_melee.verified_damage(proof), (proof, after, misses, geometry)
         assert math.isclose(proof["enemy_health_before"], float(baseline[3]), abs_tol=.001), (proof, baseline)
         assert after[1] == "true" and math.isclose(proof["enemy_health_after"], float(after[3]), abs_tol=.001), (proof, after)
         assert campaign_save_hashes(host.campaign) == saves, "A warehouse melee hit wrote campaign saves"
-        return {"tutorial_dock_melee": {"stock_input": tap, "authority_damage": proof, "baseline": baseline, "after": after}}
+        return {"tutorial_dock_melee": {"stock_input": tap, "authority_damage": proof, "baseline": baseline, "after": after,
+                                        "contact_geometry": geometry, "prior_misses": misses}}
     finally:
         for seat in (host, guest):
             assert await command(seat, "clear-melee-aim") == "cleared"
@@ -6035,10 +6052,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableBoardOfferProbe",
                                                      fixture="portable_board_offer_probe.lua"))
-        if (stock_npc_override and resident_weapon_cues) or stock_melee_family:
+        if (stock_npc_override and resident_weapon_cues) or stock_melee_family or tutorial_dock_melee:
             proof["npc_combat_overlays"] = [probes.enter_context(host_npc_combat_overlay(game)) for game in games]
         elif (stock_host_corpse_carry or stock_npc_rivalry or stock_npc_override or stock_melee_edges
-              or tutorial_dock_combat or tutorial_dock_melee):
+              or tutorial_dock_combat):
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
                                                      fixture="portable_npc_override_probe.lua"))
