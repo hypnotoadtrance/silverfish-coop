@@ -1,6 +1,7 @@
 local doors = {}
 local guest_save = require("guest_save")
 local preview_component = require("native_preview_component")
+local stock_alert = require("native_cash_popup")
 
 local base_path = "/Game/Assets/StaticMeshes/Doors/BasicDoor_Master.BasicDoor_Master_C"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
@@ -634,13 +635,23 @@ end
 
 function doors.command(fields, state, phase)
     if fields[2] == "native-stock-door-lockpick-feedback" then
-        local actor = phase == "connected" and #fields == 3 and target_door(state, phase, fields[3])
-        local effects = StaticFindObject("/Game/Classes/Libraries/Fuctions_Lib/FL_GameEffects.Default__FL_GameEffects_C")
-        if not valid(actor) or actor.Locked ~= false or not valid(effects) then
+        local actor = phase == "connected" and #fields == 4 and target_door(state, phase, fields[3])
+        local pawn = state.local_pawn and state.local_pawn.pawn
+        local message
+        if fields[4] == "picked" and valid(actor) and actor.Locked == false then
+            message = "You picked the lock!"
+        elseif fields[4] == "broken" and valid(actor) then
+            message = "Lock Pick broke..."
+        end
+        if not message or not valid(pawn) or pawn:HasAuthority() or not pawn:IsLocallyControlled()
+            or not valid(state.controller) or not same(pawn.Controller, state.controller) then
             error("stock_lockpick_feedback_unavailable", 0)
         end
-        effects:SendAlertMessage_ToScreen(FText("You picked the lock!"), actor, actor)
-        return "stock door lockpick feedback played"
+        local widget = stock_alert.show(state.controller, message)
+        if not valid(widget) or widget.Messaage:ToString() ~= message then
+            error("stock_lockpick_feedback_unavailable", 0)
+        end
+        return message
     end
     if fields[2] == "native-stock-door-project" then return project(fields, state, phase) end
     if fields[2] == "native-stock-door-fixture" then return fixture(fields, state, phase) end

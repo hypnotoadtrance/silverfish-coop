@@ -3665,7 +3665,7 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str, hinged=None
                 await wait_resident_status(run, lambda f:
                     f["game"].get(native_stock_door.KEY, {}).get(hinged, {}).get("locked") is False)
             assert any(row["time_unix"] >= started_at and row["actor"] == hinged
-                       for row in await resident_events(guest_run, frame)
+                       and row["message"] == "You picked the lock!" for row in await resident_events(guest_run, frame)
                        if row["event"] == "native_stock_door_lockpick_feedback_played")
         else:
             for seat in (host, guest):

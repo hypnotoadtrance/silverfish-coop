@@ -34,16 +34,15 @@ function popup.enqueue(state, pawn, epoch, path, amount)
     return true
 end
 
-local function show(scope, amount)
+function popup.show(controller, message)
     local widgets = StaticFindObject(windows_path)
     local class = StaticFindObject(widget_path)
     if not valid(class) then LoadAsset(widget_path); class = StaticFindObject(widget_path) end
     if not valid(widgets) or not valid(class) then return end
-    local widget = widgets:Create(scope.controller, class, scope.controller)
+    local widget = widgets:Create(controller, class, controller)
     if not valid(widget) or not same(widget:GetClass(), class)
-        or not same(widget:GetOwningPlayer(), scope.controller) then return end
-    -- Match the stock Give_PlayerCash message and let its widget animate and expire.
-    widget.Messaage = FText(("Received $%d!"):format(amount))
+        or not same(widget:GetOwningPlayer(), controller) then return end
+    widget.Messaage = FText(message)
     widget:AddToViewport(9999)
     return widget:IsInViewport() and widget or nil
 end
@@ -57,7 +56,7 @@ function popup.update(state, phase)
     local now = os.clock()
     if current.retry and now < current.retry then return end
     current.retry = now + .25
-    local ok, widget = pcall(show, current, current.queue[1])
+    local ok, widget = pcall(popup.show, current.controller, ("Received $%d!"):format(current.queue[1]))
     if not ok or not widget then return end
     current.widget = widget
     table.remove(current.queue, 1)

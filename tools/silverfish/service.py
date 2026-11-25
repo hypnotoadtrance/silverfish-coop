@@ -5882,18 +5882,21 @@ class Client:
                 result = await self.gameplay_action(native_loot.LOCKPICK, operation, target)
                 elapsed = round(1000 * (time.monotonic() - started))
                 proof = result.get(native_loot.LOCKPICK_RESULT, {})
-                if proof.get("locked") is False and (proof.get("map"), proof.get("crate"), proof.get("guid")) == (area, crate, row["guid"]):
-                    await self.cancel_gameplay_snapshot()
-                    if self.stock_interaction_scope() == scope:
-                        if not hinged:
+                if (proof.get("map"), proof.get("crate"), proof.get("guid")) == (area, crate, row["guid"]):
+                    if not hinged and proof.get("locked") is False:
+                        await self.cancel_gameplay_snapshot()
+                        if self.stock_interaction_scope() == scope:
                             self.gameplay.setdefault(native_loot.VEHICLE_LOCKS, {})[crate] = False
-                        elif row["unlocked"] == "1":
-                            try:
-                                await self.bridge.command("native-stock-door-lockpick-feedback", crate, timeout=1)
-                            except (OSError, RuntimeError, TimeoutError) as error:
-                                self.control.event("native_stock_door_lockpick_feedback_deferred", reason=str(error))
-                            else:
-                                self.control.event("native_stock_door_lockpick_feedback_played", actor=crate)
+                    if hinged and self.stock_interaction_scope() == scope:
+                        feedback = "picked" if row["unlocked"] == "1" else "broken"
+                        try:
+                            view = await self.bridge.command("native-stock-door-lockpick-feedback", crate, feedback,
+                                                             timeout=1, update_status=False)
+                        except (OSError, RuntimeError, TimeoutError) as error:
+                            self.control.event("native_stock_door_lockpick_feedback_unavailable", reason=str(error))
+                        else:
+                            self.control.event("native_stock_door_lockpick_feedback_played", actor=crate,
+                                               message=view["ack"]["message"])
                 self.control.event("native_guest_lockpick", sequence=sequence, milliseconds=elapsed, **result)
             except (ValueError, OSError, RuntimeError) as error:
                 self.control.event("native_guest_lockpick_rejected", sequence=sequence, reason=str(error))
