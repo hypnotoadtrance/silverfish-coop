@@ -272,6 +272,12 @@ local function sync(state, phase)
             return select_pistol(state.local_pawn.pawn, slot)
         end
         if portable and phase == "connected" and operation == "aimjammer" then return aim_jammer(state) end
+        if portable and operation == "sampler" then
+            local objective = state.map:match("/([^/]+)$")
+            local profile = ({CrossRoads_P = "crossroads", Lake_01_P = "lake"})[objective]
+            assert(profile, "Jammer sampler expects an objective map")
+            return ModRef:GetSharedVariable("SilverfishPortableJammerSampler:native-" .. profile .. "-jammer") or "waiting"
+        end
         assert(state.map == area, "Simmi's stock board is only available in Observatory")
         if portable and phase == "hosting" then
             if operation == "seedpistol" then return seed_pistol(state) end

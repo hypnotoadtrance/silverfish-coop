@@ -6,6 +6,7 @@ local jammer_class = "/Game/Classes/ScriptingActors/Quest_Objectives/SignalJamme
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 local sound_path = "/Game/Assets/Sounds/WAVs/Ambiant_Wav/sw_Amb_PhoneBox_LP.sw_Amb_PhoneBox_LP"
+local native_projection = SilverfishReadNativeJammerProjection
 local binding, observed
 
 local function valid(object)
@@ -186,17 +187,30 @@ function jammer.command(fields, state, phase)
 end
 
 function jammer.rows(state, phase, status_row)
-    local checked, current, actor, root = pcall(function()
-        local connected = context(state, phase)
-        if not connected then return end
-        local placed, detail = live_actor(connected)
-        return connected, placed, detail
-    end)
+    local checked, current = pcall(context, state, phase)
     if not checked or not current then
         jammer.clear()
         return {}
     end
     local profile = current.profile
+    if binding and not same_context(current, binding) then binding = nil end
+    if not binding and type(native_projection) == "function" then
+        local ok, result, x, y, z, pitch, yaw, roll, sx, sy, sz =
+            pcall(native_projection, profile.objective_world, current.world:GetAddress(), phase == "hosting")
+        if ok and result == "omit" then return {} end
+        if ok and result == "pose" then
+            local pose_sample = status_row(profile.tag .. "-pose", profile.objective_map, profile.jammer_name,
+                x, y, z, pitch, yaw, roll, sx, sy, sz)
+            if phase == "hosting" then return {pose_sample} end
+            return {status_row(profile.tag .. "-projection", profile.objective_map, profile.jammer_name,
+                "present", "-"), pose_sample}
+        end
+    end
+    local found, actor, root = pcall(live_actor, current)
+    if not found then
+        jammer.clear()
+        return {}
+    end
     local function pose_row()
         local values = actor and pose(actor)
         if values then
@@ -207,7 +221,6 @@ function jammer.rows(state, phase, status_row)
         if not actor or not actor:HasAuthority() or hidden(actor) then return {} end
         return {pose_row()}
     end
-    if binding and not same_context(current, binding) then binding = nil end
     if not actor then
         if root ~= "absent" then return {} end
         return {status_row(profile.tag .. "-projection", profile.objective_map, profile.jammer_name, "absent", "none")}

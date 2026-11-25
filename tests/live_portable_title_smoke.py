@@ -56,7 +56,7 @@ from portable_loki_control import verify_guest_loki, verify_guest_loki_reconnect
 from portable_lingering_teleport import lingering_overlay, verify_stock_lingering_teleport
 from portable_personal_consumable import verify_personal_consumable_reconnect, verify_stock_personal_consumable
 from portable_wipe_chooser import verify_stock_wipe_chooser
-from portable_simmi_jammer import verify_stock_simmi_jammers
+from portable_simmi_jammer import instrument_jammer_sampler, verify_stock_simmi_jammers
 from portable_quarry_photo import verify_quarry_photo
 from portable_weather_travel import verify_weather_travel
 from portable_lightning import verify_stock_lightning
@@ -6720,6 +6720,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if stock_simmi_jammers or stock_board_offers:
             proof["jammer_aim_overlays"] = [probes.enter_context(jammer_aim_overlay(game)) for game in games]
             for game in games:
+                if stock_simmi_jammers:
+                    probes.enter_context(portable_script_overlay(game, "native_flood_jammer_projection.lua",
+                                                                 instrument_jammer_sampler))
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableSimmiJobsProbe",
                                                      fixture="simmi_jobs_probe.lua"))
         if stock_quarry_photo:

@@ -15,6 +15,43 @@ from tools.silverfish.native_flood_jammer import (
 from tools.silverfish.travel import CROSSROADS, LAKE, OBSERVATORY
 
 
+def instrument_jammer_sampler(source):
+    anchor = '        if ok and result == "pose" then\n'
+    if source.count(anchor) != 1:
+        raise ValueError("The native jammer pose anchor changed")
+    return source.replace(anchor, anchor + """            local key = "SilverfishPortableJammerSampler:" .. profile.tag
+            if not ModRef:GetSharedVariable(key) then
+                local measured, evidence = pcall(function()
+                    local address = current.world:GetAddress()
+                    local hosting = phase == "hosting"
+                    local function native_sample() return native_projection(profile.objective_world, address, hosting) end
+                    local function reflected_sample()
+                        local actor = assert(live_actor(current))
+                        return assert(pose(actor))
+                    end
+                    local stock = reflected_sample()
+                    local observed = {x, y, z, pitch, yaw, roll, sx, sy, sz}
+                    for index = 1, 9 do
+                        assert(stock[index] == observed[index], "pose field " .. index .. " differs")
+                    end
+                    assert(native_projection(profile.objective_world, address + 1, hosting) == nil, "wrong world accepted")
+                    assert(native_sample() == "pose", "binding did not recover after the mismatched world")
+                    local rounds = 512
+                    local function measure(sample)
+                        local started = os.clock()
+                        for index = 1, rounds do sample() end
+                        return (os.clock() - started) * 1000
+                    end
+                    local native_first, reflected_first = measure(native_sample), measure(reflected_sample)
+                    local reflected_second, native_second = measure(reflected_sample), measure(native_sample)
+                    return ("%d,%.3f,%.3f"):format(rounds * 2,
+                        native_first + native_second, reflected_first + reflected_second)
+                end)
+                ModRef:SetSharedVariable(key, measured and evidence or "failed: " .. tostring(evidence))
+            end
+""")
+
+
 async def verify_stock_simmi_jammers(host, guest, pawn, probe):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     peers = host, guest
@@ -158,7 +195,13 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
             (pose := f["game"].get(POSE, {})).get("actor") == spec.jammer
             and same_pose(authority["transform"], pose["transform"])
         )))["game"][POSE]
-        return {"host_pose": authority, "guest_pose": guest_pose}
+        samples = {}
+        for role, seat in (("host", host), ("guest", guest)):
+            raw = await command(seat, "sampler")
+            calls, native_ms, reflected_ms = map(float, raw.split(","))
+            samples[role] = {"calls_per_path": int(calls), "native_ms": native_ms, "lua_ms": reflected_ms,
+                             "all_pose_fields_matched": True, "wrong_world_refused": True}
+        return {"host_pose": authority, "guest_pose": guest_pose, "sampler": samples}
 
     async def confirm_weapon(ammo):
         await state(guest, lambda f: f["game"].get("native_guest_primary_scope", {}).get("guid") == guid)

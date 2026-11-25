@@ -1,6 +1,7 @@
 #include "flood_jammer.hpp"
 #include "shared_loot.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -157,6 +158,101 @@ namespace
             STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.Quest_Trigger_BP_C_1"),
             STR("Jmr_CrossRoads"), 524500608, 8, 50},
     };
+
+    struct ProjectionReader
+    {
+        const JammerProfile* profile{};
+        U::FWeakObjectPtr world{}, actor{}, capsule_type{};
+        U::FObjectProperty *capsule{}, *root{};
+        U::FBoolProperty *destroying{}, *hidden{};
+        U::FByteProperty* role{};
+        Clock::time_point retry{};
+    };
+
+    thread_local ProjectionReader projection;
+
+    int read_projection(const Lua& lua)
+    {
+        if (!U::IsInGameThreadRaw() || lua.get_stack_size() != 3 ||
+            !lua.is_string(1) || !lua.is_integer(2) || !lua.is_bool(3)) return 0;
+        const auto path = lua.get_string();
+        if (path.size() > 128) return 0;
+        const auto requested_world = RC::to_generic_string(path);
+        const auto requested_address = static_cast<Address>(lua.get_integer());
+        const bool hosting = lua.get_bool();
+        const auto profile = std::ranges::find(jammer_profiles, requested_world, &JammerProfile::world);
+        if (profile == jammer_profiles.end()) return 0;
+
+        auto* world = projection.world.Get();
+        if (projection.profile != &*profile || reinterpret_cast<Address>(world) != requested_address)
+        {
+            projection = {};
+            world = find<U::UWorld>(profile->world);
+            if (!live(world) || reinterpret_cast<Address>(world) != requested_address) return 0;
+            projection.profile = &*profile;
+            projection.world = world;
+        }
+        if (!live(world)) return 0;
+
+        auto* actor = projection.actor.Get();
+        if (!actor)
+        {
+            const auto now = Clock::now();
+            if (now < projection.retry) return 0;
+            projection.retry = now + std::chrono::milliseconds(750);
+            actor = find<U::UObject>(profile->jammer);
+            if (!exact(actor, jammer_type) || static_cast<U::AActor*>(actor)->GetWorld() != world ||
+                static_cast<U::AActor*>(actor)->GetLevel() != object(world, STR("PersistentLevel"))) return 0;
+            projection.capsule = field<U::FObjectProperty>(actor, STR("Capsule"));
+            projection.root = field<U::FObjectProperty>(actor, STR("RootComponent"));
+            projection.destroying = field<U::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
+            projection.hidden = field<U::FBoolProperty>(actor, STR("bHidden"));
+            projection.role = field<U::FByteProperty>(actor, STR("Role"));
+            if (!projection.capsule || !projection.root || !projection.destroying ||
+                !projection.hidden || !projection.role) return 0;
+            projection.actor = actor;
+        }
+        if (!live(actor) || projection.destroying->GetPropertyValueInContainer(actor))
+        {
+            projection.actor.Reset();
+            return 0;
+        }
+        const auto component = [actor](U::FObjectProperty* property) {
+            return property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(actor));
+        };
+        auto* capsule = component(projection.capsule);
+        auto* capsule_type = projection.capsule_type.Get();
+        if (!capsule_type)
+        {
+            capsule_type = find<U::UClass>(STR("/Script/Engine.CapsuleComponent"));
+            projection.capsule_type = capsule_type;
+        }
+        if (!live(capsule) || capsule != component(projection.root) ||
+            capsule->GetOuterPrivate() != actor || !capsule_type || capsule->GetClassPrivate() != capsule_type) return 0;
+
+        auto* jammer = static_cast<U::AActor*>(actor);
+        if (hosting && (projection.role->GetPropertyValueInContainer(actor) != 3 ||
+            (projection.hidden->GetPropertyValueInContainer(actor) && !jammer->GetActorEnableCollision())))
+        {
+            lua.set_string("omit");
+            return 1;
+        }
+
+        const auto location = jammer->K2_GetActorLocation();
+        const auto rotation = jammer->K2_GetActorRotation();
+        const auto scale = jammer->GetActorScale3D();
+        const std::array values{location.X(), location.Y(), location.Z(),
+            rotation.GetPitch(), rotation.GetYaw(), rotation.GetRoll(), scale.X(), scale.Y(), scale.Z()};
+        for (std::size_t index = 0; index < values.size(); ++index)
+        {
+            const auto value = values[index];
+            const double limit = index < 3 ? 1e7 : index < 6 ? 360.0 : 100.0;
+            if (!std::isfinite(value) || std::abs(value) > limit || (index >= 6 && value == 0)) return 0;
+        }
+        lua.set_string("pose");
+        for (const auto value : values) lua.set_number(value);
+        return 10;
+    }
 
     struct Snapshot { int step{absent}, cash{}, xp{}; };
     struct Proof
@@ -531,5 +627,6 @@ namespace silverfish::native_flood_jammer
         lua.register_function("SilverfishWatchFloodJammer", watch);
         lua.register_function("SilverfishReadFloodJammer", read);
         lua.register_function("SilverfishClearFloodJammer", clear);
+        lua.register_function("SilverfishReadNativeJammerProjection", read_projection);
     }
 }
