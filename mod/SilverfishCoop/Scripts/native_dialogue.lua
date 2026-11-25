@@ -10,6 +10,7 @@ local castaway_stock = require("native_castaway_stock_screen")
 local shop_view = require("native_shop_view")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
+local embedded = os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local title_fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
@@ -336,11 +337,15 @@ local function drain(current, sequence, ordinal)
     end
     if session and session.content then token, choice = session.token, session.content.ordinals[selected] end
     if ordinal and choice ~= ordinal then return false end
-    local file = io.open(events, "ab")
-    if not file then return false end
-    local written = file:write(table.concat({"dialogue-input", sequence, current.name, token, choice}, "\t"), "\n")
-    local closed = file:close()
-    if not written or not closed then return false end
+    local record = table.concat({"dialogue-input", sequence, current.name, token, choice}, "\t") .. "\n"
+    if embedded then
+        if type(SilverfishEnqueueLocalBridgeInput) ~= "function" or not SilverfishEnqueueLocalBridgeInput(record) then return false end
+    else
+        local file = io.open(events, "ab")
+        if not file then return false end
+        local written, closed = file:write(record), file:close()
+        if not written or not closed then return false end
+    end
     session = session or {}
     session.sequence, session.pending, session.token, session.expires = sequence, true, token, os.time() + 25
     return true

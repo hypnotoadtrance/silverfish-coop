@@ -19,6 +19,8 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 | Guest combat responsiveness | The guest noticed a delay before their shots registered on enemies. Guest-side feedback and reporting a hit or kill against the synchronized enemy are open. |
 | Guest lockpicking | The guest equipped a lockpick and received the success message after using it on a locker. The locker remained locked. |
 | Guest pipe bomb | The guest equipped and threw a pipe bomb. The players confirmed that the throw and explosion synchronized between host and guest. |
+| Television | The players confirmed that television activation state synchronized in the two-PC retest. |
+| Guest forward movement | The guest reported intermittent loss of movement while holding W. The conditions and cause are still being investigated. |
 
 ## `rc-161145a` playtest
 

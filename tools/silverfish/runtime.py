@@ -739,6 +739,7 @@ class Bridge:
         self.local_bridge = None
         self._local_interaction_records = deque(maxlen=64)
         self._local_board_records = deque(maxlen=64)
+        self._local_dialogue_records = deque(maxlen=64)
         self._local_crate_records = deque(maxlen=64)
         self._local_melee_records = deque(maxlen=64)
         self._local_cooked_meals = deque(maxlen=16)
@@ -757,13 +758,13 @@ class Bridge:
         if guest:
             if self.local_bridge is None:
                 streams.extend((("native-guest-primary-events", self.primary_input_offset),
-                                ("native-guest-held-fire-events", self.held_fire_offset)))
+                                ("native-guest-held-fire-events", self.held_fire_offset),
+                                ("native-dialogue-events", self.dialogue_offset)))
             streams.extend((
                 ("native-inventory-view-events", self.inventory_view_offset),
                 ("native-guest-inventory-equip-events", self.inventory_equip_offset),
                 ("native-shop-view-events", self.shop_view_offset),
                 ("native-wire-board-events", self.wire_board_offset),
-                ("native-dialogue-events", self.dialogue_offset),
                 ("native-mosby-station-events", self.mosby_station_offset),
             ))
         while (remaining := deadline - time.monotonic()) > 0:
@@ -800,6 +801,8 @@ class Bridge:
             for record in self.local_bridge.read_input(room):
                 if record.startswith(b"wire-board\t"):
                     self._local_board_records.append(record)
+                elif record.startswith(b"dialogue-input\t"):
+                    self._local_dialogue_records.append(record)
                 elif record.startswith(b"loot-crate-open\t"):
                     self._local_crate_records.append(record)
                 elif record.startswith(b"native-guest-melee-edge\t"):
@@ -1065,16 +1068,20 @@ class Bridge:
         return events
 
     def native_dialogue_requests(self) -> list[tuple[int, str, str, str]]:
-        try:
-            with (self.directory / "native-dialogue-events").open("rb") as stream:
-                stream.seek(self.dialogue_offset)
-                batch = stream.read(4096)
-        except OSError:
-            return []
-        end = batch.rfind(b"\n") + 1
-        self.dialogue_offset += end if end else len(batch) if len(batch) == 4096 else 0
+        if self.local_bridge is None:
+            try:
+                with (self.directory / "native-dialogue-events").open("rb") as stream:
+                    stream.seek(self.dialogue_offset)
+                    batch = stream.read(4096)
+            except OSError:
+                return []
+            end = batch.rfind(b"\n") + 1
+            self.dialogue_offset += end if end else len(batch) if len(batch) == 4096 else 0
+            records = batch[:end].splitlines()
+        else:
+            records = self._take_local_inputs(self._local_dialogue_records)
         events = []
-        for line in batch[:end].splitlines():
+        for line in records:
             fields = line.decode("utf-8", errors="replace").split("\t")
             if len(fields) != 5 or fields[0] != "dialogue-input":
                 continue

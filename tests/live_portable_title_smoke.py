@@ -3994,6 +3994,7 @@ async def verify_stock_castaway_dialogue(host: Seat, guest: Seat, pawn: str) -> 
         frame = await wait_resident_status(guest_run, lambda frame: view(frame).get("sequence") == sequence
             and view(frame).get("row") == row and (view(frame).get("state"), view(frame).get("surface")) == expected)
         responses.append(view(frame))
+    assert not (guest.bridge.directory / "native-dialogue-events").exists(), "Dialogue wrote an input mailbox"
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"stock_castaway_dialogue": responses}
 
