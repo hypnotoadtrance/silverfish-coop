@@ -2892,6 +2892,10 @@ class Bridge:
                             and None not in location and scale is not None and 0 < scale <= 10
                             and volume is not None and 0 <= volume <= 10):
                         cues.append([int(serial), kind, location, scale, volume, *([shape] if shape else [])])
+                elif fields[0] == "native-wandering-teleport-capture" and len(fields) == 2 and data.get("state") == "hosting":
+                    captured = int(fields[1])
+                    if captured >= 0:
+                        data["native_wandering_teleport_capture"] = captured
                 elif fields[0] == "native-anomaly-capture" and len(fields) in {4, 5, 6, 7} and data.get("state") == "hosting":
                     charge, blast, vortex = map(int, fields[1:4])
                     electrode = int(fields[4]) if len(fields) >= 5 else 0

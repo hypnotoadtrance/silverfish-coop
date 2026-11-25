@@ -123,13 +123,17 @@ function effects.observe_charge(entry)
     entry.charged = charged
 end
 
-function effects.observe_prop_breaks(world)
-    if type(SilverfishTakeNativePropBreakCue) ~= "function" then return end
+function effects.observe_spatial_cues(world)
+    if type(SilverfishTakeNativeAnomalySpatialCue) ~= "function" then return end
     local address = world:GetAddress()
-    for _ = 1, 8 do
-        local kind, x, y, z = SilverfishTakeNativePropBreakCue(address)
+    for _ = 1, 12 do
+        local kind, x, y, z = SilverfishTakeNativeAnomalySpatialCue(address)
         if not kind then break end
-        if prop_breaks[kind] then record(kind, {X = x, Y = y, Z = z}, 1) end
+        if kind == "wandering" then
+            record(kind, {X = x, Y = y, Z = z}, 1, .6)
+        elseif prop_breaks[kind] then
+            record(kind, {X = x, Y = y, Z = z}, 1)
+        end
     end
 end
 
@@ -149,13 +153,6 @@ function effects.observe_glass_break(actor)
     if not hit then return end
     local shape = glass_shape(angle.Pitch, angle.Yaw, angle.Roll, actor.Length, hit.X, hit.Y, hit.Z)
     if shape then record("glassthread", point, 1, 1, shape) end
-end
-
-function effects.observe_wandering_teleport(point)
-    if point and type(point.X) == "number" and type(point.Y) == "number" and type(point.Z) == "number"
-        and math.abs(point.X) <= 1e7 and math.abs(point.Y) <= 1e7 and math.abs(point.Z) <= 1e7 then
-        record("wandering", point, 1, .6)
-    end
 end
 
 local function stock_blast(cue, point, pfx, sfx, scale, volume)
@@ -238,6 +235,9 @@ function effects.rows(row)
             captured.fueldrum or 0),
         row("native-fixed-explosive-capture", (captured.powerbox or 0) + (captured.fixedtank or 0) + (captured.fixedfire or 0)),
     }
+    if captured.wandering then
+        rows[#rows + 1] = row("native-wandering-teleport-capture", captured.wandering)
+    end
     for _, entry in ipairs(pending) do
         rows[#rows + 1] = row("native-anomaly-cue", table.unpack(entry))
     end

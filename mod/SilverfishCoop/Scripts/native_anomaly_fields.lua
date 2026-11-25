@@ -34,7 +34,6 @@ local host_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") =
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local rook = "/Game/Classes/Maps/Dreams/TheRook_P"
 local pending, active, pending_fires, fires, fixtures = {}, {}, {}, {}, {}
-local wandering_hooks, wandering_retry = {}, {}
 local world, world_map, fixture_kind, wandering_probe
 local recovery, glass_break_hook
 local glass_pending, glass_live = {}, {}
@@ -51,28 +50,6 @@ end
 
 local function in_world(actor, current)
     return valid(actor) and not actor:IsActorBeingDestroyed() and same(actor:GetWorld(), current)
-end
-
-local function bind_wandering_effect(kind)
-    if wandering_hooks[kind] or type(RegisterHook) ~= "function" then return end
-    local now = os.clock()
-    if now < (wandering_retry[kind] or 0) then return end
-    local path = classes[kind] .. ":Tele_FX"
-    if not valid(StaticFindObject(path)) then
-        wandering_retry[kind] = now + .5
-        return
-    end
-    RegisterHook(path, function(context, position)
-        local actor = context:get()
-        if not in_world(actor, world) or not actor:HasAuthority() then return end
-        local entry = active[actor:GetAddress()]
-        local driver = actor:GetWorld().NetDriver
-        if entry and entry.kind == kind and same(entry.actor, actor)
-            and valid(driver) and same(driver.World, world) and not valid(driver.ServerConnection) then
-            effects.observe_wandering_teleport(position:get())
-        end
-    end)
-    wandering_hooks[kind] = true
 end
 
 local function trap_kind(actor, class)
@@ -534,8 +511,10 @@ function fields.command(args, state, phase)
             if #trap.Waypoints < 1 or not trap:HasAuthority() then error("Stock teleport waypoints unavailable", 0) end
             local original = guest:K2_GetActorLocation()
             wandering_probe = {world = state.world, guest = guest, origin = {X = original.X, Y = original.Y, Z = original.Z}}
-            trap[wandering_overlap](trap, trigger, guest, guest.CapsuleComponent, 0, false, {})
-            return "Stock wandering teleport overlap invoked on the host"
+            -- The overlap has a stock cooldown. Exercise the same target
+            -- authentication and teleport without depending on the gate's timer.
+            trap:Authenticate_Target(guest)
+            return "Stock wandering teleport invoked on the host"
         end
         local center = trigger:K2_GetComponentLocation()
         if not guest:K2_TeleportTo({X = center.X, Y = center.Y, Z = center.Z + 45}, guest:K2_GetActorRotation()) then
@@ -592,7 +571,7 @@ function fields.rows(state, phase, row)
     if not same(world, state.world) or world_map ~= state.map then
         active, fires, fixtures, world, world_map = {}, {}, {}, state.world, state.map
         glass_live, glass_work = {}, {}
-        recovery, wandering_retry = nil, {}
+        recovery = nil
         effects.clear()
         electrodes.clear()
         lamps.clear()
@@ -678,10 +657,6 @@ function fields.rows(state, phase, row)
         local actor = entry.actor
         if valid(actor) and not actor:IsActorBeingDestroyed() and valid(actor.RootComponent) then
             if phase == "hosting" and entry.kind == "starburst" then effects.observe_charge(entry) end
-            if phase == "hosting" and (entry.kind == "wandering-teleport" or entry.kind == "lingering-teleport")
-                and not wandering_hooks[entry.kind] then
-                bind_wandering_effect(entry.kind)
-            end
             if phase == "connected" and entry.placed and actor:GetActorEnableCollision() then
                 actor:SetActorEnableCollision(false)
             end
@@ -750,7 +725,7 @@ function fields.rows(state, phase, row)
         end
     end
     if phase == "hosting" then
-        effects.observe_prop_breaks(world)
+        effects.observe_spatial_cues(world)
         for _, cue in ipairs(effects.rows(row)) do rows[#rows + 1] = cue end
         for _, electrode in ipairs(electrodes.retired_rows(row)) do rows[#rows + 1] = electrode end
     else

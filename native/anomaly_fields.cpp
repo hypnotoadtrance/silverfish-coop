@@ -101,7 +101,7 @@ namespace
     std::array<U::FName, 3> patch_events;
     std::array<U::FName, 6> electrode_events;
     std::array<U::FName, 9> roaming_events;
-    U::FName lingering_teleport, artifact_spawner, spawn_anomalies, travel_pool;
+    U::FName lingering_teleport, artifact_spawner, spawn_anomalies, travel_pool, teleport_fx, teleport_actor;
     std::array<U::FName, canister_classes.size()> canister_names;
     std::array<U::FName, 16> canister_events;
     U::FName fuel_drum, fuel_drum_graph, prop_broken, receive_tick, drum_fire_name, standing_tank_name;
@@ -724,7 +724,7 @@ namespace
         std::string_view kind;
     };
 
-    struct PropBreakCue
+    struct SpatialCue
     {
         U::FWeakObjectPtr world;
         std::array<double, 3> point{};
@@ -733,7 +733,7 @@ namespace
     };
 
     thread_local std::array<PropBreak, 4> prop_breaks;
-    thread_local std::array<PropBreakCue, 8> prop_break_cues;
+    thread_local std::array<SpatialCue, 12> spatial_cues;
 
     void begin_prop_break(Iteration& call, U::UObject* actor, U::UFunction* function, const void* locals)
     {
@@ -802,6 +802,16 @@ namespace
         *slot = {&call, actor, world, point, media->kind};
     }
 
+    void queue_spatial_cue(U::UObject* world, const std::array<double, 3>& point, std::string_view kind)
+    {
+        const auto now = Clock::now();
+        auto pending = std::ranges::find_if(spatial_cues, [world, now](const auto& cue) {
+            return cue.world.Get() != world || cue.expires <= now;
+        });
+        if (pending == spatial_cues.end()) pending = std::ranges::min_element(spatial_cues, {}, &SpatialCue::expires);
+        *pending = {world, point, now + std::chrono::milliseconds(1250), kind};
+    }
+
     void end_prop_break(Iteration& call, U::UFunction* function)
     {
         if (!function || function->GetFName() != prop_broken || !U::IsInGameThreadRaw()) return;
@@ -814,28 +824,57 @@ namespace
         auto* broken = property<U::FBoolProperty>(actor, STR("Broken"));
         if (!world || !broken || !broken->GetPropertyValueInContainer(actor) ||
             call.OriginalFunctionCallPrevented()) return;
-        const auto now = Clock::now();
-        auto pending = std::ranges::find_if(prop_break_cues, [world, now](const auto& cue) {
-            return cue.world.Get() != world || cue.expires <= now;
-        });
-        if (pending == prop_break_cues.end()) pending = std::ranges::min_element(prop_break_cues, {}, &PropBreakCue::expires);
-        *pending = {world, observed.point, now + std::chrono::milliseconds(1250), observed.kind};
+        queue_spatial_cue(world, observed.point, observed.kind);
     }
 
-    int take_prop_break_cue(const Lua& lua)
+    void observe_teleport_fx(Iteration& call, U::UObject* actor, U::FFrame& frame)
+    {
+        auto* function = frame.Node();
+        if (!function || function->GetFName() != teleport_fx || guest_session || !U::IsInGameThreadRaw() ||
+            call.OriginalFunctionCallPrevented() || !actor || frame.Object() != actor || !frame.Locals()) return;
+        auto* caller = frame.PreviousFrame();
+        auto* type = actor->GetClassPrivate();
+        if (!type || !caller || caller->Object() != actor || !caller->Node() ||
+            caller->Node()->GetFName() != teleport_actor || caller->Node()->GetOuterPrivate() != type ||
+            function->GetOuterPrivate() != type || function->GetNumParms() != 1 ||
+            function->GetReturnProperty() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return;
+        const auto name = type->GetFName();
+        if ((name != roaming_teleport || type->GetPathName() != roaming_teleport_class) &&
+            (name != lingering_teleport || type->GetPathName() != lingering_class)) return;
+        if (actor->IsUnreachable() || actor->HasAnyFlags(static_cast<U::EObjectFlags>(U::RF_BeginDestroyed | U::RF_FinishDestroyed))) return;
+        auto* world = static_cast<U::AActor*>(actor)->GetWorld();
+        auto* driver = object(world, STR("NetDriver"));
+        auto* role = property<U::FByteProperty>(actor, STR("Role"));
+        auto* replicates = property<U::FBoolProperty>(actor, STR("bReplicates"));
+        if (!world || !driver || object(driver, STR("World")) != world || object(driver, STR("ServerConnection")) ||
+            !role || role->GetPropertyValueInContainer(actor) != 3 ||
+            !replicates || !replicates->GetPropertyValueInContainer(actor)) return;
+
+        auto* input = property<U::FStructProperty>(function, STR("InputPin"));
+        auto* vector = input ? input->GetStruct().Get() : nullptr;
+        std::array<double, 3> point{};
+        if (!vector || vector->GetPathName() != STR("/Script/CoreUObject.Vector") ||
+            input->GetOffset_Internal() != 0 || input->GetSize() != sizeof(point) ||
+            function->GetParmsSize() != sizeof(point)) return;
+        std::memcpy(point.data(), frame.Locals(), sizeof(point));
+        if (std::ranges::all_of(point, [](double axis) { return std::isfinite(axis) && std::abs(axis) <= 1e7; }))
+            queue_spatial_cue(world, point, "wandering");
+    }
+
+    int take_spatial_cue(const Lua& lua)
     {
         if (guest_session || !U::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
         const auto world = static_cast<std::uintptr_t>(lua.get_integer());
         const auto now = Clock::now();
-        auto next = prop_break_cues.end();
-        for (auto it = prop_break_cues.begin(); it != prop_break_cues.end(); ++it)
+        auto next = spatial_cues.end();
+        for (auto it = spatial_cues.begin(); it != spatial_cues.end(); ++it)
         {
             if (reinterpret_cast<std::uintptr_t>(it->world.Get()) != world || it->expires <= now)
                 *it = {};
-            else if (next == prop_break_cues.end() || it->expires < next->expires)
+            else if (next == spatial_cues.end() || it->expires < next->expires)
                 next = it;
         }
-        if (next == prop_break_cues.end()) return 0;
+        if (next == spatial_cues.end()) return 0;
         lua.set_string(next->kind);
         for (const auto axis : next->point) lua.set_number(axis);
         *next = {};
@@ -1064,7 +1103,7 @@ namespace
                 drum_fires = {};
                 drum_breaks = {};
                 prop_breaks = {};
-                prop_break_cues = {};
+                spatial_cues = {};
             }
         }
         lua.set_bool(valid);
@@ -1171,6 +1210,8 @@ namespace silverfish::native_anomaly_fields
         standing_tank_name = U::FName{STR("Prop_Standing_FuelTank_C"), U::FNAME_Add};
         fuel_drum_graph = U::FName{STR("ExecuteUbergraph_Prop_FuelDrum"), U::FNAME_Add};
         prop_broken = U::FName{STR("PropBroken"), U::FNAME_Add};
+        teleport_fx = U::FName{STR("Tele_FX"), U::FNAME_Add};
+        teleport_actor = U::FName{STR("Teleport_Actor"), U::FNAME_Add};
         user_construction_script = U::FName{STR("UserConstructionScript"), U::FNAME_Add};
         scrap_wood_post_name = U::FName{STR("Prop_ScrapWood_Post_C"), U::FNAME_Add};
         drum_fire_name = U::FName{STR("Fire_Molotov_C"), U::FNAME_Add};
@@ -1291,7 +1332,10 @@ namespace silverfish::native_anomaly_fields
             }
         };
         stock_script_post = H::RegisterProcessLocalScriptFunctionPostCallback(
-            stock_result, {false, false, owner, STR("Read stock anomaly and prop results")});
+            [stock_result](Iteration& call, U::UObject* actor, U::FFrame& frame, void* result) {
+                stock_result(call, actor, frame, result);
+                observe_teleport_fx(call, actor, frame);
+            }, {false, false, owner, STR("Read stock anomaly and prop results")});
         stock_internal_post = H::RegisterProcessInternalPostCallback(
             stock_result, {false, false, owner, STR("Read reflected anomaly and prop results")});
         stock_event_post = H::RegisterProcessEventPostCallback(
@@ -1316,7 +1360,7 @@ namespace silverfish::native_anomaly_fields
         drum_fires = {};
         drum_breaks = {};
         prop_breaks = {};
-        prop_break_cues = {};
+        spatial_cues = {};
         for (auto* post : {&stock_script_post, &stock_internal_post, &stock_event_post, &stock_actor_begin})
         {
             if (*post != H::ERROR_ID) H::UnregisterCallback(*post);
@@ -1332,7 +1376,7 @@ namespace silverfish::native_anomaly_fields
     void register_lua(Lua& lua)
     {
         lua.register_function("SilverfishSetNativeAnomalyGuest", set_guest);
-        lua.register_function("SilverfishTakeNativePropBreakCue", take_prop_break_cue);
+        lua.register_function("SilverfishTakeNativeAnomalySpatialCue", take_spatial_cue);
         lua.register_function("SilverfishReadNativeAnomalySkips", count);
         lua.register_function("SilverfishReadNativeGuestStormGuard", [](const Lua& current) {
             if (!U::IsInGameThreadRaw() || !guest_session || current.get_stack_size() != 0) return 0;

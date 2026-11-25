@@ -965,7 +965,12 @@ async def verify_rook_anomaly_motion():
     await command("action", "--profile", profile, "native-placed-anomaly-guest-fixture", "--target", observed["actor"])
     await wait(client_run, lambda row: row["game"]["native_anomaly_field"]["blocked_triggers"] > prior_blocks, timeout=6)
     assert {row["serial"] for row in effects()} == old_cues
+    capture_key = "native_wandering_teleport_capture"
+    prior_captures = original["game"].get(capture_key, 0)
     await command("action", "--campaign", campaign, "native-anomaly-trigger-fixture", "--target", observed["actor"])
+    captured = await wait(run, lambda row: row.get("game", {}).get(capture_key, 0) >= prior_captures + 2, timeout=8)
+    assert captured["game"][capture_key] == prior_captures + 2, captured["game"][capture_key]
+    note("rook_wandering_teleport_captured_both_stock_effects", {"cues": 2})
     await wait(client_run, lambda _: len([row for row in effects() if row["serial"] not in old_cues]) >= 2, timeout=12)
     start, finish = [row for row in effects() if row["serial"] not in old_cues]
     assert start["particles"] and finish["particles"] and start["serial"] < finish["serial"]
