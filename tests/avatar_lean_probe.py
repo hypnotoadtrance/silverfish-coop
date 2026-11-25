@@ -59,7 +59,7 @@ async def capture(seat, side, local, remote, *, drive):
             header = lines[0].split("\t") if lines else []
             if header[:2] == [ticket, "error"]:
                 raise AssertionError(" ".join(header[2:]))
-            if header[:2] == [ticket, "ok"] and len(header) == 11 and len(lines) == 1 + int(header[6]):
+            if header[:2] == [ticket, "ok"] and len(header) == 15 and len(lines) == 1 + int(header[6]):
                 assert header[2:5] == [side, local, remote] and header[10] == drive, header
                 rows = []
                 for line in lines[1:]:
@@ -71,9 +71,13 @@ async def capture(seat, side, local, remote, *, drive):
                     rows.append(row)
                 gaps = [b["seconds"] - a["seconds"] for a, b in zip(rows, rows[1:])]
                 assert all(gap > 0 for gap in gaps), rows
-                injection_frames, started, completed = map(int, header[7:10])
+                injections, started, completed = map(int, header[7:10])
                 return {"caller": local, "observer_for": remote, "side": side, "drive": drive, "samples": rows,
-                        "input_frames": injection_frames, "stock_started": started, "stock_completed": completed,
+                        "injections": injections, "stock_started": started, "stock_completed": completed,
+                        "stock_triggered": int(header[11]),
+                        "started_requested_degrees": float(header[12]) if header[12] != "-" else None,
+                        "started_limit_degrees": float(header[13]) if header[13] != "-" else None,
+                        "lean_behavior": int(header[14]) if header[14] != "-" else None,
                         "median_interval_seconds": median(gaps), "final_requested_degrees": float(header[5])}
             await asyncio.sleep(.09)
 
@@ -85,8 +89,8 @@ def input_diagnostic(result):
         return {"verified": False, "status": "fixture_unavailable", "reason": str(result)}
     held = [row for row in result["samples"] if row["phase"] == "held"]
     sign = -1 if result["side"] == "left" else 1
-    if result["input_frames"] < 8:
-        status = "insufficient_input_frames"
+    if result["injections"] < 8:
+        status = "insufficient_input_samples"
     elif not (result["stock_started"] >= 1 and result["stock_completed"] >= 1):
         status = "stock_events_unobserved"
     elif len(held) < 8 or sign * median(row["requested"] for row in held[-4:]) <= 6:
@@ -128,7 +132,8 @@ async def verify_lean(host, guest, pawn, *, projected=True, drive="combined"):
             return_exceptions=True,
         )
         input_result = {"exercised": True, "side": "left", "host": input_diagnostic(host_input), "guest": input_diagnostic(guest_input)}
-    wave_drive = "input" if drive == "input" else "solver"
+    input_verified = (drive == "combined" and input_result["host"]["verified"] and input_result["guest"]["verified"])
+    wave_drive = "input" if drive == "input" or input_verified else "solver"
     waves = []
     for host_side, guest_side in (("left", "right"), ("right", "left")):
         host_trial, guest_trial = await asyncio.gather(
@@ -143,7 +148,7 @@ async def verify_lean(host, guest, pawn, *, projected=True, drive="combined"):
             sign = -1 if owner["side"] == "left" else 1
             assert sign * owner_steady > 6, owner
             if wave_drive == "solver":
-                assert owner["input_frames"] == owner["stock_started"] == owner["stock_completed"] == 0, owner
+                assert owner["injections"] == owner["stock_started"] == owner["stock_completed"] == 0, owner
                 assert abs(owner["final_requested_degrees"]) < .01, owner
             else:
                 assert input_diagnostic(owner)["verified"], owner

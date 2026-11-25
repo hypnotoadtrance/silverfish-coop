@@ -62,23 +62,21 @@ end
 
 local function install_hooks()
     if hooks_installed then return end
-    RegisterHook(player_class .. ":ReceiveTick", function(context)
-        local run = trial
-        if not run or run.drive ~= "input" or not run.down_at or run.up_at or run.input_error
-            or not same(context:get(), run.pawn) then return end
-        if not same(run.controller.Pawn, run.pawn) or not same(run.pawn:GetWorld(), run.world) then return end
-        if os.clock() - run.down_at >= 1 then return end
-        -- The vector overload builds the opaque FInputActionValue inside the engine.
-        local ok, error_text = pcall(function()
-            run.subsystem:InjectInputVectorForAction(run.action, input_vector, {}, {})
-        end)
-        if ok then run.injections = run.injections + 1 else run.input_error = tostring(error_text) end
-    end)
     for side, data in pairs(sides) do
         local wrapper = player_class .. ":InpActEvt_" .. data[1] .. "_K2Node_EnhancedInputActionEvent_"
         RegisterHook(wrapper .. data[2], function(context)
             local run = trial
-            if run and run.drive == "input" and run.side == side and same(context:get(), run.pawn) then run.starts = run.starts + 1 end
+            if run and run.drive == "input" and run.side == side and same(context:get(), run.pawn) then
+                run.starts = run.starts + 1
+                run.started_request = run.pawn.LeanAngle
+                run.started_limit = run.pawn.Max_LeanAngle
+            end
+        end)
+        RegisterHook(wrapper .. (data[2] + 1), function(context)
+            local run = trial
+            if run and run.drive == "input" and run.side == side and same(context:get(), run.pawn) then
+                run.triggers = run.triggers + 1
+            end
         end)
         RegisterHook(wrapper .. (data[2] + 2), function(context)
             local run = trial
@@ -103,12 +101,25 @@ local function input_action(run)
     end
     local subsystem = library:GetLocalPlayerSubSystemFromPlayerController(controller, subclass)
     assert(mapped and exact(subsystem, subsystem_class), "stock lean action or exact local EnhancedInput subsystem unavailable")
-    local config = run.world.OwningGameInstance.GamePlay_Config
-    assert(valid(config) and (config.LeanBehavior == 0 or config.LeanBehavior == 2),
+    local instance = run.world.OwningGameInstance
+    local config = valid(instance) and instance.GamePlay_Config
+    assert(same(run.pawn["As Game Instance FP"], instance) and valid(config)
+        and (config.LeanBehavior == 0 or config.LeanBehavior == 2),
         "the isolated lean input trial requires stock Hold or Hybrid input behavior")
     run.action, run.subsystem = action, subsystem
+    run.behavior = config.LeanBehavior
     install_hooks()
 end
+
+LoopInGameThreadWithDelay(1, function()
+    local run = trial
+    if not run or run.drive ~= "input" or not run.down_at or run.up_at or run.input_error
+        or os.clock() - run.down_at >= 1 then return end
+    if not same(run.controller.Pawn, run.pawn) or not same(run.pawn:GetWorld(), run.world)
+        or not run.pawn:IsLocallyControlled() then return end
+    local ok, failure = pcall(run.subsystem.InjectInputVectorForAction, run.subsystem, run.action, input_vector, {}, {})
+    if ok then run.injections = run.injections + 1 else run.input_error = failure end
+end)
 
 local function begin(id, side, drive, now)
     local viewport = FindFirstOf("GameViewportClient")
@@ -137,7 +148,7 @@ local function begin(id, side, drive, now)
         and same(controller:GetWorld(), world), "the exact local lean controller is unavailable")
     local body, head, bone = rig(remote)
     local run = {id = id, side = side, drive = drive, start = now, world = world, pawn = pawn, remote = remote,
-        controller = controller, injections = 0, starts = 0, completes = 0,
+        controller = controller, injections = 0, starts = 0, completes = 0, triggers = 0,
         arrow = stock_arrow(pawn), remote_arrow = stock_arrow(remote), math_api = math_api,
         body = body, head = head, bone = bone, rows = {}}
     if drive == "input" then input_action(run) end
@@ -211,7 +222,9 @@ LoopInGameThreadWithDelay(50, function()
             answer(trial.id, "error\t" .. tostring(done) .. (restored and "" or " | restore: " .. tostring(failure)))
         elseif done then
             answer(trial.id, table.concat({"ok", trial.side, trial.pawn:GetFullName(), trial.remote:GetFullName(),
-                trial.pawn.LeanAngle, #trial.rows, trial.injections, trial.starts, trial.completes, trial.drive}, "\t"), trial.rows)
+                trial.pawn.LeanAngle, #trial.rows, trial.injections, trial.starts, trial.completes, trial.drive,
+                trial.triggers, trial.started_request or "-", trial.started_limit or "-", trial.behavior or "-"},
+                "\t"), trial.rows)
         else
             return false
         end

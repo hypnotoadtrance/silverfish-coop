@@ -55,11 +55,14 @@ async def toggle_door(host, guest, actor, pawn, expected_open, *, inspect_during
                        and event.get("actor") == actor and event.get("opens") is expected_open for event in events):
                     break
                 await asyncio.sleep(.015)
-        probe_start = time.monotonic()
+        probe_start = time.time()
         inspection = await submit(guest_run, "native-loot-inspect", target=inspect_during_motion)
         assert inspection["ok"], inspection
-        inspected = {"actor": inspect_during_motion, "completed_at": time.time(),
-                     "roundtrip_ms": round((time.monotonic() - probe_start) * 1000)}
+        # Use the controller's response write time. The observer polls the
+        # response file every 200 ms and may read it after the door settles.
+        completed_at = (guest_run / "responses" / f"{inspection['id']}.json").stat().st_mtime
+        inspected = {"actor": inspect_during_motion, "completed_at": completed_at,
+                     "roundtrip_ms": round((completed_at - probe_start) * 1000)}
 
     authority = observed(await wait_resident_status(host_run, lambda frame:
         observed(frame).get("open") is expected_open and observed(frame).get("locked") is False))
