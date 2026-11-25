@@ -59,6 +59,7 @@ from .native_guest_npc import parse_bandit
 from .enemy_loot_profiles import BY_ACTOR as ENEMY_LOOT_ACTORS
 from .native_host_save import SLOT
 from . import native_smg_hold
+from .guest_weapon_profiles import AMMO_BY_PATH
 from .native_guest_weapon import (
     BARREL_MODES, FIRE_CLASSES, FIRE_MODES, LOKI_AMMO, LOKI_KINDS, PRIMARY_KINDS,
     valid_mounted_ammo, valid_primary_shot, valid_shot_view,
@@ -2128,11 +2129,13 @@ class Bridge:
                     data["native_campaign_npc_melee_sickness"] = {
                         **dict(zip(identities, fields[1:5])), **dict(zip(counters, map(int, fields[5:]))),
                     }
-                elif (fields[0] == "native-guest-reload-intent" and len(fields) == 6
+                elif (fields[0] == "native-guest-reload-intent" and len(fields) in (6, 7)
                       and (sequence := _held_input_sequence(fields[3]))
-                      and valid_guid(fields[4]) and fields[5] in {"primary", "loki"}):
+                      and valid_guid(fields[4]) and fields[5] in {"primary", "loki"}
+                      and (len(fields) == 6 or fields[6] in AMMO_BY_PATH)):
                     data["native_guest_reload_intent"] = {
                         "map": fields[1], "pawn": fields[2], "sequence": sequence, "guid": fields[4], "barrel": fields[5],
+                        **({"ammo_class": fields[6]} if len(fields) == 7 else {}),
                     }
                 elif (fields[0] == "native-guest-equipment-selection" and len(fields) == 5 and valid_guid(fields[4])
                       and (selection := _held_input_sequence(fields[3]))):

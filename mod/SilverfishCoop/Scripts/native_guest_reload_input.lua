@@ -31,11 +31,12 @@ function reload_input.rows(state, phase, status_row)
     if not pawn or not pawn:IsValid() or type(local_pawn.name) ~= "string" or pawn:GetFullName() ~= local_pawn.name then
         return {}
     end
-    local sequence, address, guid, barrel = SilverfishReadNativeGuestReloadIntent()
+    local sequence, address, guid, barrel, ammo = SilverfishReadNativeGuestReloadIntent()
     if type(sequence) ~= "number" or not math.tointeger(sequence) or sequence < 1 or sequence >= 2 ^ 53
         or address ~= pawn:GetAddress() or type(guid) ~= "string" or #guid ~= 32
         or (barrel ~= "primary" and barrel ~= "loki") then return {} end
-    local rows = {status_row("native-guest-reload-intent", state.map, local_pawn.name, sequence, guid, barrel)}
+    local option = ammo and {ammo} or {}
+    local rows = {status_row("native-guest-reload-intent", state.map, local_pawn.name, sequence, guid, barrel, table.unpack(option))}
     if fixture_proof and fixture_proof.map == state.map and fixture_proof.pawn == local_pawn.name
         and fixture_proof.sequence == sequence then
         rows[#rows + 1] = status_row("native-guest-reload-fixture", state.map, local_pawn.name, sequence,

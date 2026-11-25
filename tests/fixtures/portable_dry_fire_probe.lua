@@ -386,6 +386,41 @@ local function run(action, argument)
         local round = pawn.EquipedItem.AmmoType[ammo_item]
         return valid(round) and round:GetFullName():match("^%S+ (%S+)$") or "waiting"
     end
+    if action == "ammo-selector" then
+        assert(observing() and not local_pawn:HasAuthority() and argument == reserve_9mm_ap)
+        local weapon = local_pawn.EquipedItem
+        local original, count = weapon.AmmoType[ammo_item], weapon.Ammo
+        assert(valid(original) and count > 0, "fixture requires a loaded weapon")
+        local ok, result = SilverfishProbeNativeGuestReloadInput(local_pawn:GetAddress(), "hold")
+        assert(ok and result == "stock_selector_opened", tostring(result))
+        local selector
+        for _, widget in ipairs(FindAllOf("AmmoTypeSelect_C") or {}) do
+            if valid(widget) and widget:IsInViewport() and same(widget["As Player FP"], local_pawn)
+                and same(widget.Weapon, weapon) then
+                assert(not selector, "duplicate stock ammo selector")
+                selector = widget
+            end
+        end
+        assert(selector and selector.Buttons:GetArrayNum() >= 3, "the stock selector did not list two reserve types")
+        for i = 2, selector.Buttons:GetArrayNum() do
+            local button = selector.Buttons[i]
+            if type(button.type) == "function" and button:type() == "RemoteUnrealParam" then button = button:get() end
+            if same(button.Item[item_class], asset(argument)) then
+                selector.HighlightedButton = button
+                selector:Close()
+                assert(not selector:IsInViewport() and local_pawn.IsChangingAmmo == false,
+                    "the stock ammo selector did not close")
+                assert(weapon.Ammo == count and same(weapon.AmmoType[ammo_item], original),
+                    "the stock selector changed the local inventory before host settlement")
+                return "stock alternate ammo selected"
+            end
+        end
+        error("the requested reserve type did not appear in the stock selector")
+    end
+    if action == "peer-second-reserve" then
+        assert(observing() and local_pawn:HasAuthority() and reserve_path == arm_profiles["arm-ammo-order"][2])
+        return read_reserve(peer, reserve_9mm_ap)
+    end
     if action == "rifle-grip" then return rifle_grip(argument) end
     if action == "rifle-witness" then
         assert(observing() and ready(local_pawn) ~= "waiting")

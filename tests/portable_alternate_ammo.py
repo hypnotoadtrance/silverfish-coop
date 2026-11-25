@@ -2,6 +2,7 @@
 
 import asyncio
 import re
+import time
 
 from live_multi_smoke import campaign_save_hashes
 from portable_guest_world_start import resident_events, wait_resident_status
@@ -104,8 +105,38 @@ async def verify_alternate_ammo(host, guest, pawn, probe):
         await wait_resident_status(guest_run, lambda view: view.get("game", {}).get(
             "native_inventory_view", {}).get("state") == "closed")
         assert await command(host, "reserve") == host_reserve and campaign_save_hashes(host.campaign) == checkpoint
+        switched = None
+        if arm == "arm-ammo-order":
+            def units(stacks):
+                return sum(int(stack.split(",")[1]) for stack in stacks.split("|") if stack)
+
+            loaded = await stock_input("reload", frame, guid)
+            await read(guest, "ready", f"{guid},{loaded['after']},{loaded['after']}")
+            await read(guest, "round", NINE_MM_VAMP.item_path)
+            old_reserve = units(await command(host, "peer-reserve"))
+            new_reserve = units(await command(host, "peer-second-reserve"))
+            pressed = time.time()
+            assert await command(guest, f"ammo-selector\t{NINE_MM_AP.item_path}") == "stock alternate ammo selected"
+            async with asyncio.timeout(12):
+                while switched is None:
+                    for row in await resident_events(guest_run, frame):
+                        if row["time_unix"] < pressed:
+                            continue
+                        assert row["event"] != "native_guest_reload_input_rejected", row
+                        proof = row.get("native_guest_weapon", {})
+                        if row["event"] == "native_guest_reload_input" and proof.get("ammo_class") == NINE_MM_AP.item_path:
+                            switched = proof
+                            break
+                    if switched is None:
+                        await asyncio.sleep(.08)
+            assert switched["guid"] == guid and (switched["before"], switched["after"]) == (0, rounds), switched
+            await asyncio.gather(read(host, "peer-round", NINE_MM_AP.item_path), read(guest, "round", NINE_MM_AP.item_path))
+            assert units(await command(host, "peer-reserve")) == old_reserve + loaded["after"]
+            assert units(await command(host, "peer-second-reserve")) == new_reserve - switched["after"]
+            assert campaign_save_hashes(host.campaign) == checkpoint
         untouched = alternate if earlier else second
         return {"class_path": selected.item_path, "reload": reloaded, "shot": shot, "take_ammo": unloaded,
+                **({"stock_selector": switched} if switched else {}),
                 **({"untouched_following_reserve": untouched.item_path} if untouched else {})}
 
     cases = (

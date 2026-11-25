@@ -13,6 +13,7 @@
 #include <string>
 #include <utility>
 
+#include <Helpers/String.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
@@ -38,6 +39,8 @@ namespace
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto controller_path = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
     constexpr auto input_path = STR("/Game/Classes/Player/Player_Inputs/IA_Reload.IA_Reload");
+    constexpr auto selector_path = STR("/Game/Classes/GUI/New/AmmoTypeSelect.AmmoTypeSelect_C");
+    constexpr auto ammo_path = STR("/Game/Classes/Items/Ammo_Master_BP.Ammo_Master_BP_C");
     constexpr std::array event_paths{
         STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_Reload_K2Node_EnhancedInputActionEvent_31"),
         STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_Reload_K2Node_EnhancedInputActionEvent_30"),
@@ -153,6 +156,7 @@ namespace
         Unreal::FWeakObjectPtr pawn{};
         Clock::time_point expires{};
         ReloadWeapon weapon;
+        std::string ammo;
     };
 
     Input press;
@@ -215,6 +219,57 @@ namespace
         return role && role->GetPropertyValueInContainer(pawn) == 2 && dead && !dead->GetPropertyValueInContainer(pawn);
     }
 
+    bool close_selector(Unreal::UObject* widget, Unreal::UFunction* function)
+    {
+        static const Unreal::FName close_name{STR("Close")};
+        if (function->GetFName() != close_name || !live(widget)) return false;
+        auto* selector = find<Unreal::UClass>(selector_path);
+        auto* medical = field<Unreal::FBoolProperty>(widget, STR("Medical"));
+        auto* highlighted = field<Unreal::FObjectProperty>(widget, STR("HighlightedButton"));
+        auto* pawn = object_field(widget, STR("As Player FP"));
+        if (!selector || widget->GetClassPrivate() != selector || !local_client(pawn) ||
+            function->GetOuterPrivate() != selector || function->GetNumParms() != 0 || function->GetParmsSize() != 0 ||
+            function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
+            !medical || medical->GetPropertyValueInContainer(widget) || !highlighted) return false;
+
+        press = {};
+        if (auto* changing = field<Unreal::FBoolProperty>(pawn, STR("IsChangingAmmo")))
+            changing->SetPropertyValueInContainer(pawn, false);
+        auto* selected = object_field(widget, STR("HighlightedButton"));
+        if (!live(selected)) return true;
+        auto* buttons = field<Unreal::FArrayProperty>(widget, STR("Buttons"));
+        auto* entry = buttons ? Unreal::CastField<Unreal::FObjectProperty>(buttons->GetInner()) : nullptr;
+        if (!entry) return false;
+        Unreal::FScriptArrayHelper rows(buttons, buttons->ContainerPtrToValuePtr<void>(widget));
+        if (rows.Num() <= 0 || rows.Num() > 256 || entry->GetObjectPropertyValue(rows.GetRawPtr(0)) == selected) return true;
+
+        // Stock Close restores the cursor and removes the widget, then ejects the
+        // magazine and reloads. Suppress just that inventory branch on the guest.
+        highlighted->SetObjectPropertyValue(highlighted->ContainerPtrToValuePtr<void>(widget), nullptr);
+        if (!standing_autonomous(pawn) || sequence == max_sequence) return true;
+        auto weapon = reload_weapon(pawn);
+        auto* receiver = weapon.receiver.Get();
+        auto* barrel = weapon.underbarrel ? object_field(receiver, STR("InputIntercept")) : receiver;
+        if (weapon.guid.empty() || !barrel || object_field(widget, STR("Weapon")) != barrel) return true;
+
+        bool listed = false;
+        for (int index = 1; index < rows.Num(); ++index)
+            if (entry->GetObjectPropertyValue(rows.GetRawPtr(index)) == selected) { listed = true; break; }
+        const auto* item = field<Unreal::FStructProperty>(selected, STR("Item"));
+        auto* item_schema = item ? item->GetStruct().Get() : nullptr;
+        auto* cls = item_schema ? Unreal::CastField<Unreal::FClassProperty>(item_schema->GetPropertyByNameInChain(
+            STR("Item_Class_3_2813641E42AA35FC0693029E4EE49F81"))) : nullptr;
+        auto* ammo = cls && listed ? Unreal::Cast<Unreal::UClass>(cls->GetObjectPropertyValue(
+            cls->ContainerPtrToValuePtr<void>(item->ContainerPtrToValuePtr<void>(selected)))) : nullptr;
+        auto* ammo_base = find<Unreal::UClass>(ammo_path);
+        if (ammo && ammo_base && ammo != ammo_base && ammo->IsChildOf(ammo_base))
+        {
+            pending = {pawn, Clock::now() + intent_timeout, std::move(weapon), RC::to_utf8_string(ammo->GetPathName())};
+            ++sequence;
+        }
+        return true;
+    }
+
     void intercept(Iteration& iteration, Unreal::UObject* pawn, Unreal::UFunction* function, const void* parameters)
     {
         if (!installed.load(std::memory_order_acquire) || !Unreal::IsInGameThreadRaw() || !pawn || !function ||
@@ -225,26 +280,41 @@ namespace
             schema = {};
             bind_schema();
         }
+        if (close_selector(pawn, function)) return;
         if (pawn->GetClassPrivate() != schema.pawn.Get()) return;
         const auto match = std::ranges::find_if(schema.events, [&](const auto& event) { return event.function.Get() == function; });
         if (match == schema.events.end() || !local_client(pawn)) return;
-        iteration.PreventOriginalFunctionCall();
-        if (!iteration.OriginalFunctionCallPrevented() || !parameters || !match->elapsed || !match->triggered || !match->source ||
-            !schema.input.Get() || !standing_autonomous(pawn) ||
-            match->source->GetObjectPropertyValue(match->source->ContainerPtrToValuePtr<void>(parameters)) != schema.input.Get())
-        {
-            press = {};
-            return;
-        }
-        const auto elapsed = match->elapsed->GetPropertyValueInContainer(parameters);
-        const auto triggered = match->triggered->GetPropertyValueInContainer(parameters);
+        const bool valid_event = parameters && match->elapsed && match->triggered && match->source &&
+            schema.input.Get() && standing_autonomous(pawn) &&
+            match->source->GetObjectPropertyValue(match->source->ContainerPtrToValuePtr<void>(parameters)) == schema.input.Get();
+        const auto elapsed = valid_event ? match->elapsed->GetPropertyValueInContainer(parameters) : -1.0f;
+        const auto triggered = valid_event ? match->triggered->GetPropertyValueInContainer(parameters) : -1.0f;
         if (!std::isfinite(elapsed) || elapsed < 0 || !std::isfinite(triggered) || triggered < 0)
         {
+            iteration.PreventOriginalFunctionCall();
             press = {};
             return;
         }
+
         const auto now = Clock::now();
         const auto index = match - schema.events.begin();
+        auto* changing_ammo = field<Unreal::FBoolProperty>(pawn, STR("IsChangingAmmo"));
+        if (index == 2 && changing_ammo && changing_ammo->GetPropertyValueInContainer(pawn))
+        {
+            // The stock Completed wrapper only clears this flag while the selector is open.
+            press = {};
+            return;
+        }
+        const bool current = press.pawn.Get() == pawn && now < press.expires;
+        if (index == 1 && current && press.weapon.matches(reload_weapon(pawn)))
+        {
+            // Triggered opens the stock selector at its original threshold.
+            press.expires = now + press_timeout;
+            return;
+        }
+
+        iteration.PreventOriginalFunctionCall();
+        if (!iteration.OriginalFunctionCallPrevented()) return;
         if (index == 0)
         {
             press = {};
@@ -254,17 +324,8 @@ namespace
             press.expires = now + press_timeout;
             return;
         }
-        if (press.pawn.Get() != pawn || now >= press.expires) return;
-        if (index == 1)
-        {
-            press.expires = now + press_timeout;
-            return;
-        }
+        if (!current || index != 2 || sequence == max_sequence) return;
         auto started = std::exchange(press, {});
-        // The stock Completed event checks whether the ammo menu actually opened.
-        // Press duration alone does not turn a reload into an ammo selection.
-        auto* changing_ammo = field<Unreal::FBoolProperty>(pawn, STR("IsChangingAmmo"));
-        if (!changing_ammo || changing_ammo->GetPropertyValueInContainer(pawn) || sequence == max_sequence) return;
         if (!started.weapon.matches(reload_weapon(pawn))) return;
         pending = {started.pawn, now + intent_timeout, std::move(started.weapon)};
         ++sequence;
@@ -326,13 +387,15 @@ namespace
         }
     };
 
-    void dispatch_fixture(Unreal::UObject* pawn, const InputEvent& event, const InputValueFactory& factory, bool pressed)
+    void dispatch_fixture(Unreal::UObject* pawn, const InputEvent& event, const InputValueFactory& factory,
+                          bool pressed, float seconds = -1.0f)
     {
         alignas(std::max_align_t) std::array<std::byte, 0x30> parameters{};
         StructParameter value(event.value, parameters.data());
         factory.fill(event.value, parameters.data(), pressed);
-        event.elapsed->SetPropertyValueInContainer(parameters.data(), pressed ? 0.0f : 0.3f);
-        event.triggered->SetPropertyValueInContainer(parameters.data(), pressed ? 0.0f : 0.3f);
+        const auto duration = seconds >= 0 ? seconds : pressed ? 0.0f : 0.3f;
+        event.elapsed->SetPropertyValueInContainer(parameters.data(), duration);
+        event.triggered->SetPropertyValueInContainer(parameters.data(), duration);
         event.source->SetObjectPropertyValue(event.source->ContainerPtrToValuePtr<void>(parameters.data()), schema.input.Get());
         pawn->ProcessEvent(static_cast<Unreal::UFunction*>(event.function.Get()), parameters.data());
     }
@@ -354,7 +417,7 @@ namespace
             (lua.get_stack_size() == 2 && !lua.is_string(2)))
             return fixture_result(lua, false, "native_guest_reload_fixture_scope_unavailable");
         const auto edge = lua.get_stack_size() == 2 ? lua.get_string(2) : std::string{};
-        if (!edge.empty() && edge != "start" && edge != "cancel")
+        if (!edge.empty() && edge != "start" && edge != "cancel" && edge != "hold")
             return fixture_result(lua, false, "native_guest_reload_fixture_scope_unavailable");
         const auto address = lua.get_integer(1);
         if (address <= 0) return fixture_result(lua, false, "native_guest_reload_fixture_exact_pawn_required");
@@ -400,6 +463,17 @@ namespace
             return fixture_result(lua, false, "native_guest_reload_fixture_started_not_guarded");
         }
         if (edge == "start") return fixture_result(lua, true, "stock_started");
+        if (edge == "hold")
+        {
+            const auto& triggered = schema.events[1];
+            if (!valid_event(triggered) || triggered.value->GetStruct().Get() != started.value->GetStruct().Get())
+                return fixture_result(lua, false, "native_guest_reload_fixture_wrapper_schema_unavailable");
+            dispatch_fixture(pawn, triggered, factory, true, 0.35f);
+            auto* changing = field<Unreal::FBoolProperty>(pawn, STR("IsChangingAmmo"));
+            if (!changing || !changing->GetPropertyValueInContainer(pawn))
+                return fixture_result(lua, false, "native_guest_reload_fixture_selector_did_not_open");
+            return fixture_result(lua, true, "stock_selector_opened");
+        }
         dispatch_fixture(pawn, completed, factory, false);
         if (press.pawn.Get() || pending.pawn.Get() != pawn || sequence != before + 1 || !local_client(pawn))
         {
@@ -422,7 +496,9 @@ namespace
         lua.set_integer(reinterpret_cast<std::intptr_t>(pawn));
         lua.set_string(pending.weapon.guid);
         lua.set_string(pending.weapon.underbarrel ? "loki" : "primary");
-        return 4;
+        if (pending.ammo.empty()) return 4;
+        lua.set_string(pending.ammo);
+        return 5;
     }
 
     int clear_intent(const Lua&)

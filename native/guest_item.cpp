@@ -444,7 +444,7 @@ namespace
 
     std::string_view resolve(const Lua& lua, Context& context, SeedSelection* seed_selection,
                              std::int64_t* hold_duration = nullptr, StackSplit* split = nullptr, bool full_split = false,
-                             int* requested_slot = nullptr, ShotView* shot_view = nullptr)
+                             int* requested_slot = nullptr, ShotView* shot_view = nullptr, std::string* reload_round = nullptr)
     {
         if (!env("SILVERFISH_COOP_NATIVE_GUEST_SAVE")) return "native_guest_weapon_scope_disabled";
         const auto count = lua.get_stack_size();
@@ -453,7 +453,7 @@ namespace
         const int view_fields = count - first_view + 1;
         const bool shot_fields = shot_view && view_fields > 0 && !split && !seed_selection && !requested_slot;
         if (shot_fields && !shot_view_fields(lua, first_view, view_fields)) return "guest_weapon_view_unqualified";
-        const bool legacy_fields = count == 3 || (count == 4 && ((seed_selection && lua.is_string(4)) ||
+        const bool legacy_fields = count == 3 || (count == 4 && (((seed_selection || reload_round) && lua.is_string(4)) ||
             ((hold_duration || requested_slot) && lua.is_integer(4))));
         if (!Unreal::IsInGameThreadRaw() || (split ? !split_fields : !legacy_fields && !shot_fields) ||
             (hold_duration && (!lua.is_integer(4) || (count != 4 && !shot_fields))) ||
@@ -488,6 +488,8 @@ namespace
             if (slot < 0 || slot >= 8) return "native_inventory_equip_refused_slot";
             *requested_slot = static_cast<int>(slot);
         }
+        else if (count == 4 && reload_round)
+            *reload_round = lua.get_string();
         else if (count == 4 && !hold_duration)
         {
             if (!env("SILVERFISH_COOP_HEADLESS")) return "stock_guest_weapon_fixture_profile_unqualified";
@@ -2179,7 +2181,47 @@ namespace
         return result(lua, verified, verified ? "stock underbarrel round projected" : "guest_underbarrel_round_projection_unverified");
     }
 
-    int reload(const Lua& lua, const Context& context, Inventory inventory, bool underbarrel)
+    struct PropertyDeleter
+    {
+        Unreal::FProperty* type;
+        void operator()(void* storage) const { type->DestroyAndFreeValue(storage); }
+    };
+
+    std::unique_ptr<void, PropertyDeleter> make_returned_rounds(const Context& context, const Inventory& inventory,
+                                                                  Unreal::UClass* ammo, int amount)
+    {
+        using Value = std::unique_ptr<void, PropertyDeleter>;
+        auto* make = find<Unreal::UFunction>(
+            STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:MakeItemStack"));
+        auto* library = find<Unreal::UObject>(
+            STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"));
+        auto* klass = input<Unreal::FClassProperty>(make, STR("Item_Class"), 0);
+        auto* count = input<Unreal::FIntProperty>(make, STR("Count"), 8);
+        auto* world = input<Unreal::FObjectProperty>(make, STR("__WorldContext"), 16);
+        auto* out = field<Unreal::FStructProperty>(make, STR("Item"));
+        alignas(std::max_align_t) std::array<std::byte, 256> parameters{};
+        if (!library || !library->HasAnyFlags(Unreal::RF_ClassDefaultObject) || !make ||
+            make->GetOuterPrivate() != library->GetClassPrivate() || make->GetNumParms() != 4 || make->GetReturnProperty() ||
+            make->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) || !klass || !count || !world || !out ||
+            klass->GetMetaClass().Get() != inventory.item_class->GetMetaClass().Get() ||
+            !out->HasAllPropertyFlags(Unreal::CPF_Parm | Unreal::CPF_OutParm) || out->GetOffset_Internal() != 24 ||
+            out->GetStruct().Get() != inventory.type->GetStruct().Get() || 24 + out->GetSize() > make->GetParmsSize() ||
+            make->GetParmsSize() > parameters.size()) return Value(nullptr, {inventory.type});
+        auto* output = out->ContainerPtrToValuePtr<void>(parameters.data());
+        out->InitializeValue(output);
+        const auto cleanup = [out](void* value) { out->DestroyValue(value); };
+        std::unique_ptr<void, decltype(cleanup)> temporary(output, cleanup);
+        klass->SetObjectPropertyValue(klass->ContainerPtrToValuePtr<void>(parameters.data()), ammo);
+        count->SetPropertyValueInContainer(parameters.data(), amount);
+        world->SetObjectPropertyValue(world->ContainerPtrToValuePtr<void>(parameters.data()), context.pawn);
+        library->ProcessEvent(make, parameters.data());
+        Value row(inventory.type->AllocateAndInitializeValue(), {inventory.type});
+        if (row) inventory.type->CopyCompleteValue(row.get(), temporary.get());
+        return row;
+    }
+
+    int reload(const Lua& lua, const Context& context, Inventory inventory, bool underbarrel, std::string_view requested_round)
+
     {
         auto* receiver = equipped(context, inventory);
         if (!receiver) return reload_proof(lua, false, "guest_weapon_actor_not_equipped");
@@ -2229,14 +2271,32 @@ namespace
         if (cap <= 0 || before < 0 || before > cap || before != stored_rounds(inventory))
             return reload_proof(lua, false, "guest_weapon_magazine_unqualified", before, before);
 
+        auto* old_ammo = ammo_class;
+        const profiles::StockAmmo* changed_round = nullptr;
+        if (!requested_round.empty() && requested_round != RC::to_utf8_string(ammo_class->GetPathName()))
+        {
+            const auto match = std::ranges::find_if(profiles::stock_ammo, [&](const auto* candidate) {
+                return requested_round == RC::to_utf8_string(candidate->item);
+            });
+            if (match == profiles::stock_ammo.end())
+                return reload_proof(lua, false, "guest_weapon_ammo_selection_unqualified");
+            auto* selected = find<Unreal::UClass>((*match)->item);
+            if (!selected || (stock_profile ? !magazine_round(*stock_profile, selected)
+                : !bolt || (selected != find<Unreal::UClass>(rifle_fmj_path) &&
+                            selected != find<Unreal::UClass>(profiles::thirty_06_incendiary.item))) ||
+                !ammo_item_row_matches(selected, **match) || !stack_schema.read(selected, inventory))
+                return reload_proof(lua, false, "guest_weapon_ammo_selection_unqualified");
+            ammo_class = selected;
+            changed_round = *match;
+        }
+
         std::int32_t reserve_before{};
         std::vector<ReserveStack> stacks;
         if (!snapshot_reserve(context, inventory, ammo_class, stacks, reserve_before))
             return reload_proof(lua, false, "guest_weapon_reserve_unqualified", before, before);
-        if (before == cap)
+        if (before == cap && !changed_round)
             return reload_proof(lua, false, "magazine_full", before, before, reserve_before, reserve_before);
-        const profiles::StockAmmo* changed_round = nullptr;
-        if (before == 0 && reserve_before == 0)
+        if (requested_round.empty() && before == 0 && reserve_before == 0)
         {
             // Stock FindAmmo_InInventory checks the Backpack in slot order
             // when an empty weapon has run out of its currently selected round.
@@ -2266,9 +2326,30 @@ namespace
         if (reserve_before == 0)
             return reload_proof(lua, false, "no_matching_guest_ammo", before, before, 0, 0);
 
+        // Stage the previous load before changing its type. The old rounds return
+        // to the same detached guest backpack even when the magazine was full.
+        using Value = std::unique_ptr<void, PropertyDeleter>;
+        Value returned(nullptr, {inventory.type});
+        if (changed_round && before > 0)
+        {
+            AmmoStackSchema old_schema;
+            if (!old_schema.read(old_ammo, inventory) || !old_schema.qualifies(before) ||
+                Unreal::FScriptArrayHelper(inventory.backpack,
+                    inventory.backpack->ContainerPtrToValuePtr<void>(context.save)).Num() >= max_inventory)
+                return reload_proof(lua, false, "guest_weapon_previous_load_unqualified");
+            returned = make_returned_rounds(context, inventory, old_ammo, before);
+            auto check = context;
+            check.guid = returned ? inventory.identity(returned.get()) : Guid{};
+            Inventory collision;
+            if (!returned || check.guid == Guid{} || inventory.row_class(returned.get()) != old_ammo ||
+                !old_schema.totals_match(returned.get(), before) || !locate(check, collision).empty() || collision.item)
+                return reload_proof(lua, false, "guest_weapon_previous_load_unqualified");
+        }
+
+        const auto loaded_before = changed_round ? 0 : before;
         // These stock magazine reloads exit after debiting the first matching Backpack stack.
         const auto available = stock_profile && stock_profile->reload_first_stack ? stacks.front().units : reserve_before;
-        const auto transferred = single_reload ? 1 : std::min(cap - before, available);
+        const auto transferred = single_reload ? 1 : std::min(cap - loaded_before, available);
         auto needed = transferred;
         for (auto& stack : stacks)
         {
@@ -2306,7 +2387,7 @@ namespace
         }
 
         // Publish the verified detached reserve and magazine in one game-thread turn.
-        const auto refilled = before + transferred;
+        const auto refilled = loaded_before + transferred;
         Unreal::FScriptArrayHelper backpack(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(context.save));
         for (auto it = stacks.rbegin(); it != stacks.rend(); ++it)
         {
@@ -2321,6 +2402,7 @@ namespace
             inventory.ammo->SetPropertyValueInContainer(row, remaining);
             stack_schema.set_totals(row, remaining);
         }
+        if (returned) inventory.type->CopyCompleteValue(backpack.GetRawPtr(backpack.AddValue()), returned.get());
         if (!underbarrel) inventory.ammo->SetPropertyValueInContainer(inventory.item, refilled);
         rounds->SetPropertyValueInContainer(actor, refilled);
         const Unreal::FWeakObjectPtr held_actor{actor};
@@ -2350,8 +2432,11 @@ namespace
                 return expected.guid == actual.guid && expected.units - expected.debit == actual.units &&
                     (expected.debit == 0 || stack_schema.totals_match(backpack.GetRawPtr(actual.index), actual.units));
             });
-        return reload_proof(lua, proven, proven ? "reloaded" : "mutation_unverified_guest_weapon_reload_stacks",
-                            before, observed, reserve_before, reserve_after);
+        const bool returned_verified = !returned ||
+            (backpack.Num() > 0 && inventory.type->Identical(returned.get(), backpack.GetRawPtr(backpack.Num() - 1)));
+        const bool settled = proven && returned_verified;
+        return reload_proof(lua, settled, settled ? "reloaded" : "mutation_unverified_guest_weapon_reload_stacks",
+                            loaded_before, observed, reserve_before, reserve_after);
     }
 
     const profiles::StockAmmo* reserve_fixture_profile(const Context& context)
@@ -2789,12 +2874,6 @@ namespace
         }
         return hold_result(lua, !smg_hold.dirty, smg_hold.closing && !smg_hold.dirty ? "closing" : smg_hold.status, &smg_hold);
     }
-
-    struct PropertyDeleter
-    {
-        Unreal::FProperty* type;
-        void operator()(void* storage) const { type->DestroyAndFreeValue(storage); }
-    };
 
     bool accepts_stock_quick_slot(int index, Unreal::UClass* item_class, std::uint8_t item_type)
     {
@@ -4098,8 +4177,10 @@ namespace
         Context context;
         SeedSelection seed_selection;
         ShotView shot_view;
+        std::string reload_round;
         if (const auto error = resolve(lua, context, operation == Operation::Seed ? &seed_selection : nullptr,
-                                       nullptr, nullptr, false, nullptr, operation == Operation::Fire ? &shot_view : nullptr);
+                                       nullptr, nullptr, false, nullptr, operation == Operation::Fire ? &shot_view : nullptr,
+                                       operation == Operation::Reload ? &reload_round : nullptr);
             !error.empty()) return fail(error);
         if constexpr (operation != Operation::Inspect)
             if (std::ranges::any_of(smg_holds, [&](const SmgHold& hold) {
@@ -4150,7 +4231,7 @@ namespace
         if constexpr (operation == Operation::Equip) return equip(lua, context, inventory);
         if constexpr (operation == Operation::Inspect)
             return underbarrel ? inspect_underbarrel(lua, context, inventory) : inspect(lua, context, inventory);
-        if constexpr (operation == Operation::Reload) return reload(lua, context, inventory, underbarrel);
+        if constexpr (operation == Operation::Reload) return reload(lua, context, inventory, underbarrel, reload_round);
         return fire(lua, context, inventory, operation == Operation::Disarm, shot_view, underbarrel);
     }
 }

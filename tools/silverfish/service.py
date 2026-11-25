@@ -5663,11 +5663,16 @@ class Client:
             operation_key += f":{step}"
         operation = uuid.uuid5(self.bridge.input_namespace, operation_key).hex
         target = f"{selected}@{self.zone_epoch}"
-        if underbarrel:
+        ammo = intent.get("ammo_class") if fresh else None
+        if ammo:
+            target += f"@{'loki' if underbarrel else 'primary'}@{ammo}"
+        elif underbarrel:
             target += "@loki"
         try:
             result = await self.gameplay_action("native-guest-weapon-reload", operation, target)
             self.control.event("native_guest_reload_input", operation_id=operation, sequence=sequence, **result)
+            if ammo:
+                self.guest_ui.queue_stock_inventory(self)
         except (ValueError, OSError, RuntimeError) as error:
             self.control.event("native_guest_reload_input_rejected", operation_id=operation, sequence=sequence, reason=str(error))
             return

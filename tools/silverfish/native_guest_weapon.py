@@ -208,6 +208,7 @@ async def service_fire_modes(client, active: bool) -> None:
 async def perform(host, bridge, character: str, operation_id: str, action: str, guid: str, *, seed_kind=None,
                   bandit_fixture: str | None = None) -> dict:
     shot_view = None
+    selected_round = None
     underbarrel = False
     if action == "native-guest-weapon-fire" and isinstance(guid, str) and "@" in guid:
         parts = guid.split("@")
@@ -220,9 +221,13 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
             raise party.RuleError("native_guest_weapon_view_unqualified")
     elif action == "native-guest-weapon-reload" and isinstance(guid, str) and "@" in guid:
         parts = guid.split("@")
-        if len(parts) not in (2, 3) or parts[1] != host.zone_epoch or parts[2:] not in ([], ["loki"]):
+        if len(parts) == 4 and parts[2] in {"primary", "loki"} and parts[3] in guest_weapon_profiles.AMMO_BY_PATH:
+            selected_round = parts[3]
+        elif len(parts) not in (2, 3) or parts[2:] not in ([], ["loki"]):
             raise party.RuleError("native_guest_weapon_view_unqualified")
-        guid, underbarrel = parts[0], len(parts) == 3
+        if parts[1] != host.zone_epoch:
+            raise party.RuleError("native_guest_weapon_view_unqualified")
+        guid, underbarrel = parts[0], parts[2:3] == ["loki"]
     fixture = bandit_fixture is not None or action in ("native-guest-weapon-seed", "native-guest-weapon-seed-ammo")
     if (not host.native_guest or (fixture and not host.fixtures) or host.native_profile is None
             or host.transitioning or host.stopping or host.native_checkpoint_unsafe
@@ -244,9 +249,11 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
         extra = (seed_kind,)
     elif shot_view is not None:
         extra = (("loki:" if underbarrel else "") + shot_view,)
+    elif selected_round:
+        extra = ("loki" if underbarrel else "primary", selected_round)
     else:
         extra = ("loki",) if underbarrel else ()
-    fingerprint = [action, guid, bandit_fixture or (extra[0] if extra else None)]
+    fingerprint = [action, guid, bandit_fixture or ("@".join(extra) if extra else None)]
     mutates = operation != "inspect"
     if mutates:
         for receipt in host.party["receipts"].get(character, []):
@@ -366,7 +373,8 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
             if (proof["status"] != ("underbarrel_equipped" if underbarrel else "equipped") or proof.get("after") != stored
                     or any(type(amount) is not int for amount in (before, reserve_before, reserve_after))
                     or not 0 <= before < stored or not 0 <= reserve_after < reserve_before
-                    or stored - before != reserve_before - reserve_after):
+                    or stored - before != reserve_before - reserve_after
+                    or selected_round is not None and proof.get("ammo_class") != selected_round):
                 raise RuntimeError("Stock reserve ammunition did not move exactly into the guest magazine")
 
         host.last_game, host.last_seen = snapshot, time.monotonic()

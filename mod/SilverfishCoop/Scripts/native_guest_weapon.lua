@@ -465,13 +465,16 @@ function guest_weapon.command(fields, state, phase)
     local underbarrel = (view and view:sub(1, 5) == "loki:") or (action == "reload" and fields[5] == "loki")
     local shot_view = view and require("guest_shot_view").parse(underbarrel and view:sub(6) or view)
     local underbarrel_reload = underbarrel and action == "reload" and #fields == 5
+    local selected_round = action == "reload" and #fields == 6 and (fields[5] == "primary" or fields[5] == "loki")
+        and fields[6]:match("^/Game/Classes/Items/[%w_./%-]+_C$") and fields[6]
     if underbarrel then
         invoke = action == "fire" and SilverfishFireNativeGuestUnderbarrel or SilverfishReloadNativeGuestUnderbarrel
         inspect = SilverfishInspectNativeGuestUnderbarrel
     end
     local equipped_target = action == "reload" and guid == "equipped"
     observation = nil
-    if not enabled or (#fields ~= 4 and not seed_profile and not shot_view and not underbarrel_reload) or phase ~= "hosting"
+    if not enabled or (#fields ~= 4 and not seed_profile and not shot_view and not underbarrel_reload and not selected_round)
+        or phase ~= "hosting"
         or (not equipped_target and (not guid or #guid ~= 32 or guid:find("[^0-9A-F]"))) then
         error("A native weapon operation needs an exact guest and item GUID", 0)
     end
@@ -501,7 +504,11 @@ function guest_weapon.command(fields, state, phase)
     end
 
     local pawn_address, save_address = pawn:GetAddress(), detached:GetAddress()
-    local arguments = seed_profile and {fields[5]} or shot_view or {}
+    local arguments = seed_profile and {fields[5]} or shot_view or selected_round and {selected_round} or {}
+    if selected_round then
+        local class = StaticFindObject(selected_round)
+        if not class or not class:IsValid() then LoadAsset(selected_round) end
+    end
     local restore, refusal
     local spratt = spratt_fixture and state.map == spratt_fixture.map
     local shot_fixture = spratt and spratt_fixture or flayer_fixture
@@ -543,7 +550,8 @@ function guest_weapon.command(fields, state, phase)
         if verified then
             state_name, actor_ammo, stored_ammo = tostring(state_name), actor, stored
             status = state_name
-            if underbarrel then ammo_class = mounted_ammo end
+            if underbarrel then ammo_class = mounted_ammo
+            elseif selected_round then ammo_class = mounted_ammo_path(pawn.EquipedItem) end
         else
             ok, status = false, "mutation_unverified_stock_readback"
         end
