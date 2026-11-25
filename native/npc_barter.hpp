@@ -40,7 +40,7 @@ namespace silverfish::npc_barter
         return value ? value->GetObjectPropertyValue(value->ContainerPtrToValuePtr<void>(object)) : nullptr;
     }
 
-    inline Unreal::UObject* linked_npc(Unreal::UObject* trader, Unreal::UWorld* world)
+    inline Unreal::UObject* linked_npc(Unreal::UObject* trader, Unreal::UWorld* world, bool require_alive = true)
     {
         if (!live(world) || !live(trader) || trader->GetClassPrivate() != type(trader_class) ||
             static_cast<Unreal::AActor*>(trader)->GetWorld() != world || child(trader, STR("LinkedShop"))) return nullptr;
@@ -49,7 +49,8 @@ namespace silverfish::npc_barter
         auto* merchant = child(trader, STR("MerchantData"));
         auto* alive = property<Unreal::FBoolProperty>(npc, STR("Alive"));
         if (!live(npc) || !base || !npc->IsA(base) || child(npc, STR("BarterRef")) != trader ||
-            static_cast<Unreal::AActor*>(npc)->GetWorld() != world || !alive || !alive->GetPropertyValueInContainer(npc) ||
+            static_cast<Unreal::AActor*>(npc)->GetWorld() != world || !alive ||
+            (require_alive && !alive->GetPropertyValueInContainer(npc)) ||
             !live(merchant) || merchant->GetClassPrivate() != type(merchant_class)) return nullptr;
         return npc;
     }

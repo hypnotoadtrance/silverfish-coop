@@ -1513,14 +1513,21 @@ namespace
     {
         if (!object || !function || call.OriginalFunctionCallPrevented()) return;
         static const Unreal::FName confirm{STR("CompleteTrade")};
-        if (function->GetFName() != confirm || scope.host || function != find<Unreal::UFunction>(npc_barter_complete) ||
+        if (function->GetFName() != confirm || function != find<Unreal::UFunction>(npc_barter_complete) ||
             function->GetNumParms() != 0 || function->GetParmsSize() != 0 || function->GetReturnProperty() ||
-            !stock_npc_barter_menu(object)) return;
+            !live_scope(scope)) return;
+        const auto tracked = object == npc_barter_screen.Get();
+        auto* trader = object_field(object, STR("Trader"));
+        auto* linked = silverfish::npc_barter::linked_npc(trader, static_cast<Unreal::UWorld*>(scope.world.Get()), false);
+        auto* alive = field<Unreal::FBoolProperty>(linked, STR("Alive"));
+        const bool dead = alive && !alive->GetPropertyValueInContainer(linked);
+        const bool can_route = !scope.host && stock_npc_barter_menu(object);
+        if (!dead && !tracked && !can_route) return;
         // Keep stock selection and confirmation controls. The guest's local
         // GameInstance must never run the exchange against its inventory copy.
         call.PreventOriginalFunctionCall();
         const auto now = Clock::now();
-        if (call.OriginalFunctionCallPrevented() && object == npc_barter_screen.Get() && now < npc_barter_input.expires &&
+        if (call.OriginalFunctionCallPrevented() && can_route && tracked && now < npc_barter_input.expires &&
             now < scope.expires && live_scope(scope) && standing(scope.pawn.Get()) && npc_barter_menu_active(object) &&
             !npc_barter_confirm.pending.sequence && npc_barter_sequence < max_sequence)
             npc_barter_confirm.pending = {++npc_barter_sequence, now + receipt_lifetime};

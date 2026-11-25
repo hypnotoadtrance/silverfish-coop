@@ -33,12 +33,12 @@ local function close_to(pawn, target)
         and (point.X - location.X)^2 + (point.Y - location.Y)^2 + (point.Z - location.Z)^2 <= max^2
 end
 
-local function trader_owner(actor, state)
+local function trader_owner(actor, state, allow_dead)
     local npc = exact(actor, trader_class) and actor.LinkedNPC
     local base = StaticFindObject(npc_class)
     if not valid(npc) or not valid(base) or npc:IsA(base) ~= true or not same(npc.BarterRef, actor)
         or valid(actor.LinkedShop) or not exact(actor.MerchantData, merchant_class)
-        or npc.Alive ~= true or npc:IsActorBeingDestroyed() or actor:IsActorBeingDestroyed()
+        or (not allow_dead and npc.Alive ~= true) or npc:IsActorBeingDestroyed() or actor:IsActorBeingDestroyed()
         or not same(npc:GetWorld(), state.world) or not same(actor:GetWorld(), state.world) then return end
     return npc
 end
@@ -194,13 +194,14 @@ local function hide_provisional_screen(controller)
     local stack = controller.MenuStack
     local screen = stack:GetArrayNum() == 1 and stack[1]
     if observed_phase ~= "connected" or not exact(screen, barter_screen) or session and same(screen, session.screen) then return end
+    local linked = trader_owner(screen.Trader, observed_state, true)
+    local dead = valid(linked) and linked.Alive == false
     if not local_context(observed_state, observed_phase, screen) then
         local trader = screen.Trader
-        local npc = trader_owner(trader, observed_state)
-        if not npc or not identity.is_dynamic(npc) or trader.Save ~= true then return end
+        if not dead and (not valid(linked) or not identity.is_dynamic(linked) or trader.Save ~= true) then return end
     end
     if not waiting_screen or not same(waiting_screen.screen, screen) then
-        waiting_screen = {screen = screen, controller = controller, expires = os.time() + 12}
+        waiting_screen = {screen = screen, controller = controller, expires = os.time() + (dead and 0 or 12)}
     end
     -- A replacement stock screen can open before the previous view has finished closing.
     screen:SetRenderOpacity(0)
@@ -456,10 +457,12 @@ function barter.sync(state, phase)
         local waiting = waiting_screen
         if phase ~= "connected" or not same(waiting.controller, state.controller) or not top(waiting, waiting.screen) then
             waiting_screen = nil
-        elseif os.time() >= waiting.expires then
-            waiting_screen = nil
-            waiting.controller:CloseMenu({})
-            print("[SilverfishCoop] NPC trade closed while waiting for the co-op trade session. Reopen the trade to retry.")
+        else
+            local npc = trader_owner(waiting.screen.Trader, state, true)
+            if os.time() >= waiting.expires or valid(npc) and npc.Alive == false then
+                waiting_screen = nil
+                waiting.controller:CloseMenu({})
+            end
         end
     end
     if not current then close_stock(); return end
