@@ -370,7 +370,7 @@ namespace
             return fixture_result(lua, false, "native_guest_reload_fixture_exact_local_client_required");
         const auto now = Clock::now();
         const bool pressed = press.pawn.Get() == pawn && now < press.expires;
-        if ((edge == "cancel" ? !pressed : pressed) || (pending.pawn.Get() && now < pending.expires) || sequence == max_sequence)
+        if ((edge == "cancel" ? !pressed : pressed) || sequence == max_sequence)
             return fixture_result(lua, false, "native_guest_reload_fixture_input_busy");
         const auto& started = schema.events[0];
         const auto& completed = schema.events[2];
