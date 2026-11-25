@@ -80,7 +80,8 @@ WAREHOUSE_DOCK = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
 INDEPENDENT_RESIDENT_MAPS = {
     "stock_food": {OBSERVATORY}, "stock_cooked_meal": {OBSERVATORY}, "stock_melee_edges": {OBSERVATORY},
     "stock_castaway_dialogue": {OBSERVATORY},
-    "stock_avatar_tail": {OBSERVATORY}, "stock_impact_cues": {OBSERVATORY},
+    "stock_avatar_tail": {OBSERVATORY}, "stock_avatar_lean": {OBSERVATORY},
+    "stock_footsteps": {OBSERVATORY}, "stock_impact_cues": {OBSERVATORY},
     "stock_lockpicks": {OBSERVATORY}, "stock_observatory_tv": {OBSERVATORY},
     "stock_critters": {CROSSROADS}, "stock_lingering_teleport": {CROSSROADS}, "stock_mushrooms": {CROSSROADS},
     "stock_placed_item": {CROSSROADS}, "stock_cash_popup": {CROSSROADS}, "stock_weather_travel": {OBSERVATORY},
@@ -6460,6 +6461,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_take_ammo: bool = False, stock_shotguns: bool = False, stock_alternate_ammo: bool = False,
                  stock_impact_cues: bool = False,
                  stock_avatar_tail: bool = False, stock_avatar_binoculars: bool = False,
+                 stock_avatar_lean: bool = False, stock_footsteps: bool = False,
                  stock_interaction_feedback: bool = False,
                  stock_loki_control: bool = False, stock_loki_guest: bool = False,
                  stock_light_ar: bool = False, stock_fire_mode_reopen: bool = False,
@@ -6521,6 +6523,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         await travel_pair_to_dock(host, guest, pawn)
         return await verify_stock_dock_gate(host, guest)
 
+    async def check_lean(host, guest, pawn):
+        from avatar_lean_probe import verify_lean
+        return await verify_lean(host, guest, pawn)
+
+    async def check_footsteps(host, guest, _pawn):
+        return {"stock_footsteps": await verify_resident_footsteps(host, guest)}
+
     storm_trial = StockStormTrial(portable_probe_command) if stock_storm_ambience else None
     weapon_campaign = "tutorial_dock_combat" if tutorial_dock_combat else "observatory"
     shot_view_campaign = "tutorial_dock_shot_view" if tutorial_dock_pursuit else weapon_campaign
@@ -6549,6 +6558,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_melee_edges, "observatory", "stock_melee_edges", verify_stock_melee_edges_only),
         (stock_avatar_tail, "observatory", "stock_avatar_tail", verify_stock_avatar_tail),
         (stock_avatar_binoculars, "observatory", "stock_avatar_binoculars", verify_stock_avatar_binoculars),
+        (stock_avatar_lean, "observatory", "stock_avatar_lean", check_lean),
+        (stock_footsteps, "observatory", "stock_footsteps", check_footsteps),
         (stock_interaction_feedback, "observatory", "stock_lockpicks", verify_stock_lockpicks),
         (stock_interaction_feedback, "observatory", "stock_observatory_tv", verify_observatory_tv),
         (stock_melee_family, "observatory", "stock_melee_family", verify_stock_melee_family),
@@ -6881,7 +6892,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableWeaponCueProbe",
                                                      fixture="avatar_presentation_probe.lua"))
-        if resident_weapon_cues:
+        if stock_avatar_lean:
+            from avatar_lean_probe import installed_probe as installed_lean_probe
+            for game in games:
+                probes.enter_context(installed_lean_probe(game))
+        if resident_weapon_cues or stock_footsteps:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableFootstepProbe",
                                                      fixture="portable_footstep_probe.lua"))
@@ -7408,6 +7423,10 @@ if __name__ == "__main__":
                         help="verify both peers see and hear the stock binoculars raise and lower")
     parser.add_argument("--stock-avatar-tail", action="store_true",
                         help="verify the armored stock tail seam through turning and jumping")
+    parser.add_argument("--stock-avatar-lean", action="store_true",
+                        help="verify both directions of stock lean and release on the observer")
+    parser.add_argument("--stock-footsteps", action="store_true",
+                        help="verify both directions of stock footstep audio")
     parser.add_argument("--stock-interaction-feedback", action="store_true",
                         help="verify the guest's stock lockpick equipment and Observatory television")
     parser.add_argument("--stock-loki-control", action="store_true",
@@ -7538,6 +7557,7 @@ if __name__ == "__main__":
                               "stock_bandage_revisit", "stock_buried_placements", "stock_shovel", "stock_shovel_loot",
                               "stock_shovel_quest", "stock_shovel_host_quest", "stock_take_ammo",
                               "stock_shotguns", "stock_impact_cues", "stock_avatar_tail", "stock_avatar_binoculars",
+                              "stock_avatar_lean", "stock_footsteps",
                               "stock_interaction_feedback",
                               "stock_loki_control", "stock_loki_guest",
                               "stock_host_corpse_carry", "stock_host_prop_observer", "stock_flashlights", "stock_simmi_jammers",
@@ -7586,6 +7606,7 @@ if __name__ == "__main__":
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_buried_placements,
             args.stock_take_ammo, args.stock_shotguns,
             args.stock_impact_cues, args.stock_avatar_tail, args.stock_avatar_binoculars, args.stock_interaction_feedback,
+            args.stock_avatar_lean, args.stock_footsteps,
             args.stock_loki_control, args.stock_loki_guest,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
             args.crossroads_profile, args.stock_lightning, args.stock_crossroads_door, args.stock_dock_gate,
@@ -7672,6 +7693,7 @@ if __name__ == "__main__":
                        stock_take_ammo=args.stock_take_ammo, stock_shotguns=args.stock_shotguns,
                        stock_impact_cues=args.stock_impact_cues,
                        stock_avatar_tail=args.stock_avatar_tail, stock_avatar_binoculars=args.stock_avatar_binoculars,
+                       stock_avatar_lean=args.stock_avatar_lean, stock_footsteps=args.stock_footsteps,
                        stock_interaction_feedback=args.stock_interaction_feedback,
                        stock_loki_control=args.stock_loki_control, stock_loki_guest=args.stock_loki_guest,
                        stock_alternate_ammo=args.stock_alternate_ammo,

@@ -68,7 +68,8 @@ function lean_bridge.update(get_world, role, leaving)
         return
     end
     local attached, frame = SilverfishTakeRemoteAvatarPoses()
-    if attached ~= true then
+    if attached == nil then return end
+    if attached == false then
         current.last_roll, current.last_publish = nil, nil
         return
     end
@@ -77,8 +78,9 @@ function lean_bridge.update(get_world, role, leaving)
     local roll = players.is_downed(pawn) == false and avatar.local_lean(pawn, world) or 0
     local centidegrees = math.floor(roll * 100 + .5)
     if centidegrees == current.last_roll and (centidegrees == 0 or now - current.last_publish < .2) then return end
-    SilverfishPublishLocalAvatarPose(current.name .. "\t" .. centidegrees)
-    current.last_roll, current.last_publish = centidegrees, now
+    if SilverfishPublishLocalAvatarPose(current.name .. "\t" .. centidegrees) ~= false then
+        current.last_roll, current.last_publish = centidegrees, now
+    end
 end
 
 return lean_bridge

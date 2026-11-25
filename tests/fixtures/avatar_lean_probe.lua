@@ -1,7 +1,9 @@
 -- Private, muted title fixture for the two stock lean actions and the actual display rig.
 local mailbox = os.getenv("SILVERFISH_COOP_BRIDGE")
 if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") ~= "1"
-    or os.getenv("SILVERFISH_COOP_AVATAR_LEAN_PROBE") ~= "1" or not mailbox then return end
+    or not mailbox then return end
+local portable = mailbox:match("[/\\]portable%-title%-%x+[/\\][%a]+[/\\]titles[/\\]local[/\\]")
+if not portable and os.getenv("SILVERFISH_COOP_AVATAR_LEAN_PROBE") ~= "1" then return end
 local seat, nonce = mailbox:match("[/\\]titles[/\\]([a-zA-Z0-9][a-zA-Z0-9_%-]*)[/\\]run[/\\]game%-bridge[/\\]([0-9a-f]+)$")
 if not seat or #seat > 64 or #nonce ~= 32 then return end
 

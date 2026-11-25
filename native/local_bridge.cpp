@@ -7,6 +7,7 @@
 #include <cstring>
 #include <deque>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -45,8 +46,8 @@ namespace
     std::int64_t active_ticket{};
     State state{State::idle};
     std::string command;
-    std::string reply;
-    std::string status_frame;
+    std::shared_ptr<const std::string> reply;
+    std::shared_ptr<const std::string> status_frame;
     std::uint64_t status_revision{};
     std::deque<std::string> input;
     std::string prop_poses;
@@ -82,7 +83,7 @@ namespace
         active_ticket = 0;
         state = State::idle;
         command.clear();
-        reply.clear();
+        reply.reset();
         changed.notify_all();
     }
 
@@ -153,15 +154,17 @@ namespace
         // UE4SS removes each argument as it is read.
         const auto ticket = lua.get_integer();
         const auto frame = lua.get_string();
+        const auto snapshot = !frame.empty() && frame.size() <= reply_limit
+            ? std::make_shared<const std::string>(frame) : nullptr;
         std::lock_guard lock(mutex);
         if (state != State::running || ticket != active_ticket) return 0;
-        if (frame.empty() || frame.size() > reply_limit)
+        if (!snapshot)
         {
             state = State::too_large;
         }
         else
         {
-            reply.assign(frame);
+            reply = snapshot;
             state = State::replied;
         }
         changed.notify_all();
@@ -172,18 +175,17 @@ namespace
     {
         if (lua.get_stack_size() != 1 || !lua.is_string()) return 0;
         const auto frame = lua.get_string();
+        auto snapshot = !frame.empty() && frame.size() <= reply_limit
+            ? std::make_shared<const std::string>(frame) : nullptr;
         bool published{};
         {
             std::lock_guard lock(mutex);
             if (status_enabled)
             {
-                published = !frame.empty() && frame.size() <= reply_limit;
-                if (published)
-                {
-                    status_frame.assign(frame);
-                    ++status_revision;
-                }
-                else status_frame.clear();
+                published = snapshot != nullptr;
+                // Retire the previous buffer after releasing the bridge lock.
+                status_frame.swap(snapshot);
+                if (published) ++status_revision;
             }
         }
         lua.set_bool(published);
@@ -278,7 +280,9 @@ namespace
         bool active{};
         std::string frame;
         {
-            std::lock_guard lock(mutex);
+            // A missed sample stays queued until the next update or until replaced.
+            std::unique_lock lock(mutex, std::try_to_lock);
+            if (!lock) return 0;
             active = attached;
             frame.swap(mailbox);
         }
@@ -302,7 +306,8 @@ namespace
     {
         std::string frame;
         {
-            std::lock_guard lock(mutex);
+            std::unique_lock lock(mutex, std::try_to_lock);
+            if (!lock) return 0;
             if (attached && std::chrono::steady_clock::now() < remote_footsteps_expires)
                 frame.swap(remote_footsteps);
             else
@@ -317,12 +322,17 @@ namespace
     {
         if (lua.get_stack_size() != 1 || !lua.is_string()) return 0;
         const auto frame = lua.get_string();
-        std::lock_guard lock(mutex);
-        if (attached && !frame.empty() && frame.size() <= limit)
+        bool published = false;
         {
-            mailbox.assign(frame);
+            std::unique_lock lock(mutex, std::try_to_lock);
+            if (lock && attached && !frame.empty() && frame.size() <= limit)
+            {
+                mailbox.assign(frame);
+                published = true;
+            }
         }
-        return 0;
+        lua.set_bool(published);
+        return 1;
     }
 
     int publish_avatar_pose(const Lua& lua)
@@ -409,7 +419,7 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCloseV1()
     std::lock_guard lock(mutex);
     attached = false;
     status_enabled = false;
-    status_frame.clear();
+    status_frame.reset();
     input.clear();
     prop_poses.clear();
     local_prop_pose.clear();
@@ -435,19 +445,26 @@ extern "C" __declspec(dllexport) int SilverfishBridgeEnableStatusV1()
 extern "C" __declspec(dllexport) std::uint64_t SilverfishBridgeStatusRevisionV1()
 {
     std::lock_guard lock(mutex);
-    return status_frame.empty() ? 0 : status_revision;
+    return status_frame ? status_revision : 0;
 }
 
 extern "C" __declspec(dllexport) std::uint32_t SilverfishBridgeCopyStatusV1(
     std::uint64_t previous, char* buffer, std::uint32_t capacity, std::uint64_t* revision)
 {
-    std::lock_guard lock(mutex);
-    if (status_frame.empty() || status_revision == previous || !buffer || !revision) return 0;
-    const auto size = static_cast<std::uint32_t>(status_frame.size());
+    if (!buffer || !revision) return 0;
+    std::shared_ptr<const std::string> snapshot;
+    std::uint64_t version{};
+    {
+        std::lock_guard lock(mutex);
+        if (!status_frame || status_revision == previous) return 0;
+        snapshot = status_frame;
+        version = status_revision;
+    }
+    const auto size = static_cast<std::uint32_t>(snapshot->size());
     if (capacity >= size)
     {
-        std::memcpy(buffer, status_frame.data(), size);
-        *revision = status_revision;
+        std::memcpy(buffer, snapshot->data(), size);
+        *revision = version;
     }
     return size;
 }
@@ -622,14 +639,19 @@ extern "C" __declspec(dllexport) std::int32_t SilverfishBridgeWaitV1(std::int64_
         return ticket != active_ticket || state == State::replied || state == State::too_large;
     });
     if (ticket != active_ticket || state == State::too_large) return -1;
-    return state == State::replied ? static_cast<std::int32_t>(reply.size()) : 0;
+    return state == State::replied ? static_cast<std::int32_t>(reply->size()) : 0;
 }
 
 extern "C" __declspec(dllexport) int SilverfishBridgeCopyV1(std::int64_t ticket, char* buffer, std::uint32_t size)
 {
-    std::lock_guard lock(mutex);
-    if (!buffer || ticket != active_ticket || state != State::replied || size != reply.size()) return 0;
-    std::memcpy(buffer, reply.data(), size);
+    if (!buffer) return 0;
+    std::shared_ptr<const std::string> snapshot;
+    {
+        std::lock_guard lock(mutex);
+        if (ticket != active_ticket || state != State::replied || size != reply->size()) return 0;
+        snapshot = reply;
+    }
+    std::memcpy(buffer, snapshot->data(), size);
     return 1;
 }
 
@@ -670,7 +692,7 @@ namespace silverfish::local_bridge
         ready = false;
         attached = false;
         status_enabled = false;
-        status_frame.clear();
+        status_frame.reset();
         input.clear();
         prop_poses.clear();
         local_prop_pose.clear();

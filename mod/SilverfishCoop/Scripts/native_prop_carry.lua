@@ -847,6 +847,7 @@ local function read_targets(now)
     local active, frame
     if type(SilverfishTakeLocalPropPoses) == "function" then
         active, frame = SilverfishTakeLocalPropPoses()
+        if active == nil then return end
     end
     local frame_limit = 4 * 257
     if not active and mailbox then
