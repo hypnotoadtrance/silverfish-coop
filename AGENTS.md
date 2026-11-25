@@ -20,4 +20,4 @@ Reserve the full automated suite for major releases or when the user explicitly 
 
 # Documentation maintenance
 
-Review the player guide, installation steps, and known issues once per working day. Check them against the current published candidate and recent test evidence. Update current guidance and mark older test results with their build. Refresh the release download index whenever published candidates change.
+During the first repository update of each working day, review the README, player guide, installation steps, and known issues against the published candidate and recent test evidence. Update current guidance and mark older test results with their build. Refresh the release download index whenever published candidates change.

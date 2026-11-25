@@ -32,7 +32,7 @@ $sfTag = "rc-$($sfRevision.Substring(0,7))"
 4. Attach `Silverfish-Coop-RC-*.zip` under the release assets and select **This is a pre-release**. Publish once the upload is complete, then open the release and verify the asset name and checksum. Keep the automatically generated **Source code** downloads available for readers who need the source snapshot.
 5. Retain up to three published candidates for the current Mountain Time day and the newest candidate from each earlier publication day. Run `python tools/release_index.py` from the repository root after publishing and pruning, verify the new candidate appears first and the older links still resolve, then commit the refreshed [release download index](RELEASES.md).
 
-Once per working day, compare the player guide, installation steps, and known issues with the published candidate and the latest test evidence. Use the [known issues list](KNOWN-ISSUES.md) for current status and identify the build when retaining a historical test result.
+Review the README, player guide, installation steps, and known issues during the first repository update of each working day. Compare them with the published candidate and recent test evidence. The download index tracks each publication and pruning pass.
 
 The current workflow builds locally and uploads through GitHub Releases. A future automated build would need a Windows runner with access to the pinned SDK dependencies and the qualified Steam executable. [GitHub’s release publishing guide](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)
 

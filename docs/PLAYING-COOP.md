@@ -4,7 +4,7 @@ Host via Steam Networking or Direct IP on Windows. The installed mod opens co-op
 
 ## Install and open the Windows trial
 
-Close the game on both PCs. Download the same `Silverfish-Coop-RC-*.zip` from the release’s **Assets**. In Steam, choose **Manage → Browse local files** and extract the co-op ZIP into the folder containing `SilverFish.exe`. Use the same ZIP for a first install or an update. Merge its `SilverFish` folder and replace files if asked. The ZIP includes the pinned UE4SS loader and replaces its settings INI during an update. Start Project Silverfish through Steam and choose **Multiplayer**. [GitHub Releases](https://github.com/hypnotoadtrance/silverfish-coop/releases) · [Resident trial setup](../bootstrap/README.md#installed-resident-title)
+Close the game on both PCs. Download the same `Silverfish-Coop-RC-*.zip` from the release’s **Assets**. In Steam, choose **Manage → Browse local files** and extract the co-op ZIP into the folder containing `SilverFish.exe`. Use the same ZIP for a first install or an update. Merge its `SilverFish` folder and replace files if asked. The ZIP includes the pinned UE4SS loader and replaces its settings INI during an update. Start Project Silverfish through Steam and choose **Multiplayer**. [GitHub Releases](https://github.com/hypnotoadtrance/silverfish-coop/releases) · [Current Steam installation](../bootstrap/README.md#current-steam-installation)
 
 Trial setup defaults to listening on all IPv4 interfaces on UDP port 7777. The host can select an interface address and port in **Host** settings. For LAN play, use the host PC's LAN address and allow inbound UDP on the chosen port. Across networks, use an address the guest can reach on that port. Use `127.0.0.1` when both players run on the same PC.
 
@@ -32,7 +32,7 @@ Set `$sfPython` and `$sfCli` again when opening a new terminal. The workspace pa
 
 Choose **Multiplayer** on the first screen, then **Host**. **New Game** opens the stock character creator and creates a co-op save automatically. **Load Game** lists saves by location and last-saved time. The selected save restores its character and world. Use **Network** to select the connection method. The Direct IP form starts with the configured UDP port and listening address. Select **Require password** to enable the password field for either method. **Friendly fire** is off by default. Check it when starting or loading a campaign to allow damage attributed to another player for that hosting session. Self-inflicted damage follows the normal game rules. Up to four guests can join.
 
-Host container pickups take effect immediately. Rest, Save and Quit, level transitions, and the loss of an enrolled guest connection can save the live campaign. If the game closes unexpectedly before a save, the campaign resumes at the last saved checkpoint.
+Host container pickups take effect immediately. The live campaign writes a checkpoint at normal save boundaries such as resting, Save and Quit, or a level transition. A brief connection loss reserves the guest’s character in memory. If the host game closes unexpectedly before a save, the campaign resumes at the last saved checkpoint.
 
 ## Join from the co-op title
 
@@ -49,7 +49,7 @@ The game asks you to confirm trust on a first connection or when a known host’
 
 Steam relay carries the connection without a publicly reachable UDP port. The host remains the authority for the same campaign and character roster. The lobby ends when the host closes the campaign. Direct IP remains available through the title menu.
 
-The host sent an in-game Steam invite and the guest accepted it and joined the campaign in a two-PC playtest. Automated tests cover the new lobby choices, the friend join callback, and selection from the public browser. The new modes, Steam reconnect, and longer sessions still need a live two-PC test. If Steam is unavailable, check the `steam-coop-status.json` file in the current game bridge for the initialization result.
+The host sent an in-game Steam invite and the guest accepted it and joined the campaign in a two-PC playtest. Automated tests cover the new lobby choices, the friend join callback, and selection from the public browser. A later two-PC test found that the Public browser missed a lobby the guest could join by invite. The discovery fix passed an automated check and needs a two-account Steam retest. Friends Only joining through Steam, reconnect, and longer sessions also need live retests. If Steam is unavailable, check the `steam-coop-status.json` file in the current game bridge for the initialization result.
 
 ### Steam Cloud backups
 
@@ -105,7 +105,7 @@ Check guest status from another terminal. A ready gameplay session reports `stat
 
 Leave both games running during a brief network interruption. The guest can retry automatically. The host reserves the character for 90 seconds. The reserved pawn still counts for party travel and other active-player checks. Reconnecting within that window restores control of the same pawn if Unreal still has the connection.
 
-If the guest game closes unexpectedly, reopen co-op and select the same character. Join can wait about two minutes while the host saves the old pawn and Unreal clears its connection. The replacement then joins close to the host with its saved inventory. Local automation reports `state: waiting_for_host` and `wait_reason: native_runtime_retiring` during that wait.
+If the guest game closes unexpectedly, reopen co-op and select the same character. Joining can take about two minutes while Unreal clears the old connection. The replacement joins close to the host and can resume from the available character state. Local automation reports `state: waiting_for_host` and `wait_reason: native_runtime_retiring` during that wait.
 
 In the resident trial, use **Load Game** to reopen the same save and have the guest select the same character. The host resumes in its saved zone. For development CLI sessions, reuse the invitation and native flags, and keep the campaign's `save` directory together with its stock save generations.
 

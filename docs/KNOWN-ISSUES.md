@@ -2,11 +2,22 @@
 
 Project Silverfish Co-op is a proof of concept under active development. This list summarizes reports from release-candidate playtests. Check the notes for the specific ZIP you installed. Fixes verified in development can still need a live two-PC retest. [Release notes](https://github.com/hypnotoadtrance/silverfish-coop/releases)
 
+## Latest candidate checks
+
+- **Guest lean.** On `rc-02b5313`, a follow-up muted Direct IP test reached the guest’s stock lean input callbacks. The guest stayed upright during the injected hold. Both remote avatars leaned and returned upright when the test supplied a request directly to the stock solver. Test actual Q and E presses on both seats and report which direction or stance fails.
+- **Crossroads hinged door.** On the same candidate, the guest closed the stock wood door and inspected a nearby crate during the motion. A subsequent guest press failed to reopen the door in that run. An earlier run completed both toggles. If the door stops responding, report whether local motion started and whether the host saw a change.
+- **Steam lobby discovery and reconnect.** A player reached a Public lobby by invite even though the browser missed it. The browser fix passed an automated check. Public discovery and reconnect still need a two-account test.
+
+[Released ZIP and its test notes](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-02b5313)
+
 ## Current priorities
 
 1. Improve host and guest frame pacing, local interaction response, and network latency during play. Compare Observatory and Crossroads under load, track packet volume and queue delays, and work toward a 100 ms round trip where the connection allows it. Ordinary map loading time is a lower priority. Keep transition bugs that interrupt the session or leave the party behind in the functional backlog.
 2. Rework co-op menus and flows, starting with hosting, joining, and Steam invites. Keep stock menus for gameplay where the game already provides them.
 3. Return to visual and animation polish after the performance and UI/UX passes. Gameplay regressions stay in the functional backlog.
+
+<details>
+<summary>Development measurements and earlier candidate checks</summary>
 
 The `rc-f0b1c06` Crossroads baseline used two muted Direct IP instances. During the short guest-walking sample, the longest observed intervals were 24 ms for the host and 23 ms for the guest. Status publication took 11 ms and 16 ms inside those intervals. The guest measured about 2 ms of loopback keepalive RTT and reported no expired or evicted relay frames. These samples guide the next game-thread and network measurements. Weather, critters, the Lingering Teleport, placed loot, and mushrooms passed. The shared cash check timed out waiting for its starting cash stack before making a pickup. The `rc-9545b3a` retest passed.
 
@@ -75,6 +86,8 @@ A follow-up on the same ZIP profiled status assembly in two muted Direct IP laun
 The optional private collection trial on `rc-0d06181` used three consecutive 12-second Crossroads walking samples on the same host and guest, with a pause of 120 and step multiplier of 160 in the middle sample. Both seats restored their original 200 and 100 settings afterward. The guest recorded 1, 14, and 3 heap drops of at least 1 MiB. Guest frame P99 was 7.43, 7.69, and 7.38 ms. Guest status P99 was 3.05, 9.21, and 4.40 ms. The guest's longest interval fell from 34.1 to 18.9 ms in the tuned window and stayed at 18.9 ms after restoring the defaults. The heap started at different sizes in each window. This comparison supports keeping the shipped defaults, with further work directed at recurring allocations. The same two muted Direct IP launches passed weather travel and stock door toggles, and preserved the original saves.
 
 `rc-02b5313` reads local lean through the qualified stock pawn in C++. In Observatory and Crossroads, 256 reads took 5.5 to 5.8 ms through the native reader and 18.0 to 18.9 ms through the Lua reader. Different pawn, world, and role identities were refused. The host and guest matched 62 and 39 nonzero samples with their stock lean components. Both observed the lean solver and release in each direction. The host key-injection probe passed, and the guest probe did not observe its requested lean. Stock footstep relay, Crossroads weather travel, and stock door toggles passed across two muted Direct IP launches, with the original saves preserved. Guest key input, rendered motion, and Steam behavior still need two-PC playtesting.
+
+</details>
 
 ## `rc-6690ff4` playtest
 
