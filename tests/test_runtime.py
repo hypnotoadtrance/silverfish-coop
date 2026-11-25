@@ -1,4 +1,5 @@
 import asyncio
+import ctypes
 import hashlib
 import os
 from pathlib import Path
@@ -9,7 +10,49 @@ import uuid
 from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import runtime, service
+from tools.silverfish.local_bridge import INPUT_LIMIT, LocalBridge
 from tools.silverfish.control import Control
+
+
+class LocalBridgeInputTests(unittest.TestCase):
+    def test_reads_only_the_requested_batch_and_preserves_record_boundaries(self):
+        library = Mock()
+        bridge = LocalBridge(library)
+        first = b"wire-board\trow\n"
+        second = b"interact\t1\n"
+        third = b"next"
+        records = [first, second, third]
+
+        def read(buffer, capacity, lengths, limit):
+            self.assertGreaterEqual(capacity, INPUT_LIMIT * limit)
+            batch = records[:limit]
+            del records[:limit]
+            packed = b"".join(batch)
+            ctypes.memmove(buffer, packed, len(packed))
+            for index, line in enumerate(batch):
+                lengths[index] = len(line)
+            return len(batch)
+
+        library.SilverfishBridgeReadInputBatchV1.side_effect = read
+        self.assertEqual(bridge.read_input(0), [])
+        self.assertEqual(bridge.read_input(2), [first[:-1], second[:-1]])
+        self.assertEqual(bridge.read_input(), [third])
+        self.assertEqual(bridge.read_input(), [])
+        library.SilverfishBridgeReadInputV1.assert_not_called()
+
+    def test_older_native_bridge_can_still_read_one_record_at_a_time(self):
+        library = Mock()
+        del library.SilverfishBridgeReadInputBatchV1
+        bridge = LocalBridge(library)
+        rows = iter([b"interact\t1\n", b""])
+
+        def read(buffer, capacity):
+            row = next(rows)
+            ctypes.memmove(buffer, row, len(row))
+            return len(row)
+
+        library.SilverfishBridgeReadInputV1.side_effect = read
+        self.assertEqual(bridge.read_input(), [b"interact\t1"])
 
 
 class BridgeWalkTests(unittest.IsolatedAsyncioTestCase):

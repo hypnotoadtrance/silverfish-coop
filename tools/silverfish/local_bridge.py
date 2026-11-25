@@ -7,6 +7,9 @@ import os
 from pathlib import Path
 
 STATUS_LIMIT = 2 * 1024 * 1024
+# Match the native FIFO and its largest accepted input record.
+INPUT_LIMIT = 1536
+INPUT_CAPACITY = 64
 ZONE_ROSTER_LIMIT = 8192
 WEAPON_CUES_LIMIT = 16 * 1024
 GUEST_INTERACTION_SHOP = 1
@@ -40,6 +43,15 @@ class LocalBridge:
         self._input_ready.argtypes, self._input_ready.restype = [], ctypes.c_int
         self._read_input = library.SilverfishBridgeReadInputV1
         self._read_input.argtypes, self._read_input.restype = [ctypes.c_void_p, ctypes.c_uint32], ctypes.c_uint32
+        self._read_input_batch = getattr(library, "SilverfishBridgeReadInputBatchV1", None)
+        if self._read_input_batch is not None:
+            self._read_input_batch.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+                                               ctypes.POINTER(ctypes.c_uint16), ctypes.c_uint32]
+            self._read_input_batch.restype = ctypes.c_uint32
+            self._input_buffer = ctypes.create_string_buffer(INPUT_LIMIT * INPUT_CAPACITY)
+            self._input_lengths = (ctypes.c_uint16 * INPUT_CAPACITY)()
+        else:
+            self._input_buffer = ctypes.create_string_buffer(INPUT_LIMIT)
         self._native_events_heartbeat = getattr(library, "SilverfishBridgePublishNativeEventsHeartbeatV1", None)
         if self._native_events_heartbeat is not None:
             self._native_events_heartbeat.argtypes = [ctypes.c_int64]
@@ -293,10 +305,20 @@ class LocalBridge:
         return self._avatar_pose_buffer is not None and bool(self._publish_avatar_poses(frame, len(frame)))
 
     def read_input(self, limit: int = 64):
-        # Match native/local_bridge.cpp, including a primary input's optional stock target.
-        buffer = ctypes.create_string_buffer(1536)
+        buffer = self._input_buffer
+        limit = min(limit, INPUT_CAPACITY)
+        if limit <= 0:
+            return []
         records = []
-        for _ in range(min(limit, 64)):
+        if self._read_input_batch is not None:
+            count = self._read_input_batch(buffer, len(buffer), self._input_lengths, limit)
+            start = 0
+            for length in self._input_lengths[:count]:
+                end = start + length
+                records.append(buffer[start:end].rstrip(b"\n"))
+                start = end
+            return records
+        for _ in range(limit):
             size = self._read_input(buffer, len(buffer))
             if not size:
                 break

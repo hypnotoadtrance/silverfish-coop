@@ -1,6 +1,7 @@
 #include "local_bridge.hpp"
 #include "local_stash_ticket.hpp"
 
+#include <array>
 #include <chrono>
 #include <cctype>
 #include <condition_variable>
@@ -193,13 +194,13 @@ namespace
     int enqueue_input(const Lua& lua)
     {
         if (lua.get_stack_size() != 1 || !lua.is_string()) return 0;
-        const auto record = lua.get_string();
+        auto record = lua.get_string();
         bool queued = false;
         {
             std::lock_guard lock(mutex);
             if (attached && !record.empty() && record.size() <= input_limit && input.size() < input_capacity)
             {
-                input.emplace_back(record);
+                input.emplace_back(std::move(record));
                 queued = true;
             }
         }
@@ -543,6 +544,30 @@ extern "C" __declspec(dllexport) std::uint32_t SilverfishBridgeReadInputV1(char*
     std::memcpy(buffer, record.data(), size);
     input.pop_front();
     return size;
+}
+
+extern "C" __declspec(dllexport) std::uint32_t SilverfishBridgeReadInputBatchV1(
+    char* buffer, std::uint32_t capacity, std::uint16_t* lengths, std::uint32_t limit)
+{
+    if (!buffer || !lengths || !limit || limit > input_capacity || capacity < limit * input_limit) return 0;
+    std::array<std::string, input_capacity> pending;
+    std::uint32_t count{};
+    {
+        std::lock_guard lock(mutex);
+        while (count < limit && !input.empty())
+        {
+            pending[count++] = std::move(input.front());
+            input.pop_front();
+        }
+    }
+    for (std::uint32_t index = 0; index < count; ++index)
+    {
+        const auto& record = pending[index];
+        lengths[index] = static_cast<std::uint16_t>(record.size());
+        std::memcpy(buffer, record.data(), record.size());
+        buffer += record.size();
+    }
+    return count;
 }
 
 extern "C" __declspec(dllexport) int SilverfishBridgePublishNativeEventsHeartbeatV1(std::int64_t stamp)

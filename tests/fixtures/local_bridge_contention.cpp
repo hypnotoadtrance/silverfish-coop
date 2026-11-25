@@ -50,6 +50,32 @@ int main()
     assert(SilverfishBridgeTakeAvatarPoseV1(avatar_buffer, sizeof avatar_buffer) == 5);
     assert(std::string_view(avatar_buffer, 5) == "retry");
 
+    auto enqueue = [&](const std::string& record) {
+        lua.set_string(record);
+        assert(enqueue_input(lua) == 1 && lua_toboolean(stack, 1));
+        lua_settop(stack, 0);
+    };
+    const std::string large_record(input_limit, 'X');
+    for (std::size_t index = 0; index < input_capacity; ++index)
+        enqueue(index == 0 ? large_record : std::to_string(index) + "\n");
+    std::array<char, input_limit * input_capacity> batch{};
+    std::array<std::uint16_t, input_capacity> lengths{};
+    assert(!SilverfishBridgeReadInputBatchV1(batch.data(), input_limit - 1, lengths.data(), 1));
+    assert(!SilverfishBridgeReadInputBatchV1(batch.data(), batch.size(), lengths.data(), 0));
+    assert(!SilverfishBridgeReadInputBatchV1(batch.data(), batch.size(), lengths.data(), input_capacity + 1));
+    assert(SilverfishBridgeReadInputBatchV1(batch.data(), batch.size(), lengths.data(), 1) == 1);
+    assert(lengths[0] == input_limit && std::string_view(batch.data(), lengths[0]) == large_record);
+    const auto count = SilverfishBridgeReadInputBatchV1(batch.data(), batch.size(), lengths.data(), 62);
+    assert(count == 62);
+    std::size_t offset{};
+    for (std::uint32_t index = 0; index < count; ++index)
+    {
+        assert(std::string_view(batch.data() + offset, lengths[index]) == std::to_string(index + 1) + "\n");
+        offset += lengths[index];
+    }
+    assert(SilverfishBridgeReadInputV1(batch.data(), batch.size()) == 3);
+    assert(std::string_view(batch.data(), 3) == "63\n" && !SilverfishBridgeInputReadyV1());
+
     constexpr std::size_t packet_size = 64 * 1024;
     std::atomic<bool> done{};
     std::vector<char> output(packet_size);
