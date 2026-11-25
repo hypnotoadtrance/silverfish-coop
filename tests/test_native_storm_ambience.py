@@ -58,6 +58,32 @@ class StockStormAmbienceTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.assert_awaited_with(weather.COMMAND, EPOCH, "idle", timeout=1.5)
         self.assertEqual([entry.kwargs["phase"] for entry in control.event.call_args_list], ["active", "idle"])
 
+    async def test_compact_storm_reply_updates_only_the_matching_guest_world(self):
+        pawn, nonce = "Current guest pawn", "a" * 32
+        frame = {**weather.parse_host(HOST), "epoch": EPOCH, "map": OBSERVATORY}
+        weather.add_fog(frame, HOST_FOG)
+        fields = (nonce, weather.COMMAND, EPOCH, *weather._args(frame))
+        guest_fog = [weather.GUEST_FOG_TAG, EPOCH, *HOST_FOG[1:]]
+        raw = "".join("\t".join(row) + "\n" for row in (
+            [weather.REPLY, "1", "22", OBSERVATORY, pawn],
+            ["ack", nonce, "accepted", "projected"], GUEST, guest_fog,
+        ))
+        reply = runtime.Bridge._local_storm_ambience_reply(raw, fields)
+        game = {"state": "connected", "map": OBSERVATORY, "sequence": 22, "native_loot_crates": {"crate": {}},
+                "pawns": {"local": {"name": pawn}},
+                "native_world_view": {"mode": "applied", "map": OBSERVATORY, "epoch": EPOCH}}
+        bridge, control = Mock(command=AsyncMock(return_value=reply)), Mock()
+        observed = await weather.Projection().sync(bridge, control, game, frame, EPOCH, .1)
+        self.assertEqual(observed[weather.GUEST]["fog"]["material"], FOG)
+        self.assertIs(observed["native_loot_crates"], game["native_loot_crates"])
+        self.assertEqual(observed["sequence"], 22)
+        newer = {**game, "sequence": 23}
+        self.assertIs(await weather.Projection().sync(bridge, control, newer, frame, EPOCH, .1), newer)
+        self.assertIs(await weather.Projection().sync(bridge, control, game, {**frame, "phase": "fading"}, EPOCH, .1),
+                      game)
+        with self.assertRaises(RuntimeError):
+            runtime.Bridge._local_storm_ambience_reply(raw.replace(EPOCH, "b" * 32), fields)
+
 
 if __name__ == "__main__":
     unittest.main()

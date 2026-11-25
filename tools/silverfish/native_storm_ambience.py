@@ -13,6 +13,7 @@ GUEST_TAG = "native-weather-ambience-guest"
 HOST_FOG_TAG = "native-weather-ambience-fog"
 GUEST_FOG_TAG = "native-weather-ambience-guest-fog"
 COMMAND = "native-weather-ambience-apply"
+REPLY = "native-weather-ambience-reply"
 GUARD_TAG = "native-weather-storm-guard"
 
 _STORM = "/Game/Classes/Weather/Storms/"
@@ -143,6 +144,12 @@ class Projection:
 
         try:
             result = await bridge.command(COMMAND, epoch, *arguments, timeout=1.5)
+            local_scope = result.get("native_weather_ambience_local_scope")
+            if local_scope is not None:
+                sequence, pawn = local_scope
+                if (result.get("map") != area or game.get("sequence", 0) > sequence
+                        or game.get("pawns", {}).get("local", {}).get("name") != pawn):
+                    raise RuntimeError("The storm ambience reply belongs to another guest or visit")
         except (OSError, RuntimeError) as error:
             self.args, self.retry_at = None, now + 1
             control.event("native_weather_ambience_unavailable", reason=str(error))
@@ -156,9 +163,11 @@ class Projection:
                     epoch, frame["phase"], frame.get("variant"))):
             self.args, self.retry_at = None, now + 1
             control.event("native_weather_ambience_unavailable", reason="stock ambience readback did not match")
-            return result
+            return game if local_scope is not None else result
         if self.args is None or self.args[:2] != arguments[:2]:
             control.event("native_weather_ambience_applied", epoch=epoch, phase=frame["phase"],
                           variant=frame.get("variant"))
         self.args, self.retry_at = arguments, now + 1
+        if local_scope is not None:
+            return {**game, GUEST: proof}
         return result

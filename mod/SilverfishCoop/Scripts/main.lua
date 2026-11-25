@@ -1803,15 +1803,37 @@ local function tick(fields, pending, periodic)
             native_guest_clock.command_reply(fields, state, current_phase, sequence, status_row))
         return true
     end
-    if fields and pending and fields[2] == "native-world-view-apply-local" and not periodic and current_phase == "connected"
+    if fields and pending and (fields[2] == "native-world-view-apply-local" or fields[2] == "native-weather-ambience-apply")
+        and not periodic and current_phase == "connected"
         and world_view_enabled and status_publication.compact() and status_publication.steady(state, current_phase)
         and os.clock() < status_publication.next_frame then
         if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
         pending.dispatched = true
         local accepted, message, proof = pcall(run_command, fields, state, current_phase)
-        local reply = status_row("native-world-view-reply", 1, sequence, state.local_pawn.name) .. "\n"
-            .. status_row("ack", fields[1], accepted and "accepted" or "error", message) .. "\n"
-        if accepted then reply = reply .. world_view_row("applied", proof) .. "\n" end
+        local ack = status_row("ack", fields[1], accepted and "accepted" or "error", message) .. "\n"
+        local reply
+        if fields[2] == "native-world-view-apply-local" then
+            reply = status_row("native-world-view-reply", 1, sequence, state.local_pawn.name) .. "\n" .. ack
+            if accepted then reply = reply .. world_view_row("applied", proof) .. "\n" end
+        else
+            reply = status_row("native-weather-ambience-reply", 1, sequence, state.map, state.local_pawn.name) .. "\n" .. ack
+            if accepted then
+                local rows = native_world_view.ambience_rows(status_row)
+                if #rows > 0 then reply = reply .. table.concat(rows, "\n") .. "\n" end
+            end
+        end
+        SilverfishPublishLocalBridgeReply(pending.ticket, reply)
+        return true
+    end
+    if fields and pending and fields[2] == "native-guest-ui-read-memory" and not periodic and current_phase == "hosting"
+        and status_publication.compact() and status_publication.steady(state, current_phase) then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        local accepted, message, body = pcall(native_guest_ui.memory_command, fields, state, current_phase, pending.body)
+        pending.body = nil
+        local reply = status_row("native-guest-ui-read-reply", 1, fields[1], current_phase, state.map,
+            accepted and "accepted" or "error", message) .. "\n"
+        if accepted then reply = reply .. "native-guest-ui-body\t" .. #body .. "\n" .. body end
         SilverfishPublishLocalBridgeReply(pending.ticket, reply)
         return true
     end

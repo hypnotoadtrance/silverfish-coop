@@ -167,6 +167,25 @@ class ResidentGuestUIBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.bridge._local_status, game)
         self.assertNotIn("inventory-layout", self.bridge._status_text)
 
+    async def test_compact_capture_keeps_the_periodic_snapshot_and_checks_the_body(self):
+        def compact(request, _):
+            nonce = request.partition(b"\t")[0].decode("ascii")
+            return (f"native-guest-ui-read-reply\t1\t{nonce}\thosting\t{self.area}\taccepted\t"
+                    f"captured co-op guest view\nnative-guest-ui-body\t{len(self.body)}\n" + self.body.decode("ascii"))
+
+        self.bridge.local_bridge.command.side_effect = compact
+        state, contents = await self.bridge.guest_ui_command(self.target)
+        self.assertEqual((state["state"], state["map"], state["ack"]["message"]),
+                         ("hosting", self.area, "captured co-op guest view"))
+        self.assertEqual(contents, self.body)
+        self.assertIs(self.bridge._local_status, self.prior)
+        for invalid in (lambda raw: raw.replace("\thosting\t", "\tconnected\t"),
+                        lambda raw: raw.replace(f"body\t{len(self.body)}", "body\t1")):
+            self.bridge.local_bridge.command.side_effect = lambda request, timeout: invalid(compact(request, timeout))
+            with self.assertRaises(RuntimeError):
+                await self.bridge.guest_ui_command(self.target)
+            self.assertIs(self.bridge._local_status, self.prior)
+
     async def test_exact_projection_body_and_ordinary_command_share_the_existing_bridge(self):
         async def command(request, timeout):
             header, _, body = request.partition(b"\n")

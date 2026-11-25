@@ -109,6 +109,7 @@ GUEST_UI_MEMORY = "native_guest_ui_memory"
 GUEST_UI_MAX_BYTES = 20_000
 _GUEST_UI_MAX_ROWS = 128
 _GUEST_UI_REPLY = "\nnative-guest-ui-body\t"
+_GUEST_UI_READ_REPLY = "native-guest-ui-read-reply"
 _GUEST_UI_BYTES = re.compile(rb"[\t\n -~]+")
 MOD_SCRIPTS = Path("ue4ss/Mods/SilverfishCoop/Scripts")
 DEATH_PATCH = "zzzz_SilverfishCoop_Death_P"
@@ -3712,6 +3713,31 @@ class Bridge:
         return {**game, "native_world_view": proof}
 
     @staticmethod
+    def _local_storm_ambience_reply(raw: str, fields: tuple[str, ...]) -> dict:
+        rows = [line.split("\t") for line in raw.splitlines()] if len(raw) <= 4096 and raw.endswith("\n") else []
+        if (not 2 <= len(rows) <= 4 or len(rows[0]) != 5
+                or rows[0][:2] != [native_storm_ambience.REPLY, "1"]):
+            raise RuntimeError("The resident storm ambience receipt was malformed")
+        _, _, sequence, area, pawn = rows[0]
+        ack = rows[1]
+        if len(ack) != 4 or ack[:2] != ["ack", fields[0]]:
+            raise RuntimeError("The resident storm ambience receipt did not match the request")
+        if ack[2] != "accepted":
+            raise RuntimeError(ack[3] or "The resident storm ambience was refused")
+        if (not 3 <= len(rows) <= 4 or len(fields) < 4 or not _held_input_sequence(sequence)
+                or not 0 < len(pawn) <= 512 or rows[2][:3] != [native_storm_ambience.GUEST_TAG, *fields[2:4]]
+                or (len(rows) == 4 and rows[3][0] != native_storm_ambience.GUEST_FOG_TAG)):
+            raise RuntimeError("The resident storm ambience receipt did not verify the requested visit")
+        try:
+            proof = native_storm_ambience.parse_guest(rows[2])
+            if len(rows) == 4:
+                native_storm_ambience.add_fog(proof, rows[3], guest=True)
+        except (IndexError, ValueError) as error:
+            raise RuntimeError("The resident storm ambience receipt had invalid playback readback") from error
+        return {"state": "connected", "map": area, "native_weather_ambience_local_scope": (int(sequence), pawn),
+                "ack": {"id": ack[1], "result": ack[2], "message": ack[3]}, native_storm_ambience.GUEST: proof}
+
+    @staticmethod
     def _local_guest_clock_reply(raw: str, fields: tuple[str, ...]) -> dict:
         rows = [line.split("\t") for line in raw.splitlines()] if len(raw) <= 2048 and raw.endswith("\n") else []
         if (not rows or len(rows[0]) != 6 or rows[0][:3] != [native_guest_clock.REPLY, "1", fields[0]]
@@ -3776,6 +3802,8 @@ class Bridge:
                 return _parse_stock_loot_inspection(raw, fields)
             if action == native_weather_view.LOCAL_APPLY and raw.startswith("native-world-view-reply\t"):
                 return self._local_world_view_reply(raw, fields)
+            if action == native_storm_ambience.COMMAND and raw.startswith(native_storm_ambience.REPLY + "\t"):
+                return self._local_storm_ambience_reply(raw, fields)
             if action == native_guest_clock.APPLY and raw.startswith(native_guest_clock.REPLY + "\t"):
                 return self._local_guest_clock_reply(raw, fields)
             status = self._parse_status(raw)
@@ -3815,7 +3843,17 @@ class Bridge:
 
         raw = await self.local_bridge.command(request, timeout)
         frame, marker, remainder = raw.partition(_GUEST_UI_REPLY)
-        state = self._parse_status(frame + "\n" if marker else frame)
+        compact = payload is None and frame.startswith(_GUEST_UI_READ_REPLY + "\t")
+        if compact:
+            header = (frame if marker else frame.removesuffix("\n")).split("\t", 6)
+            if (len(frame) > 1024 or len(header) != 7 or header[:4] != [_GUEST_UI_READ_REPLY, "1", nonce, "hosting"]
+                    or not re.fullmatch(r"/Game/Classes/Maps/[A-Za-z0-9_/-]{1,236}", header[4])
+                    or not re.fullmatch(r"[ -~]+", header[6])):
+                raise RuntimeError("The resident guest view reply did not match the request")
+            _, _, _, phase, area, result, message = header
+            state = {"state": phase, "map": area, "ack": {"id": nonce, "result": result, "message": message}}
+        else:
+            state = self._parse_status(frame + "\n" if marker else frame)
         ack = state.get("ack", {}) if state else {}
         if ack.get("id") != nonce:
             raise RuntimeError("The resident guest view reply did not match the request")
@@ -3830,7 +3868,8 @@ class Bridge:
             body = checked_body(text.encode("ascii"))
         elif marker:
             raise RuntimeError("The resident guest view projection returned an unexpected body")
-        self._local_status = state
+        if not compact:
+            self._local_status = state
         return state, body
 
     @staticmethod
