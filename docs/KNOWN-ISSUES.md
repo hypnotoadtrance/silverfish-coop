@@ -2,13 +2,11 @@
 
 Project Silverfish Co-op is a proof of concept under active development. This list summarizes reports from release-candidate playtests. Check the notes for the specific ZIP you installed. Fixes verified in development can still need a live two-PC retest. [Release notes](https://github.com/hypnotoadtrance/silverfish-coop/releases)
 
-## Latest candidate checks
+## Current playtest checks
 
 - **Guest lean.** On `rc-02b5313`, a follow-up muted Direct IP test reached the guest’s stock lean input callbacks. The guest stayed upright during the injected hold. Both remote avatars leaned and returned upright when the test supplied a request directly to the stock solver. Test actual Q and E presses on both seats and report which direction or stance fails.
-- **Crossroads hinged door.** On the same candidate, the guest closed the stock wood door and inspected a nearby crate during the motion. A subsequent guest press failed to reopen the door in that run. An earlier run completed both toggles. If the door stops responding, report whether local motion started and whether the host saw a change.
+- **Guest door presses.** On `rc-02b5313`, a guest press intermittently failed to reopen the Crossroads wood door, although a follow-up run passed. `rc-a1ea860` uses the knob from the guest’s stock press and removes the host’s duplicate camera trace. Two muted Direct IP launches passed the Crossroads door and Tutorial Dock gate in both directions, including lock refusal, collision, repeat delivery of an earlier request, and a crate inspection during door motion. Local previews began in 46–67 ms. Retest in a rendered Steam session and report whether local motion and host confirmation both appeared. [Release notes](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-a1ea860)
 - **Steam lobby discovery and reconnect.** A player reached a Public lobby by invite even though the browser missed it. The browser fix passed an automated check. Public discovery and reconnect still need a two-account test.
-
-[Released ZIP and its test notes](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-02b5313)
 
 ## Current priorities
 
