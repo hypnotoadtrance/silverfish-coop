@@ -21,7 +21,9 @@
     end
     if fields[2] == "fixture-stock-take-ammo-loadout" and headless
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
-        assert(phase == "connected" and state.map == "/Game/Classes/Maps/Maps_OverWorld/Observitory_P" and #fields == 5)
+        local allowed_map = state.map == "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+            or fields[5] == "equip" and state.map == "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+        assert(phase == "connected" and allowed_map and #fields == 5)
         local pawn = state.local_pawn.pawn
         local save, slot = pawn.Save, math.tointeger(tonumber(fields[3]))
         assert(slot and slot >= 0 and slot < 8)
@@ -66,12 +68,13 @@
     end
     if fields[2] == "fixture-stock-take-ammo-seed" and headless
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
-        assert(phase == "hosting" and state.map == "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
-            and (#fields == 4 or #fields == 5))
-        local pawn, save = guest_save.exact_item_context(state, phase, fields[3])
-        assert(pawn and save and not same(save, state.world.OwningGameInstance.SaveSlot_Ref))
         local lockpick = fields[4] == "lockpick" and "Eqp_LockPick"
             or fields[4] == "heavy-lockpick" and "Eqp_LockPick_Hev"
+        local allowed_map = state.map == "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+            or lockpick and state.map == "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+        assert(phase == "hosting" and allowed_map and (#fields == 4 or #fields == 5))
+        local pawn, save = guest_save.exact_item_context(state, phase, fields[3])
+        assert(pawn and save and not same(save, state.world.OwningGameInstance.SaveSlot_Ref))
         local path = lockpick and "/Game/Classes/Equipment/" .. lockpick .. "." .. lockpick .. "_C"
             or weapon_profiles.paths[fields[4]]
         local rounds = #fields == 4 and 1 or math.tointeger(fields[5])

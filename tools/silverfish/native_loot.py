@@ -533,9 +533,13 @@ async def restore_key_unlocks(host, bridge):
         host.last_game, host.last_seen = snapshot, time.monotonic()
 
 
+def lockpick_door(actor, area):
+    return actor not in CRATES and bool(area) and native_stock_door.actor_map(actor) == area
+
+
 def parse_lockpick(fields):
     _, area, crate, pawn, sequence, guid, unlocked, quantity, spent = fields
-    if (not (lockable_container(crate, area) or area and native_stock_door.actor_map(crate) == area)
+    if (not (lockable_container(crate, area) or lockpick_door(crate, area))
             or not pawn.startswith("Player_FP_C ")
             or not 0 < int(sequence) < 2**53 or not valid_guid(guid) or unlocked not in ("0", "1")
             or not 0 < int(quantity) <= 2**31 - 1 or spent not in ("0", "1") or unlocked == spent == "0"):
@@ -584,7 +588,7 @@ async def settle_lockpick(host, bridge, character, target, operation):
         host.native_pickup.forget_committed_row(character, guid)
     proof = {"map": area, "crate": crate, "guid": guid, "locked": locked == "locked", "remaining": remaining}
     result = {LOCKPICK_RESULT: proof}
-    if native_stock_door.actor_map(crate) == area:
+    if lockpick_door(crate, area):
         delta = native_stock_door.frame(frame, epoch, crate)
         if delta:
             result[native_stock_door.DELTA] = delta

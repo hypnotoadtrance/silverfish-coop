@@ -25,6 +25,7 @@ class AuthoredCrateRegistryTests(unittest.TestCase):
     def test_stock_lockpick_result_can_target_a_secure_locker_with_a_key(self):
         crate = next(name for name in CRATES if name.startswith("LootLocker_Secure_BP_C "))
         area = CRATES[crate]
+        self.assertFalse(native_loot.lockpick_door(crate, area))
         fields = ["loot-lockpick", area, crate, "Player_FP_C exact guest", "1", "A" * 32, "1", "1", "1"]
         self.assertEqual(native_loot.parse_lockpick(fields)["crate"], crate)
         fields[1] = OBSERVATORY

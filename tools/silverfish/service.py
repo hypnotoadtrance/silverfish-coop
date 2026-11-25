@@ -5874,7 +5874,7 @@ class Client:
             operation = uuid.uuid5(self.bridge.input_namespace, f"{session}:{epoch}:{pawn}:lockpick:{sequence}").hex
             target = "@".join((epoch, *(row[key] for key in ("crate", "guid", "unlocked", "quantity", "spent"))))
             crate = row["crate"]
-            hinged = native_stock_door.actor_map(crate) == area
+            hinged = native_loot.lockpick_door(crate, area)
             if row["unlocked"] == "1" and not hinged:
                 self.pending_lockpick_unlocks.add(crate)
             started = time.monotonic()
