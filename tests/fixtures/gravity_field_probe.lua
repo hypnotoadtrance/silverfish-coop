@@ -6,7 +6,10 @@ local observer = box and box:find("observer%-proof%-%x+") ~= nil
 if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not box
     or not (pyrogeist or shadow or angler or observer or box:find("gravity%-proof%-%x+")) then return end
 
-local level = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
+local placed_shadow = shadow and os.getenv("SILVERFISH_COOP_PLACED_SHADOW_FIXTURE") == "1"
+local level = placed_shadow and "/Game/Classes/Maps/Maps_Dungeons/Sci_Tunnel_01_P.Sci_Tunnel_01_P"
+    or "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
+local shadow_path = level .. ":PersistentLevel.ShadowSphere_BP_C_1"
 local director_path = level .. ":PersistentLevel.DynaimicSpawnControler_BP_C_1"
 local class = pyrogeist and "Pyrogeist_BP_C" or shadow and "ShadowSphere_BP_C"
     or angler and "AnglerLamp_BP_C" or observer and "Observers_BP_C" or "GravityAnomaly_BP_C"
@@ -22,7 +25,7 @@ local test_lane = {X = 13850, Y = -200, Z = 132}
 local previous, lift, hooked, selected
 local watched, damage_hooked
 local gaze_hooked
-local reward_camera
+local reward_camera, shadow_camera
 
 local function valid(object)
     return object and object:IsValid()
@@ -144,8 +147,9 @@ local function command(operation, world, driver, host, local_pawn, argument)
         return table.concat(rows, ";")
     elseif operation == "guestguard" then
         assert(not host and #current > 0)
-        local well = current[1]
-        assert(well:GetLocalRole() == 1 and not well:GetActorEnableCollision() and not well:IsActorTickEnabled())
+        local well = placed_shadow and StaticFindObject(shadow_path) or current[1]
+        assert(valid(well) and (well:GetLocalRole() == 1 or placed_shadow and well:GetLocalRole() == 0)
+            and not well:GetActorEnableCollision() and not well:IsActorTickEnabled())
         if observer then
             local opacity = well.OpacityTarget
             well:ReceiveBeginPlay()
@@ -192,9 +196,14 @@ local function command(operation, world, driver, host, local_pawn, argument)
         assert(#well.Characters == characters and #well.PhysActors == bodies)
         return tostring(characters) .. "|" .. tostring(bodies)
     elseif (shadow or angler or observer) and operation == "prepare" then
-        assert(host and #current > 0 and #driver.ClientConnections == 0)
-        local body = current[1]
-        assert(body:HasAuthority() and body.bReplicates and body:GetActorEnableCollision())
+        assert(host and #current > 0 and #driver.ClientConnections == (placed_shadow and 1 or 0))
+        local body = placed_shadow and StaticFindObject(shadow_path) or current[1]
+        assert(valid(body) and body:HasAuthority() and body.bReplicates and body:GetActorEnableCollision())
+        local original
+        if placed_shadow then
+            original = body:K2_GetActorLocation()
+            test_lane = {X = original.X, Y = original.Y, Z = original.Z}
+        end
         local anchor = {X = test_lane.X, Y = test_lane.Y, Z = test_lane.Z + 3500}
         -- Scope this lane above the roaming NPCs so unrelated attacks cannot alter either save during the proof.
         local_pawn.CharacterMovement:StopMovementImmediately()
@@ -207,7 +216,8 @@ local function command(operation, world, driver, host, local_pawn, argument)
         end
         body:ForceNetUpdate()
         local_pawn:ForceNetUpdate()
-        selected = {well = body, entry = {X = anchor.X + 120, Y = anchor.Y, Z = anchor.Z}, anchor = anchor}
+        selected = {well = body, entry = {X = anchor.X + 120, Y = anchor.Y, Z = anchor.Z}, anchor = anchor,
+            original = original}
         return ("%.2f|%.2f|%.2f"):format(anchor.X, anchor.Y, anchor.Z)
     elseif pyrogeist and operation == "prepare" then
         assert(host and #current > 0 and #driver.ClientConnections == 0)
@@ -263,11 +273,27 @@ local function command(operation, world, driver, host, local_pawn, argument)
         assert(valid(subject) and same(subject:GetWorld(), world))
         local point = subject:K2_GetActorLocation()
         return ("%.2f|%.2f|%.2f"):format(point.X, point.Y, point.Z)
+    elseif placed_shadow and operation == "shadowpark" then
+        assert(host and selected and #driver.ClientConnections == 1)
+        local guest = driver.ClientConnections[1].PlayerController.Pawn
+        assert(valid(guest) and guest:HasAuthority() and not guest:IsLocallyControlled())
+        guest.CharacterMovement:StopMovementImmediately()
+        guest.CharacterMovement:SetMovementMode(0, 0)
+        local at = {X = selected.anchor.X + 1040, Y = selected.anchor.Y, Z = selected.anchor.Z}
+        selected.retreat = at
+        assert(guest:K2_SetActorLocation(at, false, {}, true))
+        guest:ForceNetUpdate()
+        return ("%.2f|%.2f|%.2f"):format(at.X, at.Y, at.Z)
+    elseif placed_shadow and operation == "shadowrestore" then
+        assert(host and selected and selected.original and valid(selected.well))
+        assert(selected.well:K2_SetActorLocation(selected.original, false, {}, true))
+        selected.well:ForceNetUpdate()
+        return selected.well:GetFullName()
     elseif shadow and operation == "shadowinside" then
         assert(host and selected and valid(selected.well) and #driver.ClientConnections == 1)
         local guest = driver.ClientConnections[1].PlayerController.Pawn
         assert(valid(guest) and guest:HasAuthority() and not guest:IsLocallyControlled())
-        selected.retreat = {X = selected.entry.X + 930, Y = selected.entry.Y, Z = selected.entry.Z}
+        selected.retreat = selected.retreat or {X = selected.entry.X + 930, Y = selected.entry.Y, Z = selected.entry.Z}
         guest.CharacterMovement:StopMovementImmediately()
         guest.CharacterMovement:SetMovementMode(0, 0)
         assert(guest:K2_SetActorLocation(selected.entry, false, {}, true))
@@ -276,7 +302,13 @@ local function command(operation, world, driver, host, local_pawn, argument)
     elseif shadow and operation == "shadowleave" then
         assert(host and selected and selected.retreat and #driver.ClientConnections == 1)
         local guest = driver.ClientConnections[1].PlayerController.Pawn
-        assert(valid(guest) and guest:K2_TeleportTo(selected.retreat, guest:K2_GetActorRotation()))
+        assert(valid(guest))
+        if placed_shadow then
+            assert(guest:K2_SetActorLocation(selected.retreat, false, {}, true))
+            guest:ForceNetUpdate()
+        else
+            assert(guest:K2_TeleportTo(selected.retreat, guest:K2_GetActorRotation()))
+        end
         return guest:GetFullName()
     elseif angler and operation == "anglerholdguest" then
         assert(host and selected and #driver.ClientConnections == 1)
@@ -358,6 +390,25 @@ local function command(operation, world, driver, host, local_pawn, argument)
                 tostring(post.bEnabled), light and light.A or 0, rotation.Yaw, rotation.Pitch)
         end
         return table.concat(rows, ";")
+    elseif placed_shadow and operation == "shadowcamera" then
+        local camera = local_pawn.Camera
+        assert(not host and local_pawn:IsLocallyControlled() and valid(camera) and same(camera:GetOwner(), local_pawn))
+        if argument == "restore" then
+            assert(shadow_camera and same(shadow_camera.camera, camera))
+            camera:K2_SetRelativeLocation(shadow_camera.relative, false, {}, true)
+            shadow_camera = nil
+            return "restored"
+        end
+        local actor = StaticFindObject(shadow_path)
+        assert(not shadow_camera and valid(actor) and same(actor:GetWorld(), world)
+            and not actor:GetActorEnableCollision())
+        local center = actor.Sphere:K2_GetComponentLocation()
+        local relative = camera.RelativeLocation
+        local point = {X = center.X + 500, Y = center.Y, Z = center.Z}
+        shadow_camera = {camera = camera, point = point,
+            relative = {X = relative.X, Y = relative.Y, Z = relative.Z}}
+        camera:K2_SetWorldLocation(point, false, {}, true)
+        return "staged"
     elseif (shadow or angler) and operation == "viewpoint" then
         assert(not host and valid(local_pawn.Camera))
         local point = local_pawn.Camera:K2_GetComponentLocation()
@@ -392,7 +443,8 @@ local function command(operation, world, driver, host, local_pawn, argument)
             camera.X, camera.Y, camera.Z, rendered.X, rendered.Y, rendered.Z, pawn.X, pawn.Y, pawn.Z))
         for _, actor in ipairs(current) do
             local post, sphere, mesh = actor.PostProcess_CreepingShadows, actor.Sphere, actor.FX_Sphere_01
-            if actor:GetLocalRole() == 1 and valid(post) and valid(sphere) and valid(mesh) then
+            if (actor:GetLocalRole() == 1 or placed_shadow and actor:GetLocalRole() == 0)
+                and valid(post) and valid(sphere) and valid(mesh) then
                 local list = post.Settings.WeightedBlendables.Array
                 local material = #list > 0 and list[1].Object
                 local point = sphere:K2_GetComponentLocation()
@@ -730,6 +782,9 @@ LoopInGameThreadWithDelay(60, function()
     local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     local pawn = statics:GetPlayerPawn(world, 0)
     if not valid(pawn) or not pawn:IsLocallyControlled() then return end
+    if shadow_camera and same(shadow_camera.camera, pawn.Camera) then
+        pawn.Camera:K2_SetWorldLocation(shadow_camera.point, false, {}, true)
+    end
     if watched and watched.hit and watched.retreat and valid(watched.guest) then
         local guest = watched.guest
         if guest:K2_TeleportTo(watched.retreat, guest:K2_GetActorRotation()) then watched.retreat = nil end

@@ -14,6 +14,8 @@ import uuid
 from live_ai_smoke import status, wait
 from live_campaign_npc_smoke import MAP
 from live_guest_held_fire_smoke import events
+from live_multi_smoke import saved_hashes
+from tools.silverfish.travel import SCI_TUNNEL
 
 
 @contextmanager
@@ -337,13 +339,20 @@ async def verify_angler(guest, host_box, guest_box, probe):
             "host_npc_alert": {"actor": npc, "position": [float(axis) for axis in (x, y, z)], "duration": float(duration)}}
 
 
-async def verify_shadow(guest, host_box, guest_box, probe):
+async def verify_shadow(guest, host_box, guest_box, probe, *, placed=False):
+    if placed:
+        seat = list(map(float, (await probe(host_box, "shadowpark")).split("|")))
+        await wait(guest, lambda frame: math.dist(
+            frame.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), seat) < 70)
     vetoes = blocked_triggers(status(guest))
     assert await probe(guest_box, "guestguard") == "0"
     await wait(guest, lambda view: blocked_triggers(view) >= vetoes + 4, timeout=5)
     parked = shadow_rows(await probe(guest_box, "shadowvisual"))
     assert parked and all(not enabled for enabled, *_ in parked), parked
-    await probe(host_box, "viewinside", await probe(guest_box, "viewpoint"))
+    if placed:
+        assert await probe(guest_box, "shadowcamera") == "staged"
+    else:
+        await probe(host_box, "viewinside", await probe(guest_box, "viewpoint"))
     async with asyncio.timeout(8):
         while True:
             nearby = [item for item in shadow_rows(await probe(guest_box, "shadowvisual")) if item[0]]
@@ -353,7 +362,10 @@ async def verify_shadow(guest, host_box, guest_box, probe):
     assert len(nearby) == 1
     _, strength, _, distance, radius, blend = nearby[0]
     assert abs(strength - .97 * max(0, min(1, (radius - distance) / blend))) < .05, nearby
-    await probe(host_box, "viewrestore")
+    if placed:
+        assert await probe(guest_box, "shadowcamera", "restore") == "restored"
+    else:
+        await probe(host_box, "viewrestore")
     async with asyncio.timeout(6):
         while any(enabled for enabled, *_ in shadow_rows(await probe(guest_box, "shadowvisual"))):
             await asyncio.sleep(.1)
@@ -373,13 +385,18 @@ async def verify_shadow(guest, host_box, guest_box, probe):
         while not any(item.get("sound_mask") == 16 for item in events(guest, "native_guest_hurt_played")):
             await asyncio.sleep(.1)
     await probe(host_box, "shadowleave")
+    async with asyncio.timeout(6):
+        while any(enabled for enabled, *_ in shadow_rows(await probe(guest_box, "shadowvisual"))):
+            await asyncio.sleep(.1)
     return {"parked_guest_effects": parked, "active_guest_effect": nearby[0],
             "host_fatigue_health_guest_fatigue_health_before": initial,
             "host_fatigue_health_guest_fatigue_health_after": later,
             "guest_stock_psychic_feedback": True, "guest_darkness_cleared": True}
 
 
-async def verify(work, family, observer_offering=None):
+async def verify(work, family, observer_offering=None, *, placed_shadow=False, vanilla_saved=None):
+    area = SCI_TUNNEL if placed_shadow else MAP
+    original_saves = saved_hashes(vanilla_saved) if vanilla_saved else None
     profile = f"{family}-proof-" + uuid.uuid4().hex[:8]
     host, guest = [work / role / profile / "run" for role in ("campaigns", "clients")]
     host.mkdir(parents=True)
@@ -391,6 +408,8 @@ async def verify(work, family, observer_offering=None):
         env = {**os.environ, "SILVERFISH_COOP_RENDER_CAPTURE": "guest"}
         if family == "shadow-sphere":
             env["SILVERFISH_COOP_SHADOW_SPHERE_FIXTURE"] = "1"
+        if placed_shadow:
+            env["SILVERFISH_COOP_PLACED_SHADOW_FIXTURE"] = "1"
         if family == "angler-lamp" and args[0] == "join":
             env["SILVERFISH_COOP_ANGLER_LAMP_FIXTURE"] = "1"
         if family == "observer":
@@ -431,25 +450,55 @@ async def verify(work, family, observer_offering=None):
     with probe_mod(work):
         try:
             await start(host, "host", "--campaign", profile, "--port", "0", "--headless", "--fixtures",
-                        "--native-zones", "--native-events", "--native-guest", "--start-zone", MAP)
-            await wait(host, lambda view: view.get("state") == "hosting" and view.get("game", {}).get("map") == MAP)
+                        "--native-zones", "--native-events", "--native-guest", "--start-zone", area)
+            await wait(host, lambda view: view.get("state") == "hosting" and view.get("game", {}).get("map") == area)
             host_box, = (host / "game-bridge").iterdir()
-            for attempt in range(6):
-                director = await probe(host_box, "roll")
-                try:
-                    await wait(host, lambda view: family_actors(view, family), timeout=3)
-                    break
-                except RuntimeError:
-                    if attempt == 5:
-                        raise
-            anchor = list(map(float, (await probe(host_box, "prepare")).split("|")))
-            spawn_limit = 3100 if family == "observer" else 1500
-            await wait(host, lambda view: math.dist(
-                view.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), anchor) < spawn_limit)
+            if placed_shadow:
+                paths = {f"{area}.Sci_Tunnel_01_P:PersistentLevel.ShadowSphere_BP_C_{index}" for index in (1, 3, 5, 7)}
+
+                def placed_rows(view):
+                    return {path: row for path, row in view.get("game", {}).get("native_placed_anomalies", {}).items()
+                            if row["kind"] == family}
+
+                host_frame = await wait(host, lambda view: placed_rows(view).keys() == paths)
+                director = None
+            else:
+                for attempt in range(6):
+                    director = await probe(host_box, "roll")
+                    try:
+                        await wait(host, lambda view: family_actors(view, family), timeout=3)
+                        break
+                    except RuntimeError:
+                        if attempt == 5:
+                            raise
+            if not placed_shadow:
+                anchor = list(map(float, (await probe(host_box, "prepare")).split("|")))
+                spawn_limit = 3100 if family == "observer" else 1500
+                await wait(host, lambda view: math.dist(
+                    view.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), anchor) < spawn_limit)
             invite = await command("invite", "--campaign", profile, "--name", "Anomaly observer", "--character", "Observer")
             await start(guest, "join", "--profile", profile, "--invite", invite["invite_file"], "--headless", "--native-zones")
             guest_state = await wait(guest, lambda view: view.get("state") == "connected" and view.get("gameplay_fresh"))
             guest_box, = (guest / "game-bridge").iterdir()
+            if placed_shadow:
+                guest_frame = await wait(guest, lambda view: placed_rows(view).keys() == paths)
+                authority, replicas = placed_rows(host_frame), placed_rows(guest_frame)
+                assert all(authority[path]["collision"] and authority[path]["role"] == 3
+                           and not replicas[path]["collision"] and replicas[path]["role"] in (0, 1)
+                           and math.dist(authority[path]["location"], replicas[path]["location"]) < 3 for path in paths)
+                assert len(family_actors(guest_frame, family)) == len(paths)
+                await probe(host_box, "prepare")
+                try:
+                    result = await verify_shadow(guest, host_box, guest_box, probe, placed=True)
+                finally:
+                    await probe(host_box, "shadowrestore")
+                await wait(guest, lambda view: placed_rows(view).keys() == paths and all(
+                    math.dist(row["location"], authority[path]["location"]) < 3 for path, row in placed_rows(view).items()))
+                evidence = host / "live-shadow-sphere-placements.json"
+                evidence.write_text(json.dumps({"host": authority, "guest": replicas, **result}, indent=2),
+                                    encoding="utf-8")
+                print(evidence, flush=True)
+                return
             old = guest_state["game"]["native_anomaly_field"]["suppressed"]
             attempted = await probe(guest_box, "roll")
             before, after = map(int, attempted.split("|"))
@@ -538,6 +587,9 @@ async def verify(work, family, observer_offering=None):
                 except TimeoutError:
                     child.kill()
                     await child.wait()
+            if original_saves is not None:
+                assert saved_hashes(vanilla_saved) == original_saves, "Original saves changed"
+                print("Original saves preserved", flush=True)
 
 
 if __name__ == "__main__":
@@ -545,7 +597,12 @@ if __name__ == "__main__":
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--family", choices=("gravity", "pyrogeist", "shadow-sphere", "angler-lamp", "observer"), default="gravity")
     parser.add_argument("--observer-offering", nargs="?", const="contact", choices=("contact", "flight", "loot", "input"))
+    parser.add_argument("--placed-shadow", action="store_true", help="verify the four Science Tunnels Shadow Spheres")
+    parser.add_argument("--vanilla-saved", type=Path, help="hash original saves before and after the isolated trial")
     args = parser.parse_args()
+    if args.placed_shadow and args.family != "shadow-sphere":
+        parser.error("--placed-shadow requires --family shadow-sphere")
     if args.observer_offering and args.family != "observer":
         parser.error("--observer-offering requires --family observer")
-    asyncio.run(verify(args.work.resolve(), args.family, args.observer_offering))
+    asyncio.run(verify(args.work.resolve(), args.family, args.observer_offering,
+                       placed_shadow=args.placed_shadow, vanilla_saved=args.vanilla_saved))

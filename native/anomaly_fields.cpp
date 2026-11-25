@@ -340,7 +340,8 @@ namespace
     {
         if (!kind) return false;
         const auto path = kind->GetPathName();
-        return std::ranges::find(replicated_classes, std::wstring_view{path}) != replicated_classes.end();
+        return (shadow_replication && path == shadow_class) ||
+            std::ranges::find(replicated_classes, std::wstring_view{path}) != replicated_classes.end();
     }
 
     bool canister_class(U::UObject* type)
@@ -484,7 +485,6 @@ namespace
             if (name == pyrogeist && type->GetPathName() == pyrogeist_class) continue;
             if (angler_replication && name == angler && type->GetPathName() == angler_class) continue;
             if (observer_enabled && name == observer && type->GetPathName() == observer_class) continue;
-            if (shadow_replication && name == shadow && type->GetPathName() == shadow_class) continue;
             return false;
         }
         return true;
@@ -1042,11 +1042,11 @@ namespace
             // Keep arming, blast creation, and queued graph continuations on the host.
             if (type->GetPathName() != electrode_class) return;
         }
-        else if (pyrogeist_body || pyrogeist_jet || shadow_sphere || angler_lamp || observing)
+        else if (pyrogeist_body || pyrogeist_jet || angler_lamp || observing)
         {
             if (!world || world->GetPathName() != crossroads_world) return;
         }
-        else if (!canister && !fixed && !roaming && !gravity_well &&
+        else if (!canister && !fixed && !roaming && !gravity_well && !shadow_sphere &&
                  (function->GetNumParms() != 6 || !trap_class(type))) return;
         if (!guest_world(world)) return;
 

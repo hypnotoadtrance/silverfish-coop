@@ -2874,7 +2874,7 @@ class Bridge:
                     # Map-loaded guest actors can have ROLE_None until they enter replication range.
                     if (area.startswith("/Game/Classes/Maps/") and path.startswith(f"{area}.{area.rsplit('/', 1)[-1]}:")
                             and len(path) <= 512 and len(placed) < 1024
-                            and kind in {"starburst", "burner", "vortex", "gravity", "electrode", "wandering-teleport"}
+                            and kind in {"starburst", "burner", "vortex", "gravity", "electrode", "wandering-teleport", "shadow-sphere"}
                             and collision in {"0", "1"} and role in {"0", "1", "3"}):
                         placed[path] = {"kind": kind, "location": [_finite(axis) for axis in (x, y, z)],
                                         "collision": collision == "1", "role": int(role)}

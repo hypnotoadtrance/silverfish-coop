@@ -1,7 +1,6 @@
 local shadows = {}
 
 shadows.class = "BlueprintGeneratedClass /Game/Classes/Anomalies/ShadowSphere_BP.ShadowSphere_BP_C"
-local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local observer_fixture = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_SHADOW_SPHERE_FIXTURE") == "1"
 shadows.enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
@@ -46,19 +45,22 @@ local function bind_material(actor, visual)
 end
 
 function shadows.project(active, state, phase)
-    if not shadows.enabled or phase ~= "connected" or state.server ~= true or state.map ~= crossroads then return end
-    local pawn = state.local_pawn and state.local_pawn.pawn
-    local camera = valid(pawn) and pawn.Camera
-    if not valid(pawn) or not pawn:IsLocallyControlled() or not owned(camera, pawn) then return end
-    local point, clock, strongest, amount = camera:K2_GetComponentLocation(), nil, nil, 0
+    if not shadows.enabled or phase ~= "connected" or state.server ~= true then return end
+    local point, clock, strongest, amount = nil, nil, nil, 0
     for _, entry in pairs(active) do
         local actor = entry.actor
-        if entry.kind == "shadow-sphere" and valid(actor) and actor:GetLocalRole() == 1
+        if entry.kind == "shadow-sphere" and valid(actor) and (entry.placed or actor:GetLocalRole() == 1)
             and not actor:IsActorBeingDestroyed() and not actor:GetActorEnableCollision() then
             local visual = entry.shadow or setup(actor)
             entry.shadow = visual
             if visual then
-                if not clock then clock = StaticFindObject(gameplay_statics):GetTimeSeconds(state.world) end
+                if not point then
+                    local pawn = state.local_pawn and state.local_pawn.pawn
+                    local camera = valid(pawn) and pawn.Camera
+                    if not valid(pawn) or not pawn:IsLocallyControlled() or not owned(camera, pawn) then return end
+                    point = camera:K2_GetComponentLocation()
+                    clock = StaticFindObject(gameplay_statics):GetTimeSeconds(state.world)
+                end
                 local center = visual.sphere:K2_GetComponentLocation()
                 local distance = math.sqrt((center.X - point.X)^2 + (center.Y - point.Y)^2 + (center.Z - point.Z)^2)
                 local fraction = math.max(0, math.min(1, (visual.radius - distance) / visual.blend))

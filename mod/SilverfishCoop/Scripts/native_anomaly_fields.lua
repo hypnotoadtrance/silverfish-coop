@@ -53,15 +53,15 @@ local function in_world(actor, current)
 end
 
 local function trap_kind(actor, class)
-    if class == pyrogeist.body or shadows.enabled and class == shadows.class
-        or lamps.enabled and class == lamps.class or observers.enabled and class == observers.class then
+    if shadows.enabled and class == shadows.class then return "shadow-sphere" end
+    if class == pyrogeist.body or lamps.enabled and class == lamps.class or observers.enabled and class == observers.class then
         local at = actor:GetWorld()
         if not valid(at) then return end
         local name = at:GetFullName()
         if name == "World " .. crossroads .. ".CrossRoads_P" then
             if class == pyrogeist.body then return "pyrogeist" end
             if class == observers.class then return "observer" end
-            return class == shadows.class and "shadow-sphere" or "angler-lamp"
+            return "angler-lamp"
         end
         return
     end
@@ -108,15 +108,14 @@ local function recover_family()
             if not active[address] and not pending[address] then
                 local kind = trap_kind(actor, actor:GetClass():GetFullName())
                 if kind and (job.rook or disables_replica_tick(kind)) then
-                    local placed, local_copy
-                    if kind == "gravity" then placed, local_copy = placement(actor) end
+                    local placed, local_copy = placement(actor)
                     local host = job.phase == "hosting" and actor:HasAuthority()
                         and (placed or actor:ActorHasTag(FName("Anomaly")))
                     local guest = job.phase == "connected" and (local_copy or replica(actor))
                     if host or guest then
-                        if guest and kind == "gravity" then
+                        if guest then
                             actor:SetActorEnableCollision(false)
-                            actor:SetActorTickEnabled(false)
+                            if disables_replica_tick(kind) then actor:SetActorTickEnabled(false) end
                         end
                         pending[address] = {actor = actor, kind = kind, placed = placed}
                     end
@@ -587,7 +586,9 @@ function fields.rows(state, phase, row)
             if observers.enabled then names[#names + 1] = "Observers_BP_C" end
             recovery = {world = world, phase = phase, index = 1, names = names, pyrogeist = true}
         else
-            recovery = {world = world, phase = phase, index = 1, names = {"GravityAnomaly_BP_C"}}
+            local names = {"GravityAnomaly_BP_C"}
+            if shadows.enabled then names[#names + 1] = "ShadowSphere_BP_C" end
+            recovery = {world = world, phase = phase, index = 1, names = names}
         end
     end
     if phase == "hosting" and type(SilverfishTakeNativeLingeringTeleport) == "function" then
