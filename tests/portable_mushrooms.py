@@ -22,14 +22,15 @@ async def verify_stock_mushrooms(host, guest, pawn):
     arrival = await wait_resident_status(host_run, lambda frame: frame["game"].get("map") == CROSSROADS
                                          and not frame.get("awaiting_zone_guest")
                                          and frame["game"].get("native_guest_save", {}).get("state") == "bound", timeout=60)
-    host_position = arrival["game"]["pawns"]["local"]["location"]
+    guest_position = arrival["game"]["pawns"]["guest"]["location"]
 
     def same_world(frame):
         game = frame.get("game", {})
-        remote = game.get("pawns", {}).get("guest", {}).get("location")
-        return (frame.get("state") == "connected" and frame.get("zone_epoch") == arrival["zone_epoch"]
-                and game.get(mushrooms.SUPPRESSION, 0) > 0 and remote
-                and math.dist(remote, host_position) < 250)
+        local = game.get("pawns", {}).get("local", {}).get("location")
+        return (frame.get("state") == "connected" and game.get("map") == CROSSROADS
+                and frame.get("zone_epoch") == arrival["zone_epoch"]
+                and game.get(mushrooms.SUPPRESSION, 0) > 0 and local
+                and math.dist(local, guest_position) < 250)
 
     joined = await wait_resident_status(guest_run, same_world, timeout=35)
 
@@ -87,6 +88,6 @@ async def verify_stock_mushrooms(host, guest, pawn):
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"stock_mushrooms": {"host_pick": host_pick, "guest_claim": claim,
                                "guest_stock_spawn_suppression": joined["game"][mushrooms.SUPPRESSION],
-                               "guest_roster_host": joined["game"]["pawns"]["guest"]["name"],
+                               "guest_local_pawn": joined["game"]["pawns"]["local"]["name"],
                                "both_removed_for_both_players": True, "stock_regrowth": growth,
                                "checkpoint_unchanged": True}}
