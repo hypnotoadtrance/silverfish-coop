@@ -1,4 +1,4 @@
-"""Trace a guest stock camera shutter to the authored Bronze Quarry objective."""
+"""Trace a guest shutter to a bound stock photo target and check the unbound Quarry target."""
 
 import asyncio
 import math
@@ -14,6 +14,8 @@ from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, OBSERVATORY
 OVERWORLD = "/Game/Classes/Maps/Maps_OverWorld/"
 QUARRY = OVERWORLD + "Quarry_01_P"
 QUEST = "Photo_BrnzQuarry"
+STONE_MAZE = OVERWORLD + "StoneMaze_P"
+STONE_QUEST = "Photo_SM_Anom"
 
 
 async def verify_quarry_photo(host, guest, pawn, probe):
@@ -30,8 +32,8 @@ async def verify_quarry_photo(host, guest, pawn, probe):
         while await command(guest, "equip\t" + guid) != "equipped":
             await asyncio.sleep(.15)
 
-    maps = (OBSERVATORY, CROSSROADS, DEAD_BRIDGE, OVERWORLD + "StoneMaze_P", OVERWORLD + "PineRidge_P", QUARRY)
-    for source, destination in zip(maps, maps[1:]):
+    async def travel(source, destination):
+        nonlocal pawn
         route, = (row for row in AUTHORED_ROUTES if (row.source, row.destination) == (source, destination))
         await wait_resident_status(host_run, lambda frame: frame["game"]["map"] == source
                                    and frame["game"].get("native_zone", {}).get("state") == "ready")
@@ -45,7 +47,10 @@ async def verify_quarry_photo(host, guest, pawn, probe):
         await wait_resident_status(guest_run, lambda frame: frame.get("zone_epoch") == arrival["zone_epoch"]
                                    and frame.get("game", {}).get("map") == destination, timeout=35)
 
+    for source, destination in ((OBSERVATORY, CROSSROADS), (CROSSROADS, DEAD_BRIDGE), (DEAD_BRIDGE, STONE_MAZE)):
+        await travel(source, destination)
     assert await command(host, "journal") == "1"
+    assert await command(host, "binding") == "bound"
     checkpoint = campaign_save_hashes(host.campaign)
     point = tuple(map(float, (await command(host, "position")).split(",")))
     await wait_resident_status(guest_run, lambda frame: (
@@ -76,8 +81,8 @@ async def verify_quarry_photo(host, guest, pawn, probe):
     capture = await shutter()
     photo = capture[native_turret_photo.STOCK_PROOF]
     assert (photo["map"], photo["quest"], photo["camera"], photo["step_before"], photo["step_after"]) == (
-        QUARRY, QUEST, guid, 1, 2), photo
-    assert photo["target"].endswith("StaticMeshActor_1147") and photo["visibility"] >= .75, photo
+        STONE_MAZE, STONE_QUEST, guid, 1, 2), photo
+    assert photo["target"].endswith("SpinningBall_Anomaly_C_1") and photo["visibility"] >= .75, photo
     async with asyncio.timeout(10):
         while await asyncio.gather(command(host, "journal"), command(guest, "journal")) != ["2", "2"]:
             await asyncio.sleep(.2)
@@ -85,5 +90,17 @@ async def verify_quarry_photo(host, guest, pawn, probe):
                           operation_id=capture["operation_id"])
     assert replay["ok"] and replay[native_turret_photo.STOCK_PROOF] == photo, replay
     assert campaign_save_hashes(host.campaign) == checkpoint
-    return {"stock_quarry_photo": {"miss_refused": missed["reason"], "capture": photo, "same_journal_step": 2,
-                                   "replay_preserved_progress": True, "checkpoint_unchanged_after_travel": True}}
+    pine = OVERWORLD + "PineRidge_P"
+    await travel(STONE_MAZE, pine)
+    await travel(pine, QUARRY)
+    assert await command(host, "journal") == "1"
+    assert await command(host, "binding") == "unbound"
+    await wait_resident_status(host_run, lambda state: (
+        state["game"].get("native_guest_equipped_weapons", {}).get(pawn, {}).get("guid") == guid
+        and not state["game"].get(native_turret_photo.STOCK_READY)))
+    await wait_resident_status(guest_run, lambda state: (
+        not state.get("gameplay", {}).get("native_equipped_weapon")
+        and not state["game"].get("native_guest_primary_scope")))
+    return {"stock_photo": {"miss_refused": missed["reason"], "capture": photo, "same_journal_step": 2,
+                            "replay_preserved_progress": True, "checkpoint_unchanged_after_travel": True,
+                            "unbound_quest": QUEST, "unbound_primary_not_intercepted": True}}

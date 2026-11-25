@@ -427,6 +427,11 @@ local function field_recipe(save, source, target)
         or not finite(distance) or distance <= 0 or distance > 100000 or not finite(score) or score <= 0 or score > 1
         or not int32(points) or points < 1 or points > 128
         or not component.ReqiredFlags or #component.ReqiredFlags ~= 0 or not component.SetFlags or #component.SetFlags ~= 0 then return end
+    local primitives = component.Targets
+    if count(primitives) ~= points then return end
+    for index = 1, points do
+        if not valid(primitives[index]) then return end
+    end
     return {key = key, quest = quest, step = step, next_step = step + increment, distance = distance, threshold = score}
 end
 

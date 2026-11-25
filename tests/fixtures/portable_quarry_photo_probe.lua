@@ -3,8 +3,9 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_TI
     or not mailbox or not mailbox:match("[/\\]portable%-title%-%x+[/\\][%a]+[/\\]titles[/\\]local[/\\]run[/\\]game%-bridge[/\\]%x+$") then return end
 
 local prefix = mailbox .. "/portable-quarry-photo-"
-local quest = "Photo_BrnzQuarry"
 local quarry = "/Game/Classes/Maps/Maps_OverWorld/Quarry_01_P.Quarry_01_P"
+local stone_maze = "/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P.StoneMaze_P"
+local quarry_quest, stone_quest = "Photo_BrnzQuarry", "Photo_SM_Anom"
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
@@ -19,15 +20,19 @@ local function guid(row)
 end
 
 local function sight(world)
-    local actor = StaticFindObject(quarry .. ":PersistentLevel.StaticMeshActor_1147")
+    local in_quarry = world:GetFullName() == "World " .. quarry
+    local actor = StaticFindObject(in_quarry and quarry .. ":PersistentLevel.StaticMeshActor_1147"
+        or stone_maze .. ":PersistentLevel.SpinningBall_Anomaly_C_1")
     local target = valid(actor) and actor:GetComponentByClass(
         StaticFindObject("/Game/Classes/Actors/ActorAssets/CameraTarget_BP.CameraTarget_BP_C"))
-    assert(valid(target) and same(actor:GetWorld(), world) and target.TrackedQuest.RowName:ToString() == quest)
-    local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
-    assert(target.Targets:GetArrayNum() == 1, "stock skull primitive unavailable")
-    local primitive = target.Targets[1]
-    assert(valid(primitive), "stock skull primitive unavailable")
-    return actor, trace, primitive:K2_GetComponentLocation()
+    assert(valid(target) and same(actor:GetWorld(), world)
+        and target.TrackedQuest.RowName:ToString() == (in_quarry and quarry_quest or stone_quest))
+    return target
+end
+
+local function point_for(target)
+    assert(target.Targets:GetArrayNum() == 1 and valid(target.Targets[1]), "stock photo primitive unavailable")
+    return target.Targets[1]:K2_GetComponentLocation()
 end
 
 local function run(action, argument)
@@ -37,7 +42,12 @@ local function run(action, argument)
     local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     local pawn = statics:GetPlayerPawn(world, 0)
     assert(valid(pawn) and pawn:IsLocallyControlled())
+    local quest = world:GetFullName() == "World " .. quarry and quarry_quest or stone_quest
     local save, key = pawn.Save, FName(quest, EFindName.FNAME_Find)
+    if action == "binding" then
+        local target = sight(world)
+        return target.Targets:GetArrayNum() == 1 and valid(target.Targets[1]) and "bound" or "unbound"
+    end
     if action == "journal" then
         return save.ActiveQuests:Contains(key) and tostring(save.ActiveQuests:Find(key):get()[step]) or "-"
     end
@@ -61,9 +71,12 @@ local function run(action, argument)
         assert(valid(guest) and guest:HasAuthority() and not guest:IsLocallyControlled() and not same(guest.Save, save))
         if action == "seed" then
             assert(world:GetFullName():find("Observitory_P", 1, true))
-            assert(not save.ActiveQuests:Contains(key))
-            instance:AddQuest_ByName(key)
-            assert(save.ActiveQuests:Find(key):get()[step] == 1)
+            for _, id in ipairs({stone_quest, quarry_quest}) do
+                local row = FName(id, EFindName.FNAME_Find)
+                assert(not save.ActiveQuests:Contains(row))
+                instance:AddQuest_ByName(row)
+                assert(save.ActiveQuests:Find(row):get()[step] == 1)
+            end
             if not valid(StaticFindObject(camera_path)) then LoadAsset(camera_path) end
             local class = StaticFindObject(camera_path)
             local inventory = StaticFindObject("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C")
@@ -75,7 +88,8 @@ local function run(action, argument)
             items[items:GetArrayNum() + 1] = row
             return guid(row)
         end
-        local actor, trace, center = sight(world)
+        local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+        local center = point_for(sight(world))
         local color = {R=0,G=0,B=0,A=0}
         local height = guest.CapsuleComponent:GetScaledCapsuleHalfHeight()
         for _, distance in ipairs({800, 1300, 2000, 2800, 4200}) do
@@ -97,10 +111,10 @@ local function run(action, argument)
                 end
             end
         end
-        error("A clear stock floor and line of sight to the skull are required")
+        error("A clear stock floor and line of sight to the photo target are required")
     end
     assert((action == "aim" or action == "miss") and not pawn:HasAuthority())
-    local _, _, center = sight(world)
+    local center = point_for(sight(world))
     local camera = pawn.EquipedItem
     assert(valid(camera) and valid(camera.SceneCaptureComponent2D))
     local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")

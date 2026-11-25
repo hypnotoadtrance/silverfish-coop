@@ -6783,7 +6783,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 exit_actions = ("prompt", "confirm") if campaign in {
                     "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_shot_view", "tutorial_dock_buckshot",
                     "tutorial_dock_melee", "tutorial_dock_late_join",
-                    "crossroads", "crossroads_anomaly",
+                    "crossroads", "crossroads_anomaly", "quarry_photo",
                     "lab_east_wing_acid", "shopkeep"
                 } or stock_host_prop_observer and campaign == prop_campaign else ("save_and_quit",)
                 after_reconnect = None
