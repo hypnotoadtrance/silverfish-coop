@@ -792,6 +792,42 @@ local function sample(state, phase, status_row, profiles)
     return readings
 end
 
+local function crate_status_blocks(profiles, readings, requested)
+    local rows, details = {}, {}
+    for _, profile in ipairs(profiles) do
+        local observed = readings[profile.index]
+        if observed then
+            for _, row in ipairs(observed) do rows[#rows + 1] = row end
+        end
+        local diagnostic = requested and requested.index == profile.index and requested.row or observed and observed.diagnostic
+        if diagnostic then details[#details + 1] = diagnostic end
+    end
+    return #rows > 0 and table.concat(rows, "\n") or nil, #details > 0 and table.concat(details, "\n") or nil
+end
+
+local function remember_reading(scan, index, observed)
+    local before = scan.readings[index]
+    if before == observed then return end
+    scan.readings[index] = observed
+    if scan.dirty then return end
+    if not before or not observed or before.diagnostic ~= observed.diagnostic or #before ~= #observed then
+        scan.dirty = true
+        return
+    end
+    for row_index, row in ipairs(observed) do
+        if before[row_index] ~= row then
+            scan.dirty = true
+            return
+        end
+    end
+end
+
+local function refresh_blocks(scan)
+    if not scan.dirty then return end
+    scan.gameplay, scan.details = crate_status_blocks(scan.profiles, scan.readings)
+    scan.dirty = false
+end
+
 local function sample_slice()
     local scan = sampler
     if not scan then return end
@@ -801,11 +837,13 @@ local function sample_slice()
     for _ = 1, math.ceil(#scan.profiles / 20) do
         local profile = scan.profiles[scan.next]
         local ok, observed = pcall(sample_profile, scan.state, scan.phase, scan.status_row, profile)
-        scan.readings[profile.index] = ok and observed or nil
+        remember_reading(scan, profile.index, ok and observed or nil)
         if scan.next == #scan.profiles then
             scan.next = 1
             -- A short sweep should run at the same cadence as a long sweep.
             scan.resume_at = scan.cycle_started + 0.25
+            -- Movement frames reuse the completed snapshot until a sampled row changes.
+            refresh_blocks(scan)
             break
         end
         scan.next = scan.next + 1
@@ -895,7 +933,7 @@ function input.rows(state, phase, status_row, fields, separate_details, requeste
         return {}
     end
     if not same(active_world, state.world) then reset_world(state.world) end
-    local readings
+    local gameplay, details
     if periodic_sampling then
         local pawn = detail.pawn
         if not sampler or not same(sampler.pawn, pawn) or sampler.phase ~= phase then
@@ -903,28 +941,36 @@ function input.rows(state, phase, status_row, fields, separate_details, requeste
                 readings = {}, next = 1, resume_at = 0}
         end
         sampler.state = state
-        readings = sampler.readings
         -- Crate commands retain immediate readback for the exact affected containers.
         local command = fields and fields[2]
         if command and command:match("^native%-loot%-") and command ~= "native-loot-crate-diagnostic" then
+            local sampled
             for index = 3, #fields do
                 local profile = loot.profile(state.map, fields[index])
-                if profile then readings[profile.index] = sample_profile(state, phase, status_row, profile) end
+                if profile then
+                    remember_reading(sampler, profile.index, sample_profile(state, phase, status_row, profile))
+                    sampled = true
+                end
             end
+            if sampled then refresh_blocks(sampler) end
+        end
+        gameplay, details = sampler.gameplay, sampler.details
+        if requested then
+            local _, exact = crate_status_blocks(profiles, sampler.readings, requested)
+            details = exact
         end
     else
-        readings = sample(state, phase, status_row, profiles)
+        local readings = sample(state, phase, status_row, profiles)
+        gameplay, details = crate_status_blocks(profiles, readings, requested)
     end
-    local rows, details = {}, separate_details and {} or nil
+    local rows = {}
+    if gameplay then rows[#rows + 1] = gameplay end
+    if details and not separate_details then
+        rows[#rows + 1] = details
+        details = nil
+    end
     if not receipt_frame then receipt_frame = {} end
     receipt_frame.state, receipt_frame.row = state, status_row
-    for _, profile in ipairs(profiles) do
-        local observed = readings[profile.index] or {}
-        local diagnostic = requested and requested.index == profile.index and requested.row or observed.diagnostic
-        local destination = details or rows
-        if diagnostic then destination[#destination + 1] = diagnostic end
-        for _, row in ipairs(observed) do rows[#rows + 1] = row end
-    end
     if type(SilverfishReadNativeLootCrateReceipts) == "function" then append_receipts(rows, state, status_row) end
     if phase == "connected" then visit_lockpicks(state, status_row, function(_, row) rows[#rows + 1] = row end) end
     if tool_report and phase == "hosting" and tool_report.map == state.map then

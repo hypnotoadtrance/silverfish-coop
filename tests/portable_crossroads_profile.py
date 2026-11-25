@@ -56,11 +56,18 @@ def instrument_input_mappings(source):
 
 
 def instrument_inline_crate_scan(source):
-    anchor = "readings = sample(state, phase, status_row, profiles)"
-    if source.count(anchor) != 1:
-        raise ValueError("The inline crate sampling anchor changed")
-    return source.replace(anchor, 'readings = SilverfishProfileCrossroadsCall("crate_inline_scan", '
-                          'sample, state, phase, status_row, profiles)')
+    probes = {
+        "sample(state, phase, status_row, profiles)": (
+            "local readings = ", "crate_inline_scan", "sample, state, phase, status_row, profiles"),
+        "refresh_blocks(scan)": ("            ", "crate_snapshot_refresh", "refresh_blocks, scan"),
+        "refresh_blocks(sampler)": ("if sampled then ", "crate_command_refresh", "refresh_blocks, sampler"),
+    }
+    for call, (prefix, name, arguments) in probes.items():
+        anchor = prefix + call
+        if source.count(anchor) != 1:
+            raise ValueError(f"The crate status timing anchor changed: {name}")
+        source = source.replace(anchor, f'{prefix}SilverfishProfileCrossroadsCall("{name}", {arguments})')
+    return source
 
 
 def instrument_loose_discovery(source):

@@ -5785,6 +5785,21 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
     else:
         await guest.bridge.wait_for(lambda state: math.dist(state["pawns"]["local"]["location"], position) < 50)
 
+    diagnostics = {}
+    if cold:
+        for name, seat, run, startup in (("host", host, host_run, host_state), ("guest", guest, guest_run, guest_state)):
+            local_pawn = startup["game"]["pawns"]["local"]["name"]
+            command = native_loot.CRATE_DIAGNOSTIC
+            fallback = await seat.bridge.command(command, area, local_pawn, crate, timeout=5)
+            row = fallback[native_loot.CRATE_DIAGNOSTICS][crate]
+            assert row["scope"] == "active" and row["looted"] is False, row
+            raw = (seat.bridge.directory / "status.tsv").read_text(encoding="utf-8")
+            matches = [line for line in raw.splitlines() if line.startswith(f"{command}\t{area}\t{crate}\t")]
+            assert len(matches) == 1, matches
+            exact = await submit(run, command, target=crate)
+            assert exact["ok"] and exact["native_loot_crate_diagnostic"] == row, exact
+            diagnostics[name] = row
+
     def save_fingerprints():
         return campaign_save_hashes(host.campaign), saved_hashes(host.profile / "Saved/SaveGames")
 
@@ -5822,6 +5837,7 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
         "input_source": received["input_source"], "sequence": received["sequence"],
         "roll_id": roll["id"], "roll_count": 1, "guest_scope_cleared_before_press": cold,
         "saves_unchanged_after_open": True,
+        "pre_open_diagnostics": diagnostics,
         "probe_request_to_press_reply_ms": round(1000 * (pressed_at - request_at), 2),
         "probe_request_to_visible_roll_ms": round(1000 * (visible_at - request_at), 2),
         "probe_request_to_guest_lid_ms": round(1000 * (lid_at - request_at), 2),

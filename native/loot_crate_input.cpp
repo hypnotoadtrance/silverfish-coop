@@ -562,7 +562,7 @@ namespace
 
     int receipts(const Lua& lua)
     {
-        if (!ready() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        if (!ready() || pending_receipts.empty() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
         const auto pawn = static_cast<std::uintptr_t>(lua.get_integer());
         const auto now = Clock::now();
         int values = 0;

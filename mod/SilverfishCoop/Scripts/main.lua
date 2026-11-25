@@ -1706,7 +1706,7 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         status_publication.context = nil
     end
     if status_publication.memory_live and not status_publication.mirror and not file_command then return end
-    if crate_details and #crate_details > 0 then frame = frame .. table.concat(crate_details, "\n") .. "\n" end
+    if crate_details then frame = frame .. crate_details .. "\n" end
     local temporary = status_path .. ".tmp"
     local file = io.open(temporary, "wb")
     if not file then return end
