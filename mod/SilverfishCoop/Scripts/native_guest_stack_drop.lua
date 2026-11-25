@@ -79,9 +79,10 @@ local function exact_row(save, guid, quantity, class, single)
         seen = seen + 1
         if id == guid then
             local slot = source == "helmet" and 8 or source == "armor" and 9 or nil
+            local sealed_package = asset == "/Game/Classes/Items/Key_Items/Package_Item_FarmHouse.Package_Item_FarmHouse_C"
             if found or (source ~= "backpack" and (single or not slot or quantity ~= 1
                     or type(SilverfishDebitNativeGuestWornDrop) ~= "function"))
-                or tonumber(count) ~= quantity or important ~= "0"
+                or tonumber(count) ~= quantity or (important ~= "0" and not sealed_package)
                 or droppable ~= "1" or (class and class ~= asset) then return end
             found, worn = asset, slot
         else

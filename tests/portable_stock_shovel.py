@@ -2,6 +2,7 @@
 
 import asyncio
 import math
+import time
 
 from live_multi_smoke import campaign_save_hashes
 from portable_guest_world_start import resident_events, wait_resident_status
@@ -144,20 +145,22 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
     await wait_resident_status(guest_run, lambda f: f.get("game", {}).get("map") == CROSSROADS
                                      and f.get("state") == "connected", timeout=35)
     pawn = arrived["game"]["native_guest_save"]["pawn"]
-    await host.bridge.command(loose.APPROACH, SPADE, pawn)
-    target = f"loose:{SPADE}"
-    tapped = await submit(guest_run, loose.FIXTURE, target=target)
-    assert tapped["ok"], tapped
-    await wait_resident_status(guest_run, lambda f: SPADE in f.get("gameplay", {}).get(loose.STATE, []), timeout=12)
-    inventory = await submit(guest_run, "native-inventory-list")
-    assert inventory["ok"], inventory
-    item, = [entry for entry in inventory["native_inventory"]["items"] if entry["class_path"] == native_guest_weapon.SPADE_PATH]
-    equipped = await submit(guest_run, "native-guest-weapon-equip", target=item["guid"])
-    assert equipped["ok"] and equipped["native_guest_weapon"]["kind"] == "spade", equipped
-    current = await wait_resident_status(
-        guest_run, lambda frame: frame.get("game", {}).get("native_guest_primary_scope", {}).get("kind") == "spade",
-        timeout=10,
-    )
+    item, current = None, None
+    if not host_quest:
+        await host.bridge.command(loose.APPROACH, SPADE, pawn)
+        target = f"loose:{SPADE}"
+        tapped = await submit(guest_run, loose.FIXTURE, target=target)
+        assert tapped["ok"], tapped
+        await wait_resident_status(guest_run, lambda f: SPADE in f.get("gameplay", {}).get(loose.STATE, []), timeout=12)
+        inventory = await submit(guest_run, "native-inventory-list")
+        assert inventory["ok"], inventory
+        item, = [entry for entry in inventory["native_inventory"]["items"] if entry["class_path"] == native_guest_weapon.SPADE_PATH]
+        equipped = await submit(guest_run, "native-guest-weapon-equip", target=item["guid"])
+        assert equipped["ok"] and equipped["native_guest_weapon"]["kind"] == "spade", equipped
+        current = await wait_resident_status(
+            guest_run, lambda frame: frame.get("game", {}).get("native_guest_primary_scope", {}).get("kind") == "spade",
+            timeout=10,
+        )
 
     async def observe(seat, action, *args):
         report = await seat.bridge.command("fixture-spade-" + action, *args, update_status=False)
@@ -210,7 +213,7 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
             dispatch = event[dig.GUEST_RESULT]
         if quest_dig:
             # The buried-item branch can emit its package without leaving an ordinary terrain hole.
-            return {"contact": contacts, "dispatch": dispatch, "guid": item["guid"]}
+            return {"contact": contacts, "dispatch": dispatch}
         additions = []
         try:
             async with asyncio.timeout(10):
@@ -238,13 +241,15 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
         return result
 
     if quest:
-        ordinary = await dig_once()
-        host_dig = await verify_host_dig()
-        digger_guid = item["guid"]
         if host_quest:
-            equipped_spade, = [item for item in await stock_inventory(host_run)
-                               if item["class_path"] == native_guest_weapon.SPADE_PATH]
+            assert await observe(host, "host-equip", "local") == "equipped"
+            equipped_spade, = [row for row in await stock_inventory(host_run)
+                               if row["class_path"] == native_guest_weapon.SPADE_PATH]
             digger_guid = equipped_spade["guid"]
+        else:
+            ordinary = await dig_once()
+            host_dig = await verify_host_dig()
+            digger_guid = item["guid"]
         result = await dig_once(quest_dig=True, host_dig=host_quest)
         result["guid"] = digger_guid
         result["digger"] = "host" if host_quest else "guest"
@@ -287,6 +292,7 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
             assert host_item["guid"] == owner["package_guid"], (host_item, owner)
             await wait_resident_status(guest_run, lambda frame: not projected(frame), timeout=10)
             checkpoint = campaign_save_hashes(host.campaign)
+            drop_started = time.time()
             drop_press = await host.bridge.command(
                 native_host_stack_drop.FIXTURE, host_item["guid"], "1", "context_menu")
             assert drop_press["ack"]["message"] == "stock drop invoked without direct inventory mutation", drop_press
@@ -294,12 +300,12 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
                 while True:
                     current_host = await current_status(host_run)
                     drops = [event for event in await resident_events(host_run, current_host)
-                             if event["event"] == "native_host_stock_drop" and event.get("guid") == host_item["guid"]]
+                             if event["event"] == "native_host_stock_drop" and event["time_unix"] >= drop_started]
                     if drops:
                         break
                     await asyncio.sleep(.08)
             drop, = drops
-            assert not drop["error"], drop
+            assert not drop["error"] and drop["guid"] == host_item["guid"], drop
             await host.bridge.command(native_host_stack_drop.CLOSE_FIXTURE, host_item["guid"])
             shared = native_world_loot.player_drop_identity(drop["drop_id"])
             await wait_resident_status(guest_run, lambda frame: shared in frame["game"].get(native_world_loot.KEY, {}))
@@ -313,8 +319,7 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
             assert guest_item["guid"] == host_item["guid"], (host_item, guest_item)
             assert not sealed_packages(await stock_inventory(host_run))
             assert campaign_save_hashes(host.campaign) == checkpoint, "Dropping or reclaiming the package wrote a save"
-            return {"stock_shovel": ordinary, "stock_host_shovel": host_dig,
-                    "stock_missing_contact_host_dig": {**result, "package": package, "custody": custody,
+            return {"stock_missing_contact_host_dig": {**result, "package": package, "custody": custody,
                         "world_actors_before_pickup": raw_packages, "host_package": host_item,
                         "guest_package": guest_item, "shared_drop": drop, "redrop_checkpoint_unchanged": True}}
         press = await submit(guest_run, native_world_loot.FIXTURE, target=identity)
@@ -339,9 +344,8 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
         guest_package, = sealed_packages(guest_after)
         assert (guest_package["guid"], guest_package["source"], guest_package["quantity"]) == (
             owned["package_guid"], "backpack", 1), guest_package
-        check = "stock_missing_contact_host_dig" if host_quest else "stock_missing_contact_guest_dig"
         return {"stock_shovel": ordinary, "stock_host_shovel": host_dig,
-                check: {**result, "package": package, "custody": custody,
+                "stock_missing_contact_guest_dig": {**result, "package": package, "custody": custody,
                                                      "world_actors_before_pickup": raw_packages, "guest_pickup": owned,
                                                      "collector": collector, "guest_inventory_item": guest_package,
                                                      "host_inventory_preserved": True, "second_pickup_refused": True}}

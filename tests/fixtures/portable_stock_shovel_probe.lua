@@ -98,10 +98,11 @@
             if fields[2] == "fixture-spade-host-equip" then
                 local inventory = StaticFindObject("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C")
                 local output = {}
-                inventory:MakeItemStack(class, 1, pawn, output)
+                -- Match the stock placed shovel row, which carries no ammunition.
+                inventory:MakeItemStack(class, -1, pawn, output)
                 local row, slots = output.Item or output, ctx.save.PlayerEquipment
                 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
-                assert(same(row[item_class], class))
+                assert(same(row[item_class], class) and row.Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788 == -1)
                 for index = 1, slots:GetArrayNum() do
                     if not valid(slots[index][item_class]) then
                         slots[index] = row
