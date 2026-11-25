@@ -3763,6 +3763,33 @@ class Bridge:
         return {"state": "connected", "map": area, "native_guest_clock_snapshot_sequence": int(sequence),
                 "ack": {"id": nonce, "result": result, "message": message}, native_guest_clock.KEY: proof}
 
+    @staticmethod
+    def _local_stock_interaction_reply(raw: str, fields: tuple[str, ...]) -> dict:
+        rows = [line.split("\t") for line in raw.splitlines()] if len(raw) <= 16384 and raw.endswith("\n") else []
+        if (not rows or len(rows[0]) != 9 or rows[0][:3] != ["native-stock-interaction-reply", "1", fields[0]]
+                or len(fields) < 3):
+            raise RuntimeError("The stock interaction receipt did not match the request")
+        _, _, nonce, phase, area, sequence, pawn, status, message = rows[0]
+        expected_phase = "connected" if fields[1] == native_stock_switch.PROJECT else "hosting"
+        if (phase != expected_phase or native_stock_door.actor_map(fields[2]) != area
+                or not (local_sequence := _held_input_sequence(sequence)) or not 0 < len(pawn) <= 512):
+            raise RuntimeError("The stock interaction receipt did not match the current world")
+        if status != "accepted":
+            raise RuntimeError(message or "The stock interaction was refused")
+        reply = {"state": phase, "map": area, "sequence": local_sequence, native_stock_door.LOCAL_SCOPE: pawn,
+                 "ack": {"id": nonce, "result": status, "message": message}}
+        if fields[1] == native_stock_door.DISPATCH and len(rows) == 1:
+            return reply
+        if (fields[1] == native_stock_door.DISPATCH or len(rows) != 2
+                or rows[1][:3] != [native_stock_switch.TAG, area, fields[2]]):
+            raise RuntimeError("The stock switch receipt did not verify the requested actor")
+        try:
+            proof = native_stock_switch.parse(rows[1], phase, area)
+        except ValueError as error:
+            raise RuntimeError("The stock switch receipt contained an invalid state") from error
+        reply[native_stock_switch.KEY] = {fields[2]: proof}
+        return reply
+
     async def command(self, action: str, *arguments: str, timeout: float = 8, update_status: bool = True,
                       stash_payload: bytes | None = None) -> dict:
         fields = (uuid.uuid4().hex, action, *arguments)
@@ -3804,6 +3831,9 @@ class Bridge:
                 return self._local_world_view_reply(raw, fields)
             if action == native_storm_ambience.COMMAND and raw.startswith(native_storm_ambience.REPLY + "\t"):
                 return self._local_storm_ambience_reply(raw, fields)
+            if (action in (native_stock_door.DISPATCH, native_stock_switch.PROJECT, *native_stock_switch.ACTIONS)
+                    and raw.startswith("native-stock-interaction-reply\t")):
+                return self._local_stock_interaction_reply(raw, fields)
             if action == native_guest_clock.APPLY and raw.startswith(native_guest_clock.REPLY + "\t"):
                 return self._local_guest_clock_reply(raw, fields)
             status = self._parse_status(raw)

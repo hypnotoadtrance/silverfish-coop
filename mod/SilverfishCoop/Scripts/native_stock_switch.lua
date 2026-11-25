@@ -163,32 +163,36 @@ local function suppress_candle_overlap(name, sphere)
     end
 end
 
+function switches.read_row(entry, name, state, phase, row)
+    if entry.power then
+        local actor = entry.actor or StaticFindObject(entry.path)
+        if qualified(actor, state.world) and type(actor[entry.power]) == "boolean" then
+            if entry.candle and phase == "connected" then
+                local sphere = actor.Sphere
+                if valid(sphere) and same(sphere:GetOwner(), actor) then suppress_candle_overlap(name, sphere) end
+            end
+            return row("native-stock-switch", state.map, name, bit(actor[entry.power]), 0, 0, 0, "-", "-")
+        end
+    elseif valid(entry.actor) and not entry.actor:IsActorBeingDestroyed() and valid(entry.lever) then
+        local angles = entry.lever.RelativeRotation
+        local panel = entry.panel:GetMaterial(0)
+        local lights = {}
+        for id, link in pairs(entry.lights) do
+            if valid(link.target) and valid(link.bulb) then
+                lights[#lights + 1] = table.concat({id, bit(link.target.Powered), bit(link.bulb:IsVisible())}, "|")
+            end
+        end
+        table.sort(lights)
+        return row("native-stock-switch", state.map, name, bit(entry.actor.Powered),
+            angles.Pitch, angles.Yaw, angles.Roll, valid(panel) and panel:GetFullName() or "-",
+            #lights > 0 and table.concat(lights, ";") or "-")
+    end
+end
+
 function switches.rows(state, phase, row)
     local rows = {}
     for name, entry in pairs(census(state, phase)) do
-        if entry.power then
-            local actor = StaticFindObject(entry.path)
-            if qualified(actor, state.world) and type(actor[entry.power]) == "boolean" then
-                if entry.candle and phase == "connected" then
-                    local sphere = actor.Sphere
-                    if valid(sphere) and same(sphere:GetOwner(), actor) then suppress_candle_overlap(name, sphere) end
-                end
-                rows[#rows + 1] = row("native-stock-switch", state.map, name, bit(actor[entry.power]), 0, 0, 0, "-", "-")
-            end
-        elseif valid(entry.actor) and not entry.actor:IsActorBeingDestroyed() and valid(entry.lever) then
-            local angles = entry.lever.RelativeRotation
-            local panel = entry.panel:GetMaterial(0)
-            local lights = {}
-            for id, link in pairs(entry.lights) do
-                if valid(link.target) and valid(link.bulb) then
-                    lights[#lights + 1] = table.concat({id, bit(link.target.Powered), bit(link.bulb:IsVisible())}, "|")
-                end
-            end
-            table.sort(lights)
-            rows[#rows + 1] = row("native-stock-switch", state.map, name, bit(entry.actor.Powered),
-                angles.Pitch, angles.Yaw, angles.Roll, valid(panel) and panel:GetFullName() or "-",
-                #lights > 0 and table.concat(lights, ";") or "-")
-        end
+        rows[#rows + 1] = switches.read_row(entry, name, state, phase, row)
     end
     return rows
 end
@@ -256,7 +260,7 @@ function switches.command(fields, state, phase)
         end
         local expected = ignite or not entry.candle and not before
         if not valid(entry.actor) or entry.actor[power] ~= expected then error("stock_switch_toggle_unverified", 0) end
-        return "stock switch interaction dispatched"
+        return "stock switch interaction dispatched", entry
     end
     if action == "native-stock-switch-project" and phase == "connected" and fields[4] == state.map and #fields >= 8 then
         local power, pitch, yaw, roll = fields[5], tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8])
@@ -271,7 +275,7 @@ function switches.command(fields, state, phase)
             lights[#lights + 1] = {id = id, powered = on == "1", visible = visible == "1"}
         end
         project(entry, power == "1", {Pitch = pitch, Yaw = yaw, Roll = roll}, lights)
-        return "stock switch state projected"
+        return "stock switch state projected", entry
     end
     error("stock_switch_scope_unavailable", 0)
 end

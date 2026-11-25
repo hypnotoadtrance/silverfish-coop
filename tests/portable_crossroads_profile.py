@@ -11,7 +11,7 @@ from tools.silverfish.control import current_status, submit
 from tools.silverfish.travel import CROSSROADS
 
 
-def instrument_profile(source):
+def instrument_profile(source, *, stock_receipts=False):
     code = (Path(__file__).with_name("fixtures") / "portable_crossroads_profile.lua").read_text(encoding="utf-8")
     anchor = "local function write_status("
     before, separator, rest = source.partition(anchor)
@@ -46,6 +46,20 @@ def instrument_profile(source):
         else:
             status_code = status_code.replace(needle, call + needle)
     rest = status_code + boundary + after_status
+    if stock_receipts:
+        # Keep the private status mirror available to the runner while exercising the
+        # installed compact interaction branch. Scope validation still runs normally.
+        scope = "if resident_title and status_publication.installed and status_publication.memory_live and not status_publication.mirror then"
+        gate = ("if interaction and pending and not periodic and current_phase == interaction.phase\n"
+                "        and status_publication.compact() and status_publication.steady(state, current_phase) then")
+        admission = gate.replace("status_publication.compact()", "resident_title and status_publication.installed "
+                                                                  "and status_publication.memory_live")
+        publish = "        SilverfishPublishLocalBridgeReply(pending.ticket, readback and reply .. readback or reply)"
+        assert all(rest.count(marker) == 1 for marker in (scope, gate, publish))
+        rest = rest.replace(scope, scope.replace(" and not status_publication.mirror", ""))
+        rest = rest.replace(gate, admission)
+        rest = rest.replace(publish, "        if accepted then status_publication.profile.stock_receipt("
+                            "fields[2], #reply + (readback and #readback or 0)) end\n" + publish)
     tick = "local function tick(fields, pending, periodic)\n"
     assert rest.count(tick) == 1
     rest = rest.replace(tick, tick + "    local profile_fields = fields\n"
@@ -66,6 +80,12 @@ def instrument_profile(source):
     assert before.count(fallback_query) == 1
     before = before.replace(fallback_query, f'{wrapper}("player_actor_fallback", FindAllOf, "Player_FP_C")')
     return before + "status_publication.profile = (function()\n" + code + "\nend)()\n\n" + anchor + rest
+
+
+async def read_stock_receipts(seat, probe):
+    raw = await probe(seat.bridge, "crossroads-profile", "stockreceipts", reply_end="|end")
+    return {name: {"count": int(count), "maximum_bytes": int(size)}
+            for name, count, size in (row.split(",") for row in raw.removesuffix("|end").split(";") if row)}
 
 
 def instrument_kill_volume(source, *, measure=False, recovery_fixture=False):

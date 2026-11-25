@@ -71,6 +71,24 @@ class StockDoorActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.host.last_game, snapshot)
         self.assertEqual((await self.interact())[door.DELTA], response[door.DELTA])
 
+    async def test_compact_dispatch_still_waits_for_exact_target_transform(self):
+        dispatch, host_pawn = "c" * 32, "host pawn"
+        game = self.host.last_game
+        game.update(sequence=11, pawns={"local": {"name": host_pawn}})
+        reply = {"state": "hosting", "map": CROSSROADS, "sequence": 11, door.LOCAL_SCOPE: host_pawn,
+                 "ack": {"id": dispatch, "message": "stock hinged door interaction dispatched closed|0|90|0|0|0|0"}}
+        self.bridge.command.return_value = reply
+        completion = asyncio.get_running_loop().create_future()
+        self.assertIsNone(await self.interact(completion))
+        self.assertIs(self.host.last_game, game)
+        self.actions.settle(self.host)
+        self.assertFalse(completion.done())
+        row = ("native-stock-door", CROSSROADS, self.actor, "0", "1", "1", "0", "90", *("0",) * 10, "1")
+        fields = ("stock-door-settled", dispatch, "12", "350", *row)
+        self.actions.settle(self.host, ["\t".join(fields).encode()])
+        self.assertIs((await completion)[door.RESULT]["open"], True)
+        self.assertIs(self.host.last_game, game)
+
     async def test_pending_motion_releases_dispatch_and_deduplicates_until_authoritative_frame(self):
         reply = {**self.host.last_game, "sequence": 11,
                  "ack": {"message": "stock hinged door interaction dispatched closed"}}

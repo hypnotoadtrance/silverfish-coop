@@ -6,6 +6,7 @@ local window_us = 3000000
 local coarse_window_us = 5000000
 local gc_window_us = 12000000
 local gc_pause, gc_step_multiplier = 120, 160
+local stock_receipts = {}
 
 local function record(active, tag, wall_ms, cycles)
     local rows = active.rows[tag]
@@ -71,6 +72,13 @@ function probe.command(fields, periodic, publishes_snapshot)
     local counts = publishes_snapshot and capture.snapshot_sources or capture.tick_sources
     local key = (periodic and "due/" or "between/") .. action
     counts[key] = (counts[key] or 0) + 1
+end
+
+function probe.stock_receipt(action, bytes)
+    local report = stock_receipts[action] or {count = 0, max = 0}
+    report.count = report.count + 1
+    report.max = math.max(report.max, bytes)
+    stock_receipts[action] = report
 end
 
 function probe.status_mark(tag, rows, bytes)
@@ -258,6 +266,12 @@ LoopInGameThreadWithDelay(50, function()
     elseif action == "lean" and not capture then
         local ok, value = pcall(SilverfishProfileLocalLean)
         if ok then message = value else message = "lean reader comparison failed: " .. tostring(value) end
+    elseif action == "stockreceipts" and not capture then
+        local summary = {}
+        for command, report in pairs(stock_receipts) do
+            summary[#summary + 1] = ("%s,%d,%d"):format(command, report.count, report.max)
+        end
+        message = table.concat(summary, ";")
     end
     local output = assert(io.open(prefix .. "reply.tsv", "wb"))
     output:write(ticket, message and "\tok\t" or "\terror\t", message or "unexpected sampling request", "|end")

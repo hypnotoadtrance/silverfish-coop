@@ -1760,6 +1760,13 @@ status_publication.pickup_presentation = {
     ["native-world-loot-present-host-claim"] = native_guest_drop_projection.command,
 }
 
+status_publication.stock_interactions = {
+    ["native-stock-door-guest-interact"] = {phase = "hosting", command = native_stock_door.command},
+    ["native-stock-switch-interact"] = {phase = "hosting", command = native_stock_switch.command},
+    ["native-stock-switch-ignite"] = {phase = "hosting", command = native_stock_switch.command},
+    ["native-stock-switch-project"] = {phase = "connected", command = native_stock_switch.command},
+}
+
 local function tick(fields, pending, periodic)
     if fields and pending and fields[2] == "native-guest-smg-hold-aim" then
         if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
@@ -1769,6 +1776,26 @@ local function tick(fields, pending, periodic)
     end
     local state, current_phase = observe_session()
     if not state then return end
+    local interaction = fields and status_publication.stock_interactions[fields[2]]
+    if interaction and pending and not periodic and current_phase == interaction.phase
+        and status_publication.compact() and status_publication.steady(state, current_phase) then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        local accepted, message, target = pcall(interaction.command, fields, state, current_phase)
+        local readback
+        if accepted and interaction.command == native_stock_switch.command then
+            local checked, line = pcall(native_stock_switch.read_row, target, fields[3], state, current_phase, status_row)
+            if checked and line then
+                readback = line .. "\n"
+            else
+                accepted, message = false, "stock_switch_readback_unavailable"
+            end
+        end
+        local reply = status_row("native-stock-interaction-reply", 1, fields[1], current_phase, state.map,
+            sequence, state.local_pawn.name, accepted and "accepted" or "error", message) .. "\n"
+        SilverfishPublishLocalBridgeReply(pending.ticket, readback and reply .. readback or reply)
+        return true
+    end
     if fields and pending and native_guest_smg_hold.is_command(fields[2]) then
         if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
         pending.dispatched = true

@@ -2,7 +2,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock
 
-from tools.silverfish import native_stock_switch as switches
+from tools.silverfish import native_stock_switch as switches, runtime
 
 
 class StockSwitchResponseTests(unittest.IsolatedAsyncioTestCase):
@@ -58,3 +58,28 @@ class StockSwitchResponseTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(client.gameplay[switches.KEY]["switches"], {radio: on, wall: off})
         self.assertIs(client.last_game, updated)
+
+    async def test_compact_switch_reply_merges_only_the_verified_actor(self):
+        area = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
+        radio = f"Prop_Radio01_C {area}.Tut_Dock_P:PersistentLevel.Prop_Radio01_C_3"
+        other = radio[:-1] + "4"
+        nonce, epoch, pawn = "a" * 32, "e" * 32, "guest pawn"
+        fields = (nonce, switches.PROJECT, radio, area, "1", "0", "0", "0")
+        raw = (
+            f"native-stock-interaction-reply\t1\t{nonce}\tconnected\t{area}\t12\t{pawn}\taccepted\t"
+            f"stock switch state projected\n{switches.TAG}\t{area}\t{radio}\t1\t0\t0\t0\t-\t-\n"
+        )
+        reply = runtime.Bridge._local_stock_interaction_reply(raw, fields)
+        on = reply[switches.KEY][radio]
+        off = dict(on, powered=False)
+        game = {"state": "connected", "map": area, "sequence": 12, "pawns": {"local": {"name": pawn}},
+                switches.KEY: {radio: off, other: off}, "native_loot_crates": {"crate": {}}}
+        frame = {"map": area, "epoch": epoch, "switches": {radio: on}}
+        bridge = SimpleNamespace(command=AsyncMock(return_value=reply))
+        observed = await switches.project(bridge, game, frame, epoch)
+        self.assertEqual(observed[switches.KEY], {radio: on, other: off})
+        self.assertEqual(observed["native_loot_crates"], game["native_loot_crates"])
+        stale = {**game, "sequence": 13}
+        self.assertIs(await switches.project(bridge, stale, frame, epoch), stale)
+        with self.assertRaises(RuntimeError):
+            runtime.Bridge._local_stock_interaction_reply(raw.replace(f"{area}\t{radio}\t1", f"{area}\t{other}\t1"), fields)

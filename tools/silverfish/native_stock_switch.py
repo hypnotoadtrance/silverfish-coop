@@ -9,6 +9,7 @@ TAG = "native-stock-switch"
 KEY = "native_stock_switches"
 ACTION = TAG + "-interact"
 IGNITE = TAG + "-ignite"
+PROJECT = TAG + "-project"
 ACTIONS = (ACTION, IGNITE)
 TARGET = "stock-switch:"
 IGNITION_TARGET = "stock-switch-ignite:"
@@ -86,8 +87,14 @@ async def interact(host, bridge, character, requested, operation, action=ACTION)
     if ((snapshot.get("state"), snapshot.get("map"), snapshot.get("ack", {}).get("message"))
             != ("hosting", game["map"], "stock switch interaction dispatched") or row is None):
         raise RuntimeError("The stock switch interaction did not verify")
-    host.last_game = snapshot
-    host.last_seen = time.monotonic()
+    if native_stock_door.LOCAL_SCOPE in snapshot:
+        if host.zone_epoch != epoch or not native_stock_door.matches_local_scope(host.last_game, snapshot):
+            raise party.RuleError("stock_switch_scope_unavailable")
+        if host.last_game.get("sequence", 0) <= snapshot["sequence"]:
+            host.last_game = {**host.last_game, KEY: {**host.last_game.get(KEY, {}), actor: row}}
+    else:
+        host.last_game = snapshot
+        host.last_seen = time.monotonic()
     result = {"native_stock_switch_interaction": {"actor": actor, "powered": row["powered"]},
               KEY: {"map": game["map"], "epoch": epoch, "switches": {actor: row}}}
     receipts.append({"id": operation, "request": fingerprint, "result": result})
@@ -130,9 +137,15 @@ async def project(bridge, game, frame, epoch):
         known = local[actor]["lights"]
         bulbs = [f"{name}|{int(state[0])}|{int(state[1])}" for name, state in lights.items()
                  if name in known and isinstance(state, list) and len(state) == 2 and all(type(bit) is bool for bit in state)]
-        updated = await bridge.command(TAG + "-project", actor, area, str(int(target["powered"])),
+        updated = await bridge.command(PROJECT, actor, area, str(int(target["powered"])),
                                        *map(str, angles), *bulbs, timeout=2)
         if (updated.get("state"), updated.get("map")) != ("connected", area):
             return game
-        game = updated
+        if native_stock_door.LOCAL_SCOPE in updated:
+            if not native_stock_door.matches_local_scope(game, updated):
+                return game
+            if game.get("sequence", 0) <= updated["sequence"]:
+                game = {**game, KEY: {**game.get(KEY, {}), actor: updated[KEY][actor]}}
+        else:
+            game = updated
     return game

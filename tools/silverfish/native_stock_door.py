@@ -13,6 +13,8 @@ from .native_gold import valid_guid
 TAG = "native-stock-door"
 KEY = "native_stock_doors"
 ACTION = "native-stock-door-interact"
+DISPATCH = TAG + "-guest-interact"
+LOCAL_SCOPE = "native_stock_interaction_local_scope"
 RESULT = "native_stock_door_interaction"
 DELTA = "native_stock_door_delta"
 FIXTURE = "native-stock-door-fixture"
@@ -43,6 +45,11 @@ def target_actor(target):
         if actor_map(actor):
             return actor
     return None
+
+
+def matches_local_scope(game, receipt):
+    return (game.get("state"), game.get("map"), game.get("pawns", {}).get("local", {}).get("name")) == (
+        receipt.get("state"), receipt.get("map"), receipt[LOCAL_SCOPE])
 
 
 def parse(fields, phase, area):
@@ -272,7 +279,7 @@ class Interactions:
 
 async def _start_motion(host, bridge, character, pawn, area, epoch, actor, operation, fingerprint, future):
     try:
-        reply = await bridge.command(TAG + "-guest-interact", actor, pawn, timeout=4)
+        reply = await bridge.command(DISPATCH, actor, pawn, timeout=4)
     except RuntimeError as error:
         if str(error) == "stock_door_locked" or str(error).startswith("stock_door_guest_"):
             raise party.RuleError(str(error)) from error
@@ -297,7 +304,13 @@ async def _start_motion(host, bridge, character, pawn, area, epoch, actor, opera
             or type(sequence) is not int or sequence <= 0):
         raise RuntimeError("The host did not report the door state at dispatch")
     now = time.monotonic()
-    host.last_game, host.last_seen = reply, now
+    if LOCAL_SCOPE in reply:
+        if host.zone_epoch != epoch or not matches_local_scope(host.last_game, reply):
+            raise party.RuleError("stock_door_scope_unavailable")
+        # The next published sample or native target-transform event confirms the motion.
+        sequence += 1
+    else:
+        host.last_game, host.last_seen = reply, now
     return DoorMotion(area, epoch, actor, character, operation, fingerprint, sequence,
                       before == "closed", now + 2, [future], reply.get("ack", {}).get("id"), destination), reply
 
