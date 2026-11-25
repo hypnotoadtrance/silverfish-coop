@@ -200,12 +200,17 @@ local function text_field(value)
     return (tostring(value or ""):gsub("[%c]", " "))
 end
 
-local function status_row(...)
+function status_publication.lua_row(...)
     local fields = { ... }
     for index, value in ipairs(fields) do
         fields[index] = text_field(value)
     end
     return table.concat(fields, "\t")
+end
+
+local status_row = status_publication.lua_row
+if type(SilverfishFormatLocalStatusRow) == "function" then
+    status_row = function(...) return SilverfishFormatLocalStatusRow(...) or status_publication.lua_row(...) end
 end
 
 local function map_package(world)
@@ -1635,7 +1640,8 @@ local function write_status(state, current_phase, failure, fields, pending, crat
     end
     if failure then rows[#rows + 1] = status_row("diagnostic", failure) end
 
-    local frame = table.concat(rows, "\n") .. "\n"
+    rows[#rows + 1] = ""
+    local frame = table.concat(rows, "\n")
     if pending and pending.dispatched and acknowledged_id == pending.fields[1] then
         local view = pending.guest_view_reply
         if view then

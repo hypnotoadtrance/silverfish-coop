@@ -2,6 +2,7 @@
 #include "local_stash_ticket.hpp"
 
 #include <chrono>
+#include <cctype>
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
@@ -133,6 +134,42 @@ namespace
     int stash_body_limit(const Lua& lua)
     {
         lua.set_integer(silverfish::local_stash_ticket::body_limit);
+        return 1;
+    }
+
+    int format_status_row(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        const auto count = lua_gettop(stack);
+        std::string row;
+        for (int index = 1; index <= count; ++index)
+        {
+            if (index > 1) row.push_back('\t');
+            switch (lua_type(stack, index))
+            {
+            case LUA_TBOOLEAN:
+                if (lua_toboolean(stack, index)) row.append("true");
+                break;
+            case LUA_TNUMBER:
+            case LUA_TSTRING:
+            {
+                std::size_t length{};
+                const auto* text = lua_tolstring(stack, index, &length);
+                const auto start = row.size();
+                row.append(text, length);
+                for (std::size_t field_index = start; field_index < row.size(); ++field_index)
+                {
+                    auto& byte = row[field_index];
+                    if (std::iscntrl(static_cast<unsigned char>(byte))) byte = ' ';
+                }
+                break;
+            }
+            default:
+                // Preserve Lua's handling of nils and custom tostring behavior.
+                return 0;
+            }
+        }
+        lua.set_string(row);
         return 1;
     }
 
@@ -690,6 +727,7 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishTakeLocalBridgeCommand", take);
         lua.register_function("SilverfishClaimLocalBridgeCommand", claim_command);
         lua.register_function("SilverfishLocalBridgeStashBodyLimit", stash_body_limit);
+        lua.register_function("SilverfishFormatLocalStatusRow", format_status_row);
         lua.register_function("SilverfishPublishLocalBridgeReply", publish);
         lua.register_function("SilverfishPublishLocalBridgeStatus", publish_status);
         lua.register_function("SilverfishEnqueueLocalBridgeInput", enqueue_input);

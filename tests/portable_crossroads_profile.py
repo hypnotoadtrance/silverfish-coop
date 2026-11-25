@@ -204,6 +204,11 @@ async def profile_world(host, guest, area, probe):
         return {"reads_per_path": int(calls), "native_ms": native_ms, "lua_ms": lua_ms,
                 "all_vitals_matched": True, "wrong_pawn_and_save_refused": True}
 
+    async def compare_rows(seat):
+        calls, native_ms, lua_ms, native_cycles, lua_cycles = (await command(seat, "rows")).split(",")
+        return {"rows_per_path": int(calls), "native_ms": float(native_ms), "lua_ms": float(lua_ms),
+                "native_cycles": int(native_cycles), "lua_cycles": int(lua_cycles), "all_rows_matched": True}
+
     def position(status):
         return status.get("game", {}).get("pawns", {}).get("local", {}).get("location")
 
@@ -226,6 +231,8 @@ async def profile_world(host, guest, area, probe):
     assert movement and max(movement) >= 40, movement
     after_movement = await transport()
     comparison = await asyncio.gather(*(compare_vitals(seat) for seat in seats.values()))
+    rows = await asyncio.gather(*(compare_rows(seat) for seat in seats.values()))
     return {"idle": idle, "guest_walking": moving, "guest_max_displacement_cm": max(movement),
             "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(after_idle, after_movement),
+            "row_format_comparison": dict(zip(seats, rows, strict=True)),
             "vitals_comparison": dict(zip(seats, comparison, strict=True))}

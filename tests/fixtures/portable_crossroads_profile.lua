@@ -58,6 +58,40 @@ local function result()
     return ("%.5f"):format(complete.elapsed) .. table.concat(rows) .. table.concat(peak)
 end
 
+local function compare_rows()
+    local lua_status_row = status_publication.lua_row
+    local samples = {
+        {"pawn", "local", "Player_FP_C /Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.Player_FP_C_17",
+            248.75, -111143.078, 33305.762, 1325.09, "PlayerControler_FP_C PC", 250},
+        {"native-loot-pickup", 1, "finite", "valid", "Item Bandage", "\tcontains\ncontrols\r\0", false, true},
+        {"ack", "sample", "accepted", "merchant é", -17, math.maxinteger, -0.0, "a\127b"},
+        {},
+    }
+    for _, fields in ipairs(samples) do
+        local expected = lua_status_row(table.unpack(fields))
+        assert(SilverfishFormatLocalStatusRow(table.unpack(fields)) == expected, "native row bytes differ")
+        assert(status_row(table.unpack(fields)) == expected, "normal status row bytes differ")
+    end
+    local custom = setmetatable({}, {__tostring = function() return "custom\tvalue" end})
+    assert(SilverfishFormatLocalStatusRow("row", custom) == nil and status_row("row", custom) == "row\tcustom value")
+    assert(status_row("row", nil) == lua_status_row("row", nil))
+    local rounds = 512
+    local function measure(format)
+        local started, started_cycles = stamp()
+        for _ = 1, rounds do
+            for _, fields in ipairs(samples) do format(table.unpack(fields)) end
+        end
+        local now, cycles = stamp()
+        return (now - started) / 1000, cycles - started_cycles
+    end
+    local native_first, native_first_cycles = measure(status_row)
+    local lua_first, lua_first_cycles = measure(lua_status_row)
+    local lua_second, lua_second_cycles = measure(lua_status_row)
+    local native_second, native_second_cycles = measure(status_row)
+    return ("%d,%.3f,%.3f,%d,%d"):format(rounds * 2 * #samples, native_first + native_second,
+        lua_first + lua_second, native_first_cycles + native_second_cycles, lua_first_cycles + lua_second_cycles)
+end
+
 LoopInGameThreadWithDelay(1, function()
     local active = capture
     if not active then return end
@@ -109,6 +143,9 @@ LoopInGameThreadWithDelay(50, function()
     elseif action == "vitals" and not capture then
         local ok, value = pcall(SilverfishProfileCrossroadsVitals)
         if ok then message = value else message = "vitals comparison failed: " .. tostring(value) end
+    elseif action == "rows" and not capture then
+        local ok, value = pcall(compare_rows)
+        if ok then message = value else message = "status rows comparison failed: " .. tostring(value) end
     end
     local output = assert(io.open(prefix .. "reply.tsv", "wb"))
     output:write(ticket, message and "\tok\t" or "\terror\t", message or "unexpected sampling request", "|end")
