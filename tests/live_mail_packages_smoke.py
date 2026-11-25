@@ -36,9 +36,10 @@ async def verify_mail_packages(host, guest, pawn):
     host_pack = await inventory(host_run)
     authority = await suite.wait_resident_status(host_run, lambda state: state.get("state") == "hosting")
     seeded = time.time()
-    guids = (await probe(host, "seed-mail")).split(";")
+    mail_pairs = [(await probe(host, "seed-mail")).split(";") for _ in range(4)]
+    guids = [guid for pair in mail_pairs for guid in pair]
     guest_pack = await inventory(guest_run)
-    assert len(guids) == 2 and {guest_pack[guid]["class_path"] for guid in guids} == consumable.MAIL_CLASSES
+    assert len(set(guids)) == 8 and {guest_pack[guid]["class_path"] for guid in guids} == consumable.MAIL_CLASSES
     frame = await suite.wait_resident_status(guest_run, lambda state: state.get("gameplay_fresh"))
     async with asyncio.timeout(10):
         while not any(row["event"] == "native_guest_ui_projected" and row["time_unix"] >= seeded
@@ -47,7 +48,8 @@ async def verify_mail_packages(host, guest, pawn):
 
     evidence = {}
     key = consumable.RESULT[consumable.MAIL_PACKAGE]
-    for guid, drag in zip(guids, (False, True), strict=True):
+    for index, guid in enumerate(guids):
+        drag = index % 2 == 1
         class_name = guest_pack[guid]["class_path"].rsplit(".", 1)[1]
         host_before, guest_before = await asyncio.gather(props(host, "true"), props(guest, "false"))
         started = time.time()
@@ -81,6 +83,11 @@ async def verify_mail_packages(host, guest, pawn):
         assert suite.campaign_save_hashes(host.campaign) == saves, "Opening a mail package wrote an early save"
         evidence[guid] = {"gesture": "drag" if drag else "context", "receipt": receipt,
                           "shared_props": host_new, "shared_items": [item["class_path"] for item in banked]}
+        if index >= 1 and any(row["shared_props"] for row in evidence.values()) and any(
+                row["shared_items"] for row in evidence.values()):
+            break
+    assert any(row["shared_props"] for row in evidence.values()), "The stock rolls did not produce a shared prop"
+    assert any(row["shared_items"] for row in evidence.values()), "The stock rolls did not produce a shared item"
     return {"stock_mail_packages": evidence, "deferred_save": True}
 
 
