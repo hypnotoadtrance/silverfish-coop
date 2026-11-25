@@ -2570,6 +2570,22 @@ async def verify_dock_enemy_drop(host: Seat, guest: Seat, arrival: dict) -> dict
             "duplicate": refused["error"], "checkpoint_unchanged": True}
 
 
+async def tap_dock_primary(host: Seat, guest: Seat, command) -> dict:
+    blockers = "unavailable"
+    try:
+        async with asyncio.timeout(4):
+            while True:
+                tap = await submit(guest.client / "run", "native-guest-primary-input-fixture")
+                if tap["ok"]:
+                    return tap
+                # This refusal occurs before either stock input wrapper runs.
+                assert "native_guest_primary_fixture_scope_unavailable" in tap.get("error", ""), tap
+                blockers = await asyncio.gather(*(command(seat, "dock-garage-blockers") for seat in (host, guest)))
+                await asyncio.sleep(.06)
+    except TimeoutError as error:
+        raise AssertionError({"stock_primary_input_gates": blockers}) from error
+
+
 async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, retaliation: bool = False,
                                      pursuit: bool = False, held_mask: bool = False, grounded_gait: bool = False,
                                      shot_view: bool = False) -> dict:
@@ -2630,8 +2646,7 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
     await asyncio.sleep(.2)
     assert await command(host, f"dock-aim\t{target}") == "ready"
     started = time.time()
-    tap = await submit(guest_run, "native-guest-primary-input-fixture")
-    assert tap["ok"], tap
+    tap = await tap_dock_primary(host, guest, command)
     sequence = tap["native_guest_primary_fixture"]["sequence"]
     async with asyncio.timeout(8):
         while True:
@@ -2762,18 +2777,7 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
 
     async def shoot(expected_health, *, should_hit, contact_required=False):
         started = time.time()
-        blockers = "unavailable"
-        try:
-            async with asyncio.timeout(4):
-                while True:
-                    tap = await submit(guest_run, "native-guest-primary-input-fixture")
-                    if tap["ok"]:
-                        break
-                    assert "native_guest_primary_fixture_scope_unavailable" in tap.get("error", ""), tap
-                    blockers = await asyncio.gather(*(command(seat, "dock-garage-blockers") for seat in (host, guest)))
-                    await asyncio.sleep(.06)
-        except TimeoutError as error:
-            raise AssertionError(dict(stock_pose_blockers=blockers, shot=should_hit)) from error
+        tap = await tap_dock_primary(host, guest, command)
         sequence = tap["native_guest_primary_fixture"]["sequence"]
         async with asyncio.timeout(8):
             while not (events := [row for row in await resident_events(guest_run, frame)
