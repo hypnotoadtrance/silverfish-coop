@@ -123,6 +123,8 @@ function view.animate_bolts(get_world)
     bolt_view.animate(get_world)
 end
 
+view.update_npc_melee = npc_melee.update
+
 local function record_npc_melee(now, id, path, rate, blend_in, blend_out)
     serial = serial + 1
     record({serial, "npc-melee", id, path, rate, blend_in, blend_out, expires = now + .25})

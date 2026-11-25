@@ -149,7 +149,13 @@ function melee.sync(state, phase, on_capture)
         end)
         hooked = true
     end
-    if current.count == 0 then return end
+end
+
+function melee.update(get_world)
+    if not current or current.count == 0 or not valid(statics) then return end
+    local world = get_world()
+    if not same(current.world, world) then return end
+    local hosting = current.capture ~= nil
     local now = statics:GetRealTimeSeconds(world)
     if now < current.next_scan then return end
     current.next_scan = now + (hosting and .5 or .05)
