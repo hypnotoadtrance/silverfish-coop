@@ -5951,6 +5951,19 @@ async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str, *, large
             "stash_page_files_seen": False, "saves_unchanged_before_checkpoint": True}
 
 
+def instrument_crate_loot_presentation(script: str) -> str:
+    marker = "            local pickable = ok and not item.moving\n"
+    assert script.count(marker) == 1
+    return script.replace(marker, marker + '''            if phase == "connected" and pickable and not was_pickable then
+                local micros = SilverfishBridgeProfileStamp()
+                local path = os.getenv("SILVERFISH_COOP_BRIDGE") .. "/portable-crate-loot.tsv"
+                local output = assert(io.open(path, "ab"))
+                output:write(id, "\\t", micros, "\\n")
+                output:close()
+            end
+''', 1)
+
+
 async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_positions: bool = False, cold: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_state, guest_state = await asyncio.gather(
@@ -5989,8 +6002,10 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
     before = save_fingerprints()
     assert all(before)
     request_at = time.monotonic()
-    guest_actor = await portable_probe_command(guest.bridge, "portable-crate", "coldpress" if cold else "press")
+    wall_offset_us = (time.time_ns() - time.monotonic_ns()) / 1000
+    reply = await portable_probe_command(guest.bridge, "portable-crate", "coldpress" if cold else "press")
     pressed_at = time.monotonic()
+    guest_actor, _, stamp = reply.partition("|")
     # The guest's stock actor can have a different Unreal instance suffix.
     prefix = crate.rsplit("_", 1)[0] + "_"
     assert guest_actor.startswith(prefix) and guest_actor[len(prefix):].isdigit(), guest_actor
@@ -6013,6 +6028,35 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
     received, = await events(guest_run, guest_state, "native_stock_crate_interaction")
     applied, = await events(host_run, host_state, "native_loot_roll_accepted")
     assert received["input_source"] == "memory_input" and received["operation_id"] == applied["id"] == roll["id"]
+    timings = {}
+    presentation = guest.bridge.directory / "portable-crate-loot.tsv"
+    if memory_positions and cold:
+        assert stamp.isascii() and stamp.isdigit(), "Cold crate fixture did not report its native press timestamp"
+        pressed_us = int(stamp)
+        assert request_at <= pressed_us / 1_000_000 <= pressed_at, stamp
+        items = {native_world_loot.crate_identity(roll["id"], item["guid"]) for item in roll["items"]}
+        assert items
+        first_views = {}
+        async with asyncio.timeout(6):
+            while items - first_views.keys():
+                if presentation.is_file():
+                    for row in presentation.read_text(encoding="ascii").splitlines():
+                        identity, _, micros = row.partition("\t")
+                        if identity in items and micros.isascii() and micros.isdigit():
+                            first_views.setdefault(identity, int(micros))
+                if items - first_views.keys():
+                    await asyncio.sleep(.02)
+        pressed_wall_us = pressed_us + wall_offset_us
+        committed_ms = (applied["time_unix"] * 1_000_000 - pressed_wall_us) / 1000
+        reply_ms = (received["time_unix"] * 1_000_000 - pressed_wall_us) / 1000
+        first_ms = (min(first_views.values()) - pressed_us) / 1000
+        last_ms = (max(first_views.values()) - pressed_us) / 1000
+        assert 0 <= committed_ms <= reply_ms < 6000 and 0 <= first_ms <= last_ms < 6000, (
+            committed_ms, reply_ms, first_ms, last_ms)
+        timings = {"press_to_host_roll_ms": round(committed_ms, 2), "press_to_guest_reply_ms": round(reply_ms, 2),
+                   "press_to_first_world_item_ms": first_ms, "press_to_last_world_item_ms": last_ms,
+                   "guest_reply_to_last_world_item_ms": round(last_ms - reply_ms, 2),
+                   "world_items_presented": len(items)}
     assert save_fingerprints() == before
     return {
         "local_bridge": {"host": host_state["local_bridge"], "guest": guest_state["local_bridge"]},
@@ -6025,6 +6069,7 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
         "probe_request_to_visible_roll_ms": round(1000 * (visible_at - request_at), 2),
         "probe_request_to_guest_lid_ms": round(1000 * (lid_at - request_at), 2),
         "guest_press_to_preview_motion_ms": float(motion_ms), "guest_preview_collision_preserved": True,
+        **timings,
     }
 
 
@@ -6974,6 +7019,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["crossroads_profile_overlays"] = [
                 probes.enter_context(portable_main_overlay(game, crossroads_overlay)) for game in games
             ]
+            if stock_crate_ring:
+                for game in games:
+                    probes.enter_context(portable_script_overlay(game, "native_guest_drop_projection.lua",
+                                                                  instrument_crate_loot_presentation))
             proof["crossroads_input_overlays"] = [
                 probes.enter_context(portable_script_overlay(game, "players.lua", instrument_input_mappings))
                 for game in games

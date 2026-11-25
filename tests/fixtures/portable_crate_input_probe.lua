@@ -89,9 +89,10 @@ local function press(mode)
         motion = {crate = crate, box = box, panel = panel, mesh_class = mesh_class, statics = statics, world = world,
             components = components, panel_collision = panel:GetCollisionEnabled(), box_collision = box:GetCollisionEnabled(),
             rotation = {Pitch = angles.Pitch, Yaw = angles.Yaw, Roll = angles.Roll}, pressed = statics:GetRealTimeSeconds(world)}
+        local pressed_us = type(SilverfishBridgeProfileStamp) == "function" and SilverfishBridgeProfileStamp()
         pawn:InpActEvt_IA_Interact_K2Node_EnhancedInputActionEvent_19(started, 0, 0, action)
         pawn:InpActEvt_IA_Interact_K2Node_EnhancedInputActionEvent_21(completed, .05, .05, action)
-        return crate:GetFullName()
+        return pressed_us and crate:GetFullName() .. "|" .. pressed_us or crate:GetFullName()
     end)
     camera:K2_SetRelativeRotation(restore, false, {}, true)
     pawn:LookTrace()

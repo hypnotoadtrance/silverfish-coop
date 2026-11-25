@@ -213,6 +213,43 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(task, 1)
         client.bridge.command.assert_awaited_once()
 
+    async def test_crate_reply_wakes_world_loot_and_drops_a_projection_from_the_previous_visit(self):
+        crate = next(name for name, area in native_loot.CRATES.items() if area == OBSERVATORY)
+        roll = {"id": "a" * 32, "map": OBSERVATORY, "crate": crate, "items": []}
+        client = self.guest(AsyncMock(return_value={"ok": True, "native_loot_roll": roll}))
+        client.host_session, client.zone_epoch = "session", "old-visit"
+        client.expected_zone = OBSERVATORY
+        state = {"state": "connected", "map": OBSERVATORY, "sequence": 1, native_world_loot.CAPABILITY: 2}
+        client.last_game = state
+        client.gameplay_seen = service.time.monotonic()
+        client.transport.connected = client.transport.game_access = True
+        client.transport.take_loot_motion = lambda: []
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        async def project(_bridge, _game, rolls, _generation, zone, **options):
+            self.assertEqual((rolls[crate], zone, options["active"]), (roll, "old-visit", True))
+            started.set()
+            await finish.wait()
+            client.stopping = True
+            return {**state, "sequence": 3}
+
+        client.world_loot.sync = AsyncMock(side_effect=project)
+        task = asyncio.create_task(client.run_world_loot())
+        try:
+            await client.gameplay_action("native-loot-open", roll["id"], crate)
+            await asyncio.wait_for(started.wait(), .5)
+            client.zone_epoch = "new-visit"
+            current = {**state, "sequence": 2}
+            client.last_game = current
+            finish.set()
+            await asyncio.wait_for(task, .5)
+            self.assertIs(client.last_game, current)
+            client.world_loot.sync.assert_awaited_once()
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
     async def test_legacy_lid_restoration_keeps_its_turn_during_other_projection_backoff(self):
         client = self.guest(AsyncMock())
         client.bridge.local_bridge = None

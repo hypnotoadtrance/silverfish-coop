@@ -5245,6 +5245,7 @@ class Client:
         self.inventory_drop_scope = None
         self.crate_intents = native_loot.OpenIntents()
         self.crate_lids = native_loot.GuestCrateProjection()
+        self.world_loot_wake = asyncio.Event()
         self.last_lockpick_result = 0
         self.pending_lockpick_unlocks = set()
         self.stock_door_requests = {}
@@ -5569,7 +5570,10 @@ class Client:
                     and native_loot.CRATES.get(target) == area):
                 await self.cancel_gameplay_snapshot()
                 if (self.last_game.get("map"), self.zone_epoch, self.host_session) == (area, epoch, session):
-                    self.gameplay.setdefault(native_loot.STATE_KEY, {})[target] = roll
+                    rolls = self.gameplay.setdefault(native_loot.STATE_KEY, {})
+                    if rolls.get(target) != roll:
+                        rolls[target] = roll
+                        self.world_loot_wake.set()
             placed = reply.get("native_authored_pickup_claim")
             if action == native_authored_pickup.ACTION and isinstance(placed, dict):
                 source = target.partition("@")[0] if target else None
@@ -6801,6 +6805,55 @@ class Client:
                     await request
             self.stock_door_requests.clear()
 
+    async def project_world_loot(self) -> None:
+        game = self.last_game
+        area, session, zone = game.get("map"), self.host_session, self.zone_epoch
+        version = game.get(native_world_loot.CAPABILITY, 0)
+        motion_packets = self.transport.take_loot_motion()
+        if not self.invite.get("native_loot_input") and version < 1:
+            return
+        active = (self.transport.connected and self.transport.game_access and game.get("state") == "connected"
+                  and area == self.expected_zone and not self.needs_travel and not self.server_transitioning
+                  and not self.stopping)
+        fresh = active and time.monotonic() - self.gameplay_seen < 2
+        gameplay = self.gameplay
+        motion = self.loot_motion_playback.frame(
+            motion_packets, area, zone, active=active and version >= 1, now=time.monotonic(),
+        )
+        try:
+            snapshot = await self.world_loot.sync(
+                self.bridge, game, gameplay.get(native_loot.STATE_KEY, {}),
+                f"{session}:{self.stack_drop_projection.admission}", zone, active=fresh,
+                enemy_frame=gameplay.get(native_enemy_shells.FRAME_KEY) if fresh and version >= 1
+                and area in native_enemy_loot.BY_MAP else None,
+                enemy_rolls=gameplay.get(native_enemy_loot.STATE_KEY),
+                stock_enemy_drops=gameplay.get(native_stock_enemy_drops.STATE),
+                enemy_motion=motion,
+                carried=gameplay.get(native_world_loot.MOVING),
+                player_drops=gameplay.get(native_guest_drop_record.STATE)
+                if version >= native_world_loot.SHARED_PICKUPS_VERSION else None,
+                mushroom_frame=gameplay.get(native_mushrooms.KEY),
+                quest_package=gameplay.get(native_host_dig_live.PACKAGE_FRAME),
+            )
+        except (OSError, RuntimeError, TimeoutError) as error:
+            if self.world_loot.last_error != str(error):
+                self.world_loot.last_error = str(error)
+                self.control.event("world_loot_projection_unavailable", reason=str(error))
+        else:
+            current = self.last_game
+            if ((self.host_session, self.zone_epoch) == (session, zone)
+                    and (current.get("map"), current.get("state")) == (area, game.get("state"))
+                    and current.get("pawns", {}).get("local", {}).get("name")
+                    == game.get("pawns", {}).get("local", {}).get("name")
+                    and snapshot.get("sequence", 0) >= current.get("sequence", 0)):
+                self.last_game = snapshot
+
+    async def run_world_loot(self) -> None:
+        while not self.stopping:
+            await self.world_loot_wake.wait()
+            self.world_loot_wake.clear()
+            await self.project_world_loot()
+
     async def run_stock_crates(self) -> None:
         next_lids = 0
         while not self.stopping:
@@ -6923,15 +6976,17 @@ class Client:
         combat = (asyncio.create_task(self.run_stock_combat_inputs())
                   if resident and self.guest_primary_input else None)
         cues = asyncio.create_task(self.run_weapon_cues()) if resident else None
+        world_loot = asyncio.create_task(self.run_world_loot()) if resident else None
         prop_poses = (asyncio.create_task(self.prop_carry.stream_local_poses())
                       if self.prop_carry.has_local_pose_stream else None)
         try:
             await self.run_session(pause_exit=pause_exit)
         finally:
-            for task in (interact, crates, cues, combat):
+            input_tasks = (interact, crates, cues, combat, world_loot)
+            for task in input_tasks:
                 if task is not None:
                     task.cancel()
-            for task in (interact, crates, cues, combat):
+            for task in input_tasks:
                 if task is not None:
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
@@ -6985,6 +7040,10 @@ class Client:
                     self.next_retry = time.monotonic() + self.auto_delay
             active = (self.transport.connected and self.last_game.get("state") == "connected"
                       and not self.needs_travel and not self.server_transitioning)
+            if self.bridge.local_bridge is not None:
+                self.world_loot_wake.set()
+            else:
+                await self.project_world_loot()
             if not await native_guest_consumable.service_cooked_meals(self, active):
                 await self.guest_ui.sync_health(self, active)
             if active and self.last_game.get("map") == self.expected_zone and time.monotonic() - self.gameplay_seen < 2:
@@ -7096,31 +7155,6 @@ class Client:
                 self.last_game = await self.enemy_shell_view.sync(
                     self.bridge, self.last_game, "connected", self.zone_epoch, frame, present=not world_items,
                 )
-            motion_packets = self.transport.take_loot_motion()
-            if self.invite.get("native_loot_input") or world_items:
-                try:
-                    motion = self.loot_motion_playback.frame(
-                        motion_packets, self.last_game.get("map"), self.zone_epoch,
-                        active=active and world_items and self.transport.game_access, now=time.monotonic(),
-                    )
-                    self.last_game = await self.world_loot.sync(
-                        self.bridge, self.last_game, self.gameplay.get(native_loot.STATE_KEY, {}),
-                        f"{self.host_session}:{self.stack_drop_projection.admission}", self.zone_epoch,
-                        active=active and self.transport.game_access and not self.stopping
-                        and time.monotonic() - self.gameplay_seen < 2,
-                        enemy_frame=frame if world_items else None,
-                        enemy_rolls=self.gameplay.get(native_enemy_loot.STATE_KEY),
-                        stock_enemy_drops=self.gameplay.get(native_stock_enemy_drops.STATE),
-                        enemy_motion=motion,
-                        carried=self.gameplay.get(native_world_loot.MOVING),
-                        player_drops=self.gameplay.get(native_guest_drop_record.STATE) if shared_pickups else None,
-                        mushroom_frame=self.gameplay.get(native_mushrooms.KEY),
-                        quest_package=self.gameplay.get(native_host_dig_live.PACKAGE_FRAME),
-                    )
-                except (OSError, RuntimeError) as error:
-                    if self.world_loot.last_error != str(error):
-                        self.world_loot.last_error = str(error)
-                        self.control.event("world_loot_projection_unavailable", reason=str(error))
             if not active and self.last_game.get("native_bag_projection", {}).get("count"):
                 with contextlib.suppress(OSError, RuntimeError):
                     self.last_game = await self.bridge.command("native-bag-projection-clear", timeout=2)
