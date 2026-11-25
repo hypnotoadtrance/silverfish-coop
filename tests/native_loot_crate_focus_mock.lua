@@ -124,13 +124,13 @@ project[5] = "99"
 assert(input.command(project, state, "connected") == "stock crate exhausted projection verified")
 assert(response == 0 and query_collision == 0 and crate.Looted and door.RelativeRotation.Pitch == 81)
 package.loaded.native_loot.profiles = function() return {profile} end
-local rows = input.rows(state, "connected", function(...) return {...} end)
-assert(rows[2][1] == "native-loot-crate-input" and rows[2][4] == "exhausted" and rows[2][5] == 99)
-print("An authored random lid pose keeps the stock collision response and equivalent rotation")
-
 local function row(...)
     return table.concat({...}, "\t")
 end
+
+local rows = input.rows(state, "connected", row)
+assert(rows[1] == row("native-loot-crate-state", profile.index, "exhausted", 0, "-", 99))
+print("An authored random lid pose keeps the stock collision response and equivalent rotation")
 
 local action = "native-loot-crate-diagnostic"
 local query = {"read", action, area, pawn:GetFullName(), profile.name}
@@ -208,7 +208,7 @@ local function status_case(installed, headless, resident)
     local function status(fields, pending, requested)
         time = time + .3
         write(state, "connected", nil, fields, pending, requested)
-        assert((memory or file):find("native-loot-crate-input", 1, true))
+        assert((memory or file):find("native-loot-crate-state", 1, true))
     end
     local function has_detail(frame)
         return frame and frame:find(action .. "\t", 1, true)

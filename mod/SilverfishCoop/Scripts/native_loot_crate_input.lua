@@ -760,18 +760,19 @@ local function sample_profile(state, phase, status_row, profile, diagnostic_only
         local angle = observe_angle(profile, info.door)
         local spent = exhausted(current.crate, info.door, info.box, info.second, open_poses(profile, info.second, angle),
             profile.door_locations or {}, profile)
-        local status = spent and "exhausted" or "ready"
-        local args = spent and angle and {angle} or {}
-        rows[#rows + 1] = status_row("native-loot-crate-input", profile.map, profile.name, status, table.unpack(args))
-        if profile.lockable and type(current.crate.Locked) == "boolean" then
-            rows[#rows + 1] = status_row("native-loot-vehicle-lock", profile.map, profile.name, current.crate.Locked and 1 or 0)
+        local locked = "-"
+        if profile.lockable then
+            local value = current.crate.Locked
+            if type(value) == "boolean" then locked = value and 1 or 0 end
         end
-        if current.host and info.looted == false and info.box and (info.collision == 1 or info.collision == 3) then
+        local replenished = false
+        if current.host and not spent and current.name == state.local_pawn.name
+            and info.looted == false and info.box and (info.collision == 1 or info.collision == 3) then
             local verified, active = pcall(loot.temporary_activation, current.crate, current.pawn)
-            if verified and active == false then
-                rows[#rows + 1] = status_row("native-loot-crate-replenished", profile.map, profile.name, current.name)
-            end
+            replenished = verified and active == false
         end
+        rows[#rows + 1] = status_row("native-loot-crate-state", profile.index, spent and "exhausted" or "ready",
+            replenished and 1 or 0, locked, spent and angle or "-")
     end
     if active and profile.stock_alarm then
         local ok, lit, audible = pcall(alarm.read, current.crate)

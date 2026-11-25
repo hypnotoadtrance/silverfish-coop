@@ -71,7 +71,7 @@ from . import native_host_dig, native_host_dig_live, native_package_handoff_jour
 from . import native_title_entry
 from .native_host_landmine import parse as parse_host_landmine
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
-from .authored_loot import (CRATES as AUTHORED_CRATES, LEGACY_CRATE, loot_capacity, random_lid,
+from .authored_loot import (CRATES as AUTHORED_CRATES, CRATE_NAMES_BY_INDEX, LEGACY_CRATE, loot_capacity, random_lid,
                             valid_item_transform, valid_lid_angle, lockable_container)
 from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
 from .native_quest_catalog import parse as parse_quest_catalog
@@ -714,6 +714,39 @@ def _finite(value: str) -> float | None:
     if not math.isfinite(number):
         raise ValueError("Snapshot contained a non-finite number")
     return number
+
+
+def _store_crate_state(data: dict, area: str, crate: str, state: str, angle_text: str | None = None) -> None:
+    row = {"map": area, "crate": crate, "state": state}
+    if angle_text is not None:
+        angle, lid = _finite(angle_text), random_lid(crate)
+        if state != "exhausted" or not lid or not valid_lid_angle(lid, angle):
+            raise ValueError("Invalid stock lid pose")
+        row[lid[0]] = angle
+    data.setdefault("native_loot_crates", {})[crate] = row
+    if crate == LEGACY_CRATE:
+        data["native_loot_crate_input"] = row
+
+
+def _read_crate_state(data: dict, fields: list[str]) -> None:
+    _, raw_index, state, replenished, locked, angle = fields
+    index, area = int(raw_index), data.get("map")
+    if not 0 < index < len(CRATE_NAMES_BY_INDEX):
+        raise ValueError("Unknown stock crate index")
+    crate = CRATE_NAMES_BY_INDEX[index]
+    if (data.get("state") not in ("hosting", "connected") or AUTHORED_CRATES[crate] != area
+            or state not in ("ready", "exhausted") or replenished not in {"0", "1"}
+            or locked not in {"-", "0", "1"} or locked != "-" and not lockable_container(crate, area)
+            or crate in data.get("native_loot_crates", {})):
+        raise ValueError("Invalid stock crate state")
+    if replenished == "1":
+        pawn = data["pawns"].get("local", {}).get("name")
+        if data.get("state") != "hosting" or state != "ready" or not pawn:
+            raise ValueError("Invalid replenished stock crate")
+        data.setdefault(native_loot.REPLENISHED, {})[crate] = {"map": area, "crate": crate, "pawn": pawn}
+    _store_crate_state(data, area, crate, state, None if angle == "-" else angle)
+    if locked != "-":
+        data.setdefault(native_loot.VEHICLE_LOCKS, {})[crate] = locked == "1"
 
 
 def _parse_stock_loot_receipt(fields: list[str]) -> dict:
@@ -2426,17 +2459,11 @@ class Bridge:
                                                 "limit": int(fields[11]), "sequence": int(fields[12])}
                     if len(fields) == 14:
                         data["native_wipe_view"]["screen"] = fields[13]
+                elif fields[0] == "native-loot-crate-state":
+                    _read_crate_state(data, fields)
                 elif (fields[0] == "native-loot-crate-input" and len(fields) in (4, 5)
                       and AUTHORED_CRATES.get(fields[2]) == fields[1] and fields[3] in ("ready", "exhausted")):
-                    row = {"map": fields[1], "crate": fields[2], "state": fields[3]}
-                    if len(fields) == 5:
-                        angle, lid = _finite(fields[4]), random_lid(fields[2])
-                        if fields[3] != "exhausted" or not lid or not valid_lid_angle(lid, angle):
-                            raise ValueError("Invalid stock lid pose")
-                        row[lid[0]] = angle
-                    data.setdefault("native_loot_crates", {})[fields[2]] = row
-                    if fields[2] == LEGACY_CRATE:
-                        data["native_loot_crate_input"] = row
+                    _store_crate_state(data, *fields[1:])
                 elif fields[0] == "loot-lockpick" and len(fields) == 9 and data.get("state") == "connected":
                     data.setdefault(native_loot.LOCKPICK_INPUTS, []).append(native_loot.parse_lockpick(fields))
                 elif (fields[0] == "native-loot-vehicle-lock" and len(fields) == 4

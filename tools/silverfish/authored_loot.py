@@ -512,6 +512,8 @@ OFFICE_DESK = full_name(*OFFICE_DESK_PROFILE[:2])
 CRATES = {full_name(area, actor): area for area, actor, _, _ in CRATE_PROFILES}
 CRATES.update({SMALL_CABINET: LAB_E206, OFFICE_DESK: LAKE})
 CRATES.update({full_name(area, actor, family): area for family, area, actor, *_ in CONTAINER_PLACEMENTS})
+# One-based order shared by the generated Lua and C++ stock crate registries.
+CRATE_NAMES_BY_INDEX = ("", *CRATES)
 CONTAINER_CAPACITIES = {full_name(area, actor, family): CLASS_CAPACITIES[family]
                         for family, area, actor, *_ in CONTAINER_PLACEMENTS}
 CONTAINER_CAPACITIES.update({SMALL_CABINET: 4, OFFICE_DESK: 4})

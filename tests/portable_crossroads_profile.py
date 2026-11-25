@@ -41,7 +41,8 @@ def instrument_profile(source):
     ):
         assert status_code.count(needle) == 1, needle
         if call is None:
-            status_code = status_code.replace(needle, needle + f'    {mark}("status_concat", #rows - 1, #frame)\n')
+            status_code = status_code.replace(needle, needle + f'    {mark}("status_concat", #rows - 1, #frame)\n'
+                                              '    status_publication.profile.status_size(rows)\n')
         else:
             status_code = status_code.replace(needle, call + needle)
     rest = status_code + boundary + after_status
@@ -349,6 +350,7 @@ end
 
 
 def read_comparison(raw):
+    raw, memory, sizes = raw.split("|")
     raw, status = raw.split("^")
     summary, slow_frame = raw.split("!")
     duration, *sections = summary.split(";")
@@ -379,8 +381,16 @@ def read_comparison(raw):
         status_peaks[name] = {"elapsed_ms": float(wall), "thread_cycles": int(cycles),
                               "lua_heap_delta_kib": float(heap_delta)}
     assert int(max_bytes) > 0 and int(max_rows) > 0 and "status_native_publish" in status_peaks, status
+    heap_calls = {}
+    for entry in memory.split(";")[1:]:
+        name, count, drops, growth, peak_growth = entry.split(",")
+        heap_calls[name] = {"nonnegative_samples": int(count), "heap_drops": int(drops),
+                            "inclusive_growth_kib": float(growth), "peak_inclusive_growth_kib": float(peak_growth)}
+    status_bytes_by_tag = {entry.split(",")[0]: int(entry.split(",")[1]) for entry in sizes.split(";")[1:]}
+    assert status_bytes_by_tag and sum(status_bytes_by_tag.values()) <= int(max_bytes)
     return {"seconds": float(duration), "timings": totals, "status_sections": status_peaks,
             "max_status_bytes": int(max_bytes), "max_status_rows": int(max_rows), "lua_heap": heap,
+            "heap_calls": heap_calls, "sample_status_bytes_by_tag": status_bytes_by_tag,
             "slowest_interval": {"elapsed_ms": float(elapsed), "inclusive_calls_ms": slow_calls,
                                  "thread_cycles": int(peak_cycles), "inclusive_call_cycles": call_cycles}}
 

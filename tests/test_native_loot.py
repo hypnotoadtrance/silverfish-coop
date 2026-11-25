@@ -1,4 +1,5 @@
 import asyncio
+import re
 import tempfile
 import time
 import unittest
@@ -7,8 +8,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call, patch
 
 from tools.silverfish import native_host_save, native_loose_pickup, native_loot, native_stock_enemy_drops, party, runtime
-from tools.silverfish.authored_loot import (CRATES, LEGACY_CRATE, OFFICE_DESK, PLACEMENTS, OVERRIDDEN_PLACEMENTS,
-                                           SMALL_CABINET, full_name, loot_capacity, random_lid)
+from tools.silverfish.authored_loot import (CRATES, CRATE_NAMES_BY_INDEX, LEGACY_CRATE, OFFICE_DESK,
+                                           PLACEMENTS, OVERRIDDEN_PLACEMENTS, SMALL_CABINET, full_name,
+                                           lockable_container, loot_capacity, random_lid)
 from tools.silverfish.campaign import CampaignFormatError
 from tools.silverfish.generate_authored_loot_registry import outputs, survey
 from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, OBSERVATORY, RAIL_YARD
@@ -22,6 +24,12 @@ OPERATION = "f" * 32
 
 
 class AuthoredCrateRegistryTests(unittest.TestCase):
+    def test_compact_status_indices_match_every_generated_lua_profile(self):
+        registry = outputs()["mod/SilverfishCoop/Scripts/authored_loot_registry.lua"]
+        recorded = re.findall(r'index = (\d+), map = "([^"]+)",\s+name = "([^"]+)"', registry)
+        expected = [(str(index), CRATES[crate], crate) for index, crate in enumerate(CRATE_NAMES_BY_INDEX[1:], 1)]
+        self.assertEqual(recorded, expected)
+
     def test_stock_lockpick_result_can_target_a_secure_locker_with_a_key(self):
         crate = next(name for name in CRATES if name.startswith("LootLocker_Secure_BP_C "))
         area = CRATES[crate]
@@ -349,6 +357,31 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["native_loot_crate_input"], snapshot["native_loot_crates"][LEGACY_CRATE])
         self.assertEqual(snapshot["native_loot_view_candidates"][LEGACY_CRATE]["distance"], 25.5)
         self.assertEqual(snapshot["native_loot_view"]["crate"], LEGACY_CRATE)
+
+    def test_compact_stock_crate_snapshot_preserves_locks_lids_and_replenishment(self):
+        angle_crate = next(crate for crate, area in CRATES.items() if area == CROSSROADS and random_lid(crate))
+        locked_crate = next(crate for crate, area in CRATES.items() if area == CROSSROADS
+                            and crate != angle_crate and lockable_container(crate, area))
+        pose, angle, _ = random_lid(angle_crate)
+        rows = [
+            ("schema", "1"), ("session", "host", "hosting", CROSSROADS, "1", "0"),
+            ("pawn", "local", PAWN, "100", "1", "2", "3", "local controller"),
+            ("native-loot-crate-state", str(CRATE_NAMES_BY_INDEX.index(LEGACY_CRATE)), "ready", "1", "-", "-"),
+            ("native-loot-crate-state", str(CRATE_NAMES_BY_INDEX.index(angle_crate)), "exhausted", "0", "-", str(angle)),
+            ("native-loot-crate-state", str(CRATE_NAMES_BY_INDEX.index(locked_crate)), "ready", "0", "1", "-"),
+        ]
+
+        def parse(records):
+            text = "".join("\t".join(row) + "\n" for row in records)
+            return runtime.Bridge(self.root, None)._parse_status(text)
+
+        snapshot = parse(rows)
+        self.assertEqual(snapshot["native_loot_crate_input"]["state"], "ready")
+        self.assertEqual(snapshot["native_loot_crates"][angle_crate][pose], angle)
+        self.assertEqual(snapshot[native_loot.REPLENISHED][LEGACY_CRATE]["pawn"], PAWN)
+        self.assertEqual(snapshot[native_loot.VEHICLE_LOCKS], {locked_crate: True})
+        for bad_index in ("0", str(len(CRATE_NAMES_BY_INDEX)), str(CRATE_NAMES_BY_INDEX.index(BRIDGE_CRATE))):
+            self.assertIsNone(parse(rows + [("native-loot-crate-state", bad_index, "ready", "0", "-", "-")]))
 
     async def test_new_roll_commits_only_its_crate_and_reopen_uses_saved_roll(self):
         legacy_roll = self.roll(CROSSROADS, LEGACY_CRATE, "1" * 32)

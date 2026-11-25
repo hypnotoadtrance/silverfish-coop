@@ -17,9 +17,24 @@ local function record(active, tag, wall_ms, cycles)
     rows.cycles[#rows.cycles + 1] = cycles
 end
 
-local function measured(active, tag, started, started_cycles, ...)
+local function measured(active, tag, started, started_cycles, heap_before, ...)
     local now, cycles = stamp()
     local wall_ms, used_cycles = (now - started) / 1000, cycles - started_cycles
+    if heap_before then
+        local growth = collectgarbage("count") - heap_before
+        local sample = active.heap_calls[tag]
+        if not sample then
+            sample = {retained = 0, peak = 0, samples = 0, drops = 0}
+            active.heap_calls[tag] = sample
+        end
+        if growth >= 0 then
+            sample.retained = sample.retained + growth
+            sample.peak = math.max(sample.peak, growth)
+            sample.samples = sample.samples + 1
+        else
+            sample.drops = sample.drops + 1
+        end
+    end
     record(active, tag, wall_ms, used_cycles)
     local call = active.calls[tag]
     if call then
@@ -32,8 +47,22 @@ end
 
 function probe.call(tag, operation, ...)
     if not capture or capture.coarse and tag ~= "write_status" and tag ~= "tick" then return operation(...) end
+    local heap_before = not capture.coarse and collectgarbage("count")
     local started, started_cycles = stamp()
-    return measured(capture, tag, started, started_cycles, operation(...))
+    return measured(capture, tag, started, started_cycles, heap_before, operation(...))
+end
+
+function probe.status_size(rows)
+    local active = capture
+    if not active or active.status_sizes then return end
+    local sizes = {}
+    for _, row in ipairs(rows) do
+        for line in row:gmatch("[^\n]+") do
+            local tag = line:match("^[^\t]+")
+            if tag then sizes[tag] = (sizes[tag] or 0) + #line + 1 end
+        end
+    end
+    active.status_sizes = sizes
 end
 
 function probe.status_mark(tag, rows, bytes)
@@ -92,7 +121,17 @@ local function result()
     for tag, sample in pairs(complete.status_peaks) do
         status[#status + 1] = (";%s,%.4f,%d,%.3f"):format(tag, sample.wall, sample.cycles, sample.heap_delta)
     end
+    local memory = {}
+    for tag, sample in pairs(complete.heap_calls) do
+        memory[#memory + 1] = (";%s,%d,%d,%.3f,%.3f"):format(
+            tag, sample.samples, sample.drops, sample.retained, sample.peak)
+    end
+    local sizes = {}
+    for tag, size in pairs(complete.status_sizes or {}) do
+        sizes[#sizes + 1] = (";%s,%d"):format(tag, size)
+    end
     return ("%.5f"):format(complete.elapsed) .. table.concat(rows) .. table.concat(peak) .. table.concat(status)
+        .. "|" .. table.concat(memory) .. "|" .. table.concat(sizes)
 end
 
 local function compare_rows()
@@ -181,7 +220,7 @@ LoopInGameThreadWithDelay(50, function()
             capture, previous, previous_cycles, complete = {
                 rows = {}, calls = {}, peak = 0, peak_calls = {}, started = now,
                 coarse = coarse, deadline = now + (gc_trial and gc_window_us or coarse and coarse_window_us or window_us),
-                status_peaks = {}, max_status_rows = 0, max_status_bytes = 0,
+                status_peaks = {}, heap_calls = {}, max_status_rows = 0, max_status_bytes = 0,
                 heap_start = heap, heap_previous = heap, heap_peak = heap, heap_max_drop = 0, heap_large_drops = 0,
                 original_mirror = status_publication.mirror,
             }, nil, nil, nil
