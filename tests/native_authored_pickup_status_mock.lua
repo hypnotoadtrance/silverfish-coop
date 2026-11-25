@@ -2,12 +2,14 @@ package.path = "mod/SilverfishCoop/Scripts/?.lua;" .. package.path
 
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local source = "crossroads-brown-mushroom"
-local pawn = {IsValid = function() return true end, GetAddress = function() return 101 end}
 local world = {IsValid = function() return true end, GetAddress = function() return 102 end}
+local pawn = {IsValid = function() return true end, GetAddress = function() return 101 end,
+    GetWorld = function() return world end}
 local state = {map = crossroads, world = world, server = false, listening = true,
     local_pawn = {pawn = pawn, name = "Stock player"}}
 local env = setmetatable({
-    os = {getenv = function(name) return name == "SILVERFISH_COOP_NATIVE_ZONE" and "1" or nil end},
+    os = {getenv = function(name) return name == "SILVERFISH_COOP_NATIVE_ZONE" and "1" or nil end,
+        clock = function() return 1 end},
     SilverfishVerifyNativeStashSave = function() error("status must not mutate the inventory") end,
 }, {__index = _G})
 local pickup = assert(loadfile("mod/SilverfishCoop/Scripts/native_authored_pickup.lua", "t", env))()
@@ -22,9 +24,10 @@ local function observe(phase)
 end
 
 local function reporting_drop(shown, epoch, fault)
-    env.SilverfishObserveNativeCrossroadsDeadDrop = function(address, host)
+    env.SilverfishObserveNativeDeadDrop = function(address, host)
         assert(address == pawn:GetAddress() and host == not state.server)
-        return shown, epoch, fault
+        if shown == "diagnostic" then return shown, epoch, fault end
+        return shown, epoch, 1, 2, 3, 0, 0, 0, 1, 1, 1
     end
 end
 
@@ -66,4 +69,26 @@ local epoch = string.rep("1", 32)
 reporting_drop("projected", epoch)
 local guest = observe("connected")
 assert(not guest["native-authored-pickup-memory"] and guest["native-dead-drop"][6] == epoch)
-print("Stock Dead Drop reporting preserves the host's memory pickup capability.")
+local authored_binds = 0
+env.SilverfishSetNativeAuthoredPickupScope = function()
+    authored_binds = authored_binds + 1
+    error("a loose pickup must not register unrelated authored sources")
+end
+env.SilverfishDiscoverLoosePickups = function(address, host)
+    assert(address == pawn:GetAddress() and host == false)
+    return 12, "", 5
+end
+local path = crossroads .. ".CrossRoads_P:PersistentLevel.Item_BP_C_1"
+local applied = 0
+env.SilverfishSetGuestLoosePickupView = function(generation, hidden, actor)
+    assert(generation == 5 and hidden == true and actor == path)
+    applied = applied + 1
+    return true
+end
+pickup.refresh_loose(function() return world end)
+local command = {"test", "native-loose-pickup-project", "5", "hide", path}
+assert(pickup.command(command, state, "connected") == "shared level item visibility synchronized")
+command[3] = "4"
+assert(not pcall(pickup.command, command, state, "connected"))
+assert(applied == 1 and authored_binds == 0)
+print("Stock Dead Drop reporting and exact loose pickup projection passed.")

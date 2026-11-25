@@ -77,7 +77,10 @@ async def verify_stock_placed_item(host, guest, pawn):
                         return authority, replica
                 await asyncio.sleep(.12)
 
-    await shared_pose()
+    _, position = await shared_pose()
+    await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("map") == CROSSROADS
+        and (point := frame["game"].get("pawns", {}).get("local", {}).get("location")) is not None
+        and None not in point and math.dist(point, position) < 225, timeout=8)
     assert await fixture(host, "placed-visibility", path) == await fixture(guest, "placed-visibility", path) == "visible"
 
     def moved(frame, edge, lease=None):

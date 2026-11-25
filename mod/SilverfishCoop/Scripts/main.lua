@@ -1708,7 +1708,9 @@ local function write_status(state, current_phase, failure, fields, pending, crat
     end
     if status_publication.memory_live and not status_publication.mirror and not file_command then return end
     if crate_details then frame = frame .. crate_details .. "\n" end
-    local temporary = status_path .. ".tmp"
+    -- A memory command can publish a newer frame before a file client polls.
+    local destination = file_command and status_publication.memory_live and bridge .. "/command-reply.tsv" or status_path
+    local temporary = destination .. ".tmp"
     local file = io.open(temporary, "wb")
     if not file then return end
     local written = file:write(frame)
@@ -1717,9 +1719,9 @@ local function write_status(state, current_phase, failure, fields, pending, crat
 
     -- Lua's Windows rename cannot replace an existing destination. Readers
     -- may briefly see no status file, and never see partially written rows.
-    if not os.rename(temporary, status_path) then
-        os.remove(status_path)
-        os.rename(temporary, status_path)
+    if not os.rename(temporary, destination) then
+        os.remove(destination)
+        os.rename(temporary, destination)
     end
 end
 

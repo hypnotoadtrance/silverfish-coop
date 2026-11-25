@@ -334,7 +334,7 @@ function pickup.refresh_loose(current_world)
     end
 end
 
-function pickup.update(state, phase)
+local function bind_pickup_seat(state, phase)
     local detail = state.local_pawn
     local pawn = detail and detail.pawn
     local host = phase == "hosting" and state.server == false
@@ -348,14 +348,22 @@ function pickup.update(state, phase)
     if not binding or binding.placements ~= placements or binding.host ~= host
         or not same(binding.pawn, pawn) or not same(binding.world, state.world) then
         clear_previews()
-        binding = {pawn = pawn, world = state.world, host = host, placements = placements, next_loose = 0}
+        binding = {pawn = pawn, world = state.world, host = host, placements = placements, next_loose = 0,
+            active = {}, unavailable = {}}
         report, loose_check = nil, nil
     end
+    return true
+end
+
+local function refresh_authored_sources(state, phase)
+    if not bind_pickup_seat(state, phase) then return false end
+    local pawn, host = binding.pawn, binding.host
+    local address = pawn:GetAddress()
     local active, unavailable, reason = {}, {}, nil
-    for _, profile in ipairs(placements) do
+    for _, profile in ipairs(binding.placements) do
         local allowed = profile ~= gold_bag or not host or gold_bag_step(pawn.Save) == 1
         local ok, detail
-        if allowed then ok, detail = SilverfishSetNativeAuthoredPickupScope(pawn:GetAddress(), host, profile.source) end
+        if allowed then ok, detail = SilverfishSetNativeAuthoredPickupScope(address, host, profile.source) end
         if ok == true then
             active[profile.source] = profile
         elseif type(detail) == "string" then
@@ -631,11 +639,11 @@ function pickup.command(fields, state, phase)
         local library = StaticFindObject("/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C")
         if not valid(library) then error("gold_bag_quest_fixture_library_unavailable", 0) end
         library:GlobalPing("Ping_NewQuest", pawn, instance)
-        pickup.update(state, phase)
-        if not binding.active[gold_bag.source] then
+        refresh_authored_sources(state, phase)
+        if not binding or not binding.active[gold_bag.source] then
             local actor = StaticFindObject(gold_bag.path)
             local category = valid(actor) and actor.ItemType
-            error((binding.unavailable[gold_bag.source] or "gold_bag_quest_fixture_source_unavailable")
+            error((binding and binding.unavailable[gold_bag.source] or "gold_bag_quest_fixture_source_unavailable")
                 .. " category=" .. tostring(category), 0)
         end
         return "stock gold transport quest reached bag pickup step"
@@ -666,8 +674,10 @@ function pickup.command(fields, state, phase)
         if actor.bHidden ~= (not shown) or actor:GetActorEnableCollision() ~= shown then
             error("gold_bag_view_readback_unverified", 0)
         end
-        pickup.update(state, phase)
-        if shown and not binding.active[gold_bag.source] then error("gold_bag_view_interaction_unverified", 0) end
+        refresh_authored_sources(state, phase)
+        if shown and (not binding or not binding.active[gold_bag.source]) then
+            error("gold_bag_view_interaction_unverified", 0)
+        end
         return "stock gold bag view synchronized"
     end
     if action == "native-dead-drop-project" then
@@ -700,7 +710,7 @@ function pickup.command(fields, state, phase)
         return "stock temporary loot expired after " .. tostring(days) .. " daily updates"
     end
     if action == "native-loose-pickup-claim" then
-        pickup.update(state, phase)
+        bind_pickup_seat(state, phase)
         local valid_args = #fields == 5 or (#fields == 6 and fields[6] == "stock-input")
         local profile = valid_args and loose_profile(fields[5], state)
         if not profile or profile.claimed or require("native_prop_carry").item_is_held(StaticFindObject(profile.path)) then
@@ -709,7 +719,7 @@ function pickup.command(fields, state, phase)
         return claim(fields, state, phase, profile)
     end
     if action == "native-loose-pickup-check" then
-        pickup.update(state, phase)
+        bind_pickup_seat(state, phase)
         if phase ~= "hosting" or not binding or not binding.loose_count or #fields < 3 or #fields > 66 then
             error("loose_pickup_check_arguments", 0)
         end
@@ -723,7 +733,7 @@ function pickup.command(fields, state, phase)
         return "stock loose pickup availability verified"
     end
     if action == "native-loose-pickup-project" then
-        pickup.update(state, phase)
+        bind_pickup_seat(state, phase)
         local generation, mode = math.tointeger(tonumber(fields[3])), fields[4]
         if phase ~= "connected" or not binding or not generation or generation ~= binding.loose_generation or
             #fields < 5 or #fields > 68 or (mode ~= "hide" and mode ~= "show") or
@@ -736,7 +746,7 @@ function pickup.command(fields, state, phase)
         return "shared level item visibility synchronized"
     end
     if action == "native-loose-pickup-nearby-fixture" then
-        pickup.update(state, phase)
+        bind_pickup_seat(state, phase)
         local profile = #fields == 3 and loose_profile(fields[3], state)
         local controller = state.controller
         local class = StaticFindObject("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C")
@@ -764,7 +774,7 @@ function pickup.command(fields, state, phase)
         error("loose_pickup_nearby_card_unavailable", 0)
     end
     if action == "native-loose-pickup-approach" or action == "native-loose-pickup-fixture" then
-        pickup.update(state, phase)
+        bind_pickup_seat(state, phase)
         local approach = action == "native-loose-pickup-approach"
         local profile = #fields == (approach and 4 or 3) and loose_profile(fields[3], state)
         local fixture_host = host_fixtures or (approach and title_fixtures)
@@ -796,7 +806,7 @@ function pickup.command(fields, state, phase)
     if not count then return end
     local stock_claim = action == "native-authored-pickup-claim" and #fields == 6 and fields[6] == "stock-input"
     if #fields ~= count and #fields ~= count + 1 and not stock_claim then error("authored_pickup_arguments", 0) end
-    local ok, reason = pickup.update(state, phase)
+    local ok, reason = refresh_authored_sources(state, phase)
     if not ok then error(reason or "authored_pickup_scope_unavailable", 0) end
     local profile = select_profile(fields[count + 1])
     if action == "native-authored-pickup-claim" then return claim(fields, state, phase, profile) end
@@ -925,7 +935,7 @@ function pickup.rows(state, phase, status_row)
             end
         end
     end
-    local qualified = pickup.update(state, phase)
+    local qualified = refresh_authored_sources(state, phase)
     if not qualified or type(SilverfishReadNativeAuthoredPickup) ~= "function" then return rows end
     for _, profile in ipairs(binding.placements) do
         if binding.active[profile.source] then

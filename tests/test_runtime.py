@@ -177,6 +177,21 @@ class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((request.sequence, request.guid, request.location), (1, guid, (1, 2, 3)))
             self.assertEqual(bridge.native_cube_requests("stardust"), [])
 
+    async def test_file_command_keeps_its_reply_when_memory_publishes_a_new_frame(self):
+        with TemporaryDirectory() as temporary:
+            bridge = runtime.Bridge(Path(temporary), Mock(poll=Mock(return_value=None)))
+            frame = "schema\t1\nseq\t{}\nack\t{}\taccepted\t{}\nsession\tclient\tconnected\tObservatory\t1\t0\n"
+
+            def publish(path, request):
+                tag = request.split("\t", 1)[0]
+                path.with_name("command-reply.tsv").write_text(frame.format(40, tag, "stock action applied"))
+                path.with_name("status.tsv").write_text(frame.format(41, "later-memory-ticket", ""))
+
+            with patch.object(runtime, "write_text", side_effect=publish):
+                reply = await bridge.command("stock-fixture")
+            self.assertEqual((reply["sequence"], reply["ack"]["message"]), (40, "stock action applied"))
+            self.assertEqual(bridge.snapshot()["sequence"], 41)
+
     async def test_bad_embedded_receipt_does_not_fall_back_to_replay(self):
         with TemporaryDirectory() as temporary:
             bridge = runtime.Bridge(Path(temporary), None)

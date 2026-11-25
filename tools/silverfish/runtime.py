@@ -3569,12 +3569,20 @@ class Bridge:
             return None
         return None
 
-    async def wait_for(self, condition, timeout: float = 30, *, interval: float = .15) -> dict:
+    async def wait_for(self, condition, timeout: float = 30, *, interval: float = .15,
+                       file_reply: bool = False) -> dict:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while loop.time() < deadline:
             if self.process.poll() is not None:
                 raise RuntimeError(f"Staged game exited with code {self.process.returncode}")
+            if file_reply:
+                try:
+                    reply = self._parse_status((self.directory / "command-reply.tsv").read_text(encoding="utf-8"))
+                except (OSError, UnicodeError):
+                    reply = None
+                if reply is not None and condition(reply):
+                    return reply
             snapshot = self.snapshot()
             if snapshot is not None and condition(snapshot):
                 return snapshot
@@ -3631,7 +3639,8 @@ class Bridge:
         if self.local_bridge is None:
             async with self._file_command_lock:
                 write_text(self.directory / "command.tsv", request)
-                status = await self.wait_for(lambda state: state.get("ack", {}).get("id") == fields[0], timeout, interval=.025)
+                status = await self.wait_for(lambda state: state.get("ack", {}).get("id") == fields[0], timeout,
+                                             interval=.025, file_reply=True)
         else:
             raw = await self.local_bridge.command(request.encode("utf-8") + (stash_payload or b""), timeout)
             if action == native_stash.RENDER_MEMORY and _GUEST_UI_REPLY in raw:
