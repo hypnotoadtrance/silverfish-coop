@@ -12,7 +12,9 @@ from live_ai_smoke import wait
 from tools.silverfish import runtime
 
 
-FIELDS = ("seconds", "phase", "requested", "owner_roll", "remote_stock_roll", "displayed_roll", "head_roll", "neck_error_cm")
+FIELDS = ("seconds", "phase", "requested", "owner_roll", "remote_stock_roll", "displayed_roll",
+          "head_roll", "neck_error_cm", "injection_present", "input_trigger", "input_elapsed_seconds",
+          "controller_loading", "open_menus", "move_input_ignored", "look_input_ignored", "same_player_input")
 
 
 @contextmanager
@@ -40,11 +42,11 @@ def installed_probe(game: Path):
         suite.rmdir()
 
 
-async def capture(seat, side, local, remote, *, drive):
+async def capture(seat, side, local, remote, *, drive, extended_hold=False):
     ticket = uuid.uuid4().hex
     root = seat.bridge.directory
     command, reply = (root / f"avatar-lean-probe-{kind}.tsv" for kind in ("command", "reply"))
-    operation = f"solver{side}" if drive == "solver" else side
+    operation = f"solver{side}" if drive == "solver" else f"hold{side}" if extended_hold else side
     runtime.write_text(command, f"{ticket}\t{operation}\n", newline="")
     async with asyncio.timeout(9):
         while True:
@@ -59,7 +61,7 @@ async def capture(seat, side, local, remote, *, drive):
             header = lines[0].split("\t") if lines else []
             if header[:2] == [ticket, "error"]:
                 raise AssertionError(" ".join(header[2:]))
-            if header[:2] == [ticket, "ok"] and len(header) == 17:
+            if header[:2] == [ticket, "ok"] and len(header) == 19:
                 assert header[2:5] == [side, local, remote] and header[10] == drive, header
                 count, event_count = int(header[6]), int(header[16])
                 if len(lines) != 1 + count + event_count:
@@ -81,9 +83,20 @@ async def capture(seat, side, local, remote, *, drive):
                     assert event in {"starts", "cancels", "completes", "cancel_leaning"}, line
                     seconds, requested, leaning = map(float, values)
                     events.append({"event": event, "seconds": seconds, "requested": requested, "leaning": leaning == 1})
+                dispatch = {}
+                for window, raw in zip(("held", "total"), header[17:19], strict=True):
+                    if raw == "-":
+                        continue
+                    counts = [int(value) for value in raw.split(",")]
+                    assert len(counts) == 12 and all(count >= 0 for count in counts), counts
+                    dispatch[window] = {
+                        phase: dict(zip(("started", "canceled", "completed"), counts[index * 3:index * 3 + 3], strict=True))
+                        for index, phase in enumerate(("process_event_entry", "process_event_return", "blueprint_entry",
+                                                       "prevented"))
+                    }
                 injections, started, completed = map(int, header[7:10])
                 return {"caller": local, "observer_for": remote, "side": side, "drive": drive, "samples": rows,
-                        "events": events,
+                        "events": events, "native_dispatch": dispatch,
                         "injections": injections, "input_method": header[15],
                         "stock_started": started, "stock_completed": completed,
                         "stock_canceled": int(header[11]),
@@ -142,10 +155,10 @@ async def verify_lean(host, guest, pawn, *, projected=True, drive="combined"):
     input_verified = False
     if drive == "combined":
         input_result["exercised"] = True
-        for host_side, guest_side in (("left", "right"), ("right", "left")):
+        for attempt, (host_side, guest_side) in enumerate((("left", "right"), ("right", "left"))):
             host_input, guest_input = await asyncio.gather(
-                capture(host, host_side, *host_pawns, drive="input"),
-                capture(guest, guest_side, *guest_pawns, drive="input"),
+                capture(host, host_side, *host_pawns, drive="input", extended_hold=attempt == 0),
+                capture(guest, guest_side, *guest_pawns, drive="input", extended_hold=attempt == 0),
                 return_exceptions=True,
             )
             input_result.setdefault(host_side, {})["host"] = input_diagnostic(host_input)

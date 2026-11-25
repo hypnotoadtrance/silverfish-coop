@@ -110,7 +110,7 @@ local function input_action(run)
     assert(same(run.pawn["As Game Instance FP"], instance) and valid(config)
         and (config.LeanBehavior == 0 or config.LeanBehavior == 2),
         "the isolated lean input trial requires stock Hold or Hybrid input behavior")
-    run.action, run.subsystem = action, subsystem
+    run.action, run.subsystem, run.player_input = action, subsystem, controller.PlayerInput
     run.input_method = type(SilverfishProbeContinuousLean) == "function" and "continuous" or "vector"
     run.behavior = config.LeanBehavior
     install_hooks()
@@ -119,14 +119,14 @@ end
 LoopInGameThreadWithDelay(1, function()
     local run = trial
     if not run or run.input_method ~= "vector" or not run.down_at or run.up_at or run.input_error
-        or os.clock() - run.down_at >= 1 then return end
+        or os.clock() - run.down_at >= run.hold_seconds then return end
     if not same(run.controller.Pawn, run.pawn) or not same(run.pawn:GetWorld(), run.world)
         or not run.pawn:IsLocallyControlled() then return end
     local ok, failure = pcall(run.subsystem.InjectInputVectorForAction, run.subsystem, run.action, input_vector, {}, {})
     if ok then run.injections = run.injections + 1 else run.input_error = failure end
 end)
 
-local function begin(id, side, drive, now)
+local function begin(id, side, drive, now, hold_seconds)
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
     local driver = valid(world) and world.NetDriver
@@ -153,7 +153,7 @@ local function begin(id, side, drive, now)
         and same(controller:GetWorld(), world), "the exact local lean controller is unavailable")
     local body, head, bone = rig(remote)
     local run = {id = id, side = side, drive = drive, start = now, world = world, pawn = pawn, remote = remote,
-        controller = controller, injections = 0, starts = 0, completes = 0, cancels = 0,
+        controller = controller, hold_seconds = hold_seconds, injections = 0, starts = 0, completes = 0, cancels = 0,
         arrow = stock_arrow(pawn), remote_arrow = stock_arrow(remote), math_api = math_api,
         body = body, head = head, bone = bone, rows = {}, events = {}}
     if drive == "input" then input_action(run) end
@@ -190,6 +190,13 @@ local function stop_input(run)
     end
 end
 
+local function dispatch_trace(run, clear)
+    if type(SilverfishReadLeanDispatchTrace) == "function" and run.input_method == "continuous" then
+        return SilverfishReadLeanDispatchTrace(run.pawn:GetAddress(), clear) or "-"
+    end
+    return "-"
+end
+
 local function sample(run, now)
     local time, phase = now - run.start, "baseline"
     assert(same(run.pawn:GetWorld(), run.world) and same(run.remote:GetWorld(), run.world)
@@ -207,8 +214,9 @@ local function sample(run, now)
     if run.down_at then
         local held = now - run.down_at
         phase = run.up_at and "released" or "held"
-        if not run.up_at and held >= 1 then
+        if not run.up_at and held >= run.hold_seconds then
             restore_solver(run)
+            run.held_dispatch = dispatch_trace(run, false)
             stop_input(run)
             run.up_at, phase = now, "released"
         end
@@ -219,9 +227,23 @@ local function sample(run, now)
         run.math_api:ComposeRotators(run.math_api:NegateRotator(basis), run.body.RelativeRotation), basis)
     local neck, pivot = run.body:GetSocketLocation(run.bone), run.head:K2_GetComponentLocation()
     local neck_error = math.sqrt((pivot.X - neck.X)^2 + (pivot.Y - neck.Y)^2 + (pivot.Z - neck.Z)^2)
-    run.rows[#run.rows + 1] = string.format("%.5f\t%s\t%.5f\t%.5f\t%.5f\t%.5f\t%.5f\t%.5f",
+    local controller = run.controller
+    local present, trigger, elapsed, same_input = -1, -1, -1, -1
+    if run.action then
+        local input = controller.PlayerInput
+        same_input = same(input, run.player_input) and 1 or 0
+        present = run.subsystem.ContinuouslyInjectedInputs:Contains(run.action) and 1 or 0
+        if valid(input) and input.ActionInstanceData:Contains(run.action) then
+            local action = input.ActionInstanceData:Find(run.action):get()
+            trigger, elapsed = action.TriggerEvent, action.ElapsedProcessedTime
+        end
+    end
+    run.rows[#run.rows + 1] = string.format(
+        "%.5f\t%s\t%.5f\t%.5f\t%.5f\t%.5f\t%.5f\t%.5f\t%d\t%d\t%.5f\t%d\t%d\t%d\t%d\t%d",
         time, phase, run.pawn.LeanAngle, run.arrow.RelativeRotation.Roll, run.remote_arrow.RelativeRotation.Roll,
-        rotation.Roll, run.head:K2_GetComponentRotation().Roll, neck_error)
+        rotation.Roll, run.head:K2_GetComponentRotation().Roll, neck_error, present, trigger, elapsed,
+        controller.Loading and 1 or 0, controller.MenuStack:GetArrayNum(), controller:IsMoveInputIgnored() and 1 or 0,
+        controller:IsLookInputIgnored() and 1 or 0, same_input)
     return run.up_at and now - run.up_at >= .75
 end
 
@@ -240,6 +262,7 @@ LoopInGameThreadWithDelay(50, function()
         if not ok then
             local restored, failure = pcall(function()
                 stop_input(trial)
+                dispatch_trace(trial, true)
                 restore_solver(trial)
             end)
             answer(trial.id, "error\t" .. tostring(done) .. (restored and "" or " | restore: " .. tostring(failure)))
@@ -247,7 +270,7 @@ LoopInGameThreadWithDelay(50, function()
             answer(trial.id, table.concat({"ok", trial.side, trial.pawn:GetFullName(), trial.remote:GetFullName(),
                 trial.pawn.LeanAngle, #trial.rows, trial.injections, trial.starts, trial.completes, trial.drive,
                 trial.cancels, trial.started_request or "-", trial.started_limit or "-", trial.behavior or "-",
-                trial.input_method or "-", #trial.events},
+                trial.input_method or "-", #trial.events, trial.held_dispatch, dispatch_trace(trial, true)},
                 "\t"), trial.rows, trial.events)
         else
             return false
@@ -261,10 +284,11 @@ LoopInGameThreadWithDelay(50, function()
     file:close()
     local id, operation = (request or ""):match("^(%x+)\t([a-z]+)\n$")
     local solver_side = operation and operation:match("^solver([a-z]+)$")
-    local side, drive = solver_side or operation, solver_side and "solver" or "input"
+    local long_side = operation and operation:match("^hold([a-z]+)$")
+    local side, drive = solver_side or long_side or operation, solver_side and "solver" or "input"
     if not id or #id ~= 32 or id == last or not sides[side] then return false end
     last = id
-    local ok, result = pcall(begin, id, side, drive, now)
+    local ok, result = pcall(begin, id, side, drive, now, long_side and 3 or 1)
     if ok then trial = result else answer(id, "error\t" .. tostring(result)) end
     return false
 end)

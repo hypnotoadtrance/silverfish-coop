@@ -1267,9 +1267,41 @@ namespace
         return false;
     }
 
+    enum class LeanTraceStage : std::size_t { event_pre, event_post, script_pre };
+
+    struct LeanDispatchTrace
+    {
+        Unreal::FWeakObjectPtr pawn, action;
+        std::array<Wrapper, 3> callbacks;
+        std::array<std::array<unsigned, 3>, 3> calls{};
+        std::array<unsigned, 3> prevented{};
+        bool active{};
+    };
+
+    LeanDispatchTrace lean_trace;
+
+    void observe_lean_dispatch(Iteration& iteration, Unreal::UObject* pawn, Unreal::UFunction* function,
+        const void* parameters, LeanTraceStage stage)
+    {
+        if (!function || !pawn || pawn != lean_trace.pawn.Get() || pawn != scope.pawn.Get() || !parameters) return;
+        const auto* action = lean_trace.action.Get();
+        if (!action) return;
+        for (std::size_t i = 0; i < lean_trace.callbacks.size(); ++i)
+        {
+            const auto& callback = lean_trace.callbacks[i];
+            if (function != callback.function.Get() ||
+                callback.source->GetObjectPropertyValue(callback.source->ContainerPtrToValuePtr<void>(parameters)) != action)
+                continue;
+            ++lean_trace.calls[static_cast<std::size_t>(stage)][i];
+            if (stage == LeanTraceStage::event_post && iteration.OriginalFunctionCallPrevented()) ++lean_trace.prevented[i];
+            break;
+        }
+    }
+
     void event_pre(Iteration& iteration, Unreal::UObject* pawn, Unreal::UFunction* function, void* parameters)
     {
         if (!available()) return;
+        if (lean_trace.active) observe_lean_dispatch(iteration, pawn, function, parameters, LeanTraceStage::event_pre);
         if (function && function == prop_movement.notify && pawn == prop_movement.actor.Get())
         {
             if (iteration.OriginalFunctionCallPrevented()) return;
@@ -1301,7 +1333,9 @@ namespace
 
     void event_post(Iteration& iteration, Unreal::UObject* pawn, Unreal::UFunction* function, void* parameters)
     {
-        if (!available() || !exact_dispatch(pawn, function) || !event_depth) return;
+        if (!available()) return;
+        if (lean_trace.active) observe_lean_dispatch(iteration, pawn, function, parameters, LeanTraceStage::event_post);
+        if (!exact_dispatch(pawn, function) || !event_depth) return;
         if (--event_depth != 0) return;
         if (!event_consumed) record(iteration, pawn, parameters, event_focus);
         event_focus = Unreal::FWeakObjectPtr{};
@@ -1313,6 +1347,8 @@ namespace
         // ProcessEvent owns its whole synchronous dispatch, including the VM.
         // Script-to-script invocations can reach the wrapper without ProcessEvent.
         if (!available() || frame.Object() != pawn) return;
+        if (lean_trace.active)
+            observe_lean_dispatch(iteration, pawn, frame.Node(), frame.Locals(), LeanTraceStage::script_pre);
         if (exact_dispatch(pawn, frame.Node()))
         {
             if (!event_depth) record(iteration, pawn, frame.Locals(), pressed_focus(pawn));
@@ -1986,6 +2022,52 @@ namespace
             ? subsystem : nullptr;
     }
 
+    bool arm_lean_trace(Unreal::UObject* pawn, Unreal::UObject* action, bool left)
+    {
+        static constexpr auto left_callbacks = std::to_array({
+            STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_Lean_Left_K2Node_EnhancedInputActionEvent_3"),
+            STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_Lean_Left_K2Node_EnhancedInputActionEvent_4"),
+            STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_Lean_Left_K2Node_EnhancedInputActionEvent_5"),
+        });
+        static constexpr auto right_callbacks = std::to_array({
+            STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_Lean_Right_K2Node_EnhancedInputActionEvent_10"),
+            STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_Lean_Right_K2Node_EnhancedInputActionEvent_11"),
+            STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_Lean_Right_K2Node_EnhancedInputActionEvent_12"),
+        });
+        static constexpr std::array events{2, 8, 16}; // Started, Canceled, Completed
+        LeanDispatchTrace trace{Unreal::FWeakObjectPtr{pawn}, Unreal::FWeakObjectPtr{action}};
+        const auto& paths = left ? left_callbacks : right_callbacks;
+        for (std::size_t i = 0; i < trace.callbacks.size(); ++i)
+        {
+            trace.callbacks[i] = bind_wrapper(pawn->GetClassPrivate(), action, paths[i], events[i]);
+            if (!trace.callbacks[i].function.Get()) return false;
+        }
+        trace.active = true;
+        lean_trace = trace;
+        return true;
+    }
+
+    int read_lean_trace(const Lua& lua)
+    {
+        if (!available() || !lean_fixture_enabled() || lua.get_stack_size() != 2 ||
+            !lua.is_integer(1) || !lua.is_bool(2)) return 0;
+        auto* pawn = lean_trace.pawn.Get();
+        if (!pawn || pawn != scope.pawn.Get() || address(pawn) != lua.get_integer()) return 0;
+        std::string result;
+        auto append = [&](const std::array<unsigned, 3>& counts) {
+            for (const auto count : counts)
+            {
+                if (!result.empty()) result += ',';
+                result += std::to_string(count);
+            }
+        };
+        for (const auto& calls : lean_trace.calls) append(calls);
+        append(lean_trace.prevented);
+        if (lua.get_bool(2)) lean_trace = {};
+        lua.set_string(result);
+        return 1;
+    }
+
     int probe_continuous_lean(const Lua& lua)
     {
         if (!available() || !lean_fixture_enabled() || lua.get_stack_size() != 3 ||
@@ -2039,6 +2121,8 @@ namespace
         raw->CopyCompleteValue(raw->ContainerPtrToValuePtr<void>(arguments.data()),
             factory.output->ContainerPtrToValuePtr<void>(generated.data()));
         source->SetObjectPropertyValue(arguments.data(), action);
+        if (!arm_lean_trace(pawn, action, side == "left"))
+            return report(lua, false, "lean_fixture_stock_callbacks_unavailable");
         subsystem->ProcessEvent(function, arguments.data());
         return report(lua, true, "started");
     }
@@ -2239,6 +2323,7 @@ namespace silverfish::native_interaction_input
         {
             lua.register_function("SilverfishProbeNativeRadioPlayback", probe_radio_playback);
             lua.register_function("SilverfishProbeContinuousLean", probe_continuous_lean);
+            lua.register_function("SilverfishReadLeanDispatchTrace", read_lean_trace);
         }
         if (fixture_enabled()) lua.register_function("SilverfishProbeNativeInteractInput", probe);
     }
@@ -2246,6 +2331,7 @@ namespace silverfish::native_interaction_input
     void clear_scope()
     {
         generation.fetch_add(1, std::memory_order_acq_rel);
+        lean_trace = {};
         if (!Unreal::IsInGameThreadRaw()) return;
         scope = {};
         prop_movement = {};
