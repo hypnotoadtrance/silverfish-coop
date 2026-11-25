@@ -368,12 +368,10 @@ local function run(action, argument)
                 local card = unwrap(cards[i])
                 if valid(card) and identify(card.Item) == argument then
                     assert(card.Item[ammo] == 0)
-                    manager.HoveredCard = card
-                    manager:InitiateItemTake()
-                    manager:FinalTakeItem()
-                    assert(manager.HoldingItem and identify(manager.HeldItem) == argument)
-                    manager:InsertItem(target, 1)
-                    assert(not manager.HoldingItem)
+                    manager:OpenContextMenu(card)
+                    local menu = manager.ItemContextMenu
+                    assert(menu.Button_Equip:IsVisible() and same(menu["Item Card"], card))
+                    menu:BndEvt__ItemContextMenu_Button_Equip_K2Node_ComponentBoundEvent_3_Pressed__DelegateSignature()
                     found = true
                     break
                 end

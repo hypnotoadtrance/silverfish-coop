@@ -92,7 +92,10 @@ async def verify_alternate_ammo(host, guest, pawn, probe):
         assert (unequipped["slot"], unequipped["ammo"]) == (1, 0), unequipped
         assert await command(guest, f"launcher-equip\t{guid}") == "launcher-equip"
         equipped = await inventory_receipt(native_inventory.STORE_KEY)
-        assert equipped["slot"] == 1, equipped
+        assert 0 <= equipped["slot"] < 8, equipped
+        assert await asyncio.gather(*(command(seat, f"select-probe-slot\t{equipped['slot'] + 1}") for seat in seats)) == [
+            "scoped", "scoped",
+        ]
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
         await wait_resident_status(guest_run, lambda view: view.get("game", {}).get(
             "native_inventory_view", {}).get("state") == "closed")
