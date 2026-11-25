@@ -42,7 +42,7 @@ from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mindcore, native_mosby_station_view, native_mosby_tape, native_smg_hold
 from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lift, native_mindcore_carry, native_mindcore_view
-from . import native_flashlight, native_lantern, native_stock_door, native_stock_switch
+from . import native_flashlight, native_ladder, native_lantern, native_stock_door, native_stock_switch
 from . import native_player_avatar
 from . import native_pickup_audio
 from . import native_damage_feedback, native_storm_ambience, native_weather_view
@@ -99,6 +99,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         "native-loot-inspect", "native-loot-open", "native-loot-claim", native_loot.LOCKPICK,
                         *native_loot.PRY_TOOL_ACTIONS.values(),
                         native_stock_door.ACTION, *native_stock_door.PRY_ACTIONS.values(), native_stock_switch.ACTION,
+                        native_ladder.ACTION,
                         *native_guest_drop.ACTIONS,
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS, native_npc_barter.OPEN, native_npc_barter.EXCHANGE,
@@ -2291,6 +2292,8 @@ class Host:
             elif action in native_loot.PRY_TOOL_ACTIONS.values():
                 async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                     result = await native_loot.use_vehicle_pry_tool(self, bridge, character, target, request["operation_id"], action)
+            elif action == native_ladder.ACTION:
+                result = await native_ladder.apply(self, bridge, character, target)
             elif action == native_stock_door.ACTION:
                 result = await self.stock_doors.dispatch(self, bridge, character, target, request["operation_id"], future)
                 if result is None:
@@ -6832,6 +6835,8 @@ class Client:
             if self.stock_interaction_scope() == scope:
                 self.guest_ui.queue_stock_inventory(self)
             return result
+        if native_ladder.target_parts(target):
+            return await self.gameplay_action(native_ladder.ACTION, operation, f"{self.zone_epoch}@{target}")
         if door := native_stock_door.target_actor(target):
             return await self.gameplay_action(native_stock_door.ACTION, operation, door)
         if critter := native_critters.target_id(target):

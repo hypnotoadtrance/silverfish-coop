@@ -5,6 +5,7 @@ local native_guest_drop_projection = require("native_guest_drop_projection")
 local native_authored_pickup = require("native_authored_pickup")
 local native_enemy_shell_view = require("native_enemy_shell_view")
 local native_stock_door = require("native_stock_door")
+local native_ladder = require("native_ladder")
 local native_stock_switch = require("native_stock_switch")
 players.critters = require("native_critters")
 
@@ -104,7 +105,8 @@ end
 local function write_interaction(pawn, pickup_source, pressed_component, projected_actor)
     if not input_file or not local_player or desired[local_player.name] or not same(pawn, local_player.pawn)
         or not pawn:IsLocallyControlled() then return end
-    local target = pickup_source or native_stock_door.focused_target(pawn, pressed_component)
+    local target = pickup_source or native_ladder.focused_target(pawn, pressed_component)
+        or native_stock_door.focused_target(pawn, pressed_component)
         or native_stock_switch.focused_target(pawn, pressed_component)
         or players.critters.focused_target(pawn, pressed_component)
         or native_bag_projection.focused_target(pawn) or native_enemy_shell_view.focused_target(pawn)
@@ -145,6 +147,8 @@ local function drain_native_interact()
             write_interaction(pawn, string.format("observatory-lantern:%.2f:%.2f", pitch, yaw))
         end
     end
+    local released = native_ladder.release_target(pawn)
+    if released then write_interaction(pawn, released) end
     local target
     for _ = 1, 8 do
         local sequence, matched, pressed_component = SilverfishTakeNativeInteractPress(address)
@@ -809,6 +813,7 @@ function players.sync(state, phase)
     for name in pairs(markers) do
         if not desired[name] then sync_marker(name, nil) end
     end
+    pcall(native_ladder.sync, state, phase, desired)
     sync_guest_sprints(state, slots, phase)
     pcall(native_downed_ai.sync, state, phase, desired)
     sync_local_input(state, phase)
@@ -832,6 +837,8 @@ function players.is_standing_guest(pawn, name)
 end
 
 function players.command(fields, state, phase)
+    local ladder = native_ladder.command(fields, state, phase)
+    if ladder then return ladder end
     local command = fields[2]
     if command == "player-guest-sprints" then
         if phase ~= "hosting" or state.map ~= fields[3] or #fields > 11 or (#fields - 3) % 2 ~= 0 then

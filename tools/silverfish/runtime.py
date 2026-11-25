@@ -24,7 +24,7 @@ from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from . import native_finite_shop
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
 from . import native_board_contract
-from . import native_authored_pickup, native_borough_barter, native_dead_drop, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
+from . import native_authored_pickup, native_borough_barter, native_dead_drop, native_ladder, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
 from . import native_npc_barter
 from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lift, native_mindcore, native_mindcore_carry, native_mindcore_fixture, native_mindcore_view
 from . import native_dust_cabinet, native_savlo_locker
@@ -871,6 +871,7 @@ class Bridge:
                     and not native_stock_door.target_actor(decoded) and not native_stock_switch.target_actor(decoded)
                     and not native_loose_pickup.target_path(decoded)
                     and not native_critters.target_id(decoded)
+                    and not native_ladder.target_parts(decoded)
                     and (len(target) != 32 or any(digit not in b"0123456789abcdef" for digit in target))):
                 continue
             identity = uuid.uuid5(self.input_namespace, fields[1].decode("ascii")).hex
