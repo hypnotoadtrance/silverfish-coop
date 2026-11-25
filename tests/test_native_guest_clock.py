@@ -3,6 +3,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from tools.silverfish import native_guest_clock as clock, runtime
 from tools.silverfish.native_guest_clock import GuestClockView
 
 
@@ -40,3 +41,24 @@ class GuestClockTests(unittest.IsolatedAsyncioTestCase):
         client.gameplay["host_world"]["native_scene"]["active_map"] = "another level"
         await view.sync(client)
         client.bridge.command.assert_not_awaited()
+
+    async def test_compact_clock_reply_keeps_the_current_pawn_and_world_data(self):
+        client = self.client()
+        client.last_game.update(sequence=42, native_loot_crates={"crate": {"state": "ready"}})
+        fields = ("a" * 32, clock.APPLY, client.zone_epoch, "1", AREA, "456125")
+        header = f"{clock.REPLY}\t1\t{fields[0]}\t42\taccepted\tclock armed\n"
+        proof = f"native-guest-clock\t{AREA}\texact guest pawn\t{client.zone_epoch}\t1\t456125\tarmed\t0\t-\n"
+        client.bridge.command.return_value = runtime.Bridge._local_guest_clock_reply(header + proof, fields)
+        await GuestClockView().sync(client)
+        self.assertEqual(client.last_game[clock.KEY]["milliseconds"], 456125)
+        self.assertEqual(client.last_game["native_loot_crates"], {"crate": {"state": "ready"}})
+        self.assertEqual(client.last_game["sequence"], 42)
+        for wrong in (proof.replace("456125", "416125"), proof.replace(client.zone_epoch, "b" * 32), ""):
+            with self.assertRaises(RuntimeError):
+                runtime.Bridge._local_guest_clock_reply(header + wrong, fields)
+
+        stale = self.client()
+        stale.last_game["sequence"] = 43
+        stale.bridge.command.return_value = client.bridge.command.return_value
+        await GuestClockView().sync(stale)
+        self.assertNotIn(clock.KEY, stale.last_game)

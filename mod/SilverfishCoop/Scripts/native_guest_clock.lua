@@ -134,7 +134,24 @@ function clock.command(fields, state, phase)
     if ok ~= true or status ~= "armed" then error(tostring(status), 0) end
     current.epoch, current.sequence, current.ms = epoch, sequence, ms
     lease = current
-    return "authenticated guest clock projection armed"
+    return "authenticated guest clock projection armed", current
+end
+
+local function lease_row(current, report, status_row)
+    return status_row("native-guest-clock", current.map, current.name, lease.epoch, lease.sequence, lease.ms,
+        report.hits > 0 and "projected" or "armed", report.hits, report.original or "-")
+end
+
+function clock.command_reply(fields, state, phase, sequence, status_row)
+    local accepted, message, current = pcall(clock.command, fields, state, phase)
+    local report = accepted and current and read(current)
+    if accepted and not report then
+        return status_row("native-guest-clock-reply", 1, fields[1], sequence, "error",
+            "guest_clock_lease_readback_unavailable") .. "\n"
+    end
+    local header = status_row("native-guest-clock-reply", 1, fields[1], sequence,
+        accepted and "accepted" or "error", message) .. "\n"
+    return report and header .. lease_row(current, report, status_row) .. "\n" or header
 end
 
 function clock.rows(state, phase, status_row)
@@ -143,8 +160,7 @@ function clock.rows(state, phase, status_row)
     if not checked or not same_context(current, lease) then return {} end
     local report = read(current)
     if not report then return {} end
-    local rows = {status_row("native-guest-clock", current.map, current.name, lease.epoch, lease.sequence, lease.ms,
-        report.hits > 0 and "projected" or "armed", report.hits, report.original or "-")}
+    local rows = {lease_row(current, report, status_row)}
     if fixture and fixture.epoch == lease.epoch then
         rows[#rows + 1] = status_row("native-guest-clock-fixture", current.map, current.name, fixture.epoch,
             fixture.sequence, fixture.ms, fixture.hits, fixture.text)

@@ -2035,11 +2035,7 @@ class Bridge:
                         data[native_flood_jammer.POSE] = native_flood_jammer.parse_pose(
                             fields, data.get("state"), data.get("map"), spec)
                 elif fields[0] == "native-guest-clock" and len(fields) == 9 and fields[6] in ("armed", "projected"):
-                    data["native_guest_clock"] = {
-                        "map": fields[1], "pawn": fields[2], "epoch": fields[3], "sequence": int(fields[4]),
-                        "milliseconds": int(fields[5]), "state": fields[6], "calls": int(fields[7]),
-                        "original_client_milliseconds": None if fields[8] == "-" else int(fields[8]),
-                    }
+                    data[native_guest_clock.KEY] = native_guest_clock.parse_report(fields)
                 elif fields[0] == "native-guest-clock-fixture" and len(fields) == 8:
                     data["native_guest_clock_fixture"] = {
                         "map": fields[1], "pawn": fields[2], "epoch": fields[3], "sequence": int(fields[4]),
@@ -3715,6 +3711,32 @@ class Bridge:
         self._local_world_view = sequence, pawn, proof
         return {**game, "native_world_view": proof}
 
+    @staticmethod
+    def _local_guest_clock_reply(raw: str, fields: tuple[str, ...]) -> dict:
+        rows = [line.split("\t") for line in raw.splitlines()] if len(raw) <= 2048 and raw.endswith("\n") else []
+        if (not rows or len(rows[0]) != 6 or rows[0][:3] != [native_guest_clock.REPLY, "1", fields[0]]
+                or not _held_input_sequence(rows[0][3])):
+            raise RuntimeError("The resident guest clock receipt did not match the request")
+        _, _, nonce, sequence, result, message = rows[0]
+        if result != "accepted":
+            raise RuntimeError(message or "The resident guest clock update was refused")
+        if len(rows) != 2 or len(fields) != 6 or len(rows[1]) != 9:
+            raise RuntimeError("The resident guest clock receipt was malformed")
+        epoch, revision, area, milliseconds = fields[2:]
+        row = rows[1]
+        if (row[0] != "native-guest-clock" or not 0 < len(row[2]) <= 512
+                or (row[1], *row[3:6]) != (area, epoch, revision, milliseconds)
+                or row[6] not in ("armed", "projected")):
+            raise RuntimeError("The resident guest clock receipt did not verify the requested time")
+        try:
+            proof = native_guest_clock.parse_report(row)
+        except ValueError as error:
+            raise RuntimeError("The resident guest clock receipt was malformed") from error
+        if not 0 <= proof["calls"] <= 100000 or (proof["calls"] > 0) != (proof["state"] == "projected"):
+            raise RuntimeError("The resident guest clock receipt contained invalid readback")
+        return {"state": "connected", "map": area, "native_guest_clock_snapshot_sequence": int(sequence),
+                "ack": {"id": nonce, "result": result, "message": message}, native_guest_clock.KEY: proof}
+
     async def command(self, action: str, *arguments: str, timeout: float = 8, update_status: bool = True,
                       stash_payload: bytes | None = None) -> dict:
         fields = (uuid.uuid4().hex, action, *arguments)
@@ -3754,6 +3776,8 @@ class Bridge:
                 return _parse_stock_loot_inspection(raw, fields)
             if action == native_weather_view.LOCAL_APPLY and raw.startswith("native-world-view-reply\t"):
                 return self._local_world_view_reply(raw, fields)
+            if action == native_guest_clock.APPLY and raw.startswith(native_guest_clock.REPLY + "\t"):
+                return self._local_guest_clock_reply(raw, fields)
             status = self._parse_status(raw)
             if not status or status.get("ack", {}).get("id") != fields[0]:
                 raise RuntimeError("The local co-op command receipt did not match the request")

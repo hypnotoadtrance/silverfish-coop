@@ -95,3 +95,11 @@ class MarkerTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(markers.time, "monotonic", return_value=21):
             await view.sync(client)
         bridge.command.assert_awaited_with(markers.COMMAND, EPOCH, CROSSROADS, timeout=2)
+        client.gameplay_seen = 22
+        with patch.object(markers.time, "monotonic", return_value=22):
+            await view.sync(client)
+        self.assertEqual(bridge.command.await_count, 2)
+        client.zone_epoch = public[markers.KEY]["epoch"] = "b" * 32
+        with patch.object(markers.time, "monotonic", return_value=23):
+            await view.sync(client)
+        bridge.command.assert_awaited_with(markers.COMMAND, client.zone_epoch, CROSSROADS, timeout=2)

@@ -46,6 +46,13 @@ def instrument_profile(source):
         else:
             status_code = status_code.replace(needle, call + needle)
     rest = status_code + boundary + after_status
+    tick = "local function tick(fields, pending, periodic)\n"
+    assert rest.count(tick) == 1
+    rest = rest.replace(tick, tick + "    local profile_fields = fields\n"
+                        "    status_publication.profile.command(profile_fields, periodic, false)\n")
+    final_write = '    status_publication.profile.call("write_status", write_status, state, current_phase, not projected'
+    assert rest.count(final_write) == 1
+    rest = rest.replace(final_write, '    status_publication.profile.command(profile_fields, periodic, true)\n' + final_write)
     mailbox = 'io.open(command_path, "rb")'
     assert before.count(mailbox) == 1
     before = before.replace(mailbox, f'{wrapper}("command_mailbox", io.open, command_path, "rb")')
@@ -350,7 +357,7 @@ end
 
 
 def read_comparison(raw):
-    raw, memory, sizes = raw.split("|")
+    raw, memory, sizes, commands = raw.split("|")
     raw, status = raw.split("^")
     summary, slow_frame = raw.split("!")
     duration, *sections = summary.split(";")
@@ -388,9 +395,14 @@ def read_comparison(raw):
                             "inclusive_growth_kib": float(growth), "peak_inclusive_growth_kib": float(peak_growth)}
     status_bytes_by_tag = {entry.split(",")[0]: int(entry.split(",")[1]) for entry in sizes.split(";")[1:]}
     assert status_bytes_by_tag and sum(status_bytes_by_tag.values()) <= int(max_bytes)
+    tick_sources = {}
+    for entry in commands.split(";")[1:]:
+        name, ticks, snapshots = entry.split(",")
+        tick_sources[name] = {"ticks": int(ticks), "snapshot_attempts": int(snapshots)}
+    assert tick_sources
     return {"seconds": float(duration), "timings": totals, "status_sections": status_peaks,
             "max_status_bytes": int(max_bytes), "max_status_rows": int(max_rows), "lua_heap": heap,
-            "heap_calls": heap_calls, "sample_status_bytes_by_tag": status_bytes_by_tag,
+            "heap_calls": heap_calls, "sample_status_bytes_by_tag": status_bytes_by_tag, "tick_sources": tick_sources,
             "slowest_interval": {"elapsed_ms": float(elapsed), "inclusive_calls_ms": slow_calls,
                                  "thread_cycles": int(peak_cycles), "inclusive_call_cycles": call_cycles}}
 

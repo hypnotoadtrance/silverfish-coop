@@ -4979,9 +4979,8 @@ async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
     healing = healing_game["native_guest_regen"][pawn]
     published = healing_game["pawns"]["guest"]
     assert published["name"] == pawn and abs(published["health"] - healing["health_after"]) < 1e-7, (published, healing)
-    remote_recovered = await sample(host)
-    assert abs(remote_recovered["remote_health"] - expected_ceiling) <= .2, remote_recovered
-    assert abs(remote_recovered["remote_regen"] - expected_ceiling) < .01, remote_recovered
+    remote_recovered = await wait_for(host, lambda hit: abs(hit["remote_health"] - expected_ceiling) <= .2
+                                      and abs(hit["remote_regen"] - expected_ceiling) < .01)
 
     await asyncio.sleep(1)
     assert all(result == "cleared" for result in await asyncio.gather(*(command(seat, "clear") for seat in (host, guest))))

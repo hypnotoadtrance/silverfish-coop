@@ -37,6 +37,7 @@ def frame(known, positions, area, epoch, viewer) -> dict:
 class MarkerView:
     def __init__(self) -> None:
         self.next_update = 0.0
+        self.empty_scope = None
 
     async def sync(self, client) -> None:
         now = time.monotonic()
@@ -54,9 +55,14 @@ class MarkerView:
         if (not isinstance(markers, dict) or len(markers) > MAX_MARKERS or viewer in markers or markers.keys() - downed
                 or any(not character_id(character) or not location(point) for character, point in markers.items())):
             return
+        pawn = client.last_game.get("pawns", {}).get("local", {}).get("name")
+        scope = area, epoch, pawn
+        if not markers and self.empty_scope == scope:
+            return
         self.next_update = now + .8
         fields = tuple(field for character, point in sorted(markers.items()) for field in (character, *map(str, point)))
         await client.bridge.command(COMMAND, epoch, area, *fields, timeout=2)
+        self.empty_scope = scope if not markers else None
 
 
 def parse(frame_row, marker_rows, area) -> dict:

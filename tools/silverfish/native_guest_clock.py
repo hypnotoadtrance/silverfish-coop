@@ -4,8 +4,18 @@ import time
 
 
 FIXTURE = "native-guest-clock-fixture"
+APPLY = "native-guest-clock-apply"
+REPLY = "native-guest-clock-reply"
+KEY = "native_guest_clock"
 WORLD_START = "native_guest_world_start"
 MAX_MILLISECONDS = 922_337_203_685_477
+
+
+def parse_report(fields):
+    _, area, pawn, epoch, sequence, milliseconds, phase, calls, original = fields
+    return {"map": area, "pawn": pawn, "epoch": epoch, "sequence": int(sequence),
+            "milliseconds": int(milliseconds), "state": phase, "calls": int(calls),
+            "original_client_milliseconds": None if original == "-" else int(original)}
 
 
 class GuestClockView:
@@ -32,11 +42,18 @@ class GuestClockView:
             return
         self.sequence += 1
         self.next_refresh = now + .65
-        snapshot = await client.bridge.command("native-guest-clock-apply", client.zone_epoch, str(self.sequence),
+        snapshot = await client.bridge.command(APPLY, client.zone_epoch, str(self.sequence),
                                                area, str(milliseconds), timeout=2)
-        proof = snapshot.get("native_guest_clock", {})
+        proof = snapshot.get(KEY, {})
         fields = ("map", "pawn", "epoch", "sequence", "milliseconds")
         if (snapshot.get("state") != "connected" or snapshot.get("map") != area
                 or tuple(proof.get(key) for key in fields) != (area, pawn, client.zone_epoch, self.sequence, milliseconds)):
             raise RuntimeError("The guest's stock clock did not verify the fresh host time")
-        client.last_game = snapshot
+        if (sequence := snapshot.get("native_guest_clock_snapshot_sequence")) is None:
+            client.last_game = snapshot
+            return
+        latest = client.last_game
+        if (latest.get("sequence", 0) <= sequence
+                and (latest.get("state"), latest.get("map"), latest.get("pawns", {}).get("local", {}).get("name"))
+                == ("connected", area, pawn)):
+            client.last_game = {**latest, KEY: proof}

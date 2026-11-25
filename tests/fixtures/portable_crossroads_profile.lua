@@ -65,6 +65,14 @@ function probe.status_size(rows)
     active.status_sizes = sizes
 end
 
+function probe.command(fields, periodic, publishes_snapshot)
+    if not capture then return end
+    local action = fields and fields[2] or "scheduled"
+    local counts = publishes_snapshot and capture.snapshot_sources or capture.tick_sources
+    local key = (periodic and "due/" or "between/") .. action
+    counts[key] = (counts[key] or 0) + 1
+end
+
 function probe.status_mark(tag, rows, bytes)
     local active = capture
     if not active then return end
@@ -130,8 +138,12 @@ local function result()
     for tag, size in pairs(complete.status_sizes or {}) do
         sizes[#sizes + 1] = (";%s,%d"):format(tag, size)
     end
+    local commands = {}
+    for key, count in pairs(complete.tick_sources) do
+        commands[#commands + 1] = (";%s,%d,%d"):format(key, count, complete.snapshot_sources[key] or 0)
+    end
     return ("%.5f"):format(complete.elapsed) .. table.concat(rows) .. table.concat(peak) .. table.concat(status)
-        .. "|" .. table.concat(memory) .. "|" .. table.concat(sizes)
+        .. "|" .. table.concat(memory) .. "|" .. table.concat(sizes) .. "|" .. table.concat(commands)
 end
 
 local function compare_rows()
@@ -220,7 +232,8 @@ LoopInGameThreadWithDelay(50, function()
             capture, previous, previous_cycles, complete = {
                 rows = {}, calls = {}, peak = 0, peak_calls = {}, started = now,
                 coarse = coarse, deadline = now + (gc_trial and gc_window_us or coarse and coarse_window_us or window_us),
-                status_peaks = {}, heap_calls = {}, max_status_rows = 0, max_status_bytes = 0,
+                status_peaks = {}, heap_calls = {}, tick_sources = {}, snapshot_sources = {},
+                max_status_rows = 0, max_status_bytes = 0,
                 heap_start = heap, heap_previous = heap, heap_peak = heap, heap_max_drop = 0, heap_large_drops = 0,
                 original_mirror = status_publication.mirror,
             }, nil, nil, nil
