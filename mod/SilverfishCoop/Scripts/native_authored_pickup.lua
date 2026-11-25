@@ -973,16 +973,9 @@ function pickup.rows(state, phase, status_row)
         if phase == "connected" and binding.loose_generation then
             rows[#rows + 1] = status_row("native-loose-pickup-view-scope", binding.loose_generation)
         end
-        local list = SilverfishNearbyLoosePickups()
-        if type(list) == "string" then
-            for entry in list:gmatch("[^\n]+") do
-                local path, class, mode, availability, x, y, z = entry:match(
-                    "^([^|]+)|([^|]+)|([012])|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
-                if path then
-                    rows[#rows + 1] = status_row("native-loose-pickup", state.map, path, class, mode, availability, x, y, z)
-                end
-            end
-        end
+        local publish = SilverfishNearbyLoosePickupStatusRows
+        local nearby = type(publish) == "function" and publish(state.map)
+        if type(nearby) == "string" and nearby ~= "" then rows[#rows + 1] = nearby end
     end
     if loose_check and phase == "hosting" then
         for _, checked in ipairs(loose_check) do

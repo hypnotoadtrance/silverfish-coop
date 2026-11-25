@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <format>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
@@ -449,6 +450,7 @@ namespace
     struct LooseSource
     {
         RC::StringType world, actor, item_class;
+        std::string item_class_utf8;
         Profile profile{};
         Scope scope{};
         U::UObject* indexed_actor{};
@@ -2268,6 +2270,7 @@ namespace
         loose.world = seat.profile->world;
         loose.actor = path;
         loose.item_class = class_path;
+        loose.item_class_utf8 = RC::to_utf8_string(class_path);
         loose.profile = {.source = entry->first, .world = loose.world.c_str(), .actor = loose.actor.c_str(),
             .item_class = loose.item_class.c_str(), .stock_cash = cash, .discovered = true};
         loose.scope = {seat.world.Get(), seat.pawn.Get(), actor, box, seat.controller.Get(), seat.driver.Get(), &loose.profile,
@@ -2475,15 +2478,16 @@ namespace
         return report("stock_item_available");
     }
 
-    int nearby_loose(const Lua& lua)
+    int nearby_loose_status_rows(const Lua& lua)
     {
         auto* pawn = loose_pawn.Get();
-        if (!ready() || !live(pawn) || lua.get_stack_size() != 0) return 0;
+        if (!ready() || !live(pawn) || lua.get_stack_size() != 1 || !lua.is_string()) return 0;
+        const auto map = lua.get_string();
         auto center = static_cast<U::AActor*>(pawn)->K2_GetActorLocation();
         struct Nearby
         {
             double distance;
-            const Scope* scope;
+            const LooseSource* source;
             U::FVector position;
         };
         std::vector<Nearby> nearby;
@@ -2499,24 +2503,26 @@ namespace
             const auto dx = at.GetX() - center.GetX(), dy = at.GetY() - center.GetY(), dz = at.GetZ() - center.GetZ();
             const auto distance = dx * dx + dy * dy + dz * dz;
             if (std::isfinite(distance) && distance <= 1800.0 * 1800.0)
-                nearby.push_back({distance, &loose.scope, at});
+                nearby.push_back({distance, &loose, at});
         }
         std::ranges::sort(nearby, {}, &Nearby::distance);
         std::string rows;
         int remaining = 48;
-        for (auto& [_, scope, at] : nearby)
+        for (auto& [_, source, at] : nearby)
         {
-            auto* actor = scope->actor.Get();
+            const auto& scope = source->scope;
+            auto* actor = scope.actor.Get();
             auto* mode = loose_respawn_mode(actor);
             if (!mode) continue;
             if (remaining-- == 0) break;
             // Unreal can deliver the host's hidden flag ahead of the pickup ledger.
             // Keep the registered replica eligible for the local visibility update.
-            const bool awaiting_claim = !scope->host && remotely_hidden_loose(actor);
-            if (!scope->claimed && !available(*scope) && !awaiting_claim) continue;
-            rows += std::format("{}|{}|{}|{}|{:.3f}|{:.3f}|{:.3f}\n", scope->profile->source,
-                RC::to_utf8_string(scope->profile->item_class), mode->GetPropertyValueInContainer(actor),
-                scope->claimed ? "claimed" : "available", at.GetX(), at.GetY(), at.GetZ());
+            const bool awaiting_claim = !scope.host && remotely_hidden_loose(actor);
+            if (!scope.claimed && !available(scope) && !awaiting_claim) continue;
+            if (!rows.empty()) rows.push_back('\n');
+            std::format_to(std::back_inserter(rows), "native-loose-pickup\t{}\t{}\t{}\t{}\t{}\t{:.3f}\t{:.3f}\t{:.3f}",
+                map, scope.profile->source, source->item_class_utf8, mode->GetPropertyValueInContainer(actor),
+                scope.claimed ? "claimed" : "available", at.GetX(), at.GetY(), at.GetZ());
         }
         lua.set_string(rows);
         return 1;
@@ -3085,7 +3091,7 @@ namespace silverfish::native_authored_pickup
         lua.register_function("SilverfishAcknowledgeLooseCarry", acknowledge_loose_carry);
         lua.register_function("SilverfishSetGuestLoosePickupView", set_guest_loose_view);
         lua.register_function("SilverfishDescribeLoosePickup", describe_loose);
-        lua.register_function("SilverfishNearbyLoosePickups", nearby_loose);
+        lua.register_function("SilverfishNearbyLoosePickupStatusRows", nearby_loose_status_rows);
         lua.register_function("SilverfishTakeNativeAuthoredPickupPress", take_press);
         lua.register_function("SilverfishProjectNativeAuthoredPickup", project);
         lua.register_function("SilverfishReadNativeAuthoredPickup", status);

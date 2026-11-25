@@ -104,10 +104,6 @@ reporting_drop("projected", epoch)
 local guest = observe("connected")
 assert(not guest["native-authored-pickup-memory"] and guest["native-dead-drop"][6] == epoch)
 local authored_binds = 0
-env.SilverfishSetNativeAuthoredPickupScope = function()
-    authored_binds = authored_binds + 1
-    error("a loose pickup must not register unrelated authored sources")
-end
 env.SilverfishDiscoverLoosePickups = function(address, host)
     assert(address == pawn:GetAddress() and host == false)
     return 12, "", 5
@@ -120,6 +116,20 @@ env.SilverfishSetGuestLoosePickupView = function(generation, hidden, actor)
     return true
 end
 pickup.refresh_loose(function() return world end)
+local nearby = table.concat({"native-loose-pickup", crossroads, path, "Stock item", "2", "available",
+    "10.000", "20.000", "30.000"}, "\t")
+env.SilverfishNearbyLoosePickupStatusRows = function(map)
+    assert(map == crossroads)
+    return nearby
+end
+env.SilverfishSetNativeAuthoredPickupScope = function() return false end
+local snapshot = table.concat(pickup.rows(state, "connected", function(...) return table.concat({...}, "\t") end), "\n")
+assert(snapshot:sub(-#nearby) == nearby and snapshot:find("native-loose-pickup-view-scope\t5\n", 1, true))
+env.SilverfishNearbyLoosePickupStatusRows = nil
+env.SilverfishSetNativeAuthoredPickupScope = function()
+    authored_binds = authored_binds + 1
+    error("a loose pickup must not register unrelated authored sources")
+end
 local command = {"test", "native-loose-pickup-project", "5", "hide", path}
 assert(pickup.command(command, state, "connected") == "shared level item visibility synchronized")
 command[3] = "4"
