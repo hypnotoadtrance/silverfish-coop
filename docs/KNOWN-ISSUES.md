@@ -74,6 +74,8 @@ A follow-up on the same ZIP profiled status assembly in two muted Direct IP laun
 
 The optional private collection trial on `rc-0d06181` used three consecutive 12-second Crossroads walking samples on the same host and guest, with a pause of 120 and step multiplier of 160 in the middle sample. Both seats restored their original 200 and 100 settings afterward. The guest recorded 1, 14, and 3 heap drops of at least 1 MiB. Guest frame P99 was 7.43, 7.69, and 7.38 ms. Guest status P99 was 3.05, 9.21, and 4.40 ms. The guest's longest interval fell from 34.1 to 18.9 ms in the tuned window and stayed at 18.9 ms after restoring the defaults. The heap started at different sizes in each window. This comparison supports keeping the shipped defaults, with further work directed at recurring allocations. The same two muted Direct IP launches passed weather travel and stock door toggles, and preserved the original saves.
 
+`rc-02b5313` reads local lean through the qualified stock pawn in C++. In Observatory and Crossroads, 256 reads took 5.5 to 5.8 ms through the native reader and 18.0 to 18.9 ms through the Lua reader. Different pawn, world, and role identities were refused. The host and guest matched 62 and 39 nonzero samples with their stock lean components. Both observed the lean solver and release in each direction. The host key-injection probe passed, and the guest probe did not observe its requested lean. Stock footstep relay, Crossroads weather travel, and stock door toggles passed across two muted Direct IP launches, with the original saves preserved. Guest key input, rendered motion, and Steam behavior still need two-PC playtesting.
+
 ## `rc-6690ff4` playtest
 
 | Area | Two-PC observation |
