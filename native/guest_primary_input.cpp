@@ -1054,6 +1054,19 @@ namespace
         return fields;
     }
 
+    int read_pump_trigger(const Lua& lua)
+    {
+        const auto now = Clock::now();
+        auto* pawn = scope.seat.pawn.Get();
+        if (!available() || scope.seat.host || !scope.item || !scope.item->single_reload ||
+            !press.fire_on_release || press.seat.pawn.Get() != pawn || press.seat.held.Get() != scope.seat.held.Get() ||
+            press.generation != generation.load(std::memory_order_acquire) ||
+            now >= press.expires || lua.get_stack_size() != 1 || !lua.is_integer(1) ||
+            lua.get_integer() != address(pawn) || !qualified(scope, now)) return 0;
+        lua.set_bool(true);
+        return 1;
+    }
+
     int read_aim(const Lua& lua)
     {
         auto* pawn = scope.seat.pawn.Get();
@@ -1220,15 +1233,21 @@ namespace
 
     int probe(const Lua& lua, bool host)
     {
-        if (!available() || scope.seat.host != host || !fixtures(host) || lua.get_stack_size() != 1 || !lua.is_integer(1))
+        const auto size = lua.get_stack_size();
+        if (!available() || scope.seat.host != host || !fixtures(host) || (size != 1 && size != 2) ||
+            !lua.is_integer(1) || (size == 2 && !lua.is_string(2)))
+            return result(lua, false, "native_guest_primary_fixture_unavailable");
+        const auto edge = size == 2 ? lua.get_string(2) : std::string_view{};
+        if (size == 2 && (host || !scope.item || !scope.item->single_reload || (edge != "press" && edge != "release")))
             return result(lua, false, "native_guest_primary_fixture_unavailable");
         const auto now = Clock::now();
         auto* pawn = scope.seat.pawn.Get();
         auto* action = scope.action.Get();
-        if (lua.get_integer() != address(pawn) || !qualified(scope, now) || !can_act(scope.seat))
+        if (lua.get_integer(1) != address(pawn) || !qualified(scope, now) || !can_act(scope.seat))
             return result(lua, false, "native_guest_primary_fixture_scope_unavailable");
         discard_expired(now);
-        if (count || (press.seat.pawn.Get() && now < press.expires) || sequence == max_sequence)
+        const bool pending_press = press.seat.pawn.Get() == pawn && now < press.expires;
+        if (count || (edge == "release" ? !pending_press : pending_press) || sequence == max_sequence)
             return result(lua, false, "native_guest_primary_fixture_input_busy");
         const bool toggle = scope.item == &crowbar;
         const auto& first = toggle ? scope.completed : scope.started;
@@ -1239,7 +1258,7 @@ namespace
         const auto before = sequence;
         const bool on_release = scope.item->action_on_release &&
             !silverfish::native_guest_item::active_loki_barrel(pawn, scope.seat.held.Get());
-        if (!toggle)
+        if (!toggle && edge != "release")
         {
             factory.dispatch(pawn, action, first, true);
             if (press.seat.pawn.Get() != pawn || !qualified(scope, Clock::now()))
@@ -1247,6 +1266,7 @@ namespace
             if (on_release && (sequence != before || count != 0))
                 return result(lua, false, "native_guest_primary_fixture_fired_before_release");
         }
+        if (edge == "press") return result(lua, true, "stock_held");
         factory.dispatch(pawn, action, scope.completed, false);
         if (press.seat.pawn.Get() || sequence != before + 1 || count != 1)
             return result(lua, false, "native_guest_primary_fixture_release_unverified");
@@ -1495,6 +1515,7 @@ namespace silverfish::native_guest_primary_input
             lua.register_function("SilverfishTakeNativeGuestMeleeInput", [](const Lua& lua) { return take_held(lua, true); });
             lua.register_function("SilverfishClearNativeGuestPrimaryScope", [](const Lua&) { return clear(false); });
             lua.register_function("SilverfishReadNativeGuestAim", read_aim);
+            lua.register_function("SilverfishReadNativeGuestPumpTrigger", read_pump_trigger);
             if (fixtures(false))
             {
                 lua.register_function("SilverfishProbeNativeGuestPrimaryInput", [](const Lua& lua) { return probe(lua, false); });

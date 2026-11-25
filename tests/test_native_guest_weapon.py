@@ -258,6 +258,15 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(client.tube_reload)
         self.assertEqual(client.gameplay_action.await_count, 2)
 
+        client.zone_epoch = "epoch"
+        client.tube_reload = scope, sequence, step, time.monotonic() - 1
+        client.last_game["native_guest_primary_scope"] = {
+            "map": area, "pawn": "guest", "guid": guid, "kind": kind, "pump_trigger_held": True,
+        }
+        await service.Client.service_reload_input(client, True)
+        self.assertIsNone(client.tube_reload)
+        self.assertEqual(client.gameplay_action.await_count, 2)
+
     def host(self):
         player_party = party.new_party()
         party.add_player(player_party, "character")

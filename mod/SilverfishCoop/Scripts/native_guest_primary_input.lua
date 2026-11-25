@@ -402,8 +402,10 @@ end
 function primary.rows(state, phase, status_row)
     local current = context(state, phase)
     if not same_context(current, binding) then return {} end
+    local trigger = type(SilverfishReadNativeGuestPumpTrigger) == "function"
+        and SilverfishReadNativeGuestPumpTrigger(current.pawn:GetAddress()) == true
     local rows = { status_row("native-guest-primary-scope", current.map, current.name, binding.guid,
-        binding.kind, binding.mode) }
+        binding.kind, binding.mode, trigger and 1 or 0) }
     if binding.kind == "spade" and shovel_intent and os.clock() < shovel_intent.expires and can_use(current) then
         rows[#rows + 1] = status_row("native-guest-spade-intent", current.map, current.name, binding.guid, shovel_intent.sequence)
     end

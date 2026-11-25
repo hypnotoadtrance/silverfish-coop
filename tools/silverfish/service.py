@@ -5573,7 +5573,10 @@ class Client:
         underbarrel = fresh and intent.get("barrel") == "loki"
         magazine = guest_weapon_profiles.SINGLE_RELOAD_MAGAZINES.get(kind) if not underbarrel else None
         scope = self.host_session, self.zone_epoch, area, pawn, receiver
-        if magazine and (not native_gold.valid_guid(receiver) or self.primary_scope != (area, pawn, receiver, kind)
+        primary = self.last_game.get("native_guest_primary_scope", {})
+        pump_trigger_held = (magazine and primary.get("pump_trigger_held")
+                             and (primary.get("map"), primary.get("pawn"), primary.get("guid")) == (area, pawn, receiver))
+        if magazine and (pump_trigger_held or self.primary_scope != (area, pawn, receiver, kind)
                          or self.gameplay.get("players", {}).get(self.viewer_role, {}).get("downed")
                          or self.last_game.get("native_inventory_view", {}).get("state") == "stock"):
             self.tube_reload = None

@@ -6,6 +6,13 @@
         assert(slot and slot >= 0 and slot < 8)
         local row = save.PlayerEquipment[slot + 1]
         if item_identity(row) ~= fields[4] then return "waiting" end
+        if fields[5] == "pump-press" or fields[5] == "pump-release" then
+            assert(equipped_guid(pawn, save) == fields[4])
+            local edge = fields[5]:match("^pump%-(%l+)$")
+            local ok, message, sequence = SilverfishProbeNativeGuestPrimaryInput(pawn:GetAddress(), edge)
+            assert(ok, message)
+            return edge == "press" and message or tostring(sequence)
+        end
         if fields[5] == "switch-during-reload" then
             local before = equipped_guid(pawn, save)
             assert(before and before ~= fields[4])

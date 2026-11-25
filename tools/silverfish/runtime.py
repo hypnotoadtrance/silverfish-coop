@@ -2128,8 +2128,10 @@ class Bridge:
                       and fields[1] == data.get("map") and data.get("state") == "connected" and len(fields[2]) <= 512
                       and (sequence := _held_input_sequence(fields[4]))):
                     data[native_host_dig_live.GUEST_INTENT] = (sequence, fields[1], fields[2], fields[3], "spade")
-                elif fields[0] == "native-guest-primary-scope" and len(fields) == 6:
-                    data["native_guest_primary_scope"] = dict(zip(("map", "pawn", "guid", "kind", "mode"), fields[1:]))
+                elif fields[0] == "native-guest-primary-scope" and len(fields) in {6, 7}:
+                    data["native_guest_primary_scope"] = dict(zip(("map", "pawn", "guid", "kind", "mode"), fields[1:6]))
+                    if len(fields) == 7 and fields[6] == "1":
+                        data["native_guest_primary_scope"]["pump_trigger_held"] = True
                 elif (fields[0] == "native-guest-primary-publication" and len(fields) == 7 and valid_guid(fields[3])
                       and fields[4] in ("tap", "held") and (sequence := _held_input_sequence(fields[5]))
                       and fields[6] in ("memory", "file")):
