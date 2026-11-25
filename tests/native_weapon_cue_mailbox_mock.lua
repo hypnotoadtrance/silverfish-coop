@@ -3,33 +3,16 @@ package.path = "./mod/SilverfishCoop/Scripts/?.lua;" .. package.path
 local now = 10
 local area = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local bandage = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
-local bridge = "private-weapon-cues"
-local original_getenv = os.getenv
-os.getenv = function(name)
-    if name == "SILVERFISH_COOP_BRIDGE" then return bridge end
-    return original_getenv(name)
-end
-
-local frames, files, clears = {}, {}, 0
-local attached = true
+local frames, clears = {}, 0
+local attached, accept_until = true, math.huge
 SilverfishPublishLocalWeaponCue = function(map, record, remaining)
-    if not attached then return false end
+    if not attached or #frames >= accept_until then return false end
     assert(map == area and remaining > 0 and remaining <= 250)
     frames[#frames + 1] = {record, remaining}
     return true
 end
 SilverfishClearLocalWeaponCues = function() clears = clears + 1 end
-io.open = function(path, mode)
-    assert(path == bridge .. "/native-weapon-shots.tmp" and mode == "wb")
-    return {
-        write = function(_, text, suffix) files[#files + 1] = text .. suffix; return true end,
-        close = function() return true end,
-    }
-end
-os.rename = function(from, to)
-    assert(from == bridge .. "/native-weapon-shots.tmp" and to == bridge .. "/native-weapon-shots")
-    return true
-end
+io.open = function() error("Gameplay cues must never open a mailbox file") end
 
 local function object(properties)
     properties.IsValid = function() return true end
@@ -66,29 +49,29 @@ now = 10.1
 report()
 flush()
 flush()
-assert(#frames == 2 and #files == 0)
+assert(#frames == 2)
 assert(frames[1][1] == record(1) and frames[1][2] >= 149 and frames[1][2] <= 150)
 assert(frames[2][1] == record(2) and frames[2][2] >= 249)
 
 report()
 now = 10.4
 flush()
-assert(#frames == 2 and #files == 0)
+assert(#frames == 2)
 
 report()
 state.world = object({})
 flush()
 view.sync(state, "hosting", avatar)
-assert(clears == 1 and #frames == 2 and #files == 0)
+assert(clears == 1 and #frames == 2)
 report()
 flush()
-assert(frames[3][1] == record(5) and #files == 0)
+assert(frames[3][1] == record(5))
 
 -- A resident worker disappearing during teardown does not switch active cues to disk.
 attached = false
 report()
 flush()
-assert(#frames == 3 and #files == 0)
+assert(#frames == 3)
 view.sync(state, "ready", avatar)
 assert(clears == 2)
 
@@ -97,22 +80,44 @@ view.sync(state, "hosting", avatar)
 for _ = 1, 40 do report() end
 flush()
 assert(#frames == 39 and frames[4][1] == record(11) and frames[39][1] == record(46))
-assert(#files == 0)
+-- Detach after accepting one entry. The accepted prefix must not replay on recovery.
+accept_until = 40
+report()
+report()
+flush()
+assert(#frames == 40 and frames[40][1] == record(47))
+accept_until = math.huge
+now = now + .04
+flush()
+assert(#frames == 41 and frames[41][1] == record(48) and frames[41][2] <= 210)
 view.sync(state, "ready", avatar)
 
--- An unattached worker and an older native core both preserve the legacy file route.
+-- The first cue can arrive before the resident worker attaches.
 attached = false
 view.sync(state, "hosting", avatar)
 report()
 flush()
-assert(files[1] == area .. "\n" .. record(47) .. "\n")
+assert(#frames == 41)
+attached = true
+now = now + .04
+flush()
+assert(#frames == 42 and frames[42][1] == record(49))
+
+attached = false
+report()
+flush()
+now = now + .3
+attached = true
+flush()
+assert(#frames == 42, "an expired cue must not play after the bridge comes back")
+
 view.sync(state, "ready", avatar)
 SilverfishPublishLocalWeaponCue = nil
 SilverfishClearLocalWeaponCues = nil
 view.sync(state, "hosting", avatar)
 report()
 flush()
-assert(files[2] == area .. "\n" .. record(48) .. "\n")
+assert(#frames == 42)
 -- The shooter uses their live first-person muzzle, while observers keep the host pose.
 local weapon_path = "/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C"
 local muzzle_location = {X = 152, Y = 225, Z = 325}

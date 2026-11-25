@@ -25,10 +25,9 @@ local attenuation_path = "/Game/Assets/Sounds/SoundClasses/Weapon_Attenuation.We
 local local_attenuation = "/Game/Assets/Sounds/SoundClasses/SmallSound_Attenuation.SmallSound_Attenuation"
 local npc_impact_attenuation = "/Game/Assets/Sounds/SoundClasses/Default_Attenuation.Default_Attenuation"
 local sound_types = {SoundCue = true, SoundWave = true, MetaSoundSource = true}
-local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 local maximum, range = 36, 30000
 local current, hooked, melee_hooked, recoil_hooked, cycle_hooked, visit, last_played, last_round
-local serial, published, pending = 0, 0, {}
+local serial, pending = 0, {}
 local use_hooked, location_sound_hooked, turret_hooked
 
 local function valid(object) return object and object:IsValid() end
@@ -114,7 +113,7 @@ function view.short_bolt(world, origin, finish, rotation, from_guest)
     if not current or not same(current.world, world) or type(SilverfishPublishLocalWeaponCue) ~= "function" then return end
     serial = serial + 1
     record({serial, "bolt-flight", origin.X, origin.Y, origin.Z, finish.X, finish.Y, finish.Z,
-        rotation.Pitch, rotation.Yaw, rotation.Roll, memory_only = true,
+        rotation.Pitch, rotation.Yaw, rotation.Roll,
         expires = current.statics:GetRealTimeSeconds(world) + .25})
     if from_guest and valid(current.listener) then pcall(bolt_view.play, world, current.listener, origin, finish, rotation) end
 end
@@ -420,43 +419,24 @@ function view.sync(state, phase, avatar)
 end
 
 function view.flush(get_world)
-    if not current or not bridge or published == serial or #pending == 0 then return end
+    if not current or #pending == 0 or type(SilverfishPublishLocalWeaponCue) ~= "function" then return end
     local world = get_world()
     if not same(world, current.world) then return end
     local now = current.statics:GetRealTimeSeconds(world)
-    while pending[1] and pending[1].expires <= now do table.remove(pending, 1) end
-    if #pending == 0 then return end
-    if type(SilverfishPublishLocalWeaponCue) == "function" then
-        for _, entry in ipairs(pending) do
-            if entry[1] > published then
-                local remaining = math.max(1, math.min(250, math.floor((entry.expires - now) * 1000)))
-                local offered = SilverfishPublishLocalWeaponCue(current.map, table.concat(entry, "|"), remaining)
-                if offered == false then break end
-                current.memory_cues = true
-            end
-        end
-        if current.memory_cues then
-            published, pending = serial, {}
-            return
-        end
-    end
-    local rows = {current.map}
+    local first_unsent = 1
     for _, entry in ipairs(pending) do
-        if not entry.memory_only then rows[#rows + 1] = table.concat(entry, "|") end
-    end
-    if #rows == 1 then published, pending = serial, {}; return end
-    local target = bridge .. "/native-weapon-shots"
-    local temporary = target .. ".tmp"
-    local file = io.open(temporary, "wb")
-    if not file then return end
-    local written = file:write(table.concat(rows, "\n"), "\n")
-    local closed = file:close()
-    if written and closed then
-        if not os.rename(temporary, target) then
-            os.remove(target)
-            if not os.rename(temporary, target) then return end
+        if entry.expires > now then
+            local remaining = math.max(1, math.min(250, math.floor((entry.expires - now) * 1000)))
+            local offered = SilverfishPublishLocalWeaponCue(current.map, table.concat(entry, "|"), remaining)
+            -- False means the resident worker is detached. Retry the unexpired suffix in order.
+            if offered == false then break end
         end
-        published = serial
+        first_unsent = first_unsent + 1
+    end
+    if first_unsent > #pending then
+        pending = {}
+    elseif first_unsent > 1 then
+        pending = table.move(pending, first_unsent, #pending, 1, {})
     end
 end
 
