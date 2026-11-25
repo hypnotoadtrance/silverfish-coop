@@ -6907,7 +6907,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     async def check_footsteps(host, guest, _pawn):
         return {"stock_footsteps": await verify_resident_footsteps(host, guest)}
 
-    storm_trial = StockStormTrial(portable_probe_command) if stock_storm_ambience else None
+    storm_trial = StockStormTrial(portable_probe_command, profile_receipts=crossroads_profile) if stock_storm_ambience else None
     weapon_campaign = "tutorial_dock_combat" if tutorial_dock_combat else "observatory"
     shot_view_campaign = "tutorial_dock_shot_view" if tutorial_dock_pursuit else weapon_campaign
     dock_world_checks = stock_bandage_revisit or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_dock_gate

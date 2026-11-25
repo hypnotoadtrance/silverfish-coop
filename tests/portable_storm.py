@@ -27,11 +27,28 @@ def conflict_report(response):
 
 
 class StockStormTrial:
-    def __init__(self, probe):
+    def __init__(self, probe, *, profile_receipts=False):
         self.probe = probe
+        self.profile_receipts = profile_receipts
 
     async def stage(self, seat, action):
         return (await self.probe(seat.bridge, "portable-storm", action)).strip()
+
+    async def verify_receipts(self, guest):
+        from portable_crossroads_profile import read_comparison
+
+        async def request(action):
+            result = await self.probe(guest.bridge, "crossroads-profile", action, reply_end="|end")
+            return result.removesuffix("|end")
+
+        assert await request("arm") == "armed"
+        async with asyncio.timeout(7):
+            while (sample := await request("read")) == "sampling":
+                await asyncio.sleep(.2)
+        sources = read_comparison(sample)["tick_sources"]
+        compact = sources.get("between/native-weather-ambience-apply", {})
+        assert compact.get("ticks", 0) > 0 and compact["snapshot_attempts"] == 0, sources
+        return compact
 
     async def wait_projection(self, host, guest, variant, *, guard_after=0, fresh_after=0):
         host_run, guest_run = host.campaign / "run", guest.client / "run"
@@ -96,6 +113,8 @@ class StockStormTrial:
                 await asyncio.sleep(.1)
         attempt = conflict_report(attempt)
         projected = await self.wait_projection(host, guest, LIGHTNING)
+        if self.profile_receipts:
+            projected["compact_receipts"] = await self.verify_receipts(guest)
         host_stock, guest_stock = map(source_report, await asyncio.gather(
             self.stage(host, "read"), self.stage(guest, "read")))
         assert host_stock["actor"] == self.first_actor and host_stock["lightning_warning"] == 1, host_stock
@@ -123,6 +142,8 @@ class StockStormTrial:
         variant, actor = (await self.stage(host, "fog")).split(";")
         assert variant == PESTILENCE and int(actor) and int(actor) != self.first_actor, (variant, actor)
         self.evidence["custom_fog"] = await self.wait_projection(host, guest, PESTILENCE)
+        if self.profile_receipts:
+            self.evidence["custom_fog"]["compact_receipts"] = await self.verify_receipts(guest)
         host_stock, guest_stock = map(source_report, await asyncio.gather(
             self.stage(host, "read"), self.stage(guest, "read")))
         assert host_stock["pestilence_spawns"] == 1 and guest_stock["pestilence_spawns"] == 0, (host_stock, guest_stock)
