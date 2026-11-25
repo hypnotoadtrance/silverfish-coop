@@ -1802,6 +1802,37 @@ namespace
         return 2;
     }
 
+    int read_local_lean(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_bool(3)) return 0;
+        const auto pawn_address = lua.get_integer();
+        const auto world_address = lua.get_integer();
+        const auto host = lua.get_bool();
+        auto* pawn = silverfish::native_interaction_input::current_local_pawn(pawn_address);
+        if (!pawn || scope.host != host || address(scope.world.Get()) != world_address) return 0;
+        if (!standing(pawn))
+        {
+            lua.set_number(0);
+            return 1;
+        }
+
+        auto* arrow = object_field(pawn, STR("LeanPivotArrow"));
+        auto* capsule = object_field(pawn, STR("CapsuleComponent"));
+        if (!live(arrow) || arrow->GetClassPrivate() != find<Unreal::UClass>(STR("/Script/Engine.ArrowComponent")) ||
+            arrow->GetOuterPrivate() != pawn || !live(capsule) || object_field(arrow, STR("AttachParent")) != capsule)
+            return 0;
+        auto* rotation = field<Unreal::FStructProperty>(arrow, STR("RelativeRotation"));
+        auto* type = rotation ? rotation->GetStruct().Get() : nullptr;
+        if (!type || type != find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.Rotator"))) return 0;
+        auto* roll = field<Unreal::FDoubleProperty>(type, STR("Roll"));
+        if (!roll || roll->GetOffset_Internal() < 0 ||
+            roll->GetOffset_Internal() + static_cast<int>(sizeof(double)) > rotation->GetSize()) return 0;
+        const auto angle = roll->GetPropertyValueInContainer(rotation->ContainerPtrToValuePtr<void>(arrow));
+        if (!std::isfinite(angle) || std::abs(angle) > 40) return 0;
+        lua.set_number(angle);
+        return 1;
+    }
+
     int dispatch_valve(const Lua& lua)
     {
         const auto respond = [&](bool value) { lua.set_bool(value); return 1; };
@@ -2106,6 +2137,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishTakeNativeCastawayResponse", take_castaway_response);
         lua.register_function("SilverfishTakeNativeSubwayValvePress", take_valve_press);
         lua.register_function("SilverfishTakeNativeStashPress", take_stash_press);
+        lua.register_function("SilverfishReadNativeLocalLean", read_local_lean);
         lua.register_function("SilverfishTakeNativeLanternPress", take_lantern_press);
         lua.register_function("SilverfishDispatchNativeSubwayValve", dispatch_valve);
         mosby_station_input::register_lua(lua);

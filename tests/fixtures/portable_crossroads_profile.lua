@@ -203,6 +203,9 @@ LoopInGameThreadWithDelay(50, function()
     elseif action == "rows" and not capture then
         local ok, value = pcall(compare_rows)
         if ok then message = value else message = "status rows comparison failed: " .. tostring(value) end
+    elseif action == "lean" and not capture then
+        local ok, value = pcall(SilverfishProfileLocalLean)
+        if ok then message = value else message = "lean reader comparison failed: " .. tostring(value) end
     end
     local output = assert(io.open(prefix .. "reply.tsv", "wb"))
     output:write(ticket, message and "\tok\t" or "\terror\t", message or "unexpected sampling request", "|end")

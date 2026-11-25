@@ -6897,7 +6897,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
 
     async def check_lean(host, guest, pawn):
         from avatar_lean_probe import verify_lean
-        return await verify_lean(host, guest, pawn)
+        proof = await verify_lean(host, guest, pawn)
+        if crossroads_profile:
+            from portable_crossroads_profile import compare_lean_reader
+            samples = await asyncio.gather(*(compare_lean_reader(seat, portable_probe_command) for seat in (host, guest)))
+            assert all(sample["nonzero_samples_matched"] > 0 for sample in samples), samples
+            proof["native_lean_reader"] = dict(zip(("host", "guest"), samples, strict=True))
+        return proof
 
     async def check_footsteps(host, guest, _pawn):
         return {"stock_footsteps": await verify_resident_footsteps(host, guest)}
@@ -7072,7 +7078,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 ))
         if crossroads_profile:
             from portable_crossroads_profile import (
-                instrument_anomaly_work, instrument_death_poll, instrument_flashlight_scope,
+                instrument_anomaly_work, instrument_avatar_lean, instrument_death_poll, instrument_flashlight_scope,
                 instrument_host_drop_context, instrument_inline_crate_scan,
                 instrument_input_mappings, instrument_journal_context,
                 instrument_loose_discovery, instrument_npc_class_discovery, instrument_profile,
@@ -7101,6 +7107,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(portable_script_overlay(game, "zone_wall.lua", instrument_zone_walls))
                 probes.enter_context(portable_script_overlay(game, "native_stash_view.lua", instrument_stash_binding))
+                probes.enter_context(portable_script_overlay(game, "native_avatar_lean_bridge.lua", instrument_avatar_lean))
             proof["crossroads_input_overlays"] = [
                 probes.enter_context(portable_script_overlay(game, "players.lua", instrument_input_mappings))
                 for game in games

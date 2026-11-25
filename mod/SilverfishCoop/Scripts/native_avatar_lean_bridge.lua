@@ -17,7 +17,8 @@ function lean_bridge.sync(state, phase)
     local details, world = state.local_pawn, state.world
     local controller = details and details.controller_object
     local driver = valid(world) and world.NetDriver
-    if not role or not details or not state.listening or not valid(driver) or not same(controller, state.controller)
+    if not role or not details or not valid(details.pawn) or not state.listening or not valid(driver)
+        or not same(controller, state.controller)
         or type(details.name) ~= "string" or not details.name:match("^Player_FP_C [!-~]+$") or #details.name > 480 then
         scope = nil
         return
@@ -25,7 +26,7 @@ function lean_bridge.sync(state, phase)
     if not scope or scope.role ~= role or scope.name ~= details.name or not same(scope.world, world)
         or not same(scope.pawn, details.pawn) or not same(scope.controller, controller) or not same(scope.driver, driver) then
         scope = {world = world, pawn = details.pawn, name = details.name, controller = controller, driver = driver,
-            role = role, next_sample = 0}
+            role = role, pawn_address = details.pawn:GetAddress(), world_address = world:GetAddress(), next_sample = 0}
     end
 end
 
@@ -46,6 +47,15 @@ local function project(frame, current)
     for id, roll in pairs(angles) do avatar.set_remote_lean(current.world, id, roll) end
 end
 
+local function qualify_lua(current, world)
+    local controller, pawn = current.controller, current.pawn
+    return same(world.NetDriver, current.driver)
+        and valid(current.driver.ServerConnection) == (current.role == "client")
+        and valid(controller) and controller:IsLocalController() and same(controller:GetWorld(), world)
+        and same(controller.Pawn, pawn) and same(pawn:GetWorld(), world) and pawn:IsLocallyControlled()
+        and not pawn:IsActorBeingDestroyed() and pawn:GetFullName() == current.name
+end
+
 function lean_bridge.update(get_world, role, leaving)
     local current = scope
     if not current then return end
@@ -58,12 +68,16 @@ function lean_bridge.update(get_world, role, leaving)
     if now < current.next_sample then return end
     current.next_sample = now + .05
 
-    local world, controller, pawn = get_world(), current.controller, current.pawn
-    if not same(world, current.world) or not same(world.NetDriver, current.driver)
-        or valid(current.driver.ServerConnection) ~= (role == "client")
-        or not valid(controller) or not controller:IsLocalController() or not same(controller:GetWorld(), world)
-        or not same(controller.Pawn, pawn) or not same(pawn:GetWorld(), world) or not pawn:IsLocallyControlled()
-        or pawn:IsActorBeingDestroyed() or pawn:GetFullName() ~= current.name then
+    local world, pawn = get_world(), current.pawn
+    if not same(world, current.world) then
+        scope = nil
+        return
+    end
+    local native_roll
+    if type(SilverfishReadNativeLocalLean) == "function" then
+        native_roll = SilverfishReadNativeLocalLean(current.pawn_address, current.world_address, role == "host")
+    end
+    if native_roll == nil and not qualify_lua(current, world) then
         scope = nil
         return
     end
@@ -75,7 +89,7 @@ function lean_bridge.update(get_world, role, leaving)
     end
     project(frame, current)
 
-    local roll = players.is_downed(pawn) == false and avatar.local_lean(pawn, world) or 0
+    local roll = players.is_downed(pawn) == false and (native_roll or avatar.local_lean(pawn, world)) or 0
     local centidegrees = math.floor(roll * 100 + .5)
     if centidegrees == current.last_roll and (centidegrees == 0 or now - current.last_publish < .2) then return end
     if SilverfishPublishLocalAvatarPose(current.name .. "\t" .. centidegrees) ~= false then

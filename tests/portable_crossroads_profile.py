@@ -138,6 +138,55 @@ def instrument_stash_binding(source):
         'end\n\n' + insertion)
 
 
+def instrument_avatar_lean(source):
+    anchor = "function lean_bridge.update(get_world, role, leaving)"
+    read = "SilverfishReadNativeLocalLean(current.pawn_address, current.world_address, role == \"host\")"
+    assert source.count(anchor) == source.count(read) == 1
+    fixture = """
+local lean_sample_count = 0
+local function check_native_lean(current, world, host)
+    local roll = SilverfishProfileCrossroadsCall("avatar_lean.native_read", SilverfishReadNativeLocalLean,
+        current.pawn_address, current.world_address, host)
+    if type(roll) == "number" and math.abs(roll) > 4 then
+        local legacy = avatar.local_lean(current.pawn, world)
+        assert(legacy and math.abs(roll - legacy) < 0.001, "Native lean disagreed with the stock component")
+        lean_sample_count = lean_sample_count + 1
+    end
+    return roll
+end
+
+SilverfishProfileLocalLean = function()
+    local current = assert(scope, "Local stock lean scope unavailable")
+    local pawn, world, host = current.pawn_address, current.world_address, current.role == "host"
+    local native = SilverfishReadNativeLocalLean
+    local function legacy()
+        if qualify_lua(current, current.world) then return avatar.local_lean(current.pawn, current.world) end
+    end
+    local value, expected = native(pawn, world, host), legacy()
+    assert(type(value) == "number" and type(expected) == "number" and math.abs(value - expected) < 0.001)
+    assert(native(pawn + 1, world, host) == nil and native(pawn, world + 1, host) == nil
+        and native(pawn, world, not host) == nil, "Lean read accepted a different pawn, world or role")
+    local reads = 256
+    local function measure(read, ...)
+        local start = SilverfishBridgeProfileStamp()
+        for _ = 1, reads do read(...) end
+        return (SilverfishBridgeProfileStamp() - start) / 1000
+    end
+    local native_ms, legacy_ms = measure(native, pawn, world, host), measure(legacy)
+    return ("%d,%.3f,%.3f,%d"):format(reads, native_ms, legacy_ms, lean_sample_count)
+end
+
+"""
+    return source.replace(read, 'check_native_lean(current, world, role == "host")').replace(anchor, fixture + anchor)
+
+
+async def compare_lean_reader(seat, probe):
+    info = await probe(seat.bridge, "crossroads-profile", "lean", reply_end="|end")
+    reads, native_ms, legacy_ms, held = info.removesuffix("|end").split(",")
+    return {"reads_per_path": int(reads), "native_ms": float(native_ms), "lua_ms": float(legacy_ms),
+            "nonzero_samples_matched": int(held), "wrong_pawn_world_and_role_refused": True}
+
+
 def instrument_input_mappings(source):
     original = "local function observe_mapping("
     anchor = "local function verified_mapping("
@@ -460,6 +509,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
     settled = await wait_resident_status(guest_run, pawns_here)
     comparison = await asyncio.gather(*(compare_vitals(seat) for seat in seats.values()))
     rows = await asyncio.gather(*(compare_rows(seat) for seat in seats.values()))
+    lean = await asyncio.gather(*(compare_lean_reader(seat, probe) for seat in seats.values()))
     journal = {}
     if area == CROSSROADS:
         async def journal_action(action, receipt):
@@ -476,6 +526,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
     return {"idle": idle, "guest_walking": moving, "guest_max_displacement_cm": displacement,
             "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(after_idle, after_movement),
             "row_format_comparison": dict(zip(seats, rows, strict=True)),
+            "lean_reader_comparison": dict(zip(seats, lean, strict=True)),
             "zone_walls": {seat: frame["game"]["native_zone_wall"]
                            for seat, frame in zip(seats, wall_status, strict=True)},
             "guest_roster": {slot: row["name"] for slot, row in settled["game"]["pawns"].items()},
