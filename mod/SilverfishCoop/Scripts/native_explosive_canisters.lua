@@ -89,6 +89,15 @@ function canisters.blast_source(position, cue)
     return matches == 1
 end
 
+local function sample_lua(entry, hosting)
+    local actor = entry.actor
+    if not valid(actor) or actor:IsActorBeingDestroyed() then return false end
+    if not entry.path then return true end
+    local burning = (hosting and actor[entry.spec.source] == true) or (not hosting and entry.lit == true)
+    local location = (burning or entry.sample_position) and actor:K2_GetActorLocation()
+    return true, burning, actor.Health, location and location.X, location and location.Y, location and location.Z
+end
+
 function canisters.rows(state, phase, row)
     if not same(state.world, world) or state.map ~= area then
         world, area, active, removed = state.world, state.map, {}, {}
@@ -108,20 +117,26 @@ function canisters.rows(state, phase, row)
     end
 
     local rows = {}
+    local hosting = phase == "hosting"
+    local native_sample = SilverfishReadNativePlacedCanister
+    local world_address = type(native_sample) == "function" and valid(world) and world:GetAddress()
     for address, entry in pairs(active) do
-        local actor = entry.actor
-        if valid(actor) and not actor:IsActorBeingDestroyed() then
+        local alive, burning, health, x, y, z
+        if entry.path and world_address then
+            alive, burning, health, x, y, z = native_sample(address, world_address, hosting,
+                entry.lit == true, entry.sample_position == true)
+        end
+        if alive == nil then alive, burning, health, x, y, z = sample_lua(entry, hosting) end
+        if alive then
             if entry.path and removed[entry.path] and phase == "connected" then
                 -- A stale actor channel can arrive after the direct map state.
-                actor:K2_DestroyActor()
+                entry.actor:K2_DestroyActor()
             elseif entry.path then
-                local burning = phase == "hosting" and actor[entry.spec.source] == true or phase == "connected" and entry.lit == true
                 entry.changed = entry.changed or burning
-                local particles = burning and phase == "connected" and fire_components(actor)
-                local location = (burning or entry.sample_position) and actor:K2_GetActorLocation()
+                local particles = burning and phase == "connected" and fire_components(entry.actor)
                 rows[#rows + 1] = row("native-explosive-canister", entry.path, burning and 1 or 0,
-                    particles and particles:IsActive() and 1 or 0, entry.changed and 1 or 0, actor.Health,
-                    location and location.X or "-", location and location.Y or "-", location and location.Z or "-")
+                    particles and particles:IsActive() and 1 or 0, entry.changed and 1 or 0, health,
+                    x or "-", y or "-", z or "-")
             end
         else
             if entry.path then removed[entry.path] = true end

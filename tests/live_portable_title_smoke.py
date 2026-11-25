@@ -67,6 +67,7 @@ from portable_mushrooms import verify_stock_mushrooms
 from portable_placed_item import placed_item_overlay, verify_stock_placed_item
 from portable_pickup_preview import pickup_preview_overlay, verified_drop_preview
 from portable_cash_popup import cash_pickup_overlay, verify_stock_cash_popup
+from portable_crossroads_canister import allow_portable_canister_fixture, instrument_canisters, verify_crossroads_canister
 from portable_world_view_receipt import patch_world_view_receipts, verify_world_view_receipt
 from tools.silverfish.title_session import STATUS_FILE as TITLE_STATUS_FILE
 
@@ -83,6 +84,7 @@ INDEPENDENT_RESIDENT_MAPS = {
     "stock_lockpicks": {OBSERVATORY}, "stock_observatory_tv": {OBSERVATORY},
     "stock_critters": {CROSSROADS}, "stock_lingering_teleport": {CROSSROADS}, "stock_mushrooms": {CROSSROADS},
     "stock_placed_item": {CROSSROADS}, "stock_cash_popup": {CROSSROADS}, "stock_weather_travel": {OBSERVATORY},
+    "stock_canister": {CROSSROADS},
     "stock_warehouse_switch": {OBSERVATORY, WAREHOUSE_DOCK}, "stock_warehouse_radio": {OBSERVATORY, WAREHOUSE_DOCK},
     "stock_warehouse_candle": {WAREHOUSE_DOCK}, "stock_dock_gate": {WAREHOUSE_DOCK},
     "tutorial_dock_npc_population": {WAREHOUSE_DOCK},
@@ -6442,7 +6444,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_melee_family: bool = False, stock_melee_edges: bool = False,
                  stock_warehouse_switch: bool = False, stock_warehouse_board: bool = False, stock_bottle: bool = False,
                  stock_roaming_barter: bool = False, stock_castaway_dialogue: bool = False,
-                 stock_critters: bool = False, stock_placed_item: bool = False,
+                 stock_critters: bool = False, stock_placed_item: bool = False, stock_canister: bool = False,
                  stock_mushrooms: bool = False, stock_eye_stacks: bool = False, stock_lingering_teleport: bool = False, stock_acid_pool: bool = False,
                  stock_npc_rivalry: bool = False, stock_throwables: str | None = None,
                  memory_status: bool = False, stock_prop_grip: bool = False,
@@ -6471,7 +6473,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  resident_cabinet_checkpoint: Path | None = None,
                  resident_cabinet_candidate_sha256: str | None = None) -> None:
     guest_world_start = guest_world_start or guest_world_start_travel
-    stock_weather_travel = stock_weather_travel or crossroads_profile
+    stock_weather_travel = stock_weather_travel or crossroads_profile or stock_canister
     guest_stash_memory = guest_stash_memory or guest_stash_large_memory
     container_nearby = container_nearby or guest_ui_memory
     roots = (work, first_game, second_game, original)
@@ -6612,6 +6614,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_placed_item, "crossroads", "stock_cash_popup",
          lambda host, guest, pawn: verify_stock_cash_popup(host, guest, pawn, portable_probe_command, campaign_save_hashes)),
         (stock_mushrooms, "crossroads", "stock_mushrooms", verify_stock_mushrooms),
+        (stock_canister, "crossroads", "stock_canister", lambda host, guest, pawn:
+         verify_crossroads_canister(host, guest, pawn, resident_events, campaign_save_hashes)),
         (stock_buried_placements, "buried_placements" if stock_shovel_quest else "crossroads",
          "stock_buried_placements", verify_stock_buried_placements),
         (stock_simmi_jammers, "simmi", "stock_simmi_jammers",
@@ -6693,6 +6697,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     ("native_loot_crate_input.lua", instrument_inline_crate_scan),
                     ("native_authored_pickup.lua", instrument_loose_discovery),
                 )
+            ]
+        if stock_canister:
+            proof["crossroads_canister_overlays"] = [
+                probes.enter_context(portable_script_overlay(game, script, patch))
+                for game in games
+                for script, patch in (("native_canister_fixture.lua", allow_portable_canister_fixture),
+                                      ("native_explosive_canisters.lua", instrument_canisters))
             ]
         if stock_weather_travel:
             for game in games:
@@ -7431,6 +7442,8 @@ if __name__ == "__main__":
                         help="verify one stock lightning strike and thunder across a private Crossroads pair")
     parser.add_argument("--stock-storm-ambience", action="store_true",
                         help="verify active stock storms across fresh join and reconnect in one private pair")
+    parser.add_argument("--stock-canister", action="store_true",
+                        help="verify native sampling and stock canister behavior in Crossroads")
     parser.add_argument("--stock-mushrooms", action="store_true",
                         help="verify both players harvest identified stock Crossroads mushrooms in one campaign")
     parser.add_argument("--stock-placed-item", action="store_true",
@@ -7529,7 +7542,7 @@ if __name__ == "__main__":
                               "stock_storm_ambience",
                               "stock_melee_family", "stock_melee_edges", "stock_warehouse_switch", "stock_warehouse_board", "stock_bottle",
                               "stock_roaming_barter", "stock_castaway_dialogue", "stock_critters", "stock_placed_item",
-                              "stock_mushrooms", "stock_throwables", "stock_eye_stacks",
+                              "stock_mushrooms", "stock_throwables", "stock_eye_stacks", "stock_canister",
                               "stock_lingering_teleport", "stock_light_ar", "stock_acid_pool", "stock_alternate_ammo"}
     if args.resident_held_queue and not args.resident_weapon_cues:
         parser.error("Use --resident-held-queue with --resident-weapon-cues")
@@ -7577,7 +7590,7 @@ if __name__ == "__main__":
             args.stock_melee_family, args.stock_melee_edges, args.stock_warehouse_switch, args.stock_warehouse_board, args.stock_bottle,
             args.stock_roaming_barter, args.stock_castaway_dialogue, args.stock_critters, args.stock_placed_item,
             args.stock_throwables, args.stock_eye_stacks,
-            args.stock_lingering_teleport, args.stock_acid_pool, args.stock_mushrooms)) and (
+            args.stock_lingering_teleport, args.stock_acid_pool, args.stock_mushrooms, args.stock_canister)) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
         parser.error("Run the resident gameplay checks without other gameplay fixtures")
@@ -7638,6 +7651,7 @@ if __name__ == "__main__":
                        stock_roaming_barter=args.stock_roaming_barter, stock_castaway_dialogue=args.stock_castaway_dialogue,
                        stock_critters=args.stock_critters,
                        stock_placed_item=args.stock_placed_item, stock_mushrooms=args.stock_mushrooms,
+                       stock_canister=args.stock_canister,
                        stock_eye_stacks=args.stock_eye_stacks, stock_lingering_teleport=args.stock_lingering_teleport,
                        stock_acid_pool=args.stock_acid_pool,
                        stock_throwables=args.stock_throwables,
