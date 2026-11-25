@@ -246,15 +246,15 @@ async def profile_world(host, guest, area, probe):
     rows = await asyncio.gather(*(compare_rows(seat) for seat in seats.values()))
     journal = {}
     if area == CROSSROADS:
-        async def journal_action(action):
-            reply = await submit(runs["host"], native_package_handoff_journal.FIXTURE, target=action)
-            assert reply.get("ok") and reply.get("native_package_handoff_journal_fixture") == action, reply
+        async def journal_action(action, receipt):
+            reply = await host.bridge.command("native-host-invite-fixture", action)
+            assert reply["ack"]["message"] == receipt, reply
 
-        await journal_action("open")
+        await journal_action("open", "native_host_invite_journal_open")
         view = await wait_resident_status(runs["host"], lambda frame:
             frame["game"].get("native_host_invite_journal") == "journal"
             and frame["game"].get(native_package_handoff_journal.JOURNAL, {}).get("state") == "idle")
-        await journal_action("close")
+        await journal_action("close", "native_host_invite_journal_closed")
         await wait_resident_status(runs["host"], lambda frame: "native_host_invite_journal" not in frame["game"])
         journal = {"journal_open_and_close": view["game"][native_package_handoff_journal.JOURNAL]}
     return {"idle": idle, "guest_walking": moving, "guest_max_displacement_cm": max(movement),

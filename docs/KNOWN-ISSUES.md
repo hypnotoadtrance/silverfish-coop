@@ -22,6 +22,8 @@ The `rc-f0b1c06` Crossroads baseline used two muted Direct IP instances. During 
 
 `rc-0cae3d6` formats status rows in C++. On both seats in Observatory and Crossroads, 4,096 representative rows matched the Lua output byte for byte and took 4.2 to 6.3 ms in C++, compared with 13.9 to 18.6 ms in Lua. The grouped run passed roaming barter, Castaway dialogue, guest crate opening, and weather travel. The Simmi check needed two focused reruns after a missed transition fixture acknowledgement and a Black Lake firing-position search failure. The final run verified both objectives and turn-ins on the same ZIP. All six isolated launches preserved the original saves. Crossroads still had a 74 ms idle host interval, so frame pacing remains open.
 
+`rc-b0fe29f` checks the active stock menu before qualifying the Journal's host and viewport, and reuses formatted canister rows when their live state is unchanged. The grouped run passed guest crate opening, critters, mushrooms, propane movement, and fuel drum ignition, destruction, and blast cue dispatch. The muted test still reported no continuous flame or blast particle creation. The stock Journal opened and closed on a focused follow-up pair after correcting the fixture entry point. No closed-menu sample reached the full Journal context check. The largest sampled Journal update was 0.008 ms, and canister rows peaked at 0.112 ms. Both pairs preserved the original saves. Crossroads still reached a 69 ms host interval, and live Steam invite verification remains open.
+
 ## `rc-1799e4b` playtest
 
 | Area | Two-PC observation |
