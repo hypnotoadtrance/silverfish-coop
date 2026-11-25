@@ -7,15 +7,15 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 | Area | Two-PC observation |
 | --- | --- |
 | Live Frog | The guest picked up a frog. Both Use in the stock context menu and dragging it onto their character failed to consume it. Development candidate `rc-7683381` accepts stock inherited infection effects in the guest consumable path. A muted Direct IP pair verified both gestures after reconnecting. Each consumed one frog, restored about eight food points, and increased only the guest's sickness on both seats. The campaign checkpoint stayed unchanged. |
-| Shotgun wall decals | The host saw the wall impacts and spread from the guest's suppressed shotgun. The firing guest reported no visible decals. |
+| Shotgun wall decals | The host saw the wall impacts and spread from the guest's suppressed shotgun. The firing guest reported no visible decals. Development candidate `rc-71e97ba` shares stock bullet decals on matching static surfaces. A muted Direct IP pair measured all nine pellets from the guest's suppressed shotgun hitting Observatory terrain and verified the same decal material and position on both seats. Rendered wall impacts still need a two-PC retest. |
 | Intro metal gate | The guest saw the open and closed positions, with an instant change between them. |
-| Guest melee impacts | The host heard the guest's melee hits. The guest reported missing the impact sound and the effect on physics objects. |
+| Guest melee impacts | The host heard the guest's melee hits. The guest reported missing the impact sound and the effect on physics objects. On development candidate `rc-71e97ba`, a guest Old Pipe strike moved the stock plastic barrel about 127 cm on the host and played both stock contact cues on the guest. Repeat swings and charged attacks also passed. The two-PC sound and physics presentation still needs a playtest. |
 | Candle extinguish | The guest extinguished a lit candle. The host still saw it burning. |
 | Shared cash pickup popup | The party balance updated correctly. Only the player who picked up the cash saw the stock receipt popup. |
 | Resting with Insomnia | The host pressed Interact at a bed with the Insomnia perk. The clock stayed at the same time of day. |
 | Radio | The guest heard the radio after the host switched it on. |
 | Wild mushrooms | The players reported that mushroom pickup worked in this session. |
-| Avatar tail seam | A rendered playtest screenshot showed a long tail floating behind an armored remote avatar. The previous smoke test verified the base bone against the body socket. The visible seam with armor still needs verification. |
+| Avatar tail seam | A rendered playtest screenshot showed a long tail floating behind an armored remote avatar. The visible base of the stock mesh sits behind its first animated bone. Development candidate `rc-71e97ba` anchors the mesh seam to the hips while keeping the body centered. A muted Direct IP pair measured the seam about 3 cm inside the back of the Hunter Jacket while standing, turning, jumping, and landing. The docked tail remained on its stock socket. A rendered two-PC retest is still open. |
 
 On development candidate `rc-7683381`, a separate muted Direct IP pair verified two stock hit presentations in the same game tick. The injured guest received both the burn and blunt impact cues, one hurt call, and the latest hit direction. The host had neither impact cue nor the guest's hit overlay. The same run exercised real campfire damage and regeneration. Both runs preserved their copied saves and used two executable launches each.
 

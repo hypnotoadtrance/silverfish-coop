@@ -1913,7 +1913,8 @@ local function run(action, actor_path)
         local class = StaticFindObject(path)
         if not valid(class) then LoadAsset(path); class = StaticFindObject(path) end
         assert(valid(class), "stock plastic barrel class unavailable")
-        local transform = pawn:K2_GetActorTransform()
+        local at = pawn:K2_GetActorLocation()
+        local transform = {Translation={X=at.X, Y=at.Y, Z=at.Z+150}, Rotation={X=0,Y=0,Z=0,W=1}, Scale3D={X=1,Y=1,Z=1}}
         local prop = statics:BeginDeferredActorSpawnFromClass(pawn, class, transform, 1, nil, 0)
         assert(valid(prop) and same(statics:FinishSpawningActor(prop, transform, 0), prop), "stock prop spawn failed")
         melee_prop = prop
