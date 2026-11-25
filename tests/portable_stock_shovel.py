@@ -9,6 +9,7 @@ from portable_guest_world_start import resident_events, wait_resident_status
 from tools.silverfish import (
     native_board_contract,
     native_computer_board as board,
+    native_guest_drop,
     native_guest_weapon,
     native_host_stack_drop,
     native_host_dig,
@@ -304,9 +305,11 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
                     if drops:
                         break
                     await asyncio.sleep(.08)
-            drop, = drops
-            assert not drop["error"] and drop["guid"] == host_item["guid"], drop
+            drop_event, = drops
+            assert not drop_event["error"], drop_event
+            drop = drop_event[native_guest_drop.RESULT]
             await host.bridge.command(native_host_stack_drop.CLOSE_FIXTURE, host_item["guid"])
+            assert drop["guid"] == host_item["guid"], drop
             shared = native_world_loot.player_drop_identity(drop["drop_id"])
             await wait_resident_status(guest_run, lambda frame: shared in frame["game"].get(native_world_loot.KEY, {}))
             await host.bridge.command(native_world_loot.APPROACH, shared, pawn, timeout=5)

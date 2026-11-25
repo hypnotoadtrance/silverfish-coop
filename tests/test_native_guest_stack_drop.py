@@ -112,7 +112,9 @@ class GuestStackDropTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(snapshot([*row[:8], ACTOR, NEW_GUID]))
         magnum = snapshot([*row[:8], actor.replace("Ammo_Pistol_BP", "Ammo_Magnum_BP"), NEW_GUID])
         self.assertEqual(magnum[drop.KEY]["class_path"], "/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C")
-        self.assertIsNone(snapshot([*row[:8], actor.replace("Ammo_Pistol_BP", "Ammo_9mm_AP_BP"), NEW_GUID]))
+        ap = snapshot([*row[:8], actor.replace("Ammo_Pistol_BP", "Ammo_9mm_AP_BP"), NEW_GUID])
+        self.assertEqual(ap[drop.KEY]["class_path"], "/Game/Classes/Items/Ammo_9mm_AP_BP.Ammo_9mm_AP_BP_C")
+        self.assertIsNone(snapshot([*row[:8], actor.replace("Ammo_Pistol_BP", "Ammo_Unregistered_BP"), NEW_GUID]))
 
         stock_class = "/Game/Classes/Items/Item_PocketWatch.Item_PocketWatch_C"
         stock_actor = actor.replace("Ammo_Pistol_BP", "Item_PocketWatch")
