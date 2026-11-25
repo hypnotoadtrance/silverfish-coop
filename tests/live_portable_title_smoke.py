@@ -85,6 +85,7 @@ INDEPENDENT_RESIDENT_MAPS = {
     "stock_placed_item": {CROSSROADS}, "stock_cash_popup": {CROSSROADS}, "stock_weather_travel": {OBSERVATORY},
     "stock_warehouse_switch": {OBSERVATORY, WAREHOUSE_DOCK}, "stock_warehouse_radio": {OBSERVATORY, WAREHOUSE_DOCK},
     "stock_warehouse_candle": {WAREHOUSE_DOCK}, "stock_dock_gate": {WAREHOUSE_DOCK},
+    "tutorial_dock_npc_population": {WAREHOUSE_DOCK},
     "stock_bottle": {OBSERVATORY, WAREHOUSE_DOCK},
     "stock_prop_breaks": {WAREHOUSE_DOCK}, "stock_acid_bottle": {WAREHOUSE_DOCK}, "stock_wood_debris": {WAREHOUSE_DOCK},
 }
@@ -2808,7 +2809,6 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
         and frame["game"].get("native_guest_primary_scope", {}).get("kind") == "rusty-pistol"), timeout=12)
     presentation = {}
     if shot_view:
-        presentation.update(await verify_dock_npc_population(host, guest, command))
         presentation.update(await verify_dock_garage_shots(host, guest, frame, command))
         presentation.update(await verify_dock_garage_burst(host, guest, frame, command))
         return presentation
@@ -2909,7 +2909,10 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
                                                      "downed_aggro_and_queued_strike_denied": True},
                                      "stock_swing": {"host": source, "guest": observer, "received": received}}}
 
-async def verify_dock_npc_population(host: Seat, guest: Seat, command) -> dict:
+async def verify_dock_npc_population(host: Seat, guest: Seat, _pawn: str) -> dict:
+    async def command(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-npc-override", action)
+
     async def wait_for_population(seat, points, expected):
         observed = "unavailable"
         try:
@@ -2940,8 +2943,11 @@ async def verify_dock_npc_population(host: Seat, guest: Seat, command) -> dict:
         paths = await asyncio.gather(*(command(seat, f"dock-population-paths\t{authoritative_points}")
                                        for seat in (host, guest)))
         staged = int(await command(guest, f"dock-population-arm-view\t{authoritative_points}"))
-        assert await command(guest, "dock-population-weapons") == "bandit,state"
-        assert await command(host, "dock-population-weapons") == "bandit,state"
+        for seat in (guest, host):
+            equipped = await command(seat, "dock-population-weapons")
+            assert equipped == "bandit,state", (
+                seat is host, equipped, await command(seat, "dock-population-weapon-details"),
+            )
         assert await command(host, "dock-population-cleanup") == "cleared"
         await wait_for_population(guest, authoritative_points, "empty")
         await guest_weapons_clear()
@@ -3039,11 +3045,38 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
     evidence = {}
     before_mismatch = after_blocked
     if pellets == 1:
-        clear, before_mismatch = await shoot(after_blocked, should_hit=True)
+        # The guest's camera is behind the door while their muzzle clears it.
+        # Keep ordinary stock damage and spread active when checking this launch.
+        eye_point = tuple(map(float, low.split(",")))
+        target_point = tuple(map(float, worker.split(",")))
+        length = math.dist(eye_point, target_point)
+        forward = tuple((end - start) / length for start, end in zip(eye_point, target_point))
+        muzzle = ",".join(f"{start + 380 * axis:.3f}" for start, axis in zip(eye_point, forward))
+        assert await command(guest, "dock-garage-occlude-camera") == "lowered"
+        assert await command(guest, below) == "blocked"
+        actual_muzzle = await command(guest, f"dock-garage-offset-muzzle\t{muzzle}")
+        assert math.dist(tuple(map(float, actual_muzzle.split(","))), tuple(map(float, muzzle.split(",")))) < 1
+        muzzle_trace = f"dock-garage-projectile-trace\t{muzzle};{worker}"
+        assert await command(guest, muzzle_trace) == "NPC_Survivor_Worker_C_2"
+        assert await command(host, muzzle_trace) == "NPC_Survivor_Worker_C_2"
+        clear, before_mismatch = await shoot(after_blocked, should_hit=True, contact_required=True)
+        geometry = clear["native_guest_trigger_view"]
+        launch, velocity, _ = (await command(host, "dock-garage-shot-witness")).split(";")
+        origin_error = math.dist(tuple(map(float, launch.split(","))), tuple(map(float, geometry["muzzle"].split(","))))
+        sight_target = tuple(map(float, geometry["target"].split(",")))
+        assert math.dist(sight_target, eye_point) < 380 and origin_error < 1, (geometry, launch)
+        velocity = tuple(map(float, velocity.split(",")))
+        aim_agreement = sum(axis * component for axis, component in zip(forward, velocity)) / math.hypot(*velocity)
+        assert aim_agreement > math.cos(math.radians(3)), (geometry, velocity)
+        assert await command(guest, "dock-garage-clear-camera") == "raised"
+        evidence["tutorial_dock_camera_obstruction_behind_muzzle"] = {
+            "health": [after_blocked, before_mismatch], "launch_error_cm": origin_error,
+            "launch_angle_degrees": math.degrees(math.acos(min(1, aim_agreement))), "shot": clear,
+        }
         for event, expected in ((blocked, high), (clear, low)):
             geometry = event["native_guest_trigger_view"]
             assert math.dist(tuple(map(float, geometry["eye"].split(","))), tuple(map(float, expected.split(",")))) < 10, event
-        evidence["tutorial_dock_shot_view"] = {"host_camera_line": "blocked", "clear_guest_line": "worker",
+        evidence["tutorial_dock_shot_view"] = {"host_camera_line": "blocked", "guest_muzzle_line": "worker",
             "health": [health, after_blocked, before_mismatch], "blocked": blocked, "clear": clear}
     assert await command(host, "dock-garage-lower-host") == "lowered"
     assert await command(host, below) == "blocked"
@@ -3118,39 +3151,6 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         blocked, after_blocked = await shoot(distant_health, should_hit=False)
         assert not blocked["native_guest_trigger_view"].get("contact"), blocked
 
-        # The door is behind the guest's muzzle, but still occludes their camera.
-        # Move the same door into the host's muzzle lane to exercise contact reconciliation.
-        eye_point = tuple(map(float, eye.split(",")))
-        target_point = tuple(map(float, target.split(",")))
-        barrier_point = tuple(map(float, barrier.split(",")))
-        length = math.dist(eye_point, target_point)
-        forward = tuple((end - start) / length for start, end in zip(eye_point, target_point))
-        muzzle = ",".join(f"{start + 560 * axis:.3f}" for start, axis in zip(eye_point, forward))
-        host_barrier = ",".join(f"{point + 470 * axis:.3f}" for point, axis in zip(barrier_point, forward))
-        assert await command(host, f"dock-garage-long-block\t{host_barrier}") == "blocked"
-        assert await command(guest, aim) == "blocked"
-        actual_muzzle = await command(guest, f"dock-garage-offset-muzzle\t{muzzle}")
-        assert math.dist(tuple(map(float, actual_muzzle.split(","))), tuple(map(float, muzzle.split(",")))) < 1
-        muzzle_trace = f"dock-garage-projectile-trace\t{muzzle};{target}"
-        assert await command(guest, muzzle_trace) == "NPC_Survivor_Worker_C_2"
-        assert await command(host, muzzle_trace) == host_collision
-        behind, after_behind = await shoot(after_blocked, should_hit=True, contact_required=True)
-        geometry = behind["native_guest_trigger_view"]
-        witness = await command(host, "dock-garage-shot-witness")
-        launch, velocity, ignored = witness.split(";")
-        origin_error = math.dist(tuple(map(float, launch.split(","))), tuple(map(float, geometry["muzzle"].split(","))))
-        sight_target = tuple(map(float, geometry["target"].split(",")))
-        assert math.dist(sight_target, eye_point) < 560 and origin_error < 1, (geometry, witness)
-        velocity = tuple(map(float, velocity.split(",")))
-        aim_agreement = sum(axis * component for axis, component in zip(forward, velocity)) / math.hypot(*velocity)
-        assert aim_agreement > math.cos(math.radians(3)) and host_collision in ignored.split(","), (geometry, witness)
-        evidence["tutorial_dock_camera_obstruction_behind_muzzle"] = {
-            "health": [after_blocked, after_behind], "launch_error_cm": origin_error,
-            "launch_angle_degrees": math.degrees(math.acos(min(1, aim_agreement))),
-            "shot": behind, "host_projectile": witness,
-        }
-
-        assert await command(host, f"dock-garage-long-block\t{barrier}") == "blocked"
         assert await command(guest, f"dock-garage-long-clear\t{barrier}") == "clear"
         observed = "unavailable"
         try:
@@ -3161,7 +3161,7 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
             raise AssertionError(dict(distant_guest_trace=observed, firing_position=eye, worker_position=target)) from error
         assert await command(host, aim) == "blocked"
         assert await command(host, f"dock-garage-projectile-trace\t{eye};{target}") == host_collision
-        accepted, after_hit = await shoot(after_behind, should_hit=True, contact_required=True)
+        accepted, after_hit = await shoot(after_blocked, should_hit=True, contact_required=True)
         geometry = accepted["native_guest_trigger_view"]
         distance = math.dist(tuple(map(float, geometry["muzzle"].split(","))),
                              tuple(map(float, geometry["contact"]["point"].split(","))))
@@ -3169,7 +3169,7 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         witness = await command(host, "dock-garage-shot-witness")
         assert host_collision in witness.rsplit(";", 1)[-1].split(","), witness
         evidence["tutorial_dock_distant_contact"] = {
-            "meters": round(distance / 100, 2), "health": [distant_health, after_blocked, after_behind, after_hit],
+            "meters": round(distance / 100, 2), "health": [distant_health, after_blocked, after_hit],
             "blocked_shot": blocked, "accepted_shot": accepted, "host_only_barrier": host_collision,
         }
 
@@ -6550,6 +6550,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, rusty=True, npc_rivalry=False)),
         (tutorial_dock_shot_view, shot_view_campaign, "tutorial_dock_shot_view",
          lambda host, guest, pawn: verify_tutorial_dock_combat(host, guest, pawn, shot_view=True)),
+        (tutorial_dock_shot_view, shot_view_campaign, "tutorial_dock_npc_population", verify_dock_npc_population),
         (tutorial_dock_shot_view, "tutorial_dock_buckshot", "tutorial_dock_buckshot", verify_dock_garage_buckshot),
         (tutorial_dock_melee, "tutorial_dock_melee", "tutorial_dock_melee", verify_tutorial_dock_melee),
         (stock_eye_stacks, "shopkeep", "stock_eye_stacks", verify_stock_eye_stacks),

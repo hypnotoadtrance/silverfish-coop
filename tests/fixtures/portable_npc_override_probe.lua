@@ -1840,6 +1840,12 @@ local function run(action, actor_path)
         return restore_garage_fixture()
     elseif action == "dock-garage-aim" then
         return set_garage_aim(pawn, world, host, actor_path)
+    elseif action == "dock-garage-occlude-camera" or action == "dock-garage-clear-camera" then
+        assert(not host and garage_door and valid(garage_door.mesh))
+        local raised = action == "dock-garage-clear-camera"
+        local point = garage_door.point
+        garage_door.mesh:K2_SetWorldLocation({X=point.X,Y=point.Y,Z=point.Z+(raised and 165 or 0)}, false, {}, true)
+        return raised and "raised" or "lowered"
     elseif action == "dock-garage-offset-muzzle" then
         assert(not host and garage_aim and same(garage_aim.muzzle, pawn.EquipedItem.Arrow_Muzzle))
         local point = position(actor_path)
