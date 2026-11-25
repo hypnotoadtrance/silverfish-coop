@@ -24,6 +24,8 @@ local scanned_world
 local scanned_actors = {}
 local scan_after = 0
 local approach_scope, open_exit
+local guest_walls
+local guest_check_interval = 0.5
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -77,6 +79,7 @@ function wall.clear()
     observation = nil
     primary_key, approach_scope, open_exit = nil, nil, nil
     scanned_world, scanned_actors, scan_after = nil, {}, 0
+    guest_walls = nil
     status, failure = "inactive", ""
     regroup.clear()
 end
@@ -354,6 +357,19 @@ function wall.sync(state, phase, fixture, accepting, secondary)
         status, failure = "arming", "Waiting for a compatible pawn capsule and exit Box"
         return
     end
+    if not hosting and guest_walls and guest_walls.map == state.map and os.clock() < guest_walls.expires
+        and same(guest_walls.world, world) and same(guest_walls.pawn, local_pawn)
+        and same(guest_walls.capsule, local_capsule) then
+        local intact = true
+        for _, record in pairs(records) do
+            if not valid(record.actor) or not valid(record.component) or not valid(record.fixture) then
+                intact = false
+                break
+            end
+        end
+        if intact then return end
+    end
+    guest_walls = nil
     local permitted, blockers
     if hosting then permitted, blockers = host_can_pass(state, local_pawn, world, accepting) end
     local desired = permitted and local_capsule or nil
@@ -390,6 +406,10 @@ function wall.sync(state, phase, fixture, accepting, secondary)
     status = primary_key and records[primary_key] and "ready" or had_error and "error" or "arming"
     table.sort(diagnostics)
     failure = table.concat(diagnostics, ", ")
+    if not hosting and status == "ready" and failure == "" then
+        guest_walls = {map = state.map, world = world, pawn = local_pawn, capsule = local_capsule,
+            expires = os.clock() + guest_check_interval}
+    end
     local near = blockers and #blockers > 0 and nearby_exit(local_pawn:K2_GetActorLocation(), 450)
     if near and not valid(records[near].host_capsule) then
         regroup.show(state, near, blockers)

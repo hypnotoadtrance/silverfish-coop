@@ -7073,6 +7073,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 instrument_input_mappings, instrument_journal_context,
                 instrument_loose_discovery, instrument_npc_class_discovery, instrument_profile,
                 instrument_shop_discovery, instrument_spawn_context, instrument_vital_reads, instrument_weather_status,
+                instrument_zone_walls,
             )
 
             crate_probe = ((Path(__file__).with_name("fixtures") / "portable_crate_input_probe.lua").read_text(encoding="utf-8")
@@ -7093,6 +7094,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                                   instrument_crate_loot_presentation))
                     probes.enter_context(portable_script_overlay(game, "native_loot_actions.lua",
                                                                   instrument_crate_host_action))
+            for game in games:
+                probes.enter_context(portable_script_overlay(game, "zone_wall.lua", instrument_zone_walls))
             proof["crossroads_input_overlays"] = [
                 probes.enter_context(portable_script_overlay(game, "players.lua", instrument_input_mappings))
                 for game in games

@@ -103,6 +103,13 @@ async def verify_crossroads_recovery(host, guest, _pawn):
     return {"stock_crossroads_recovery": receipts}
 
 
+def instrument_zone_walls(source):
+    anchor = "local sources = wall_sources(world, state.map, route, fixture, secondary)"
+    assert source.count(anchor) == 1
+    return source.replace(anchor, 'local sources = SilverfishProfileCrossroadsCall("zone_wall_sources", '
+                          'wall_sources, world, state.map, route, fixture, secondary)')
+
+
 def instrument_input_mappings(source):
     original = "local function observe_mapping("
     anchor = "local function verified_mapping("

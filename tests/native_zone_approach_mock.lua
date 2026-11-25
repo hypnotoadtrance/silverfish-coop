@@ -3,6 +3,8 @@ package.path = "mod/SilverfishCoop/Scripts/?.lua;" .. package.path
 
 local map, first, second = "/Game/Classes/Maps/Test", "Level_Exit_BP_C_1", "Level_Exit_BP_C_2"
 local auth, receipts, walls = false, {}, {}
+local now, shape_reads = 10, 0
+os.clock = function() return now end
 local function point(x, y, z) return {X = x or 0, Y = y or 0, Z = z or 0} end
 local function object(methods)
     methods.IsValid = function(self) return not self.destroyed end
@@ -19,7 +21,7 @@ package.loaded.authored_wall_routes = {[map] = {
 }}
 package.loaded.zone_regroup = {clear = function() end, show = function() end, rows = function(rows) return rows end}
 
-local world = object({})
+local world = object({GetFullName = function() return "World " .. map .. ".Test" end})
 local function shape(actor, center)
     return object({
         extent = point(20, 100, 100),
@@ -70,8 +72,23 @@ local function exit(name, tag, x)
     return placed
 end
 local exits = {exit(first, "One", 0), exit(second, "Two", 2000)}
-FindAllOf = function(class) assert(class == "Level_Exit_BP_C"); return exits end
-StaticFindObject = function(class) assert(class == "/Script/Engine.TriggerBox"); return object({}) end
+StaticFindObject = function(path)
+    if path == "/Script/Engine.TriggerBox" then return object({}) end
+    for _, placed in ipairs(exits) do
+        if placed:GetFullName() == "Level_Exit_BP_C " .. path then return placed end
+    end
+end
+local function track_source(placed)
+    local tag = placed["Entrance Tag"]
+    placed["Entrance Tag"] = nil
+    setmetatable(placed, {__index = function(_, key)
+        if key == "Entrance Tag" then
+            shape_reads = shape_reads + 1
+            return tag
+        end
+    end})
+end
+for _, placed in ipairs(exits) do track_source(placed) end
 SilverfishSetNativeExitApproach = function(exit_name)
     receipts[#receipts + 1] = exit_name
     return auth and exit_name ~= ""
@@ -113,8 +130,21 @@ auth = false
 tick(1870)
 assert(not host.ignores[walls[2000]], "native refusal restores collision")
 wall.sync(state, "connected", nil, true)
+local after_guest_setup = shape_reads
+wall.sync(state, "connected", nil, true)
+assert(shape_reads == after_guest_setup, "A settled guest should reuse the verified walls")
 state.local_pawn.pawn = guest
 wall.sync(state, "connected", nil, true)
+assert(shape_reads > after_guest_setup, "A different guest pawn should reverify the walls immediately")
+after_guest_setup = shape_reads
+local old_wall = walls[0]
+old_wall.destroyed = true
+wall.sync(state, "connected", nil, true)
+assert(shape_reads > after_guest_setup and walls[0] ~= old_wall, "A destroyed wall should be rebuilt immediately")
+after_guest_setup = shape_reads
+now = now + .6
+wall.sync(state, "connected", nil, true)
+assert(shape_reads > after_guest_setup, "Settled guest walls should still be rechecked periodically")
 local previous = #receipts
 tick(-35)
 assert(#receipts == previous and next(guest.ignores) == nil, "guest never requests or receives an open wall")
