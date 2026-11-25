@@ -6062,8 +6062,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(stock_board_approach_overlay(game))
         if stock_split:
-            proof["stock_split_overlay"] = probes.enter_context(
-                guest_weapon_fixture_overlay(first_game, "portable_stock_split_probe.lua"))
+            proof["stock_split_overlay"] = [probes.enter_context(
+                guest_weapon_fixture_overlay(game, "portable_stock_split_probe.lua")) for game in games]
         if stock_take_ammo or stock_shotguns or stock_loki_guest or resident_held_queue:
             proof["stock_take_ammo_overlays"] = [
                 probes.enter_context(guest_weapon_fixture_overlay(game, "portable_take_ammo_probe.lua")) for game in games
