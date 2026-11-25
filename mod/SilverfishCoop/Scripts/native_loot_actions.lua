@@ -406,6 +406,26 @@ function actions.reset()
     observation, placement, daily_update = nil, nil, nil
 end
 
+local function result_row(row, status_row)
+    return status_row("native-loot", row.action, row.map, row.crate, row.pawn, row.ok and 1 or 0,
+        row.status or "", row.looted and 1 or 0, row.lucky and 1 or 0, row.trait or "", row.calls,
+        row.distance or "-", #row.items, row.invoked and 1 or 0, row.escrow_slot or "-",
+        row.retained and 1 or 0, row.memory_escrow and 1 or 0)
+end
+
+function actions.inspect_reply(fields, state, phase, status_row)
+    local previous = observation
+    observation = nil
+    local accepted, message = pcall(actions.command, fields, state, phase)
+    local result = observation
+    observation = previous
+    local reply = status_row("native-loot-inspection-reply", 1) .. "\n"
+    if not accepted or not result then
+        return reply .. status_row("ack", fields[1], "error", message or "stock loot inspection unavailable") .. "\n"
+    end
+    return reply .. status_row("ack", fields[1], "accepted", message) .. "\n" .. result_row(result, status_row) .. "\n"
+end
+
 function actions.rows(state, phase, status_row)
     local row = observation
     local records = {}
@@ -424,10 +444,7 @@ function actions.rows(state, phase, status_row)
         end
     end
     if not row or row.map ~= state.map then return records end
-    records[#records + 1] = status_row("native-loot", row.action, row.map, row.crate, row.pawn, row.ok and 1 or 0,
-        row.status or "", row.looted and 1 or 0, row.lucky and 1 or 0, row.trait or "", row.calls,
-        row.distance or "-", #row.items, row.invoked and 1 or 0, row.escrow_slot or "-",
-        row.retained and 1 or 0, row.memory_escrow and 1 or 0)
+    records[#records + 1] = result_row(row, status_row)
     if row.cash then
         local cash = row.cash
         records[#records + 1] = status_row("native-loot-cash", cash.guid, cash.amount, cash.before, cash.after)

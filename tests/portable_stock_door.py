@@ -7,7 +7,7 @@ import time
 from live_multi_smoke import campaign_save_hashes
 from portable_guest_world_start import resident_events, wait_resident_status
 from portable_weather_travel import enter_crossroads
-from tools.silverfish import native_stock_door as door
+from tools.silverfish import native_loot, native_stock_door as door
 from tools.silverfish.authored_loot import full_name
 from tools.silverfish.control import submit
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
@@ -63,6 +63,8 @@ async def toggle_door(host, guest, actor, pawn, expected_open, *, inspect_during
         completed_at = (guest_run / "responses" / f"{inspection['id']}.json").stat().st_mtime
         inspected = {"actor": inspect_during_motion, "completed_at": completed_at,
                      "roundtrip_ms": round((completed_at - probe_start) * 1000)}
+        if native_loot.INSPECTION_BYTES in inspection:
+            inspected["reply_bytes"] = inspection[native_loot.INSPECTION_BYTES]
 
     # Read the guest receipt before waiting on world state. A rejected input
     # has a reason in the short-lived event ring and will not change the host.
@@ -131,7 +133,12 @@ async def verify_stock_crossroads_door(host, guest, pawn, *, lockpick=None):
     points = (x + dx, y + dy, kz, x - dx, y - dy, kz)
 
     async def panel(seat, query):
-        report = await seat.bridge.command(door.TRACE_FIXTURE, WOOD_DOOR, query, *map(str, points))
+        if seat is guest:
+            start, end = (",".join(map(str, points[index:index + 3])) for index in (0, 3))
+            report = await submit(guest_run, door.TRACE_FIXTURE, target=f"{WOOD_DOOR}@{query}@{start}@{end}")
+            assert report["ok"], report
+        else:
+            report = await seat.bridge.command(door.TRACE_FIXTURE, WOOD_DOOR, query, *map(str, points))
         row = report[door.TRACE_RESULT]
         assert row["actor"] == WOOD_DOOR and row["query"] == int(query)
         return row["panel"]

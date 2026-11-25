@@ -76,6 +76,32 @@ class BridgeWalkTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stock_loot_inspection_receipt_preserves_the_resident_world_frame(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        area = runtime.AUTHORED_CRATES[runtime.native_loot.CRATE]
+        crate = runtime.native_loot.CRATE
+        pawn = "Player_FP_C exact participant"
+        published = {"sequence": 42, "state": "hosting", "map": area}
+        bridge._local_status = published
+        reply_pawn = pawn
+
+        async def reply(payload, _timeout):
+            nonce, *_ = payload.decode().split("\t")
+            row = ("native-loot", "inspect", area, crate, reply_pawn, "1", "ready",
+                   "0", "0", "", "0", "24", "0", "0", "-", "0", "0")
+            return f"native-loot-inspection-reply\t1\nack\t{nonce}\taccepted\tinspected\n" + "\t".join(row) + "\n"
+
+        bridge.local_bridge = Mock(command=AsyncMock(side_effect=reply))
+        response = await bridge.command("native-loot-inspect", pawn, crate)
+        self.assertEqual(response["native_loot"]["distance"], 24)
+        self.assertGreater(response[runtime.native_loot.INSPECTION_BYTES], 0)
+        self.assertIs(bridge._local_status, published)
+
+        reply_pawn = "Player_FP_C stale participant"
+        with self.assertRaisesRegex(RuntimeError, "invalid scope"):
+            await bridge.command("native-loot-inspect", pawn, crate)
+        self.assertIs(bridge._local_status, published)
+
     async def test_pickup_presentation_receipts_do_not_replace_resident_status(self):
         bridge = runtime.Bridge(Path("unused"), None)
         bridge.local_bridge = Mock(command=AsyncMock())

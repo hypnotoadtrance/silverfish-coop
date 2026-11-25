@@ -1775,6 +1775,14 @@ local function tick(fields, pending, periodic)
         SilverfishPublishLocalBridgeReply(pending.ticket, native_guest_smg_hold.command_reply(fields, state, current_phase, status_row))
         return true
     end
+    if fields and pending and fields[2] == "native-loot-inspect" then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        SilverfishPublishLocalBridgeReply(pending.ticket,
+            native_loot_actions.inspect_reply(fields, state, current_phase, status_row))
+        if not periodic then return true end
+        fields, pending = nil, nil
+    end
     local pickup_presentation = fields and status_publication.pickup_presentation[fields[2]]
     if fields and pending and (fields[2] == "native-weapon-play-shots" or pickup_presentation) then
         if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end

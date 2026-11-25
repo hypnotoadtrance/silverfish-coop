@@ -716,6 +716,50 @@ def _finite(value: str) -> float | None:
     return number
 
 
+def _parse_stock_loot_receipt(fields: list[str]) -> dict:
+    count = int(fields[12])
+    if AUTHORED_CRATES.get(fields[3]) != fields[2] or not 0 <= count <= loot_capacity(fields[3]):
+        raise ValueError("Stock container receipt has an unqualified map or item count")
+    result = {
+        "action": fields[1], "map": fields[2], "crate": fields[3], "pawn": fields[4],
+        "ok": fields[5] == "1", "status": fields[6], "looted": fields[7] == "1",
+        "lucky_looter": fields[8] == "1", "trait_source": fields[9], "trait_calls": int(fields[10]),
+        "distance": _finite(fields[11]), "item_count": count, "invoked": fields[13] == "1",
+        "items": [], "escrow_slot": fields[14] if len(fields) >= 15 else "-",
+    }
+    if len(fields) >= 16 and fields[15] == "1":
+        result["retained"] = True
+    if len(fields) == 17 and fields[16] == "1":
+        result["memory_escrow"] = True
+    return result
+
+
+def _parse_stock_loot_inspection(raw: str, request: tuple[str, ...]) -> dict:
+    rows = [line.split("\t") for line in raw.splitlines()] if len(raw) <= 4096 and raw.endswith("\n") else []
+    if len(rows) not in (2, 3) or rows[0] != ["native-loot-inspection-reply", "1"]:
+        raise RuntimeError("The local stock loot inspection reply was malformed")
+    ack = rows[1]
+    if len(ack) != 4 or ack[:2] != ["ack", request[0]]:
+        raise RuntimeError("The local stock loot inspection reply did not match the request")
+    if ack[2] == "error" and len(rows) == 2:
+        raise RuntimeError(ack[3] or "The game declined the stock loot inspection")
+    if len(request) != 4 or ack[2] != "accepted" or len(rows) != 3 or len(rows[2]) != 17:
+        raise RuntimeError("The local stock loot inspection reply was incomplete")
+    row = rows[2]
+    pawn, crate = request[2:4]
+    if (row[0:2] != ["native-loot", "inspect"] or row[3:5] != [crate, pawn]
+            or any(row[index] not in ("0", "1") for index in (5, 8))
+            or any(row[index] != "0" for index in (7, 10, 12, 13, 15, 16)) or row[14] != "-"):
+        raise RuntimeError("The local stock loot inspection reply had an invalid scope or result")
+    try:
+        proof = _parse_stock_loot_receipt(row)
+    except ValueError as error:
+        raise RuntimeError("The local stock loot inspection reply was malformed") from error
+    return {"state": "hosting", "map": proof["map"], "native_loot": proof, "ack": {
+        "id": request[0], "result": "accepted", "message": ack[3]},
+        native_loot.INSPECTION_BYTES: len(raw.encode("utf-8"))}
+
+
 def _parse_world_view(fields: list[str], phase: str | None) -> dict:
     row = {"mode": fields[1], "map": fields[2], "actor": fields[3], "epoch": fields[4],
            "sequence": int(fields[5]), "sun_visible": fields[13] == "1", "sun_intensity": _finite(fields[14]),
@@ -2770,20 +2814,7 @@ class Bridge:
                 elif fields == ["native-loot-special-memory", "1"] and data.get("state") == "hosting":
                     data[native_loot.SPECIAL_MEMORY_CAPABILITY] = True
                 elif fields[0] == "native-loot" and len(fields) in (14, 15, 16, 17):
-                    count = int(fields[12])
-                    if AUTHORED_CRATES.get(fields[3]) != fields[2] or not 0 <= count <= loot_capacity(fields[3]):
-                        raise ValueError("Stock container receipt has an unqualified map or item count")
-                    data["native_loot"] = {
-                        "action": fields[1], "map": fields[2], "crate": fields[3], "pawn": fields[4],
-                        "ok": fields[5] == "1", "status": fields[6], "looted": fields[7] == "1",
-                        "lucky_looter": fields[8] == "1", "trait_source": fields[9], "trait_calls": int(fields[10]),
-                        "distance": _finite(fields[11]), "item_count": count, "invoked": fields[13] == "1",
-                        "items": [], "escrow_slot": fields[14] if len(fields) >= 15 else "-",
-                    }
-                    if len(fields) >= 16 and fields[15] == "1":
-                        data["native_loot"]["retained"] = True
-                    if len(fields) == 17 and fields[16] == "1":
-                        data["native_loot"]["memory_escrow"] = True
+                    data["native_loot"] = _parse_stock_loot_receipt(fields)
                 elif fields[0] == native_loot.PLACEMENT and len(fields) == 13:
                     _, area, crate, index, *axes = fields
                     transform = dict(zip(("position", "rotation", "scale"),
@@ -3686,6 +3717,8 @@ class Bridge:
                 if receipt[2] != "accepted":
                     raise RuntimeError(receipt[3] or f"The game declined the {action} command")
                 return {"ack": {"id": receipt[1], "result": receipt[2], "message": receipt[3]}}
+            if action == "native-loot-inspect" and raw.startswith("native-loot-inspection-reply\t"):
+                return _parse_stock_loot_inspection(raw, fields)
             if action == native_weather_view.LOCAL_APPLY and raw.startswith("native-world-view-reply\t"):
                 return self._local_world_view_reply(raw, fields)
             status = self._parse_status(raw)

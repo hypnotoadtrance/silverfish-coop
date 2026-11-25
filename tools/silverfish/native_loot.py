@@ -39,6 +39,9 @@ STACK_MERGE_TAG = "native-loot-stack-merge"
 PLACEMENT_KEY = "native_loot_placement"
 FORCED_ROLL_STATUS = "opened_fixture_seeded"
 SPECIAL_MEMORY_CAPABILITY = "native_loot_special_memory"
+INSPECTION_BYTES = "native_loot_inspection_reply_bytes"
+
+
 def public_roll(roll: dict) -> dict:
     return {key: value for key, value in roll.items() if key != "escrow"}
 
@@ -937,6 +940,8 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             if mutates and tool_receipt is None:
                 host.native_checkpoint_unsafe = False
             raise party.RuleError(proof["status"] or "native_loot_refused")
+        if action == "inspect" and INSPECTION_BYTES in snapshot:
+            return {"native_loot": proof, INSPECTION_BYTES: snapshot[INSPECTION_BYTES]}
         host.last_game, host.last_seen = snapshot, time.monotonic()
         if action == "open":
             if proof.get("status") == "unlocked":
