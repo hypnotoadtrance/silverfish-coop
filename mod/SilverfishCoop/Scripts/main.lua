@@ -1720,6 +1720,15 @@ local function tick(fields, pending, periodic)
         SilverfishPublishLocalBridgeReply(pending.ticket, native_guest_smg_hold.command_reply(fields, state, current_phase, status_row))
         return true
     end
+    if fields and pending and fields[2] == "native-weapon-play-shots" then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        local accepted, message = pcall(native_weapon_fire_view.command, fields, state, current_phase, native_player_avatar)
+        SilverfishPublishLocalBridgeReply(pending.ticket,
+            status_row("weapon-cue-ack", fields[1], accepted and "accepted" or "error", message or "") .. "\n")
+        if not periodic then return true end
+        fields, pending = nil, nil
+    end
     if fields and pending and fields[2] == "native-world-view-apply-local" and not periodic and current_phase == "connected"
         and world_view_enabled and status_publication.compact() and status_publication.steady(state, current_phase)
         and os.clock() < status_publication.next_frame then

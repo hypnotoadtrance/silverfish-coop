@@ -42,7 +42,7 @@ class ItemUseCueTests(unittest.IsolatedAsyncioTestCase):
         await projection.sync(bridge, control, game, [message], self.epoch)
         await projection.sync(bridge, control, game, [message], self.epoch)
         bridge.command.assert_awaited_once_with("native-weapon-play-shots", self.area, self.epoch,
-                                               f"1|consume|{self.item}|121|-59|2.05|257", timeout=1.5)
+                                               f"1|consume|{self.item}|121|-59|2.05|257", timeout=1.5, update_status=False)
         self.assertEqual(control.event.call_count, 2)
         control.event.assert_any_call("native_avatar_use_sound_played", serial=1, item_class=self.item)
         control.event.assert_any_call("native_avatar_use_visual_played", serial=1, item_class=self.item, player_id=257)
@@ -61,7 +61,8 @@ class ItemUseCueTests(unittest.IsolatedAsyncioTestCase):
         observer = Playback()
         await observer.sync(bridge, control, {"map": area}, payload, "2" * 32)
         bridge.command.assert_not_called()
-        self.assertEqual(await observer.sync(bridge, control, {"map": area}, payload, self.epoch), result)
+        game = {"map": area, "sequence": 17}
+        self.assertIs(await observer.sync(bridge, control, game, payload, self.epoch), game)
         control.event.assert_called_once_with("native_stock_door_motion_played", serial=1, actor=actor,
                                               opens=True, duration=.65)
 
@@ -76,7 +77,7 @@ class ItemUseCueTests(unittest.IsolatedAsyncioTestCase):
         await observer.sync(bridge, control, {"map": area}, payload, self.epoch)
         await observer.sync(bridge, control, {"map": area}, payload, self.epoch)
         bridge.command.assert_awaited_once_with("native-weapon-play-shots", area, self.epoch,
-                                               "3|dry|121.00|-59.00|2.05", timeout=1.5)
+                                               "3|dry|121.00|-59.00|2.05", timeout=1.5, update_status=False)
         control.event.assert_called_once_with("native_weapon_dry_fire_played", serial=3)
 
     async def test_npc_swing_keeps_its_exact_owner_reference_and_clip_in_the_current_visit(self):
@@ -95,7 +96,7 @@ class ItemUseCueTests(unittest.IsolatedAsyncioTestCase):
         await observer.sync(bridge, control, {"map": area}, [packet, packet], self.epoch)
         await observer.sync(bridge, control, {"map": area}, [packet], self.epoch)
         bridge.command.assert_awaited_once_with("native-weapon-play-shots", area, self.epoch,
-                                               f"2|npc-melee|17|{clip}|1.3|0.2|0.3", timeout=1.5)
+                                               f"2|npc-melee|17|{clip}|1.3|0.2|0.3", timeout=1.5, update_status=False)
         control.event.assert_called_once_with("native_npc_melee_received", serial=2, actor_id=17, clip=clip)
 
     async def test_npc_contact_sound_replays_once_at_the_authoritative_hit_position(self):
@@ -115,7 +116,7 @@ class ItemUseCueTests(unittest.IsolatedAsyncioTestCase):
         await observer.sync(bridge, control, {"map": area}, [packet, packet], self.epoch)
         await observer.sync(bridge, control, {"map": area}, [packet], self.epoch)
         bridge.command.assert_awaited_once_with("native-weapon-play-shots", area, self.epoch,
-                                               f"2|npc-impact|{sound}|80.0|-15.0|105.0", timeout=1.5)
+                                               f"2|npc-impact|{sound}|80.0|-15.0|105.0", timeout=1.5, update_status=False)
         control.event.assert_called_once_with("native_npc_impact_played", serial=2, sound=sound, position=[80, -15, 105])
 
     async def test_stock_pellet_marks_keep_their_individual_wall_transforms(self):

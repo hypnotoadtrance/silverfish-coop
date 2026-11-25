@@ -3528,6 +3528,13 @@ class Bridge:
             raw = await self.local_bridge.command(request.encode("utf-8") + (stash_payload or b""), timeout)
             if action == native_stash.RENDER_MEMORY and _GUEST_UI_REPLY in raw:
                 raise RuntimeError("The resident stash renderer returned an unexpected body")
+            if action == "native-weapon-play-shots" and raw.startswith("weapon-cue-ack\t"):
+                receipt = raw[:-1].split("\t", 3) if raw.endswith("\n") and "\n" not in raw[:-1] else []
+                if len(receipt) != 4 or receipt[1] != fields[0]:
+                    raise RuntimeError("The local weapon cue receipt did not match the request")
+                if receipt[2] != "accepted":
+                    raise RuntimeError(receipt[3] or "The game declined weapon cue playback")
+                return {"ack": {"id": receipt[1], "result": receipt[2], "message": receipt[3]}}
             if action == native_weather_view.LOCAL_APPLY and raw.startswith("native-world-view-reply\t"):
                 return self._local_world_view_reply(raw, fields)
             status = self._parse_status(raw)

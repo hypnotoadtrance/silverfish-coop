@@ -877,9 +877,7 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([packet for _, packet in self.client.take_loot_motion()], [b"falling item"])
 
         self.host.send_weapon_shots((b"queued cue",), lambda _: True)
-        async with asyncio.timeout(1):
-            while not self.client.weapon_shots_ready():
-                await asyncio.sleep(.01)
+        await asyncio.wait_for(self.client.wait_weapon_shots(), 1)
         await asyncio.sleep(.3)
         self.assertEqual(self.client.take_weapon_shots(), [])
 

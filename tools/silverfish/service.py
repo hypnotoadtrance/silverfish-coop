@@ -6693,6 +6693,14 @@ class Client:
             await native_loose_pickup.refresh_claimed_stock_view(self)
         return result
 
+    async def run_weapon_cues(self) -> None:
+        while not self.stopping:
+            await self.transport.wait_weapon_shots()
+            shots = self.transport.take_weapon_shots()
+            if shots and self.stock_interaction_scope() is not None:
+                await self.weapon_shot_playback.sync(
+                    self.bridge, self.control, self.last_game, shots, self.zone_epoch)
+
     async def run(self) -> None:
         engine = self.bridge.process if isinstance(self.bridge.process, EmbeddedEngine) else None
         pause_exit = (native_session_exit.PauseExit(self.bridge, self.control, "guest", engine=engine)
@@ -6702,16 +6710,21 @@ class Client:
         lean = (asyncio.create_task(native_avatar_lean.follow(self))
                 if native_avatar_lean.enabled(self.bridge) else None)
         footstep_io = asyncio.create_task(native_footsteps.follow(self)) if native_footsteps.enabled(self.bridge) else None
-        interact = asyncio.create_task(self.run_stock_interactions()) if self.bridge.local_bridge is not None else None
+        resident = self.bridge.local_bridge is not None
+        interact = asyncio.create_task(self.run_stock_interactions()) if resident else None
+        cues = asyncio.create_task(self.run_weapon_cues()) if resident else None
         prop_poses = (asyncio.create_task(self.prop_carry.stream_local_poses())
                       if self.prop_carry.has_local_pose_stream else None)
         try:
             await self.run_session(pause_exit=pause_exit)
         finally:
-            if interact is not None:
-                interact.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await interact
+            for task in (interact, cues):
+                if task is not None:
+                    task.cancel()
+            for task in (interact, cues):
+                if task is not None:
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
             await self.cancel_gameplay_snapshot()
             await self.guest_ui.close()
             if pause_exit is not None:
@@ -6767,10 +6780,11 @@ class Client:
             if active and self.last_game.get("map") == self.expected_zone and time.monotonic() - self.gameplay_seen < 2:
                 self.last_game = await self.hurt_playback.sync(
                     self.bridge, self.control, self.last_game, self.gameplay.get(native_damage_feedback.KEY), self.zone_epoch)
-            shots = self.transport.take_weapon_shots()
-            if active and shots and self.last_game.get("map") == self.expected_zone:
-                self.last_game = await self.weapon_shot_playback.sync(
-                    self.bridge, self.control, self.last_game, shots, self.zone_epoch)
+            if self.bridge.local_bridge is None:
+                shots = self.transport.take_weapon_shots()
+                if active and shots and self.last_game.get("map") == self.expected_zone:
+                    self.last_game = await self.weapon_shot_playback.sync(
+                        self.bridge, self.control, self.last_game, shots, self.zone_epoch)
             await native_guest_weapon.service_fire_modes(self, active)
             if pause_exit is not None:
                 pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
@@ -6895,7 +6909,8 @@ class Client:
                 await self.project_gameplay()
             self.publish_gameplay_status(active)
             await self.bridge.wait_for_interaction(
-                .25, wake_if=lambda: self.gameplay_snapshot_ready() or self.transport.weapon_shots_ready()
+                .25, wake_if=lambda: self.gameplay_snapshot_ready()
+                or (self.bridge.local_bridge is None and self.transport.weapon_shots_ready())
                 or self.transport.loot_motion_ready() or self.guest_ui.stock_refresh_ready(), guest=True)
 
     def publish_gameplay_status(self, active: bool) -> None:

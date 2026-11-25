@@ -1506,6 +1506,7 @@ class ClientLink:
         self._keepalive: asyncio.Task[None] | None = None
         self._game_endpoint: Address | None = None
         self._weapon_shots: deque[tuple[float, bytes]] = deque(maxlen=36)
+        self._weapon_shots_received = asyncio.Event()
         self._footsteps: deque[tuple[float, bytes]] = deque(maxlen=16)
         self._loot_motion: deque[tuple[float, bytes]] = deque(maxlen=32)
         self.game_local_datagrams = 0
@@ -1673,6 +1674,10 @@ class ClientLink:
     def _receive_weapon_shot(self, data: bytes, now: float) -> None:
         if 0 < len(data) <= _FRAGMENT_SIZE:
             self._weapon_shots.append((now, data))
+            self._weapon_shots_received.set()
+
+    async def wait_weapon_shots(self) -> None:
+        await self._weapon_shots_received.wait()
 
     def weapon_shots_ready(self) -> bool:
         return bool(self._weapon_shots)
@@ -1681,6 +1686,7 @@ class ClientLink:
         now = asyncio.get_running_loop().time()
         result = [data for received, data in self._weapon_shots if now - received <= _WEAPON_SHOT_MAX_AGE]
         self._weapon_shots.clear()
+        self._weapon_shots_received.clear()
         return result
 
     def _send_pose(self, header: bytes, data: bytes) -> bool:
@@ -1729,6 +1735,7 @@ class ClientLink:
 
     async def _disconnect_locked(self) -> None:
         self._weapon_shots.clear()
+        self._weapon_shots_received.clear()
         self._footsteps.clear()
         self._loot_motion.clear()
         if self._keepalive is not None:

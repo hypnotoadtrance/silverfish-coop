@@ -206,7 +206,7 @@ async def relay(host, bridge, transport, *, footsteps=None):
     memory = getattr(mailbox, "local_weapon_cues_available", False)
     revision, last_sent = None, 0
     while not host.stopping:
-        await asyncio.sleep(.025)
+        await asyncio.sleep(.010 if memory else .025)
         if footsteps is not None:
             footsteps.flush()
         try:
@@ -296,7 +296,8 @@ class Playback:
                       else (f"{value:.2f}" for value in parameters))
             arguments.append("|".join((str(serial), path, *values)))
         try:
-            result = await bridge.command("native-weapon-play-shots", game["map"], epoch, *arguments, timeout=1.5)
+            result = await bridge.command("native-weapon-play-shots", game["map"], epoch, *arguments,
+                                          timeout=1.5, update_status=False)
         except (OSError, RuntimeError, TimeoutError) as error:
             control.event("native_weapon_shots_unavailable", reason=str(error))
             return game
@@ -347,4 +348,4 @@ class Playback:
                 control.event("native_weapon_shot_played", serial=serial, weapon=selected[serial][0],
                               muzzle_flash=match[2] == "1", audio_component=match[3] == "1", stock_sound=match[4] == "1",
                               recoil=match[5] == "1")
-        return result
+        return result if "state" in result else game
