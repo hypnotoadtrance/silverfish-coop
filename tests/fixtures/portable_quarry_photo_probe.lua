@@ -4,8 +4,8 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_TI
 
 local prefix = mailbox .. "/portable-quarry-photo-"
 local quarry = "/Game/Classes/Maps/Maps_OverWorld/Quarry_01_P.Quarry_01_P"
-local stone_maze = "/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P.StoneMaze_P"
-local quarry_quest, stone_quest = "Photo_BrnzQuarry", "Photo_SM_Anom"
+local southern_road = "/Game/Classes/Maps/Maps_OverWorld/SouthEast_Road_P.SouthEast_Road_P"
+local quarry_quest, tower_quest = "Photo_BrnzQuarry", "Photo_SB_Tower"
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
@@ -22,11 +22,11 @@ end
 local function sight(world)
     local in_quarry = world:GetFullName() == "World " .. quarry
     local actor = StaticFindObject(in_quarry and quarry .. ":PersistentLevel.StaticMeshActor_1147"
-        or stone_maze .. ":PersistentLevel.SpinningBall_Anomaly_C_1")
+        or southern_road .. ":PersistentLevel.StaticMeshActor_3458")
     local target = valid(actor) and actor:GetComponentByClass(
         StaticFindObject("/Game/Classes/Actors/ActorAssets/CameraTarget_BP.CameraTarget_BP_C"))
     assert(valid(target) and same(actor:GetWorld(), world)
-        and target.TrackedQuest.RowName:ToString() == (in_quarry and quarry_quest or stone_quest))
+        and target.TrackedQuest.RowName:ToString() == (in_quarry and quarry_quest or tower_quest))
     return target
 end
 
@@ -42,7 +42,7 @@ local function run(action, argument)
     local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     local pawn = statics:GetPlayerPawn(world, 0)
     assert(valid(pawn) and pawn:IsLocallyControlled())
-    local quest = world:GetFullName() == "World " .. quarry and quarry_quest or stone_quest
+    local quest = world:GetFullName() == "World " .. quarry and quarry_quest or tower_quest
     local save, key = pawn.Save, FName(quest, EFindName.FNAME_Find)
     if action == "binding" then
         local target = sight(world)
@@ -71,7 +71,7 @@ local function run(action, argument)
         assert(valid(guest) and guest:HasAuthority() and not guest:IsLocallyControlled() and not same(guest.Save, save))
         if action == "seed" then
             assert(world:GetFullName():find("Observitory_P", 1, true))
-            for _, id in ipairs({stone_quest, quarry_quest}) do
+            for _, id in ipairs({tower_quest, quarry_quest}) do
                 local row = FName(id, EFindName.FNAME_Find)
                 assert(not save.ActiveQuests:Contains(row))
                 instance:AddQuest_ByName(row)
@@ -92,6 +92,7 @@ local function run(action, argument)
         local center = point_for(sight(world))
         local color = {R=0,G=0,B=0,A=0}
         local height = guest.CapsuleComponent:GetScaledCapsuleHalfHeight()
+        local floors, visible = 0, 0
         for _, distance in ipairs({800, 1300, 2000, 2800, 4200}) do
             for index = 0, 15 do
                 local angle = math.pi * index / 8
@@ -99,19 +100,23 @@ local function run(action, argument)
                 local ground, hit = {}, {}
                 if trace:LineTraceSingle(pawn, {X=x,Y=y,Z=center.Z+600}, {X=x,Y=y,Z=center.Z-4000}, 0, false,
                     {pawn,guest}, 0, ground, true, color, color, 0) then
+                    floors = floors + 1
                     local floor = (ground.OutHit or ground).ImpactPoint
                     local point = {X=x,Y=y,Z=floor.Z+height+4}
                     local eye = {X=x,Y=y,Z=point.Z+60}
                     local blocked = trace:LineTraceSingle(pawn, eye, center, 0, true, {pawn,guest},
                         0, hit, true, color, color, 0)
-                    if not blocked and guest:K2_TeleportTo(point, {Pitch=0,Yaw=0,Roll=0}) then
-                        guest:ForceNetUpdate()
-                        return ("%.3f,%.3f,%.3f"):format(point.X,point.Y,point.Z)
+                    if not blocked then
+                        visible = visible + 1
+                        if guest:K2_TeleportTo(point, {Pitch=0,Yaw=0,Roll=0}) then
+                            guest:ForceNetUpdate()
+                            return ("%.3f,%.3f,%.3f"):format(point.X,point.Y,point.Z)
+                        end
                     end
                 end
             end
         end
-        error("A clear stock floor and line of sight to the photo target are required")
+        error(("No clear position at %.1f,%.1f,%.1f, floors=%d, visible=%d"):format(center.X, center.Y, center.Z, floors, visible))
     end
     assert((action == "aim" or action == "miss") and not pawn:HasAuthority())
     local center = point_for(sight(world))
@@ -123,6 +128,7 @@ local function run(action, argument)
     local rotation = {Pitch = aim.Pitch, Yaw = aim.Yaw, Roll = 0}
     if action == "miss" then rotation.Yaw = (rotation.Yaw + 180) % 360 end
     pawn.Controller:SetControlRotation(rotation)
+    camera.SceneCaptureComponent2D:K2_SetWorldRotation(rotation, false, {}, true)
     return action
 end
 

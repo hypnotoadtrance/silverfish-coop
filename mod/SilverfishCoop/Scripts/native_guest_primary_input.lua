@@ -174,6 +174,17 @@ local function pry_name(current, kind)
     if name and actor.Locked == true and (kind ~= "crowbar" or pawn.CanInteract == true) then return name end
 end
 
+local function camera_view(current)
+    local camera = current.pawn.EquipedItem
+    local lens = valid(camera) and camera.SceneCaptureComponent2D
+    if not valid(lens) or not same(lens:GetOwner(), camera) or not same(camera.User, current.pawn) then return end
+    local frame = lens:K2_GetComponentToWorld()
+    if not frame or not frame.Translation or not frame.Rotation then return end
+    local position, rotation = frame.Translation, frame.Rotation
+    return ("camera:%.4f,%.4f,%.4f,%.6f,%.6f,%.6f,%.6f"):format(
+        position.X, position.Y, position.Z, rotation.X, rotation.Y, rotation.Z, rotation.W)
+end
+
 local function drain_taps(current, address)
     if not standing(current) then
         primary.reset()
@@ -203,6 +214,14 @@ local function drain_taps(current, address)
             commit("tap", address, sequence)
         else
             local view = shot_view.format(x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz, actor, hx, hy, hz)
+            if kind == "camera" and current.field_camera then
+                local ok, sampled = pcall(camera_view, current)
+                if not ok or not sampled then
+                    commit("tap", address, sequence)
+                    break
+                end
+                view = sampled
+            end
             if underbarrel then
                 if not view or not mx then
                     commit("tap", address, sequence)
@@ -394,6 +413,7 @@ function primary.command(fields, state, phase)
         error(tostring(status or "stock_guest_primary_scope_unavailable"), 0)
     end
     current.guid, current.kind, current.mode = guid, kind, status
+    current.field_camera = camera and extra == "stock-photo"
     if binding then current.view_stroke, current.shot_view = binding.view_stroke, binding.shot_view end
     binding = current
     return "stock guest primary scope refreshed"

@@ -5752,7 +5752,9 @@ class Client:
                 action, event = "native-guest-weapon-fire", "native_guest_primary_input"
             try:
                 if action == native_turret_photo.STOCK_SHUTTER:
-                    selection = f"{event_guid}@{self.zone_epoch}"
+                    if not extra:
+                        continue
+                    selection = f"{event_guid}@{self.zone_epoch}@{extra[0]}"
                 elif extra and event_kind in native_guest_weapon.FIRE_CLASSES:
                     selection = f"{event_guid}@{self.zone_epoch}@{extra[0]}"
                 else:

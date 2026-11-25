@@ -14,8 +14,9 @@ from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, OBSERVATORY
 OVERWORLD = "/Game/Classes/Maps/Maps_OverWorld/"
 QUARRY = OVERWORLD + "Quarry_01_P"
 QUEST = "Photo_BrnzQuarry"
-STONE_MAZE = OVERWORLD + "StoneMaze_P"
-STONE_QUEST = "Photo_SM_Anom"
+SOUTHERN_ROAD = OVERWORLD + "SouthEast_Road_P"
+NORTHEAST_RAIL = OVERWORLD + "NorthEast_Rail_P"
+TOWER_QUEST = "Photo_SB_Tower"
 
 
 async def verify_quarry_photo(host, guest, pawn, probe):
@@ -47,7 +48,8 @@ async def verify_quarry_photo(host, guest, pawn, probe):
         await wait_resident_status(guest_run, lambda frame: frame.get("zone_epoch") == arrival["zone_epoch"]
                                    and frame.get("game", {}).get("map") == destination, timeout=35)
 
-    for source, destination in ((OBSERVATORY, CROSSROADS), (CROSSROADS, DEAD_BRIDGE), (DEAD_BRIDGE, STONE_MAZE)):
+    outbound = (OBSERVATORY, CROSSROADS, NORTHEAST_RAIL, SOUTHERN_ROAD)
+    for source, destination in zip(outbound, outbound[1:]):
         await travel(source, destination)
     assert await command(host, "journal") == "1"
     assert await command(host, "binding") == "bound"
@@ -76,23 +78,26 @@ async def verify_quarry_photo(host, guest, pawn, probe):
     missed = await shutter()
     assert missed.get("reason") == "stock_photo_no_objective_in_frame", missed
     assert await command(host, "journal") == "1"
-    await command(guest, "aim")
     await asyncio.sleep(3.1)
+    await command(guest, "aim")
     capture = await shutter()
+    assert capture.get("effect") == "native_quest_changed", capture
     photo = capture[native_turret_photo.STOCK_PROOF]
     assert (photo["map"], photo["quest"], photo["camera"], photo["step_before"], photo["step_after"]) == (
-        STONE_MAZE, STONE_QUEST, guid, 1, 2), photo
-    assert photo["target"].endswith("SpinningBall_Anomaly_C_1") and photo["visibility"] >= .75, photo
+        SOUTHERN_ROAD, TOWER_QUEST, guid, 1, 2), photo
+    assert photo["target"].endswith("StaticMeshActor_3458") and photo["visibility"] >= .75, photo
     async with asyncio.timeout(10):
         while await asyncio.gather(command(host, "journal"), command(guest, "journal")) != ["2", "2"]:
             await asyncio.sleep(.2)
-    replay = await submit(guest_run, native_turret_photo.STOCK_SHUTTER, target=f"{guid}@{frame['zone_epoch']}",
+    replay = await submit(guest_run, native_turret_photo.STOCK_SHUTTER,
+                          target=f"{guid}@{frame['zone_epoch']}@{capture['shutter_view']}",
                           operation_id=capture["operation_id"])
     assert replay["ok"] and replay[native_turret_photo.STOCK_PROOF] == photo, replay
     assert campaign_save_hashes(host.campaign) == checkpoint
-    pine = OVERWORLD + "PineRidge_P"
-    await travel(STONE_MAZE, pine)
-    await travel(pine, QUARRY)
+    onward = (SOUTHERN_ROAD, NORTHEAST_RAIL, CROSSROADS, DEAD_BRIDGE, OVERWORLD + "StoneMaze_P",
+              OVERWORLD + "PineRidge_P", QUARRY)
+    for source, destination in zip(onward, onward[1:]):
+        await travel(source, destination)
     assert await command(host, "journal") == "1"
     assert await command(host, "binding") == "unbound"
     await wait_resident_status(host_run, lambda state: (

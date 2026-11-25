@@ -452,13 +452,22 @@ end
 
 local function field_shutter(command, state, phase)
     field_result = nil
-    local name, guid = command[3], command[4]
-    if #command ~= 4 or type(guid) ~= "string" or #guid ~= 32 or not guid:match("^[A-F0-9]+$") then field_fail("arguments") end
+    local name, guid, view = command[3], command[4], command[5]
+    if #command ~= 5 or type(guid) ~= "string" or #guid ~= 32 or not guid:match("^[A-F0-9]+$")
+        or type(view) ~= "string" or #view > 180 or not view:match("^camera:[%d.,%-]+$") then field_fail("arguments") end
     local context = actor_context(state, phase, name, false, true)
     if same(context.host, context.pawn) then field_fail("guest_required") end
     local camera, identity = equipped_camera(context)
     if guid ~= identity then field_fail("camera_changed") end
     local frame = frustum(camera, context)
+    local values = {}
+    for number in view:sub(8):gmatch("[^,]+") do values[#values + 1] = tonumber(number) or math.huge end
+    if #values ~= 7 then field_fail("view_unqualified") end
+    local x, y, z, qx, qy, qz, qw = table.unpack(values)
+    local position = xyz({X = x, Y = y, Z = z})
+    if not position or not within(position, xyz(context.pawn:K2_GetActorLocation()), 400)
+        or math.abs(qx^2 + qy^2 + qz^2 + qw^2 - 1) > .01 then field_fail("view_unqualified") end
+    frame.Translation, frame.Rotation = position, {X = qx, Y = qy, Z = qz, W = qw}
     local source = quest_table()
     local cash, xp = read_flag(context.instance, "Player_Cash"), read_flag(context.instance, "Player_Xp")
     for _, target in ipairs(field_components(context.world)) do

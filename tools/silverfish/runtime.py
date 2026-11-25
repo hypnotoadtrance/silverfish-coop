@@ -931,6 +931,9 @@ class Bridge:
             if fields[5] in native_loot.PRY_TOOL_ACTIONS:
                 if not target or not (lockable_container(target, fields[2]) or native_stock_door.actor_map(target) == fields[2]):
                     continue
+            elif fields[5] == "camera":
+                if target is not None and (len(target) > 180 or not target.startswith("camera:")):
+                    continue
             elif target is not None and (fields[5] not in FIRE_CLASSES or not valid_primary_shot(fields[5], target)):
                 continue
             events.append((sequence, *fields[2:]))

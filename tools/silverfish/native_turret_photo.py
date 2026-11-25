@@ -155,8 +155,12 @@ async def shutter(host, bridge, character, camera, operation):
 async def stock_shutter(host, bridge, character, target, operation):
     area = host.last_game.get("map")
     pawn = _pawn(host, character, area)
-    camera, separator, visit = target.partition("@") if isinstance(target, str) else ("", "", "")
-    if (character == "host" or not separator or visit != host.zone_epoch or area not in host.allowed_maps
+    parts = target.split("@", 2) if isinstance(target, str) else []
+    if len(parts) != 3:
+        raise party.RuleError("native_stock_photo_shutter_invalid")
+    camera, visit, view = parts
+    if (character == "host" or visit != host.zone_epoch or area not in host.allowed_maps
+            or len(view) > 180 or not re.fullmatch(r"camera:(?:-?[0-9]+\.[0-9]+,){6}-?[0-9]+\.[0-9]+", view)
             or not valid_guid(camera) or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation)):
         raise party.RuleError("native_stock_photo_shutter_invalid")
     request = [STOCK_SHUTTER, target, None]
@@ -177,7 +181,7 @@ async def stock_shutter(host, bridge, character, target, operation):
     try:
         host.native_checkpoint_unsafe = True
         try:
-            snapshot = await bridge.command(STOCK_SHUTTER, pawn, camera, timeout=3)
+            snapshot = await bridge.command(STOCK_SHUTTER, pawn, camera, view, timeout=3)
         except RuntimeError as error:
             if str(error).startswith(("stock_photo_", "stock_turret_photo_")):
                 host.native_checkpoint_unsafe = False
@@ -195,7 +199,7 @@ async def stock_shutter(host, bridge, character, target, operation):
         candidate = party.load_party(host.party)
         record = {"quest_id": quest, "step": after, "actor": character}
         candidate.setdefault("native_quests", {})[quest] = record
-        result = {"effect": "native_quest_changed", **record, STOCK_PROOF: proof}
+        result = {"effect": "native_quest_changed", **record, STOCK_PROOF: proof, "shutter_view": view}
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": request, "result": result})
         del receipts[:-party.RECENT_ACTIONS]

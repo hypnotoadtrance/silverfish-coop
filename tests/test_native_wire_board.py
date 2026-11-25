@@ -34,18 +34,20 @@ class WireBoardTests(unittest.IsolatedAsyncioTestCase):
             RuntimeError("stock_photo_no_objective_in_frame"), captured,
         ]))
         operation = uuid.uuid4().hex
+        view = "camera:1.0000,1.0000,1.0000,0.000000,0.000000,0.000000,1.000000"
+        target = f"{camera}@{visit}@{view}"
         with self.assertRaisesRegex(party.RuleError, "shutter_invalid"):
-            await photo.stock_shutter(host, bridge, "guest", f"{camera}@{'a' * 32}", operation)
+            await photo.stock_shutter(host, bridge, "guest", f"{camera}@{'a' * 32}@{view}", operation)
         bridge.command.assert_not_awaited()
         with self.assertRaisesRegex(party.RuleError, "no_objective_in_frame"):
-            await photo.stock_shutter(host, bridge, "guest", f"{camera}@{visit}", operation)
+            await photo.stock_shutter(host, bridge, "guest", target, operation)
         self.assertFalse(host.native_checkpoint_unsafe or host.stopping)
         self.assertNotIn(quest, host.party.get("native_quests", {}))
         host.camera_ready_at.clear()
-        result = await photo.stock_shutter(host, bridge, "guest", f"{camera}@{visit}", operation)
+        result = await photo.stock_shutter(host, bridge, "guest", target, operation)
         self.assertEqual(host.party["native_quests"][quest], {"quest_id": quest, "step": 2, "actor": "guest"})
         host.last_game = {"state": "hosting", "map": area}
-        self.assertEqual(await photo.stock_shutter(host, bridge, "guest", f"{camera}@{visit}", operation), result)
+        self.assertEqual(await photo.stock_shutter(host, bridge, "guest", target, operation), result)
         self.assertEqual(bridge.command.await_count, 2)
 
     async def test_turret_contract_and_shutter_receipt_stay_pending_until_checkpoint(self):
