@@ -520,12 +520,25 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
     async def test_bridge_idle_wait_wakes_for_a_host_request_without_local_input(self):
         with TemporaryDirectory() as temporary:
             bridge = runtime.Bridge(Path(temporary), Mock())
-            requests = asyncio.Queue()
-            wait = asyncio.create_task(bridge.wait_for_interaction(5, wake_if=lambda: not requests.empty()))
+            host = service.Host.__new__(service.Host)
+            host.native_requests = asyncio.Queue()
+            host.native_request_ready = asyncio.Event()
+            wait = asyncio.create_task(bridge.wait_for_interaction(5, wake_event=host.native_request_ready))
+            self.addAsyncCleanup(self.cancel_wait, wait)
             await asyncio.sleep(0)
-            requests.put_nowait("guest interaction")
+            first = asyncio.create_task(host.enqueue_native_request("guest", {"action": "first"}))
+            second = asyncio.create_task(host.enqueue_native_request("guest", {"action": "second"}))
+            for task in first, second:
+                self.addAsyncCleanup(self.cancel_wait, task)
             await asyncio.wait_for(wait, .5)
-            self.assertEqual(requests.get_nowait(), "guest interaction")
+            self.assertEqual(host.native_requests.qsize(), 2)
+            # A disconnected guest cancels its request before the game can dispatch it.
+            await self.cancel_wait(first)
+            await self.cancel_wait(second)
+            await host.service_guest_native_requests(bridge)
+            self.assertTrue(host.native_request_ready.is_set())
+            await host.service_guest_native_requests(bridge)
+            self.assertFalse(host.native_request_ready.is_set())
 
     async def test_guest_idle_wait_wakes_for_supported_gameplay_events(self):
         streams = (

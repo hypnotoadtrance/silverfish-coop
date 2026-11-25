@@ -357,6 +357,7 @@ class Host:
         self.fall_origin = None
         self.native_pickup = NativePickup()
         self.native_requests = asyncio.Queue(maxsize=8)
+        self.native_request_ready = asyncio.Event()
         self.stock_doors = native_stock_door.Interactions()
         self.prepared_guest_leaves: dict[str, GuestLeave] = {}
         self.confirmed_guest_leaves: set[str] = set()
@@ -2234,6 +2235,7 @@ class Host:
             self.native_requests.put_nowait((guest_id, request, future))
         except asyncio.QueueFull:
             return {"ok": False, "error": "native_actions_busy"}
+        self.native_request_ready.set()
         return await future
 
     def guest_leave_pending(self, guest_id: str) -> bool:
@@ -2245,6 +2247,8 @@ class Host:
         if self.native_requests.empty():
             return
         guest_id, request, future = self.native_requests.get_nowait()
+        if self.native_requests.empty():
+            self.native_request_ready.clear()
         if future.cancelled():
             return
         try:
@@ -4512,7 +4516,7 @@ class Host:
             self.stock_doors.settle(self)
             self.publish_host_status(transport, bridge)
             await bridge.wait_for_interaction(
-                .25, wake_if=lambda: not self.native_checkpoint_unsafe and not self.native_requests.empty(),
+                .25, wake_event=None if self.native_checkpoint_unsafe else self.native_request_ready,
             )
 
     def publish_host_status(self, transport, bridge):

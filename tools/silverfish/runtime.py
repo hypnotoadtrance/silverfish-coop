@@ -787,7 +787,8 @@ class Bridge:
         self._file_command_lock = asyncio.Lock()
         self._local_world_view = None
 
-    async def wait_for_interaction(self, timeout: float, *, wake_if=None, guest=False) -> None:
+    async def wait_for_interaction(self, timeout: float, *, wake_if=None, wake_event: asyncio.Event | None = None,
+                                   guest=False) -> None:
         """Wake for local input, a new game frame, or pending network work."""
         deadline = time.monotonic() + timeout
         streams = [("input.tsv", self.input_offset)]
@@ -804,8 +805,9 @@ class Bridge:
                 ("native-mosby-station-events", self.mosby_station_offset),
             ))
         while (remaining := deadline - time.monotonic()) > 0:
-            if ((wake_if is not None and wake_if()) or (self.local_bridge is not None
-                    and (self.local_bridge.input_ready() or self.local_bridge.status_ready()))):
+            if ((wake_event is not None and wake_event.is_set()) or (wake_if is not None and wake_if())
+                    or (self.local_bridge is not None
+                        and (self.local_bridge.input_ready() or self.local_bridge.status_ready()))):
                 return
             if self.status_source == "file":
                 try:
@@ -828,7 +830,16 @@ class Bridge:
                     ready = True
             if ready:
                 return
-            await asyncio.sleep(min(.025, remaining))
+            delay = min(.025, remaining)
+            if wake_event is None:
+                await asyncio.sleep(delay)
+            else:
+                try:
+                    async with asyncio.timeout(delay):
+                        await wake_event.wait()
+                    return
+                except TimeoutError:
+                    pass
 
     def _take_local_inputs(self, pending: deque[bytes]) -> list[bytes]:
         # Keep unread combat and travel inputs in the native FIFO until the collectors can take another batch.
