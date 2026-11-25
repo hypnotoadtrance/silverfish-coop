@@ -67,7 +67,9 @@ async def verify_oil_lamps(host, guest, pawn):
         receipts = [row for row in await suite.resident_events(guest_run, replica)
                     if row.get("time_unix", 0) >= started
                     and row.get("native_stock_switch_interaction", {}).get("actor") == actor]
-        assert [row["native_stock_switch_interaction"]["powered"] for row in receipts] == [False, True], receipts
+        power = [row["native_stock_switch_interaction"]["powered"] for row in receipts]
+        # A held lighter can emit another ignition callback before the reply.
+        assert len(power) >= 2 and power[0] is False and all(value is True for value in power[1:]), receipts
         assert await probe(host, "host-off", actor) == "false"
         _, host_extinguished = await verify_state(actor, False)
         assert suite.campaign_save_hashes(host.campaign) == checkpoint

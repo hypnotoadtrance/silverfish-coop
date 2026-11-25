@@ -7089,7 +7089,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                            if stock_crate_ring else None)
 
             def crossroads_overlay(source):
-                profiled = instrument_profile(source, stock_receipts=stock_crossroads_door or stock_warehouse_switch)
+                profiled = instrument_profile(source, stock_receipts=bool(
+                    stock_crossroads_door or stock_warehouse_switch or oil_lamps_check))
                 # Native globals are registered on the co-op Lua state.
                 return (profiled + "\nstatus_publication.cold_crate_probe = function()\n" + crate_probe
                         + "\nend\nstatus_publication.cold_crate_probe()\n") if crate_probe else profiled
@@ -7537,7 +7538,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     proof.setdefault("join_seconds", gameplay["join_seconds"])
                     gameplay.update(await run_resident_checks(checks, host, guest, finish_check, skip_check))
                     if crossroads_profile and ((campaign == "crossroads" and stock_crossroads_door)
-                                               or (campaign == "tutorial_dock" and stock_warehouse_switch)):
+                                               or (campaign == "tutorial_dock" and stock_warehouse_switch)
+                                               or (campaign == "oil_lamps" and oil_lamps_check)):
                         from portable_crossroads_profile import read_stock_receipts
 
                         host_receipts, guest_receipts = await asyncio.gather(
@@ -7549,6 +7551,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                         if campaign == "tutorial_dock" and results["stock_warehouse_switch"]["passed"]:
                             assert host_receipts.get(native_stock_switch.ACTION, {}).get("count", 0) > 0, evidence
                             assert guest_receipts.get(native_stock_switch.PROJECT, {}).get("count", 0) > 0, evidence
+                        if campaign == "oil_lamps" and results["stock_oil_lamps"]["passed"]:
+                            assert host_receipts.get(native_stock_switch.IGNITE, {}).get("count", 0) > 0, evidence
                     return gameplay
 
                 async def check_shovel_reconnect(guest, _started):

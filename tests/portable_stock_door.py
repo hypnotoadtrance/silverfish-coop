@@ -33,15 +33,15 @@ async def toggle_door(host, guest, actor, pawn, expected_open, *, inspect_during
                     break
                 await asyncio.sleep(.015)
         probe_start = time.time()
-        inspection = await submit(guest_run, "native-loot-inspect", target=inspect_during_motion)
-        assert inspection["ok"], inspection
-        # The controller polls response files. Measure from the response write.
-        completed_at = (guest_run / "responses" / f"{inspection['id']}.json").stat().st_mtime
-        proof = {"actor": inspect_during_motion, "completed_at": completed_at,
-                 "roundtrip_ms": round((completed_at - probe_start) * 1000)}
+        inspection = await host.bridge.command("native-loot-inspect", pawn, inspect_during_motion, update_status=False)
+        completed_at = time.time()
+        proof = inspection["native_loot"]
+        assert (proof["ok"], proof["pawn"], proof["crate"]) == (True, pawn, inspect_during_motion), proof
+        evidence = {"actor": inspect_during_motion, "completed_at": completed_at,
+                    "local_bridge_ms": round((completed_at - probe_start) * 1000)}
         if native_loot.INSPECTION_BYTES in inspection:
-            proof["reply_bytes"] = inspection[native_loot.INSPECTION_BYTES]
-        return proof
+            evidence["reply_bytes"] = inspection[native_loot.INSPECTION_BYTES]
+        return evidence
 
     attempts = []
     inspected = None
