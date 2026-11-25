@@ -1,12 +1,15 @@
-    if (fields[2] == "fixture-warehouse-switch" or fields[2] == "fixture-warehouse-radio" or fields[2] == "fixture-observatory-tv")
+    if (fields[2] == "fixture-warehouse-switch" or fields[2] == "fixture-warehouse-radio"
+        or fields[2] == "fixture-observatory-tv" or fields[2] == "fixture-warehouse-candle")
         and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
         local stock_focus = require("native_loot_crate_input").stock_focus
         local dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
         local radio = fields[2] == "fixture-warehouse-radio"
+        local candle = fields[2] == "fixture-warehouse-candle"
         local television = fields[2] == "fixture-observatory-tv"
         local class, number = "CircutBox_BP_C", 1
         if radio then class, number = "Prop_Radio01_C", 3 end
+        if candle then class = "Prop_Candle_01_C" end
         local name = class .. " " .. dock .. ".Tut_Dock_P:PersistentLevel." .. class .. "_" .. number
         local mode = fields[3]
         if television then
@@ -27,7 +30,17 @@
             assert(state.map == dock)
         end
         local entry = assert(find_switch(state, phase, name), "the stock warehouse device is missing")
-        if television and mode == "screen" then
+        if candle and mode == "state" then
+            local material = entry.mesh:GetMaterial(0)
+            return table.concat({bit(entry.actor.Lit), bit(entry.light:IsVisible()), bit(entry.flame:IsActive()),
+                bit(entry.box:GetGenerateOverlapEvents()), valid(material) and material:GetFullName() or "-"}, "|")
+        elseif candle and mode == "ignite" and phase == "hosting" then
+            entry.actor:SetLitUnlit(true, false)
+            return "host lit the candle"
+        elseif candle and mode == "local-extinguish" and phase == "connected" then
+            entry.actor:Extinguish(1)
+            return bit(entry.actor.Lit)
+        elseif television and mode == "screen" then
             local material = assert(entry.actor.PropMesh:GetMaterial(entry.actor.ScreenIndex))
             return (entry.actor.Power and "1|" or "0|") .. material:GetFullName()
         elseif radio and mode == "playback" then

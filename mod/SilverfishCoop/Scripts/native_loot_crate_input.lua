@@ -390,7 +390,13 @@ local function stock_focus(pawn, box, dispatch, focus_refusal)
         error(focus_refusal or "native_loot_crate_stock_fixture_camera_unavailable", 0)
     end
     local rotation, eye = camera.RelativeRotation, camera:K2_GetComponentLocation()
-    local center, extent = box:K2_GetComponentLocation(), box:GetScaledBoxExtent()
+    local center, extent = box:K2_GetComponentLocation(), nil
+    if exact_component(box, "/Script/Engine.SphereComponent", box:GetOwner()) then
+        local radius = box:GetScaledSphereRadius()
+        extent = {Y = radius, Z = radius}
+    else
+        extent = box:GetScaledBoxExtent()
+    end
     if not rotation or not eye or not center or not extent or not close_angle(rotation.Pitch, rotation.Pitch)
         or not close_angle(rotation.Yaw, rotation.Yaw) or not close_angle(rotation.Roll, rotation.Roll) then
         error(focus_refusal or "native_loot_crate_stock_fixture_camera_unavailable", 0)

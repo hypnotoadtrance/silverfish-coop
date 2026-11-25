@@ -1771,6 +1771,7 @@ local function tick(fields, pending, periodic)
     native_flare.sync(state, current_phase)
     pcall(native_crate_props.sync, state, current_phase)
     native_lantern.sync(state, current_phase)
+    native_stock_switch.release_candles(state, current_phase)
     native_broker_input.sync(state, current_phase)
     native_death.sync(state, current_phase)
     if native_kill_volume.sync(state, current_phase) then

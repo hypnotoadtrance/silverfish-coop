@@ -1641,6 +1641,50 @@ async def verify_observatory_tv(host: Seat, guest: Seat, pawn: str) -> dict:
                                      "guest_toggle_screens": guest_toggle, "guest_receipt_ms": receipt["elapsed_ms"]}}
 
 
+async def verify_warehouse_candle(host: Seat, guest: Seat, pawn: str) -> dict:
+    fixture = "fixture-warehouse-candle"
+    kind = "Prop_Candle_01_C"
+    actor = f"{kind} {WAREHOUSE_DOCK}.Tut_Dock_P:PersistentLevel.{kind}_1"
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    checkpoint = campaign_save_hashes(host.campaign)
+
+    async def invoke(seat, mode, *fields):
+        return (await seat.bridge.command(fixture, mode, *fields))["ack"]["message"]
+
+    async def view(lit):
+        for run in (host_run, guest_run):
+            await wait_resident_status(run, lambda frame:
+                frame.get("game", {}).get(native_stock_switch.KEY, {}).get(actor, {}).get("powered") is lit)
+        readings = []
+        async with asyncio.timeout(5):
+            while True:
+                readings = [value.split("|", 4) for value in await asyncio.gather(
+                    *(invoke(seat, "state") for seat in (host, guest)))]
+                if all(row[:3] == [str(int(lit))] * 3 and ("UnLit" in row[-1]) is not lit
+                       for row in readings) and readings[1][3] == "0":
+                    return readings
+                await asyncio.sleep(.05)
+
+    before = await view(True)
+    point = list(map(float, (await invoke(host, "stage", pawn)).split(",")))
+    frame = await wait_resident_status(guest_run, lambda row:
+        math.dist(row.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0] * 3), point) < 55)
+    assert await invoke(guest, "local-extinguish") == "1"
+    started = time.time()
+    assert await invoke(guest, "guest") == "guest pressed"
+    after_guest = await view(False)
+    receipt, = [event for event in await resident_events(guest_run, frame) if event["time_unix"] >= started
+                and event.get("native_stock_switch_interaction", {}).get("actor") == actor]
+    assert await invoke(host, "ignite") == "host lit the candle"
+    relit = await view(True)
+    assert await invoke(host, "host") == "host pressed"
+    after_host = await view(False)
+    assert campaign_save_hashes(host.campaign) == checkpoint
+    return {"stock_warehouse_candle": {"actor": actor, "before": before, "after_guest": after_guest,
+            "relit": relit, "after_host": after_host, "guest_receipt_ms": receipt["elapsed_ms"],
+            "guest_local_extinguish_suppressed": True, "campaign_checkpoint_unchanged": True}}
+
+
 async def verify_warehouse_switch(host: Seat, guest: Seat, pawn: str, *, radio: bool = False,
                                   check_track_selection: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
@@ -6226,6 +6270,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_warehouse_switch, "tutorial_dock", "stock_warehouse_switch", verify_warehouse_switch),
         (stock_warehouse_switch, "tutorial_dock", "stock_warehouse_radio",
          lambda host, guest, pawn: verify_warehouse_switch(host, guest, pawn, radio=True, check_track_selection=stock_radio_media)),
+        (stock_warehouse_switch, "tutorial_dock", "stock_warehouse_candle", verify_warehouse_candle),
         (stock_warehouse_switch, "tutorial_dock_late_join", "stock_warehouse_late_join",
          lambda host, guest, _pawn: verify_warehouse_late_join(host, guest, warehouse_prejoin)),
         (stock_bandage_revisit, "tutorial_dock", "stock_bandage_revisit", verify_tutorial_bandage_revisit),

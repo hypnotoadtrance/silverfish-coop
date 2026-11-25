@@ -12,6 +12,9 @@ profiles.Prop_Radio01_C = {path = props .. "Prop_Radio01.Prop_Radio01_C", power 
 for _, name in ipairs({"Prop_TV_01", "Prop_TV_02", "Prop_TV_03"}) do
     profiles[name .. "_C"] = {path = props .. name .. "." .. name .. "_C", power = "Power", television = true}
 end
+for _, name in ipairs({"Prop_Candle_01", "Prop_Candle_02", "Prop_Candle_03"}) do
+    profiles[name .. "_C"] = {path = props .. name .. "." .. name .. "_C", power = "Lit", candle = true}
+end
 for kind, profile in pairs(profiles) do
     profile.path = profile.path or root .. kind:sub(1, -3) .. "." .. kind
 end
@@ -21,6 +24,7 @@ local bulb_profiles = {
 }
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local world, entries, dirty
+local candle_overlaps = {}
 
 local function valid(object) return object and object:IsValid() end
 local function same(left, right) return valid(left) and valid(right) and left:GetAddress() == right:GetAddress() end
@@ -38,8 +42,15 @@ local function parts(actor, scope)
     local profile = profiles[class:GetFName():ToString()]
     if not profile or class:GetFullName() ~= "BlueprintGeneratedClass " .. profile.path
         or not qualified(actor, scope) or type(actor[profile.power or "Powered"]) ~= "boolean" then return end
-    local box = actor.Box
+    local box = profile.candle and actor.Sphere or actor.Box
     if not valid(box) or not same(box:GetOwner(), actor) then return end
+    if profile.candle then
+        local mesh, light, flame = actor.PropMesh, actor.PointLight, actor.FX_CandleFlame_01_Converted
+        if not same(mesh, actor.RootComponent) or not same(mesh:GetOwner(), actor)
+            or not valid(light) or not same(light:GetOwner(), actor)
+            or not valid(flame) or not same(flame:GetOwner(), actor) then return end
+        return {actor = actor, box = box, mesh = mesh, light = light, flame = flame, power = profile.power, candle = true}
+    end
     if profile.power then return {actor = actor, box = box, power = profile.power, television = profile.television} end
     local lever, panel = actor[profile[1]], actor[profile[2]]
     if not valid(lever) or not valid(panel) then return end
@@ -110,7 +121,7 @@ local function census(state, phase)
                 if entry and (phase ~= "hosting" or actor:HasAuthority()) then
                     local name = actor:GetFullName()
                     if entry.power then
-                        entries[name] = {power = entry.power, path = name:match("^%S+ (.+)$")}
+                        entries[name] = {power = entry.power, path = name:match("^%S+ (.+)$"), candle = entry.candle}
                     elseif not entries[name] or not same(entries[name].actor, actor) then
                         entry.lights = light_links(actor, world)
                         entries[name] = entry
@@ -130,12 +141,34 @@ local function find_switch(state, phase, name)
     if resolved and resolved.power == entry.power then return resolved end
 end
 
+function switches.release_candles(state, phase)
+    if not next(candle_overlaps) or phase == "connected" and state.listening and same(world, state.world) then return end
+    if same(world, state.world) then
+        for _, sphere in pairs(candle_overlaps) do
+            local owner = valid(sphere) and sphere:GetOwner()
+            if qualified(owner, state.world) then sphere:SetGenerateOverlapEvents(true) end
+        end
+    end
+    candle_overlaps = {}
+end
+
+local function suppress_candle_overlap(name, sphere)
+    if sphere:GetGenerateOverlapEvents() then
+        sphere:SetGenerateOverlapEvents(false)
+        candle_overlaps[name] = sphere
+    end
+end
+
 function switches.rows(state, phase, row)
     local rows = {}
     for name, entry in pairs(census(state, phase)) do
         if entry.power then
             local actor = StaticFindObject(entry.path)
             if qualified(actor, state.world) and type(actor[entry.power]) == "boolean" then
+                if entry.candle and phase == "connected" then
+                    local sphere = actor.Sphere
+                    if valid(sphere) and same(sphere:GetOwner(), actor) then suppress_candle_overlap(name, sphere) end
+                end
                 rows[#rows + 1] = row("native-stock-switch", state.map, name, bit(actor[entry.power]), 0, 0, 0, "-", "-")
             end
         elseif valid(entry.actor) and not entry.actor:IsActorBeingDestroyed() and valid(entry.lever) then
@@ -162,11 +195,18 @@ function switches.focused_target(pawn, pressed_component)
     local box = StaticFindObject(pressed_component)
     local actor = valid(box) and box:GetOwner()
     local entry = parts(actor, pawn:GetWorld())
-    if entry and same(box, entry.box) then return "stock-switch:" .. actor:GetFullName() end
+    if entry and (same(box, entry.box) or entry.candle and same(box, entry.mesh)) then
+        return "stock-switch:" .. actor:GetFullName()
+    end
 end
 
 local function project(entry, powered, angles, lights)
     local actor, lever = entry.actor, entry.lever
+    if entry.candle then
+        if actor.Lit ~= powered then actor:SetLitUnlit(powered, false) end
+        if actor.Lit ~= powered or entry.light:IsVisible() ~= powered then error("stock_switch_candle_unverified", 0) end
+        return
+    end
     if entry.power then
         if actor[entry.power] ~= powered then actor:Toggle_Power(powered) end
         if actor[entry.power] ~= powered then error("stock_switch_toggle_unverified", 0) end
@@ -202,8 +242,9 @@ function switches.command(fields, state, phase)
         -- The guest routes the exact stock interaction component it just hit.
         if not valid(entry.box) or not same(entry.box:GetOwner(), entry.actor) then error("stock_switch_unavailable", 0) end
         if entry.television and entry.actor.Working ~= true then error("stock_switch_unavailable", 0) end
-        entry.actor:SendInteractionToActor(pawn, entry.box)
-        if not valid(entry.actor) or entry.actor[power] ~= not before then error("stock_switch_toggle_unverified", 0) end
+        if not entry.candle or before then entry.actor:SendInteractionToActor(pawn, entry.box) end
+        local expected = not entry.candle and not before
+        if not valid(entry.actor) or entry.actor[power] ~= expected then error("stock_switch_toggle_unverified", 0) end
         return "stock switch interaction dispatched"
     end
     if action == "native-stock-switch-project" and phase == "connected" and fields[4] == state.map and #fields >= 8 then

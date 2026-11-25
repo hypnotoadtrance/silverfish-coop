@@ -3,6 +3,7 @@
 #include "mindcore_input.hpp"
 #include "npc_barter.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -70,6 +71,11 @@ namespace
     constexpr auto lantern_interaction = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_01.Prop_Candle_01_C:SendInteractionToActor");
     constexpr auto lantern_ignite = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_01.Prop_Candle_01_C:SetOnFire");
     constexpr auto lantern_extinguish = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_01.Prop_Candle_01_C:Extinguish");
+    constexpr std::array candles{
+        STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_01.Prop_Candle_01_C"),
+        STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_02.Prop_Candle_02_C"),
+        STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_03.Prop_Candle_03_C"),
+    };
     constexpr auto radio_class = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Radio01.Prop_Radio01_C");
 
     constexpr auto sewer_screen_class = STR("/Game/Classes/GUI/Menu_Trade_Widget.Menu_Trade_Widget_C");
@@ -997,15 +1003,20 @@ namespace
     void intercept_stock_switch(Iteration& call, Unreal::UObject* actor, Unreal::UFunction* function, const void* args)
     {
         static const Unreal::FName interaction{STR("SendInteractionToActor")};
-        if (!function || function->GetFName() != interaction || !args || scope.host ||
+        static const Unreal::FName ignite{STR("SetOnFire")};
+        static const Unreal::FName extinguish{STR("Extinguish")};
+        if (!function || scope.host ||
             call.OriginalFunctionCallPrevented() || !live(actor) || !actor->HasAnyFlags(Unreal::RF_WasLoaded)) return;
+        const auto name = function->GetFName();
+        if (name != interaction && name != ignite && name != extinguish) return;
         auto* pawn = scope.pawn.Get();
         auto* world = scope.world.Get();
         if (!pawn || Clock::now() >= scope.expires || !live_scope(scope) ||
             actor->GetOuterPrivate() != object_field(world, STR("PersistentLevel"))) return;
         auto* klass = actor->GetClassPrivate();
         const auto path = klass->GetPathName();
-        if (path != STR("/Game/Classes/ScriptingActors/CircutBox_BP.CircutBox_BP_C") &&
+        const bool candle = std::ranges::find(candles, path) != candles.end();
+        if (!candle && path != STR("/Game/Classes/ScriptingActors/CircutBox_BP.CircutBox_BP_C") &&
             path != STR("/Game/Classes/ScriptingActors/LightSwitch_BP.LightSwitch_BP_C") &&
             path != STR("/Game/Classes/ScriptingActors/LightSwitch_02_BP.LightSwitch_02_BP_C") &&
             path != radio_class &&
@@ -1013,15 +1024,23 @@ namespace
             path != STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_TV_02.Prop_TV_02_C") &&
             path != STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_TV_03.Prop_TV_03_C")) return;
         if (!live_actor(actor, world, 3) && !live_actor(actor, world, 1)) return;
+        if (name != interaction)
+        {
+            if (candle && function == find<Unreal::UFunction>(name == ignite ? lantern_ignite : lantern_extinguish))
+                call.PreventOriginalFunctionCall();
+            return;
+        }
+        if (!args) return;
         if (klass->GetFunctionByNameInChain(interaction) != function || function->GetNumParms() != 2 ||
             function->GetParmsSize() != 2 * sizeof(void*) || function->GetReturnProperty() ||
             function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
         auto* player = input<Unreal::FObjectProperty>(function, STR("Player"), 0);
         auto* target = input<Unreal::FObjectProperty>(function, STR("HitComponent"), sizeof(void*));
-        auto* box = object_field(actor, STR("Box"));
-        if (player && target && live(box) && box->GetOuterPrivate() == actor &&
-            player->GetObjectPropertyValue(player->ContainerPtrToValuePtr<void>(args)) == pawn &&
-            target->GetObjectPropertyValue(target->ContainerPtrToValuePtr<void>(args)) == box)
+        if (!player || !target || player->GetObjectPropertyValue(player->ContainerPtrToValuePtr<void>(args)) != pawn) return;
+        auto* hit = target->GetObjectPropertyValue(target->ContainerPtrToValuePtr<void>(args));
+        if (live(hit) && hit->GetOuterPrivate() == actor &&
+            (hit == object_field(actor, candle ? STR("Sphere") : STR("Box")) ||
+                (candle && hit == object_field(actor, STR("PropMesh")))))
             call.PreventOriginalFunctionCall();
     }
 
