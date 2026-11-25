@@ -20,6 +20,8 @@ The `rc-f0b1c06` Crossroads baseline used two muted Direct IP instances. During 
 
 `rc-18e85a7` uses a current-world Unreal query for stock merchant discovery. The host's sampled lookups peaked at 0.11 ms in Observatory and 0.03 ms in Crossroads. The same two muted launches verified discovery of the ShopKeep merchant, the two-stack eye contract, roaming barter, guest crate opening, and Crossroads weather travel. The original saves were preserved. The profiler now records elapsed milliseconds and game-thread CPU cycles separately. During one 69 ms Crossroads host interval, status publication took 54 ms and used 8.8 times its same-window median CPU cycles. The guest's longest Crossroads interval was 70 ms, with world inspection and player synchronization among the largest timed calls. Frame pacing remains open.
 
+`rc-0cae3d6` formats status rows in C++. On both seats in Observatory and Crossroads, 4,096 representative rows matched the Lua output byte for byte and took 4.2 to 6.3 ms in C++, compared with 13.9 to 18.6 ms in Lua. The grouped run passed roaming barter, Castaway dialogue, guest crate opening, and weather travel. The Simmi check needed two focused reruns after a missed transition fixture acknowledgement and a Black Lake firing-position search failure. The final run verified both objectives and turn-ins on the same ZIP. All six isolated launches preserved the original saves. Crossroads still had a 74 ms idle host interval, so frame pacing remains open.
+
 ## `rc-1799e4b` playtest
 
 | Area | Two-PC observation |

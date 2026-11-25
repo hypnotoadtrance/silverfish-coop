@@ -234,10 +234,13 @@ def stock_wipe_chooser_overlay(game: Path):
 def jammer_aim_overlay(game: Path):
     def allow_isolated_aim(script):
         gate = 'local enabled = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1" and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"'
-        if script.count(gate) != 1:
+        search = 'local rooftop = tag == "native-crossroads-jammer"'
+        if script.count(gate) != 1 or script.count(search) != 1:
             raise ValueError("The replica lacks the stock jammer aim fixture gate")
-        return script.replace(gate, gate + '\n    or (os.getenv("SILVERFISH_COOP_HEADLESS") == "1"'
-                              + '\n        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1")', 1)
+        opted_in = script.replace(gate, gate + '\n    or (os.getenv("SILVERFISH_COOP_HEADLESS") == "1"'
+                                  + '\n        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1")', 1)
+        # Bank and slope placement can require a farther firing position than the nearby search finds.
+        return opted_in.replace(search, search + ' or tag == "native-lake-jammer"', 1)
 
     return portable_script_overlay(game, "native_flood_jammer_aim_fixture.lua", allow_isolated_aim)
 
@@ -7136,7 +7139,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_shot_view", "tutorial_dock_buckshot",
                     "tutorial_dock_melee", "tutorial_dock_late_join",
                     "crossroads", "crossroads_anomaly", "quarry_photo", "buried_placements",
-                    "lab_east_wing_acid", "shopkeep"
+                    "lab_east_wing_acid", "shopkeep", "simmi"
                 } or stock_host_prop_observer and campaign == prop_campaign else ("save_and_quit",)
                 after_reconnect = None
                 if campaign == "crossroads" and stock_shovel_quest and not stock_shovel_host_quest:

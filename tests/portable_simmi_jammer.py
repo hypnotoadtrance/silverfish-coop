@@ -149,6 +149,8 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
         proof = result["native_wire_board_stock"]
         assert (proof["board"], proof["quest"], proof["state"]) == (SIMMI_BOARD, spec.quest, "starting"), proof
 
+    travel_receipts = []
+
     async def cross(source, destination, tag):
         nonlocal pawn
         route, = (route for route in AUTHORED_ROUTES
@@ -156,13 +158,29 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
         assert route.kind == "overlap", route
         before = await state(host, lambda f: f["game"]["map"] == source
                              and f["game"].get("native_zone", {}).get("state") == "ready")
+        fixture_timeout = None
         for participant, position in ((pawn, "near"), ("local", "near"), ("local", "inside")):
-            await host.bridge.command("native-exit-position", participant, position, tag, route.actor)
+            try:
+                await host.bridge.command("native-exit-position", participant, position, tag, route.actor)
+            except TimeoutError as error:
+                fixture_timeout = error
+                break
         arrived = await state(host, lambda f: f["game"]["map"] == destination
                               and f["zone_epoch"] != before["zone_epoch"] and not f.get("awaiting_zone_guest")
                               and f["game"].get("native_guest_save", {}).get("state") == "bound", timeout=55)
         await state(guest, lambda f: f["game"]["map"] == destination and f.get("state") == "connected"
                     and f.get("zone_epoch") == arrived["zone_epoch"], timeout=35)
+        if fixture_timeout:
+            # A real overlap can unload the source before its test-only positioning receipt is read.
+            proof = next((row for row in await resident_events(host_run, arrived)
+                          if row["event"] == "native_authored_zone_request"
+                          and (row["source"], row["destination"], row["entrance"], row["actor"]) ==
+                          (source, destination, tag, route.actor)
+                          and row["result"].get("ok") is True
+                          and row["result"].get("travel_epoch") == arrived["zone_epoch"]), None)
+            if not proof:
+                raise fixture_timeout
+            travel_receipts.append({"source": source, "destination": destination, "epoch": arrived["zone_epoch"]})
         pawn = arrived["game"]["native_guest_save"]["pawn"]
         return arrived["zone_epoch"]
 
@@ -304,6 +322,7 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
     return {"stock_simmi_jammers": {
         "offered": sorted(offers), "remaining": sorted(remaining), "initial_journals": accepted_journal,
         "crossroads": crossroads, "lake": lake, "visits": [outbound, lake_out, lake_return, final_visit],
+        "visits_verified_after_fixture_timeout": travel_receipts,
         "weapon_before_travel": before_travel, "weapon_after_travel": restored,
         "objective_journals": completed_journal, "paid_journals": final_journal,
         "lake_completion": lake_completion, "crossroads_completion": crossroads_completion,
