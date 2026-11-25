@@ -33,6 +33,12 @@ def instrument_profile(source):
     viewport = 'FindFirstOf("GameViewportClient")'
     assert before.count(viewport) == 1
     before = before.replace(viewport, f'{wrapper}("viewport_discovery", FindFirstOf, "GameViewportClient")')
+    player_query = "statics:GetAllActorsOfClass(world, class, out)"
+    assert before.count(player_query) == 1
+    before = before.replace(player_query, f'{wrapper}("player_actor_query", function() {player_query} end)')
+    fallback_query = 'FindAllOf("Player_FP_C")'
+    assert before.count(fallback_query) == 1
+    before = before.replace(fallback_query, f'{wrapper}("player_actor_fallback", FindAllOf, "Player_FP_C")')
     return before + "status_publication.profile = (function()\n" + code + "\nend)()\n\n" + anchor + rest
 
 
@@ -203,12 +209,18 @@ async def profile_world(host, guest, area, probe):
 
     async def collect():
         profiles = await asyncio.gather(*(read(seat) for seat in seats.values()))
-        for profile in profiles:
+        for seat, profile in zip(seats, profiles, strict=True):
             timings = profile["timings"]
-            for operation in ("command_mailbox", "crate_inline_scan", "npc_marker_class_lookup", "journal_host_context"):
+            for operation in ("command_mailbox", "crate_inline_scan", "npc_marker_class_lookup", "journal_host_context",
+                              "player_actor_fallback"):
                 assert operation not in timings, (operation, timings.get(operation))
             discoveries = timings["loose_discovery"]["count"]
             assert 0 < discoveries <= math.ceil(profile["seconds"] / .125) + 1, profile
+            lookups = timings.get("player_actor_query", {}).get("count", 0)
+            if seat == "guest":
+                assert 0 < lookups <= math.ceil(profile["seconds"]) + 1, (area, lookups, profile["seconds"])
+            else:
+                assert lookups == 0, (area, lookups)
         return dict(zip(seats, profiles, strict=True))
 
     async def compare_vitals(seat):
@@ -224,7 +236,15 @@ async def profile_world(host, guest, area, probe):
     def position(status):
         return status.get("game", {}).get("pawns", {}).get("local", {}).get("location")
 
-    baseline = await wait_resident_status(guest_run, lambda f: f["game"].get("map") == area and position(f))
+    def pawns_here(frame):
+        game = frame.get("game", {})
+        pawns = game.get("pawns", {})
+        return (game.get("map") == area and set(pawns) == {"local", "guest"}
+                and all(row.get("name", "").startswith(f"Player_FP_C {area}.") and row.get("location")
+                        for row in pawns.values())
+                and pawns["local"]["name"] != pawns["guest"]["name"])
+
+    baseline = await wait_resident_status(guest_run, pawns_here)
     before = await transport()
     await arm()
     idle = await collect()
@@ -242,6 +262,7 @@ async def profile_world(host, guest, area, probe):
     moving = await collect()
     assert movement and max(movement) >= 40, movement
     after_movement = await transport()
+    settled = await wait_resident_status(guest_run, pawns_here)
     comparison = await asyncio.gather(*(compare_vitals(seat) for seat in seats.values()))
     rows = await asyncio.gather(*(compare_rows(seat) for seat in seats.values()))
     journal = {}
@@ -260,4 +281,5 @@ async def profile_world(host, guest, area, probe):
     return {"idle": idle, "guest_walking": moving, "guest_max_displacement_cm": max(movement),
             "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(after_idle, after_movement),
             "row_format_comparison": dict(zip(seats, rows, strict=True)),
+            "guest_roster": {slot: row["name"] for slot, row in settled["game"]["pawns"].items()},
             "vitals_comparison": dict(zip(seats, comparison, strict=True)), **journal}

@@ -267,17 +267,19 @@ end
 
 local function get_pawn_health(pawn)
     local save = pawn.Save
-    if valid(save) and finite(save.PlayerHealth) then
-        return save.PlayerHealth, save
+    if valid(save) then
+        local health = save.PlayerHealth
+        if finite(health) then return health, save end
     end
 end
 
-local function describe_pawn(pawn, local_player, controller)
+local function describe_pawn(pawn, name, local_player, controller, read_health)
     local location = pawn:K2_GetActorLocation()
-    local health, save = get_pawn_health(pawn)
+    local health, save
+    if read_health then health, save = get_pawn_health(pawn) end
     return {
         pawn = pawn,
-        name = pawn:GetFullName(),
+        name = name,
         kind = local_player and "local" or "guest",
         controller = valid(controller) and controller:GetFullName() or "",
         controller_object = controller,
@@ -290,10 +292,49 @@ local function describe_pawn(pawn, local_player, controller)
     }
 end
 
+function status_publication.find_player_pawns(world, driver, map, statics)
+    if status_publication.player_notifications == nil then
+        status_publication.player_notifications = type(NotifyOnNewObject) == "function" and
+            pcall(NotifyOnNewObject, "/Game/Classes/Player/Player_FP.Player_FP_C", function()
+                status_publication.player_pawns = nil
+            end)
+    end
+    local now, cached = os.clock(), status_publication.player_pawns
+    if cached and cached.map == map and now < cached.until_at and same_object(cached.world, world)
+        and same_object(cached.driver, driver) then return cached.actors end
+
+    if not valid(status_publication.player_class) then
+        status_publication.player_class = StaticFindObject("/Game/Classes/Player/Player_FP.Player_FP_C")
+    end
+    local class = status_publication.player_class
+    local actors
+    if valid(statics) and valid(class) then
+        local out = {}
+        statics:GetAllActorsOfClass(world, class, out)
+        actors = out.OutActors or out
+    else
+        actors = FindAllOf("Player_FP_C") or {}
+    end
+
+    local pawns = {}
+    for _, pawn in ipairs(actors) do
+        if pawn and type(pawn.type) == "function" and pawn:type() == "RemoteUnrealParam" then pawn = pawn:get() end
+        if valid(pawn) then pawns[#pawns + 1] = pawn end
+    end
+    if status_publication.player_notifications and valid(statics) and valid(class) then
+        -- Recover if a deferred spawn wound up outside the initial actor query.
+        status_publication.player_pawns = {world = world, driver = driver, map = map, actors = pawns, until_at = now + 1}
+    end
+    return pawns
+end
+
 local function inspect()
     local world = current_world()
     local state = { map = "", clients = 0, server = false, pawns = {}, guests = {} }
-    if not valid(world) then return state end
+    if not valid(world) then
+        status_publication.player_pawns = nil
+        return state
+    end
 
     state.world = world
     state.map = map_package(world)
@@ -314,56 +355,53 @@ local function inspect()
         status_publication.gameplay_statics = StaticFindObject(gameplay_statics_path)
     end
     local statics = status_publication.gameplay_statics
-    local known_pawns = {}
+    local read_health = not vitals.active()
+    local known_pawns = role == "client" and state.server and {}
     for _, controller in ipairs(session_controllers(world, driver, state.server, statics)) do
         if controller_in_world(controller, world) then
             local is_local = controller:IsLocalController()
             local pawn = controller.Pawn
             if is_local then state.controller = controller end
-            if valid(pawn) and pawn:GetFullName():match("^Player_FP_C ") then
-                local details = describe_pawn(pawn, is_local, controller)
+            local name = valid(pawn) and pawn:GetFullName()
+            if name and name:match("^Player_FP_C ") then
+                local details = describe_pawn(pawn, name, is_local, controller, read_health)
                 state.pawns[#state.pawns + 1] = details
                 if is_local then state.local_pawn = details end
-                known_pawns[pawn:GetAddress()] = true
+                if known_pawns then known_pawns[pawn:GetAddress()] = true end
             end
         end
     end
 
     -- Unreal only replicates our own controller to a client. Report the other
     -- player's visible pawn independently of whether its controller exists here.
-    if role == "client" and state.server then
-        if not valid(status_publication.player_class) then
-            status_publication.player_class = StaticFindObject("/Game/Classes/Player/Player_FP.Player_FP_C")
-        end
-        local class = status_publication.player_class
-        local actors
-        if valid(statics) and valid(class) then
-            local out = {}
-            statics:GetAllActorsOfClass(world, class, out)
-            actors = out.OutActors or out
-        else
-            actors = FindAllOf("Player_FP_C") or {}
-        end
-        for _, pawn in ipairs(actors) do
-            if pawn and type(pawn.type) == "function" and pawn:type() == "RemoteUnrealParam" then pawn = pawn:get() end
-            if valid(pawn) and not known_pawns[pawn:GetAddress()] and same_object(pawn:GetWorld(), world)
-                and pawn:GetFullName():match("^Player_FP_C ") and not pawn:GetFullName():find("Default__", 1, true) then
-                state.pawns[#state.pawns + 1] = describe_pawn(pawn, false, nil)
+    if known_pawns then
+        for _, pawn in ipairs(status_publication.find_player_pawns(world, driver, state.map, statics)) do
+            if valid(pawn) and not known_pawns[pawn:GetAddress()] and not pawn:IsActorBeingDestroyed()
+                and same_object(pawn:GetWorld(), world) then
+                local name = pawn:GetFullName()
+                if name:match("^Player_FP_C ") and not name:find("Default__", 1, true) then
+                    state.pawns[#state.pawns + 1] = describe_pawn(pawn, name, false, nil, read_health)
+                end
             end
         end
+    else
+        status_publication.player_pawns = nil
     end
 
     -- The stock game can put multiple pawns on one SaveGame_BP object.
     -- A shared field cannot be presented as independent character health.
-    local save_counts = {}
-    for _, details in ipairs(state.pawns) do
-        if valid(details.save) then
-            local address = details.save:GetAddress()
-            save_counts[address] = (save_counts[address] or 0) + 1
+    local save_counts
+    if read_health then
+        save_counts = {}
+        for _, details in ipairs(state.pawns) do
+            if valid(details.save) then
+                local address = details.save:GetAddress()
+                save_counts[address] = (save_counts[address] or 0) + 1
+            end
         end
     end
     for _, details in ipairs(state.pawns) do
-        if vitals.active() or (valid(details.save) and save_counts[details.save:GetAddress()] > 1) then
+        if save_counts and valid(details.save) and save_counts[details.save:GetAddress()] > 1 then
             details.health = nil
             details.save = nil
         end

@@ -135,12 +135,14 @@ class GuestExpiryTests(unittest.IsolatedAsyncioTestCase):
 
 class GuestInputIdentityTests(unittest.IsolatedAsyncioTestCase):
     async def test_same_pawn_and_sequence_in_new_client_are_a_new_input(self):
-        shot = {"sequence": 1, "pawn": "exact pawn", "map": "zone"}
+        guid = "A" * 32
+        shot = {"sequence": 1, "pawn": "exact pawn", "map": "zone", "guid": guid, "barrel": "primary"}
         game = {"map": "zone", "pawns": {"local": {"name": "exact pawn"}}, "native_guest_reload_intent": shot}
 
         def client():
             return SimpleNamespace(last_game=game, last_reload_intent=0, stopping=False,
                                    host_session="host", zone_epoch="zone", control=Mock(),
+                                   gameplay={"native_equipped_weapon": {"guid": guid, "kind": "light-pistol"}},
                                    bridge=SimpleNamespace(input_namespace=uuid.uuid4()), gameplay_action=AsyncMock(return_value={}))
 
         first, second = client(), client()

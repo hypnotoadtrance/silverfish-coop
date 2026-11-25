@@ -219,7 +219,7 @@ class ZoneRejoinIntegrationTests(IsolatedAsyncioTestCase):
 
         control = SimpleNamespace(event=Mock())
         bridge = SimpleNamespace(snapshot=lambda: dict(game), command=command, wait_for=wait_for,
-                                 process=SimpleNamespace(poll=lambda: None))
+                                 process=SimpleNamespace(poll=lambda: None), local_bridge=None)
         client = Client(control, transport, {"character_id": "exact-guest"}, bridge, allowed_maps=frozenset({CITY, BOROUGH}))
         client.host_session, client.zone_epoch, client.expected_zone = "same-session", "borough-epoch", BOROUGH
         client.next_projection = float("inf")
