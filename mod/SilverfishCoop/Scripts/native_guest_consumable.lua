@@ -141,7 +141,7 @@ end
 function consumable.sync(state, phase)
     if not enabled or type(SilverfishPollNativeGuestCookedMeal) ~= "function"
         or type(SilverfishEnqueueLocalBridgeInput) ~= "function" then return end
-    if local_save.guest_vitals(state, phase) == nil then
+    if not local_save.guest_vitals_save(state, phase) then
         SilverfishPollNativeGuestCookedMeal()
         return
     end

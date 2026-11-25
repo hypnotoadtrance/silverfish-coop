@@ -127,14 +127,24 @@ function scope.personal_flags(save)
         flags:Contains(sickness) and flags:Find(sickness):get() or 0
 end
 
-function scope.guest_vitals(state, phase)
+function scope.guest_vitals_save(state, phase)
     local guest = active and active.guest
     local pawn = state.local_pawn and state.local_pawn.pawn
     if phase == "connected" and state.server and guest and valid(state.world) and valid(pawn)
         and same(state.world.OwningGameInstance, guest.instance) and same(guest.instance.SaveSlot_Ref, guest.save)
         and same(pawn.Save, guest.save) then
-        return guest.save.PlayerHealth, guest.save.PlayerFood, guest.save.PlayerRegen, guest.save.PlayerStim, guest.save
+        return guest.save
     end
+end
+
+function scope.vitals_for_status(details, save)
+    if type(SilverfishReadBoundNativeVitals) == "function" then
+        local health, regen, food, stim, rads, fatigue, intox, sickness =
+            SilverfishReadBoundNativeVitals(details.name, details.pawn:GetAddress(), save:GetAddress())
+        if type(health) == "number" then return health, food, regen, stim, fatigue, intox, sickness, rads end
+    end
+    local fatigue, intox, sickness = scope.personal_flags(save)
+    return save.PlayerHealth, save.PlayerFood, save.PlayerRegen, save.PlayerStim, fatigue, intox, sickness, save.PlayerRads
 end
 
 local function route(parameter)

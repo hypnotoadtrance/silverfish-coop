@@ -80,6 +80,9 @@ LoopInGameThreadWithDelay(50, function()
         message = "armed"
     elseif action == "read" then
         message = complete and result() or "sampling"
+    elseif action == "vitals" and not capture then
+        local ok, value = pcall(SilverfishProfileCrossroadsVitals)
+        if ok then message = value else message = "vitals comparison failed: " .. tostring(value) end
     end
     local output = assert(io.open(prefix .. "reply.tsv", "wb"))
     output:write(ticket, message and "\tok\t" or "\terror\t", message or "unexpected sampling request", "|end")

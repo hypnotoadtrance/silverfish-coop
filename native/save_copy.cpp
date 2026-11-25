@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <exception>
 #include <format>
@@ -24,6 +25,7 @@ namespace
     using Lua = RC::LuaMadeSimple::Lua;
 
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
+    constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto item_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto guid_path = STR("/Script/CoreUObject.Guid");
@@ -62,6 +64,115 @@ namespace
             Unreal::RF_ClassDefaultObject | Unreal::RF_ArchetypeObject |
             Unreal::RF_BeginDestroyed | Unreal::RF_FinishDestroyed);
         return !object->HasAnyFlags(excluded) && !object->IsUnreachable();
+    }
+
+    struct VitalsReader
+    {
+        Unreal::FWeakObjectPtr pawn_type, save_type;
+        Unreal::FObjectProperty* save_slot{};
+        std::array<Unreal::FDoubleProperty*, 5> vitals{};
+        Unreal::FMapProperty* flags{};
+        Unreal::FNameProperty* flag_key{};
+        Unreal::FIntProperty* flag_value{};
+        Unreal::FScriptMapLayout flag_layout{};
+
+        bool bind(Unreal::UClass* player, Unreal::UClass* save)
+        {
+            if (!player || !save) return false;
+            if (pawn_type.Get() == player && save_type.Get() == save) return true;
+            pawn_type = Unreal::FWeakObjectPtr{};
+            save_type = Unreal::FWeakObjectPtr{};
+            save_slot = field<Unreal::FObjectProperty>(player, STR("Save"));
+            if (!save_slot || save_slot->GetPropertyClass().Get() != save) return false;
+            for (std::size_t index = 0; index < vitals.size(); ++index)
+            {
+                vitals[index] = field<Unreal::FDoubleProperty>(save, vitals_names[index]);
+                if (!vitals[index]) return false;
+            }
+            flags = field<Unreal::FMapProperty>(save, STR("Flags"));
+            flag_key = flags ? Unreal::CastField<Unreal::FNameProperty>(flags->GetKeyProp()) : nullptr;
+            flag_value = flags ? Unreal::CastField<Unreal::FIntProperty>(flags->GetValueProp()) : nullptr;
+            if (!flag_key || !flag_value || flag_key->GetOffset_Internal() != 0 ||
+                flag_key->GetArrayDim() != 1 || flag_value->GetArrayDim() != 1 ||
+                flag_key->GetSize() != sizeof(Unreal::FName) || flag_value->GetSize() != sizeof(int) ||
+                !flag_key->HasAnyPropertyFlags(Unreal::CPF_HasGetValueTypeHash)) return false;
+            flag_layout = Unreal::FScriptMap::GetScriptLayout(flag_key->GetSize(), flag_key->GetMinAlignment(),
+                flag_value->GetSize(), flag_value->GetMinAlignment());
+            if (flag_value->GetOffset_Internal() != flag_layout.ValueOffset) return false;
+            pawn_type = player;
+            save_type = save;
+            return true;
+        }
+    };
+
+    int read_bound_vitals(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 3 || !lua.is_string(1) ||
+            !lua.is_integer(2) || !lua.is_integer(3)) return 0;
+        const auto save_address = lua.get_integer(3);
+        const auto pawn_address = lua.get_integer(2);
+        const std::string name{lua.get_string(1)};
+        constexpr std::string_view prefix = "Player_FP_C ";
+        if (save_address <= 0 || pawn_address <= 0 || name.size() > 512 ||
+            !name.starts_with(prefix) || name.find_first_of("\t\r\n\0", 0, 4) != std::string::npos) return 0;
+
+        // Resolve a new pawn by its Unreal path once. The addresses are only compared
+        // against weak or engine-owned objects and are never dereferenced directly.
+        struct Seat
+        {
+            Unreal::FWeakObjectPtr pawn;
+            std::string name;
+        };
+        static std::array<Seat, 8> seats{};
+        static std::size_t next_seat{};
+        static VitalsReader reader;
+        Unreal::UObject* pawn{};
+        for (auto& seat : seats)
+        {
+            auto* candidate = seat.pawn.Get();
+            if (reinterpret_cast<std::uintptr_t>(candidate) == static_cast<std::uintptr_t>(pawn_address) && seat.name == name)
+            {
+                pawn = candidate;
+                break;
+            }
+        }
+        const bool cached = pawn != nullptr;
+        if (!cached)
+        {
+            const auto path = RC::to_wstring(std::string_view{name}.substr(prefix.size()));
+            pawn = Unreal::UObjectGlobals::StaticFindObject<Unreal::UObject*>(nullptr, nullptr, path.c_str());
+            if (reinterpret_cast<std::uintptr_t>(pawn) != static_cast<std::uintptr_t>(pawn_address)) return 0;
+        }
+        if (!live_instance(pawn)) return 0;
+        auto* player_type = Unreal::Cast<Unreal::UClass>(reader.pawn_type.Get());
+        auto* save_type = Unreal::Cast<Unreal::UClass>(reader.save_type.Get());
+        if (!player_type) player_type = Unreal::UObjectGlobals::StaticFindObject<Unreal::UClass*>(nullptr, nullptr, pawn_path);
+        if (!save_type) save_type = Unreal::UObjectGlobals::StaticFindObject<Unreal::UClass*>(nullptr, nullptr, save_path);
+        if (pawn->GetClassPrivate() != player_type || !reader.bind(player_type, save_type)) return 0;
+        auto* save = reader.save_slot->GetObjectPropertyValue(reader.save_slot->ContainerPtrToValuePtr<void>(pawn));
+        if (reinterpret_cast<std::uintptr_t>(save) != static_cast<std::uintptr_t>(save_address) ||
+            !live_instance(save) || save->GetClassPrivate() != save_type) return 0;
+
+        auto* flags = reader.flags->ContainerPtrToValuePtr<Unreal::FScriptMap>(save);
+        if (!flags || flags->Num() < 0 || flags->Num() > flags->GetMaxIndex() || flags->GetMaxIndex() >= 16384) return 0;
+        const auto hash = [](const void* value) { return reader.flag_key->GetValueTypeHash(value); };
+        const auto equal = [](const void* first, const void* second) { return reader.flag_key->Identical(first, second); };
+        static const std::array names{Unreal::FName{STR("Player_Fatigue")}, Unreal::FName{STR("Player_Intox")},
+            Unreal::FName{STR("Sickness")}};
+        std::array<double, 5> values{};
+        for (std::size_t index = 0; index < values.size(); ++index)
+        {
+            values[index] = reader.vitals[index]->GetPropertyValueInContainer(save);
+            if (!std::isfinite(values[index])) return 0;
+        }
+        if (!cached) seats[next_seat++ % seats.size()] = {pawn, name};
+        for (const auto value : values) lua.set_number(value);
+        for (const auto& key : names)
+        {
+            const auto* value = flags->FindValue(&key, reader.flag_layout, hash, equal);
+            lua.set_integer(value ? reader.flag_value->GetPropertyValue(value) : 0);
+        }
+        return 8;
     }
 
     auto resolve_pair(const Lua& lua, SavePair& pair) -> std::string_view
@@ -490,6 +601,7 @@ void silverfish::register_native_save_copy_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishRetainNativeLootEscrow", run<retain_loot_escrow>);
     lua.register_function("SilverfishReleaseNativeLootEscrow", run<release_loot_escrow>);
     lua.register_function("SilverfishCopyNativeGuestSave", run<copy_guest_save>);
+    lua.register_function("SilverfishReadBoundNativeVitals", run<read_bound_vitals>);
     lua.register_function("SilverfishProbeNativeInventory", run<probe_stock_inventory>);
     lua.register_function("SilverfishProbeNativeInventoryFixture", run<probe_fixture_inventory>);
 }

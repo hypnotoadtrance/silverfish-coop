@@ -87,6 +87,47 @@ def instrument_anomaly_work(source):
     return start + separator + rest
 
 
+def instrument_vital_reads(source):
+    anchor = "function scope.vitals_for_status(details, save)\n"
+    if source.count(anchor) != 1:
+        raise ValueError("The vitals timing anchor changed")
+    fixture = """local vital_details, vital_save
+function SilverfishProfileCrossroadsVitals()
+    local details, save = vital_details, vital_save
+    local function from_lua()
+        local fatigue, intox, sickness = scope.personal_flags(save)
+        return save.PlayerHealth, save.PlayerFood, save.PlayerRegen, save.PlayerStim,
+            fatigue, intox, sickness, save.PlayerRads
+    end
+    local native = table.pack(scope.vitals_for_status(details, save))
+    local stock = table.pack(from_lua())
+    for index = 1, 8 do assert(native[index] == stock[index], "native vital read differs at field " .. index) end
+    local name, pawn_address, save_address = details.name, details.pawn:GetAddress(), save:GetAddress()
+    assert(type(SilverfishReadBoundNativeVitals(name, pawn_address, save_address)) == "number", "native vitals unavailable")
+    assert(SilverfishReadBoundNativeVitals(name, pawn_address, save_address + 1) == nil, "mismatched save read accepted")
+    assert(SilverfishReadBoundNativeVitals(name, pawn_address + 1, save_address) == nil, "mismatched pawn read accepted")
+    local rounds = 512
+    local function measure(fn, ...)
+        local before = os.clock()
+        for index = 1, rounds do fn(...) end
+        return (os.clock() - before) * 1000
+    end
+    local native_first = measure(scope.vitals_for_status, details, save)
+    local lua_first = measure(from_lua)
+    local lua_second = measure(from_lua)
+    local native_second = measure(scope.vitals_for_status, details, save)
+    return ("%d,%.3f,%.3f"):format(rounds * 2, native_first + native_second, lua_first + lua_second)
+end
+
+"""
+    wrapped = source.replace(anchor, fixture + anchor + "    vital_details, vital_save = details, save\n")
+    baseline = "SilverfishReadBoundNativeVitals(details.name, details.pawn:GetAddress(), save:GetAddress())"
+    if wrapped.count(baseline) != 1:
+        raise ValueError("The native vitals call changed")
+    return wrapped.replace(baseline, 'SilverfishProfileCrossroadsCall("vitals.native", SilverfishReadBoundNativeVitals, '
+                           'details.name, details.pawn:GetAddress(), save:GetAddress())')
+
+
 def read_comparison(raw):
     summary, slow_frame = raw.split("!")
     duration, *sections = summary.split(";")
@@ -144,6 +185,11 @@ async def profile_world(host, guest, area, probe):
             assert 0 < discoveries <= math.ceil(profile["seconds"] / .125) + 1, profile
         return dict(zip(seats, profiles, strict=True))
 
+    async def compare_vitals(seat):
+        calls, native_ms, lua_ms = map(float, (await command(seat, "vitals")).split(","))
+        return {"reads_per_path": int(calls), "native_ms": native_ms, "lua_ms": lua_ms,
+                "all_vitals_matched": True, "wrong_pawn_and_save_refused": True}
+
     def position(status):
         return status.get("game", {}).get("pawns", {}).get("local", {}).get("location")
 
@@ -164,5 +210,8 @@ async def profile_world(host, guest, area, probe):
             movement.append(math.dist(point, position(baseline)))
     moving = await collect()
     assert movement and max(movement) >= 40, movement
+    after_movement = await transport()
+    comparison = await asyncio.gather(*(compare_vitals(seat) for seat in seats.values()))
     return {"idle": idle, "guest_walking": moving, "guest_max_displacement_cm": max(movement),
-            "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(after_idle, await transport())}
+            "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(after_idle, after_movement),
+            "vitals_comparison": dict(zip(seats, comparison, strict=True))}
