@@ -997,7 +997,7 @@ function players.start(bridge)
     LoopInGameThreadWithDelay(250, function()
         if not interact_hook_checked then ensure_hooks() end
     end)
-    LoopInGameThreadWithDelay(33, function()
+    LoopInGameThreadWithDelay(16, function()
         if not native_interact_address then return end
         local ok, failure = pcall(drain_native_interact)
         if not ok then

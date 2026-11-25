@@ -4242,14 +4242,6 @@ class Host:
             if bridge.process.poll() is not None:
                 raise RuntimeError(f"Host game exited with code {bridge.process.returncode}")
             await self.observe(bridge, transport)
-            if not self.transitioning:
-                with contextlib.suppress(OSError, RuntimeError, TimeoutError):
-                    self.last_game = await native_player_avatar.project_host(self, bridge)
-                with contextlib.suppress(OSError, RuntimeError, TimeoutError):
-                    await self.project_guest_sprints(bridge)
-            with contextlib.suppress(OSError, RuntimeError, TimeoutError):
-                beams = native_flashlight.peer_frame(self)
-                self.last_game = await native_flashlight.project_peers(bridge, self.last_game, beams, self.zone_epoch)
             if self.mindcore_carry:
                 self.mindcore_carry.maintain()
             try:
@@ -4333,6 +4325,15 @@ class Host:
                     self.control.event("native_loot_key_restore_unavailable", reason=str(error))
             if not self.stopping and not self.native_checkpoint_unsafe:
                 await self.service_guest_native_requests(bridge)
+            if not self.stopping:
+                if not self.transitioning:
+                    with contextlib.suppress(OSError, RuntimeError, TimeoutError):
+                        self.last_game = await native_player_avatar.project_host(self, bridge)
+                    with contextlib.suppress(OSError, RuntimeError, TimeoutError):
+                        await self.project_guest_sprints(bridge)
+                with contextlib.suppress(OSError, RuntimeError, TimeoutError):
+                    beams = native_flashlight.peer_frame(self)
+                    self.last_game = await native_flashlight.project_peers(bridge, self.last_game, beams, self.zone_epoch)
             if self.host_camera_input and not self.stopping and not self.native_checkpoint_unsafe:
                 await self.host_camera_input.sync(self, bridge)
             if wire_board and not self.stopping and not self.native_checkpoint_unsafe:
@@ -5479,7 +5480,7 @@ class Client:
                               retained: dict | None = None) -> dict:
         if not self.transport.connected or (action != "keep" and self.last_game.get("state") != "connected"):
             raise RuntimeError("game_connection_unavailable")
-        area, epoch = self.last_game.get("map"), self.zone_epoch
+        area, epoch, session = self.last_game.get("map"), self.zone_epoch, self.host_session
         if action == native_authored_pickup.ACTION:
             target = native_authored_pickup.request_target(target, self.zone_epoch)
         elif ((action == native_loose_pickup.CLAIM and native_loose_pickup.target_path(target))
@@ -5499,7 +5500,7 @@ class Client:
         reply = await self.transport.request(request, timeout=timeout)
         if not reply.get("ok"):
             raise ValueError(reply.get("error", "interaction_refused"))
-        if (self.last_game.get("map"), self.zone_epoch) == (area, epoch) and epoch:
+        if (self.last_game.get("map"), self.zone_epoch, self.host_session) == (area, epoch, session) and epoch:
             if action == "native-guest-weapon-reload" and isinstance(weapon := reply.get("native_guest_weapon"), dict):
                 pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
                 guid, previous = weapon.get("guid"), weapon.get("before")
@@ -5522,6 +5523,20 @@ class Client:
                     and native_loot.CRATES.get(target) == area):
                 await self.cancel_gameplay_snapshot()
                 self.gameplay.setdefault(native_loot.STATE_KEY, {})[target] = roll
+            placed = reply.get("native_authored_pickup_claim")
+            if action == native_authored_pickup.ACTION and isinstance(placed, dict):
+                source = target.partition("@")[0] if target else None
+                profile = native_authored_pickup.SOURCES.get(source)
+                if profile and (placed.get("source"), placed.get("map"), placed.get("actor"), placed.get("owner")) == (
+                        source, area, profile[1], self.invite["character_id"]):
+                    await self.cancel_gameplay_snapshot()
+                    claims = self.gameplay.setdefault(native_authored_pickup.STATE_KEY, {})
+                    claims[source] = placed
+                    try:
+                        await native_authored_pickup.project(self, self.bridge, {source: placed})
+                    except (OSError, RuntimeError) as error:
+                        self.control.event("native_authored_pickup_projection_deferred", reason=str(error))
+                    self.guest_ui.queue_stock_inventory(self)
             claimed = reply.get(native_loose_pickup.PROOF)
             if action == native_loose_pickup.CLAIM and isinstance(claimed, dict):
                 path = native_loose_pickup.target_path(target.partition("@")[0]) if target else None
@@ -5861,10 +5876,11 @@ class Client:
         sequence, area, pawn, guid, item_class = entries[-1]
         view = self.last_game.get("native_guest_inventory_equip_view", {})
         armor = native_guest_armor.equip_action(item_class)
-        throwable = item_class in native_flare.CLASSES
+        stack_equipment = item_class in native_flare.CLASSES or item_class in native_inventory.LOCKPICKS
         if (view != {"sequence": sequence, "map": area, "pawn": pawn, "guid": guid, "state": "equipping"}
                 or area != self.last_game.get("map") or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name")
-                or not native_gold.valid_guid(guid) or not (armor or throwable or item_class in native_guest_weapon.CLASS_PATHS)):
+                or not native_gold.valid_guid(guid)
+                or not (armor or stack_equipment or item_class in native_guest_weapon.CLASS_PATHS)):
             return
         epoch = self.host_session, self.zone_epoch
         identifier = f"{epoch[0]}:{epoch[1]}:{pawn}:inventory-equip:{sequence}"
@@ -5882,7 +5898,7 @@ class Client:
             if ((self.host_session, self.zone_epoch) != epoch or current.get("native_guest_inventory_equip_view") != view
                     or native_inventory.displayed_offset(current, sequence, area, pawn) != offset):
                 raise ValueError("The inventory equip confirmation expired")
-            action = armor or (native_inventory.STORE_EQUIPMENT if throwable else "native-guest-weapon-equip")
+            action = armor or (native_inventory.STORE_EQUIPMENT if stack_equipment else "native-guest-weapon-equip")
             equipped = await self.gameplay_action(action, operation, guid)
             key = "native_guest_helmet" if action == native_guest_armor.HELMET_ACTION else "native_guest_armor"
             if armor and equipped.get(key, {}).get("class_path") != item_class:
@@ -6600,6 +6616,83 @@ class Client:
             except (ValueError, OSError, RuntimeError, TimeoutError) as error:
                 self.control.respond(path, False, error=str(error))
 
+    def stock_interaction_scope(self):
+        game = self.last_game
+        pawn = game.get("pawns", {}).get("local", {}).get("name")
+        area = game.get("map")
+        if (not self.stopping and self.transport.connected and game.get("state") == "connected"
+                and not self.needs_travel and not self.server_transitioning and area == self.expected_zone
+                and self.host_session and self.zone_epoch and pawn):
+            return self.host_session, self.zone_epoch, area, pawn
+        return None
+
+    async def run_stock_interactions(self) -> None:
+        # Only this task consumes ordinary Interact and crate presses. Keep
+        # their order while snapshot, inventory and presentation work proceeds.
+        while not self.stopping:
+            if self.bridge.stock_interaction_ready(crates=self.invite.get("native_loot_input", False)):
+                await self.service_stock_interactions(self.stock_interaction_scope())
+            await asyncio.sleep(.012)
+
+    async def service_stock_interactions(self, scope) -> None:
+        await self.service_crate_interaction(scope is not None)
+        for operation, target in self.bridge.interactions():
+            if scope is None or self.stock_interaction_scope() != scope:
+                break
+            started = time.monotonic()
+            try:
+                result = await self.apply_stock_interaction(scope, operation, target)
+            except (ValueError, OSError, RuntimeError) as error:
+                self.control.event("interaction_rejected", operation_id=operation, reason=str(error))
+            else:
+                self.control.event("local_interaction", operation_id=operation,
+                                   elapsed_ms=round((time.monotonic() - started) * 1000, 1), **result)
+
+    async def apply_stock_interaction(self, scope, operation, target):
+        if loot := native_world_loot.target_parts(target):
+            action, claim = self.world_loot.claim_target(self.last_game, loot)
+            result = await self.gameplay_action(action, operation, claim)
+            if self.stock_interaction_scope() == scope:
+                try:
+                    self.last_game = await self.world_loot.retire_claim(self.bridge, self.last_game, loot)
+                except (OSError, RuntimeError) as error:
+                    self.control.event("native_world_loot_retirement_deferred", reason=str(error))
+                self.guest_ui.queue_stock_inventory(self)
+            return result
+        if dropped := native_guest_drop_projection.target_parts(target):
+            result = await self.stack_drop_projection.reclaim(self, operation, dropped)
+            if self.stock_interaction_scope() == scope:
+                self.guest_ui.queue_stock_inventory(self)
+            return result
+        if door := native_stock_door.target_actor(target):
+            return await self.gameplay_action(native_stock_door.ACTION, operation, door)
+        if critter := native_critters.target_id(target):
+            result = await self.gameplay_action(native_critters.ACTION, operation, critter)
+            if self.stock_interaction_scope() == scope:
+                self.guest_ui.queue_stock_inventory(self)
+            return result
+        if switch := native_stock_switch.target_actor(target):
+            return await self.gameplay_action(native_stock_switch.ACTION, operation, switch)
+        if native_lantern.target_angles(target):
+            result = await self.gameplay_action(native_lantern.EXTINGUISH, operation, f"{self.zone_epoch}@{target}")
+            if self.stock_interaction_scope() == scope:
+                await self.cancel_gameplay_snapshot()
+                self.gameplay[native_lantern.KEY] = result[native_lantern.KEY]
+                self.last_game = await native_lantern.project(
+                    self.bridge, self.last_game, result[native_lantern.KEY], self.zone_epoch)
+            return result
+        action = (native_authored_pickup.ACTION if target in native_authored_pickup.SOURCES
+                  else native_loose_pickup.CLAIM if native_loose_pickup.target_path(target)
+                  else native_subway_valve.ACTIVATE if target == native_subway_valve.INPUT
+                  else native_enemy_loot.CLAIM if native_enemy_shells.target_parts(target)
+                  else "native-wipe-recover" if target else "interact")
+        if action == native_subway_valve.ACTIVATE:
+            target = self.zone_epoch
+        result = await self.gameplay_action(action, operation, target)
+        if action == native_loose_pickup.CLAIM and self.stock_interaction_scope() == scope:
+            await native_loose_pickup.refresh_claimed_stock_view(self)
+        return result
+
     async def run(self) -> None:
         engine = self.bridge.process if isinstance(self.bridge.process, EmbeddedEngine) else None
         pause_exit = (native_session_exit.PauseExit(self.bridge, self.control, "guest", engine=engine)
@@ -6609,11 +6702,16 @@ class Client:
         lean = (asyncio.create_task(native_avatar_lean.follow(self))
                 if native_avatar_lean.enabled(self.bridge) else None)
         footstep_io = asyncio.create_task(native_footsteps.follow(self)) if native_footsteps.enabled(self.bridge) else None
+        interact = asyncio.create_task(self.run_stock_interactions()) if self.bridge.local_bridge is not None else None
         prop_poses = (asyncio.create_task(self.prop_carry.stream_local_poses())
                       if self.prop_carry.has_local_pose_stream else None)
         try:
             await self.run_session(pause_exit=pause_exit)
         finally:
+            if interact is not None:
+                interact.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await interact
             await self.cancel_gameplay_snapshot()
             await self.guest_ui.close()
             if pause_exit is not None:
@@ -6689,64 +6787,8 @@ class Client:
             self.prop_carry.poll(active)
             await self.service_primary_input(active)
             await self.service_reload_input(active)
-            await self.service_crate_interaction(active)
-            interactions = self.bridge.interactions()
-            if active and not self.stopping:
-                for operation_id, target in interactions:
-                    try:
-                        world_loot = native_world_loot.target_parts(target)
-                        if world_loot:
-                            action, claim = self.world_loot.claim_target(self.last_game, world_loot)
-                            result = await self.gameplay_action(action, operation_id, claim)
-                            self.control.event("local_interaction", operation_id=operation_id, **result)
-                            try:
-                                self.last_game = await self.world_loot.retire_claim(self.bridge, self.last_game, world_loot)
-                            except (OSError, RuntimeError) as error:
-                                self.control.event("native_world_loot_retirement_deferred", reason=str(error))
-                            self.guest_ui.queue_stock_inventory(self)
-                            continue
-                        stack_drop = native_guest_drop_projection.target_parts(target)
-                        if stack_drop:
-                            result = await self.stack_drop_projection.reclaim(self, operation_id, stack_drop)
-                            self.guest_ui.queue_stock_inventory(self)
-                            self.control.event("local_interaction", operation_id=operation_id, **result)
-                            continue
-                        if door := native_stock_door.target_actor(target):
-                            result = await self.gameplay_action(native_stock_door.ACTION, operation_id, door)
-                            self.control.event("local_interaction", operation_id=operation_id, **result)
-                            continue
-                        if critter := native_critters.target_id(target):
-                            result = await self.gameplay_action(native_critters.ACTION, operation_id, critter)
-                            self.guest_ui.queue_stock_inventory(self)
-                            self.control.event("local_interaction", operation_id=operation_id, **result)
-                            continue
-                        if switch := native_stock_switch.target_actor(target):
-                            result = await self.gameplay_action(native_stock_switch.ACTION, operation_id, switch)
-                            self.control.event("local_interaction", operation_id=operation_id, **result)
-                            continue
-                        if native_lantern.target_angles(target):
-                            result = await self.gameplay_action(native_lantern.EXTINGUISH, operation_id,
-                                                                f"{self.zone_epoch}@{target}")
-                            await self.cancel_gameplay_snapshot()
-                            self.gameplay[native_lantern.KEY] = result[native_lantern.KEY]
-                            self.last_game = await native_lantern.project(
-                                self.bridge, self.last_game, result[native_lantern.KEY], self.zone_epoch)
-                            self.control.event("local_interaction", operation_id=operation_id, **result)
-                            continue
-                        action = (native_authored_pickup.ACTION if target in native_authored_pickup.SOURCES
-                                  else native_loose_pickup.CLAIM if native_loose_pickup.target_path(target)
-                                  else native_subway_valve.ACTIVATE if target == native_subway_valve.INPUT
-                                  else native_enemy_loot.CLAIM if native_enemy_shells.target_parts(target)
-                                  else "native-wipe-recover" if target else "interact")
-                        if action == native_subway_valve.ACTIVATE:
-                            target = self.zone_epoch
-                        result = await self.gameplay_action(action, operation_id, target)
-                        self.control.event("local_interaction", operation_id=operation_id, **result)
-                        if action == native_loose_pickup.CLAIM:
-                            await native_loose_pickup.refresh_claimed_stock_view(self)
-                    except (ValueError, OSError, RuntimeError) as error:
-                        self.control.event("interaction_rejected", operation_id=operation_id, reason=str(error))
-            # Drain stock interaction ingress before waiting on replaceable light views.
+            if self.bridge.local_bridge is None:
+                await self.service_stock_interactions(self.stock_interaction_scope())
             flashlight = (self.gameplay.get(native_flashlight.KEY)
                           if active and self.transport.game_access and time.monotonic() - self.gameplay_seen < 3 else None)
             with contextlib.suppress(OSError, RuntimeError):
@@ -6854,7 +6896,7 @@ class Client:
             self.publish_gameplay_status(active)
             await self.bridge.wait_for_interaction(
                 .25, wake_if=lambda: self.gameplay_snapshot_ready() or self.transport.weapon_shots_ready()
-                or self.transport.loot_motion_ready(), guest=True)
+                or self.transport.loot_motion_ready() or self.guest_ui.stock_refresh_ready(), guest=True)
 
     def publish_gameplay_status(self, active: bool) -> None:
         fresh = active and time.monotonic() - self.gameplay_seen < 3

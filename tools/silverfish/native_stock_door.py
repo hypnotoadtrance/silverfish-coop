@@ -174,7 +174,7 @@ async def interact(host, bridge, character, requested, operation):
                 and snapshot.get("sequence", 0) >= sequence and observed.get("locked") is False
                 and observed.get("open") is expected_open)
 
-    host.last_game = reply if toggled(reply) else await bridge.wait_for(toggled, timeout=2)
+    host.last_game = reply if toggled(reply) else await bridge.wait_for(toggled, timeout=2, interval=.02)
     host.last_seen = time.monotonic()
     result = {RESULT: {"actor": actor, "open": host.last_game[KEY][actor]["open"]},
               DELTA: frame(host.last_game, epoch, actor)}

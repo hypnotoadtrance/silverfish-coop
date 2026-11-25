@@ -151,6 +151,10 @@ class GuestView:
             self.pending_stock_refresh = scope
             self.next_poll = 0.0
 
+    def stock_refresh_ready(self):
+        return ((self.request_for_stock is not None and self.request is not None and self.request.done())
+                or (self.pending_stock_refresh is not None and self.request is None))
+
     async def sync_health(self, client, active):
         game, frame = client.last_game, client.gameplay.get(HEALTH)
         if not active or game.get("state") != "connected":

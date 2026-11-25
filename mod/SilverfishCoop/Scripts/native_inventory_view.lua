@@ -34,6 +34,8 @@ local mre_enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MRE") == "1"
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local pry_tool_paths = {
     ["/Game/Classes/Equipment/Eqp_BlowTorch.Eqp_BlowTorch_C"] = true,
+    ["/Game/Classes/Equipment/Eqp_LockPick.Eqp_LockPick_C"] = true,
+    ["/Game/Classes/Equipment/Eqp_LockPick_Hev.Eqp_LockPick_Hev_C"] = true,
     ["/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Crowbar.MeleeWep_Crowbar_C"] = true,
 }
 local body_armor = require("native_guest_armor")

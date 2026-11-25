@@ -49,7 +49,8 @@ class StockDoorActionTests(unittest.IsolatedAsyncioTestCase):
         opened = {**self.closed, "open": True, "yaw": 90}
         frame = {**reply, "sequence": 12, door.KEY: {self.actor: opened}}
 
-        async def readback(predicate, timeout):
+        async def readback(predicate, timeout, *, interval):
+            self.assertLess(interval, .05)
             self.assertFalse(predicate(dict(frame, sequence=10)))
             self.assertFalse(predicate(reply))
             self.assertTrue(predicate(frame))

@@ -7,8 +7,11 @@ local profiles = {
     LightSwitch_BP_C = {"Switch_Mesh", "SwitchPanel"},
     LightSwitch_02_BP_C = {"Switch_Mesh", "SwitchPanel"},
 }
-local radio_path = "/Game/Assets/StaticMeshes/Mesh_Props/Prop_Radio01.Prop_Radio01_C"
-profiles.Prop_Radio01_C = {path = radio_path, radio = true}
+local props = "/Game/Assets/StaticMeshes/Mesh_Props/"
+profiles.Prop_Radio01_C = {path = props .. "Prop_Radio01.Prop_Radio01_C", power = "Powered"}
+for _, name in ipairs({"Prop_TV_01", "Prop_TV_02", "Prop_TV_03"}) do
+    profiles[name .. "_C"] = {path = props .. name .. "." .. name .. "_C", power = "Power", television = true}
+end
 for kind, profile in pairs(profiles) do
     profile.path = profile.path or root .. kind:sub(1, -3) .. "." .. kind
 end
@@ -34,10 +37,10 @@ local function parts(actor, scope)
     if not valid(class) then return end
     local profile = profiles[class:GetFName():ToString()]
     if not profile or class:GetFullName() ~= "BlueprintGeneratedClass " .. profile.path
-        or not qualified(actor, scope) or type(actor.Powered) ~= "boolean" then return end
+        or not qualified(actor, scope) or type(actor[profile.power or "Powered"]) ~= "boolean" then return end
     local box = actor.Box
     if not valid(box) or not same(box:GetOwner(), actor) then return end
-    if profile.radio then return {actor = actor, box = box, radio = true, lights = {}} end
+    if profile.power then return {actor = actor, box = box, power = profile.power, television = profile.television} end
     local lever, panel = actor[profile[1]], actor[profile[2]]
     if not valid(lever) or not valid(panel) then return end
     for _, component in ipairs({lever, panel}) do
@@ -106,8 +109,8 @@ local function census(state, phase)
                 local entry = valid(actor) and same(actor:GetClass(), class) and parts(actor, world)
                 if entry and (phase ~= "hosting" or actor:HasAuthority()) then
                     local name = actor:GetFullName()
-                    if entry.radio then
-                        entries[name] = {radio = true, path = name:match("^%S+ (.+)$")}
+                    if entry.power then
+                        entries[name] = {power = entry.power, path = name:match("^%S+ (.+)$")}
                     elseif not entries[name] or not same(entries[name].actor, actor) then
                         entry.lights = light_links(actor, world)
                         entries[name] = entry
@@ -121,19 +124,19 @@ end
 
 local function find_switch(state, phase, name)
     local entry = census(state, phase)[name]
-    if not entry or not entry.radio then return entry end
+    if not entry or not entry.power then return entry end
     local actor = StaticFindObject(entry.path)
     local resolved = parts(actor, state.world)
-    if resolved and resolved.radio then return resolved end
+    if resolved and resolved.power == entry.power then return resolved end
 end
 
 function switches.rows(state, phase, row)
     local rows = {}
     for name, entry in pairs(census(state, phase)) do
-        if entry.radio then
+        if entry.power then
             local actor = StaticFindObject(entry.path)
-            if qualified(actor, state.world) and type(actor.Powered) == "boolean" then
-                rows[#rows + 1] = row("native-stock-switch", state.map, name, bit(actor.Powered), 0, 0, 0, "-", "-")
+            if qualified(actor, state.world) and type(actor[entry.power]) == "boolean" then
+                rows[#rows + 1] = row("native-stock-switch", state.map, name, bit(actor[entry.power]), 0, 0, 0, "-", "-")
             end
         elseif valid(entry.actor) and not entry.actor:IsActorBeingDestroyed() and valid(entry.lever) then
             local angles = entry.lever.RelativeRotation
@@ -164,9 +167,9 @@ end
 
 local function project(entry, powered, angles, lights)
     local actor, lever = entry.actor, entry.lever
-    if entry.radio then
-        if actor.Powered ~= powered then actor:Toggle_Power(powered) end
-        if actor.Powered ~= powered then error("stock_switch_toggle_unverified", 0) end
+    if entry.power then
+        if actor[entry.power] ~= powered then actor:Toggle_Power(powered) end
+        if actor[entry.power] ~= powered then error("stock_switch_toggle_unverified", 0) end
         return
     end
     actor.Powered = powered
@@ -194,11 +197,13 @@ function switches.command(fields, state, phase)
     if action == "native-stock-switch-interact" and phase == "hosting" and #fields == 4 then
         local pawn = guest_save.exact_item_context(state, phase, fields[4])
         if not valid(pawn) or pawn.Dead ~= false then error("stock_switch_guest_unavailable", 0) end
-        local before = entry.actor.Powered
+        local power = entry.power or "Powered"
+        local before = entry.actor[power]
         -- The guest routes the exact stock interaction component it just hit.
         if not valid(entry.box) or not same(entry.box:GetOwner(), entry.actor) then error("stock_switch_unavailable", 0) end
+        if entry.television and entry.actor.Working ~= true then error("stock_switch_unavailable", 0) end
         entry.actor:SendInteractionToActor(pawn, entry.box)
-        if not valid(entry.actor) or entry.actor.Powered ~= not before then error("stock_switch_toggle_unverified", 0) end
+        if not valid(entry.actor) or entry.actor[power] ~= not before then error("stock_switch_toggle_unverified", 0) end
         return "stock switch interaction dispatched"
     end
     if action == "native-stock-switch-project" and phase == "connected" and fields[4] == state.map and #fields >= 8 then

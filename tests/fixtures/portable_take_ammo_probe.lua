@@ -49,10 +49,13 @@
             and (#fields == 4 or #fields == 5))
         local pawn, save = guest_save.exact_item_context(state, phase, fields[3])
         assert(pawn and save and not same(save, state.world.OwningGameInstance.SaveSlot_Ref))
-        local path = weapon_profiles.paths[fields[4]]
+        local lockpick = fields[4] == "lockpick" and "Eqp_LockPick"
+            or fields[4] == "heavy-lockpick" and "Eqp_LockPick_Hev"
+        local path = lockpick and "/Game/Classes/Equipment/" .. lockpick .. "." .. lockpick .. "_C"
+            or weapon_profiles.paths[fields[4]]
         local rounds = #fields == 4 and 1 or math.tointeger(fields[5])
-        assert(path and weapon_profiles.magazine_capacity[path] and rounds and rounds >= 1
-            and rounds <= weapon_profiles.magazine_capacity[path])
+        local capacity = lockpick and 16 or path and weapon_profiles.magazine_capacity[path]
+        assert(capacity and rounds and rounds >= 1 and rounds <= capacity)
         local class = StaticFindObject(path)
         if not class or not class:IsValid() then LoadAsset(path) class = StaticFindObject(path) end
         local converter = StaticFindObject("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C")

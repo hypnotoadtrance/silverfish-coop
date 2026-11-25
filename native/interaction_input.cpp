@@ -1008,7 +1008,10 @@ namespace
         if (path != STR("/Game/Classes/ScriptingActors/CircutBox_BP.CircutBox_BP_C") &&
             path != STR("/Game/Classes/ScriptingActors/LightSwitch_BP.LightSwitch_BP_C") &&
             path != STR("/Game/Classes/ScriptingActors/LightSwitch_02_BP.LightSwitch_02_BP_C") &&
-            path != radio_class) return;
+            path != radio_class &&
+            path != STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_TV_01.Prop_TV_01_C") &&
+            path != STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_TV_02.Prop_TV_02_C") &&
+            path != STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_TV_03.Prop_TV_03_C")) return;
         if (!live_actor(actor, world, 3) && !live_actor(actor, world, 1)) return;
         if (klass->GetFunctionByNameInChain(interaction) != function || function->GetNumParms() != 2 ||
             function->GetParmsSize() != 2 * sizeof(void*) || function->GetReturnProperty() ||

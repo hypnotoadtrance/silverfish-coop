@@ -823,6 +823,10 @@ class Bridge:
     def native_crate_inputs(self) -> list[bytes]:
         return self._take_local_inputs(self._local_crate_records)
 
+    def stock_interaction_ready(self, *, crates=False) -> bool:
+        return bool(self._local_interaction_records or crates and self._local_crate_records
+                    or self.local_bridge is not None and self.local_bridge.input_ready())
+
     def native_melee_input_requests(self):
         return [edge for raw in self._take_local_inputs(self._local_melee_records)
                 if (edge := native_guest_melee.input_record(raw)) is not None]

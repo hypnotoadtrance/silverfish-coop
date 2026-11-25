@@ -31,6 +31,10 @@ SORT = "native-inventory-sort"
 SORT_CAPABILITY = "native_inventory_sort_capability"
 SORT_KEY = "native_inventory_sort"
 STORE_EQUIPMENT = "native-inventory-store-equipment"
+LOCKPICKS = frozenset({
+    "/Game/Classes/Equipment/Eqp_LockPick.Eqp_LockPick_C",
+    "/Game/Classes/Equipment/Eqp_LockPick_Hev.Eqp_LockPick_Hev_C",
+})
 STORE_CAPABILITY = "native_inventory_store_equipment_capability"
 STORE_KEY = "native_inventory_store_equipment"
 UNEQUIP = "native-inventory-unequip"

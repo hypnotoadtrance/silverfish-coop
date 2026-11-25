@@ -1,4 +1,4 @@
-"""Share stock switch positions, linked lights, and radio power."""
+"""Share stock switch positions, linked lights, and media prop power."""
 
 import time
 
@@ -9,7 +9,8 @@ TAG = "native-stock-switch"
 KEY = "native_stock_switches"
 ACTION = TAG + "-interact"
 TARGET = "stock-switch:"
-_CLASSES = {"CircutBox_BP_C", "LightSwitch_BP_C", "LightSwitch_02_BP_C", "Prop_Radio01_C"}
+_CLASSES = {"CircutBox_BP_C", "LightSwitch_BP_C", "LightSwitch_02_BP_C", "Prop_Radio01_C",
+            "Prop_TV_01_C", "Prop_TV_02_C", "Prop_TV_03_C"}
 
 
 def actor_map(actor):

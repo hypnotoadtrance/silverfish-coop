@@ -2643,6 +2643,15 @@ namespace
     bool supported_stack_equipment(Unreal::UClass* type, Unreal::UObject* defaults)
     {
         if (boolean(defaults, STR("Stacks"), false)) return true;
+        const auto path = type->GetPathName();
+        if (path == STR("/Game/Classes/Equipment/Eqp_LockPick.Eqp_LockPick_C") ||
+            path == STR("/Game/Classes/Equipment/Eqp_LockPick_Hev.Eqp_LockPick_Hev_C"))
+        {
+            auto* base = find<Unreal::UClass>(equipment_base_path);
+            auto* category = field<Unreal::FByteProperty>(defaults, STR("ItemType"));
+            return base && type->IsChildOf(base) && category &&
+                category->GetPropertyValueInContainer(defaults) == 5 && boolean(defaults, STR("Stacks"), true);
+        }
         const auto* throwable = throwable_profile(type);
         auto* projectile = throwable ? object(defaults, STR("Projectile")) : nullptr;
         return throwable && boolean(defaults, STR("Stacks"), true) && live(projectile) &&

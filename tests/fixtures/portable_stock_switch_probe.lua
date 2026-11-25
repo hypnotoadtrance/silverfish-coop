@@ -1,16 +1,36 @@
-    if (fields[2] == "fixture-warehouse-switch" or fields[2] == "fixture-warehouse-radio")
+    if (fields[2] == "fixture-warehouse-switch" or fields[2] == "fixture-warehouse-radio" or fields[2] == "fixture-observatory-tv")
         and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
         local stock_focus = require("native_loot_crate_input").stock_focus
         local dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
         local radio = fields[2] == "fixture-warehouse-radio"
+        local television = fields[2] == "fixture-observatory-tv"
         local class, number = "CircutBox_BP_C", 1
         if radio then class, number = "Prop_Radio01_C", 3 end
         local name = class .. " " .. dock .. ".Tut_Dock_P:PersistentLevel." .. class .. "_" .. number
-        assert(state.map == dock)
-        local entry = assert(find_switch(state, phase, name), "the stock warehouse device is missing")
         local mode = fields[3]
-        if radio and mode == "playback" then
+        if television then
+            assert(state.map == "/Game/Classes/Maps/Maps_OverWorld/Observitory_P")
+            if mode == "discover" then
+                local names = {}
+                for id, candidate in pairs(census(state, phase)) do
+                    if candidate.power == "Power" then
+                        local entry = find_switch(state, phase, id)
+                        if entry and entry.actor.Working then names[#names + 1] = id end
+                    end
+                end
+                table.sort(names)
+                return assert(names[1], "no working stock television in Observatory")
+            end
+            name = assert(fields[5], "missing exact television identity")
+        else
+            assert(state.map == dock)
+        end
+        local entry = assert(find_switch(state, phase, name), "the stock warehouse device is missing")
+        if television and mode == "screen" then
+            local material = assert(entry.actor.PropMesh:GetMaterial(entry.actor.ScreenIndex))
+            return (entry.actor.Power and "1|" or "0|") .. material:GetBaseMaterial():GetFullName()
+        elseif radio and mode == "playback" then
             assert(type(SilverfishProbeNativeRadioPlayback) == "function", "the native media probe is missing")
             local playing, song = SilverfishProbeNativeRadioPlayback(name:match("^%S+ (.+)$"))
             if type(playing) ~= "boolean" then return "no media player" end

@@ -100,5 +100,6 @@ async def verify_stock_crossroads_door(host, guest, pawn):
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"stock_crossroads_door": {"actor": WOOD_DOOR, "authoritative_lock_refusal": True,
                                      "close": closed[door.RESULT], "open": reopened[door.RESULT],
+                                     "guest_confirm_ms": [closed["elapsed_ms"], reopened["elapsed_ms"]],
                                      "close_replay_preserved_open_door": True,
                                      "collision_verified_both_seats": True, "campaign_unchanged": True}}
