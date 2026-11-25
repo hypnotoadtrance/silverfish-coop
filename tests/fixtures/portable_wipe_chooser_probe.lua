@@ -25,6 +25,31 @@ local function load_class(path)
     return StaticFindObject(path)
 end
 
+local function guest_in_world(world, stock)
+    local guest
+    for _, actor in ipairs(FindAllOf("Player_FP_C") or {}) do
+        if valid(actor) and actor:HasAuthority() and same(actor:GetWorld(), world) and not actor:IsLocallyControlled()
+            and not actor:IsActorBeingDestroyed() and valid(actor.Save) and not same(actor.Save, stock) then
+            assert(not guest, "the wipe fixture requires a single guest")
+            guest = actor
+        end
+    end
+    assert(guest, "the wipe fixture requires one detached guest")
+    return guest
+end
+
+local function held_row(pawn)
+    local slots, index = pawn.Save.PlayerEquipment, pawn.Save.PlayerEquipIndex
+    local selected = index >= 0 and index < slots:GetArrayNum() and slots[index + 1]
+    local held = pawn.EquipedItem
+    local guid = selected and selected[item_guid]
+    local class = selected and selected[item_class]
+    local identity = valid(class) and guid and ("%08X%08X%08X%08X"):format(
+        guid.A & 0xffffffff, guid.B & 0xffffffff, guid.C & 0xffffffff, guid.D & 0xffffffff) or "-"
+    return table.concat({valid(held) and not held:IsActorBeingDestroyed() and held:GetClass():GetFullName() or "-",
+        identity, pawn.Aiming and "aiming" or "lowered"}, ",")
+end
+
 local function run(action)
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
@@ -33,18 +58,22 @@ local function run(action)
     local pawn = statics:GetPlayerPawn(world, 0)
     local controller = valid(pawn) and pawn.Controller
     assert(valid(controller) and pawn:IsLocallyControlled() and same(controller.Pawn, pawn) and same(pawn:GetWorld(), world))
+    if action == "held" then
+        local guest = pawn:HasAuthority() and guest_in_world(world, world.OwningGameInstance.SaveSlot_Ref) or pawn
+        return held_row(guest)
+    end
+    if action == "aim" then
+        assert(not pawn:HasAuthority() and valid(world.NetDriver.ServerConnection))
+        local held = pawn.EquipedItem
+        assert(valid(held) and same(held.User, pawn), "stock wipe aim requires a locally held weapon")
+        held:Use_Item_Secondary(true)
+        assert(pawn.Aiming)
+        return "aiming"
+    end
     if action == "configure" then
         local stock = world.OwningGameInstance.SaveSlot_Ref
         assert(pawn:HasAuthority() and same(pawn.Save, stock) and not valid(world.NetDriver.ServerConnection))
-        local guest
-        for _, actor in ipairs(FindAllOf("Player_FP_C") or {}) do
-            if valid(actor) and actor:HasAuthority() and same(actor:GetWorld(), world) and not actor:IsLocallyControlled()
-                and not actor:IsActorBeingDestroyed() and valid(actor.Save) and not same(actor.Save, stock) then
-                assert(not guest, "the wipe fixture requires a single guest")
-                guest = actor
-            end
-        end
-        assert(guest, "the wipe fixture requires one detached guest")
+        local guest = guest_in_world(world, stock)
         local rules = stock.GameRules
         rules[extraction], rules[slots], rules[drops], rules[lose_slot] = true, 1, true, false
         assert(stock.GameRules[extraction] and stock.GameRules[slots] == 1 and stock.GameRules[drops]

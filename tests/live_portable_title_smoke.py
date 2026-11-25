@@ -6273,8 +6273,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_cooked_meal, "observatory", "stock_cooked_meal", verify_stock_cooked_meal),
         (stock_personal_consumable, "personal_consumable", "stock_personal_consumable",
          lambda host, guest, pawn: verify_stock_personal_consumable(host, guest, pawn, portable_probe_command)),
-        (stock_wipe_chooser, "wipe_chooser", "stock_wipe_chooser",
-         lambda host, guest, pawn: verify_stock_wipe_chooser(host, guest, pawn, portable_probe_command)),
+        (stock_wipe_chooser, "wipe_chooser_guest_first", "stock_wipe_chooser_guest_first",
+         lambda host, guest, pawn: verify_stock_wipe_chooser(host, guest, pawn, portable_probe_command, first="guest")),
+        (stock_wipe_chooser, "wipe_chooser_host_first", "stock_wipe_chooser_host_first",
+         lambda host, guest, pawn: verify_stock_wipe_chooser(host, guest, pawn, portable_probe_command, first="host")),
         (stock_take_ammo, "observatory", "stock_take_ammo", verify_stock_take_ammo),
         (stock_shotguns, "observatory", "stock_shotguns",
          lambda host, guest, pawn: verify_stock_take_ammo(host, guest, pawn, shotguns=True)),
@@ -6433,7 +6435,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if stock_split:
             proof["stock_split_overlay"] = [probes.enter_context(
                 guest_weapon_fixture_overlay(game, "portable_stock_split_probe.lua")) for game in games]
-        if stock_take_ammo or stock_shotguns or stock_impact_cues or stock_loki_guest or resident_held_queue or stock_interaction_feedback:
+        if (stock_take_ammo or stock_shotguns or stock_impact_cues or stock_loki_guest or resident_held_queue
+                or stock_interaction_feedback or stock_wipe_chooser):
             proof["stock_take_ammo_overlays"] = [
                 probes.enter_context(guest_weapon_fixture_overlay(game, "portable_take_ammo_probe.lua")) for game in games
             ]
