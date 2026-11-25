@@ -6,6 +6,7 @@ local prefix = mailbox .. "/portable-ladder-"
 local world_name = "World /Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P.Tut_Dock_P"
 local ladder_class = "BlueprintGeneratedClass /Game/Classes/Actors/Ladder_BP.Ladder_BP_C"
 local ladder_path = "/Game/Classes/Actors/Ladder_BP.Ladder_BP_C:"
+local pawn_tick = "/Game/Classes/Player/Player_FP.Player_FP_C:ReceiveTick"
 local stock_press = "/Game/Classes/Player/Player_Inputs/IA_Interact.IA_Interact"
 local track, last, installed_hooks
 local clear = {R = 0, G = 0, B = 0, A = 0}
@@ -96,9 +97,6 @@ local function sample()
     if age <= 1.5 and #track.points < 64 then
         track.points[#track.points + 1] = ("%.3f,%s"):format(age, read(track.pawn))
     end
-    if track.climb_until and now < track.climb_until and track.pawn.OnLadder then
-        track.pawn:Add_Movement_Input({X=0,Y=.55})
-    end
 end
 
 local function run(action, payload)
@@ -107,6 +105,13 @@ local function run(action, payload)
         local ladder = not pawn:HasAuthority() and approach(pawn, ladders) or nil
         track = {world=world,statics=statics,pawn=pawn,peer=peer,ladder=ladder,ladders=ladders,points={},events={}}
         if ladder and not installed_hooks then
+            RegisterHook(pawn_tick, function(context)
+                if track and track.climb_until and same(context:get(), track.pawn)
+                    and track.pawn.OnLadder and same(track.world, track.pawn:GetWorld())
+                    and track.statics:GetRealTimeSeconds(track.world) < track.climb_until then
+                    track.pawn:Add_Movement_Input({X=0,Y=1})
+                end
+            end)
             for _, name in ipairs({"Start/Stop_Climbing",
                     "BndEvt__Box1_K2Node_ComponentBoundEvent_3_ComponentBeginOverlapSignature__DelegateSignature",
                     "BndEvt__Dismount_Top_K2Node_ComponentBoundEvent_2_ComponentBeginOverlapSignature__DelegateSignature"}) do
@@ -147,13 +152,7 @@ local function run(action, payload)
     end
     if action == "climb" then
         assert(track.pawn.OnLadder, "guest has not mounted the ladder")
-        track.climb_until = track.statics:GetRealTimeSeconds(track.world) + .35
-        return read(track.pawn)
-    end
-    if action == "dismount" then
-        assert(valid(track.ladder) and track.pawn.OnLadder and same(track.ladder.PlayerRef,track.pawn),
-            "guest ladder release target is unavailable")
-        track.ladder["Start/Stop_Climbing"](track.ladder, false)
+        track.climb_until = track.statics:GetRealTimeSeconds(track.world) + .75
         return read(track.pawn)
     end
     if action == "remote" then return read(track.peer) end

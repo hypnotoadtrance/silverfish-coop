@@ -30,6 +30,7 @@ async def exercise(work, first, second, saved, *, capture=False):
         async with asyncio.timeout(5):
             while dist(position(placed), position(await probe(guest, "local"))) > 30:
                 await asyncio.sleep(.05)
+        started = time.time()
         immediate = await probe(guest, "press")
         earlier = await probe(host, "remote")
         mounted = earlier
@@ -38,23 +39,28 @@ async def exercise(work, first, second, saved, *, capture=False):
             mounted = await probe(host, "remote")
             await asyncio.sleep(.025)
         climb_start = await probe(guest, "climb") if mounted.startswith("true,5,") else immediate
-        await asyncio.sleep(.75)
-        samples, events = (await probe(guest, "report")).split(";")
+        await asyncio.sleep(1.1)
+        samples, events = (part.split("|") for part in (await probe(guest, "report")).split(";"))
         final_host, final_guest = await asyncio.gather(probe(host, "remote"), probe(guest, "local"))
         trial = dict(actor=ladder, initial=placed, press=immediate, host_after_press=earlier, host_mounted=mounted,
                      climb_start=climb_start,
-                     host_final=final_host, guest_final=final_guest, samples=samples.split("|"), events=events.split("|"))
+                     host_final=final_host, guest_final=final_guest, samples=samples, events=events)
         if not capture:
             assert immediate.startswith("true,5,"), trial
-            assert final_host.startswith("true,5,") and final_guest.startswith("true,5,"), trial
-            assert position(final_guest)[2] - position(climb_start)[2] > 10, trial
+            assert mounted.startswith("true,5,"), trial
+            climbing = [position(sample.partition(",")[2]) for sample in samples if ",true,5," in sample]
+            trial["climb_cm"] = round(max(point[2] for point in climbing) - position(climb_start)[2], 2)
+            assert trial["climb_cm"] > 60, trial
+            assert any("Dismount_Top" in event for event in events), trial
+            assert final_host.startswith("false,") and final_guest.startswith("false,"), trial
             assert dist(position(final_host), position(final_guest)) < 32, trial
-            guest_released = await probe(guest, "dismount")
-            assert guest_released.startswith("false,"), guest_released
-            async with asyncio.timeout(4):
-                while (remote := await probe(host, "remote")).startswith("true,"):
-                    await asyncio.sleep(.05)
-            trial["release"] = {"host": remote, "guest": guest_released}
+            run = guest.client / "run"
+            frame = await suite.wait_resident_status(run, lambda state: state.get("state") == "connected")
+            receipts = [event for event in await suite.resident_events(run, frame)
+                        if event.get("event") == "local_interaction" and event["time_unix"] >= started
+                        and "native_ladder" in event]
+            assert [event["native_ladder"]["state"] for event in receipts] == ["mounted", "released"], receipts
+            trial["receipts"] = receipts
         evidence["stock_ladder"] = trial
         return evidence
 
