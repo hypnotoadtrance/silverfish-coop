@@ -112,6 +112,7 @@ local function write_interaction(pawn, pickup_source, pressed_component)
     local record = "interact\t" .. tostring(input_sequence) .. (target and "\t" .. target or "") .. "\n"
     if type(SilverfishEnqueueLocalBridgeInput) == "function" and SilverfishEnqueueLocalBridgeInput(record) then
         native_stock_door.preview_input(pawn, target)
+        if pickup_source then pcall(native_authored_pickup.preview_input, pawn, pickup_source) end
         return target
     end
     local file = io.open(input_file, "ab")
@@ -999,6 +1000,7 @@ function players.start(bridge)
         if not interact_hook_checked then ensure_hooks() end
     end)
     LoopInGameThreadWithDelay(16, function()
+        pcall(native_authored_pickup.expire_previews)
         if not native_interact_address then return end
         local ok, failure = pcall(drain_native_interact)
         if not ok then

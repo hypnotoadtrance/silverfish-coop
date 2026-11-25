@@ -6657,6 +6657,11 @@ class Client:
                 result = await self.apply_stock_interaction(scope, operation, target)
             except (ValueError, OSError, RuntimeError) as error:
                 self.control.event("interaction_rejected", operation_id=operation, reason=str(error))
+                if (self.stock_interaction_scope() == scope
+                        and (target in native_authored_pickup.SOURCES or native_loose_pickup.target_path(target))):
+                    with contextlib.suppress(OSError, RuntimeError, TimeoutError):
+                        await self.bridge.command("native-loose-pickup-cancel-preview", target,
+                                                  timeout=.75, update_status=False)
             else:
                 self.control.event("local_interaction", operation_id=operation,
                                    elapsed_ms=round((time.monotonic() - started) * 1000, 1), **result)

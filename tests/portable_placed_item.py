@@ -1,6 +1,7 @@
 """Exercise a stock Crossroads item's carry and pickup on a resident pair."""
 
 import asyncio
+from contextlib import contextmanager
 import math
 
 from portable_guest_world_start import resident_events, wait_resident_status
@@ -10,6 +11,10 @@ from tools.silverfish.control import submit
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
 
+PREVIEW_FIXTURE = "native-loose-pickup-preview-fixture"
+
+
+@contextmanager
 def placed_item_overlay(game, overlay):
     def enable_probe(source):
         gate = 'local fixtures = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"'
@@ -24,7 +29,66 @@ def placed_item_overlay(game, overlay):
     end
 """ + anchor)
 
-    return overlay(game, "native_prop_carry.lua", enable_probe)
+    with overlay(game, "native_prop_carry.lua", enable_probe), overlay(
+        game, "native_authored_pickup.lua", instrument_preview
+    ):
+        yield
+
+
+def instrument_preview(source):
+    def insert(before, after):
+        nonlocal source
+        assert source.count(before) == 1, before
+        source = source.replace(before, after)
+
+    anchor = "local previews, mesh_class = {}, nil"
+    insert(anchor, anchor + "\nlocal preview_probe = {}")
+    anchor = '    if action == "native-loose-pickup-cancel-preview" then'
+    insert(anchor, """    if action == "native-loose-pickup-preview-fixture" and fixtures and title_fixtures and #fields == 4 then
+        local mode, target = fields[3], fields[4]
+        if phase == "hosting" and mode == "reject" then
+            preview_probe.reject = target
+            return "next matching placed pickup will be refused"
+        end
+        if phase == "connected" and mode == "read" and preview_probe.target == target then
+            return ("%d|%d|%d|%.1f"):format(preview_probe.meshes, preview_probe.collision_kept and 1 or 0,
+                preview_probe.rolled_back and 1 or 0, preview_probe.latency or -1)
+        end
+        error("placed pickup preview probe scope unavailable", 0)
+    end
+""" + anchor)
+    anchor = '        restore_preview(fields[3])\n        return "loose pickup preview released"'
+    insert(anchor, """        local prior = previews[fields[3]]
+        restore_preview(fields[3])
+        if prior and preview_probe.target == fields[3] then
+            preview_probe.rolled_back = true
+            for _, mesh in ipairs(prior.meshes) do
+                if not valid(mesh) or not mesh:IsVisible() then preview_probe.rolled_back = false end
+            end
+        end
+        return "loose pickup preview released"
+""".rstrip())
+    anchor = '    if action == "native-loose-pickup-claim" then'
+    insert(anchor, anchor + """
+        if phase == "hosting" and preview_probe.reject and fields[5] == preview_probe.reject then
+            preview_probe.reject = nil
+            error("loose_pickup_source_unavailable", 0)
+        end""")
+    anchor = '        return stock_input_fixture.press_world_loot(state, pawn, actor, actor.Box, function()'
+    insert(anchor, anchor + "\n            preview_probe.pressed = os.clock()")
+    anchor = '    local preview = {actor = actor, meshes = {}, expires = os.clock() + 1.5}'
+    insert(anchor, '    local collision = actor:GetActorEnableCollision()\n' + anchor)
+    anchor = '    if #preview.meshes == 0 then previews[target] = nil end'
+    insert(anchor, """    local hidden = 0
+    for _, mesh in ipairs(preview.meshes) do
+        if not mesh:IsVisible() then hidden = hidden + 1 end
+    end
+    preview_probe.target, preview_probe.meshes = target, hidden
+    preview_probe.collision_kept = actor.bHidden == false and actor:GetActorEnableCollision() == collision and collision
+    preview_probe.rolled_back = false
+    preview_probe.latency = preview_probe.pressed and (os.clock() - preview_probe.pressed) * 1000
+""" + anchor)
+    return source
 
 
 async def verify_stock_placed_item(host, guest, pawn):
@@ -103,6 +167,32 @@ async def verify_stock_placed_item(host, guest, pawn):
 
     await host.bridge.command(loose.APPROACH, path, current_pawn, timeout=5)
     target = f"loose:{path}"
+
+    async def preview():
+        reply = await guest.bridge.command(PREVIEW_FIXTURE, "read", target, timeout=4, update_status=False)
+        meshes, collision, restored, latency = reply["ack"]["message"].split("|")
+        return int(meshes), int(collision), int(restored), float(latency)
+
+    baseline = await stock_inventory(guest_run, guest=True)
+    await host.bridge.command(PREVIEW_FIXTURE, "reject", path, timeout=4)
+    refused = await submit(guest_run, loose.FIXTURE, target=target)
+    assert refused["ok"], refused
+    async with asyncio.timeout(5):
+        while True:
+            try:
+                rejected_preview = await preview()
+            except RuntimeError as error:
+                if "preview probe scope unavailable" not in str(error):
+                    raise
+            else:
+                if rejected_preview[2] == 1:
+                    break
+            await asyncio.sleep(.05)
+    assert rejected_preview[0] > 0 and rejected_preview[1] == 1 and 0 <= rejected_preview[3] < 100, rejected_preview
+    assert await stock_inventory(guest_run, guest=True) == baseline
+    assert await fixture(guest, "placed-visibility", path) == "visible"
+    assert await fixture(host, "placed-visibility", path) == "visible"
+
     taken = await submit(guest_run, loose.FIXTURE, target=target)
     assert taken["ok"], taken
     async with asyncio.timeout(8):
@@ -120,8 +210,13 @@ async def verify_stock_placed_item(host, guest, pawn):
     assert not repeated["ok"] and repeated["error"] == "loose_pickup_already_claimed", repeated
     visibility = await asyncio.gather(fixture(host, "placed-visibility", path), fixture(guest, "placed-visibility", path))
     assert all(value in ("absent", "hidden") for value in visibility), visibility
+    accepted_preview = await preview()
+    assert accepted_preview[0] > 0 and accepted_preview[1:3] == (1, 0) and 0 <= accepted_preview[3] < 100, accepted_preview
     return {"stock_placed_item": {
         "actor": name, "held_movement_cm": math.dist(motion["game"][carry.FIXTURE]["position"], before),
         "host_pose": host_pose, "guest_pose": guest_pose, "claim": applied, "backpack": inventory,
         "visibility": dict(zip(("host", "guest"), visibility, strict=True)),
+        "local_preview": {"refused_meshes": rejected_preview[0], "accepted_meshes": accepted_preview[0],
+                          "refused_ms": rejected_preview[3], "accepted_ms": accepted_preview[3],
+                          "collision_preserved": True, "refusal_restored_mesh": True},
     }}

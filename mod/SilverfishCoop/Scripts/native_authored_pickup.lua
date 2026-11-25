@@ -257,6 +257,7 @@ for _, profile in ipairs(profiles) do
 end
 
 local binding, report, loose_check
+local previews, mesh_class = {}, nil
 
 local function valid(value)
     return value and value:IsValid()
@@ -290,7 +291,21 @@ local function gold_bag_step(save)
     return row and math.tointeger(row.Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A), key
 end
 
+local function restore_preview(target)
+    local preview = previews[target]
+    if not preview then return end
+    previews[target] = nil
+    for _, mesh in ipairs(preview.meshes) do
+        if valid(mesh) and same(mesh:GetOwner(), preview.actor) then mesh:SetVisibility(true, false) end
+    end
+end
+
+local function clear_previews()
+    for target in pairs(previews) do pcall(restore_preview, target) end
+end
+
 function pickup.clear()
+    clear_previews()
     binding, report, loose_check = nil, nil, nil
     if enabled and type(SilverfishClearNativeAuthoredPickup) == "function" then SilverfishClearNativeAuthoredPickup() end
 end
@@ -328,6 +343,7 @@ function pickup.update(state, phase)
     end
     if not binding or binding.placements ~= placements or binding.host ~= host
         or not same(binding.pawn, pawn) or not same(binding.world, state.world) then
+        clear_previews()
         binding = {pawn = pawn, world = state.world, host = host, placements = placements, next_loose = 0}
         report, loose_check = nil, nil
     end
@@ -587,6 +603,12 @@ local arguments = {
 
 function pickup.command(fields, state, phase)
     local action = fields[2]
+    if action == "native-loose-pickup-cancel-preview" then
+        if phase ~= "connected" or #fields ~= 3 or not binding or binding.host
+            or not same(binding.world, state.world) then error("loose_pickup_preview_scope_unavailable", 0) end
+        restore_preview(fields[3])
+        return "loose pickup preview released"
+    end
     if action == "native-cistern-nfta-locker-fixture" then
         return stock_input_fixture.cistern_nfta_locker(fields, state, phase)
     end
@@ -816,6 +838,46 @@ function pickup.command(fields, state, phase)
     local intercepted, detail = SilverfishProbeNativeAuthoredPickup(profile.source)
     if not intercepted then error(detail, 0) end
     return "authored loose pickup stock interaction intercepted"
+end
+
+function pickup.preview_input(pawn, target)
+    if not binding or binding.host or not same(binding.pawn, pawn) or type(target) ~= "string"
+        or previews[target] then return end
+    local profile = binding.active and binding.active[target]
+    local path = profile and profile.path
+        or target:match("^loose:(/Game/Classes/Maps/[%w_/]+%.[%w_]+:PersistentLevel%.[%w_]+)$")
+    local actor = path and StaticFindObject(path)
+    if not valid(actor) or actor.bHidden or actor:IsActorBeingDestroyed()
+        or not same(actor:GetWorld(), binding.world) or not same(actor:GetOuter(), binding.world.PersistentLevel) then return end
+    if not valid(mesh_class) then mesh_class = StaticFindObject("/Script/Engine.MeshComponent") end
+    if not valid(mesh_class) then return end
+    local components = actor:K2_GetComponentsByClass(mesh_class)
+    if not components or #components == 0 or #components > 12 then return end
+    local count = 0
+    for _ in pairs(previews) do count = count + 1 end
+    if count >= 8 then return end
+    local preview = {actor = actor, meshes = {}, expires = os.clock() + 1.5}
+    previews[target] = preview
+    -- This changes only local mesh visibility. The stock actor and its pickup collision remain live.
+    for _, mesh in ipairs(components) do
+        if type(mesh.type) == "function" and mesh:type() == "RemoteUnrealParam" then mesh = mesh:get() end
+        if valid(mesh) and same(mesh:GetOwner(), actor) and mesh:IsVisible() and mesh.bHiddenInGame == false then
+            preview.meshes[#preview.meshes + 1] = mesh
+            mesh:SetVisibility(false, false)
+        end
+    end
+    if #preview.meshes == 0 then previews[target] = nil end
+end
+
+function pickup.expire_previews()
+    if not next(previews) then return end
+    local now = os.clock()
+    for target, preview in pairs(previews) do
+        local actor = preview.actor
+        if now >= preview.expires or not valid(actor) or actor:IsActorBeingDestroyed() or actor.bHidden then
+            pcall(restore_preview, target)
+        end
+    end
 end
 
 function pickup.take_press(pawn)
