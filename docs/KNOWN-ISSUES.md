@@ -38,6 +38,8 @@ The `rc-f0b1c06` Crossroads baseline used two muted Direct IP instances. During 
 
 `rc-025ae52` sends changed gameplay sections once the guest acknowledges a baseline. A missed reply, a different guest or character, and a changed visit use a full snapshot. Legacy peers continue to exchange full snapshots. Across two muted Direct IP pairs, encoded snapshot bytes per reply fell by 51–68% in Observatory and 33–41% in Crossroads compared with the preceding candidate's corresponding samples. None of the sampled relay queues expired or evicted a frame. Across four launches, cold crate opening, the Crossroads door, weather travel, mushrooms, and storm ambience after reconnect passed. The first critter check timed out waiting for a local diagnostic command. The same ZIP passed critter pickup and Lingering Teleport synchronization on the follow-up pair. Both runs preserved the original saves. The largest Crossroads host interval was 78 ms. Rendered frame pacing and live Steam latency remain open.
 
+`rc-d43eb57` acknowledges stock pickup presentation without assembling a full game status frame for its reply. In the copied Observatory cabinet campaign, the game-thread presentation tick took 1–2 ms across three pickups, compared with 7–10 ms when the muted status mirror used the full reply. The host's stock Interact reached the combined retirement and audio receipt in 79–100 ms on the short path. Both sides removed the items, replaying the exact claim did not duplicate inventory, and pickups made no save writes. Stock Save and Quit persisted the claims. Each run used two muted Direct IP launches and verified the original saves. Rendered gameplay and Steam interaction latency remain open.
+
 ## `rc-1799e4b` playtest
 
 | Area | Two-PC observation |
