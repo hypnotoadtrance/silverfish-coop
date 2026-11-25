@@ -2859,19 +2859,35 @@ async def verify_dock_npc_population(host: Seat, guest: Seat, command) -> dict:
         except TimeoutError as error:
             raise AssertionError(f"Expected {expected} at {points}, saw {observed}") from error
 
+    async def guest_weapons_clear():
+        observed = "unavailable"
+        try:
+            async with asyncio.timeout(6):
+                while (observed := await command(guest, "dock-population-weapons")) != "empty":
+                    await asyncio.sleep(.08)
+        except TimeoutError as error:
+            raise AssertionError(f"Stock weapons outlived their NPCs on the guest: {observed}") from error
+
     try:
         local_points = await command(guest, "dock-population-spawn")
         await wait_for_population(guest, local_points, "empty")
         await wait_for_population(host, local_points, "empty")
+        await guest_weapons_clear()
         authoritative_points = await command(host, "dock-population-spawn")
         await wait_for_population(host, authoritative_points, "bandit=3,state=3")
         await wait_for_population(guest, authoritative_points, "bandit=1,state=1")
         paths = await asyncio.gather(*(command(seat, f"dock-population-paths\t{authoritative_points}")
                                        for seat in (host, guest)))
+        staged = int(await command(guest, f"dock-population-arm-view\t{authoritative_points}"))
+        assert await command(guest, "dock-population-weapons") == "bandit,state"
+        assert await command(host, "dock-population-weapons") == "bandit,state"
         assert await command(host, "dock-population-cleanup") == "cleared"
         await wait_for_population(guest, authoritative_points, "empty")
+        await guest_weapons_clear()
         return {"tutorial_dock_npc_population": {"client_only_retired": 2, "host_authorities": 2,
-                "guest_replicas": 2, "host_removal_seen": True, "actor_names": dict(zip(("host", "guest"), paths))}}
+                "guest_replicas": 2, "host_removal_seen": True, "client_only_weapons_retired": 2,
+                "replica_weapons_retired": 2, "stock_equip_calls_on_npc_replicas": staged,
+                "actor_names": dict(zip(("host", "guest"), paths))}}
     finally:
         assert await asyncio.gather(command(host, "dock-population-cleanup"), command(guest, "dock-population-cleanup")) == [
             "cleared", "cleared",

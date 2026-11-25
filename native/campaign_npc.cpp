@@ -68,6 +68,7 @@ namespace
     constexpr auto npc_controller = STR("/Game/Classes/NPCs/NPC_Assets/MasterNPC_AI_Controler_BP.MasterNPC_AI_Controler_BP_C");
     constexpr int max_flayers = 2;
     constexpr auto npc_base = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C");
+    constexpr auto npc_weapon_base = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C");
     constexpr auto initialize_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:InitializeAI");
     constexpr auto perceive_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:Proscess_TargetPerception");
     constexpr auto melee_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:ResolveMelee");
@@ -750,6 +751,11 @@ namespace
     };
 
     Handles pending_dynamic_npcs;
+    struct RetiringWeapon
+    {
+        U::FWeakObjectPtr weapon, npc, world, driver;
+    };
+    std::vector<RetiringWeapon> retiring_weapons;
     bool dynamic_births_active{};
     bool hook_ready();
 
@@ -765,9 +771,52 @@ namespace
             dynamic_stock_npc(actor);
     }
 
+    bool local_npc_weapon(U::UObject* weapon, U::UWorld* world)
+    {
+        const auto* base = find<U::UClass>(npc_weapon_base);
+        return base && in_level(weapon, world) && weapon->IsA(base) &&
+            !weapon->HasAnyFlags(U::RF_WasLoaded) && byte_field(weapon, STR("Role")) == 3 &&
+            bool_field(weapon, STR("bReplicates"), false) &&
+            bool_field(weapon, STR("HeldByPlayer"), false) && byte_field(weapon, STR("Item_RespawnMode")) == 0;
+    }
+
+    void queue_retiring_weapon(U::AActor* npc, const Network& active)
+    {
+        auto* weapon = object(npc, STR("Weapon_Ranged"));
+        if (!weapon || !local_npc_weapon(weapon, active.world) ||
+            object(weapon, STR("Owner")) != npc || object(weapon, STR("Instigator")) != npc ||
+            std::ranges::any_of(retiring_weapons, [weapon](const auto& row) { return row.weapon.Get() == weapon; })) return;
+        retiring_weapons.push_back({weapon, npc, active.world, active.driver});
+    }
+
+    void finish_retiring_weapons()
+    {
+        std::vector<RetiringWeapon> batch;
+        batch.swap(retiring_weapons);
+        for (const auto& row : batch)
+        {
+            auto* weapon = row.weapon.Get();
+            if (!live(weapon)) continue;
+            const auto active = network(static_cast<U::UWorld*>(row.world.Get()), true, true);
+            if (active.seat != Seat::Client || active.driver != row.driver.Get() ||
+                !local_npc_weapon(weapon, active.world)) continue;
+            auto* npc = row.npc.GetEvenIfUnreachable();
+            auto* owner = object(weapon, STR("Owner"));
+            auto* instigator = object(weapon, STR("Instigator"));
+            auto* mount = object(object(weapon, STR("RootComponent")), STR("AttachParent"));
+            if ((owner && owner != npc) || (instigator && instigator != npc) ||
+                (mount && mount->GetOuterPrivate() != npc)) continue;
+            // Destruction can detach the stock gun or clear its owner before
+            // this tick. Check its weak identity and any new owner first.
+            static_cast<U::AActor*>(weapon)->K2_DestroyActor();
+        }
+    }
+
     void settle_dynamic_npcs()
     {
-        if (!hook_ready() || pending_dynamic_npcs.empty()) return;
+        if (!hook_ready()) return;
+        if (!retiring_weapons.empty()) finish_retiring_weapons();
+        if (pending_dynamic_npcs.empty()) return;
         Handles batch;
         batch.swap(pending_dynamic_npcs);
         for (const auto& handle : batch)
@@ -777,7 +826,10 @@ namespace
             auto* npc = static_cast<U::AActor*>(actor);
             const auto active = network(npc->GetWorld(), true, true);
             if (active.seat == Seat::Client)
+            {
+                queue_retiring_weapon(npc, active);
                 npc->K2_DestroyActor();
+            }
             else if (active.seat == Seat::Host && (!bool_field(actor, STR("bReplicates"), true) ||
                 !bool_field(actor, STR("bReplicateMovement"), true) || byte_field(actor, STR("RemoteRole")) != 1))
                 Replication{}.apply(std::array{actor});
@@ -947,7 +999,7 @@ namespace
 
     std::atomic<bool> installed{};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID,
-        Hook::ERROR_ID, Hook::ERROR_ID};
+        Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
     bool operate{};
     bool publish_flayers{};
     bool veto_flayer_spawns{};
@@ -2779,9 +2831,18 @@ namespace silverfish::campaign_npc
                 births.last_script.Reset();
             }, {false, false, STR("SilverfishCoopNative"), STR("Observe local CrossRoads Husk births")});
         if (production_roster)
+        {
             callbacks[7] = Hook::RegisterEngineTickPreCallback(
                 [](Iteration&, U::UEngine*, float, bool) { settle_dynamic_npcs(); },
                 {false, false, STR("SilverfishCoopNative"), STR("Settle stock NPC births after role assignment")});
+            callbacks[8] = Hook::RegisterEndPlayPreCallback(
+                [](Iteration&, U::AActor* npc, U::EEndPlayReason reason) {
+                    if (!hook_ready() || reason != U::EEndPlayReason::Destroyed ||
+                        !silverfish::campaign_npc::is_spawned_stock_npc(npc) || byte_field(npc, STR("Role")) != 1) return;
+                    const auto active = network(npc->GetWorld(), false, true);
+                    if (active.seat == Seat::Client) queue_retiring_weapon(npc, active);
+                }, {false, false, STR("SilverfishCoopNative"), STR("Queue local weapons owned by an ending NPC replica")});
+        }
         dynamic_births_active = callbacks[6] != Hook::ERROR_ID && callbacks[7] != Hook::ERROR_ID;
         if (callbacks[4] == Hook::ERROR_ID || callbacks[5] == Hook::ERROR_ID)
         {
@@ -2848,6 +2909,7 @@ namespace silverfish::campaign_npc
             flayer_hit = {};
             inactive_targets = {};
             pending_dynamic_npcs.clear();
+            retiring_weapons.clear();
         }
     }
 

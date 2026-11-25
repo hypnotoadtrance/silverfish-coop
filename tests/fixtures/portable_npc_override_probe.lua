@@ -808,6 +808,19 @@ local function dock_worker(world, name)
 end
 
 local population_fixture = {}
+local population_weapons = {}
+
+local function population_weapon(actor)
+    if not valid(actor.Weapon_Ranged) then actor:Equip_RangedWeapon() end
+    local weapon = actor.Weapon_Ranged
+    local root = valid(weapon) and weapon.RootComponent
+    local mount = valid(root) and root:GetAttachParent()
+    assert(valid(weapon) and same(weapon:GetOwner(), actor) and same(weapon.Instigator, actor)
+        and valid(mount) and same(mount:GetOwner(), actor)
+        and weapon:HasAuthority() and weapon.bReplicates == false and weapon.Item_RespawnMode == 0,
+        "stock NPC did not equip a local rifle")
+    return weapon
+end
 
 local function dock_spawn_population(pawn, world, host)
     assert(not next(population_fixture), "clean stock NPC population fixture required")
@@ -825,10 +838,41 @@ local function dock_spawn_population(pawn, world, host)
             assert(actor.bReplicates == false, "fixture must start with an unpublished host NPC")
         end
         population_fixture[kind] = actor
+        population_weapons[kind] = population_weapon(actor)
         local at = actor:K2_GetActorLocation()
         points[#points + 1] = ("%s,%.3f,%.3f,%.3f"):format(kind, at.X, at.Y, at.Z)
     end
     return table.concat(points, ";")
+end
+
+local function population_weapons_at(world, points)
+    local added = 0
+    for point in points:gmatch("[^;]+") do
+        local kind, x, y, z = point:match("^(%w+),([^,]+),([^,]+),([^,]+)$")
+        local class = assert(shooter_paths[kind]):match("%.([^%.]+)$")
+        x, y, z = tonumber(x), tonumber(y), tonumber(z)
+        for _, actor in ipairs(FindAllOf(class) or {}) do
+            if valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed() then
+                local at = actor:K2_GetActorLocation()
+                if (at.X-x)^2 + (at.Y-y)^2 + (at.Z-z)^2 < 40^2 then
+                    if not valid(actor.Weapon_Ranged) then added = added + 1 end
+                    population_weapons[kind] = population_weapon(actor)
+                end
+            end
+        end
+    end
+    return tostring(added)
+end
+
+local function tracked_population_weapons(world)
+    local remaining = {}
+    for kind, weapon in pairs(population_weapons) do
+        if valid(weapon) and same(weapon:GetWorld(), world) and not weapon:IsActorBeingDestroyed() then
+            remaining[#remaining + 1] = kind
+        end
+    end
+    table.sort(remaining)
+    return #remaining > 0 and table.concat(remaining, ",") or "empty"
 end
 
 local function dock_population_at(world, points, include_paths)
@@ -1613,9 +1657,20 @@ local function run(action, actor_path)
     elseif action == "dock-population-at" or action == "dock-population-paths" then
         assert(world:GetFullName() == "World " .. dock)
         return dock_population_at(world, actor_path, action == "dock-population-paths")
+    elseif action == "dock-population-arm-view" then
+        assert(world:GetFullName() == "World " .. dock and not host)
+        return population_weapons_at(world, actor_path)
+    elseif action == "dock-population-weapons" then
+        assert(world:GetFullName() == "World " .. dock)
+        return tracked_population_weapons(world)
     elseif action == "dock-population-cleanup" then
         for _, actor in pairs(population_fixture) do
             if valid(actor) and not actor:IsActorBeingDestroyed() then actor:K2_DestroyActor() end
+        end
+        if host then
+            for _, weapon in pairs(population_weapons) do
+                if valid(weapon) and not weapon:IsActorBeingDestroyed() then weapon:K2_DestroyActor() end
+            end
         end
         population_fixture = {}
         return "cleared"
