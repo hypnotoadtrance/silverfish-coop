@@ -4,6 +4,9 @@ local visor = {}
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local source_class = "/Game/Classes/Equipment/Equipment_Assets/FlashLight_Source_BP.FlashLight_Source_BP_C"
 local spot_class = "/Script/Engine.SpotLightComponent"
+local helmet_light = "FlashLight_41_E2EDC7A04D5942755A28FE9479BE0793"
+local helmet_origin = "LightLocation_47_C3B1387F4CE0EF84D4C4CB996C535017"
+local guest_worn
 local tac = {R = .40625, G = .614151, B = 1}
 local torch = {R = 1, G = .970104, B = .947917}
 -- FlashLightTypes_DT entries selected by the stock pawn-mounted emitter.
@@ -20,26 +23,52 @@ local function same(first, second)
     return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
 end
 
-function visor.powered(pawn, world)
-    local save = pawn.Save
-    local instance = world.OwningGameInstance
-    if pawn.Dead or pawn:IsActorBeingDestroyed() or not pawn:IsLocallyControlled()
-        or not same(pawn:GetWorld(), world) or not valid(instance) or not same(save, instance.SaveSlot_Ref) then return end
-    local class = save.PlayerHelmet[item_class]
-    if not valid(class) then return end
-    local defaults = class:GetCDO()
-    local kind = valid(defaults) and defaults.FlashLightType
-    local profile = profiles[kind]
-    if not profile then return end
-
+local function owned_source(pawn, world)
     local child = pawn.FlashLight_Source_BP
     local source = valid(child) and child.ChildActor
     local spot = valid(source) and source.SpotLight
     if not valid(source) or not valid(spot) or source:IsActorBeingDestroyed()
         or not same(source:GetClass(), StaticFindObject(source_class)) or not same(source:GetWorld(), world)
         or not same(child:GetOwner(), pawn) or not same(source:GetParentActor(), pawn)
-        or not same(spot:GetClass(), StaticFindObject(spot_class)) or not same(spot:GetOwner(), source)
-        or source.Type ~= kind then return end
+        or not same(spot:GetClass(), StaticFindObject(spot_class)) or not same(spot:GetOwner(), source) then return end
+    return source, spot
+end
+
+function visor.clear_guest()
+    guest_worn = nil
+end
+
+function visor.powered(pawn, world, guest)
+    local save, instance = pawn.Save, world.OwningGameInstance
+    if pawn.Dead or pawn:IsActorBeingDestroyed() or not pawn:IsLocallyControlled()
+        or not same(pawn:GetWorld(), world) or not valid(instance) or not same(save, instance.SaveSlot_Ref)
+        or pawn:HasAuthority() == guest then return end
+    local class = save.PlayerHelmet[item_class]
+    local defaults = valid(class) and class:GetCDO()
+    local kind = valid(defaults) and defaults.FlashLightType
+    local profile = profiles[kind]
+    if not profile and not (guest and guest_worn and same(guest_worn.pawn, pawn)) then return end
+    local source, spot = owned_source(pawn, world)
+    if not source then return end
+
+    if guest then
+        local prior = guest_worn and same(guest_worn.pawn, pawn) and guest_worn
+        if profile and (not prior or not same(prior.class, class)) then
+            guest_worn = {pawn = pawn, class = class}
+            local worn, expected = pawn.Helm_Struct, defaults.FlashlightLocation
+            local origin = worn[helmet_origin]
+            if source.Type ~= kind or worn[helmet_light] ~= kind or origin.X ~= expected.X
+                or origin.Y ~= expected.Y or origin.Z ~= expected.Z then
+                -- The detached inventory projection copies the item, while
+                -- the stock update configures the local camera emitter.
+                instance:UpdateHelmet()
+            end
+        elseif not profile and prior then
+            guest_worn = nil
+            if source.Powered then pawn:Toggle_FlashLight(true) end
+        end
+    end
+    if not profile or source.Type ~= kind then return end
     return source.Powered == true and spot:IsVisible() and not spot.bHiddenInGame and not source.bHidden
         and spot.Intensity == profile.intensity and spot.AttenuationRadius == profile.radius
 end

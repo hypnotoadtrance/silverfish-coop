@@ -146,7 +146,7 @@ local function sync_local_aim(state, phase)
     if not pawn.Dead then
         local read, mode = pcall(weapon_view.local_lighter, pawn)
         if read then lighter_mode = mode end
-        local read_visor, powered = pcall(visor.powered, pawn, state.world)
+        local read_visor, powered = pcall(visor.powered, pawn, state.world, true)
         if read_visor and powered == true then local_visor = worn(pawn.Save.PlayerHelmet) end
     end
     if pawn.Dead or pawn.Sprinting or pawn.IsWeaponBlocked then return end
@@ -200,7 +200,7 @@ local function observe(state, phase)
                     if not firearm or not firearm_path(firearm) then firearm = "-" end
                     local read_visor, powered = false, false
                     if pawn:IsLocallyControlled() and head ~= "-" then
-                        read_visor, powered = pcall(visor.powered, pawn, state.world)
+                        read_visor, powered = pcall(visor.powered, pawn, state.world, false)
                     end
                     observations[id] = { pawn = details.name, body = body, head = head, weapon = read_weapon and weapon or "-",
                         appearance = read_appearance and appearance or "-", gun = gun, aim = pawn.Aiming and gun or "-",
@@ -834,6 +834,7 @@ function avatar.sync(state, phase)
     if client_world ~= world or client_map ~= state.map then
         client_world, client_map, client_outfits, client_receipt = world, state.map, {}, nil
         client_visors = {}
+        visor.clear_guest()
     end
     local authority = phase == "hosting" and state.world:GetAddress() or nil
     if authority ~= host_world then host_world, host_aim_receipt, host_aims, host_visors = authority, nil, {}, {} end

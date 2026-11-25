@@ -3,7 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock, call, patch
+from unittest.mock import ANY, AsyncMock, Mock, call, patch
 import uuid
 
 from tools.silverfish import (
@@ -81,12 +81,14 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         client.snapshot_request = ready
         identity = uuid.UUID(int=1)
         client.bridge.input_namespace = identity
+        client.bridge.local_bridge = None
         client.bridge.process.poll.return_value = None
         client.bridge.snapshot.return_value = state
         client.bridge.native_crate_inputs.return_value = [f"loot-crate-open\t{OBSERVATORY}\t{crate}\t{pawn}\t12".encode()]
         client.bridge.interactions.return_value = [(operation, native_stock_door.TARGET_PREFIX + door)]
         client.bridge.native_inventory_view_requests.return_value = []
         client.bridge.native_inventory_equip_requests.return_value = []
+        client.bridge.native_cooked_meals.return_value = []
         client.control.requests.return_value = []
         client.control.gameplay_status_due.return_value = False
         client.world_loot.sync = AsyncMock(return_value=state)
@@ -116,7 +118,7 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
             ])
             client.control.event.assert_any_call("native_stock_crate_interaction", sequence=12,
                                                  operation_id=crate_operation, crate=crate, input_source="memory_input")
-            client.control.event.assert_any_call("local_interaction", operation_id=operation)
+            client.control.event.assert_any_call("local_interaction", operation_id=operation, elapsed_ms=ANY)
             self.assertIsNone(client.snapshot_request)
         finally:
             allow_reply.set()
