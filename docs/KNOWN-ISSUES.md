@@ -68,6 +68,8 @@ Development candidate `rc-8700ea5` sends stock exit requests through the residen
 
 Development candidate `rc-5de6301` reads stock mushroom patch membership and nearby child transforms in C++. The existing repair path still pairs new stock children that start with zero IDs with their saved records. On a populated Crossroads patch, 64 samples matched the identities, amounts, and poses of all five children. The native path took 5.4 ms compared with 66.3 ms through Lua. During the short host walking sample, the timed patch update total fell from 10.7 ms to 3.1 ms. The largest host interval was 53 ms, including 17 ms in mushroom status publication. One muted Direct IP pair passed the cold crate, Observatory crossing and weather, placed loot and cash, and mushroom harvest and regrowth. The original saves were preserved. Rendered frame pacing and Steam behavior remain open.
 
+`rc-0d06181` prepares mushroom status rows during the paced patch sweep. Publishing now reuses those rows and checks for destroyed actors. A focused check verified that publication starts no scan and hides a destroyed actor before the next sweep. In one short Crossroads walking sample, mushroom publication peaked at 0.004 ms, compared with a 17 ms outlier in the previous build. The full host interval still reached 56 ms, with 45 ms in overall status publication. Two muted Direct IP launches passed the cold crate, Observatory crossing and weather, placed loot and cash, and harvest and regrowth. The original saves were preserved. Rendered frame pacing and Steam behavior still need playtesting.
+
 ## `rc-6690ff4` playtest
 
 | Area | Two-PC observation |
