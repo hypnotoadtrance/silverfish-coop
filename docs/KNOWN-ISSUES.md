@@ -18,6 +18,8 @@ The `rc-f0b1c06` Crossroads baseline used two muted Direct IP instances. During 
 
 `rc-47b0a75` releases the in-process bridge lock before copying status and command replies. Pose and footstep readers can retry on their next update when the bridge is busy. A standalone C++ test held the lock while checking that behavior, retained queued poses, and verified that concurrently copied status data matched its revision. The first two muted launches passed lean projection and release, footstep audio in both directions, prop carry and impacts, and Crossroads weather travel. The guest's stock lean key input was inconclusive. Food initially reached a guest marked downed or respawning after the impact fixture. A second pair passed both checks using separate campaigns in the same processes. Both runs preserved the original saves. The longest Crossroads intervals were 79 ms on host and 59 ms on guest, so overall frame pacing remains open.
 
+`rc-18e85a7` uses a current-world Unreal query for stock merchant discovery. The host's sampled lookups peaked at 0.11 ms in Observatory and 0.03 ms in Crossroads. The same two muted launches verified discovery of the ShopKeep merchant, the two-stack eye contract, roaming barter, guest crate opening, and Crossroads weather travel. The original saves were preserved. The profiler now records elapsed milliseconds and game-thread CPU cycles separately. During one 69 ms Crossroads host interval, status publication took 54 ms and used 8.8 times its same-window median CPU cycles. The guest's longest Crossroads interval was 70 ms, with world inspection and player synchronization among the largest timed calls. Frame pacing remains open.
+
 ## `rc-1799e4b` playtest
 
 | Area | Two-PC observation |

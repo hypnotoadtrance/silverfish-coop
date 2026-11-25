@@ -39,9 +39,14 @@ def staged_probe(game, module="eye_board_probe"):
     with fixture.open("xb") as stream:
         stream.write(source.read_bytes())
     try:
-        anchor = b"native_wire_board.sync(state, current_phase)"
-        if original.count(anchor) != 1:
+        anchors = (
+            b"native_wire_board.sync(state, current_phase)",
+            b'status_publication.profile.call("native_wire_board.sync", native_wire_board.sync, state, current_phase)',
+        )
+        matches = [anchor for anchor in anchors if original.count(anchor) == 1]
+        if len(matches) != 1:
             raise ValueError("The staged board tick is unavailable for this fixture")
+        anchor, = matches
         hook = f'\n        require("{module}").sync(state, current_phase)'.encode("ascii")
         runtime.write_text(main, original.replace(anchor, anchor + hook).decode("utf-8"), newline="")
         staged = json.loads(original_manifest)
