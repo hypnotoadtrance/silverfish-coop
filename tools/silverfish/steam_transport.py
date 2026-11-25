@@ -22,6 +22,7 @@ _METADATA_VERSION = "1"
 _PUBLIC_KEY = "silverfishcoop-public"
 _HOST_NAME = "silverfishcoop-host"
 _FINGERPRINT = re.compile(r"[0-9a-f]{64}")
+_DISCOVERY_MARKER = re.compile(rf"{_METADATA_VERSION}:([1-9][0-9]{{0,19}}):{_FINGERPRINT.pattern}")
 _HEADER = struct.Struct("!4sQQ")
 _MAGIC = b"SFQ1"
 _MAX_PACKET = 4096 - _HEADER.size
@@ -224,12 +225,9 @@ class SteamTransport:
         for lobby in dict.fromkeys(self.api.list_lobbies(min(count, _PUBLIC_LIMIT))):
             if not _steam_id(lobby) or self.api.lobby_data(lobby, _PUBLIC_KEY) != _METADATA_VERSION:
                 continue
-            owner = self.api.lobby_owner(lobby)
-            if not _steam_id(owner) or owner == self.api.local_id:
-                continue
-            marker = self.api.lobby_data(lobby, _METADATA_KEY)
-            prefix = f"{_METADATA_VERSION}:{owner}:"
-            if marker.startswith(prefix) and _FINGERPRINT.fullmatch(marker[len(prefix):]):
+            # Steam only exposes GetLobbyOwner to members. join() verifies the owner after entry.
+            marker = _DISCOVERY_MARKER.fullmatch(self.api.lobby_data(lobby, _METADATA_KEY))
+            if marker and _steam_id(host_id := int(marker[1])) and host_id != self.api.local_id:
                 results.append(PublicLobby(lobby, self._display_name(self.api.lobby_data(lobby, _HOST_NAME))))
         return tuple(results)
 

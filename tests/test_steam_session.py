@@ -246,9 +246,10 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_public_lobby_browser_search_and_selection_use_the_steam_join_route(self):
         _, host, _ = await self.start(HOST)
-        _, guest, bridge = await self.start(GUEST)
+        guest_api, guest, bridge = await self.start(GUEST)
         fingerprint = "e" * 64
         await host.transport.host(32124, fingerprint=fingerprint, access="public")
+        self.assertEqual(guest_api.lobby_owner(LOBBY), 0)
         browser = asyncio.create_task(steam_browser.serve(bridge, guest.transport, guest.open_lobby, guest.pump))
         self.addAsyncCleanup(self.stop_browser, browser)
         await asyncio.sleep(0)
@@ -259,9 +260,11 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         runtime.write_text(request, prefix + "search\n", newline="\n")
         await self.ready(result.exists)
         self.assertEqual(result.read_text(), prefix + "ready\t1\nFixture Host\n")
+        self.assertEqual(guest_api.lobby_owner(LOBBY), 0)
         runtime.write_text(request, prefix + "1\n", newline="\n")
         offer = bridge / steam_session.JOIN_OFFER
         await self.ready(offer.exists)
+        self.assertEqual(guest_api.lobby_owner(LOBBY), HOST)
         _, _, port, _ = offer.read_text().split()
         self.assertEqual(guest.fingerprint_for("127.0.0.1", int(port)), fingerprint)
 

@@ -67,7 +67,7 @@ class FakeSteam:
         self.platform.members.discard(self.local_id)
 
     def lobby_owner(self, lobby):
-        return self.platform.owner
+        return self.platform.owner if self.local_id in self.platform.members else 0
 
     def lobby_members(self, lobby):
         return self.platform.members.copy()

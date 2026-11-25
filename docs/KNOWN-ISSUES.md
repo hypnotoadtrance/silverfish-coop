@@ -2,6 +2,13 @@
 
 Project Silverfish Co-op is a proof of concept under active development. This list summarizes reports from release-candidate playtests. Check the notes for the specific ZIP you installed. Fixes verified in development can still need a live two-PC retest. [Release notes](https://github.com/hypnotoadtrance/silverfish-coop/releases)
 
+## `rc-1799e4b` playtest
+
+| Area | Two-PC observation |
+| --- | --- |
+| Steam public discovery | A guest's search did not list the host's Public lobby. The Steam invite joined the same lobby. The browser now reads the lobby's published metadata while browsing and checks the Steam owner after entry. The focused automated check reproduced the empty result on the old code and passed with the fix. Public discovery still needs a two-account Steam retest. |
+| Worn gear | The guest still could not unequip body armor and reported a crash to desktop when attempting to equip a Face Mask. The crash diagnostics and exact inventory gesture are pending. |
+
 ## `rc-161145a` playtest
 
 | Area | Two-PC observation |
