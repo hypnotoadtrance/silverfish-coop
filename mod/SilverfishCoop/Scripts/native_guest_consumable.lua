@@ -5,6 +5,11 @@ local use_presentation = require("native_weapon_fire_view")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
 local starter_bag = "native-guest-starter-bag"
+local mail_package = "native-guest-mail-package"
+local mail_classes = {
+    regular = "/Game/Classes/Items/Package_Mail.Package_Mail_C",
+    small = "/Game/Classes/Items/Package_Mail_Small.Package_Mail_Small_C",
+}
 local personal_consumable = "native-guest-personal-consumable"
 local cooked_meal = "native-guest-cooked-meal"
 local observation
@@ -71,13 +76,15 @@ function consumable.command(fields, state, phase)
         if not applied then error("guest_cooked_meal_refused_scope", 0) end
         return ("cooked meal %.17g %.17g %.17g %d %d"):format(food, health, regen, fatigue, intox)
     end
-    if action ~= "native-guest-bandage" and action ~= starter_bag and action ~= personal_consumable then return end
+    if action ~= "native-guest-bandage" and action ~= starter_bag and action ~= mail_package
+        and action ~= personal_consumable then return end
     observation = nil
     local name, guid = fields[3], fields[4]
     local bag = action == starter_bag
+    local mail = action == mail_package
     local personal = action == personal_consumable
     local prefix = personal and "guest_personal_consumable_refused_"
-        or bag and "guest_starter_bag_refused_" or "guest_bandage_refused_"
+        or bag and "guest_starter_bag_refused_" or mail and "guest_mail_package_refused_" or "guest_bandage_refused_"
     local valid_count = personal and (#fields == 10 or #fields == 12 or #fields == 13) or not personal and #fields == 4
     if not enabled or not valid_count or phase ~= "hosting" or not state.listening or not exact_guid(guid) then
         error(prefix .. "scope", 0)
@@ -91,6 +98,20 @@ function consumable.command(fields, state, phase)
         error(prefix .. "exact_detached_save", 0)
     end
     if personal then return settle_personal(fields, state, pawn, detached, stock) end
+    if mail then
+        if type(SilverfishOpenNativeGuestMailPackage) ~= "function" then error(prefix .. "addon_unavailable", 0) end
+        local called, used, status, kind = pcall(SilverfishOpenNativeGuestMailPackage,
+            pawn:GetAddress(), detached:GetAddress(), stock:GetAddress(), guid)
+        if called and used == false and type(status) == "string"
+            and (status:match("^guest_mail_package_refused_[a-z0-9_]+$")
+                or status:match("^mutation_unverified_guest_mail_package_[a-z0-9_]+$")) then error(status, 0) end
+        if not called or used ~= true or status ~= "used" or not mail_classes[kind] then
+            error("mutation_unverified_guest_mail_package_proof", 0)
+        end
+        observation = {map = state.map, pawn = name, guid = guid, mail_class = mail_classes[kind]}
+        pcall(use_presentation.consumed, pawn, observation.mail_class, false)
+        return "native guest mail package opened"
+    end
 
     local native_use = bag and SilverfishOpenNativeGuestStarterBag or SilverfishUseNativeGuestBandage
     if type(native_use) ~= "function" or bag and native_use ~= SilverfishOpenNativeGuestStarterBag then
@@ -170,6 +191,9 @@ function consumable.rows(state, phase, status_row)
     end
     if row.kind then
         return {status_row(starter_bag, "used", row.map, row.pawn, row.guid, row.kind, row.awards)}
+    end
+    if row.mail_class then
+        return {status_row(mail_package, "used", row.map, row.pawn, row.guid, row.mail_class)}
     end
     return {
         status_row("native-guest-bandage", "used", row.map, row.pawn, row.guid, row.before, row.after,

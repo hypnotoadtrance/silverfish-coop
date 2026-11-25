@@ -1509,6 +1509,8 @@ namespace
         if (path == STR("/Game/Classes/Items/Random_GearBag_Starter.Random_GearBag_Starter_C") ||
             path == STR("/Game/Classes/Items/HyperRandom_GearBag_Starter.HyperRandom_GearBag_Starter_C"))
             return "use-starter-bag";
+        if (silverfish::native_guest_consumable::qualifies_mail_package(Unreal::Cast<Unreal::UClass>(item_class)))
+            return "use-mail-package";
         for (const auto& consumable : silverfish::native_guest_consumable::consumables)
             if (path == consumable.path) return consumable.entry;
         return silverfish::native_guest_consumable::qualifies_personal_consumable(Unreal::Cast<Unreal::UClass>(item_class))

@@ -8,6 +8,10 @@ local camp = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:Pers
 local meal_path = "/Game/Classes/Items/Item_MRE.Item_MRE_C"
 local weta_path = "/Game/Classes/Items/Item_LiveWeta.Item_LiveWeta_C"
 local frog_path = "/Game/Classes/Items/Item_LiveFrog.Item_LiveFrog_C"
+local mail_paths = {
+    "/Game/Classes/Items/Package_Mail.Package_Mail_C",
+    "/Game/Classes/Items/Package_Mail_Small.Package_Mail_Small_C",
+}
 local health_effects = "/Game/Classes/Items/HealthItem_Master_BP.HealthItem_Master_BP_C:ApplyItemEffects"
 local factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
@@ -139,6 +143,9 @@ local function host_read(pawn, save, world, action)
         local dragged = stock_item(remote, frog, 1)
         return clicked .. ";" .. dragged
     end
+    if action == "seed-mail" then
+        return stock_item(remote, asset(mail_paths[1]), 1) .. ";" .. stock_item(remote, asset(mail_paths[2]), 1)
+    end
     if action == "seed-red-mushroom" then
         detached.PlayerHealth, detached.PlayerRegen = 200, 200
         detached.Flags:Add(FName("Player_Intox"), 10)
@@ -179,6 +186,27 @@ local function run(action)
     local pawn = asset("/Script/Engine.Default__GameplayStatics"):GetPlayerPawn(world, 0)
     local save = valid(pawn) and pawn.Save
     assert(valid(save) and pawn:IsLocallyControlled() and same(save, world.OwningGameInstance.SaveSlot_Ref), "bound local co-op pawn unavailable")
+    if action == "sample-mail" then
+        local types, seen, props = {}, {}, {}
+        for _, path in ipairs(mail_paths) do
+            local package = asset(path):GetCDO()
+            package.Junk:ForEach(function(_, class)
+                class = class:get()
+                if valid(class) then types[class:GetFullName():match("[^%.]+$")] = true end
+            end)
+        end
+        for name in pairs(types) do
+            for _, actor in ipairs(FindAllOf(name) or {}) do
+                if valid(actor) and not actor:IsActorBeingDestroyed() and same(actor:GetWorld(), world)
+                    and not seen[actor:GetAddress()] and not actor:HasAnyFlags(EObjectFlags.RF_WasLoaded) then
+                    seen[actor:GetAddress()] = true
+                    props[#props + 1] = ("%s,%s,%s"):format(name, actor:GetFullName(), tostring(actor:HasAuthority()))
+                end
+            end
+        end
+        table.sort(props)
+        return #props > 0 and table.concat(props, ";") or "-"
+    end
     if action == "guest-read" or action == "guest-tick" then
         assert(not pawn:HasAuthority(), "the guest meal readback requires a joined player")
         return guest_read(pawn, save, action == "guest-tick")

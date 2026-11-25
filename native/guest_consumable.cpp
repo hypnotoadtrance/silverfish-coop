@@ -50,6 +50,8 @@ namespace
     constexpr auto bandage_path = STR("/Game/Classes/Items/Item_Bandage.Item_Bandage_C");
     constexpr auto starter_bag_path = STR("/Game/Classes/Items/Random_GearBag_Starter.Random_GearBag_Starter_C");
     constexpr auto hyper_bag_path = STR("/Game/Classes/Items/HyperRandom_GearBag_Starter.HyperRandom_GearBag_Starter_C");
+    constexpr auto mail_path = STR("/Game/Classes/Items/Package_Mail.Package_Mail_C");
+    constexpr auto small_mail_path = STR("/Game/Classes/Items/Package_Mail_Small.Package_Mail_Small_C");
     constexpr auto boost_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:GiveRegenBoost");
     constexpr auto intox_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:Apply_PlayerIntox");
     constexpr std::array guid_component{STR("A"), STR("B"), STR("C"), STR("D")};
@@ -893,20 +895,26 @@ namespace
         return 10;
     }
 
-    int open_starter_bag(const Lua& lua)
+    int open_stock_package(const Lua& lua, bool mail)
     {
         constexpr int max_rewards = 16;
-        const auto refuse = [&](std::string_view reason) { return result(lua, false, reason); };
+        const auto* kind = mail ? "guest_mail_package" : "guest_starter_bag";
+        const auto refuse = [&](std::string_view reason) {
+            return result(lua, false, std::format("{}_refused_{}", kind, reason));
+        };
+        const auto uncertain = [&](std::string_view reason) {
+            return result(lua, false, std::format("mutation_unverified_{}_{}", kind, reason));
+        };
         if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 4 ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3) || !lua.is_string(4))
-            return refuse("guest_starter_bag_refused_scope");
+            return refuse("scope");
         const auto pawn = lua.get_integer(), detached = lua.get_integer(), stock = lua.get_integer();
         Guid source{};
         Scope scope;
         if (pawn <= 0 || detached <= 0 || stock <= 0 || !parse_guid(lua.get_string(), source) ||
             !scope.bind(pawn, detached, stock) || !read_bool(scope.pawn, STR("Dead"), false) ||
             !read_bool(scope.pawn, STR("HeadUnderWater"), false))
-            return refuse("guest_starter_bag_refused_owner");
+            return refuse("owner");
 
         RowLayout row;
         auto* backpack = field<Unreal::FArrayProperty>(scope.guest, STR("PlayerBackpack"));
@@ -918,14 +926,14 @@ namespace
         if (!row.bind() || !row.matches_array(backpack) || !row.matches_array(equipment) ||
             !row.matches_type(armor) || !row.matches_type(helmet) || !flags || !destroy ||
             destroy->GetNumParms() || destroy->GetParmsSize() || !destroy->HasAnyFunctionFlags(Unreal::FUNC_Native))
-            return refuse("guest_starter_bag_refused_schema");
+            return refuse("schema");
 
         auto* guest_rows = backpack->ContainerPtrToValuePtr<void>(scope.guest);
         auto* stock_rows = backpack->ContainerPtrToValuePtr<void>(scope.stock);
         Unreal::FScriptArrayHelper guest(backpack, guest_rows), host(backpack, stock_rows);
         if (guest.Num() < 1 || guest.Num() > max_inventory || host.Num() > max_inventory ||
             (host.Num() && guest.GetRawPtr() == host.GetRawPtr()))
-            return refuse("guest_starter_bag_refused_inventory");
+            return refuse("inventory");
 
         const auto rows_contain = [&](Unreal::FScriptArrayHelper& rows, const Guid& guid) {
             for (int index = 0; index < rows.Num(); ++index)
@@ -944,15 +952,21 @@ namespace
         {
             const auto* item = guest.GetRawPtr(index);
             if (row.identity(item) != source) continue;
-            if (selected != -1) return refuse("guest_starter_bag_refused_duplicate");
+            if (selected != -1) return refuse("duplicate");
             selected = index;
             type = Unreal::Cast<Unreal::UClass>(row.read_class(item));
         }
         const auto bag_path = type ? type->GetPathName() : RC::StringType{};
-        if (selected == -1 || (bag_path != starter_bag_path && bag_path != hyper_bag_path) ||
+        const bool supported = mail ? bag_path == mail_path || bag_path == small_mail_path :
+            bag_path == starter_bag_path || bag_path == hyper_bag_path;
+        if (selected == -1 || !supported ||
             !type->IsChildOf(row.item_base) || rows_contain(host, source) || gear_contains(scope.guest, source) ||
             gear_contains(scope.stock, source))
-            return refuse("guest_starter_bag_refused_exact_bag");
+            return refuse("exact_bag");
+        const auto* selected_row = guest.GetRawPtr(selected);
+        const auto quantity = row.quantity->GetPropertyValueInContainer(selected_row);
+        if (mail && (quantity < -1 || quantity > 1))
+            return refuse("quantity");
 
         auto* contents = field<Unreal::FArrayProperty>(type, STR("Contents"));
         auto* entry = contents ? Unreal::CastField<Unreal::FClassProperty>(contents->GetInner()) : nullptr;
@@ -962,20 +976,19 @@ namespace
         const auto host_before = copy_value(backpack, stock_rows);
         const auto host_flags = copy_value(flags, flags->ContainerPtrToValuePtr<void>(scope.stock));
         if (!entry || entry->GetMetaClass().Get() != row.item_base || !before || !prepared || !host_before || !host_flags)
-            return refuse("guest_starter_bag_refused_snapshot");
+            return refuse("snapshot");
         const auto unchanged = [&] {
             return scope.current() && backpack->Identical(stock_rows, host_before.get()) &&
                 flags->Identical(flags->ContainerPtrToValuePtr<void>(scope.stock), host_flags.get());
         };
-        const auto generation_failed = [&](bool retired, std::string_view reason) {
-            if (!retired) return refuse(reason);
-            if (!scope.current()) return refuse("mutation_unverified_guest_starter_bag_owner_changed");
+        const auto generation_failed = [&](std::string_view reason) {
+            if (!scope.current()) return uncertain("owner_changed");
             if (!backpack->Identical(stock_rows, host_before.get()))
-                return refuse("mutation_unverified_guest_starter_bag_host_backpack");
+                return uncertain("host_backpack");
             if (!flags->Identical(flags->ContainerPtrToValuePtr<void>(scope.stock), host_flags.get()))
-                return refuse("mutation_unverified_guest_starter_bag_host_flags");
+                return uncertain("host_flags");
             if (!backpack->Identical(guest_rows, before.get()))
-                return refuse("mutation_unverified_guest_starter_bag_guest_backpack");
+                return uncertain("guest_backpack");
             return refuse(reason);
         };
 
@@ -1018,10 +1031,18 @@ namespace
         auto* item_arg = field<Unreal::FClassProperty>(deferred, STR("ActorClass"));
         if (!spawn_function(deferred, 7, 0x90, 0x88) || !spawn_function(complete, 4, 0x80, 0x78) ||
             !item_arg || item_arg->GetOffset_Internal() != 8 || item_arg->GetMetaClass().Get() != actor_class)
-            return refuse("guest_starter_bag_refused_spawn_schema");
+            return refuse("spawn_schema");
 
         auto position = static_cast<Unreal::AActor*>(scope.pawn)->K2_GetActorLocation();
-        position.SetZ(position.GetZ() + 1500.0);
+        if (mail)
+        {
+            const auto yaw = static_cast<Unreal::AActor*>(scope.pawn)->K2_GetActorRotation().GetYaw();
+            constexpr double degrees_to_radians = 0.017453292519943295;
+            if (!std::isfinite(yaw)) return refuse("pose");
+            position.SetX(position.GetX() + 100.0 * std::cos(yaw * degrees_to_radians));
+            position.SetY(position.GetY() + 100.0 * std::sin(yaw * degrees_to_radians));
+        }
+        position.SetZ(position.GetZ() + (mail ? 10.0 : 1500.0));
         begin.context = scope.pawn;
         begin.owner = scope.pawn;
         begin.transform = Unreal::FTransform{Unreal::FQuat(0, 0, 0, 1), position, Unreal::FVector(1, 1, 1)};
@@ -1061,13 +1082,43 @@ namespace
                 static_cast<Unreal::AActor*>(remaining)->GetWorld() != scope.world;
         };
         const auto refused_bag = [&](Unreal::AActor* actor) {
-            const bool retired = retire(actor);
-            return generation_failed(retired, retired ? "guest_starter_bag_refused_stock_contents" :
-                "mutation_unverified_guest_starter_bag_retire_bag");
+            return retire(actor) ? generation_failed("stock_contents") : uncertain("retire_bag");
         };
         bool bag_ready{};
         auto* bag = spawn(type, bag_ready);
         if (!bag_ready) return refused_bag(bag);
+        if (mail)
+        {
+            auto* effects = type->GetFunctionByNameInChain(Unreal::FName{STR("ApplyItemEffects"), Unreal::FNAME_Find});
+            auto* lifespan = find<Unreal::UFunction>(STR("/Script/Engine.Actor:SetLifeSpan"));
+            auto* seconds = field<Unreal::FFloatProperty>(lifespan, STR("InLifespan"));
+            if (!effects || effects->GetOuterPrivate() != type || effects->GetNumParms() || effects->GetParmsSize() ||
+                effects->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) || !lifespan || !seconds ||
+                lifespan->GetNumParms() != 1 || lifespan->GetParmsSize() != sizeof(float) || seconds->GetOffset_Internal() != 0)
+                return refused_bag(bag);
+
+            Unreal::FScriptArrayHelper destination(backpack, prepared.get());
+            destination.RemoveValues(selected);
+            if (!unchanged() || !backpack->Identical(guest_rows, before.get())) return refused_bag(bag);
+            backpack->CopyCompleteValue(guest_rows, prepared.get());
+            if (!unchanged() || !backpack->Identical(guest_rows, prepared.get()))
+            {
+                if (!unchanged()) return uncertain("commit");
+                backpack->CopyCompleteValue(guest_rows, before.get());
+                return refused_bag(bag);
+            }
+
+            // The stock graph schedules the junk spawn after UseTime. Keep the
+            // hidden package alive until that callback can run in this world.
+            float lifetime = 15.0f;
+            bag->ProcessEvent(lifespan, &lifetime);
+            bag->ProcessEvent(effects, nullptr);
+            if (!unchanged() || !backpack->Identical(guest_rows, prepared.get()))
+                return uncertain("effect");
+            result(lua, true, "used");
+            lua.set_string(bag_path == mail_path ? "regular" : "small");
+            return 3;
+        }
         Unreal::FScriptArrayHelper stock_contents(contents, contents->ContainerPtrToValuePtr<void>(bag));
         std::array<Unreal::UClass*, max_rewards> rewards{};
         int reward_count = 0;
@@ -1081,9 +1132,9 @@ namespace
                 reward->GetPathName() == hyper_bag_path) return refused_bag(bag);
             rewards[reward_count++] = reward;
         }
-        if (!retire(bag)) return refuse("mutation_unverified_guest_starter_bag_retire_bag");
+        if (!retire(bag)) return uncertain("retire_bag");
         if (reward_count == 0 || guest.Num() - 1 + reward_count > max_inventory)
-            return generation_failed(true, "guest_starter_bag_refused_stock_contents");
+            return generation_failed("stock_contents");
 
         Unreal::FScriptArrayHelper destination(backpack, prepared.get());
         destination.RemoveValues(selected);
@@ -1095,31 +1146,34 @@ namespace
             const auto converted = Value(row_property->AllocateAndInitializeValue(), {row_property});
             const bool valid_row = reward_ready && converted &&
                 silverfish::loot_escrow::convert_stock_item(scope.pawn, actor, converted.get());
-            if (!retire(actor)) return refuse("mutation_unverified_guest_starter_bag_retire_reward");
-            if (!valid_row) return generation_failed(true, "guest_starter_bag_refused_stock_reward");
+            if (!retire(actor)) return uncertain("retire_reward");
+            if (!valid_row) return generation_failed("stock_reward");
             const auto guid = row.identity(converted.get());
             if (guid == Guid{} || guid == source || rows_contain(destination, guid) || rows_contain(host, guid) ||
                 gear_contains(scope.guest, guid) || gear_contains(scope.stock, guid))
-                return generation_failed(true, "guest_starter_bag_refused_reward_identity");
+                return generation_failed("reward_identity");
             const int inserted = destination.AddValue();
             row_property->CopyCompleteValue(destination.GetRawPtr(inserted), converted.get());
             if (!awarded.empty()) awarded.push_back(',');
             awarded += std::format("{:08X}{:08X}{:08X}{:08X}", guid[0], guid[1], guid[2], guid[3]);
         }
         if (!unchanged() || !backpack->Identical(guest_rows, before.get()))
-            return generation_failed(true, "guest_starter_bag_refused_stock_contents");
+            return generation_failed("stock_contents");
         backpack->CopyCompleteValue(guest_rows, prepared.get());
         if (!unchanged() || !backpack->Identical(guest_rows, prepared.get()))
         {
-            if (!unchanged()) return refuse("mutation_unverified_guest_starter_bag_commit");
+            if (!unchanged()) return uncertain("commit");
             backpack->CopyCompleteValue(guest_rows, before.get());
-            return generation_failed(true, "guest_starter_bag_refused_commit");
+            return generation_failed("commit");
         }
         result(lua, true, "used");
         lua.set_string(bag_path == starter_bag_path ? "random" : "hyperrandom");
         lua.set_string(awarded);
         return 4;
     }
+
+    int open_starter_bag(const Lua& lua) { return open_stock_package(lua, false); }
+    int open_mail_package(const Lua& lua) { return open_stock_package(lua, true); }
 
     struct CookingEffect
     {
@@ -1719,6 +1773,13 @@ bool silverfish::native_guest_consumable::qualifies_personal_consumable(Unreal::
     return Unreal::IsInGameThreadRaw() && personal_consumable_defaults(type);
 }
 
+bool silverfish::native_guest_consumable::qualifies_mail_package(Unreal::UClass* type)
+{
+    if (!live(type)) return false;
+    const auto path = type->GetPathName();
+    return path == mail_path || path == small_mail_path;
+}
+
 void silverfish::native_guest_consumable::install_hooks()
 {
     if (enabled() && cooking_pre == Hook::ERROR_ID && cooking_post == Hook::ERROR_ID)
@@ -1751,6 +1812,7 @@ void silverfish::native_guest_consumable::register_lua(RC::LuaMadeSimple::Lua& l
     {
         lua.register_function("SilverfishUseNativeGuestBandage", use);
         lua.register_function("SilverfishOpenNativeGuestStarterBag", open_starter_bag);
+        lua.register_function("SilverfishOpenNativeGuestMailPackage", open_mail_package);
         lua.register_function("SilverfishSettleNativeGuestPersonalConsumable", settle_personal_consumable);
         lua.register_function("SilverfishPollNativeGuestCookedMeal", poll_cooking);
         lua.register_function("SilverfishSettleNativeGuestCookedMeal", settle_cooking);

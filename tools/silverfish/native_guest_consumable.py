@@ -22,6 +22,11 @@ CANNED_BEANS_CLASS = "/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C"
 BROWN_MUSHROOM = "native-guest-brown-mushroom"
 BROWN_MUSHROOM_CLASS = "/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C"
 STARTER_BAG = "native-guest-starter-bag"
+MAIL_PACKAGE = "native-guest-mail-package"
+MAIL_CLASSES = frozenset({
+    "/Game/Classes/Items/Package_Mail.Package_Mail_C",
+    "/Game/Classes/Items/Package_Mail_Small.Package_Mail_Small_C",
+})
 PERSONAL = "native-guest-personal-consumable"
 COOKED_MEAL = "native-guest-cooked-meal"
 PERSONAL_KEY = "native_guest_personal_consumable"
@@ -90,7 +95,7 @@ MEDICINE = {
 }
 STOCK_CONSUMABLES = MEALS | MEDICINE
 COMMANDS = {BANDAGE_CLASS: ACTION, **{profile.class_path: action for action, profile in STOCK_CONSUMABLES.items()},
-            **dict.fromkeys(STARTER_BAGS.values(), STARTER_BAG)}
+            **dict.fromkeys(STARTER_BAGS.values(), STARTER_BAG), **dict.fromkeys(MAIL_CLASSES, MAIL_PACKAGE)}
 RESULT = {**{action: action.replace("-", "_") for action in COMMANDS.values()}, PERSONAL: PERSONAL_KEY}
 
 
@@ -415,6 +420,17 @@ def parse_starter_bag(fields: list[str]) -> dict:
             "quantity_before": 1, "quantity_after": 0, "awarded_guids": awards}
 
 
+def parse_mail_package(fields: list[str]) -> dict:
+    if len(fields) != 6:
+        raise ValueError("Invalid stock mail package report size")
+    action, state, area, pawn, guid, item_class = fields
+    if (action != MAIL_PACKAGE or state != "used" or item_class not in MAIL_CLASSES or not valid_guid(guid)
+            or len(pawn) > 512 or not pawn.startswith("Player_FP_C " + area + ".")):
+        raise ValueError("Invalid stock mail package receipt")
+    return {"state": state, "map": area, "pawn": pawn, "guid": guid, "class_path": item_class,
+            "quantity_before": 1, "quantity_after": 0}
+
+
 async def use(host, bridge, character: str, guid: str, operation_id: str, *, action: str = ACTION) -> dict:
     from .native_inventory import retain_guest_save
 
@@ -424,6 +440,7 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
     kind = key.removeprefix("native_guest_")
     meal = STOCK_CONSUMABLES.get(action)
     starter = action == STARTER_BAG
+    mail = action == MAIL_PACKAGE
     if not valid_guid(guid):
         raise party.RuleError(f"invalid_{kind}_guid")
     if not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
@@ -449,7 +466,7 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
     area, pawn = host.last_game["map"], owner["pawn"]
     deferred = await retain_guest_save(host, bridge, character, pawn)
     if not deferred:
-        if action in MEDICINE:
+        if action in MEDICINE or mail:
             raise party.RuleError(f"guest_{kind}_refused_working_save_unavailable")
         await host.checkpoint_native(bridge)
     host.native_checkpoint_unsafe = True
@@ -472,6 +489,9 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
             if (before != 1 or proof.get("class_path") not in STARTER_BAGS.values()
                     or not starter_awards(guid, proof.get("awarded_guids"))):
                 raise RuntimeError("The native starter bag did not verify exact stock rewards")
+        elif mail:
+            if before != 1 or proof.get("class_path") not in MAIL_CLASSES:
+                raise RuntimeError("The native mail package did not verify its stock class")
         elif (any(type(value) not in (int, float) for value in (hp, regen, maximum, proof.get("regen_before"), proof.get("health_after")))
                 or not 0 < hp <= maximum or not 25 <= regen <= maximum or not 0 <= proof["regen_before"] <= maximum
                 or type(proof.get("hemophilia")) is not bool
@@ -502,7 +522,7 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
     if meal is None or after == 0:
         host.native_pickup.forget_committed_row(character, guid)
     host.native_checkpoint_unsafe = False
-    details = {"awarded_guids": proof["awarded_guids"]} if starter else {"regen": regen}
+    details = {"awarded_guids": proof["awarded_guids"]} if starter else {} if mail else {"regen": regen}
     if meal is not None:
         details.update(food=proof["food_after"], intoxication=proof["intox_after"])
     host.control.event(f"{key}_{'accepted' if deferred else 'committed'}", character_id=character, operation_id=operation_id,

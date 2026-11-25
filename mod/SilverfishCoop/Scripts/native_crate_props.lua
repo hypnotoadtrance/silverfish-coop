@@ -23,7 +23,7 @@ local fuel_maps = {
     ["/Game/Classes/Maps/Maps_Dungeons/Anex_01_P"] = true,
 }
 local world, spawner_class, container_class, prop_class, hooked
-local placed, placed_props, dig_props
+local placed, placed_props, spawned_props
 local pending_debris = {}
 local core_class_path = "/Game/Classes/Actors/MindCore_BP.MindCore_BP_C"
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
@@ -94,19 +94,21 @@ local function publish(spawner, actor)
     if root_mesh(actor) and publish_motion(actor) then carry.enroll(actor) end
 end
 
-local function enroll_unearthed_props(state)
-    if not valid(world) or type(SilverfishReadStockDigProp) ~= "function" then
-        dig_props = nil
+local function enroll_stock_spawned_props(state)
+    if not valid(world) or type(SilverfishReadStockSpawnedProp) ~= "function" then
+        spawned_props = nil
         return
     end
     local pawn = state.local_pawn and state.local_pawn.pawn
     local base = valid(prop_class) and prop_class or StaticFindObject(prop_path)
     if not valid(pawn) or not valid(base) then return end
-    if not dig_props or not same(dig_props.world, world) then dig_props = {world = world, sequence = 0} end
+    if not spawned_props or not same(spawned_props.world, world) then
+        spawned_props = {world = world, sequence = 0}
+    end
     for _ = 1, 8 do
-        local sequence, name, class = SilverfishReadStockDigProp(pawn:GetAddress(), dig_props.sequence)
+        local sequence, name, class = SilverfishReadStockSpawnedProp(pawn:GetAddress(), spawned_props.sequence)
         if not sequence then break end
-        dig_props.sequence = sequence
+        spawned_props.sequence = sequence
         local actor = StaticFindObject(name:match("^%S+ (.+)$"))
         if valid(actor) and actor:GetFullName() == name and actor:IsA(base)
             and same(actor:GetClass(), StaticFindObject(class)) and same(actor:GetWorld(), world)
@@ -263,7 +265,7 @@ function props.sync(state, phase)
             enroll_debris(wrapper)
         end
     end
-    enroll_unearthed_props(state)
+    enroll_stock_spawned_props(state)
     if hooked or not valid(world) or type(RegisterHook) ~= "function" then return end
     local spawn = spawner_path .. ":SpawnLoot"
     spawner_class, container_class, prop_class = StaticFindObject(spawner_path),

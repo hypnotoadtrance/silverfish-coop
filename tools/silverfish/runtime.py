@@ -2256,8 +2256,13 @@ class Bridge:
                                                    "regen_before": _finite(fields[7]), "regen_after": _finite(fields[8]),
                                                    "health_before": _finite(fields[9]), "health_after": _finite(fields[10]),
                                                    "max_health": _finite(fields[11]), "hemophilia": fields[12] == "1"}
-                elif fields[0] in STOCK_CONSUMABLES or fields[0] == STARTER_BAG:
-                    proof = parse_starter_bag(fields) if fields[0] == STARTER_BAG else parse_meal(fields)
+                elif fields[0] in STOCK_CONSUMABLES or fields[0] in (STARTER_BAG, native_guest_consumable.MAIL_PACKAGE):
+                    if fields[0] == STARTER_BAG:
+                        proof = parse_starter_bag(fields)
+                    elif fields[0] == native_guest_consumable.MAIL_PACKAGE:
+                        proof = native_guest_consumable.parse_mail_package(fields)
+                    else:
+                        proof = parse_meal(fields)
                     key = CONSUMABLE_RESULT[fields[0]]
                     if key in data or data.get("state") != "hosting" or data.get("map") != proof["map"]:
                         raise ValueError("Invalid stock item use report scope")

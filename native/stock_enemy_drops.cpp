@@ -44,6 +44,8 @@ namespace
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto actor_path = STR("/Script/Engine.Actor");
     constexpr auto prop_path = STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C");
+    constexpr auto mail_graph = STR("/Game/Classes/Items/Package_Mail.Package_Mail_C:ExecuteUbergraph_Package_Mail");
+    constexpr auto small_mail_graph = STR("/Game/Classes/Items/Package_Mail_Small.Package_Mail_Small_C:ExecuteUbergraph_Package_Mail_Small");
     constexpr auto hole_path = STR("/Game/Assets/StaticMeshes/Mesh_Misc/DigHole_BP.DigHole_BP_C");
     constexpr auto hole_graph = STR("/Game/Assets/StaticMeshes/Mesh_Misc/DigHole_BP.DigHole_BP_C:ExecuteUbergraph_DigHole_BP");
     constexpr auto hole_begin = STR("/Game/Assets/StaticMeshes/Mesh_Misc/DigHole_BP.DigHole_BP_C:ReceiveBeginPlay");
@@ -275,6 +277,24 @@ namespace
             record_drop(actor, RC::to_utf8_string(receiver->GetFullName()), {}, physics_prop);
     }
 
+    void record_mail_prop(U::UObject* receiver, U::FFrame& frame, const U::TCHAR* graph_path)
+    {
+        auto* graph = find<U::UFunction>(graph_path);
+        if (!graph || !live(receiver) || frame.Object() != receiver || frame.Node() != graph ||
+            receiver->GetClassPrivate() != graph->GetOuterPrivate()) return;
+        auto* package = static_cast<U::AActor*>(receiver);
+        auto* world = package->GetWorld();
+        auto* prop = find<U::UClass>(prop_path);
+        if (!prop || !listen_instance(world) || !authority_in_level(package, world)) return;
+
+        // The stock package graph can resume from a latent action. Its two
+        // spawn locals identify the finished actor without scanning the level.
+        auto* actor = finished_stock_spawn(frame);
+        if (!actor || !actor->IsA(prop) || !authority_in_level(static_cast<U::AActor*>(actor), world) ||
+            already_observed(world, actor) || !begin_roll(world)) return;
+        record_drop(actor, RC::to_utf8_string(package->GetFullName()), {}, true);
+    }
+
     void observe_buried_spawn(U::UObject* receiver, U::FFrame& frame)
     {
         auto* base = find<U::UClass>(buried_path);
@@ -435,8 +455,15 @@ namespace
         restore_fixture_roll(frame);
         if (buried.frame == &frame) record_buried_spawn(call, frame);
         static const U::FName dig_graph{STR("ExecuteUbergraph_DigHole_BP")};
-        if (frame.Node() && frame.Node()->GetFName() == dig_graph && !call.OriginalFunctionCallPrevented())
-            record_unearthed(receiver, frame);
+        static const U::FName mail_name{STR("ExecuteUbergraph_Package_Mail")};
+        static const U::FName small_mail_name{STR("ExecuteUbergraph_Package_Mail_Small")};
+        if (frame.Node() && !call.OriginalFunctionCallPrevented())
+        {
+            const auto name = frame.Node()->GetFName();
+            if (name == dig_graph) record_unearthed(receiver, frame);
+            else if (name == mail_name) record_mail_prop(receiver, frame, mail_graph);
+            else if (name == small_mail_name) record_mail_prop(receiver, frame, small_mail_graph);
+        }
         if (!observing.frame) return;
         if (&frame != observing.frame)
         {
@@ -519,7 +546,7 @@ namespace
     }
 
     int read(const Lua& lua) { return read_drop(lua, false); }
-    int read_dig_prop(const Lua& lua) { return read_drop(lua, true); }
+    int read_spawned_prop(const Lua& lua) { return read_drop(lua, true); }
 }
 
 namespace silverfish::stock_enemy_drops
@@ -586,7 +613,7 @@ namespace silverfish::stock_enemy_drops
     {
         if (!enabled()) return;
         lua.register_function("SilverfishReadStockEnemyDrop", read);
-        lua.register_function("SilverfishReadStockDigProp", read_dig_prop);
+        lua.register_function("SilverfishReadStockSpawnedProp", read_spawned_prop);
         if (dig_fixture_enabled()) lua.register_function("SilverfishArmStockDigRollFixture", arm_dig_fixture);
     }
 }
