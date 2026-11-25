@@ -64,6 +64,8 @@ Development build `rc-0d64597` reuses unchanged ground-fire status and skips the
 
 Development candidate `rc-8700ea5` sends stock exit requests through the resident in-process queue. An exit can retry briefly if the queue is full and releases its request if the source pawn changes or the retry expires. Two muted Direct IP launches verified the Observatory crossing, the Northeast Rail door into ShopKeep, Crossroads weather, a stock door toggle, mushroom regrowth, and the ShopKeep bounty turn-in. The crossing advanced the campaign checkpoint, the exit requests created no mailbox files, and the original saves were preserved. The guest's visible transition and two-PC Steam behavior still need playtesting.
 
+`rc-41e2e2a` reuses verified transition walls on the host while continuing to check the party's travel permission. The guest renews the native stash input scope while the stash is closed and qualifies the screen after a stock press. In one short Crossroads sample, the idle host refreshed wall sources five times across 12 updates, compared with 13 refreshes across 13 updates on `rc-8700ea5`. Median guest stash polling during walking took 0.018 ms, compared with 0.046 ms. One muted Direct IP pair passed the Observatory crossing and checkpoint, Crossroads weather and door toggles, the authored route and bounty turn-in at ShopKeep, and a drag deposit through the private stock stash. The stash created no page files and left the campaign checkpoint unchanged. The original saves were preserved across the two executable launches. Steam reconnect and rendered frame pacing still need playtesting.
+
 ## `rc-6690ff4` playtest
 
 | Area | Two-PC observation |

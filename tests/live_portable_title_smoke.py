@@ -8045,6 +8045,7 @@ if __name__ == "__main__":
         parser.error("Use --stock-shovel-host-quest with --stock-shovel-quest")
     resident_check_options.add("stock_cooked_meal")
     resident_check_options.update(("crossroads_profile", "stock_crossroads_recovery"))
+    resident_check_options.update(("guest_stash_memory", "guest_stash_large_memory"))
     if args.crossroads_profile:
         resident_check_options.add("stock_crate_ring")
     if any((args.stock_food, args.stock_cooked_meal, args.stock_personal_consumable, args.stock_wipe_chooser,
