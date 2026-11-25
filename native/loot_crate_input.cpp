@@ -323,15 +323,17 @@ namespace
 
     int read_lockpicks(const Lua& lua)
     {
-        if (!ready() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        if (!ready() || lockpick_results.empty() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto now = Clock::now();
+        std::erase_if(lockpick_results, [now](const auto& row) { return row.deadline <= now || !row.pawn.Get(); });
+        if (lockpick_results.empty()) return 0;
         const auto address = lua.get_integer();
         auto* pawn = address > 0 ? silverfish::native_interaction_input::current_guest_pawn(address) : nullptr;
         if (!pawn) return 0;
         int fields = 0;
-        const auto now = Clock::now();
         for (const auto& result : lockpick_results)
         {
-            if (result.pawn.Get() != pawn || result.deadline <= now) continue;
+            if (result.pawn.Get() != pawn) continue;
             const auto* profile = silverfish::shared_loot::authored_profile(result.crate.Get());
             if (!profile) continue;
             lua.set_integer(static_cast<std::int64_t>(profile - profiles.data() + 1));
