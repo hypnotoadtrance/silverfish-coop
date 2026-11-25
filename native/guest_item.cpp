@@ -3173,12 +3173,59 @@ namespace
         return 2;
     }
 
+    bool local_inventory_current(const Context& context)
+    {
+        return context.pawn && context.save && context.world &&
+            silverfish::native_interaction_input::current_guest_pawn(
+                reinterpret_cast<std::uintptr_t>(context.pawn)) == context.pawn &&
+            object(context.pawn, STR("Save")) == context.save &&
+            static_cast<Unreal::AActor*>(context.pawn)->GetWorld() == context.world &&
+            object(context.world, STR("OwningGameInstance")) == context.instance &&
+            object(context.instance, STR("SaveSlot_Ref")) == context.save;
+    }
+
+    bool bind_local_inventory(Context& context, std::int64_t pawn, std::int64_t save)
+    {
+        if (!Unreal::IsInGameThreadRaw() || pawn <= 0 || save <= 0) return false;
+        context.pawn = silverfish::native_interaction_input::current_guest_pawn(static_cast<std::uintptr_t>(pawn));
+        if (!live(context.pawn) || context.pawn->GetClassPrivate() != find<Unreal::UClass>(pawn_path)) return false;
+        context.save = object(context.pawn, STR("Save"));
+        if (!live(context.save) || context.save->GetClassPrivate() != find<Unreal::UClass>(save_path) ||
+            reinterpret_cast<std::uintptr_t>(context.save) != static_cast<std::uintptr_t>(save)) return false;
+        context.world = static_cast<Unreal::AActor*>(context.pawn)->GetWorld();
+        context.instance = object(context.world, STR("OwningGameInstance"));
+        return local_inventory_current(context) && ready_pawn(context);
+    }
+
+    template <bool local>
+    bool inventory_current(const Context& context)
+    {
+        if constexpr (local) return local_inventory_current(context);
+        return ownership_current(context);
+    }
+
+    template <bool local>
     int store_stock_equipment(const Lua& lua)
     {
         Context context;
         int requested_slot = -1;
-        if (!resolve(lua, context, nullptr, nullptr, nullptr, false, &requested_slot).empty() || !ready_pawn(context) ||
-            std::ranges::any_of(smg_holds, [&](const SmgHold& hold) {
+        if constexpr (local)
+        {
+            const auto count = lua.get_stack_size();
+            if (count < 3 || count > 4 || !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3) ||
+                (count == 4 && !lua.is_integer(4))) return result(lua, false, "native_inventory_equip_refused_owner");
+            const auto pawn = lua.get_integer();
+            const auto save = lua.get_integer();
+            if (!parse_guid(lua.get_string(), context.guid) || !bind_local_inventory(context, pawn, save))
+                return result(lua, false, "native_inventory_equip_refused_owner");
+            const auto slot = count == 4 ? lua.get_integer() : -1;
+            if (slot < -1 || slot >= quick_slots) return result(lua, false, "native_inventory_equip_refused_slot");
+            requested_slot = static_cast<int>(slot);
+        }
+        else if (!resolve(lua, context, nullptr, nullptr, nullptr, false, &requested_slot).empty())
+            return result(lua, false, "native_inventory_equip_refused_owner");
+
+        if (!ready_pawn(context) || std::ranges::any_of(smg_holds, [&](const SmgHold& hold) {
                 return hold.fenced && hold.pawn.Get() == context.pawn;
             })) return result(lua, false, "native_inventory_equip_refused_owner");
         Inventory inventory;
@@ -3258,16 +3305,16 @@ namespace
                 payload->Identical(payload->ContainerPtrToValuePtr<void>(first), payload->ContainerPtrToValuePtr<void>(second));
         };
         if (!same_item(target_row, inventory.item) || (replacing && !same_item(source_row, old_slot)) ||
-            !ownership_current(context) || !bag_property->Identical(original_bag.get(), bag) ||
+            !inventory_current<local>(context) || !bag_property->Identical(original_bag.get(), bag) ||
             !equip_property->Identical(original_equipment.get(), equipped))
             return result(lua, false, "native_inventory_equip_refused_staging");
         bag_property->CopyCompleteValue(bag, proposed_bag.get());
         equip_property->CopyCompleteValue(equipped, proposed_equipment.get());
-        if (!ownership_current(context) || !bag_property->Identical(proposed_bag.get(), bag) ||
+        if (!inventory_current<local>(context) || !bag_property->Identical(proposed_bag.get(), bag) ||
             !equip_property->Identical(proposed_equipment.get(), equipped) ||
             inventory.selected->GetPropertyValueInContainer(context.save) != selected)
         {
-            if (ownership_current(context))
+            if (inventory_current<local>(context))
             {
                 bag_property->CopyCompleteValue(bag, original_bag.get());
                 equip_property->CopyCompleteValue(equipped, original_equipment.get());
@@ -3286,6 +3333,74 @@ namespace
                 formatted[word * 8 + part] = digits[(old_guid[word] >> ((7 - part) * 4)) & 15];
         lua.set_string(replacing ? std::string_view{formatted.data(), formatted.size()} : std::string_view{"-"});
         return 5;
+    }
+
+    int preview_worn_or_unequip(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 5 || !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3) ||
+            !lua.is_integer(4) || !lua.is_bool(5)) return 0;
+        const auto pawn = lua.get_integer();
+        const auto save = lua.get_integer();
+        Context context;
+        if (!parse_guid(lua.get_string(), context.guid) || !bind_local_inventory(context, pawn, save)) return 0;
+        const auto slot = lua.get_integer();
+        const bool removing = lua.get_bool();
+        if (slot < 0 || slot > 9 || (!removing && slot < quick_slots)) return 0;
+        Inventory inventory;
+        if (removing ? !bind_inventory(context, inventory).empty() : !locate(context, inventory).empty()) return 0;
+        if (slot == inventory.selected->GetPropertyValueInContainer(context.save)) return 0;
+
+        auto* bag = inventory.backpack->ContainerPtrToValuePtr<void>(context.save);
+        Unreal::FScriptArrayHelper live_slots(inventory.equipment,
+            inventory.equipment->ContainerPtrToValuePtr<void>(context.save));
+        auto* destination = slot == 8 ? inventory.helmet->ContainerPtrToValuePtr<void>(context.save) :
+            slot == 9 ? inventory.armor->ContainerPtrToValuePtr<void>(context.save) :
+            slot < live_slots.Num() ? live_slots.GetRawPtr(static_cast<int>(slot)) : nullptr;
+        if (!destination) return 0;
+
+        using Value = std::unique_ptr<void, PropertyDeleter>;
+        auto* bag_property = inventory.backpack;
+        auto* row_property = inventory.type;
+        Value prepared_bag(bag_property->AllocateAndInitializeValue(), {bag_property});
+        Value prepared_row(row_property->AllocateAndInitializeValue(), {row_property});
+        if (!prepared_bag || !prepared_row) return 0;
+        bag_property->CopyCompleteValue(prepared_bag.get(), bag);
+        Unreal::FScriptArrayHelper items(bag_property, prepared_bag.get());
+        const auto prior = inventory.identity(destination);
+        auto* old_class = inventory.row_class(destination);
+        if (removing)
+        {
+            if (prior != context.guid || !live(old_class) || items.Num() >= max_inventory ||
+                inventory.ammo->GetPropertyValueInContainer(destination) < -1) return 0;
+            row_property->CopyCompleteValue(items.GetRawPtr(items.AddValue()), destination);
+            if (slot >= quick_slots)
+            {
+                auto* defaults = context.save->GetClassPrivate()->GetClassDefaultObject().Get();
+                auto* worn = slot == 8 ? inventory.helmet : inventory.armor;
+                if (!live(defaults)) return 0;
+                row_property->CopyCompleteValue(prepared_row.get(), worn->ContainerPtrToValuePtr<void>(defaults));
+            }
+        }
+        else
+        {
+            if (inventory.backpack_index < 0 || !inventory.item || (prior == Guid{}) != (old_class == nullptr)) return 0;
+            auto* type = Unreal::Cast<Unreal::UClass>(inventory.row_class(inventory.item));
+            auto* base = find<Unreal::UClass>(slot == 8 ?
+                STR("/Game/Classes/Armor_Items/Item_HelmetMaster_BP.Item_HelmetMaster_BP_C") :
+                STR("/Game/Classes/Armor_Items/Item_ArmorMaster_BP.Item_ArmorMaster_BP_C"));
+            if (!live(type) || !base || type == base || !type->IsChildOf(base)) return 0;
+            row_property->CopyCompleteValue(prepared_row.get(), inventory.item);
+            if (prior == Guid{}) items.RemoveValues(inventory.backpack_index, 1);
+            else row_property->CopyCompleteValue(items.GetRawPtr(inventory.backpack_index), destination);
+        }
+        if (!local_inventory_current(context)) return 0;
+        const auto ammo = inventory.ammo->GetPropertyValueInContainer(destination);
+        bag_property->CopyCompleteValue(bag, prepared_bag.get());
+        row_property->CopyCompleteValue(destination, prepared_row.get());
+        lua.set_integer(slot);
+        lua.set_string(removing ? std::to_string(ammo) : prior == Guid{} ? "-" :
+            std::format("{:08X}{:08X}{:08X}{:08X}", prior[0], prior[1], prior[2], prior[3]));
+        return 2;
     }
 
     struct RemoveEquipmentCall
@@ -3491,6 +3606,7 @@ namespace
         return 5;
     }
 
+    template <bool local>
     int sort_backpack(const Lua& lua)
     {
         if (!env("SILVERFISH_COOP_NATIVE_GUEST_SAVE") || !Unreal::IsInGameThreadRaw() ||
@@ -3499,7 +3615,12 @@ namespace
         const auto pawn_address = lua.get_integer();
         const auto save_address = lua.get_integer();
         Context context;
-        if (pawn_address <= 0 || save_address <= 0 || !resolve_owner(context, pawn_address, save_address).empty())
+        if constexpr (local)
+        {
+            if (!bind_local_inventory(context, pawn_address, save_address))
+                return result(lua, false, "native_inventory_sort_refused_owner");
+        }
+        else if (pawn_address <= 0 || save_address <= 0 || !resolve_owner(context, pawn_address, save_address).empty())
             return result(lua, false, "native_inventory_sort_refused_owner");
         if (!ready_pawn(context) || std::ranges::any_of(smg_holds, [&](const SmgHold& hold) {
                 return hold.fenced && hold.pawn.Get() == context.pawn;
@@ -3584,15 +3705,15 @@ namespace
                 return result(lua, false, "native_inventory_sort_refused_payload");
         }
 
-        if (!ownership_current(context) || !backpack->Identical(original.get(), current))
+        if (!inventory_current<local>(context) || !backpack->Identical(original.get(), current))
             return result(lua, false, "mutation_unverified_native_inventory_sort_scope");
         const bool changed = !backpack->Identical(candidate, current);
         if (changed)
         {
             backpack->CopyCompleteValue(current, candidate);
-            if (!ownership_current(context) || !backpack->Identical(candidate, current))
+            if (!inventory_current<local>(context) || !backpack->Identical(candidate, current))
             {
-                if (ownership_current(context))
+                if (inventory_current<local>(context))
                 {
                     backpack->CopyCompleteValue(current, original.get());
                     if (backpack->Identical(original.get(), current))
@@ -4188,8 +4309,11 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishReloadNativeGuestUnderbarrel", run<Operation::Reload, true>);
     lua.register_function("SilverfishSplitNativeGuestAmmoStack", split_backpack_stack);
     lua.register_function("SilverfishTakeNativeGuestWeaponAmmo", take_ammo);
-    lua.register_function("SilverfishSortNativeGuestBackpack", sort_backpack);
-    lua.register_function("SilverfishStoreNativeGuestEquipment", store_stock_equipment);
+    lua.register_function("SilverfishSortNativeGuestBackpack", sort_backpack<false>);
+    lua.register_function("SilverfishStoreNativeGuestEquipment", store_stock_equipment<false>);
+    lua.register_function("SilverfishSortLocalGuestBackpack", sort_backpack<true>);
+    lua.register_function("SilverfishStoreLocalGuestEquipment", store_stock_equipment<true>);
+    lua.register_function("SilverfishPreviewLocalGuestGear", preview_worn_or_unequip);
     lua.register_function("SilverfishUnequipNativeGuestEquipment", unequip_stock_equipment);
     lua.register_function("SilverfishSelectNativeGuestEquipment", select_stock_equipment);
     lua.register_function("SilverfishThrowNativeGuestFlare", throw_flare);

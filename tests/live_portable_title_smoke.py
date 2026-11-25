@@ -4931,6 +4931,15 @@ async def verify_stock_unequip(first, second, evidence):
                         raise RuntimeError(rejected[-1]["reason"])
                     await asyncio.sleep(.15)
 
+        async def local_move(receipt, mode, guid, slot):
+            frame = await wait_resident_status(guest_run, lambda value: value.get("state") == "connected")
+            rows = await resident_events(guest_run, frame)
+            preview, = [row for row in rows if row["event"] == "native_stock_inventory_local_preview"
+                        and row.get("operation_id") == receipt["operation_id"]]
+            assert (preview["mode"], preview["guid"], preview["slot"]) == (mode, guid, slot), preview
+            assert preview["time_unix"] <= receipt["time_unix"], (preview, receipt)
+            return preview
+
         async def leaves_stock_open():
             await wait_resident_status(guest_run, lambda frame:
                 frame.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
@@ -4980,7 +4989,8 @@ async def verify_stock_unequip(first, second, evidence):
         host_inactive = unequip_seat(await portable_probe_command(host.bridge, probe, f"remote-read\t{pawn}"))
         assert guest_inactive == host_inactive == dict(host_before, rows=rows), (guest_inactive, host_inactive)
         evidence["guest_inactive"] = {"guest": guest_inactive, "host": host_inactive, "receipt": inactive,
-                                      "canceled_drag_kept_slot": True}
+                                      "canceled_drag_kept_slot": True,
+                                      "local_move": await local_move(inactive, "unequip", ids[2], 5)}
         await leaves_stock_open()
 
         changed = unequip_seat(await portable_probe_command(host.bridge, probe, f"remote-ammo\t{pawn}"))
@@ -5040,7 +5050,8 @@ async def verify_stock_unequip(first, second, evidence):
             rows = [row for row in authoritative["native_inventory"]["items"] if row["guid"] == guid]
             source = "helmet" if slot == 8 else "armor"
             assert len(rows) == 1 and rows[0]["source"] == source, authoritative
-            evidence["guest_worn_equip"].append({"receipt": receipt, "worn_row": rows[0]})
+            evidence["guest_worn_equip"].append({"receipt": receipt, "worn_row": rows[0],
+                                                 "local_move": await local_move(receipt, "equip", guid, slot)})
         evidence["guest_worn_swap"] = []
         for index, ((key, slot, equip, _), guid) in enumerate(zip(worn, replacements, strict=True)):
             displaced = current_worn[index]
@@ -5053,7 +5064,9 @@ async def verify_stock_unequip(first, second, evidence):
             inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
             sources = {row["guid"]: row["source"] for row in inventory}
             assert (sources.get(displaced), sources.get(guid)) == ("backpack", "helmet" if slot == 8 else "armor")
-            evidence["guest_worn_swap"].append(receipt)
+            preview = await local_move(receipt, "equip", guid, slot)
+            assert preview["result"] == displaced, (preview, displaced)
+            evidence["guest_worn_swap"].append(dict(receipt, local_move=preview))
         evidence["guest_worn"] = []
         for index, ((_, slot, _, action), guid) in enumerate(zip(worn, replacements, strict=True)):
             assert (await portable_probe_command(guest.bridge, probe, f"{action}\t{guid}")).split(",") == current_worn
@@ -5066,7 +5079,8 @@ async def verify_stock_unequip(first, second, evidence):
             assert authoritative["ok"], authoritative
             rows = [row for row in authoritative["native_inventory"]["items"] if row["guid"] == guid]
             assert len(rows) == 1 and rows[0]["source"] == "backpack", authoritative
-            evidence["guest_worn"].append({"receipt": receipt, "backpack_row": rows[0]})
+            evidence["guest_worn"].append({"receipt": receipt, "backpack_row": rows[0],
+                                           "local_move": await local_move(receipt, "unequip", guid, slot)})
 
         assert saves() == before, "The guest stock Unequip wrote a save before a checkpoint"
         evidence["guest_worn_world_drop"] = []

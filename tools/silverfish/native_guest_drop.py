@@ -124,11 +124,14 @@ async def stock_menu_fixture(client, target, operation: str, mode: str) -> dict:
                                      sequence, expected, split)
 
 
-async def settle_stock_action(client, area, epoch, operation, mode, entry, guid, quantity, sequence, expected, split):
+async def settle_stock_action(client, area, epoch, operation, mode, entry, guid, quantity, sequence, expected, split,
+                              layout_preview=None):
     sorting, splitting, unloading = mode == "sort", mode == "split", mode == "unload"
     accepted = False
     finish = ("native-inventory-stock-drop-finish", epoch, sequence)
     try:
+        if layout_preview is not None:
+            await client.guest_ui.close()
         if sorting:
             if entry != "sort" or quantity != 0:
                 raise ValueError("The native action did not request a backpack sort")
@@ -238,12 +241,25 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                     or not record.valid_position(receipt.get("location"))):
                 raise RuntimeError("The host did not settle the stock guest inventory drop")
             committed = (str(remaining),)
-        await client.guest_ui.refresh(client)
+        # A matching slot receipt already describes the local inventory.
+        # Sorting still needs the complete host order, which can include
+        # other items that arrived while this report was in flight.
+        same_layout = layout_preview is not None and (
+            mode == "equip" and displaced == layout_preview or mode == "unequip" and rounds == layout_preview
+        )
+        if not same_layout:
+            if layout_preview is None:
+                await client.guest_ui.refresh(client)
+            else:
+                await client.guest_ui.refresh(client, force=True)
         accepted = True
     except (KeyError, TypeError, ValueError) as error:
         raise RuntimeError(f"The stock guest backpack could not refresh: {error}") from error
     finally:
         if not accepted:
+            if layout_preview is not None and client.zone_epoch == epoch and client.last_game.get("map") == area:
+                with suppress(OSError, RuntimeError, ValueError):
+                    await client.guest_ui.refresh(client, force=True)
             with suppress(OSError, RuntimeError, ValueError):
                 await client.bridge.command(*finish, "refused", timeout=3)
     client.last_game = await client.bridge.command(*finish, *committed, timeout=5)
@@ -265,8 +281,12 @@ async def service_stock_view(client, active: bool) -> None:
                            f"{client.host_session}:{epoch}:{view['pawn']}:stock-inventory:{sequence}").hex
     split = (guid, count, expected) if mode in ("split", "unload") else None
     try:
+        layout_preview = view.get("layout_preview")
+        if layout_preview is not None:
+            client.control.event("native_stock_inventory_local_preview", operation_id=operation,
+                                 mode=mode, guid=guid, slot=expected - 1, result=layout_preview)
         result = await settle_stock_action(client, area, epoch, operation, mode, view["entry"],
-                                           guid, count, str(sequence), str(expected), split)
+                                           guid, count, str(sequence), str(expected), split, layout_preview)
         client.control.event("native_stock_inventory_action", operation_id=operation, **result)
     except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
         client.control.event("native_stock_inventory_rejected", operation_id=operation, reason=str(error))

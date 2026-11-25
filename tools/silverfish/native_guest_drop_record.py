@@ -43,7 +43,7 @@ def valid_id(value) -> bool:
 
 
 def parse_stock_action(fields, game):
-    _, area, pawn, epoch, sequence, entry, guid, count, expected = fields
+    _, area, pawn, epoch, sequence, entry, guid, count, expected, *layout = fields
     if ((game.get("state"), game.get("map"), game.get("pawns", {}).get("local", {}).get("name"))
             != ("connected", area, pawn) or not valid_id(epoch)
             or not re.fullmatch(r"[1-9][0-9]{0,15}", sequence) or int(sequence) >= 2**53
@@ -66,8 +66,18 @@ def parse_stock_action(fields, game):
             or (mode == "worn-drop" and (amount != 1 or before not in (9, 10)))
             or (mode not in ("split", "unload", "equip", "unequip", "worn-drop") and before != 0)):
         raise ValueError("Invalid stock backpack operation")
-    return dict(area=area, pawn=pawn, epoch=epoch, sequence=int(sequence), entry=entry, guid=guid,
-                count=amount, expected=before, mode=mode)
+    result = dict(area=area, pawn=pawn, epoch=epoch, sequence=int(sequence), entry=entry, guid=guid,
+                  count=amount, expected=before, mode=mode)
+    if layout and layout[0]:
+        preview = layout[0]
+        if (mode == "sort" and preview == "sorted"
+                or mode == "equip" and 1 <= before <= 10 and (preview == "-" or valid_guid(preview) and preview != guid)):
+            result["layout_preview"] = preview
+        elif mode == "unequip" and re.fullmatch(r"(?:-1|[0-9]{1,10})", preview) and int(preview) < 2**31:
+            result["layout_preview"] = int(preview)
+        else:
+            raise ValueError("Invalid local backpack result")
+    return result
 
 
 def valid_position(value) -> bool:

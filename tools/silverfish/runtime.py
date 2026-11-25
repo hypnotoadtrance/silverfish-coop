@@ -2443,7 +2443,7 @@ class Bridge:
                         map=fields[1], pawn=fields[2], source_guid=fields[3], new_guid=fields[4], class_path=fields[5],
                         quantity_before=int(fields[6]), remaining=int(fields[7]), split=int(fields[8]), weapon_class=fields[9],
                     )
-                elif fields[0] == native_guest_drop_record.STOCK_ACTION_ROW and len(fields) == 9:
+                elif fields[0] == native_guest_drop_record.STOCK_ACTION_ROW and len(fields) in (9, 10):
                     data[native_guest_drop_record.STOCK_ACTION_KEY] = native_guest_drop_record.parse_stock_action(fields, data)
                 elif fields == ["native-inventory-split-view-capability", "1"]:
                     data["native_inventory_split_view_capability"] = True

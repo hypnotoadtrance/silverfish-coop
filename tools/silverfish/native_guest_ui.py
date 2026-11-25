@@ -278,9 +278,11 @@ class GuestView:
         await self.project(client, character, validate(contents, area, character))
         self.digest = digest
 
-    async def refresh(self, client):
+    async def refresh(self, client, *, force=False):
         """Project a newly committed inventory while the requesting screen is still mounted."""
         await self.close()
+        if force:
+            self.digest = "-"
         area, epoch = client.last_game.get("map"), client.zone_epoch
         character = client.invite["character_id"]
         try:

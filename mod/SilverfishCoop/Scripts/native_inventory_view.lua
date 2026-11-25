@@ -683,6 +683,39 @@ local function open_stock_inventory(fields, current, state, phase)
     return ("opened stock guest inventory with %d backpack cards"):format(displayed)
 end
 
+local function preview_stock_layout(action)
+    local pawn, save = action.context.pawn:GetAddress(), action.save:GetAddress()
+    local target = (action.expected or 0) - 1
+    local slot, receipt
+    if action.sort and type(SilverfishSortLocalGuestBackpack) == "function" then
+        local ok = SilverfishSortLocalGuestBackpack(pawn, save)
+        if ok then receipt = "sorted" end
+    elseif action.equip and target < 8 and type(SilverfishStoreLocalGuestEquipment) == "function" then
+        local ok, _, stored, _, displaced = SilverfishStoreLocalGuestEquipment(pawn, save, action.guid, target)
+        if ok then slot, receipt = stored, displaced end
+    elseif (action.equip or action.entry == "unequip") and type(SilverfishPreviewLocalGuestGear) == "function" then
+        slot, receipt = SilverfishPreviewLocalGuestGear(pawn, save, action.guid, target, action.entry == "unequip")
+    end
+    if not receipt then return end
+
+    -- Keep the exact destination and outcome for the host report. Rebuild the
+    -- stock cards while the native input receipt is still occupied.
+    action.layout_preview = receipt
+    if slot then action.expected = slot + 1 end
+    local screen = action.screen
+    if not action.sort then screen.ItemManager:CloseContextMenu() end
+    screen.BackpackPanel:FullRefresh()
+    if slot then
+        local widget = widget_at(screen.ItemManager.EquipSlots, slot + 1)
+        if valid(widget) then widget:FullRefresh() end
+    end
+    if slot and slot >= 8 then
+        local instance = action.context.world.OwningGameInstance
+        if slot == 8 then instance:UpdateHelmet() else instance:UpdateArmor() end
+        instance:Calc_CarryWeight()
+    end
+end
+
 sync_stock = function(current, state, phase, allowed)
     local session, stack = stock_session, current.controller.MenuStack
     local top, present = stack:GetArrayNum(), false
@@ -713,6 +746,8 @@ sync_stock = function(current, state, phase, allowed)
         guid = entry == "sort" and "-" or guid, quantity = quantity, entry = entry, expected = expected,
         sort = entry == "sort", split = (entry == "split" or entry == "take-ammo") and quantity or nil,
         unload = entry == "take-ammo", equip = entry == "equip", worn_drop = entry:match("^worn_drop_") ~= nil, live = true}
+    -- A UI refresh failure still leaves a valid report for a typed local move.
+    pcall(preview_stock_layout, stock_drop)
 end
 
 local function preview_personal_consumable(fields, current, state, phase)
@@ -1143,7 +1178,8 @@ function inventory_view.rows(state, phase, status_row)
     if binding_state then rows[#rows + 1] = status_row("native-inventory-view-binding", binding_state) end
     if stock_drop and stock_drop.live and same_context(current, stock_drop.context) then
         rows[#rows + 1] = status_row("native-inventory-stock-action", current.map, current.name, stock_drop.epoch,
-            stock_drop.sequence, stock_drop.entry, stock_drop.guid, stock_drop.quantity, stock_drop.expected or 0)
+            stock_drop.sequence, stock_drop.entry, stock_drop.guid, stock_drop.quantity, stock_drop.expected or 0,
+            stock_drop.layout_preview or "")
         if stock_drop.preview then
             rows[#rows + 1] = status_row("native-guest-personal-consumable-preview", current.map, current.name,
                 stock_drop.guid, table.unpack(stock_drop.preview))
