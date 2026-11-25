@@ -5223,6 +5223,7 @@ class Client:
         self.crate_intents = native_loot.OpenIntents()
         self.crate_lids = native_loot.GuestCrateProjection()
         self.last_lockpick_result = 0
+        self.pending_lockpick_unlocks = set()
         self.last_broker_intent = 0
         self.wire_board = native_wire_board.WireBoardView(bridge, control) if invite.get("native_wire_board") else None
         self.dead_drop_projection = (None, 0.0)
@@ -5822,13 +5823,23 @@ class Client:
             self.last_lockpick_result = sequence
             operation = uuid.uuid5(self.bridge.input_namespace, f"{session}:{epoch}:{pawn}:lockpick:{sequence}").hex
             target = "@".join((epoch, *(row[key] for key in ("crate", "guid", "unlocked", "quantity", "spent"))))
+            crate = row["crate"]
+            if row["unlocked"] == "1":
+                self.pending_lockpick_unlocks.add(crate)
             started = time.monotonic()
             try:
                 result = await self.gameplay_action(native_loot.LOCKPICK, operation, target)
-                self.control.event("native_guest_lockpick", sequence=sequence, milliseconds=round(1000 * (time.monotonic() - started)),
-                                   **result)
+                elapsed = round(1000 * (time.monotonic() - started))
+                proof = result.get(native_loot.LOCKPICK_RESULT, {})
+                if proof.get("locked") is False and (proof.get("map"), proof.get("crate"), proof.get("guid")) == (area, crate, row["guid"]):
+                    await self.cancel_gameplay_snapshot()
+                    if self.stock_interaction_scope() == scope:
+                        self.gameplay.setdefault(native_loot.VEHICLE_LOCKS, {})[crate] = False
+                self.control.event("native_guest_lockpick", sequence=sequence, milliseconds=elapsed, **result)
             except (ValueError, OSError, RuntimeError) as error:
                 self.control.event("native_guest_lockpick_rejected", sequence=sequence, reason=str(error))
+            finally:
+                self.pending_lockpick_unlocks.discard(crate)
 
     async def service_broker_input(self, active: bool) -> None:
         if not self.invite.get("native_broker_input"):
@@ -6307,8 +6318,11 @@ class Client:
                     await native_subway_valve.project_client(self)
                     await native_enemy_loot.project_client(self)
                     if self.invite.get("native_loot_input"):
+                        locks = self.gameplay.get(native_loot.VEHICLE_LOCKS)
+                        if self.pending_lockpick_unlocks and isinstance(locks, dict):
+                            locks = {crate: locked for crate, locked in locks.items() if crate not in self.pending_lockpick_unlocks}
                         self.last_game = await native_loot.project_vehicle_locks(
-                            self.bridge, self.last_game, self.gameplay.get(native_loot.VEHICLE_LOCKS))
+                            self.bridge, self.last_game, locks)
                         self.last_game = await native_loot.project_stock_alarms(
                             self.bridge, self.last_game, self.gameplay.get(native_loot.STOCK_ALARMS))
                         self.last_game = await native_loot.project_power_boxes(

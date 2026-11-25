@@ -3432,16 +3432,19 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str) -> dict:
             armed = await seat.bridge.command("fixture-stock-lockpick-locker", "arm")
             assert armed["ack"]["message"] == "locked", armed["ack"]
         approached = await host.bridge.command("native-loot-approach", pawn, crate)
+        assert approached["native_loot"]["ok"], approached["native_loot"]
         position, = [row["location"] for row in approached["pawns"].values() if row["name"] == pawn]
         await wait_resident_status(guest_run, lambda frame:
             (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location")) and math.dist(point, position) < 50)
         started = time.monotonic()
+        started_at = time.time()
         press = await guest.bridge.command("native-loot-lockpick-input-fixture", crate)
         assert press["ack"]["message"] == "stock lockpick started", press["ack"]
         async with asyncio.timeout(12):
             while True:
                 receipt = next((row for row in await resident_events(guest_run, frame)
-                                if row["event"] in ("native_guest_lockpick", "native_guest_lockpick_rejected")), None)
+                                if row["time_unix"] >= started_at
+                                and row["event"] in ("native_guest_lockpick", "native_guest_lockpick_rejected")), None)
                 if receipt:
                     break
                 await asyncio.sleep(.06)
@@ -3452,6 +3455,8 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str) -> dict:
         for seat in (host, guest):
             lock = await seat.bridge.command("fixture-stock-lockpick-locker", "read")
             assert lock["ack"]["message"] == "unlocked", lock["ack"]
+        rows = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
+        assert [row["quantity"] for row in rows if row["guid"] == guid] == [result["remaining"]], rows
         proofs.append({"class_path": item["class_path"], "slot": slot, "units": units,
                        "remaining": result["remaining"], "result_roundtrip_ms": receipt["milliseconds"],
                        "press_to_ack_ms": round((time.monotonic() - started) * 1000)})
@@ -6628,6 +6633,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             ]
         if stock_warehouse_switch or stock_interaction_feedback:
             proof["warehouse_switch_overlays"] = [probes.enter_context(warehouse_switch_overlay(game)) for game in games]
+        if stock_interaction_feedback:
+            for game in games:
+                probes.enter_context(portable_script_overlay(game, "native_authored_pickup_input_fixture.lua", lambda script:
+                    script.replace('local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"',
+                                   'local host_fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"', 1)))
         if stock_warehouse_board:
             proof["warehouse_board_overlays"] = [probes.enter_context(warehouse_board_overlay(game)) for game in games]
         if stock_bottle:
