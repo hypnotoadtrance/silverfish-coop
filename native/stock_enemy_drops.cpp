@@ -1,5 +1,6 @@
 #include "stock_enemy_drops.hpp"
 #include "enemy_loot.hpp"
+#include "guest_consumable.hpp"
 #include "host_dig.hpp"
 #include "shared_loot.hpp"
 
@@ -46,6 +47,7 @@ namespace
     constexpr auto prop_path = STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C");
     constexpr auto mail_graph = STR("/Game/Classes/Items/Package_Mail.Package_Mail_C:ExecuteUbergraph_Package_Mail");
     constexpr auto small_mail_graph = STR("/Game/Classes/Items/Package_Mail_Small.Package_Mail_Small_C:ExecuteUbergraph_Package_Mail_Small");
+    constexpr auto package_contents_graph = STR("/Game/Classes/Items/Container_Item_Master.Container_Item_Master_C:ExecuteUbergraph_Container_Item_Master");
     constexpr auto hole_path = STR("/Game/Assets/StaticMeshes/Mesh_Misc/DigHole_BP.DigHole_BP_C");
     constexpr auto hole_graph = STR("/Game/Assets/StaticMeshes/Mesh_Misc/DigHole_BP.DigHole_BP_C:ExecuteUbergraph_DigHole_BP");
     constexpr auto hole_begin = STR("/Game/Assets/StaticMeshes/Mesh_Misc/DigHole_BP.DigHole_BP_C:ReceiveBeginPlay");
@@ -85,12 +87,12 @@ namespace
         std::string source;
         bool managed{};
     } buried;
-    struct BoltObservation
+    struct DeferredSpawnObservation
     {
         U::FFrame* frame{};
-        U::FWeakObjectPtr projectile, world;
+        U::FWeakObjectPtr source, world;
         U::FObjectProperty* deferred{};
-    } bolt_observing;
+    } bolt_observing, mail_contents;
     U::FWeakObjectPtr reported_world;
     std::deque<Drop> recent;
     std::uint64_t sequence{}, roll{};
@@ -295,6 +297,33 @@ namespace
         record_drop(actor, RC::to_utf8_string(package->GetFullName()), {}, true);
     }
 
+    void observe_mail_contents(U::UObject* receiver, U::FFrame& frame)
+    {
+        if (mail_contents.frame || !frame.Locals() || !live(receiver) || frame.Object() != receiver ||
+            frame.Node() != find<U::UFunction>(package_contents_graph) ||
+            !silverfish::native_guest_consumable::qualifies_mail_package(receiver->GetClassPrivate())) return;
+        auto* package = static_cast<U::AActor*>(receiver);
+        auto* world = package->GetWorld();
+        auto* deferred = field<U::FObjectProperty>(frame.Node(), STR("CallFunc_BeginDeferredActorSpawnFromClass_ReturnValue"));
+        auto* to_inventory = field<U::FBoolProperty>(receiver, STR("AddToInventory"));
+        if (deferred && !deferred->HasAnyPropertyFlags(U::CPF_Parm | U::CPF_OutParm | U::CPF_ReturnParm) &&
+            to_inventory && !to_inventory->GetPropertyValueInContainer(receiver) &&
+            listen_instance(world) && authority_in_level(package, world))
+            mail_contents = {&frame, package, world, deferred};
+    }
+
+    void record_mail_item(U::AActor* actor)
+    {
+        const auto& scope = mail_contents;
+        auto* package = scope.source.Get();
+        auto* world = static_cast<U::UWorld*>(scope.world.Get());
+        auto* locals = scope.frame->Locals();
+        if (!live(package) || !item_in_world(actor, world) || actor->HasAnyFlags(U::RF_WasLoaded) || !locals ||
+            scope.deferred->GetObjectPropertyValue(scope.deferred->ContainerPtrToValuePtr<void>(locals)) != actor ||
+            already_observed(world, actor) || !begin_roll(world)) return;
+        record_drop(actor, RC::to_utf8_string(package->GetFullName()), {});
+    }
+
     void observe_buried_spawn(U::UObject* receiver, U::FFrame& frame)
     {
         auto* base = find<U::UClass>(buried_path);
@@ -346,7 +375,7 @@ namespace
     void record_landed_bolt(U::AActor* actor)
     {
         const auto& scope = bolt_observing;
-        auto* projectile = scope.projectile.Get();
+        auto* projectile = scope.source.Get();
         auto* world = static_cast<U::UWorld*>(scope.world.Get());
         if (!scope.frame || !live(projectile) || !live(actor) || actor->GetClassPrivate() != find<U::UClass>(bolt_path) ||
             actor->HasAnyFlags(U::RF_WasLoaded) || !item_in_world(actor, world)) return;
@@ -373,6 +402,7 @@ namespace
     {
         if (!available() || call.OriginalFunctionCallPrevented()) return;
         if (bolt_observing.frame) record_landed_bolt(actor);
+        if (mail_contents.frame) record_mail_item(actor);
         if (!observing.frame) return;
         auto* locals = observing.frame->Locals();
         if (locals && std::ranges::any_of(observing.deferred, [=](auto* property) {
@@ -386,11 +416,13 @@ namespace
         static const U::FName dig_graph{STR("ExecuteUbergraph_DigHole_BP")};
         static const U::FName thrown_bolt_graph{STR("ExecuteUbergraph_Bolt_Projectile_BP")};
         static const U::FName buried_item_graph{STR("ExecuteUbergraph_BurriedItem_BP")};
+        static const U::FName contents_graph{STR("ExecuteUbergraph_Container_Item_Master")};
         auto* function = frame.Node();
         if (!available() || !function || call.OriginalFunctionCallPrevented()) return;
         if (function->GetFName() == dig_graph) force_fixture_roll(receiver, frame);
         if (function->GetFName() == thrown_bolt_graph) observe_landing_bolt(receiver, frame);
         if (function->GetFName() == buried_item_graph) observe_buried_spawn(receiver, frame);
+        if (function->GetFName() == contents_graph) observe_mail_contents(receiver, frame);
         if (observing.frame || function->GetFName() != spawn_name || frame.Object() != receiver || !live(receiver)) return;
         auto* base = find<U::UClass>(npc_path);
         auto* caller = frame.PreviousFrame();
@@ -452,6 +484,7 @@ namespace
     {
         if (!available()) return;
         if (&frame == bolt_observing.frame) bolt_observing = {};
+        if (&frame == mail_contents.frame) mail_contents = {};
         restore_fixture_roll(frame);
         if (buried.frame == &frame) record_buried_spawn(call, frame);
         static const U::FName dig_graph{STR("ExecuteUbergraph_DigHole_BP")};
@@ -602,6 +635,7 @@ namespace silverfish::stock_enemy_drops
         recent.clear();
         reported_world = U::FWeakObjectPtr{};
         buried = {};
+        mail_contents = {};
         for (auto& hook : hooks)
         {
             if (hook != H::ERROR_ID) H::UnregisterCallback(hook);

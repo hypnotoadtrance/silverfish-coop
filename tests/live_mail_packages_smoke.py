@@ -7,7 +7,7 @@ import time
 
 import live_portable_title_smoke as suite
 from portable_personal_consumable import stock_inventory_open, use_stock_item
-from tools.silverfish import native_guest_consumable as consumable
+from tools.silverfish import native_guest_consumable as consumable, native_world_loot
 
 
 async def verify_mail_packages(host, guest, pawn):
@@ -34,6 +34,7 @@ async def verify_mail_packages(host, guest, pawn):
         return result
 
     host_pack = await inventory(host_run)
+    authority = await suite.wait_resident_status(host_run, lambda state: state.get("state") == "hosting")
     seeded = time.time()
     guids = (await probe(host, "seed-mail")).split(";")
     guest_pack = await inventory(guest_run)
@@ -47,6 +48,7 @@ async def verify_mail_packages(host, guest, pawn):
     evidence = {}
     key = consumable.RESULT[consumable.MAIL_PACKAGE]
     for guid, drag in zip(guids, (False, True), strict=True):
+        class_name = guest_pack[guid]["class_path"].rsplit(".", 1)[1]
         host_before, guest_before = await asyncio.gather(props(host, "true"), props(guest, "false"))
         started = time.time()
         receipt = await use_stock_item(guest_run, frame, guid, key, drag=drag)
@@ -58,9 +60,17 @@ async def verify_mail_packages(host, guest, pawn):
                 host_after, guest_after = await asyncio.gather(props(host, "true"), props(guest, "false"))
                 host_new = sorted(kind for name, kind in host_after.items() if name not in host_before)
                 guest_new = sorted(kind for name, kind in guest_after.items() if name not in guest_before)
-                if host_new and host_new == guest_new:
+                banked = [row for row in await suite.resident_events(host_run, authority)
+                          if row["event"] == "native_stock_enemy_loot_banked" and row["time_unix"] >= started
+                          and row["source"].rsplit(".", 1)[1].startswith(class_name + "_")]
+                if banked or host_new and host_new == guest_new:
                     break
                 await asyncio.sleep(.1)
+        for item in banked:
+            assert item["revision"] is None, item
+            identity = native_world_loot.stock_enemy_identity(item["guid"], item.get("visual_id"))
+            await suite.wait_resident_status(guest_run, lambda state: identity in state.get("game", {}).get(
+                native_world_loot.KEY, {}), timeout=7)
 
         event, = [row for row in await suite.resident_events(guest_run, frame)
                   if row["time_unix"] >= started and row.get(key) == receipt]
@@ -69,7 +79,8 @@ async def verify_mail_packages(host, guest, pawn):
         assert guid not in await inventory(guest_run)
         assert await inventory(host_run) == host_pack
         assert suite.campaign_save_hashes(host.campaign) == saves, "Opening a mail package wrote an early save"
-        evidence[guid] = {"gesture": "drag" if drag else "context", "receipt": receipt, "shared_objects": host_new}
+        evidence[guid] = {"gesture": "drag" if drag else "context", "receipt": receipt,
+                          "shared_props": host_new, "shared_items": [item["class_path"] for item in banked]}
     return {"stock_mail_packages": evidence, "deferred_save": True}
 
 
