@@ -6430,8 +6430,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["stock_placed_item_overlays"] = [
                 probes.enter_context(placed_item_overlay(game, portable_script_overlay)) for game in games
             ]
-            probes.enter_context(cash_pickup_overlay(first_game, portable_script_overlay))
             for game in games:
+                probes.enter_context(cash_pickup_overlay(game, portable_script_overlay))
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableCashPopupProbe",
                                                      fixture="portable_cash_popup_probe.lua"))
         if stock_mushrooms:

@@ -1,12 +1,15 @@
 """Verify a committed pickup reaches both seats' stock cash widget."""
 
 import asyncio
+from contextlib import contextmanager
+import math
 
 from portable_guest_world_start import resident_events, wait_resident_status
 from tools.silverfish import native_authored_pickup as pickup
 from tools.silverfish.travel import CROSSROADS
 
 
+@contextmanager
 def cash_pickup_overlay(game, overlay):
     gate = 'if phase ~= "hosting" or not fixtures or not host_fixtures then\n            error("The stock loose pickup positioning fixture is unavailable", 0)'
 
@@ -14,7 +17,16 @@ def cash_pickup_overlay(game, overlay):
         assert script.count(gate) == 1
         return script.replace(gate, gate.replace("not host_fixtures", "not (host_fixtures or title_fixtures)"))
 
-    return overlay(game, "native_authored_pickup.lua", enable)
+    def allow_title_approach(script):
+        guard = "not approach_scope(state, phase, pawn, actor, sources[profile.source])"
+        assert script.count(guard) == 1
+        return script.replace(guard, 'not approach_scope(state, phase, pawn, actor, sources[profile.source], '
+                              'os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1")')
+
+    with overlay(game, "native_authored_pickup.lua", enable), overlay(
+        game, "native_authored_pickup_input_fixture.lua", allow_title_approach
+    ):
+        yield
 
 
 async def verify_stock_cash_popup(host, guest, pawn, command, save_hashes):
@@ -31,11 +43,13 @@ async def verify_stock_cash_popup(host, guest, pawn, command, save_hashes):
         return (await command(seat.bridge, "portable-cash-popup", request)).strip()
 
     assert await asyncio.gather(*(notice(seat, "arm") for seat in (host, guest))) == ["armed", "armed"]
-    await host.bridge.command(pickup.APPROACH, pawn, source, timeout=6)
+    staged = await host.bridge.command(pickup.APPROACH, pawn, source, timeout=6)
+    position, = [row["location"] for row in staged["pawns"].values() if row.get("name") == pawn]
     guest_frame = await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("map") == CROSSROADS
-        and frame["game"].get(pickup.SOURCES_KEY, {}).get(source, {}).get("state") == "available")
+        and frame["game"].get(pickup.SOURCES_KEY, {}).get(source, {}).get("state") == "available"
+        and math.dist(frame["game"]["pawns"].get("local", {}).get("location", [0] * 3)[:2], position[:2]) < 70)
     pressed = await guest.bridge.command(pickup.STOCK_FIXTURE, source, timeout=6)
-    assert pressed["native_authored_pickup_interaction"]["source"] == source, pressed.get("ack")
+    assert pressed["ack"]["message"] == "exact stock loose pickup input consumed", pressed["ack"]
     settled = await wait_resident_status(host_run, lambda frame: frame.get("gameplay", {})
         .get(pickup.STATE_KEY, {}).get(source, {}).get("wallet_credit", {}).get("after") == balance + amount)
     await wait_resident_status(guest_run, lambda frame: frame.get("gameplay", {}).get("shared_wallet") == balance + amount
@@ -43,12 +57,15 @@ async def verify_stock_cash_popup(host, guest, pawn, command, save_hashes):
 
     expected = f"RECEIVED ${amount}!"
     readings = {}
-    async with asyncio.timeout(8):
-        while True:
-            readings = dict(zip(("host", "guest"), await asyncio.gather(*(notice(seat, "read") for seat in (host, guest)))))
-            if set(readings.values()) == {expected}:
-                break
-            await asyncio.sleep(.08)
+    try:
+        async with asyncio.timeout(8):
+            while True:
+                readings = dict(zip(("host", "guest"), await asyncio.gather(*(notice(seat, "read") for seat in (host, guest)))))
+                if set(readings.values()) == {expected}:
+                    break
+                await asyncio.sleep(.08)
+    except TimeoutError as error:
+        raise AssertionError(f"Expected {expected} once on each seat, saw {readings}") from error
     await asyncio.sleep(.8)
     assert await asyncio.gather(*(notice(seat, "read") for seat in (host, guest))) == [expected, expected]
     notices = [event for event in await resident_events(guest_run, guest_frame)
