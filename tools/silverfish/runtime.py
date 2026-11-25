@@ -1579,8 +1579,13 @@ class Bridge:
                         raise ValueError("Invalid local stock dialogue view")
                     view = dict(pawn=pawn, state=state, sequence=sequence, row=row, token=token)
                     if len(fields) == 7:
-                        if fields[6] != "stock" or row != native_dialogue.SEWER_OFFERS or data.get("map") != native_dialogue.CISTERN:
-                            raise ValueError("Invalid local stock trade surface")
+                        stock_surface = (data.get("map"), row) in (
+                            (native_dialogue.CISTERN, native_dialogue.SEWER_OFFERS),
+                            (native_dialogue.OBSERVATORY, native_dialogue.ROOT),
+                            (native_dialogue.OBSERVATORY, native_dialogue.STORY),
+                        )
+                        if fields[6] != "stock" or not stock_surface:
+                            raise ValueError("Invalid local stock dialogue surface")
                         view["surface"] = "stock"
                     data["native_dialogue_view"] = view
                 elif fields[0] == "native-dialogue-stock":

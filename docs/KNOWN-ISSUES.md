@@ -16,6 +16,9 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 | Wandering trader confirmation | The guest opened the stock barter window in Observatory and staged an offer. Clicking Trade left the original panel unchanged and showed no confirmation popup. One isolated host purchase and one isolated guest purchase succeeded through the stock button on `rc-b1654c1`. The original trade failure remains open. |
 | Guest level transitions | The guest saw the expected fade to black, then briefly saw the main menu during the next map's load. |
 | Castaway dialogue | The guest saw the keyboard-driven text overlay when talking to the Castaway in Observatory. This conversation still needs the stock dialogue screen. |
+| Guest combat responsiveness | The guest noticed a delay before their shots registered on enemies. Guest-side feedback and reporting a hit or kill against the synchronized enemy are open. |
+| Guest lockpicking | The guest equipped a lockpick and received the success message after using it on a locker. The locker remained locked. |
+| Guest pipe bomb | The guest equipped and threw a pipe bomb. The players confirmed that the throw and explosion synchronized between host and guest. |
 
 ## `rc-161145a` playtest
 

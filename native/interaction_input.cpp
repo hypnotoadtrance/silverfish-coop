@@ -276,6 +276,14 @@ namespace
     };
 
     SewerTradeInput sewer_trade;
+    struct CastawayMenu
+    {
+        Unreal::FWeakObjectPtr screen;
+        std::array<Unreal::FWeakObjectPtr, 3> responses;
+        Receipt pending{};
+        int ordinal{};
+    };
+    CastawayMenu castaway_menu;
     std::atomic<bool> installed{};
     std::atomic<std::uint64_t> generation{1};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
@@ -837,6 +845,102 @@ namespace
         lua.set_integer(sewer_trade.ordinal);
         return 2;
     }
+
+    constexpr auto castaway_screen_class = STR("/Game/Classes/GUI/Dialogue_Widget.Dialogue_Widget_C");
+    constexpr auto castaway_response_class = STR("/Game/Classes/GUI/SubWidgets/PlayerResponce_Widget.PlayerResponce_Widget_C");
+
+    bool castaway_screen_active(Unreal::UObject* screen)
+    {
+        auto* world = scope.world.Get();
+        return !scope.host && live_scope(scope) && live(world) && world->GetPathName() == dialogue_profiles.front().world &&
+            live(screen) && screen->GetClassPrivate() == find<Unreal::UClass>(castaway_screen_class) &&
+            screen->GetWorld() == world && top_menu() == screen && standing(scope.pawn.Get());
+    }
+
+    void intercept_castaway_response(Iteration& call, Unreal::UObject* response, Unreal::UFunction* function, const void* args)
+    {
+        auto* screen = castaway_menu.screen.Get();
+        if (!screen || !response || !function || call.OriginalFunctionCallPrevented()) return;
+        static const Unreal::FName click{STR("BndEvt__PlayerResponce_Widget_Button_0_K2Node_ComponentBoundEvent_1_OnButtonClickedEvent__DelegateSignature")};
+        static const Unreal::FName graph{STR("ExecuteUbergraph_PlayerResponce_Widget")};
+        const auto name = function->GetFName();
+        if (name != click && name != graph) return;
+        auto* type = find<Unreal::UClass>(castaway_response_class);
+        if (!type || !live(response) || response->GetClassPrivate() != type ||
+            function->GetOuterPrivate() != type || object_field(response, STR("ParentWidget_Ref")) != screen) return;
+        if (name == graph)
+        {
+            auto* entry = input<Unreal::FIntProperty>(function, STR("EntryPoint"), 0);
+            if (!args || !entry || function->GetParmsSize() != sizeof(std::int32_t) ||
+                entry->GetPropertyValueInContainer(args) != 423) return;
+        }
+        else if (function->GetNumParms() || function->GetParmsSize() || function->GetReturnProperty()) return;
+        call.PreventOriginalFunctionCall();
+        const auto now = Clock::now();
+        if (!call.OriginalFunctionCallPrevented() || !castaway_screen_active(screen) || now >= scope.expires ||
+            dialogue_sequence == max_sequence || castaway_menu.pending.sequence) return;
+        for (std::size_t index = 0; index < castaway_menu.responses.size(); ++index)
+        {
+            if (response != castaway_menu.responses[index].Get()) continue;
+            castaway_menu.ordinal = static_cast<int>(index) + 1;
+            castaway_menu.pending = {++dialogue_sequence, now + receipt_lifetime};
+            break;
+        }
+    }
+
+    int set_castaway_screen(const Lua& lua)
+    {
+        const auto respond = [&](bool value) { lua.set_bool(value); return 1; };
+        const auto count = lua.get_stack_size();
+        if (!available() || !count || !(count % 2) || count > 7 || !lua.is_integer(1)) return respond(false);
+        const auto requested_screen = lua.get_integer();
+        if (!requested_screen && count == 1) { castaway_menu = {}; return respond(true); }
+        auto* screen = top_menu();
+        if (count < 3 || !castaway_screen_active(screen) || address(screen) != requested_screen) return respond(false);
+        std::array<Address, 3> requested{};
+        for (int index = 1; index < count; index += 2)
+        {
+            if (!lua.is_integer(1) || !lua.is_integer(2)) return respond(false);
+            const auto ordinal = lua.get_integer();
+            const auto candidate = lua.get_integer();
+            if (ordinal < 1 || ordinal > 3 || candidate <= 0 || requested[ordinal - 1] ||
+                std::ranges::find(requested, candidate) != requested.end()) return respond(false);
+            requested[ordinal - 1] = candidate;
+        }
+        CastawayMenu next;
+        next.screen = screen;
+        auto* type = find<Unreal::UClass>(castaway_response_class);
+        if (!type) return respond(false);
+        int missing = (count - 1) / 2;
+        Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* response, int, int) {
+            if (!live(response) || response->GetClassPrivate() != type || object_field(response, STR("ParentWidget_Ref")) != screen)
+                return RC::LoopAction::Continue;
+            for (std::size_t index = 0; index < requested.size(); ++index)
+            {
+                if (address(response) != requested[index]) continue;
+                next.responses[index] = response;
+                --missing;
+                break;
+            }
+            return missing ? RC::LoopAction::Continue : RC::LoopAction::Break;
+        });
+        if (missing) return respond(false);
+        castaway_menu = next;
+        return respond(true);
+    }
+
+    int take_castaway_response(const Lua& lua)
+    {
+        auto* screen = castaway_menu.screen.Get();
+        if (!available() || lua.get_stack_size() != 1 || !lua.is_integer(1) ||
+            !castaway_screen_active(screen) || address(screen) != lua.get_integer(1)) return 0;
+        const auto pending = castaway_menu.pending;
+        castaway_menu.pending = {};
+        if (!pending.sequence || Clock::now() >= pending.expires) return 0;
+        lua.set_integer(static_cast<std::int64_t>(pending.sequence));
+        lua.set_integer(castaway_menu.ordinal);
+        return 2;
+    }
     bool exact_valve(Unreal::UObject* actor)
     {
         auto* world = scope.world.Get();
@@ -1077,6 +1181,7 @@ namespace
         intercept_stock_board_validation(iteration, actor, function);
         intercept_stock_board(iteration, actor, function);
         intercept_sewer_trade(iteration, actor, function, parameters);
+        intercept_castaway_response(iteration, actor, function, parameters);
         intercept_sewer_overlap(iteration, actor, function, parameters);
         intercept_dialogue(iteration, actor, function, parameters);
         intercept_valve(iteration, actor, function, parameters);
@@ -1713,6 +1818,7 @@ namespace
         {
             dialogue_input = {};
             sewer_trade = {};
+            castaway_menu = {};
             sewer_answering = false;
         }
         return 0;
@@ -1962,6 +2068,8 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishOpenNativeSewerDialogue", open_sewer_dialogue);
         lua.register_function("SilverfishTakeNativeDialogueInput", take_dialogue_press);
         lua.register_function("SilverfishClearNativeDialogueInputScope", clear_dialogue_scope);
+        lua.register_function("SilverfishSetNativeCastawayDialogueScreen", set_castaway_screen);
+        lua.register_function("SilverfishTakeNativeCastawayResponse", take_castaway_response);
         lua.register_function("SilverfishTakeNativeSubwayValvePress", take_valve_press);
         lua.register_function("SilverfishTakeNativeStashPress", take_stash_press);
         lua.register_function("SilverfishTakeNativeLanternPress", take_lantern_press);
@@ -1985,6 +2093,7 @@ namespace silverfish::native_interaction_input
         dialogue_input = {};
         sewer_answering = false;
         sewer_trade = {};
+        castaway_menu = {};
         valve_input = {};
         stash_input = {};
         lantern_input = {};

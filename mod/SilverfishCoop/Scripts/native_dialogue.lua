@@ -6,11 +6,13 @@ local shopkeep = require("native_dialogue_shopkeep")
 local mama = require("native_dialogue_mama")
 local sewer = require("native_dialogue_sewer")
 local sewer_stock = require("native_sewer_stock_screen")
+local castaway_stock = require("native_castaway_stock_screen")
 local shop_view = require("native_shop_view")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local title_fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
 local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local world_path = observatory .. ".Observitory_P"
 local level = world_path .. ":PersistentLevel."
@@ -248,14 +250,15 @@ end
 
 local function can_use(current, pending_response)
     local stack = current.controller.MenuStack
-    local in_stock_trade = session and session.trade and sewer_stock.present(current)
-    return current.controller.Loading == false and stack and (stack:GetArrayNum() == 0 or in_stock_trade)
+    local in_stock_menu = castaway_stock.present(current) or session and session.trade and sewer_stock.present(current)
+    return current.controller.Loading == false and stack and (stack:GetArrayNum() == 0 or in_stock_menu)
         and current.pawn.Dead == false
         and players.is_downed(current.pawn) == false and (pending_response or fresh(current))
         and reach(current.pawn, current.target, current.component, current.profile)
 end
 
 local function hide()
+    castaway_stock.close()
     if valid(widget) then widget:RemoveFromParent() end
     widget, last_text = nil, nil
 end
@@ -271,6 +274,12 @@ function dialogue.clear()
 end
 
 local function show(current)
+    if current.profile == castaway then
+        if not session or not session.content then hide(); return end
+        local ok, reason = pcall(castaway_stock.open, current, session.content)
+        if not ok then castaway_stock.close(); error(reason, 0) end
+        return
+    end
     if session and session.trade and session.offers and sewer_stock.available() then
         hide()
         local ok, reason = pcall(sewer_stock.open, current, session.offers)
@@ -319,7 +328,8 @@ local function drain(current, sequence, ordinal)
     if not math.tointeger(sequence) or sequence < 1 or sequence >= 2^53 or (session and session.pending) then return false end
     local token, choice = "-", "-"
     if ordinal then
-        if not session or not session.trade or not session.offers or not session.offers[ordinal].ready then return false end
+        local offer = session and session.trade and session.offers and session.offers[ordinal]
+        if not session or not session.content or (current.profile ~= castaway and not (offer and offer.ready)) then return false end
         for index, choice_id in ipairs(session.content.ordinals) do
             if ordinal == choice_id then selected = index; break end
         end
@@ -341,6 +351,7 @@ function dialogue.sync(state, phase)
     if not current then if binding then dialogue.clear() end; return end
     if not same_scope(binding, current) then dialogue.clear(); binding = current end
     if sewer_stock.exists() and not sewer_stock.present(current) then sewer_stock.close(); session = nil end
+    if castaway_stock.exists() and not castaway_stock.present(current) then castaway_stock.close(); session = nil end
     local standing, now = can_use(current, true), os.time()
     local allow = standing and fresh(current, now) and not shop_view.reception_open(current.pawn)
     if session and (not standing or session.expires <= now
@@ -356,6 +367,14 @@ function dialogue.sync(state, phase)
         session = nil; sewer_stock.close(); hide(); return
     end
     binding.armed = allow
+    if castaway_stock.exists() then
+        move = 0
+        if allow and session and not session.pending then
+            local sequence, ordinal = castaway_stock.take(current)
+            if sequence and ordinal and drain(current, sequence, ordinal) then castaway_stock.freeze() end
+        end
+        return
+    end
     if sewer_stock.exists() then
         move = 0
         if allow and session and not session.pending then
@@ -407,7 +426,7 @@ local function host_command(fields, state, phase)
     if (sewer_open or sewer_trade) and profile ~= sewer then reject("sewer_scope_unavailable") end
     if readings_open and profile ~= mosby then reject("readings_scope_unavailable") end
     if action == "native-dialogue-approach" then
-        if not (headless and fixtures) then reject("approach_unavailable") end
+        if not (headless and (fixtures or profile == castaway and title_fixtures)) then reject("approach_unavailable") end
         local location, floor = target:K2_GetActorLocation(), npc:K2_GetActorLocation().Z
         if approach_exit then
             local host = state.local_pawn and state.local_pawn.pawn
@@ -629,6 +648,15 @@ function dialogue.command(fields, state, phase)
             sewer_stock.freeze()
             return "exact stock Sewer Thing confirm button verified"
         end
+        if castaway_stock.present(current) then
+            castaway_stock.fixture(math.tointeger(tonumber(target)))
+            local sequence, ordinal = castaway_stock.take(current)
+            if not sequence or tostring(ordinal) ~= target or not drain(current, sequence, ordinal) then
+                reject("fixture_castaway_stock_press_unverified")
+            end
+            castaway_stock.freeze()
+            return "exact stock Castaway response button verified"
+        end
         if current.profile.volume then
             local accepted, status = SilverfishProbeNativeInteractInput(current.pawn:GetAddress(), true)
             if accepted ~= true or status ~= "stock_started_consumed" or not drain(current) then
@@ -712,7 +740,7 @@ function dialogue.rows(state, phase, status_row)
             or binding.armed and "armed" or "waiting"
         local row = {"native-dialogue-view", binding.name, status, session and session.sequence or 0,
             session and session.row or "-", session and session.token or "-"}
-        if sewer_stock.present(binding) then row[#row + 1] = "stock" end
+        if sewer_stock.present(binding) or castaway_stock.present(binding) then row[#row + 1] = "stock" end
         result[1] = status_row(table.unpack(row))
     end
     for _, row in ipairs(sewer.host_rows(state, phase, status_row)) do result[#result + 1] = row end

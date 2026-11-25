@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bootstrap import install_stage
 from tools.silverfish import (
     direct_ip, embedded_startup, native_finite_shop, native_guest_consumable, native_guest_drop, native_guest_melee,
-    native_host_save, native_inventory, native_loose_pickup, native_smg_hold,
+    native_dialogue, native_host_save, native_inventory, native_loose_pickup, native_smg_hold,
     native_anomaly_effects, native_critters, native_destructibles, native_lantern, native_npc_barter, native_loot, native_prop_carry, native_stash, native_stock_switch, native_weapon_fire_view,
     native_stock_enemy_drops, native_world_loot, runtime,
 )
@@ -78,6 +78,7 @@ WAREHOUSE_DOCK = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
 # when an unrelated fixture on the same map has failed.
 INDEPENDENT_RESIDENT_MAPS = {
     "stock_food": {OBSERVATORY}, "stock_cooked_meal": {OBSERVATORY}, "stock_melee_edges": {OBSERVATORY},
+    "stock_castaway_dialogue": {OBSERVATORY},
     "stock_avatar_tail": {OBSERVATORY}, "stock_impact_cues": {OBSERVATORY},
     "stock_lockpicks": {OBSERVATORY}, "stock_observatory_tv": {OBSERVATORY},
     "stock_critters": {CROSSROADS}, "stock_lingering_teleport": {CROSSROADS}, "stock_mushrooms": {CROSSROADS},
@@ -3974,6 +3975,29 @@ async def verify_stock_cooked_meal(host: Seat, guest: Seat, _pawn: str) -> dict:
                                  "host_pot_unchanged": True, "empty_pot_had_no_effect": True, "receipt": receipt}}
 
 
+async def verify_stock_castaway_dialogue(host: Seat, guest: Seat, pawn: str) -> dict:
+    guest_run = guest.client / "run"
+    checkpoint = campaign_save_hashes(host.campaign)
+
+    def view(frame):
+        return frame.get("game", {}).get("native_dialogue_view", {})
+
+    await host.bridge.command(native_dialogue.APPROACH, pawn)
+    await wait_resident_status(guest_run, lambda frame: view(frame).get("state") == "armed")
+    responses = []
+    for button, row in (("open", native_dialogue.ROOT), ("3", native_dialogue.STORY),
+                        ("1", native_dialogue.ROOT), ("1", "-")):
+        result = await submit(guest_run, native_dialogue.FIXTURE, target=button)
+        assert result["ok"], result
+        sequence = result["native_dialogue_view"]["sequence"]
+        expected = ("closed", None) if row == "-" else ("open", "stock")
+        frame = await wait_resident_status(guest_run, lambda frame: view(frame).get("sequence") == sequence
+            and view(frame).get("row") == row and (view(frame).get("state"), view(frame).get("surface")) == expected)
+        responses.append(view(frame))
+    assert campaign_save_hashes(host.campaign) == checkpoint
+    return {"stock_castaway_dialogue": responses}
+
+
 async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> dict:
     from tools.silverfish import native_anomaly_effects, native_board_contract, native_inventory
     from tools.silverfish.authored_routes import AUTHORED_ROUTES
@@ -6249,7 +6273,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  crossroads_profile: bool = False, stock_crossroads_door: bool = False, stock_dock_gate: bool = False,
                  stock_melee_family: bool = False, stock_melee_edges: bool = False,
                  stock_warehouse_switch: bool = False, stock_warehouse_board: bool = False, stock_bottle: bool = False,
-                 stock_roaming_barter: bool = False, stock_critters: bool = False, stock_placed_item: bool = False,
+                 stock_roaming_barter: bool = False, stock_castaway_dialogue: bool = False,
+                 stock_critters: bool = False, stock_placed_item: bool = False,
                  stock_mushrooms: bool = False, stock_eye_stacks: bool = False, stock_lingering_teleport: bool = False, stock_acid_pool: bool = False,
                  stock_npc_rivalry: bool = False, stock_throwables: str | None = None,
                  memory_status: bool = False, stock_prop_grip: bool = False,
@@ -6399,6 +6424,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_alternate_ammo, "observatory", "stock_alternate_ammo",
          lambda host, guest, pawn: verify_alternate_ammo(host, guest, pawn, portable_probe_command)),
         (stock_roaming_barter, "observatory", "stock_roaming_barter", verify_roaming_barter),
+        (stock_castaway_dialogue, "observatory", "stock_castaway_dialogue", verify_stock_castaway_dialogue),
         (stock_crate_ring and crossroads_profile, "crossroads", "stock_crate_ring",
          lambda host, guest, pawn: verify_stock_crate_ring(host, guest, pawn, memory_positions=True, cold=True)),
         (stock_weather_travel, "crossroads", "stock_weather_travel",
@@ -7153,6 +7179,8 @@ if __name__ == "__main__":
                         help="verify host and guest bolt flight, a stock host pipe bomb detonation, or both")
     parser.add_argument("--stock-roaming-barter", action="store_true",
                         help="compare the stock identity of a replicated dynamically spawned NPC trader")
+    parser.add_argument("--stock-castaway-dialogue", action="store_true",
+                        help="verify the Castaway conversation through the guest's stock dialogue buttons")
     parser.add_argument("--stock-critters", action="store_true",
                         help="verify a Crossroads frog hops and can be picked up by the guest")
     parser.add_argument("--stock-buried-placements", action="store_true",
@@ -7309,7 +7337,8 @@ if __name__ == "__main__":
                               "stock_weather_travel", "stock_lightning", "stock_crossroads_door", "stock_dock_gate",
                               "stock_storm_ambience",
                               "stock_melee_family", "stock_melee_edges", "stock_warehouse_switch", "stock_warehouse_board", "stock_bottle",
-                              "stock_roaming_barter", "stock_critters", "stock_placed_item", "stock_mushrooms", "stock_throwables", "stock_eye_stacks",
+                              "stock_roaming_barter", "stock_castaway_dialogue", "stock_critters", "stock_placed_item",
+                              "stock_mushrooms", "stock_throwables", "stock_eye_stacks",
                               "stock_lingering_teleport", "stock_light_ar", "stock_acid_pool", "stock_alternate_ammo"}
     if args.resident_held_queue and not args.resident_weapon_cues:
         parser.error("Use --resident-held-queue with --resident-weapon-cues")
@@ -7355,7 +7384,8 @@ if __name__ == "__main__":
             args.crossroads_profile, args.stock_lightning, args.stock_crossroads_door, args.stock_dock_gate,
             args.stock_storm_ambience,
             args.stock_melee_family, args.stock_melee_edges, args.stock_warehouse_switch, args.stock_warehouse_board, args.stock_bottle,
-            args.stock_roaming_barter, args.stock_critters, args.stock_placed_item, args.stock_throwables, args.stock_eye_stacks,
+            args.stock_roaming_barter, args.stock_castaway_dialogue, args.stock_critters, args.stock_placed_item,
+            args.stock_throwables, args.stock_eye_stacks,
             args.stock_lingering_teleport, args.stock_acid_pool, args.stock_mushrooms)) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
@@ -7414,7 +7444,8 @@ if __name__ == "__main__":
                        stock_melee_edges=args.stock_melee_edges,
                        stock_warehouse_switch=args.stock_warehouse_switch,
                        stock_warehouse_board=args.stock_warehouse_board, stock_bottle=args.stock_bottle,
-                       stock_roaming_barter=args.stock_roaming_barter, stock_critters=args.stock_critters,
+                       stock_roaming_barter=args.stock_roaming_barter, stock_castaway_dialogue=args.stock_castaway_dialogue,
+                       stock_critters=args.stock_critters,
                        stock_placed_item=args.stock_placed_item, stock_mushrooms=args.stock_mushrooms,
                        stock_eye_stacks=args.stock_eye_stacks, stock_lingering_teleport=args.stock_lingering_teleport,
                        stock_acid_pool=args.stock_acid_pool,
