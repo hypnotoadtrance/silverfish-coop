@@ -970,6 +970,31 @@ local function point_string(point)
     return ("%.3f,%.3f,%.3f"):format(point.X, point.Y, point.Z)
 end
 
+-- Arm this only for the staged long shot. The same stock projectile and
+-- rounded muzzle packet are still used by the production contact check.
+RegisterBeginPlayPreHook(function(context)
+    local view = garage_view
+    if not view or not view.stock_spread or not valid(view.worker) then return end
+    local projectile = context:get()
+    if not valid(projectile) or projectile:GetClass():GetFName():ToString() ~= "Projectile_Pistol_Light_C"
+        or not same(projectile:GetOwner(), view.shooter) or not same(projectile.Instigator, view.shooter) then return end
+    local velocity = projectile.Velocity
+    local origin, target = projectile:K2_GetActorLocation(), view.worker:K2_GetActorLocation()
+    local dx, dy = target.X-origin.X, target.Y-origin.Y
+    local distance = math.sqrt(dx^2 + dy^2)
+    if distance < 5000 then return end
+    local limit = 63 / distance
+    local forward = math.sqrt(1-limit^2)
+    local speed = math.sqrt(velocity.X^2 + velocity.Y^2 + velocity.Z^2)
+    -- Offset the round by 63 cm at the target, toward the outer edge of the
+    -- worker's mesh. This is within the 75 cm contact allowance.
+    local axis_x, axis_y = dx/distance, dy/distance
+    local side = view.stock_spread
+    projectile.Velocity = {X=speed*(forward*axis_x-side*limit*axis_y),
+        Y=speed*(forward*axis_y+side*limit*axis_x), Z=0}
+    view.stock_spread = nil
+end)
+
 local function watch_garage_projectiles()
     if garage_shot_hook then return end
     local base = StaticFindObject("/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C")
@@ -1890,6 +1915,10 @@ local function run(action, actor_path)
         return ("%.6f"):format(garage_view.worker.Health)
     elseif action == "dock-garage-shot-witness" then
         return garage_view and garage_view.last_shot or "none"
+    elseif action == "dock-garage-arm-spread" then
+        assert(host and garage_view and garage_view.long_shot)
+        garage_view.stock_spread = -1
+        return "armed"
     elseif action == "dock-garage-contact-resolution" then
         assert(host and type(SilverfishReadFixtureShotContact) == "function")
         return SilverfishReadFixtureShotContact()

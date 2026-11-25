@@ -1274,6 +1274,15 @@ namespace
     // Count the exact actor when it starts play, before stock impact processing.
     std::string_view reconcile_projectile_contact(Unreal::AActor* projectile, Unreal::UObject* pawn,
                                                   const ShotView& view, bool single_projectile);
+    struct ReportedNpcHit
+    {
+        Unreal::FWeakObjectPtr projectile;
+        Unreal::FWeakObjectPtr target;
+        AimVector direction{};
+    };
+    ReportedNpcHit reported_npc_hit(Unreal::AActor* projectile, Unreal::UObject* pawn, const ShotView& view);
+    void commit_reported_npc_hit(const ReportedNpcHit& hit, Unreal::UObject* pawn);
+
     thread_local std::string_view fixture_shot_contact;
 
     bool fixture_shot_contact_enabled()
@@ -1299,6 +1308,7 @@ namespace
         bool single_projectile{};
         int count{};
         bool owned{true};
+        ReportedNpcHit hit;
     };
 
     thread_local TapBirths* active_tap{};
@@ -1313,7 +1323,7 @@ namespace
     };
 
     void count_guest_projectile(Unreal::AActor* actor, Unreal::UObject* pawn, int& count, bool& owned,
-                                const ShotView* view, bool single_projectile)
+                                const ShotView* view, bool single_projectile, ReportedNpcHit& pending)
     {
         if (!pawn) return;
         const auto* owner = object(actor, STR("Owner"));
@@ -1323,8 +1333,13 @@ namespace
         if (owner != pawn && instigator != pawn) return;
         ++count;
         owned = owned && authority(actor) && owner == pawn && instigator == pawn;
-        const auto result = owned && view && view->contact
-            ? reconcile_projectile_contact(actor, pawn, *view, single_projectile) : "no_contact";
+        std::string_view result = "no_contact";
+        if (owned && view && view->contact)
+        {
+            if (single_projectile) pending = reported_npc_hit(actor, pawn, *view);
+            result = pending.target.Get() ? "guest_npc_report_received" :
+                reconcile_projectile_contact(actor, pawn, *view, single_projectile);
+        }
         if (fixture_shot_contact_enabled()) fixture_shot_contact = result;
     }
 
@@ -1335,7 +1350,7 @@ namespace
             [](Hook::TCallbackIterationData<void>&, Unreal::AActor* actor) {
                 auto* shot = active_tap;
                 if (!shot || !actor || actor->GetClassPrivate() != shot->projectile || actor->GetWorld() != shot->world) return;
-                count_guest_projectile(actor, shot->pawn, shot->count, shot->owned, shot->view, shot->single_projectile);
+                count_guest_projectile(actor, shot->pawn, shot->count, shot->owned, shot->view, shot->single_projectile, shot->hit);
             }, {false, false, STR("SilverfishCoopNative"), STR("Count stock guest tap projectiles before impact")});
         return tap_birth_hook != Hook::ERROR_ID;
     }
@@ -1408,9 +1423,16 @@ namespace
         bool hit{};
     };
 
+    struct ContactHitResult
+    {
+        Unreal::UObject* actor;
+        Unreal::FStructProperty* field;
+        void* storage;
+    };
+
     std::optional<AimContact> trace_shot(Unreal::UObject* context_object, const AimVector& origin,
                                         const AimVector& destination, std::uint8_t trace_channel,
-                                        std::span<Unreal::UObject* const> exclusions)
+                                        std::span<Unreal::UObject* const> exclusions, ContactHitResult* copy = nullptr)
     {
         auto* library = find<Unreal::UObject>(STR("/Script/Engine.Default__KismetSystemLibrary"));
         auto* fn = find<Unreal::UFunction>(STR("/Script/Engine.KismetSystemLibrary:LineTraceSingle"));
@@ -1455,7 +1477,10 @@ namespace
         const auto point = read_aim_vector(impact, result);
         if (!point) return {};
         auto* component = hit_component ? hit_component->GetPropertyValueInContainer(result).Get() : nullptr;
-        return AimContact{*point, live(component) ? component->GetOuterPrivate() : nullptr, true};
+        auto* hit_actor = live(component) ? component->GetOuterPrivate() : nullptr;
+        if (copy && hit_actor == copy->actor)
+            copy->field->CopyCompleteValue(copy->field->ContainerPtrToValuePtr<void>(copy->storage), result);
+        return AimContact{*point, hit_actor, true};
     }
 
     constexpr std::uint8_t visibility_trace = 1;
@@ -1570,6 +1595,100 @@ namespace
         if (id >= 1 && id <= 65535 && std::abs(height - id) < .25)
             contact_references.insert_or_assign(target, ContactReference{Unreal::FWeakObjectPtr(marker), static_cast<unsigned>(id)});
         return 0;
+    }
+
+    Unreal::UObject* reported_npc(const ShotView& view, Unreal::UWorld* world)
+    {
+        const auto number = contact_number(view.contact_actor);
+        Unreal::UObject* target{};
+        if (number)
+        {
+            for (const auto& [candidate, reference] : contact_references)
+            {
+                if (reference.number != number) continue;
+                auto* marker = reference.marker.Get();
+                if (live(marker) && object(marker, STR("Owner")) == candidate)
+                {
+                    target = candidate;
+                    break;
+                }
+            }
+        }
+        else
+        {
+            const auto path = RC::to_generic_string(view.contact_actor);
+            auto* candidate = find<Unreal::UObject>(path.c_str());
+            if (live(candidate) && candidate->GetPathName() == path &&
+                !silverfish::campaign_npc::is_spawned_stock_npc(candidate)) target = candidate;
+        }
+        return authority(target) && available_projectile_target(target, world) &&
+            field<Unreal::FBoolProperty>(target, STR("Alive")) && takes_projectile_damage(target) ? target : nullptr;
+    }
+
+    ReportedNpcHit reported_npc_hit(Unreal::AActor* projectile, Unreal::UObject* pawn, const ShotView& view)
+    {
+        if (!view.contact || !view.muzzle || !view.target) return {};
+        const auto origin = actor_aim_vector(projectile, STR("/Script/Engine.Actor:K2_GetActorLocation"));
+        auto* velocity_field = field<Unreal::FStructProperty>(projectile, STR("Velocity"));
+        if (!origin || !aim_vector_field(velocity_field, aim_vector_type) ||
+            squared_length(difference(*origin, *view.muzzle)) > 1.0) return {};
+        const auto velocity = read_aim_vector(velocity_field, projectile);
+        if (!velocity) return {};
+        const auto offset = difference(*view.contact, *origin);
+        const auto distance = std::sqrt(squared_length(offset));
+        const auto speed = std::sqrt(squared_length(*velocity));
+        const auto life = projectile_real(projectile, STR("Life"));
+        const auto sight = stock_sight_range(pawn);
+        const auto axis = shot_axis(*view.muzzle, *view.target, view.direction);
+        if (!(distance >= 1.0 && speed >= 1.0 && life > 0.0 && distance <= std::min(sight, speed * life)) ||
+            squared_length(difference(ahead(*origin, axis, distance), *view.contact)) > 1.0) return {};
+        auto* target = reported_npc(view, projectile->GetWorld());
+        if (!target) return {};
+        return {Unreal::FWeakObjectPtr(projectile), Unreal::FWeakObjectPtr(target), axis};
+    }
+
+    void commit_reported_npc_hit(const ReportedNpcHit& hit, Unreal::UObject* pawn)
+    {
+        auto* projectile = Unreal::Cast<Unreal::AActor>(hit.projectile.Get());
+        auto* target = hit.target.Get();
+        if (!authority(projectile) || !authority(target) || !available_projectile_target(target, projectile->GetWorld()) ||
+            object(projectile, STR("Instigator")) != pawn || object(projectile, STR("Owner")) != pawn) return;
+        constexpr auto base = STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C");
+        constexpr auto calc_path = STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C:CalcDmg");
+        auto* projectile_class = find<Unreal::UClass>(base);
+        auto* calc = find<Unreal::UFunction>(calc_path);
+        auto* result = input<Unreal::FStructProperty>(calc, STR("Hit"), 0);
+        if (!calc || !projectile_class || !projectile->IsA(projectile_class) ||
+            calc->GetOuterPrivate() != projectile_class || projectile->GetFunctionByNameInChain(calc->GetFName()) != calc ||
+            calc->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) || calc->GetNumParms() != 1 ||
+            calc->GetReturnProperty() || !result || result->GetStruct().Get() != find<Unreal::UScriptStruct>(aim_hit_type) ||
+            calc->GetParmsSize() != result->GetSize() || calc->GetParmsSize() > sizeof(AimParameters::data)) return;
+
+        // Find the current target's hit component locally. The original route
+        // through the host's world cannot veto the guest's contact.
+        const auto center = actor_aim_vector(target, STR("/Script/Engine.Actor:K2_GetActorLocation"));
+        if (!center) return;
+        AimParameters arguments;
+        arguments.initialize(result);
+        ContactHitResult copy{target, result, arguments.data.data()};
+        const std::array ignored{pawn, object(pawn, STR("EquipedItem"))};
+        for (double height : {0.0, 35.0, -35.0, 70.0})
+        {
+            const auto point = ahead(*center, {0, 0, 1}, height);
+            const auto start = ahead(point, hit.direction, -160.0);
+            const auto end = ahead(point, hit.direction, 160.0);
+            const auto contact = trace_shot(projectile, start, end, projectile_trace, ignored, &copy);
+            if (!contact || contact->actor != target) continue;
+            // The original shot has already spent its stock round. Resolve one
+            // stock damage call and retire its projectile before it can hit again.
+            projectile->SetActorTickEnabled(false);
+            projectile->ProcessEvent(calc, arguments.data.data());
+            if (auto* remaining = Unreal::Cast<Unreal::AActor>(hit.projectile.Get()); live(remaining))
+                remaining->K2_DestroyActor();
+            if (fixture_shot_contact_enabled()) fixture_shot_contact = "committed_guest_npc_contact";
+            return;
+        }
+        if (fixture_shot_contact_enabled()) fixture_shot_contact = "guest_npc_component_unavailable";
     }
 
     struct HostShotLane
@@ -1908,13 +2027,15 @@ namespace
         {
             const bool verified = primary_after == primary_before && after_stored == remaining &&
                 saved_magazine_round(loki_magazine, context.weapon, after, true) == round;
+            if (verified) commit_reported_npc_hit(projectiles.hit, context.pawn);
             return report(verified, verified ? "fired" : "mutation_unverified_guest_underbarrel_ammo",
                           before, remaining, projectiles.count);
         }
         after.ammo->SetPropertyValueInContainer(after.item, remaining);
-        return after.ammo->GetPropertyValueInContainer(after.item) == remaining
-            ? report(true, "fired", before, remaining, projectiles.count)
-            : report(false, "mutation_unverified_guest_weapon_ammo_commit", before, remaining, projectiles.count);
+        if (after.ammo->GetPropertyValueInContainer(after.item) != remaining)
+            return report(false, "mutation_unverified_guest_weapon_ammo_commit", before, remaining, projectiles.count);
+        commit_reported_npc_hit(projectiles.hit, context.pawn);
+        return report(true, "fired", before, remaining, projectiles.count);
     }
 
     struct ReserveStack
@@ -2278,6 +2399,7 @@ namespace
         std::int64_t serial{};
         int before{-1}, after{-1}, shot_before{-1}, rounds{}, projectiles{}, shot_births{};
         bool active{}, closing{}, fenced{}, dirty{}, owned_birth{};
+        ReportedNpcHit hit;
 
         Context context() const
         {
@@ -2398,6 +2520,7 @@ namespace
                 shot_hold = &smg_hold;
                 smg_hold.shot_before = smg_hold.after;
                 smg_hold.shot_births = 0;
+        smg_hold.hit = {};
                 smg_hold.owned_birth = true;
             }
         }
@@ -2411,7 +2534,7 @@ namespace
         if (smg_hold.shot_before < 0 ||
             actor->GetClassPrivate() != smg_hold.projectile.Get() || actor->GetWorld() != smg_hold.world.Get()) return;
         count_guest_projectile(actor, smg_hold.pawn.Get(), smg_hold.shot_births, smg_hold.owned_birth,
-                               &smg_hold.view, smg_hold.round->projectile_count == 1);
+                               &smg_hold.view, smg_hold.round->projectile_count == 1, smg_hold.hit);
     }
 
     void hold_post(HoldHook&, Unreal::UObject* receiver, Unreal::FFrame& frame, void*)
@@ -2434,6 +2557,7 @@ namespace
             hold_stop(smg_hold, "mutation_unverified_guest_smg_hold_shot_readback", true);
             return;
         }
+        commit_reported_npc_hit(smg_hold.hit, context.pawn);
         smg_hold.after = remaining;
         ++smg_hold.rounds;
         smg_hold.projectiles += smg_hold.shot_births;

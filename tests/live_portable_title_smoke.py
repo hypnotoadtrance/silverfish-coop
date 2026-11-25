@@ -3140,7 +3140,8 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
     if second_barrier:
         witness = await command(host, "dock-garage-shot-witness")
         exclusions = witness.rsplit(";", 1)[-1].split(",")
-        assert second_barrier in exclusions and host_collision in exclusions, (second_barrier, witness)
+        assert second_barrier not in exclusions and host_collision not in exclusions, (second_barrier, witness)
+        assert await command(host, "dock-garage-contact-resolution") == "committed_guest_npc_contact"
         evidence[key]["host_only_barriers"] = [host_collision, second_barrier]
     if pellets == 1:
         eye, target, barrier, distant_health = (await command(host, "dock-garage-long-stage")).split(";")
@@ -3169,15 +3170,16 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         muzzle_trace = f"dock-garage-projectile-trace\t{muzzle};{target}"
         assert await command(guest, muzzle_trace) == "NPC_Survivor_Worker_C_2"
         assert await command(host, muzzle_trace) == host_collision
+        assert await command(host, "dock-garage-arm-spread") == "armed"
         accepted, after_hit = await shoot(after_blocked, should_hit=True, contact_required=True)
         geometry = accepted["native_guest_trigger_view"]
         distance = math.dist(tuple(map(float, geometry["muzzle"].split(","))),
                              tuple(map(float, geometry["contact"]["point"].split(","))))
         assert distance > 5000 and after_hit > 0, (distance, after_hit, accepted)
         witness = await command(host, "dock-garage-shot-witness")
-        assert host_collision in witness.rsplit(";", 1)[-1].split(","), witness
+        assert host_collision not in witness.rsplit(";", 1)[-1].split(","), witness
         decision = await command(host, "dock-garage-contact-resolution")
-        assert decision in {"matched_stock_ray", "matched_guest_ray"}, decision
+        assert decision == "committed_guest_npc_contact", (decision, witness)
         evidence["tutorial_dock_distant_contact"] = {
             "meters": round(distance / 100, 2), "health": [distant_health, after_blocked, after_hit],
             "blocked_shot": blocked, "accepted_shot": accepted, "host_only_barrier": host_collision,
@@ -3192,9 +3194,10 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         guest_camera, guest_muzzle, _, _ = (await command(guest, f"{stage};out")).split(";")
         assert (host_camera, host_muzzle) == ("blocked", host_collision), (host_camera, host_muzzle)
         assert (guest_camera, guest_muzzle) == ("worker", "NPC_Survivor_Worker_C_2"), (guest_camera, guest_muzzle)
-        refused, protected_health = await shoot(after_hit, should_hit=False, contact_required=True)
+        guest_npc_hit, protected_health = await shoot(after_hit, should_hit=True, contact_required=True)
+        assert await command(host, "dock-garage-contact-resolution") == "committed_guest_npc_contact"
         exclusions = (await command(host, "dock-garage-shot-witness")).rsplit(";", 1)[-1].split(",")
-        assert host_collision not in exclusions and board not in exclusions, (exclusions, refused)
+        assert host_collision not in exclusions and board not in exclusions, (exclusions, guest_npc_hit)
         assert float(await command(host, "dock-garage-plank-health")) == float(board_health)
         assert await command(host, "dock-garage-plank-impact") == "0;-"
 
@@ -3216,7 +3219,7 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         assert hits == "1" and math.isclose(board_after, remaining, abs_tol=1e-4), (impact, board_health, board_after)
         evidence["tutorial_dock_damageable_contact"] = {
             "camera_target": "NPC_Survivor_Worker_C_2", "muzzle_target": board,
-            "blocked_shot": refused, "accepted_shot": accepted,
+            "guest_npc_hit": guest_npc_hit, "guest_board_hit": accepted,
             "board_health_before": float(board_health), "board_health_after": board_after,
             "stock_impact": {"hits": int(hits), "damage": stock_damage, "threshold": float(threshold),
                              "breacher": breacher == "true"},
