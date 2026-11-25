@@ -29,7 +29,7 @@ local function enter(current, seat)
     if same(world, current) and phase == seat then return end
     fire.clear()
     world, phase = current, seat
-    host = {fields = {}, sampled = {}, revision = 0, next_sample = 0}
+    host = {fields = {}, content = "", rows = {}, revision = 0, next_sample = 0}
     guest = {rendered = {}, rendered_count = 0, jobs = {}, next_job = 1, revision = 0}
 end
 
@@ -47,7 +47,7 @@ local function transform(component)
 end
 
 local function admit()
-    if type(SilverfishTakeNativeDrumFire) ~= "function" then return end
+    local added = false
     for _ = 1, max_fields do
         local path = SilverfishTakeNativeDrumFire(world:GetAddress())
         if not path then break end
@@ -59,9 +59,11 @@ local function admit()
             if number(origin.X, -1e7, 1e7) and number(origin.Y, -1e7, 1e7) then
                 host.fields[#host.fields + 1] = {actor = actor, id = serial,
                     center = ("%.3f,%.3f"):format(origin.X, origin.Y), ids = {}, next_id = 0}
+                added = true
             end
         end
     end
+    return added
 end
 
 local function sample(entry)
@@ -88,28 +90,32 @@ local function sample(entry)
     if #parts > 0 then return ("%d|%s|%s"):format(entry.id, entry.center, table.concat(parts, ";")) end
 end
 
-local function host_rows(row, now)
-    if now >= host.next_sample then
-        host.next_sample = now + .10
-        local fields = {}
-        for index = #host.fields, 1, -1 do
-            local entry = host.fields[index]
-            if valid(entry.actor) and not entry.actor:IsActorBeingDestroyed() then
-                local encoded = sample(entry)
-                if encoded then fields[#fields + 1] = encoded end
-            else
-                table.remove(host.fields, index)
-            end
-        end
-        admit()
-        local content = table.concat(fields, "\t")
-        if content ~= table.concat(host.sampled, "\t") then
-            host.sampled = fields
-            host.revision = host.revision + 1
+local function host_rows(row)
+    local removed = false
+    for index = #host.fields, 1, -1 do
+        local actor = host.fields[index].actor
+        if not valid(actor) or actor:IsActorBeingDestroyed() then
+            table.remove(host.fields, index)
+            removed = true
         end
     end
-    if host.revision > 0 then return {row("native-drum-fire-host", host.revision, table.unpack(host.sampled))} end
-    return {}
+    local admitted = admit()
+    if #host.fields == 0 and not removed then return host.rows end
+    local now = os.clock()
+    if not admitted and not removed and now < host.next_sample then return host.rows end
+    host.next_sample = now + .10
+    local fields = {}
+    for index = #host.fields, 1, -1 do
+        local encoded = sample(host.fields[index])
+        if encoded then fields[#fields + 1] = encoded end
+    end
+    local content = table.concat(fields, "\t")
+    if content ~= host.content then
+        host.content = content
+        host.revision = host.revision + 1
+        host.rows = {row("native-drum-fire-host", host.revision, table.unpack(fields))}
+    end
+    return host.rows
 end
 
 local function values(encoded, width)
@@ -190,7 +196,8 @@ function fire.command(args, state, seat)
     end
     if revision > guest.revision then
         schedule(wanted, count)
-        guest.revision, guest.expires = revision, statics():GetTimeSeconds(world) + 18
+        guest.revision = revision
+        guest.expires = count > 0 and statics():GetTimeSeconds(world) + 18 or nil
     end
     return "Accepted stock drum fire view"
 end
@@ -240,7 +247,7 @@ function fire.rows(state, seat, row)
     enter(state.world, seat)
     if seat == "hosting" then
         if type(SilverfishTakeNativeDrumFire) ~= "function" then return {} end
-        return host_rows(row, statics():GetTimeSeconds(world))
+        return host_rows(row)
     end
     if not guest.epoch then return {} end
     local pawn = state.local_pawn and state.local_pawn.pawn

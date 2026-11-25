@@ -14,7 +14,9 @@ local area, epoch = "/Game/Classes/Maps/CrossRoads", string.rep("a", 32)
 local asset_path = "/Game/Assets/PFX/NI_FireMolotov.NI_FireMolotov"
 local function vec(x, y, z) return {X = x, Y = y, Z = z} end
 local asset = object({GetFullName = function() return "NiagaraSystem " .. asset_path end})
-local clock, pending = 1, true
+local clock, pending = 1, false
+local engine_time_reads = 0
+os.clock = function() return clock end
 local spawned = {}
 local host_world, guest_world, host_field = object(), object(), object()
 local function world_field() return host_world end
@@ -38,7 +40,10 @@ for id = 1, 5 do
 end
 particles.GetArrayNum = function(self) return #self end
 host_field.Particles = particles
-local statics = object({GetTimeSeconds = function() return clock end})
+local statics = object({GetTimeSeconds = function()
+    engine_time_reads = engine_time_reads + 1
+    return clock
+end})
 local niagara = object()
 function niagara:SpawnSystemAtLocation(_, provided, location, rotation, scale, destroy, activate)
     assert(provided == asset and destroy and not activate)
@@ -72,10 +77,13 @@ function SilverfishTakeNativeDrumFire(world)
 end
 
 local hosting = {map = area, world = host_world}
-assert(#fire.rows(hosting, "hosting", row) == 0)
+assert(#fire.rows(hosting, "hosting", row) == 0 and engine_time_reads == 0)
+pending = true
 clock = 2
 local active = fire.rows(hosting, "hosting", row)[1]
 assert(active[2] == 1 and active[3]:find("1,-99.000,200.000,1.000,10.000,-90.000,0.000,1.000,1.000,0.500", 1, true))
+clock = 2.2
+assert(fire.rows(hosting, "hosting", row)[1] == active and engine_time_reads == 0)
 table.remove(particles, 1)
 clock = 3
 local fizzling = fire.rows(hosting, "hosting", row)[1]
@@ -84,6 +92,7 @@ host_field.retired = true
 clock = 4
 local retired = fire.rows(hosting, "hosting", row)[1]
 assert(retired[2] == 3 and #retired == 2)
+assert(fire.rows(hosting, "hosting", row)[1] == retired and engine_time_reads == 0)
 
 local local_pawn = object({GetWorld = function() return guest_world end, IsLocallyControlled = function() return true end})
 local guest = {map = area, world = guest_world, server = true, listening = true, local_pawn = {pawn = local_pawn}}
@@ -106,6 +115,7 @@ assert(fewer[4] == 4 and fewer[5] == 4 and #spawned == 5)
 for _, component in ipairs(spawned) do assert(component.active == (component.location.Z ~= 1)) end
 project(1, active[3])
 assert(fire.rows(guest, "connected", row)[1][5] == 4 and #spawned == 5)
+local reads_before_removal = engine_time_reads
 project(3)
-assert(fire.rows(guest, "connected", row)[1][5] == 0)
+assert(fire.rows(guest, "connected", row)[1][5] == 0 and engine_time_reads == reads_before_removal)
 for _, component in ipairs(spawned) do assert(not component.active) end
