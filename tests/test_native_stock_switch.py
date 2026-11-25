@@ -6,6 +6,17 @@ from tools.silverfish import native_stock_switch as switches
 
 
 class StockSwitchResponseTests(unittest.IsolatedAsyncioTestCase):
+    def test_candle_variants_share_the_stock_switch_protocol(self):
+        area = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
+        for suffix in ("01", "02", "03"):
+            kind = f"Prop_Candle_{suffix}_C"
+            actor = f"{kind} {area}.Tut_Dock_P:PersistentLevel.{kind}_7"
+            self.assertEqual(switches.target_actor(switches.TARGET + actor), actor)
+            self.assertEqual(switches.parse([switches.TAG, area, actor, "0", "0", "0", "0", "-", "-"],
+                                           "hosting", area)["powered"], False)
+            with self.assertRaises(ValueError):
+                switches.parse([switches.TAG, area, actor, "1", "0", "0", "0", "-", "-"], "hosting", "/wrong-map")
+
     async def test_reply_applies_exact_switch_before_another_world_snapshot(self):
         area = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
         epoch = "e" * 32

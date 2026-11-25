@@ -1005,10 +1005,10 @@ namespace
         static const Unreal::FName interaction{STR("SendInteractionToActor")};
         static const Unreal::FName ignite{STR("SetOnFire")};
         static const Unreal::FName extinguish{STR("Extinguish")};
-        if (!function || scope.host ||
-            call.OriginalFunctionCallPrevented() || !live(actor) || !actor->HasAnyFlags(Unreal::RF_WasLoaded)) return;
+        if (!function || scope.host) return;
         const auto name = function->GetFName();
         if (name != interaction && name != ignite && name != extinguish) return;
+        if (call.OriginalFunctionCallPrevented() || !live(actor) || !actor->HasAnyFlags(Unreal::RF_WasLoaded)) return;
         auto* pawn = scope.pawn.Get();
         auto* world = scope.world.Get();
         if (!pawn || Clock::now() >= scope.expires || !live_scope(scope) ||
