@@ -48,6 +48,8 @@ The `rc-f0b1c06` Crossroads baseline used two muted Direct IP instances. During 
 
 `rc-c865605` wakes the guest's world-item projection when a confirmed crate roll arrives. Instrumented muted Direct IP runs measured two actual item spawns per build. On `rc-653c621`, the last item appeared 336 ms after the stock press and 224 ms after the guest received the roll. On `rc-c865605`, the last item appeared after 163 ms from the press and 50 ms from the reply. The host roll took 111 ms in the latter sample. Two launches passed the cold crate, Crossroads weather and door, placed item carry and pickup, both cash popups, mushroom harvesting and regrowth, and worn gear and quick-slot transfers. The original saves were preserved. Rendered performance and Steam latency remain open.
 
+`rc-0d2cac2` reads crate contents from the stock spawn results in C++. The host checks the exact spawned actors before adding them to the shared roll. One muted Direct IP pair passed a cold crate with two spawned items, Crossroads weather travel, door opening and closing, placed-item carry and pickup, shared cash popups, and mushroom harvesting and regrowth. The original saves were preserved. In single samples, host crate processing took 34.7 ms before the change and 34.0 ms afterward. The last item appeared for the guest after 146 ms and 175 ms, respectively. These samples leave crate latency, rendered performance, and Steam latency open.
+
 ## `rc-6690ff4` playtest
 
 | Area | Two-PC observation |
