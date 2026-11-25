@@ -327,7 +327,6 @@ namespace
             object(connection, STR("Driver")) != driver || object(connection, STR("PlayerController")) != controller)
             return PsychicSource::None;
         if (barter_psy_scope && barter_psy_scope->pawn.Get() == pawn) return PsychicSource::Skinflint;
-        if (world->GetPathName() != crossroads) return PsychicSource::None;
         auto* previous = resolve->PreviousFrame();
         for (int depth = 0; previous && depth < 8; ++depth, previous = previous->PreviousFrame())
         {

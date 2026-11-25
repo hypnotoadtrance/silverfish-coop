@@ -285,7 +285,9 @@ local function command(operation, world, driver, host, local_pawn, argument)
         guest:ForceNetUpdate()
         return ("%.2f|%.2f|%.2f"):format(at.X, at.Y, at.Z)
     elseif placed_shadow and operation == "shadowrestore" then
-        assert(host and selected and selected.original and valid(selected.well))
+        assert(host)
+        if not selected then return "untouched" end
+        assert(selected.original and valid(selected.well))
         assert(selected.well:K2_SetActorLocation(selected.original, false, {}, true))
         selected.well:ForceNetUpdate()
         return selected.well:GetFullName()

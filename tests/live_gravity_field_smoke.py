@@ -340,10 +340,6 @@ async def verify_angler(guest, host_box, guest_box, probe):
 
 
 async def verify_shadow(guest, host_box, guest_box, probe, *, placed=False):
-    if placed:
-        seat = list(map(float, (await probe(host_box, "shadowpark")).split("|")))
-        await wait(guest, lambda frame: math.dist(
-            frame.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), seat) < 70)
     vetoes = blocked_triggers(status(guest))
     assert await probe(guest_box, "guestguard") == "0"
     await wait(guest, lambda view: blocked_triggers(view) >= vetoes + 4, timeout=5)
@@ -369,6 +365,11 @@ async def verify_shadow(guest, host_box, guest_box, probe, *, placed=False):
     async with asyncio.timeout(6):
         while any(enabled for enabled, *_ in shadow_rows(await probe(guest_box, "shadowvisual"))):
             await asyncio.sleep(.1)
+    if placed:
+        await probe(host_box, "prepare")
+        seat = list(map(float, (await probe(host_box, "shadowpark")).split("|")))
+        await wait(guest, lambda frame: math.dist(
+            frame.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), seat) < 70)
     initial = (await probe(host_box, "shadowstate")).split("|")
     await probe(host_box, "shadowinside")
     for _ in range(10):
@@ -487,7 +488,6 @@ async def verify(work, family, observer_offering=None, *, placed_shadow=False, v
                            and not replicas[path]["collision"] and replicas[path]["role"] in (0, 1)
                            and math.dist(authority[path]["location"], replicas[path]["location"]) < 3 for path in paths)
                 assert len(family_actors(guest_frame, family)) == len(paths)
-                await probe(host_box, "prepare")
                 try:
                     result = await verify_shadow(guest, host_box, guest_box, probe, placed=True)
                 finally:
