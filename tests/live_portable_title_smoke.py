@@ -1299,8 +1299,40 @@ async def verify_stock_melee_edges_only(host: Seat, guest: Seat, pawn: str) -> d
         assert (edges[edge]["pawn"], edges[edge]["guid"]) == (pawn, guid), edges[edge]
     first_person_contacts = int(await observe("melee-local-read"))
     assert first_person_contacts >= 5, (first_person_contacts, edges)
+    async def command(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-npc-override", action)
+
+    async def prop_state():
+        return list(map(float, (await command(host, "melee-prop-state")).split(";")))
+
+    center, target = (await command(host, "stage-melee-prop")).split(";", 1)
+    health, speed, *position = await prop_state()
+    assert health == 250 and speed < 3, (health, speed, position)
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    try:
+        assert await command(guest, f"face-melee\t{center}") == "ready"
+        assert await command(host, f"align-melee\t{center}") == "true"
+        started = time.time()
+        ack, = await stock_melee_edge_receipts(guest_run, frame, await stock_melee_edge(guest_run, guid, "tap"))
+        impact = await stock_melee_terminal(host_run, ack)
+    finally:
+        await asyncio.gather(*(command(seat, "clear-melee-aim") for seat in (host, guest)))
+    after_health, after_speed, *after_position = await prop_state()
+    assert impact["contacts"] == impact["hits"] == 1 and after_health < health, (impact, target, after_health)
+    travel = math.dist(position, after_position)
+    assert after_speed > 3 or travel > 3, (impact, after_health, after_speed, travel)
+    async with asyncio.timeout(5):
+        while True:
+            sounds = [event for event in await resident_events(guest_run, frame)
+                      if event["time_unix"] >= started and event["event"] == "native_melee_impact_played"]
+            if sounds:
+                break
+            await asyncio.sleep(.08)
+    prop = {"target": target, "health_before": health, "health_after": after_health, "velocity_cm_s": after_speed,
+            "movement_cm": travel, "guest_sounds": sounds}
     assert campaign_save_hashes(host.campaign) == before, "A regular melee attack wrote campaign saves"
-    return {"stock_melee_edges": {**edges, "first_person_contacts": first_person_contacts, "campaign_unchanged": True}}
+    return {"stock_melee_edges": {**edges, "first_person_contacts": first_person_contacts, "prop_impact": prop,
+                                  "campaign_unchanged": True}}
 
 
 async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict) -> dict:

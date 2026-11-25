@@ -11,6 +11,7 @@ local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
 local last, authority_drone, authority_turret
 local shooters = {}
 local melee_aim, melee_stage
+local melee_prop
 local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
 local color = {R=0, G=0, B=0, A=0}
 local pipe_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
@@ -259,11 +260,12 @@ local function melee_lane(guest, target, angle)
     return count > 0, ("sphere hits=%d, blocking=%s, out=%s"):format(count, tostring(blocking), type(sphere.OutHits))
 end
 
-local function stage_melee(world, attempt)
+local function stage_melee(world, attempt, prop)
     local guest = authoritative_guest(world)
-    local target = melee_target(world, true)
+    local target = prop or melee_target(world, true)
     local eye = guest.Camera:K2_GetComponentLocation()
-    assert(valid(target) and target.Alive and target:HasAuthority() and target.bReplicates, "stock melee target unavailable")
+    assert(valid(target) and target:HasAuthority() and (prop or target.Alive and target.bReplicates),
+        "stock melee target unavailable")
     if not melee_stage or not same(melee_stage.world, world) or not same(melee_stage.target, target) then
         melee_stage = {world=world, target=target, yaw=guest:K2_GetActorRotation().Yaw}
     end
@@ -277,7 +279,7 @@ local function stage_melee(world, attempt)
             if target:K2_SetActorLocation(center, false, {}, true) then
                 local clear, status = melee_lane(guest, target, heading(eye, center))
                 if clear then
-                    target.Health = 7
+                    target.Health = prop and 250 or 7
                     target:ForceNetUpdate()
                     return ("%.7f,%.7f,%.7f;%s"):format(center.X, center.Y, center.Z, target:GetFullName())
                 end
@@ -1905,6 +1907,25 @@ local function run(action, actor_path)
         local attempt = math.tointeger(actor_path) or 1
         assert(attempt >= 1 and attempt <= 4, "invalid stock melee fixture bearing")
         return stage_melee(world, attempt)
+    elseif action == "stage-melee-prop" then
+        assert(host and not valid(melee_prop), "only one host melee prop is allowed")
+        local path = "/Game/Assets/StaticMeshes/Mesh_Props/Prop_PlasticBarrel.Prop_PlasticBarrel_C"
+        local class = StaticFindObject(path)
+        if not valid(class) then LoadAsset(path); class = StaticFindObject(path) end
+        assert(valid(class), "stock plastic barrel class unavailable")
+        local transform = pawn:K2_GetActorTransform()
+        local prop = statics:BeginDeferredActorSpawnFromClass(pawn, class, transform, 1, nil, 0)
+        assert(valid(prop) and same(statics:FinishSpawningActor(prop, transform, 0), prop), "stock prop spawn failed")
+        melee_prop = prop
+        assert(valid(prop.PropMesh) and prop.PropMesh:IsSimulatingPhysics(FName("None")), "stock prop physics unavailable")
+        prop.PropMesh:SetEnableGravity(false)
+        return stage_melee(world, 1, prop)
+    elseif action == "melee-prop-state" then
+        assert(host and valid(melee_prop), "stock melee prop disappeared")
+        local velocity = melee_prop.PropMesh:GetPhysicsLinearVelocity(FName("None"))
+        local point = melee_prop.PropMesh:K2_GetComponentLocation()
+        return ("%.3f;%.3f;%.3f;%.3f;%.3f"):format(melee_prop.Health,
+            math.sqrt(velocity.X^2 + velocity.Y^2 + velocity.Z^2), point.X, point.Y, point.Z)
     elseif action == "face-melee" then
         assert(not host, "the guest must drive the test swing")
         assert(aim_melee(world, pawn, position(actor_path)), "the guest stock camera is not ready")
@@ -1913,7 +1934,8 @@ local function run(action, actor_path)
         assert(host, "the test needs the host's replica camera")
         local guest = authoritative_guest(world)
         assert(aim_melee(world, guest, position(actor_path)), "the authoritative guest stock camera is not ready")
-        local clear, status = melee_lane(guest, melee_target(world, true), guest.Camera:K2_GetComponentRotation())
+        local clear, status = melee_lane(guest, valid(melee_prop) and melee_prop or melee_target(world, true),
+            guest.Camera:K2_GetComponentRotation())
         return clear and "true" or status
     elseif action == "melee-state" then
         local target = melee_target(world, host, position(actor_path))

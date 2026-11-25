@@ -8,8 +8,7 @@ local turret_base = "/Game/Classes/NPCs/NPC_Assets/Turret_Master_BP.Turret_Maste
 local weapon_base = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
 local consumable_base = "/Game/Classes/Items/Consumable_Master_BP.Consumable_Master_BP_C"
 local melee_base = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Master_BP.MeleeWep_Master_BP_C"
-local projectile_base = "/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C"
-local spawn_hit_decal = "/Game/Classes/Libraries/Fuctions_Lib/FL_GameEffects.FL_GameEffects_C:Spawn_HitDecal"
+local spawn_hit_decal = "/Script/Engine.GameplayStatics:SpawnDecalAttached"
 local static_mesh_component = "/Script/Engine.StaticMeshComponent"
 local melee_clips = {Melee_Slash_01 = "slash", Melee_Slash_Combo01 = "backhand", Melee_Charged_Smash_01 = "overhead"}
 local melee_clip_root = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Assets/MeleWep_Anim/"
@@ -81,8 +80,10 @@ local function wall_path(path)
 end
 
 local function wall_component(component, world)
-    local class = StaticFindObject(static_mesh_component)
-    if not valid(component) or not valid(class) or not component:IsA(class) or component.Mobility ~= 0 then return end
+    if not valid(component) or component.Mobility ~= 0 then return end
+    local mesh = StaticFindObject(static_mesh_component)
+    local landscape = StaticFindObject("/Script/Landscape.LandscapeHeightfieldCollisionComponent")
+    if not (valid(mesh) and component:IsA(mesh) or valid(landscape) and component:IsA(landscape)) then return end
     local owner = component:GetOwner()
     local path = component:GetFullName():match(" (%S+)$")
     if wall_path(path) and valid(owner) and same(owner:GetWorld(), world) and not owner:IsActorBeingDestroyed() then
@@ -141,19 +142,15 @@ local function record(row)
     if #pending > maximum then table.remove(pending, 1) end
 end
 
-local function capture_decal(_, _, _, game, _, source, result)
-    if not current or not same(game:get(), current.world.OwningGameInstance) then return end
-    local projectile, decal = source:get(), result:get()
-    local base = current.projectile_class
-    if not valid(base) or not valid(projectile) or not projectile:IsA(base) or not projectile:HasAuthority()
-        or not same(projectile:GetWorld(), current.world) or not valid(decal) then return end
-
-    -- The stock library already selected the material, spread point, angle and decal size.
-    local parent, material = decal:GetAttachParent(), decal:GetDecalMaterial()
-    local surface = wall_component(parent, current.world)
+local function capture_decal(_, decal_material, decal_size, attach_to, _, location, orientation, placement, lifetime)
+    if not current or placement:get() ~= 1 or lifetime:get() ~= 0 then return end
+    local material = decal_material:get()
     local path = valid(material) and material:GetFullName():match(" (%S+)$")
-    if not surface or not stock_decal(path) then return end
-    local point, rotation, size = decal:K2_GetComponentLocation(), decal:K2_GetComponentRotation(), decal.DecalSize
+    if not stock_decal(path) then return end
+    local surface = wall_component(attach_to:get(), current.world)
+    if not surface then return end
+    -- Capture the stock per-pellet placement, including signed decal size.
+    local point, rotation, size = location:get(), orientation:get(), decal_size:get()
     if not valid_decal_pose(point, rotation, size) then return end
     serial = serial + 1
     record({serial, "bullet-decal", path, surface, point.X, point.Y, point.Z,
@@ -490,8 +487,7 @@ function view.sync(state, phase, avatar)
         RegisterHook(sound_at_location, function(...) pcall(capture_location_sound, ...) end)
         location_sound_hooked = true
     end
-    if not valid(current.projectile_class) then current.projectile_class = StaticFindObject(projectile_base) end
-    if not decal_hooked and valid(current.projectile_class) and valid(StaticFindObject(spawn_hit_decal)) then
+    if not decal_hooked and valid(StaticFindObject(spawn_hit_decal)) then
         RegisterHook(spawn_hit_decal, function(...) pcall(capture_decal, ...) end)
         decal_hooked = true
     end
