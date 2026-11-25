@@ -42,8 +42,16 @@ async def verify_oil_lamps(host, guest, pawn):
     async def verify_one(actor):
         checkpoint = suite.campaign_save_hashes(host.campaign)
         await verify_state(actor, False)
-        assert await probe(host, "ignite", actor) == "true"
-        _, host_lit = await verify_state(actor, True)
+        assert await probe(host, "seed-lighter", actor) == "selected"
+        async with asyncio.timeout(8):
+            while await probe(guest, "select-lighter", actor) == "waiting":
+                await asyncio.sleep(.08)
+        await probe(host, "stage-host", actor)
+        assert (await probe(host, "use-lighter", actor)).split(";")[0] == "true"
+        try:
+            _, host_lit = await verify_state(actor, True)
+        finally:
+            assert await probe(host, "lower-lighter", actor) == "true;false"
         place = tuple(map(float, (await probe(host, "stage", actor)).split(",")))
         await suite.wait_resident_status(guest_run, lambda frame:
             (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
@@ -51,8 +59,11 @@ async def verify_oil_lamps(host, guest, pawn):
         started = time.time()
         await probe(guest, "guest-off", actor)
         _, guest_extinguished = await verify_state(actor, False)
-        assert await probe(guest, "ignite", actor) == "false"
-        replica, guest_lit = await verify_state(actor, True)
+        assert (await probe(guest, "use-lighter", actor)).split(";")[0] == "true"
+        try:
+            replica, guest_lit = await verify_state(actor, True)
+        finally:
+            assert await probe(guest, "lower-lighter", actor) == "true;false"
         receipts = [row for row in await suite.resident_events(guest_run, replica)
                     if row.get("time_unix", 0) >= started
                     and row.get("native_stock_switch_interaction", {}).get("actor") == actor]

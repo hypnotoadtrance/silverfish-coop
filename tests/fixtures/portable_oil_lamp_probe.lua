@@ -8,6 +8,10 @@ local maps = {
     ["/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"] = true,
 }
 local class = "BlueprintGeneratedClass /Game/Assets/StaticMeshes/Mesh_Props/Prop_Lantern_01.Prop_Lantern_01_C"
+local lighter_class = "/Game/Classes/Equipment/Eqp_Lighter.Eqp_Lighter_C"
+local equip_factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
+local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
+local item_payload = "DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"
 local clear = {R=0,G=0,B=0,A=0}
 local dirs = {{1,0},{0,1},{-1,0},{0,-1},{.707,.707},{-.707,.707},{-.707,-.707},{.707,-.707}}
 local last
@@ -43,7 +47,7 @@ local function focus(pawn, lamp)
     end
 end
 
-local function stage(lamp, pawn, world)
+local function remote_seat(pawn, world)
     local guest
     for _, candidate in ipairs(FindAllOf("Player_FP_C") or {}) do
         if valid(candidate) and candidate:HasAuthority() and same(candidate:GetWorld(),world)
@@ -52,7 +56,10 @@ local function stage(lamp, pawn, world)
             guest = candidate
         end
     end
-    assert(guest, "remote seat not found")
+    return assert(guest, "remote seat not found")
+end
+
+local function stage(lamp, pawn, participant)
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local lamp_pos = lamp.PropMesh:K2_GetComponentLocation()
     for _, offset in ipairs({105, 145, 80}) do
@@ -60,16 +67,16 @@ local function stage(lamp, pawn, world)
             local x,y = lamp_pos.X + dir[1]*offset, lamp_pos.Y + dir[2]*offset
             local hit = {}
             if trace:LineTraceSingle(pawn, {X=x,Y=y,Z=lamp_pos.Z+80}, {X=x,Y=y,Z=lamp_pos.Z-160},
-                0, false, {pawn,guest,lamp}, 0, hit, true, clear, clear, 0) then
+                0, false, {pawn,participant,lamp}, 0, hit, true, clear, clear, 0) then
                 local floor = hit.OutHit or hit
-                local z = floor.ImpactPoint.Z + guest.CapsuleComponent:GetScaledCapsuleHalfHeight() + 3
+                local z = floor.ImpactPoint.Z + participant.CapsuleComponent:GetScaledCapsuleHalfHeight() + 3
                 local eye = {X=x,Y=y,Z=z+60}
                 if floor.ImpactNormal.Z > .78 and not trace:LineTraceSingle(pawn, eye, lamp_pos, 1, true,
-                    {pawn,guest,lamp}, 0, {}, true, clear, clear, 0)
-                    and guest:K2_TeleportTo({X=x,Y=y,Z=z},
+                    {pawn,participant,lamp}, 0, {}, true, clear, clear, 0)
+                    and participant:K2_TeleportTo({X=x,Y=y,Z=z},
                         {Pitch=0,Yaw=math.deg(math.atan(-dir[2],-dir[1])),Roll=0}) then
-                    guest:ForceNetUpdate()
-                    local p = guest:K2_GetActorLocation()
+                    participant:ForceNetUpdate()
+                    local p = participant:K2_GetActorLocation()
                     return ("%.2f,%.2f,%.2f"):format(p.X,p.Y,p.Z)
                 end
             end
@@ -78,19 +85,94 @@ local function stage(lamp, pawn, world)
     error("no clear approach to the stock oil lamp")
 end
 
+local function select_lighter(pawn, seed)
+    local class = StaticFindObject(lighter_class)
+    assert(valid(class) and valid(pawn.Save), "stock lighter or scoped save is unavailable")
+    local slots = pawn.Save.PlayerEquipment
+    local empty
+    for index = 5, 8 do
+        local item = slots[index][item_class]
+        if same(item,class) then
+            local held = pawn.EquipedItem
+            if pawn:IsLocallyControlled() and (not valid(held) or not same(held:GetClass(),class)) then
+                pawn:Equip_NextItem(index-1,false)
+            end
+            return "selected"
+        end
+        if not empty and not valid(item) then empty = index end
+    end
+    if not seed then return "waiting" end
+    assert(pawn:HasAuthority() and empty, "no empty utility slot for the private lighter fixture")
+    local output = {}
+    StaticFindObject(equip_factory):MakeDefaultItem(class,pawn,output)
+    slots[empty] = output.Item or output
+    slots[empty][item_payload] = class:GetCDO().DataStruct
+    assert(same(slots[empty][item_class],class), "stock lighter did not enter the scope's utility slot")
+    if pawn:IsLocallyControlled() then pawn:Equip_NextItem(empty-1,false) end
+    return "selected"
+end
+
+local function lighter_input(pawn, lamp, pressed)
+    local item = pawn.EquipedItem
+    assert(valid(item) and same(item:GetClass(),StaticFindObject(lighter_class)) and same(item.Player_Ref,pawn),
+        "the stock lighter is not in the local player's hands")
+    if pressed then
+        local eye = pawn.Camera:K2_GetComponentLocation()
+        local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+        local aimed
+        for _, target in ipairs({lamp.PropMesh:K2_GetComponentLocation(),lamp.Sphere:K2_GetComponentLocation()}) do
+            local dx,dy,dz = target.X-eye.X,target.Y-eye.Y,target.Z-eye.Z
+            local distance = math.sqrt(dx*dx+dy*dy+dz*dz)
+            if distance > 0 and distance < item.Burn_ReachRange then
+                local hit, scale = {}, item.Burn_ReachRange/distance
+                local finish = {X=eye.X+dx*scale,Y=eye.Y+dy*scale,Z=eye.Z+dz*scale}
+                if trace:LineTraceSingle(item,eye,finish,2,false,{pawn,item},0,hit,true,clear,clear,0) then
+                    hit = hit.OutHit or hit
+                    local component = hit.Component and hit.Component:Get()
+                    if valid(component) and same(component:GetOwner(),lamp) then
+                        local angle = {Pitch=math.deg(math.atan(dz,math.sqrt(dx*dx+dy*dy))),Yaw=math.deg(math.atan(dy,dx)),Roll=0}
+                        pawn.Controller:SetControlRotation(angle)
+                        pawn.Camera:K2_SetWorldRotation(angle,false,{},true)
+                        aimed = true
+                        break
+                    end
+                end
+            end
+        end
+        assert(aimed, "the lighter's stock reach and projectile trace did not reach the lamp")
+    end
+    local library = StaticFindObject("/Script/EnhancedInput.Default__EnhancedInputLibrary")
+    local action = StaticFindObject("/Game/Classes/Player/Player_Inputs/IA_Use_Secondary.IA_Use_Secondary")
+    if pressed then
+        pawn:InpActEvt_IA_Use_Secondary_K2Node_EnhancedInputActionEvent_33(
+            library:MakeInputActionValueOfType(1,0,0,0),0,0,action)
+    else
+        pawn:InpActEvt_IA_Use_Secondary_K2Node_EnhancedInputActionEvent_35(
+            library:MakeInputActionValueOfType(0,0,0,0),.25,.25,action)
+    end
+    return tostring(item.Open) .. ";" .. tostring(item.HeldOut)
+end
+
 local function run(action,id)
     local lamp,pawn,world = scene(id)
     if action == "state" then
         return table.concat({tostring(lamp.Lit), tostring(lamp.PointLight:IsVisible()),
             tostring(lamp.FX_CandleFlame_01_Converted:IsActive()), tostring(lamp.Sphere:GetGenerateOverlapEvents())},";")
     end
-    if action == "ignite" then
-        lamp:SetOnFire(5,0.2,pawn)
-        return tostring(lamp.Lit)
+    if action == "seed-lighter" then
+        assert(pawn:HasAuthority() and same(pawn.Save,world.OwningGameInstance.SaveSlot_Ref))
+        local guest = remote_seat(pawn,world)
+        assert(valid(guest.Save) and not same(guest.Save,pawn.Save), "guest fixture must use a detached save")
+        assert(select_lighter(guest,true) == "selected")
+        return select_lighter(pawn,true)
     end
-    if action == "stage" then
+    if action == "select-lighter" then return select_lighter(pawn,false) end
+    if action == "use-lighter" or action == "lower-lighter" then
+        return lighter_input(pawn,lamp,action == "use-lighter")
+    end
+    if action == "stage" or action == "stage-host" then
         assert(pawn:HasAuthority())
-        return stage(lamp,pawn,world)
+        return stage(lamp,pawn,action == "stage" and remote_seat(pawn,world) or pawn)
     end
     if action == "host-off" then
         assert(pawn:HasAuthority())
