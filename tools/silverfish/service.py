@@ -4332,8 +4332,6 @@ class Host:
                 await self.service_native_zones(bridge, transport, now)
                 if not self.stopping:
                     await self.advance_dream(bridge, transport)
-            if not self.stopping and not self.native_checkpoint_unsafe:
-                await self.service_guest_native_requests(bridge)
             if self.native_loot_input:
                 try:
                     await native_loot.retire_replenished(self, bridge)
@@ -4347,6 +4345,8 @@ class Host:
                     await native_loot.restore_key_unlocks(self, bridge)
                 except (OSError, ValueError, RuntimeError) as error:
                     self.control.event("native_loot_key_restore_unavailable", reason=str(error))
+            if not self.stopping and not self.native_checkpoint_unsafe:
+                await self.service_guest_native_requests(bridge)
             if not self.stopping:
                 if not self.transitioning:
                     with contextlib.suppress(OSError, RuntimeError, TimeoutError):
