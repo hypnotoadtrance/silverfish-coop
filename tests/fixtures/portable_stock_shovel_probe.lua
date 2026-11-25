@@ -161,7 +161,24 @@
         local function point(location)
             return ("%.3f,%.3f,%.3f"):format(location.X, location.Y, location.Z)
         end
-        if fields[2] == "fixture-spade-quest-approach" then
+        if fields[2] == "fixture-spade-buried-item" then
+            assert(phase == "hosting")
+            local subject = StaticFindObject("/Game/Classes/Actors/BurriedItem_BP.BurriedItem_BP_C")
+            local reward = StaticFindObject("/Game/Classes/Items/Item_GoldNugget.Item_GoldNugget_C")
+            local floor = assert(soil({X=origin.X+115,Y=origin.Y,Z=origin.Z+55},
+                {X=origin.X+115,Y=origin.Y,Z=origin.Z-180}), "Buried item fixture needs stock ground")
+            local ground = floor.ImpactPoint
+            local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+            local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+            local transform = math_api:MakeTransform(ground, {Pitch=0,Yaw=0,Roll=0}, {X=1,Y=1,Z=1})
+            local source = statics:BeginDeferredActorSpawnFromClass(pawn, subject, transform, 1, nil, 0)
+            assert(valid(source))
+            source.BurriedActor = reward
+            assert(same(statics:FinishSpawningActor(source, transform, 0), source))
+            local qualified = source:GetFullName()
+            source:DigForItem(ground)
+            return qualified
+        elseif fields[2] == "fixture-spade-quest-approach" then
             assert(phase == "hosting")
             local x, y, z = geometry.X, geometry.Y, geometry.Z
             local target = assert(soil({X=x, Y=y, Z=z+55}, {X=x, Y=y, Z=z-46}), "Missing Contact stock soil was unavailable")

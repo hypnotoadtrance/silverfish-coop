@@ -1,5 +1,6 @@
 #include "stock_enemy_drops.hpp"
 #include "enemy_loot.hpp"
+#include "host_dig.hpp"
 #include "shared_loot.hpp"
 
 #include <algorithm>
@@ -46,6 +47,9 @@ namespace
     constexpr auto hole_path = STR("/Game/Assets/StaticMeshes/Mesh_Misc/DigHole_BP.DigHole_BP_C");
     constexpr auto hole_graph = STR("/Game/Assets/StaticMeshes/Mesh_Misc/DigHole_BP.DigHole_BP_C:ExecuteUbergraph_DigHole_BP");
     constexpr auto hole_begin = STR("/Game/Assets/StaticMeshes/Mesh_Misc/DigHole_BP.DigHole_BP_C:ReceiveBeginPlay");
+    constexpr auto buried_path = STR("/Game/Classes/Actors/BurriedItem_BP.BurriedItem_BP_C");
+    constexpr auto buried_graph = STR("/Game/Classes/Actors/BurriedItem_BP.BurriedItem_BP_C:ExecuteUbergraph_BurriedItem_BP");
+    constexpr auto buried_dig = STR("/Game/Classes/Actors/BurriedItem_BP.BurriedItem_BP_C:DigForItem");
     constexpr auto bolt_path = STR("/Game/Classes/Equipment/Eqp_Bolt.Eqp_Bolt_C");
     constexpr auto bolt_projectile = STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Bolt_Projectile_BP.Bolt_Projectile_BP_C");
     constexpr auto bolt_graph = STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Bolt_Projectile_BP.Bolt_Projectile_BP_C:ExecuteUbergraph_Bolt_Projectile_BP");
@@ -72,6 +76,12 @@ namespace
     };
 
     Observation observing;
+    struct BuriedObservation
+    {
+        U::FFrame* frame{};
+        U::FWeakObjectPtr world, product_class;
+        std::string source;
+    } buried;
     struct BoltObservation
     {
         U::FFrame* frame{};
@@ -264,6 +274,36 @@ namespace
             record_drop(actor, RC::to_utf8_string(receiver->GetFullName()), {}, physics_prop);
     }
 
+    void observe_buried_spawn(U::UObject* receiver, U::FFrame& frame)
+    {
+        auto* base = find<U::UClass>(buried_path);
+        auto* caller = frame.PreviousFrame();
+        if (buried.frame || !base || !live(receiver) || !receiver->IsA(base) || frame.Object() != receiver ||
+            frame.Node() != find<U::UFunction>(buried_graph) || !caller || caller->Object() != receiver ||
+            caller->Node() != find<U::UFunction>(buried_dig) ||
+            silverfish::native_host_dig::manages_buried_source(receiver)) return;
+        auto* source = static_cast<U::AActor*>(receiver);
+        auto* world = source->GetWorld();
+        auto* reward = field<U::FClassProperty>(source, STR("BurriedActor"));
+        auto* type = reward ? reward->GetObjectPropertyValue(reward->ContainerPtrToValuePtr<void>(source)) : nullptr;
+        if (!live(type) || !listen_instance(world) || !authority_in_level(source, world)) return;
+        buried = {&frame, world, type, RC::to_utf8_string(source->GetFullName())};
+    }
+
+    void record_buried_spawn(Iteration& call, U::FFrame& frame)
+    {
+        if (buried.frame != &frame) return;
+        auto scope = std::exchange(buried, {});
+        if (call.OriginalFunctionCallPrevented()) return;
+        auto* world = static_cast<U::UWorld*>(scope.world.Get());
+        auto* actor = finished_stock_spawn(frame);
+        if (!actor || actor->GetClassPrivate() != scope.product_class.Get() || !listen_instance(world)) return;
+        auto* prop = find<U::UClass>(prop_path);
+        const bool physics_prop = prop && actor->IsA(prop);
+        if (physics_prop ? !authority_in_level(static_cast<U::AActor*>(actor), world) : !item_in_world(actor, world)) return;
+        if (!already_observed(world, actor) && begin_roll(world)) record_drop(actor, scope.source, {}, physics_prop);
+    }
+
     void observe_landing_bolt(U::UObject* receiver, U::FFrame& frame)
     {
         if (bolt_observing.frame || !frame.Locals() || !live(receiver) ||
@@ -319,10 +359,12 @@ namespace
         static const U::FName spawn_name{STR("SpawnLoot")};
         static const U::FName dig_graph{STR("ExecuteUbergraph_DigHole_BP")};
         static const U::FName thrown_bolt_graph{STR("ExecuteUbergraph_Bolt_Projectile_BP")};
+        static const U::FName buried_item_graph{STR("ExecuteUbergraph_BurriedItem_BP")};
         auto* function = frame.Node();
         if (!available() || !function || call.OriginalFunctionCallPrevented()) return;
         if (function->GetFName() == dig_graph) force_fixture_roll(receiver, frame);
         if (function->GetFName() == thrown_bolt_graph) observe_landing_bolt(receiver, frame);
+        if (function->GetFName() == buried_item_graph) observe_buried_spawn(receiver, frame);
         if (observing.frame || function->GetFName() != spawn_name || frame.Object() != receiver || !live(receiver)) return;
         auto* base = find<U::UClass>(npc_path);
         auto* caller = frame.PreviousFrame();
@@ -385,6 +427,7 @@ namespace
         if (!available()) return;
         if (&frame == bolt_observing.frame) bolt_observing = {};
         restore_fixture_roll(frame);
+        if (buried.frame == &frame) record_buried_spawn(call, frame);
         static const U::FName dig_graph{STR("ExecuteUbergraph_DigHole_BP")};
         if (frame.Node() && frame.Node()->GetFName() == dig_graph && !call.OriginalFunctionCallPrevented())
             record_unearthed(receiver, frame);
@@ -525,6 +568,7 @@ namespace silverfish::stock_enemy_drops
         dig_fixture = {};
         recent.clear();
         reported_world = U::FWeakObjectPtr{};
+        buried = {};
         for (auto& hook : hooks)
         {
             if (hook != H::ERROR_ID) H::UnregisterCallback(hook);

@@ -1,4 +1,4 @@
-"""Persist and transfer physical items from verified stock NPC loot rolls."""
+"""Persist and transfer physical items from verified stock spawns."""
 
 import asyncio
 import json
@@ -339,7 +339,7 @@ async def observe(host, bridge):
         for drop in observed[:8]:
             seq, area, actor = drop["sequence"], drop["map"], drop["actor"]
             if (not drop["live_at_capture"] or drop["motion"] == "gone" or uses_shell_view(host.last_game, drop)
-                    or (not memory and drop["source"].startswith(("DigHole_BP_C ", "Bolt_Projectile_BP_C ")))):
+                    or (not memory and drop["source"].startswith(("DigHole_BP_C ", "Bolt_Projectile_BP_C ", "BurriedItem_BP_C ")))):
                 processed.add(seq)
                 continue
             slot = native_host_save.new_slot()

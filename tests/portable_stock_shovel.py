@@ -379,5 +379,35 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
     except TimeoutError as error:
         raise AssertionError(f"The stock can did not replicate its physics pose. Host {host_props}. Guest {guest_props}.") from error
     replica, = replicas
+    host_result = await verify_host_dig()
+    buried_source = await observe(host, "buried-item", "local")
+
+    def buried_reward(frame):
+        return next((entry for entry in frame.get("game", {}).get(native_stock_enemy_drops.KEY, {}).values()
+                     if entry["source"] == buried_source and entry["class_path"] == NUGGET), None)
+
+    dug = buried_reward(await wait_resident_status(host_run, buried_reward, timeout=8))
+
+    def banked(events):
+        return next((entry for entry in events if entry["event"] == "native_stock_enemy_loot_banked"
+                     and entry["actor"] == dug["actor"]), None)
+
+    async with asyncio.timeout(10):
+        while not (bank := banked(await resident_events(host_run, host_status))):
+            await asyncio.sleep(.08)
+    buried_id = native_world_loot.stock_enemy_identity(bank["guid"], bank.get("visual_id"))
+    for run in (host_run, guest_run):
+        await wait_resident_status(run, lambda f: buried_id in f["game"].get(native_world_loot.KEY, {}), timeout=12)
+    await host.bridge.command(native_world_loot.APPROACH, buried_id, pawn, timeout=5)
+    await wait_resident_status(guest_run, lambda f: math.dist(
+        f["game"]["pawns"]["local"]["location"], bank["transform"]["position"]) < 180, timeout=7)
+    before = sum(row["quantity"] for row in await stock_inventory(guest_run, guest=True) if row["class_path"] == NUGGET)
+    picked = await submit(guest_run, native_world_loot.FIXTURE, target=buried_id)
+    assert picked["ok"], picked
+    await wait_resident_status(guest_run, lambda f: buried_id not in f["game"].get(native_world_loot.KEY, {}), timeout=10)
+    after = sum(row["quantity"] for row in await stock_inventory(guest_run, guest=True) if row["class_path"] == NUGGET)
+    assert after == before + 1, (before, after, picked)
+    assert bank["revision"] is None and checkpoint == campaign_save_hashes(host.campaign), bank
     return {"stock_shovel": {**dig_result, "unearthed_item": reward, "unearthed_prop": [source, replica],
-                             "duplicate_claim": rival["error"]}, "stock_host_shovel": await verify_host_dig()}
+                             "duplicate_claim": rival["error"], "buried_actor_reward": bank},
+            "stock_host_shovel": host_result}

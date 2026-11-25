@@ -1515,6 +1515,12 @@ namespace
 
 namespace silverfish::native_host_dig
 {
+    bool manages_buried_source(U::UObject* source)
+    {
+        return (ordinary && live_dig.state == LiveState::Contact && live_dig.source.Get() == source) ||
+            (watch.pressed && source && source->GetPathName() == source_path);
+    }
+
     void install_hooks()
     {
         if (installed.load(std::memory_order_acquire)) return;
