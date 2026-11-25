@@ -104,10 +104,20 @@ async def verify_crossroads_recovery(host, guest, _pawn):
 
 
 def instrument_zone_walls(source):
-    anchor = "local sources = wall_sources(world, state.map, route, fixture, secondary)"
+    anchor = "local sources = wall_sources(world, scope.map, route, scope.fixture, scope.secondary)"
     assert source.count(anchor) == 1
     return source.replace(anchor, 'local sources = SilverfishProfileCrossroadsCall("zone_wall_sources", '
-                          'wall_sources, world, state.map, route, fixture, secondary)')
+                          'wall_sources, world, scope.map, route, scope.fixture, scope.secondary)')
+
+
+def instrument_stash_binding(source):
+    anchor = "local function report(state, phase)"
+    insertion = "local function identifier(id)"
+    assert source.count(anchor) == source.count(insertion) == 1
+    return source.replace(anchor, "local function qualify_binding(state, phase)").replace(
+        insertion, 'local function report(...)\n'
+        '    return SilverfishProfileCrossroadsCall("stash_ui_binding", qualify_binding, ...)\n'
+        'end\n\n' + insertion)
 
 
 def instrument_input_mappings(source):
@@ -331,7 +341,7 @@ async def profile_world(host, guest, area, probe):
             timings = profile["timings"]
             for operation in ("command_mailbox", "crate_inline_scan", "npc_marker_class_lookup", "journal_host_context",
                               "death_pawn_receipt", "roster_spawn_qualify",
-                              "player_actor_fallback"):
+                              "player_actor_fallback", "stash_ui_binding"):
                 assert operation not in timings, (operation, timings.get(operation))
             discoveries = timings["loose_discovery"]["count"]
             assert 0 < discoveries <= math.ceil(profile["seconds"] / .125) + 1, profile

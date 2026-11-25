@@ -7050,6 +7050,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (tutorial_dock_shot_view, "tutorial_dock_buckshot", "tutorial_dock_buckshot", verify_dock_garage_buckshot),
         (tutorial_dock_melee, "tutorial_dock_melee", "tutorial_dock_melee", verify_tutorial_dock_melee),
         (stock_eye_stacks, "shopkeep", "stock_eye_stacks", verify_stock_eye_stacks),
+        (guest_stash_memory, "stash", "guest_stash_memory",
+         lambda host, guest, pawn: verify_guest_stash_memory(host, guest, pawn, large=guest_stash_large_memory,
+                                                            site_scan_probe=site_scan_probe)),
     ):
         if enabled:
             resident_campaigns.setdefault(campaign, []).append((name, check))
@@ -7073,7 +7076,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 instrument_input_mappings, instrument_journal_context,
                 instrument_loose_discovery, instrument_npc_class_discovery, instrument_profile,
                 instrument_shop_discovery, instrument_spawn_context, instrument_vital_reads, instrument_weather_status,
-                instrument_zone_walls,
+                instrument_stash_binding, instrument_zone_walls,
             )
 
             crate_probe = ((Path(__file__).with_name("fixtures") / "portable_crate_input_probe.lua").read_text(encoding="utf-8")
@@ -7096,6 +7099,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                                   instrument_crate_host_action))
             for game in games:
                 probes.enter_context(portable_script_overlay(game, "zone_wall.lua", instrument_zone_walls))
+                probes.enter_context(portable_script_overlay(game, "native_stash_view.lua", instrument_stash_binding))
             proof["crossroads_input_overlays"] = [
                 probes.enter_context(portable_script_overlay(game, "players.lua", instrument_input_mappings))
                 for game in games
@@ -7596,6 +7600,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 session = asyncio.create_task(start_pair(
                     host, second, "Gameplay scout", on_join=run_checks,
                     before_join=before_join.get(campaign),
+                    create_character=create_stock_bag_character if campaign == "stash" else None,
                     initial_map=WAREHOUSE_DOCK if campaign == "tutorial_dock_late_join" else OBSERVATORY,
                     wait_status=wait_resident_status, host_exit_actions=exit_actions,
                     after_reconnect=after_reconnect, friendly_fire=campaign == "friendly_fire_enabled"))
@@ -7657,14 +7662,6 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["sessions"].append(await start_pair(first, second, "Crate scout", on_join=verify_stock_crate_ring))
         elif guest_shop_lease:
             proof["sessions"].append(await start_pair(first, second, "Merchant scout", on_join=verify_guest_shop_lease))
-        elif guest_stash_memory:
-            async def check_stash(host, guest, pawn):
-                return await verify_guest_stash_memory(host, guest, pawn, large=guest_stash_large_memory,
-                                                       site_scan_probe=site_scan_probe)
-
-            proof["sessions"].append(await start_pair(first, second, "Stash scout", on_join=check_stash,
-                                                      create_character=create_stock_bag_character,
-                                                      wait_status=wait_resident_status))
         elif guest_ui_memory:
             proof["sessions"].append(await start_pair(first, second, "Inventory scout", on_join=check_gameplay))
         elif resident_cabinet_checkpoint:

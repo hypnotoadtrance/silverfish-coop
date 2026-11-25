@@ -24,8 +24,8 @@ local scanned_world
 local scanned_actors = {}
 local scan_after = 0
 local approach_scope, open_exit
-local guest_walls
-local guest_check_interval = 0.5
+local verified_walls
+local wall_check_interval = 0.5
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -79,7 +79,7 @@ function wall.clear()
     observation = nil
     primary_key, approach_scope, open_exit = nil, nil, nil
     scanned_world, scanned_actors, scan_after = nil, {}, 0
-    guest_walls = nil
+    verified_walls = nil
     status, failure = "inactive", ""
     regroup.clear()
 end
@@ -178,7 +178,8 @@ local function sync_shape(index, world, fixture, desired)
         clear_record(index)
         return false
     end
-    if record and (not same(record.fixture, fixture) or not same(record.world, world) or not valid(record.actor)
+    if record and (not same(record.fixture, fixture) or not same(record.world, world)
+        or not valid(record.actor) or not valid(record.component)
         or not same(record.original, fixture.Box)) then
         clear_record(index)
         record = nil
@@ -340,43 +341,22 @@ local function wall_sources(world, map, route, fixture, secondary)
     return sources
 end
 
-function wall.sync(state, phase, fixture, accepting, secondary)
-    if not enabled then return end
-    local hosting = phase == "hosting"
-    local local_pawn = state.local_pawn and state.local_pawn.pawn
-    local route = zones[state.map]
-    if (not hosting and phase ~= "connected") or not route or not valid(local_pawn)
-        or (not route.fixture and not authored_routes[state.map]) then
-        wall.clear()
-        return
+local function intact(scope, previous)
+    if not previous or previous.map ~= scope.map or previous.hosting ~= scope.hosting
+        or previous.permitted ~= scope.permitted or previous.manages_overlap ~= scope.manages_overlap
+        or previous.fixture ~= scope.fixture or previous.secondary ~= scope.secondary or os.clock() >= previous.expires
+        or not same(previous.world, scope.world) or not same(previous.pawn, scope.pawn)
+        or not same(previous.capsule, scope.capsule) then return false end
+    for _, record in pairs(records) do
+        if not valid(record.actor) or not valid(record.component) or not valid(record.fixture)
+            or not valid(record.original) then return false end
     end
-    local world = local_pawn:GetWorld()
-    local local_capsule = capsule(local_pawn)
-    if not same(world, state.world) or not local_capsule then
-        wall.clear()
-        status, failure = "arming", "Waiting for a compatible pawn capsule and exit Box"
-        return
-    end
-    if not hosting and guest_walls and guest_walls.map == state.map and os.clock() < guest_walls.expires
-        and same(guest_walls.world, world) and same(guest_walls.pawn, local_pawn)
-        and same(guest_walls.capsule, local_capsule) then
-        local intact = true
-        for _, record in pairs(records) do
-            if not valid(record.actor) or not valid(record.component) or not valid(record.fixture) then
-                intact = false
-                break
-            end
-        end
-        if intact then return end
-    end
-    guest_walls = nil
-    local permitted, blockers
-    if hosting then permitted, blockers = host_can_pass(state, local_pawn, world, accepting) end
-    local desired = permitted and local_capsule or nil
-    local manages_overlap = hosting and type(SilverfishSetNativeExitApproach) == "function"
-    approach_scope = manages_overlap and accepting and {pawn = local_pawn, capsule = local_capsule, world = world} or nil
-    if not approach_scope then close_approach() end
-    local sources = wall_sources(world, state.map, route, fixture, secondary)
+    return true
+end
+
+local function sync_geometry(scope, route)
+    local world, desired = scope.world, scope.permitted and scope.capsule or nil
+    local sources = wall_sources(world, scope.map, route, scope.fixture, scope.secondary)
     for key in pairs(records) do
         if not sources[key] then clear_record(key) end
     end
@@ -384,7 +364,7 @@ function wall.sync(state, phase, fixture, accepting, secondary)
     local first_ready, diagnostics, had_error = nil, {}, false
     for key, source in pairs(sources) do
         local source_actor = in_world(source.fixture, world) and source.fixture or nil
-        local managed = manages_overlap and source.kind == "overlap"
+        local managed = scope.manages_overlap and source.kind == "overlap"
         local keep = records[key] and records[key].host_capsule
         local target
         if managed then
@@ -406,10 +386,42 @@ function wall.sync(state, phase, fixture, accepting, secondary)
     status = primary_key and records[primary_key] and "ready" or had_error and "error" or "arming"
     table.sort(diagnostics)
     failure = table.concat(diagnostics, ", ")
-    if not hosting and status == "ready" and failure == "" then
-        guest_walls = {map = state.map, world = world, pawn = local_pawn, capsule = local_capsule,
-            expires = os.clock() + guest_check_interval}
+    if status == "ready" and failure == "" then
+        scope.expires = os.clock() + wall_check_interval
+        verified_walls = scope
     end
+end
+
+function wall.sync(state, phase, fixture, accepting, secondary)
+    if not enabled then return end
+    local hosting = phase == "hosting"
+    local local_pawn = state.local_pawn and state.local_pawn.pawn
+    local route = zones[state.map]
+    if (not hosting and phase ~= "connected") or not route or not valid(local_pawn)
+        or (not route.fixture and not authored_routes[state.map]) then
+        wall.clear()
+        return
+    end
+    local world = local_pawn:GetWorld()
+    local local_capsule = capsule(local_pawn)
+    if not same(world, state.world) or not local_capsule then
+        wall.clear()
+        status, failure = "arming", "Waiting for a compatible pawn capsule and exit Box"
+        return
+    end
+    local permitted, blockers
+    if hosting then permitted, blockers = host_can_pass(state, local_pawn, world, accepting) end
+    local manages_overlap = hosting and type(SilverfishSetNativeExitApproach) == "function"
+    approach_scope = manages_overlap and accepting and {pawn = local_pawn, capsule = local_capsule, world = world} or nil
+    if open_exit and (not approach_scope or not same(open_exit.host_capsule, local_capsule)) then close_approach() end
+    local scope = {map = state.map, world = world, pawn = local_pawn, capsule = local_capsule,
+        hosting = hosting, permitted = permitted == true, manages_overlap = manages_overlap,
+        fixture = fixture, secondary = secondary}
+    if not intact(scope, verified_walls) then
+        verified_walls = nil
+        sync_geometry(scope, route)
+    end
+    if not hosting then return end
     local near = blockers and #blockers > 0 and nearby_exit(local_pawn:K2_GetActorLocation(), 450)
     if near and not valid(records[near].host_capsule) then
         regroup.show(state, near, blockers)

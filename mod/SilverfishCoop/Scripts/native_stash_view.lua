@@ -112,7 +112,7 @@ local function begin(binding, actor)
 end
 
 function view.sync(state, phase)
-    local binding = report(state, phase)
+    local binding = current and report(state, phase)
     if current and (not binding or not same(binding.pawn, current.binding.pawn)
         or site_id(current.actor, binding) ~= current.id or not near(binding.pawn, current.actor)
         or current.screen and not visible(binding.controller, current.screen)
@@ -123,9 +123,17 @@ function view.sync(state, phase)
         local guid, deposit, _, amount, before, expected = SilverfishTakeNativeStashMove(current.screen:GetAddress())
         if guid then queue(deposit and "backpack" or "stash", guid, before, amount, expected) end
     end
-    if not binding or type(SilverfishTakeNativeStashPress) ~= "function" then return end
-    local press, path = SilverfishTakeNativeStashPress(binding.pawn:GetAddress())
-    if press and not current and type(path) == "string" then begin(binding, StaticFindObject(path)) end
+    if phase ~= "connected" or not state.listening or state.server ~= true
+        or type(SilverfishTakeNativeStashPress) ~= "function" then return end
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    if not valid(pawn) then return end
+    -- The native read renews only its current local guest scope. Qualify the
+    -- full UI binding when a stock press can actually open the screen.
+    local press, path = SilverfishTakeNativeStashPress(pawn:GetAddress())
+    if press and not current and type(path) == "string" then
+        binding = binding or report(state, phase)
+        if binding then begin(binding, StaticFindObject(path)) end
+    end
 end
 
 local function item_row(line, seen)

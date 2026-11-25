@@ -116,6 +116,9 @@ local function tick(x)
 end
 
 wall.sync(state, "hosting", nil, true)
+local after_host_setup = shape_reads
+wall.sync(state, "hosting", nil, true)
+assert(shape_reads == after_host_setup, "A settled host should reuse verified geometry")
 auth = true
 tick(900)
 assert(#receipts == 0 and not host.ignores[walls[0]] and not host.ignores[walls[2000]], "distant walls remain closed")
@@ -129,6 +132,17 @@ assert(receipts[#receipts] == second and host.ignores[walls[2000]], "next wall r
 auth = false
 tick(1870)
 assert(not host.ignores[walls[2000]], "native refusal restores collision")
+local approve_approach = SilverfishSetNativeExitApproach
+SilverfishSetNativeExitApproach = nil
+wall.sync(state, "hosting", nil, true)
+assert(host.ignores[walls[2000]], "Legacy scope opens for a nearby guest")
+after_host_setup = shape_reads
+guest.at = point(4000)
+wall.sync(state, "hosting", nil, true)
+assert(shape_reads > after_host_setup and not host.ignores[walls[2000]],
+    "Host wall permission changes before the geometry cache expires")
+guest.at = point(1400)
+SilverfishSetNativeExitApproach = approve_approach
 wall.sync(state, "connected", nil, true)
 local after_guest_setup = shape_reads
 wall.sync(state, "connected", nil, true)
