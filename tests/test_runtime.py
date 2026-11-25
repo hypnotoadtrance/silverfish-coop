@@ -377,6 +377,45 @@ class WorldWeatherTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(bridge._local_world_view)
 
 
+class SharedStockStageTests(unittest.TestCase):
+    def test_stage_links_verified_stock_data_from_a_private_cache(self):
+        with TemporaryDirectory(dir=Path.cwd()) as temporary:
+            root = Path(temporary).resolve()
+            source, loader, cache = (root / name for name in ("source", "loader", "cache"))
+            radio = Path("SilverFish/Content/Music/Radio/sample.wav")
+            metadata_paths = (runtime.SHIPPING, Path("SilverFish.exe"), radio)
+            for relative in (*metadata_paths, *(runtime.PAKS / name for name in runtime.STOCK_PACKAGES)):
+                path = source / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(relative.as_posix().encode())
+            (source / runtime.MANIFEST).write_text("\n".join(path.as_posix() for path in metadata_paths), encoding="utf-8")
+            for relative in ("dwmapi.dll", "ue4ss/UE4SS.dll", "ue4ss/UE4SS-settings.ini"):
+                path = loader / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("ConsoleEnabled = 1\n", encoding="utf-8")
+            for relative, stock in ((Path(runtime.STOCK_ARCHIVE.name), runtime.STOCK_ARCHIVE), (radio, radio)):
+                path = cache / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes((source / stock).read_bytes())
+
+            work = root / "linked"
+            runtime.prepare_game(work, source, loader, None, stock_cache=cache)
+            stage = work / "stage"
+            self.assertTrue((stage / runtime.STOCK_ARCHIVE).samefile(cache / runtime.STOCK_ARCHIVE.name))
+            self.assertTrue((stage / radio).samefile(cache / radio))
+            self.assertFalse((stage / runtime.STOCK_ARCHIVE).samefile(source / runtime.STOCK_ARCHIVE))
+            self.assertFalse((stage / runtime.SHIPPING).samefile(source / runtime.SHIPPING))
+            self.assertIn("ConsoleEnabled = 0", (stage / runtime.SHIPPING.parent /
+                                                 "ue4ss/UE4SS-settings.ini").read_text(encoding="utf-8"))
+
+            bad_cache = root / "mismatched"
+            bad_cache.mkdir()
+            (bad_cache / runtime.STOCK_ARCHIVE.name).write_bytes(b"not the installed archive")
+            with self.assertRaisesRegex(ValueError, "differs from the selected game build"):
+                runtime.prepare_game(root / "rejected", source, loader, None, stock_cache=bad_cache)
+            self.assertFalse((root / "rejected/stage").exists())
+
+
 class StageBackendTests(unittest.TestCase):
     def setUp(self):
         temporary = TemporaryDirectory()

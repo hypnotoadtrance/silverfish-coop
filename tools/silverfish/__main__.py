@@ -84,6 +84,8 @@ def parser() -> argparse.ArgumentParser:
     stage.add_argument("--signatures", type=Path, help="extracted Silverfish UE4SS_Signatures folder")
     stage.add_argument("--cpp-runtime", type=Path, help="locally built UE4SS v4.0.0 runtime DLL")
     stage.add_argument("--cpp-addon", type=Path, help="Silverfish native add-on from the same build")
+    stage.add_argument("--stock-cache", type=Path,
+                       help="private cache for hard-linking stock game data on the same volume")
 
     menu = commands.add_parser("menu", help="open a staged game with the in-game Host and Join panel")
     menu.add_argument("--title-profile", default="co-op-menu")
@@ -471,7 +473,7 @@ async def execute(opts):
     operation = opts.operation
     if operation == "stage":
         return prepare_game(opts.work, opts.source, opts.ue4ss, opts.signatures,
-                            cpp_runtime=opts.cpp_runtime, cpp_addon=opts.cpp_addon)
+                            cpp_runtime=opts.cpp_runtime, cpp_addon=opts.cpp_addon, stock_cache=opts.stock_cache)
     if operation == "menu":
         return await staged_title_menu(opts)
     if operation == "host":

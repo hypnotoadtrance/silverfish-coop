@@ -95,6 +95,11 @@ WORLD_WEATHER_FIELDS = ("fog_density", "fog_falloff", "cloud_bottom_km", "cloud_
 MANIFEST = Path("Manifest_NonUFSFiles_Win64.txt")
 STOCK_PACKAGES = ("SilverFish-Windows.pak", "SilverFish-Windows.utoc",
                   "SilverFish-Windows.ucas", "global.utoc", "global.ucas")
+STOCK_ARCHIVE = PAKS / "SilverFish-Windows.ucas"
+SHARED_MEDIA = {
+    Path("SilverFish/Content/Music/Radio"): ".wav",
+    Path("SilverFish/Content/Movies/TV_Clips"): ".mov",
+}
 MAP = "/Game/Classes/Maps/PlaytestMap_01"
 MENU = "/Game/Classes/Maps/MainMenu_P"
 CPP_MOD_NAME = "SilverfishCoopNative"
@@ -174,9 +179,27 @@ def _file_sha256(path: Path) -> str:
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
+def _shared_stock_file(cache: Path, relative: Path, original: Path) -> Path | None:
+    if relative == STOCK_ARCHIVE:
+        cached = cache / relative.name
+    elif SHARED_MEDIA.get(relative.parent) == relative.suffix.lower():
+        cached = cache / relative
+        if not cached.exists():
+            return None
+    else:
+        return None
+    path = cached.resolve(strict=True)
+    if path != cached or not path.is_file() or path.samefile(original):
+        raise ValueError(f"The shared stock file must be a private copy: {cached}")
+    if path.stat().st_size != original.stat().st_size or _file_sha256(path) != _file_sha256(original):
+        raise ValueError(f"The shared stock file differs from the selected game build: {cached}")
+    return path
+
+
 def prepare_game(work: Path, source: Path, ue4ss: Path, signatures: Path | None, *,
-                 cpp_runtime: Path | None = None, cpp_addon: Path | None = None) -> dict:
-    """Copy stock files only, then install the pinned loader and this mod in the copy."""
+                 cpp_runtime: Path | None = None, cpp_addon: Path | None = None,
+                 stock_cache: Path | None = None) -> dict:
+    """Stage stock files, the pinned loader and the mod in a private replica."""
     if bool(cpp_runtime) != bool(cpp_addon):
         raise ValueError("Supply both the locally built UE4SS runtime and its matching C++ add-on")
     for dll in (cpp_runtime, cpp_addon):
@@ -188,6 +211,11 @@ def prepare_game(work: Path, source: Path, ue4ss: Path, signatures: Path | None,
     stage = work / "stage"
     if work.is_relative_to(source) or source.is_relative_to(stage):
         raise ValueError("The prototype workspace and original installation must be separate")
+    if stock_cache is not None:
+        stock_cache = stock_cache.resolve(strict=True)
+        if (not stock_cache.is_dir() or stock_cache.is_relative_to(source)
+                or "steamapps" in {part.casefold() for part in stock_cache.parts}):
+            raise ValueError("Use an independent private cache for shared stock files")
     if stage.exists():
         raise ValueError(f"Stage already exists at {stage}. Use a new workspace to stage a fresh copy.")
     for relative in (Path("dwmapi.dll"), Path("ue4ss/UE4SS.dll"), Path("ue4ss/UE4SS-settings.ini")):
@@ -205,7 +233,11 @@ def prepare_game(work: Path, source: Path, ue4ss: Path, signatures: Path | None,
                 raise ValueError(f"Staged file points outside the source: {relative}")
             target = building / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(original, target)
+            cached = _shared_stock_file(stock_cache, relative, original) if stock_cache else None
+            if cached is None:
+                shutil.copy2(original, target)
+            else:
+                os.link(cached, target)
 
         binaries = (building / SHIPPING).parent
         shutil.copy2(ue4ss / "dwmapi.dll", binaries)

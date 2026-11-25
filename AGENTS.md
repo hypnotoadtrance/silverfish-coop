@@ -6,6 +6,8 @@ Use a gameplay-time disk write only when an operation requires durable storage t
 
 # Automated testing
 
+Reuse the existing isolated game replicas. For new replicas on the same volume, pass `stage --stock-cache` with the project-local shared stock cache so the IoStore archive, radio tracks, and TV clips use hard links. The cache has `SilverFish-Windows.ucas` at its root and stores media under its original `SilverFish/Content` paths. Keep mods, configuration and user data private to each replica. Keep the shared stock copy separate from the live Steam installation.
+
 Group related gameplay changes before running live tests. Use a small set of representative smoke tests for the shared paths changed by the batch. Run them in muted, isolated replicas with copied checkpoints. Add a focused check when the batch changes a distinct path that the representative tests do not exercise.
 
 Group compatible backlog fixes into a candidate before starting live verification. Build and stage it once, then start one private host and guest and run the selected checks on those same processes. Use fresh campaigns in the open processes when checks need clean starting state. Relaunch the executable when a check requires a cold start or the existing processes cannot be recovered. The portable smoke runner supports combining `--stock-campfire`, `--stock-melee-edges`, and `--stock-food` in one Observatory campaign, and running `--stock-unequip` in a separate campaign on the same pair.
