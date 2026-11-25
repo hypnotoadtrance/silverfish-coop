@@ -238,11 +238,18 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
         intent["guid"] = "B" * 32
         await service.Client.service_reload_input(client, True)
         client.gameplay_action.assert_not_awaited()
+        self.assertEqual(client.last_reload_intent, 0)
 
-        intent.update(guid=guid, sequence=2)
+        intent.update(guid=guid)
+        client.primary_scope = None
+        await service.Client.service_reload_input(client, True)
+        client.gameplay_action.assert_not_awaited()
+        self.assertEqual(client.last_reload_intent, 0)
+
+        client.primary_scope = (area, "guest", guid, kind)
         await service.Client.service_reload_input(client, True)
         scope, sequence, step, due = client.tube_reload
-        self.assertEqual((sequence, step), (2, 1))
+        self.assertEqual((sequence, step), (1, 1))
         self.assertGreater(due, time.monotonic())
         self.assertEqual(client.gameplay_action.await_args.args[2], f"{guid}@epoch")
         await service.Client.service_reload_input(client, True)

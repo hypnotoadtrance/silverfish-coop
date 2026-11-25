@@ -5551,7 +5551,6 @@ class Client:
         sequence = intent.get("sequence")
         fresh = type(sequence) is int and self.last_reload_intent < sequence < 2**53
         if fresh:
-            self.last_reload_intent = sequence
             self.tube_reload = None
         elif self.tube_reload is None:
             return
@@ -5560,15 +5559,20 @@ class Client:
         pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
         if not active or self.stopping or not self.host_session or not self.zone_epoch or not pawn:
             self.tube_reload = None
+            if fresh:
+                self.last_reload_intent = sequence
             return
-        if fresh and (intent.get("map"), intent.get("pawn")) != (area, pawn):
+        if fresh and ((intent.get("map"), intent.get("pawn")) != (area, pawn)
+                      or not native_gold.valid_guid(intent.get("guid")) or intent.get("barrel") not in {"primary", "loki"}):
+            self.last_reload_intent = sequence
             return
 
         equipment = self.gameplay.get("native_equipped_weapon", {})
         kind, receiver = equipment.get("kind"), equipment.get("guid")
         selected = intent.get("guid") if fresh else receiver
-        if not native_gold.valid_guid(selected) or fresh and (selected != receiver or intent.get("barrel") not in {"primary", "loki"}):
-            self.tube_reload = None
+        if fresh and selected != receiver:
+            # The live local intent disappears when its exact weapon changes.
+            # Allow the host's equipment snapshot to catch up while it still exists.
             return
         underbarrel = fresh and intent.get("barrel") == "loki"
         magazine = guest_weapon_profiles.SINGLE_RELOAD_MAGAZINES.get(kind) if not underbarrel else None
@@ -5576,9 +5580,13 @@ class Client:
         primary = self.last_game.get("native_guest_primary_scope", {})
         pump_trigger_held = (magazine and primary.get("pump_trigger_held")
                              and (primary.get("map"), primary.get("pawn"), primary.get("guid")) == (area, pawn, receiver))
-        if magazine and (pump_trigger_held or self.primary_scope != (area, pawn, receiver, kind)
-                         or self.gameplay.get("players", {}).get(self.viewer_role, {}).get("downed")
+        if magazine and (pump_trigger_held or self.gameplay.get("players", {}).get(self.viewer_role, {}).get("downed")
                          or self.last_game.get("native_inventory_view", {}).get("state") == "stock"):
+            self.tube_reload = None
+            if fresh:
+                self.last_reload_intent = sequence
+            return
+        if magazine and self.primary_scope != (area, pawn, receiver, kind):
             self.tube_reload = None
             return
 
@@ -5591,6 +5599,8 @@ class Client:
             if time.monotonic() < due:
                 return
         self.tube_reload = None
+        if fresh:
+            self.last_reload_intent = sequence
 
         operation_key = f"{self.host_session}:{self.zone_epoch}:{pawn}:reload:{sequence}"
         if step:

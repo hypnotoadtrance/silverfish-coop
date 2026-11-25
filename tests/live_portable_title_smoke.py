@@ -3227,24 +3227,22 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
             slot = moved[native_inventory.STORE_KEY]["slot"]
 
             async def read_loadout(action="read"):
-                # The portable test bridge polls a file while gameplay uses the
-                # resident bridge. A gameplay acknowledgement can replace the
-                # readback before the test sees it. Retry reads only.
-                if action != "equip":
-                    try:
-                        read = await guest.bridge.command("fixture-stock-take-ammo-loadout", str(slot), guid, action,
-                                                          timeout=1.5)
-                    except TimeoutError:
-                        return "waiting"
-                else:
-                    read = await guest.bridge.command("fixture-stock-take-ammo-loadout", str(slot), guid, action)
+                # Resident gameplay can replace the portable file bridge acknowledgement.
+                # Selecting the exact already-held GUID is idempotent in the probe.
+                try:
+                    read = await guest.bridge.command("fixture-stock-take-ammo-loadout", str(slot), guid, action,
+                                                      timeout=1.5)
+                except TimeoutError:
+                    return "waiting"
                 return read["ack"]["message"]
 
             async with asyncio.timeout(8):
                 while await read_loadout() == "waiting":
                     await asyncio.sleep(.15)
             if source == "equipped":
-                assert await read_loadout("equip") == f"{before['stored_ammo']},{before['stored_ammo']}"
+                async with asyncio.timeout(8):
+                    while await read_loadout("equip") != f"{before['stored_ammo']},{before['stored_ammo']}":
+                        await asyncio.sleep(.15)
                 async with asyncio.timeout(8):
                     while not any(entry["event"] == "native_guest_equipment_selected"
                                   and entry.get("native_guest_weapon", {}).get("guid") == guid
@@ -3287,8 +3285,11 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
             switched = await guest.bridge.command("fixture-stock-take-ammo-loadout", str(switched_slot), switched_guid,
                                                    "switch-during-reload")
             assert switched["ack"]["message"] == "stock_cancelled", switched["ack"]
-            assert await read_loadout() == "0,stored"
-            assert await read_loadout("equip") == "0,0"
+            async with asyncio.timeout(8):
+                while await read_loadout() != "0,stored":
+                    await asyncio.sleep(.1)
+                while await read_loadout("equip") != "0,0":
+                    await asyncio.sleep(.1)
             await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
             proof["switch_cancelled_reload"] = True
         if source == "equipped":
@@ -3313,6 +3314,15 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
                 resumed_at = len(inserts) - 1
                 assert (shot["guid"], shot["before"], shot["after"], shot["projectiles"]) == (
                     guid, len(inserts), resumed_at, expected.projectile_count), shot
+                async with asyncio.timeout(8):
+                    while True:
+                        try:
+                            cycle = await host.bridge.command("fixture-stock-take-ammo-cycle", pawn, guid, timeout=1.5)
+                        except TimeoutError:
+                            continue
+                        if cycle["ack"]["message"] == "ready":
+                            break
+                        await asyncio.sleep(.1)
                 proof["trigger_interrupted_reload"] = {"inserts": inserts, "shot": shot}
             reload_count = expected_rounds - resumed_at if tube else 1
             reloads = await stock_input("reload", reload_count)

@@ -25,7 +25,7 @@
             return outcome
         end
         if fields[5] == "equip" then
-            pawn:Equip_NextItem(slot, false)
+            if equipped_guid(pawn, save) ~= fields[4] then pawn:Equip_NextItem(slot, false) end
             local facing = pawn.Controller:GetControlRotation()
             pawn.Controller:SetControlRotation({Pitch = 70, Yaw = facing.Yaw, Roll = 0})
         end
@@ -60,6 +60,14 @@
         save.PlayerBackpack[index] = row
         save.PlayerBackpack[index]["DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"] = defaults.DataStruct
         return assert(item_identity(save.PlayerBackpack[index]))
+    end
+    if fields[2] == "fixture-stock-take-ammo-cycle" and headless
+        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
+        assert(phase == "hosting" and #fields == 4)
+        local pawn, save = guest_save.exact_item_context(state, phase, fields[3])
+        assert(pawn and save and equipped_guid(pawn, save) == fields[4])
+        local weapon = pawn.EquipedItem
+        return not weapon.IsCycling and not weapon.Reloading and not weapon.Holding_Primary and "ready" or "cycling"
     end
     if fields[2] == "fixture-stock-take-ammo-select-round" and headless
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
