@@ -64,6 +64,40 @@ for _, shown in ipairs({"hidden", "stock-active"}) do
         and rows["native-authored-pickup-interaction"][6] == "stock")
 end
 
+local projected_path = crossroads .. ".CrossRoads_P:PersistentLevel.ProjectedLoot_1"
+local actor_name = "Item_Master_BP_C " .. projected_path
+local projected = {
+    IsValid = function() return true end,
+    GetAddress = function() return 104 end,
+    GetFullName = function() return actor_name end,
+    GetWorld = function() return world end,
+    IsActorBeingDestroyed = function() return false end,
+    bReplicates = true,
+}
+world.PersistentLevel = {IsValid = function() return true end, GetAddress = function() return 103 end}
+projected.GetOuter = function() return world.PersistentLevel end
+local mesh_visible = true
+local mesh = {
+    IsValid = function() return true end,
+    GetOwner = function() return projected end,
+    IsVisible = function() return mesh_visible end,
+    SetVisibility = function(_, visible) mesh_visible = visible end,
+    bHiddenInGame = false,
+}
+projected.K2_GetComponentsByClass = function() return {mesh} end
+env.StaticFindObject = function(name)
+    if name == projected_path or name == "/Script/Engine.MeshComponent" then return projected end
+end
+local target = "world-loot:" .. ("a"):rep(32) .. ":" .. ("b"):rep(32) .. ":pickup"
+pickup.preview_input(pawn, target, actor_name)
+assert(mesh_visible, "A host preview cannot hide a replicated actor")
+projected.bReplicates = false
+pickup.preview_input(pawn, target, actor_name)
+assert(not mesh_visible, "A host preview should hide a projected loot mesh")
+local cancel = {"test", "native-pickup-cancel-preview", target}
+assert(not pcall(pickup.command, cancel, state, "connected") and not mesh_visible)
+assert(pickup.command(cancel, state, "hosting") == "pickup preview released" and mesh_visible)
+
 state.server = true
 local epoch = string.rep("1", 32)
 reporting_drop("projected", epoch)

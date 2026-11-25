@@ -61,6 +61,15 @@ PROBES = {
 
 
 RESIDENT_PROBES = {
+    "native_authored_pickup.lua": {
+        "    if #preview.meshes == 0 then previews[target] = nil end": (
+            "    if #preview.meshes == 0 then previews[target] = nil end\n"
+            "    if binding.host and previews[target] and actor:GetActorEnableCollision() and valid(actor.Box)"
+            " and actor.Box:GetCollisionEnabled() ~= 0 and not preview.meshes[1]:IsVisible() then\n"
+            "        cabinet_probe.mark('local-mesh-hidden', target:match('^world%-loot:%x+:(%x+):'))\n"
+            "    end"
+        ),
+    },
     "native_guest_drop_projection.lua": {
         "return pickup_fixture.press_world_loot(state, pawn, actor, actor.Box, function()": (
             "return pickup_fixture.press_world_loot(state, pawn, actor, actor.Box, function()\n"
@@ -238,6 +247,12 @@ def summarize(trace: Path, *, resident: bool = False, combined_operation: str | 
                         if row["start"] < sound["stop"] + .06 and row["stop"] > stock["start"] - .06]
         if not presentation:
             raise ValueError("Missing frame samples around the measured presentation")
+        previews = [row for row in entries if row["label"] == "local-mesh-hidden"]
+        if previews:
+            preview, = previews
+            if not stock["start"] <= preview["start"] <= enclosing["start"]:
+                raise ValueError("The local pickup preview did not precede the inventory transfer")
+            summary["stock_f_to_preview_ms"] = ms(preview["start"], stock["start"])
         summary.update(stock_f_to_input_ms=ms(queued["start"], stock["start"]),
                        input_to_claim_ms=ms(enclosing["start"], queued["start"]),
                        input_to_claim_command_end_ms=ms(claim["stop"], queued["start"]),

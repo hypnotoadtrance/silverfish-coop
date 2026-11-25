@@ -4445,6 +4445,9 @@ class Host:
                             await native_inventory_death.recover(self, bridge, "host", bag, operation_id)
                 except (ValueError, OSError, RuntimeError) as error:
                     self.control.event("interaction_rejected", operation_id=operation_id, reason=str(error))
+                    if world_loot and bridge.local_bridge is not None and not self.stopping:
+                        with contextlib.suppress(OSError, RuntimeError):
+                            await bridge.command("native-pickup-cancel-preview", target, timeout=.75, update_status=False)
             self.last_game = await self.pickup_playback.sync(
                 bridge, self.control, self.last_game, self.pickup_audio.frame(self.last_game, self.zone_epoch),
                 self.zone_epoch, self.control.generation)
