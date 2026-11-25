@@ -4574,6 +4574,11 @@ async def verify_stock_prop_grip(host: Seat, guest: Seat, pawn: str) -> dict:
         return held == "1", [float(value) for value in position]
 
     grab = await edge("grab")
+    confirmations = [row for row in await resident_events(host_run, host_status)
+                     if row["event"] == "native_prop_carry_action" and row.get("lease") == grab["lease"]
+                     and row.get("edge") == "grab"]
+    confirmation, = confirmations
+    assert confirmation["filter_confirmed"], confirmation
 
     def active_counters(state):
         counters = state.get("game", {}).get(native_prop_carry.FILTER, {})
@@ -4609,6 +4614,7 @@ async def verify_stock_prop_grip(host: Seat, guest: Seat, pawn: str) -> dict:
     return {
         "local_bridge": {"host": host_status["local_bridge"], "guest": guest_status["local_bridge"]},
         "authored_prop": native_lantern.ACTOR, "grab": grab, "drop": drop,
+        "grab_receipt_confirmed_filter": True,
         "filter_while_held": held_filter, "filter_after_drop": active_counters(resumed_state),
         "held_position": held_position, "released_position": released_position,
         "stock_sweep": {"target_seconds": 1.2, "received": streamed,

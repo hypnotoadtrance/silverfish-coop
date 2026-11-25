@@ -270,14 +270,17 @@ class Host:
                 or ("placement" in identity and actor.partition(" ")[2] != identity["placement"])):
             raise RuntimeError("The stock physics carry did not return the exact action")
         self.service.last_game, self.service.last_seen = snapshot, time.monotonic()
+        result = {PROOF: proof}
         if edge == "grab":
             self.holders[character] = dict(lease=lease, pawn=pawn, sequence=number, sample=0,
                                            deadline=time.monotonic() + 1.4, identity=identity, actor=actor)
+            if confirmation := self.grip_confirmation(character):
+                result[FILTER] = confirmation
         else:
             self.holders.pop(character, None)
             self.poses.pop(lease, None)
-        self.service.control.event("native_prop_carry_action", **proof)
-        return {PROOF: proof}
+        self.service.control.event("native_prop_carry_action", **proof, filter_confirmed=FILTER in result)
+        return result
 
     def aim(self, bridge, character, target):
         fields = target.split("@") if isinstance(target, str) and len(target) <= 180 else []
@@ -354,6 +357,7 @@ class Guest:
             suffix = tuple(str(value) for value in row["release_pose"])
         target = "@".join((self.epoch, lease, edge, str(number), str(pitch), str(yaw), *suffix))
         try:
+            requested = time.monotonic()
             returned = await service.gameplay_action(ACTION, operation, target)
             proof = returned.get(PROOF, {})
             if proof.get("sequence") != number:
@@ -374,6 +378,9 @@ class Guest:
                         and kind == row["class_path"].rsplit(".", 1)[-1] and (not placement or path == placement)):
                     self.filter_actor = actor
                     self.filter_placed = bool(placement)
+                    if confirmation := returned.get(FILTER):
+                        # The request time bounds the age of the host's initial lease.
+                        self._poll_filter(service.last_game.get(TARGET, {}), confirmation, requested)
             self.last_pose = None
             self.last_local_sample = None
             self.next_pose = 0
@@ -412,7 +419,7 @@ class Guest:
             # Stock movement stays enabled when the local grip or fresh lease cannot be proved.
             pass
 
-    def _poll_filter(self, grip):
+    def _poll_filter(self, grip, confirmation=None, seen=None):
         local_actor = grip.get("actor")
         # Keep periodic lease renewals on the in-process bridge during ordinary play.
         if (not self.service.last_game.get(FILTER_READY)
@@ -422,7 +429,9 @@ class Guest:
                 or self.filter_placed and local_actor != self.filter_actor
                 or self.filter_job is not None and not self.filter_job.done()):
             return
-        confirmation = self.service.gameplay.get(FILTER)
+        if confirmation is None:
+            confirmation = self.service.gameplay.get(FILTER)
+            seen = self.service.gameplay_seen
         if not isinstance(confirmation, dict):
             return
         if any(confirmation.get(key) != value for key, value in (
@@ -432,8 +441,10 @@ class Guest:
         version, remaining = confirmation.get("version"), confirmation.get("remaining")
         if type(version) is not int or version <= self.filter_version or type(remaining) is not int or not 0 < remaining <= 900:
             return
+        if remaining - 1000 * (time.monotonic() - seen) < 150:
+            return
         self.filter_version = version
-        self.filter_job = asyncio.create_task(self._arm_filter(confirmation, local_actor, self.service.gameplay_seen))
+        self.filter_job = asyncio.create_task(self._arm_filter(confirmation, local_actor, seen))
 
     def _send_pose(self, position, now, interval):
         service = self.service

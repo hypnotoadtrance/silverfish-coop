@@ -206,6 +206,60 @@ class ReleaseHandoffTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GuestPoseTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_grab_receipt_arms_before_a_periodic_snapshot_and_accounts_for_delay(self):
+        epoch = "a" * 32
+        area = "/Game/Test"
+        placement = f"{area}.Test:PersistentLevel.Prop_ScrapWood_C_7"
+        actor = f"Prop_ScrapWood_C {placement}"
+        pawn = "guest pawn"
+        clock = Mock(return_value=2.0)
+        authority = SimpleNamespace(zone_epoch=epoch, last_game={"map": area}, control=Mock())
+        host = carry.Host(authority)
+
+        async def execute(_action, lease, reported_pawn, edge, number, *_target, timeout):
+            self.assertEqual((reported_pawn, edge, number), (pawn, "grab", "4"))
+            proof = {"lease": lease, "sequence": 4, "edge": edge, "actor": actor, "pawn": pawn}
+            held = {"serial": 4, "pawn": pawn, "actor": actor, "remaining": 900}
+            return {"map": area, "sequence": 20, carry.PROOF: proof, carry.HELD: {lease: held}}
+
+        authority_bridge = SimpleNamespace(command=AsyncMock(side_effect=execute))
+        delay = .12
+
+        async def gameplay_action(action, _operation, target):
+            self.assertEqual(action, carry.ACTION)
+            receipt = await host.operate(authority_bridge, "guest", target)
+            clock.return_value += delay
+            return receipt
+
+        bridge = SimpleNamespace(command=AsyncMock(), input_namespace=uuid.NAMESPACE_URL, local_bridge=object())
+        game = {carry.FILTER_READY: True, carry.TARGET: {"grab": 4, "actor": actor}}
+        service = SimpleNamespace(bridge=bridge, last_game=game, gameplay_action=gameplay_action, gameplay={})
+        request = {"edge": "grab", "sequence": 4, "pose": (400, 0, 100, 20, 0), "placement": placement,
+                   "class_path": "/Game/Assets/Prop_ScrapWood.Prop_ScrapWood_C"}
+
+        with (patch.object(carry, "time", SimpleNamespace(monotonic=clock)),
+              patch.object(host, "_pawn", return_value=pawn)):
+            guest = carry.Guest(service)
+            guest.epoch = epoch
+            await guest._operate(request)
+            self.assertIsNotNone(guest.filter_job)
+            await guest.filter_job
+            call = bridge.command.await_args.args
+            self.assertEqual(call[:4], ("native-prop-carry-arm-filter", guest.lease, "4", actor))
+            self.assertIn(int(call[4]), (779, 780))
+            self.assertEqual(guest.filter_version, 20)
+            self.assertTrue(authority.control.event.call_args.kwargs["filter_confirmed"])
+
+            bridge.command.reset_mock()
+            host.holders.clear()
+            delay = .8
+            guest = carry.Guest(service)
+            guest.epoch = epoch
+            await guest._operate(request)
+            self.assertIsNone(guest.filter_job)
+            self.assertEqual(guest.filter_version, 0)
+            bridge.command.assert_not_awaited()
+
     async def test_local_samples_can_move_the_current_grip_between_status_frames(self):
         epoch, lease = "a" * 32, "b" * 32
         transport = SimpleNamespace(game_access=True, send_prop_pose=Mock(return_value=True))
