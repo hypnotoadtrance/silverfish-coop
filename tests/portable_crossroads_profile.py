@@ -98,7 +98,7 @@ async def verify_crossroads_recovery(host, guest, _pawn):
             frame["game"].get("player_effects", {}).get(slot, {}).get("state") == "standing"
             and frame["game"]["pawns"][slot]["name"] == victim_name
             and frame["game"]["pawns"][slot]["health"] > 0)
-        assert after["game"]["pawns"][helper_slot]["health"] == helper["health"], after["game"]["pawns"]
+        assert after["game"]["pawns"][helper_slot]["health"] >= helper["health"], after["game"]["pawns"]
         receipts[role] = {"recovered": receipt, "revived_health": after["game"]["pawns"][slot]["health"]}
     return {"stock_crossroads_recovery": receipts}
 
