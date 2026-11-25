@@ -1984,8 +1984,16 @@ class Host:
             positions = self.authoritative_pawns(roles) if not self.transitioning and self.last_game.get("state") == "hosting" else {}
             gameplay[native_downed_markers.KEY] = native_downed_markers.frame(
                 gameplay, positions, self.last_game["map"], self.zone_epoch, character)
+        current_world = not self.transitioning and time.monotonic() - self.last_seen < 2
+        if (self.native_guest and character and current_world and self.last_game.get("state") == "hosting"
+                and (cues := self.last_game.get(native_anomaly_effects.KEY))):
+            # World effects are available to authenticated guests during visits
+            # that temporarily suspend their personal stock saves.
+            gameplay[native_anomaly_effects.KEY] = {
+                "map": self.last_game["map"], "epoch": self.zone_epoch, "cues": cues,
+            }
         member = self.native_recipients().get(character) if self.native_guest else None
-        if member and member["connected"] and not self.transitioning and time.monotonic() - self.last_seen < 2:
+        if member and member["connected"] and current_world:
             pawn = member["pawn"]
             gameplay[native_flashlight.GUEST_SUPPORT] = True
             if beams := native_flashlight.peer_frame(self, exclude=character):
@@ -2001,10 +2009,6 @@ class Host:
                 gameplay[native_damage_feedback.KEY] = hurt_frame
             if ground_fire := native_drum_fire.host_frame(self.last_game, self.zone_epoch):
                 gameplay[native_drum_fire.KEY] = ground_fire
-            if cues := self.last_game.get(native_anomaly_effects.KEY):
-                gameplay[native_anomaly_effects.KEY] = {
-                    "map": self.last_game["map"], "epoch": self.zone_epoch, "cues": cues,
-                }
             sensors = [[row["path"], row["relative"]] for row in self.last_game.get(native_anomaly_effects.VORTEX_SENSORS, [])
                        if row["path"]]
             if sensors:

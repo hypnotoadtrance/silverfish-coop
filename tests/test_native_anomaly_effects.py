@@ -4,11 +4,12 @@ from unittest.mock import AsyncMock, Mock, call, patch
 from tools.silverfish.native_anomaly_effects import (
     ACID_POOL_VIEW, AcidPoolPlayback,
     ANGLER_COLORS, ANGLER_MAP, CANISTERS, ELECTRODE_PHASES, FIXED_EXPLOSIVES, OBSERVER_OPACITY, PROP_BREAK_CUES, Playback,
-    VORTEX_SENSORS,
+    KEY, VORTEX_SENSORS,
     angler_frame, observer_frame, project_angler_colors, project_canisters, project_electrodes,
     project_fixed_explosives, project_observer_opacity, project_sensors, valid_acid_pools,
 )
 from tools.silverfish.native_damage_feedback import Playback as HurtPlayback
+from tools.silverfish.service import Host
 from tools.silverfish.native_weather_view import (
     LIGHTNING, LIGHTNING_PLAYBACK, LightningPlayback, SirenPlayback,
     lightning_frame, parse_lightning, parse_lightning_playback,
@@ -16,6 +17,23 @@ from tools.silverfish.native_weather_view import (
 
 
 class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
+    def test_world_cues_reach_a_dream_guest_without_a_bound_save(self):
+        area, epoch = "/Game/Classes/Maps/Dreams/TheRook_P", "a" * 32
+        cues = [[1, "wandering", [0, 0, 0], 1, .6], [2, "wandering", [200, 0, 0], 1, .6]]
+        host = Mock(public_gameplay=dict, native_guest=True, prop_carry_bridge=None, relay=None,
+                    roles=lambda: {"guest": "surveyor"}, party={}, native_recipients=dict,
+                    transitioning=False, last_seen=49, zone_epoch=epoch,
+                    last_game={"map": area, "state": "hosting", KEY: cues},
+                    loading_zone=None, zone_fade_from=None)
+        with patch("tools.silverfish.service.time.monotonic", return_value=50):
+            view = Host.snapshot_for_guest(host, "peer", "guest")["gameplay"]
+            self.assertEqual(view[KEY], {"map": area, "epoch": epoch, "cues": cues})
+            self.assertNotIn(KEY, Host.snapshot_for_guest(host, "peer", "guest2")["gameplay"])
+            host.transitioning = True
+            self.assertNotIn(KEY, Host.snapshot_for_guest(host, "peer", "guest")["gameplay"])
+            host.transitioning, host.last_seen = False, 47
+            self.assertNotIn(KEY, Host.snapshot_for_guest(host, "peer", "guest")["gameplay"])
+
     def test_dynamic_acid_pool_requires_a_bounded_stock_transform(self):
         pose = "50.000,-100.000,30.000:0.000,20.000,0.000:1.250,1.000,1.000"
         self.assertTrue(valid_acid_pools(["AcidPool_BP_C_1:e", "spawned_AcidPool_BP_C_3:a:" + pose]))
