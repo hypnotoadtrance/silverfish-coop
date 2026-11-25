@@ -361,6 +361,14 @@ local function run(action, argument)
         local pack, result = pawn.Save.PlayerBackpack, {}
         for index = 1, pack:GetArrayNum() do result[index] = identity(pack[index]) end
         return table.concat(result, ",")
+    elseif action == "guest-sort-backpack" or action == "guest-reequip-utility" then
+        assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")
+        if action == "guest-sort-backpack" then
+            pawn:GetWorld().OwningGameInstance:SortItems(5)
+        else
+            equip_worn(pawn, seed.ids[3], false)
+        end
+        return "pressed"
     elseif action == "guest-equip-helmet" or action == "guest-equip-armor" then
         assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")
         local prior = worn_state(pawn)

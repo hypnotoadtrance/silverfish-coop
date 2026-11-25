@@ -150,6 +150,35 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
             "native-inventory-stock-drop-finish", client.zone_epoch, "5", "refused", timeout=3,
         )
 
+    async def test_local_equipment_result_only_fetches_view_when_the_host_disagrees(self):
+        client = self.client()
+        client.guest_ui = SimpleNamespace(close=AsyncMock(), refresh=AsyncMock())
+        operation = "a" * 32
+        old = "B" * 32
+        envelope = [record.STOCK_ACTION_ROW, MAP, PAWN, client.zone_epoch, "5", "equip", GUID, "1", "8"]
+        preview = record.parse_stock_action([*envelope, old], client.last_game)["layout_preview"]
+        self.assertEqual(preview, old)
+        with self.assertRaises(ValueError):
+            record.parse_stock_action([*envelope, GUID], client.last_game)
+
+        args = (client, MAP, client.zone_epoch, operation, "equip", "equip", GUID, 1, "5", "8", None, preview)
+        receipt = dict(owner="exact-owner", map=MAP, guid=GUID, slot=7, displaced=old)
+        client.gameplay_action.side_effect = None
+        client.gameplay_action.return_value = {native_inventory.STORE_KEY: receipt}
+        await drop.settle_stock_action(*args)
+        client.guest_ui.close.assert_awaited_once()
+        client.guest_ui.refresh.assert_not_awaited()
+
+        client.gameplay_action.return_value = {native_inventory.STORE_KEY: dict(receipt, displaced="-")}
+        await drop.settle_stock_action(*args)
+        client.guest_ui.refresh.assert_awaited_once_with(client, force=True)
+
+        client.guest_ui.refresh.reset_mock()
+        client.gameplay_action.side_effect = ValueError("refused")
+        with self.assertRaisesRegex(RuntimeError, "refused"):
+            await drop.settle_stock_action(*args)
+        client.guest_ui.refresh.assert_awaited_once_with(client, force=True)
+
     async def test_stock_unequip_returns_host_round_count_to_the_exact_open_screen(self):
         client = self.client()
         client.gameplay[native_inventory.UNEQUIP_CAPABILITY] = 1

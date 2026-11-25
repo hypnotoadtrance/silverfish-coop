@@ -128,6 +128,7 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                               layout_preview=None):
     sorting, splitting, unloading = mode == "sort", mode == "split", mode == "unload"
     accepted = False
+    local_result = None
     finish = ("native-inventory-stock-drop-finish", epoch, sequence)
     try:
         if layout_preview is not None:
@@ -191,6 +192,7 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
             if displaced != "-" and (not valid_guid(displaced) or displaced == guid):
                 raise RuntimeError("The host returned an invalid displaced item")
             committed = ("equipped", str(slot), displaced)
+            local_result = displaced
         elif mode == "unequip":
             slot = int(expected or 0) - 1
             capability = native_inventory.UNEQUIP_CAPABILITY if slot < 8 else native_inventory.UNEQUIP_WORN_CAPABILITY
@@ -204,6 +206,7 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                     or type(rounds := receipt.get("ammo")) is not int or not -1 <= rounds < 2**31):
                 raise RuntimeError("The host did not verify returning the stock equipment to the backpack")
             committed = ("unequipped", str(slot), str(rounds))
+            local_result = rounds
         elif mode == "use":
             action = f"native-guest-{entry.removeprefix('use-')}"
             meal = native_guest_consumable.STOCK_CONSUMABLES.get(action)
@@ -244,10 +247,7 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
         # A matching slot receipt already describes the local inventory.
         # Sorting still needs the complete host order, which can include
         # other items that arrived while this report was in flight.
-        same_layout = layout_preview is not None and (
-            mode == "equip" and displaced == layout_preview or mode == "unequip" and rounds == layout_preview
-        )
-        if not same_layout:
+        if layout_preview is None or local_result != layout_preview:
             if layout_preview is None:
                 await client.guest_ui.refresh(client)
             else:

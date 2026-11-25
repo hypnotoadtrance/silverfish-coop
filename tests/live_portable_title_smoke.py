@@ -5082,7 +5082,20 @@ async def verify_stock_unequip(first, second, evidence):
             evidence["guest_worn"].append({"receipt": receipt, "backpack_row": rows[0],
                                            "local_move": await local_move(receipt, "unequip", guid, slot)})
 
-        assert saves() == before, "The guest stock Unequip wrote a save before a checkpoint"
+        assert await portable_probe_command(guest.bridge, probe, "guest-reequip-utility") == "pressed"
+        utility = await witness("native_stock_inventory_action", native_inventory.STORE_KEY, ids[2])
+        utility_slot = utility[native_inventory.STORE_KEY]["slot"]
+        evidence["guest_utility_equip"] = {"receipt": utility,
+                                          "local_move": await local_move(utility, "equip", ids[2], utility_slot)}
+        assert await portable_probe_command(guest.bridge, probe, "guest-sort-backpack") == "pressed"
+        frame = await wait_resident_status(guest_run, lambda row: row.get("state") == "connected")
+        async with asyncio.timeout(6):
+            while not (sort := next((row for row in await resident_events(guest_run, frame)
+                                    if row["event"] == "native_stock_inventory_action"
+                                    and row.get(native_inventory.SORT_KEY)), None)):
+                await asyncio.sleep(.05)
+        evidence["guest_backpack_sort"] = {"receipt": sort, "local_move": await local_move(sort, "sort", "-", -1)}
+        assert saves() == before, "The guest stock inventory moves wrote a save before a checkpoint"
         evidence["guest_worn_world_drop"] = []
         for (key, slot, equip, _), guid in zip(worn, worn_guids, strict=True):
             started = time.time()

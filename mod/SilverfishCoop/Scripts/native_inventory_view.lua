@@ -683,6 +683,12 @@ local function open_stock_inventory(fields, current, state, phase)
     return ("opened stock guest inventory with %d backpack cards"):format(displayed)
 end
 
+local function update_local_worn_slot(current, slot)
+    local instance = current.world.OwningGameInstance
+    if slot == 8 then instance:UpdateHelmet() else instance:UpdateArmor() end
+    instance:Calc_CarryWeight()
+end
+
 local function preview_stock_layout(action)
     local pawn, save = action.context.pawn:GetAddress(), action.save:GetAddress()
     local target = (action.expected or 0) - 1
@@ -709,11 +715,7 @@ local function preview_stock_layout(action)
         local widget = widget_at(screen.ItemManager.EquipSlots, slot + 1)
         if valid(widget) then widget:FullRefresh() end
     end
-    if slot and slot >= 8 then
-        local instance = action.context.world.OwningGameInstance
-        if slot == 8 then instance:UpdateHelmet() else instance:UpdateArmor() end
-        instance:Calc_CarryWeight()
-    end
+    if slot and slot >= 8 then update_local_worn_slot(action.context, slot) end
 end
 
 sync_stock = function(current, state, phase, allowed)
@@ -822,6 +824,9 @@ local function finish_stock_drop(fields, current, state, phase)
         if not same(save, pending.save) or not SilverfishSetNativeGuestDropScope(pawn, pending.epoch, save:GetAddress(),
                                                                                   pending.live == true) then
             error("The stock inventory settlement lost its isolated backpack", 0)
+        end
+        if fields[5] == "refused" and pending.layout_preview and (pending.expected or 0) >= 9 then
+            update_local_worn_slot(current, pending.expected - 1)
         end
         local finished, status
         if unequipped then

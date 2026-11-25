@@ -3377,7 +3377,8 @@ namespace
             {
                 auto* defaults = context.save->GetClassPrivate()->GetClassDefaultObject().Get();
                 auto* worn = slot == 8 ? inventory.helmet : inventory.armor;
-                if (!live(defaults)) return 0;
+                if (!defaults || !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) ||
+                    defaults->GetClassPrivate() != context.save->GetClassPrivate()) return 0;
                 row_property->CopyCompleteValue(prepared_row.get(), worn->ContainerPtrToValuePtr<void>(defaults));
             }
         }
