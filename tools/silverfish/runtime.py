@@ -1540,6 +1540,12 @@ class Bridge:
                     balances = ("cash_before", "cash_after", "xp_before", "xp_after", "rep_before", "rep_after")
                     photo.update(zip(balances, map(int, fields[10:])))
                     data["native_turret_photo"] = photo
+                elif fields[0] == "native-stock-photo-ready" and len(fields) == 2:
+                    data["native_stock_photo_ready"] = fields[1]
+                elif fields[0] == "native-stock-photo" and len(fields) == 9:
+                    data["native_stock_photo"] = dict(zip(("map", "pawn", "quest", "target", "camera"), fields[1:6]),
+                                                      step_before=int(fields[6]), step_after=int(fields[7]),
+                                                      visibility=_finite(fields[8]))
                 elif fields[0] == "native-npc-barter-frame":
                     if npc_barter_frame is not None:
                         raise ValueError("Duplicate NPC barter frame")

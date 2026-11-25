@@ -57,6 +57,7 @@ from portable_lingering_teleport import lingering_overlay, verify_stock_lingerin
 from portable_personal_consumable import verify_personal_consumable_reconnect, verify_stock_personal_consumable
 from portable_wipe_chooser import verify_stock_wipe_chooser
 from portable_simmi_jammer import verify_stock_simmi_jammers
+from portable_quarry_photo import verify_quarry_photo
 from portable_weather_travel import verify_weather_travel
 from portable_lightning import verify_stock_lightning
 from portable_storm import StockStormTrial
@@ -6151,7 +6152,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_use: bool = False, stock_food: bool = False, stock_campfire: bool = False, stock_cooked_meal: bool = False,
                  stock_personal_consumable: bool = False,
                  stock_wipe_chooser: bool = False,
-                 stock_npc_override: bool = False, stock_board_offers: bool = False,
+                 stock_npc_override: bool = False, stock_board_offers: bool = False, stock_quarry_photo: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
                  stock_weather_travel: bool = False, stock_lightning: bool = False, stock_storm_ambience: bool = False,
                  crossroads_profile: bool = False, stock_crossroads_door: bool = False, stock_dock_gate: bool = False,
@@ -6252,6 +6253,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_campfire, "observatory", "stock_campfire", verify_resident_campfire),
         (stock_npc_override and not resident_weapon_cues, "observatory", "stock_npc_override", verify_resident_npc_override),
         (stock_board_offers, "observatory", "stock_board_offers", verify_resident_board_offers),
+        (stock_quarry_photo, "quarry_photo", "stock_quarry_photo",
+         lambda host, guest, pawn: verify_quarry_photo(host, guest, pawn, portable_probe_command)),
         (stock_host_corpse_carry, "observatory", "stock_host_corpse_carry", verify_stock_host_corpse_carry),
         (stock_host_prop_observer, prop_campaign, "stock_host_prop_observer",
          lambda host, guest, pawn: verify_stock_host_prop_observer(host, guest, pawn, proof.setdefault("host_prop_observer", {}))),
@@ -6410,6 +6413,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableSimmiJobsProbe",
                                                      fixture="simmi_jobs_probe.lua"))
+        if stock_quarry_photo:
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableQuarryPhotoProbe",
+                                                     fixture="portable_quarry_photo_probe.lua"))
         if stock_flashlights:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableFlashlightProbe",
@@ -6518,7 +6525,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if (tutorial_dock_combat or tutorial_dock_melee or stock_bandage_revisit or stock_shovel or stock_simmi_jammers or stock_weather_travel or stock_lightning
                 or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_critters or stock_placed_item
                 or stock_crossroads_door or stock_dock_gate
-                or stock_board_offers or stock_eye_stacks or stock_lingering_teleport or stock_acid_pool or stock_mushrooms):
+                or stock_board_offers or stock_quarry_photo or stock_eye_stacks or stock_lingering_teleport or stock_acid_pool or stock_mushrooms):
             overlay_key = ("weather_zone_overlays" if stock_weather_travel or stock_lightning else
                            "jammer_zone_overlays" if stock_simmi_jammers else
                            "acid_pool_zone_overlays" if stock_acid_pool else "dock_zone_overlays")
@@ -7042,6 +7049,8 @@ if __name__ == "__main__":
                         help="verify host and guest interactions on the Tutorial Dock warehouse circuit box")
     parser.add_argument("--stock-warehouse-board", action="store_true",
                         help="verify both peers see the Tutorial Dock warehouse board break")
+    parser.add_argument("--stock-quarry-photo", action="store_true",
+                        help="verify a guest stock camera shutter advances the authored Bronze Quarry photo objective")
     parser.add_argument("--stock-bottle", action="store_true",
                         help="verify stock bottle throws, prop break cues, acid pools, and wooden debris on both peers")
     parser.add_argument("--stock-throwables", choices=("all", "pipebomb", "bolt", "ground"), nargs="?", const="all",
@@ -7186,7 +7195,7 @@ if __name__ == "__main__":
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
     resident_check_options = {"stock_unequip", "stock_food", "stock_personal_consumable", "stock_wipe_chooser",
                               "stock_campfire", "stock_npc_override",
-                              "stock_board_offers", "resident_weapon_cues", "resident_held_queue", "resident_stale_quick_slot",
+                              "stock_board_offers", "stock_quarry_photo", "resident_weapon_cues", "resident_held_queue", "resident_stale_quick_slot",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "tutorial_dock_pursuit",
                               "tutorial_dock_held_mask", "tutorial_dock_gait",
                               "tutorial_dock_shot_view",
@@ -7236,7 +7245,7 @@ if __name__ == "__main__":
     if args.crossroads_profile:
         resident_check_options.add("stock_crate_ring")
     if any((args.stock_food, args.stock_cooked_meal, args.stock_personal_consumable, args.stock_wipe_chooser,
-            args.stock_campfire, args.stock_npc_override, args.stock_board_offers, args.tutorial_dock_melee,
+            args.stock_campfire, args.stock_npc_override, args.stock_board_offers, args.stock_quarry_photo, args.tutorial_dock_melee,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo, args.stock_shotguns,
             args.stock_impact_cues, args.stock_avatar_tail, args.stock_interaction_feedback,
             args.stock_loki_control, args.stock_loki_guest,
@@ -7289,6 +7298,7 @@ if __name__ == "__main__":
                        stock_personal_consumable=args.stock_personal_consumable,
                        stock_wipe_chooser=args.stock_wipe_chooser,
                        stock_npc_override=args.stock_npc_override, stock_board_offers=args.stock_board_offers,
+                       stock_quarry_photo=args.stock_quarry_photo,
                        stock_npc_rivalry=args.stock_npc_rivalry,
                        stock_host_corpse_carry=args.stock_host_corpse_carry,
                        stock_flashlights=args.stock_flashlights,

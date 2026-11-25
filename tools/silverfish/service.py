@@ -89,6 +89,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_prototype_drill.PREFLIGHT,
                         native_board_contract.CATALOG, native_broker.INTERACT, native_wire_quest.PREFLIGHT, native_turret_photo.PREFLIGHT,
                         native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER,
+                        native_turret_photo.STOCK_SHUTTER,
                         *native_computer_board.PREFLIGHTS, *native_flood_jammer.PREFLIGHTS, native_meet_broker.PREFLIGHT,
                         native_subway_valve.PREFLIGHT, native_subway_valve.ACTIVATE,
                         "native-inventory-list", native_inventory.SPLIT, native_inventory.TAKE_AMMO, native_inventory.SORT,
@@ -2058,6 +2059,10 @@ class Host:
             if (native_gold.valid_guid(equipped.get("guid")) and kind == "camera" and self.last_game["map"] == DEAD_BRIDGE
                     and self.party.get("native_quests", {}).get(native_turret_photo.QUEST_ID, {}).get("step") in (1, 2)):
                 gameplay["native_equipped_weapon"] = dict(equipped, pawn=pawn, map=DEAD_BRIDGE, quest=native_turret_photo.QUEST_ID)
+            elif (native_gold.valid_guid(equipped.get("guid")) and kind == "camera"
+                  and self.last_game.get(native_turret_photo.STOCK_READY) == self.last_game["map"]):
+                gameplay["native_equipped_weapon"] = dict(equipped, pawn=pawn, map=self.last_game["map"],
+                                                         quest=native_turret_photo.STOCK_SCOPE)
         reply = {"ok": True, "gameplay": gameplay, "zone_epoch": self.zone_epoch, "viewer_role": role,
                  "zone": self.last_game["map"], "travel_in_progress": self.transitioning}
         if self.transitioning and (destination := getattr(self, "loading_zone", None)) and destination != reply["zone"]:
@@ -2352,6 +2357,8 @@ class Host:
                     excluded=native_quest.AUTHORED_BOARD_ACTIONS - specialists)
             elif action == native_turret_photo.SHUTTER:
                 result = await native_turret_photo.shutter(self, bridge, character, target, request["operation_id"])
+            elif action == native_turret_photo.STOCK_SHUTTER:
+                result = await native_turret_photo.stock_shutter(self, bridge, character, target, request["operation_id"])
             elif action in native_computer_board.PREFLIGHTS and target is None:
                 result = await native_computer_board.preflight(self, bridge, character, spec=native_computer_board.PREFLIGHTS[action])
             elif action == native_meet_broker.PREFLIGHT and target is None:
@@ -5652,7 +5659,9 @@ class Client:
         member = self.gameplay.get("players", {}).get(self.viewer_role, {})
         equipment = self.gameplay.get("native_equipped_weapon", {})
         area, host_pawn, guid, kind = (equipment.get(key) for key in ("map", "pawn", "guid", "kind"))
-        camera = kind == "camera" and area == DEAD_BRIDGE and equipment.get("quest") == native_turret_photo.QUEST_ID
+        camera_quest = equipment.get("quest")
+        stock_photo = camera_quest == native_turret_photo.STOCK_SCOPE
+        camera = kind == "camera" and (stock_photo or area == DEAD_BRIDGE and camera_quest == native_turret_photo.QUEST_ID)
         melee = native_guest_melee.is_equipped(equipment, area, guid)
         pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
         # Cooked authority and autonomous pawns have independent object names.
@@ -5667,7 +5676,7 @@ class Client:
             try:
                 command = ("native-guest-primary-scope", *scope) if scope else ("native-guest-primary-clear",)
                 if scope and camera:
-                    command += (native_turret_photo.QUEST_ID,)
+                    command += (camera_quest,)
                 elif scope and kind in native_smg_hold.HOLD_KINDS and equipment.get("fire_mode") in native_guest_weapon.FIRE_MODES:
                     command += (equipment["fire_mode"],)
                 self.last_game = await self.bridge.command(*command, timeout=2)
@@ -5730,7 +5739,8 @@ class Client:
             elif event_kind == native_host_dig_live.GUEST_KIND:
                 action, event = native_host_dig_live.GUEST_ACTION, "native_guest_dig_input"
             elif event_kind == "camera":
-                action, event = native_turret_photo.SHUTTER, "native_guest_camera_shutter"
+                action = native_turret_photo.STOCK_SHUTTER if stock_photo else native_turret_photo.SHUTTER
+                event = "native_guest_camera_shutter"
             elif event_kind in native_loot.PRY_TOOL_ACTIONS:
                 if not extra:
                     continue
@@ -5741,7 +5751,9 @@ class Client:
             else:
                 action, event = "native-guest-weapon-fire", "native_guest_primary_input"
             try:
-                if extra and event_kind in native_guest_weapon.FIRE_CLASSES:
+                if action == native_turret_photo.STOCK_SHUTTER:
+                    selection = f"{event_guid}@{self.zone_epoch}"
+                elif extra and event_kind in native_guest_weapon.FIRE_CLASSES:
                     selection = f"{event_guid}@{self.zone_epoch}@{extra[0]}"
                 else:
                     selection = f"{event_guid}@{extra[0]}" if extra else event_guid

@@ -1,5 +1,6 @@
-"""Record two distinct stock photo targets and settle the authored contract once."""
+"""Record stock photo objectives and settle the Dead Bridge photography contract."""
 
+import re
 import time
 import uuid
 
@@ -12,6 +13,10 @@ PREFLIGHT = "native-turret-photo-preflight"
 CAPTURE = "native-turret-photo-capture"
 CAPTURE_FIXTURE = "native-turret-photo-capture-fixture"
 SHUTTER = "native-turret-photo-shutter"
+STOCK_SHUTTER = "native-stock-photo-shutter"
+STOCK_SCOPE = "stock-photo"
+STOCK_READY = "native_stock_photo_ready"
+STOCK_PROOF = "native_stock_photo"
 XP_FIXTURE = "native-turret-photo-xp-fixture"
 BOARD_LIST = "native-bounty-board-list"
 HOST_INPUT_FIXTURE = "native-host-camera-input-fixture"
@@ -145,6 +150,65 @@ async def shutter(host, bridge, character, camera, operation):
             if str(error) not in {"stock_turret_photo_target_out_of_range", "stock_turret_photo_target_not_in_stock_frame"}:
                 raise
     raise party.RuleError("native_turret_photo_no_target_in_frame")
+
+
+async def stock_shutter(host, bridge, character, target, operation):
+    area = host.last_game.get("map")
+    pawn = _pawn(host, character, area)
+    camera, separator, visit = target.partition("@") if isinstance(target, str) else ("", "", "")
+    if (character == "host" or not separator or visit != host.zone_epoch or area not in host.allowed_maps
+            or not valid_guid(camera) or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation)):
+        raise party.RuleError("native_stock_photo_shutter_invalid")
+    request = [STOCK_SHUTTER, target, None]
+    for receipt in host.party["receipts"].get(character, ()):
+        if receipt["id"] == operation:
+            if receipt["request"] != request:
+                raise party.RuleError("operation_id_conflict")
+            return receipt["result"]
+    equipped = host.last_game.get("native_guest_equipped_weapons", {}).get(pawn, {})
+    if (equipped.get("kind"), equipped.get("guid")) != ("camera", camera) or host.last_game.get(STOCK_READY) != area:
+        raise party.RuleError("native_stock_photo_camera_unavailable")
+    now = time.monotonic()
+    if now < host.camera_ready_at.get(character, 0):
+        raise party.RuleError("native_stock_photo_shutter_cooling_down")
+    host.camera_ready_at[character] = now + 3
+
+    host.transitioning = True
+    try:
+        host.native_checkpoint_unsafe = True
+        try:
+            snapshot = await bridge.command(STOCK_SHUTTER, pawn, camera, timeout=3)
+        except RuntimeError as error:
+            if str(error).startswith(("stock_photo_", "stock_turret_photo_")):
+                host.native_checkpoint_unsafe = False
+                raise party.RuleError(str(error)) from error
+            raise
+        proof = snapshot.get(STOCK_PROOF, {})
+        quest = proof.get("quest")
+        before, after, score = (proof.get(key) for key in ("step_before", "step_after", "visibility"))
+        if ((snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("pawn"), proof.get("camera"))
+                != ("hosting", area, area, pawn, camera)
+                or not isinstance(quest, str) or not re.fullmatch(r"[A-Za-z0-9_]{1,96}", quest) or quest == QUEST_ID
+                or type(before) is not int or type(after) is not int or not 1 <= before < after or after - before > 16
+                or type(score) not in (int, float) or not 0 < score <= 1):
+            raise RuntimeError("The stock field photo did not verify the exact guest camera and quest progress")
+        candidate = party.load_party(host.party)
+        record = {"quest_id": quest, "step": after, "actor": character}
+        candidate.setdefault("native_quests", {})[quest] = record
+        result = {"effect": "native_quest_changed", **record, STOCK_PROOF: proof}
+        receipts = candidate["receipts"].setdefault(character, [])
+        receipts.append({"id": operation, "request": request, "result": result})
+        del receipts[:-party.RECENT_ACTIONS]
+        host.last_game, host.last_seen, host.party = snapshot, time.monotonic(), candidate
+        host.native_checkpoint_unsafe = False
+        host.control.event("native_stock_photo_committed", **result)
+        return result
+    except (OSError, RuntimeError, ValueError, KeyError):
+        if host.native_checkpoint_unsafe:
+            host.stopping = True
+        raise
+    finally:
+        host.transitioning = False
 
 
 async def aim_host_fixture(host, bridge, target):

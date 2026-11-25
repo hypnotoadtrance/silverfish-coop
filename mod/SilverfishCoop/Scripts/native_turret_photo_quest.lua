@@ -78,6 +78,7 @@ local operations = {
     ["native-host-camera-aim-fixture"] = "aim_fixture",
 }
 local last, last_board
+local field_world, field_targets, field_scan, field_result
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -157,9 +158,13 @@ local function read_flag(instance, name)
     return result.Found and result.Value or 0, result.Found
 end
 
-local function actor_context(state, phase, name, listing_offers)
+local function actor_context(state, phase, name, listing_offers, field_capture)
     local placement = listing_offers and boards[state.map]
     local world_name = world_names[state.map] or placement and placement.world
+    if field_capture then
+        local map = state.map:match("^/Game/Classes/Maps/[%w_/]+/([%w_]+)$")
+        world_name = map and state.map .. "." .. map
+    end
     local world, host = state.world, state.local_pawn
     if not enabled or phase ~= "hosting" or state.listening ~= true or state.server ~= false or not world_name
         or not valid(world) or world:GetFullName() ~= "World " .. world_name or not host
@@ -228,11 +233,16 @@ local function read_progress(context)
         xp = read_flag(context.instance, "Player_Xp"), rep = rep, rep_found = found}
 end
 
-local function stock_table()
+local function quest_table()
     local source = StaticFindObject(table_path)
     local schema = valid(source) and source:GetRowStruct()
     if not valid(source) or source:GetFullName() ~= "DataTable " .. table_path or not valid(schema)
         or schema:GetFullName() ~= "UserDefinedStruct " .. schema_path then fail("quest_table_unqualified") end
+    return source
+end
+
+local function stock_table()
+    local source = quest_table()
     local template = source:FindRow(id)
     recipe(template)
     if template[fields.step] ~= 1 then fail("template_step_unqualified") end
@@ -374,7 +384,103 @@ local function turn_in(context, before)
     return after
 end
 
+local function field_fail(reason)
+    error("stock_photo_" .. reason, 0)
+end
+
+local function field_components(world)
+    if not same(field_world, world) then
+        field_world, field_targets, field_scan, field_result = world, nil, nil, nil
+    end
+    local now = os.time()
+    if not field_targets or (#field_targets == 0 and now ~= field_scan) then
+        field_targets, field_scan = {}, now
+        for _, raw in ipairs(FindAllOf("CameraTarget_BP_C") or {}) do
+            local component = type(raw.type) == "function" and raw:type() == "RemoteUnrealParam" and raw:get() or raw
+            if exact(component, component_class) then
+                local actor = component:GetOwner()
+                if valid(actor) and actor:HasAuthority() and same(actor:GetWorld(), world)
+                    and same(actor:GetOuter(), world.PersistentLevel) and not actor:IsActorBeingDestroyed() then
+                    field_targets[#field_targets + 1] = {component = component, actor = actor}
+                end
+            end
+        end
+    end
+    return field_targets
+end
+
+local function field_recipe(save, source, target)
+    local component, actor = target.component, target.actor
+    if not valid(component) or not valid(actor) or actor:IsActorBeingDestroyed() or not same(component:GetOwner(), actor) then return end
+    local handle = component.TrackedQuest
+    local key = handle and handle.RowName
+    local quest = key and key:ToString()
+    if not quest or quest == id or #quest > 96 or not quest:match("^[%w_]+$") or not same(handle.DataTable, source) then return end
+    local active = row_at(save.ActiveQuests, key)
+    local template = active and source:FindRow(quest)
+    if not template or template[fields.variant] ~= 2 or count(template[fields.objectives]) ~= 0 then return end
+    local step, finish = active[fields.step], active[fields.final]
+    local required, increment = component.Target_QuestStep, component.Add_QuestStep
+    local distance, score, points = component.MaxVisibleDistance, component.SuccessThreshold, count(component.TargetPoints)
+    if not int32(step) or not int32(finish) or finish ~= template[fields.final] or step < 1 or step >= finish
+        or not int32(increment) or increment < 1 or step + increment > finish or (required ~= -1 and required ~= step)
+        or not finite(distance) or distance <= 0 or distance > 100000 or not finite(score) or score <= 0 or score > 1
+        or not int32(points) or points < 1 or points > 128
+        or not component.ReqiredFlags or #component.ReqiredFlags ~= 0 or not component.SetFlags or #component.SetFlags ~= 0 then return end
+    return {key = key, quest = quest, step = step, next_step = step + increment, distance = distance, threshold = score}
+end
+
+local function field_ready(state, phase)
+    if not enabled or phase ~= "hosting" or not state.listening or state.server ~= false or not valid(state.world) then return end
+    for _, guest in ipairs(state.guests or {}) do
+        if valid(guest.pawn) and exact(guest.pawn.EquipedItem, camera_class) then
+            local source = quest_table()
+            local save = state.world.OwningGameInstance.SaveSlot_Ref
+            if not valid(save) or not same(save, state.local_pawn.pawn.Save) then return end
+            for _, target in ipairs(field_components(state.world)) do
+                if field_recipe(save, source, target) then return true end
+            end
+            return
+        end
+    end
+end
+
+local function field_shutter(command, state, phase)
+    field_result = nil
+    local name, guid = command[3], command[4]
+    if #command ~= 4 or type(guid) ~= "string" or #guid ~= 32 or not guid:match("^[A-F0-9]+$") then field_fail("arguments") end
+    local context = actor_context(state, phase, name, false, true)
+    if same(context.host, context.pawn) then field_fail("guest_required") end
+    local camera, identity = equipped_camera(context)
+    if guid ~= identity then field_fail("camera_changed") end
+    local frame = frustum(camera, context)
+    local source = quest_table()
+    local cash, xp = read_flag(context.instance, "Player_Cash"), read_flag(context.instance, "Player_Xp")
+    for _, target in ipairs(field_components(context.world)) do
+        local recipe = field_recipe(context.save, source, target)
+        if recipe and within(frame.Translation, xyz(target.actor:K2_GetActorLocation()), recipe.distance) then
+            local output = {}
+            local ok, returned = pcall(function() return target.component:TakePhoto(frame, output) end)
+            local after = row_at(context.save.ActiveQuests, recipe.key)
+            local step = after and after[fields.step]
+            local score = output.Visibility or returned
+            if not ok or not same(context.host.Save, context.save) or not same(context.pawn.Save, context.own_save)
+                or read_flag(context.instance, "Player_Cash") ~= cash or read_flag(context.instance, "Player_Xp") ~= xp
+                or not finite(score) or score < 0 or score > 1
+                or (step ~= recipe.step and (step ~= recipe.next_step or score < recipe.threshold)) then
+                error("mutation_unverified_stock_photo_capture", 0)
+            end
+            if step == recipe.next_step then
+                field_result = {context = context, recipe = recipe, camera = guid, score = score, actor = target.actor:GetFullName()}
+                return "verified stock photo objective progress"
+            end
+        end
+    end
+    field_fail("no_objective_in_frame")
+end
+
 function photo.command(command, state, phase)
+    if command[2] == "native-stock-photo-shutter" then return field_shutter(command, state, phase) end
     if command[2] == "native-bounty-board-list" then
         last_board = nil
         if #command ~= 3 or type(command[3]) ~= "string" or #command[3] > 512 or command[3]:find("%c") then
@@ -439,12 +545,20 @@ end
 
 function photo.rows(state, phase, status_row)
     local result = {}
+    local qualified, active = pcall(field_ready, state, phase)
+    if qualified and active then result[#result + 1] = status_row("native-stock-photo-ready", state.map) end
+    local field = field_result
+    if field and phase == "hosting" and same(field.context.world, state.world) and same(field.context.host.Save, field.context.save)
+        and same(field.context.pawn.Save, field.context.own_save) then
+        result[#result + 1] = status_row("native-stock-photo", state.map, field.context.name, field.recipe.quest,
+            field.actor, field.camera, field.recipe.step, field.recipe.next_step, field.score)
+    end
     local list = last_board
     if list then
         local scope = list.scope
         if phase == "hosting" and state.map == scope.map and same(scope.world, state.world) and os.time() <= list.time + 2
             and valid(scope.pawn) and same(scope.pawn.Save, scope.own_save) and same(scope.host.Save, scope.save) then
-            result[1] = status_row("native-bounty-board", scope.map, scope.name, list.board)
+            result[#result + 1] = status_row("native-bounty-board", scope.map, scope.name, list.board)
             for _, fields in ipairs(list.entries) do result[#result + 1] = status_row(table.unpack(fields, 1, fields.n)) end
         else
             last_board = nil

@@ -63,6 +63,7 @@ namespace
     constexpr auto old_pipe_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C");
     constexpr auto camera_primary_path = STR("/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C:Use_Item_Primary");
     constexpr std::string_view camera_quest = "Photo_DB_Turrets";
+    constexpr std::string_view stock_photo = "stock-photo";
     constexpr auto camera_quest_name = STR("Photo_DB_Turrets");
     constexpr auto quest_struct = STR("/Game/Classes/Libraries/Structs/Quest_Struct.Quest_Struct");
     constexpr auto quest_step = STR("Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A");
@@ -455,11 +456,12 @@ namespace
             (!current.seat.host || active_photo_quest(current.seat.stock.Get()));
     }
 
-    bool camera_scope(U::UObject* world)
+    bool camera_scope(U::UWorld* world, bool host)
     {
         auto* camera = find<U::UClass>(camera_path);
         auto* function = find<U::UFunction>(camera_primary_path);
-        return live(world) && world->GetPathName() == bridge_world && find<U::UWorld>(bridge_world) == world &&
+        return (host ? live(world) && world->GetPathName() == bridge_world && find<U::UWorld>(bridge_world) == world
+                     : silverfish::native_guest_melee::ordinary_world(world)) &&
             camera && function && function->GetOuterPrivate() == camera && function->GetNumParms() == 2 &&
             function->GetParmsSize() == 16 && !function->GetReturnProperty() &&
             !function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) &&
@@ -647,7 +649,8 @@ namespace
             !live(controller) || controller->GetClassPrivate() != controller_type || !live(local) ||
             !local->IsA(local_type) || (next.seat.host ? server != nullptr : !live(server) || !server->IsA(connection_type)))
             return "stock_guest_primary_connection_unavailable";
-        if (next.item->kind == "camera" && !camera_scope(world)) return "stock_guest_camera_primary_unqualified";
+        if (next.item->kind == "camera" && !camera_scope(world, next.seat.host))
+            return "stock_guest_camera_primary_unqualified";
         const bool uses_melee = next.item == &old_pipe || next.item == &melee;
         if (uses_melee && (next.seat.host || !silverfish::native_guest_melee::ordinary_world(world)))
             return "stock_guest_melee_primary_unqualified";
@@ -988,7 +991,9 @@ namespace
                 if (candidate.kind == kind) next.item = &candidate;
         if (!next.item || (host && next.item->kind != "camera"))
             return result(lua, false, "native_guest_primary_weapon_unqualified");
-        if ((next.item->kind == "camera") != (size == 6) || (size == 6 && lua.get_string() != camera_quest))
+        const auto camera_scope_id = size == 6 ? lua.get_string() : std::string_view{};
+        if ((next.item->kind == "camera") != (size == 6) ||
+            (size == 6 && camera_scope_id != camera_quest && (host || camera_scope_id != stock_photo)))
             return result(lua, false, "native_guest_primary_quest_scope_required");
         const auto now = Clock::now();
         if (scope.seat.host == host && scope.item == next.item && scope.guid == next.guid && address(scope.seat.pawn.Get()) == pawn &&

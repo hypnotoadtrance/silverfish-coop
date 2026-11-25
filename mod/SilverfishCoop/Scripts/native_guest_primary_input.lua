@@ -362,7 +362,7 @@ function primary.command(fields, state, phase)
     local mode = weapon_profiles.held_fire[kind] and extra
     local melee = melee_kinds[kind]
     if #fields ~= ((camera or mode) and 7 or 6) or fields[3] ~= current.map or fields[4] ~= current.name or not valid_guid(guid)
-        or (camera and (current.map ~= camera_map or extra ~= camera_quest))
+        or (camera and extra ~= "stock-photo" and (current.map ~= camera_map or extra ~= camera_quest))
         or (mode and mode ~= "semi" and mode ~= "auto")
         or (not camera and not melee and kind ~= "blowtorch" and kind ~= "crowbar" and kind ~= "spade"
             and not weapon_profiles.paths[kind])
