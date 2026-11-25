@@ -1888,6 +1888,7 @@ end
 players.start(bridge)
 native_loot_crate_input.start()
 native_stock_door.start()
+native_stock_switch.start()
 native_enemy_shell_view.start(players.is_downed)
 native_inventory_view.start(bridge, players.is_downed)
 native_stash_view.start(bridge, players.is_downed)

@@ -8,13 +8,16 @@ local profiles = {
     LightSwitch_02_BP_C = {"Switch_Mesh", "SwitchPanel"},
 }
 local radio_path = "/Game/Assets/StaticMeshes/Mesh_Props/Prop_Radio01.Prop_Radio01_C"
-local radio_class = "BlueprintGeneratedClass " .. radio_path
+profiles.Prop_Radio01_C = {path = radio_path, radio = true}
+for kind, profile in pairs(profiles) do
+    profile.path = profile.path or root .. kind:sub(1, -3) .. "." .. kind
+end
 local bulb_profiles = {
     ["/Game/Classes/DynamicLights/DynamicLight_Master_BP.DynamicLight_Master_BP_C"] = "PointLight",
     ["/Game/Classes/DynamicLights/Dynamic_SpotLight_Master_BP.Dynamic_SpotLight_Master_BP_C"] = "SpotLight",
 }
 local statics_path = "/Script/Engine.Default__GameplayStatics"
-local world, entries
+local world, entries, dirty
 
 local function valid(object) return object and object:IsValid() end
 local function same(left, right) return valid(left) and valid(right) and left:GetAddress() == right:GetAddress() end
@@ -26,16 +29,15 @@ local function qualified(actor, scope)
 end
 
 local function parts(actor, scope)
-    if not qualified(actor, scope) then return end
+    if not valid(actor) then return end
     local class = actor:GetClass()
-    local kind = class:GetFName():ToString()
-    local profile = profiles[kind]
-    local radio = kind == "Prop_Radio01_C"
-    local expected = radio and radio_class or profile and "BlueprintGeneratedClass " .. root .. kind:sub(1, -3) .. "." .. kind
-    if not expected or class:GetFullName() ~= expected or type(actor.Powered) ~= "boolean" then return end
+    if not valid(class) then return end
+    local profile = profiles[class:GetFName():ToString()]
+    if not profile or class:GetFullName() ~= "BlueprintGeneratedClass " .. profile.path
+        or not qualified(actor, scope) or type(actor.Powered) ~= "boolean" then return end
     local box = actor.Box
     if not valid(box) or not same(box:GetOwner(), actor) then return end
-    if radio then return {actor = actor, box = box, radio = true, lights = {}} end
+    if profile.radio then return {actor = actor, box = box, radio = true, lights = {}} end
     local lever, panel = actor[profile[1]], actor[profile[2]]
     if not valid(lever) or not valid(panel) then return end
     for _, component in ipairs({lever, panel}) do
@@ -70,29 +72,43 @@ local function light_links(actor, scope)
     return lights
 end
 
+function switches.start()
+    if type(NotifyOnNewObject) ~= "function" then return end
+    for kind, profile in pairs(profiles) do
+        NotifyOnNewObject(profile.path, function()
+            -- Construction can precede BeginPlay. Read stock properties during the regular census.
+            if dirty then dirty[kind] = true end
+        end)
+    end
+end
+
 local function census(state, phase)
     if (phase ~= "connected" and phase ~= "hosting") or not state.listening
         or state.server ~= (phase == "connected") or not valid(state.world) then
-        world, entries = nil, nil
+        world, entries, dirty = nil, nil, nil
         return {}
     end
-    if same(world, state.world) then return entries end
+    if not same(world, state.world) then
+        world, entries, dirty = state.world, {}, {}
+        for kind in pairs(profiles) do dirty[kind] = true end
+    end
+    if not next(dirty) then return entries end
     local statics = StaticFindObject(statics_path)
-    if not valid(statics) then return {} end
-    world, entries = state.world, {}
-    for _, path in ipairs({root .. "CircutBox_BP.CircutBox_BP_C", root .. "LightSwitch_BP.LightSwitch_BP_C", radio_path}) do
-        local class = StaticFindObject(path)
+    if not valid(statics) then return entries end
+    for kind in pairs(dirty) do
+        dirty[kind] = nil
+        local class = StaticFindObject(profiles[kind].path)
         if valid(class) then
             local output = {}
             statics:GetAllActorsOfClass(world, class, output)
             for _, actor in ipairs(output.OutActors or output) do
-                if type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
-                local entry = parts(actor, world)
+                if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
+                local entry = valid(actor) and same(actor:GetClass(), class) and parts(actor, world)
                 if entry and (phase ~= "hosting" or actor:HasAuthority()) then
                     local name = actor:GetFullName()
                     if entry.radio then
                         entries[name] = {radio = true, path = name:match("^%S+ (.+)$")}
-                    else
+                    elseif not entries[name] or not same(entries[name].actor, actor) then
                         entry.lights = light_links(actor, world)
                         entries[name] = entry
                     end

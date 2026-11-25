@@ -5539,6 +5539,11 @@ class Client:
                         self.last_game = await native_stock_door.project(self.bridge, self.last_game, delta, epoch)
                     except (OSError, RuntimeError, TimeoutError) as error:
                         self.control.event("native_stock_door_projection_deferred", reason=str(error))
+            if target and action == native_stock_switch.ACTION:
+                try:
+                    await native_stock_switch.apply_interaction(self, reply.get(native_stock_switch.KEY), target.split("@", 1)[1])
+                except (OSError, RuntimeError, TimeoutError) as error:
+                    self.control.event("native_stock_switch_projection_deferred", reason=str(error))
         cue = reply.pop(native_pickup_audio.KEY, None)
         if isinstance(cue, dict) and isinstance(rows := cue.get("cues"), list) and len(rows) == 1:
             if isinstance(rows[0], list) and len(rows[0]) == 3 and rows[0][0] == operation_id:

@@ -71,10 +71,26 @@ async def interact(host, bridge, character, requested, operation):
         raise RuntimeError("The stock switch interaction did not verify")
     host.last_game = snapshot
     host.last_seen = time.monotonic()
-    result = {"native_stock_switch_interaction": {"actor": actor, "powered": row["powered"]}}
+    result = {"native_stock_switch_interaction": {"actor": actor, "powered": row["powered"]},
+              KEY: {"map": game["map"], "epoch": epoch, "switches": {actor: row}}}
     receipts.append({"id": operation, "request": fingerprint, "result": result})
     del receipts[:-party.RECENT_ACTIONS]
     return result
+
+
+async def apply_interaction(client, frame, actor):
+    area, epoch = client.last_game.get("map"), client.zone_epoch
+    if (not isinstance(frame, dict) or (frame.get("map"), frame.get("epoch")) != (area, epoch)
+            or actor_map(actor) != area or not epoch or client.needs_travel or client.server_transitioning
+            or not isinstance(rows := frame.get("switches"), dict) or rows.keys() != {actor}):
+        return
+    await client.cancel_gameplay_snapshot()
+    cached = client.gameplay.get(KEY, {})
+    if (cached.get("map"), cached.get("epoch")) == (area, epoch):
+        client.gameplay[KEY] = {**frame, "switches": {**cached["switches"], **rows}}
+    else:
+        client.gameplay[KEY] = frame
+    client.last_game = await project(client.bridge, client.last_game, frame, client.zone_epoch)
 
 
 async def project(bridge, game, frame, epoch):
