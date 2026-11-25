@@ -52,6 +52,7 @@ class KillVolumeTests(unittest.IsolatedAsyncioTestCase):
         host = Host.__new__(Host)
         host.last_game = {"state": "hosting", "map": CROSSROADS, volume.KEY: {"state": "pending"}}
         host.store = Mock()
+        host.native_profile = None
         host.stopping = host.native_checkpoint_unsafe = False
         with self.assertRaisesRegex(RuntimeError, volume.PENDING):
             host.checkpoint()

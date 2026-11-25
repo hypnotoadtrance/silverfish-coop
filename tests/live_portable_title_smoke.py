@@ -8044,7 +8044,7 @@ if __name__ == "__main__":
     if args.stock_shovel_host_quest and not args.stock_shovel_quest:
         parser.error("Use --stock-shovel-host-quest with --stock-shovel-quest")
     resident_check_options.add("stock_cooked_meal")
-    resident_check_options.add("crossroads_profile")
+    resident_check_options.update(("crossroads_profile", "stock_crossroads_recovery"))
     if args.crossroads_profile:
         resident_check_options.add("stock_crate_ring")
     if any((args.stock_food, args.stock_cooked_meal, args.stock_personal_consumable, args.stock_wipe_chooser,
@@ -8057,6 +8057,7 @@ if __name__ == "__main__":
             args.stock_loki_control, args.stock_loki_guest,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
             args.crossroads_profile, args.stock_lightning, args.stock_crossroads_door, args.stock_dock_gate,
+            args.stock_crossroads_recovery,
             args.stock_storm_ambience,
             args.stock_melee_family, args.stock_melee_edges, args.stock_warehouse_switch, args.stock_warehouse_board, args.stock_bottle,
             args.stock_roaming_barter, args.stock_castaway_dialogue, args.stock_critters, args.stock_placed_item,

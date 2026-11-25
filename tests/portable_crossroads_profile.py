@@ -79,11 +79,19 @@ async def verify_crossroads_recovery(host, guest, _pawn):
         assert receipt["placement"] == "teammate" and receipt["native_health_at_down"] == 0, receipt
         assert math.dist(receipt["location"], helper["location"]) <= 250, receipt
         assert status["overlaps_vetoed"] > game[native_kill_volume.KEY]["overlaps_vetoed"] and not status["fault"], status
-        assert fallen["link_connected"] and (fallen["generation"], fallen["zone_epoch"]) == (before["generation"], before["zone_epoch"])
-        projected_slot = "local" if role == "guest" else "guest"
-        await wait_resident_status(guest_run, lambda frame:
-            frame.get("zone_epoch") == before["zone_epoch"]
-            and frame["game"].get("player_effects", {}).get(projected_slot, {}).get("state") == "downed")
+        assert fallen["link_connected"] and (fallen["generation"], fallen["zone_epoch"]) == (
+            before["generation"], before["zone_epoch"])
+
+        def guest_observed(frame):
+            if frame.get("zone_epoch") != before["zone_epoch"]:
+                return False
+            effects = frame["game"].get("player_effects", {})
+            if role == "guest":
+                return effects.get("local", {}).get("state") == "downed"
+            host_down = frame.get("gameplay", {}).get("players", {}).get("host", {}).get("downed")
+            return host_down and effects.get("guest", {}).get("crouched") is True
+
+        await wait_resident_status(guest_run, guest_observed)
         revived = await submit(helper_run, "native-interaction-fixture")
         assert revived["ok"] and revived["native_interaction_fixture"], revived
         after = await wait_resident_status(host_run, lambda frame:

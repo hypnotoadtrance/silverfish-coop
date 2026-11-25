@@ -22,7 +22,7 @@ local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SIL
 local color = {R = 0, G = 0, B = 0, A = 0}
 local near_offsets = {{110, 0}, {-110, 0}, {0, 110}, {0, -110}, {115, 115}, {115, -115}, {-115, 115}, {-115, -115}}
 local fallback_offsets = {{0, 0}, {110, 0}, {-110, 0}, {0, 110}, {0, -110}}
-local ground_sample_interval = 0.25
+local ground_sample_interval = 0.75
 local current
 
 local function valid(object) return object ~= nil and object ~= false and object:IsValid() end
