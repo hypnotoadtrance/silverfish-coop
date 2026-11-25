@@ -1264,12 +1264,14 @@ class ClientReconnectTests(unittest.IsolatedAsyncioTestCase):
         host_endpoint, local_endpoint = server.guest_endpoint(guest_id), transport.address
         await self.wait_until(lambda: client.gameplay.get("players", {}).get("guest", {}).get("character_id") == character_id)
         await exchange(b"before the outage", host_endpoint, local_endpoint)
+        await self.wait_until(lambda: transport.statistics()["keepalive_rtt_us"] > 0, timeout=1)
 
         proxy.blocked = True
         try:
             await self.wait_until(lambda: not server.connected(guest_id) and not transport.connected
                                   and host.guest["disconnected"] is not None)
             self.assertEqual(host.guest["lease_id"], lease_id)
+            self.assertEqual(transport.statistics()["keepalive_rtt_us"], -1)
             reserved, = store.status()["leases"]
             self.assertEqual((reserved["character_id"], reserved["state"]), (character_id, "reserved"))
             self.assertGreater(proxy.discarded, 0)

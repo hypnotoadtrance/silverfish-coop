@@ -1301,10 +1301,17 @@ class _ClientProtocol(_LinkProtocol):
         self._session_end_bytes = bytearray()
         self.session_end: tuple[str, int] | None = None
         self.avatar_pose: tuple[float, bytes] | None = None
+        self.keepalive_rtt_us = -1
+        self._keepalive_probe = (0, 0)
 
     def quic_event_received(self, event: events.QuicEvent) -> None:
         if isinstance(event, events.HandshakeCompleted):
             self.handshake.set()
+        elif isinstance(event, events.PingAcknowledged):
+            uid, sent_ns = self._keepalive_probe
+            if event.uid == uid and sent_ns:
+                self.keepalive_rtt_us = (perf_counter_ns() - sent_ns) // 1000
+                self._keepalive_probe = (uid, 0)
         elif isinstance(event, events.StreamDataReceived):
             if event.stream_id == _ADMISSION_STREAM:
                 payload = self._admission_payload(event)
@@ -1438,8 +1445,10 @@ class _ClientProtocol(_LinkProtocol):
         while self.authorized and not self.terminated:
             await asyncio.sleep(_KEEPALIVE_INTERVAL)
             if self.authorized and not self.terminated:
-                # No response future is needed. QUIC's idle timeout handles loss.
-                self._quic.send_ping(0)
+                # Measure the existing keepalive without extra traffic or game-thread work.
+                uid = self._keepalive_probe[0] + 1
+                self._keepalive_probe = (uid, perf_counter_ns())
+                self._quic.send_ping(uid)
                 self.transmit()
 
 
@@ -1515,8 +1524,8 @@ class ClientLink:
         self._stats = _TransportStatistics()
 
     def statistics(self) -> dict[str, int]:
-        """Report cumulative counters across this client link's reconnects."""
-        return asdict(self._stats)
+        """Report cumulative counters and a transport RTT for the current link."""
+        return {**asdict(self._stats), "keepalive_rtt_us": self._protocol.keepalive_rtt_us if self.connected else -1}
 
     @property
     def runtime_id(self) -> str | None:

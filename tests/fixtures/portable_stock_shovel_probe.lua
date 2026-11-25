@@ -88,7 +88,8 @@
         end
         local pawn = (phase == "connected" or fields[3] == "local") and state.local_pawn.pawn
             or guest_save.exact_item_context(state, phase, fields[3])
-        if fields[2] == "fixture-spade-host-equip" or fields[2] == "fixture-spade-host-press" then
+        if fields[2] == "fixture-spade-host-equip" or fields[2] == "fixture-spade-host-press"
+            or fields[2] == "fixture-spade-host-release" then
             local ctx = assert(scope(state, phase))
             assert(fields[3] == "local" and same(ctx.pawn, pawn) and pawn:IsLocallyControlled())
             local path = "/Game/Classes/Equipment/MeleeWep_Spade.MeleeWep_Spade_C"
@@ -115,6 +116,14 @@
             local input = StaticFindObject("/Game/Classes/Player/Player_Inputs/IA_Use_Primary.IA_Use_Primary")
             local library = StaticFindObject("/Script/EnhancedInput.Default__EnhancedInputLibrary")
             assert(valid(input) and valid(library))
+            local function release()
+                pawn:InpActEvt_IA_Use_Primary_K2Node_EnhancedInputActionEvent_37(
+                    library:MakeInputActionValueOfType(0, 0, 0, 0), .05, .05, input)
+            end
+            if fields[2] == "fixture-spade-host-release" then
+                release()
+                return "released"
+            end
             local press_path = path .. ":PrimaryPress"
             local spade, presses = pawn.EquipedItem, 0
             local pre, post = RegisterHook(press_path, function(context)
@@ -126,11 +135,11 @@
                 pawn.Camera:K2_SetWorldRotation(aim, false, {}, true)
             end
             pawn:InpActEvt_IA_Use_Primary_K2Node_EnhancedInputActionEvent_36(library:MakeInputActionValueOfType(1, 0, 0, 0), 0, 0, input)
-            pawn:InpActEvt_IA_Use_Primary_K2Node_EnhancedInputActionEvent_37(library:MakeInputActionValueOfType(0, 0, 0, 0), .05, .05, input)
             UnregisterHook(press_path, pre, post)
+            if fields[4] ~= "keep-aim" then release() end
             assert(presses == 1, ("Stock host input reached PrimaryPress %d times, blocked=%s, using=%s")
                 :format(presses, tostring(pawn.IsWeaponBlocked), tostring(pawn.UsingItem)))
-            return "pressed and released"
+            return fields[4] == "keep-aim" and "pressed" or "pressed and released"
         end
         local controller = pawn.Controller
         local observing = phase == "hosting" and fields[4] == "watch-host"

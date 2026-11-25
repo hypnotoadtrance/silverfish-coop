@@ -18,7 +18,7 @@ from tools.silverfish import (
     runtime,
 )
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
-from tools.silverfish.control import submit
+from tools.silverfish.control import current_status, submit
 from tools.silverfish.travel import BLACK_MARKET, CROSSROADS, LAKE
 
 SPADE = CROSSROADS + ".CrossRoads_P:PersistentLevel.MeleeWep_Spade_C_3"
@@ -192,7 +192,7 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
             await observe(host, "loot", stock_choice)
         if host_dig:
             dispatch = await observe(host, "host-press", digger, *(["keep-aim"] if quest_dig else []))
-            assert dispatch == "pressed and released", dispatch
+            assert dispatch == ("pressed" if quest_dig else "pressed and released"), dispatch
         else:
             tap = await submit(guest_run, "native-guest-primary-input-fixture")
             assert tap["ok"], tap
@@ -246,7 +246,17 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
                                if item["class_path"] == native_guest_weapon.SPADE_PATH]
             digger_guid = equipped_spade["guid"]
         result["digger"] = "host" if host_quest else "guest"
-        settled = await wait_resident_status(host_run, lambda f: f.get("game", {}).get(dig.KEY, {}).get("state") == "escrowed")
+        try:
+            settled = await wait_resident_status(
+                host_run, lambda f: f.get("game", {}).get(dig.KEY, {}).get("state") == "escrowed", timeout=10)
+        except RuntimeError as error:
+            game = (await current_status(host_run)).get("game", {})
+            packages = await asyncio.gather(*(observe(seat, "quest-packages") for seat in (host, guest)))
+            raise AssertionError({"dig": game.get(dig.KEY), "diagnostic": game.get(dig.DIAGNOSTIC_KEY),
+                                  "stock_packages": packages, "input": result}) from error
+        finally:
+            if host_quest:
+                assert await observe(host, "host-release", "local") == "released"
         package = settled["game"][dig.KEY]
         saved = runtime.read_json(host.campaign / "save" / "campaign.json")
         custody = saved["world"]["party"][dig.CUSTODY]
