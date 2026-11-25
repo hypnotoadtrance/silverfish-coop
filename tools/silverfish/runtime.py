@@ -803,7 +803,7 @@ class Bridge:
                     self._local_board_records.append(record)
                 elif record.startswith(b"dialogue-input\t"):
                     self._local_dialogue_records.append(record)
-                elif record.startswith(b"loot-crate-open\t"):
+                elif record.startswith((b"loot-crate-open\t", b"loot-lockpick\t")):
                     self._local_crate_records.append(record)
                 elif record.startswith(b"native-guest-melee-edge\t"):
                     self._local_melee_records.append(record)
@@ -2293,6 +2293,8 @@ class Bridge:
                     data.setdefault("native_loot_crates", {})[fields[2]] = row
                     if fields[2] == LEGACY_CRATE:
                         data["native_loot_crate_input"] = row
+                elif fields[0] == "loot-lockpick" and len(fields) == 9 and data.get("state") == "connected":
+                    data.setdefault(native_loot.LOCKPICK_INPUTS, []).append(native_loot.parse_lockpick(fields))
                 elif (fields[0] == "native-loot-vehicle-lock" and len(fields) == 4
                       and lockable_container(fields[2], fields[1]) and fields[3] in {"0", "1"}):
                     data.setdefault("native_loot_vehicle_locks", {})[fields[2]] = fields[3] == "1"

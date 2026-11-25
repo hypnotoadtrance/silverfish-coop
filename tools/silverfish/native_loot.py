@@ -29,6 +29,9 @@ TORCH_USE = "native-guest-vehicle-blowtorch"
 TORCH_RESULT = "native_guest_blowtorch"
 CROWBAR_USE = "native-guest-vehicle-crowbar"
 CROWBAR_RESULT = "native_guest_crowbar"
+LOCKPICK = "native-loot-guest-lockpick"
+LOCKPICK_INPUTS = "native_loot_lockpick_inputs"
+LOCKPICK_RESULT = "native_loot_lockpick_result"
 PRY_TOOL_ACTIONS = {"blowtorch": TORCH_USE, "crowbar": CROWBAR_USE}
 PRY_TOOL_RESULTS = {"blowtorch": TORCH_RESULT, "crowbar": CROWBAR_RESULT}
 PLACEMENT = "native-loot-placement"
@@ -528,6 +531,62 @@ async def restore_key_unlocks(host, bridge):
     snapshot = await project_vehicle_locks(bridge, game, locks, restore_keys=True)
     if snapshot is not game:
         host.last_game, host.last_seen = snapshot, time.monotonic()
+
+
+def parse_lockpick(fields):
+    _, area, crate, pawn, sequence, guid, unlocked, quantity, spent = fields
+    if (not lockable_container(crate, area) or key_unlock_only(crate, area) or not pawn.startswith("Player_FP_C ")
+            or not 0 < int(sequence) < 2**53 or not valid_guid(guid) or unlocked not in ("0", "1")
+            or not 0 < int(quantity) <= 2**31 - 1 or spent not in ("0", "1") or unlocked == spent == "0"):
+        raise ValueError("Invalid stock lockpick result")
+    return dict(map=area, crate=crate, pawn=pawn, sequence=int(sequence), guid=guid, unlocked=unlocked,
+                quantity=quantity, spent=spent)
+
+
+async def settle_lockpick(host, bridge, character, target, operation):
+    from .native_inventory import retain_guest_save
+
+    game, pawn = host.last_game, _scope(host, character)
+    area = game.get("map")
+    try:
+        epoch, crate, guid, unlocked, quantity, spent = target.split("@")
+        outcome = parse_lockpick(("loot-lockpick", area, crate, pawn, "1", guid, unlocked, quantity, spent))
+    except (AttributeError, TypeError, ValueError) as error:
+        raise party.RuleError("stock_lockpick_refused_arguments") from error
+    if (not host.native_loot_input or character == "host" or not pawn or epoch != host.zone_epoch
+            or game.get("state") != "hosting" or host.stopping or host.transitioning or host.native_checkpoint_unsafe
+            or host.party.get("wipe") or character in host.party["pending_spawns"] or host.party["players"][character]["downed"]):
+        raise party.RuleError("stock_lockpick_refused_scope")
+    fingerprint = [LOCKPICK, target, None]
+    for receipt in host.party["receipts"].get(character, ()):
+        if receipt["id"] == operation:
+            if receipt["request"] != fingerprint:
+                raise party.RuleError("operation_id_conflict")
+            return receipt["result"]
+    if not await retain_guest_save(host, bridge, character, pawn) or epoch != host.zone_epoch or _scope(host, character) != pawn:
+        raise party.RuleError("stock_lockpick_refused_detached_save")
+
+    try:
+        frame = await bridge.command(LOCKPICK, crate, pawn, guid, outcome["unlocked"], outcome["quantity"], outcome["spent"], timeout=3)
+    except RuntimeError as error:
+        if str(error).startswith("stock_lockpick_refused_"):
+            raise party.RuleError(str(error)) from error
+        raise
+    locked = frame.get("ack", {}).get("message")
+    if ((frame.get("state"), frame.get("map")) != ("hosting", area) or locked not in ("locked", "unlocked")
+            or unlocked == "1" and locked != "unlocked"):
+        raise RuntimeError("The stock lockpick result could not be verified")
+    host.last_game, host.last_seen = frame, time.monotonic()
+    remaining = int(quantity) - int(spent)
+    if remaining == 0:
+        host.party["players"][character].get("native_inventory", {}).pop(guid, None)
+        host.native_pickup.forget_committed_row(character, guid)
+    proof = {"map": area, "crate": crate, "guid": guid, "locked": locked == "locked", "remaining": remaining}
+    result = {LOCKPICK_RESULT: proof}
+    recent = host.party["receipts"].setdefault(character, [])
+    recent.append({"id": operation, "request": fingerprint, "result": result})
+    del recent[:-party.RECENT_ACTIONS]
+    return result
 
 
 async def use_vehicle_pry_tool(host, bridge, character, target, operation_id, action):

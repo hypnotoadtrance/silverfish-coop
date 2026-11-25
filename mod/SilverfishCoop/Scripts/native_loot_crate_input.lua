@@ -7,12 +7,14 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_LOOT") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local client_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1"
+local title_fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
 local legacy_fixture_profiles = 3
 local open_rotation = { Pitch = 0, Yaw = 0, Roll = -95 }
 local cabinet_rotations = {{Pitch = 0, Yaw = 95, Roll = 0}, {Pitch = 0, Yaw = -95, Roll = 0}}
 local bindings, fixture_sequences = {}, {}
 local active_world, sampler, receipt_frame
 local published = {}
+local lockpicks_published = 0
 local blowtorch_path = "/Game/Classes/Equipment/Eqp_BlowTorch.Eqp_BlowTorch_C"
 local crowbar_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Crowbar.MeleeWep_Crowbar_C"
 local tool_report
@@ -45,7 +47,7 @@ local function reset_world(world)
     lid_preview.clear()
     bindings, fixture_sequences, active_world = {}, {}, world
     sampler, tool_report = nil, nil
-    receipt_frame, published = nil, {}
+    receipt_frame, published, lockpicks_published = nil, {}, 0
 end
 
 function input.clear()
@@ -609,6 +611,52 @@ function input.command(fields, state, phase)
         if current.crate.Locked ~= false then error("stock_electronic_power_fixture_unverified", 0) end
         return "stock electronic locker power delay started"
     end
+    if command == "native-loot-guest-lockpick" then
+        local profile = loot.profile(state.map, fields[3])
+        local outcome, before, spent = fields[6], tonumber(fields[7]), fields[8]
+        if phase ~= "hosting" or #fields ~= 8 or not profile or not profile.lockable or profile.key_unlock_only
+            or (outcome ~= "0" and outcome ~= "1") or (spent ~= "0" and spent ~= "1")
+            or not math.tointeger(before) or before < 1 or (outcome == "0" and spent == "0")
+            or type(SilverfishSettleNativeGuestLockpick) ~= "function" then error("stock_lockpick_refused_scope", 0) end
+        local qualified, scope = pcall(loot.qualify, state, phase, fields[4], fields[3], true)
+        if not qualified or same(scope.save, scope.stock) or type(scope.crate.Locked) ~= "boolean" then
+            error("stock_lockpick_refused_container", 0)
+        end
+        local crate = scope.crate
+        if outcome == "1" and crate.Locked and
+            (type(crate["Pick Chance"]) ~= "number" or not (crate["Pick Chance"] > 0)
+                or not valid(StaticFindObject(profile.actor_class .. ":PickLock"))) then
+            error("stock_lockpick_refused_lock", 0)
+        end
+        local ok, result = SilverfishSettleNativeGuestLockpick(scope.pawn:GetAddress(), scope.save:GetAddress(), fields[5], before,
+            spent == "1")
+        if not ok then error(result, 0) end
+        if outcome == "1" and crate.Locked then
+            crate:PickLock(false)
+            if crate.Locked ~= false then error("mutation_unverified_stock_lockpick_result", 0) end
+        end
+        return crate.Locked and "locked" or "unlocked"
+    end
+    if command == "native-loot-lockpick-input-fixture" then
+        local profile = loot.profile(state.map, fields[3])
+        local current = headless and title_fixtures and phase == "connected" and #fields == 3 and profile and profile.lockable
+            and input.update(state, phase, profile)
+        local _, box
+        if current and current.crate.Locked == true then _, box = scene(current) end
+        local item = current and current.pawn.EquipedItem
+        local kind = valid(item) and item:GetClass():GetFName():ToString()
+        if not box or (kind ~= "Eqp_LockPick_C" and kind ~= "Eqp_LockPick_Hev_C") then
+            error("stock_lockpick_input_fixture_unavailable", 0)
+        end
+        stock_focus(current.pawn, box, function()
+            item:Use_Item_Primary(true, 0.0)
+            if not same(item.TargetActor, current.crate) or not same(item.LockRef, current.crate) then
+                error("stock_lockpick_input_fixture_target_unverified", 0)
+            end
+            item:Use_Item_Primary(false, 0.0)
+        end)
+        return "stock lockpick started"
+    end
     if command == "native-loot-guest-blowtorch-use" or command == "native-loot-guest-crowbar-use" then
         local crowbar = command == "native-loot-guest-crowbar-use"
         local profile = loot.profile(state.map, fields[3])
@@ -777,6 +825,20 @@ local function visit_receipts(state, accept)
     end
 end
 
+local function visit_lockpicks(state, status_row, accept)
+    if not state.server or type(SilverfishReadNativeLockpickResults) ~= "function" then return end
+    local detail = state.local_pawn
+    local rows = table.pack(SilverfishReadNativeLockpickResults(detail.pawn:GetAddress()))
+    for index = 1, rows.n, 6 do
+        local container, sequence, guid, unlocked, before, spent = table.unpack(rows, index, index + 5)
+        local profile = loot.profile_at(state.map, container)
+        if profile then
+            accept(sequence, status_row("loot-lockpick", state.map, profile.name, detail.name, sequence, guid,
+                unlocked and 1 or 0, before, spent))
+        end
+    end
+end
+
 local function append_receipts(rows, state, status_row)
     visit_receipts(state, function(index, profile, pawn, sequence, pried, guest)
         if pried and guest ~= 0 then
@@ -789,6 +851,11 @@ local function append_receipts(rows, state, status_row)
         else
             rows[#rows + 1] = status_row("native-loot-crate-interaction", state.map, profile.name, pawn, sequence,
                 pried and "pried" or sequence == fixture_sequences[index] and "fixture" or "stock")
+        end
+    end)
+    visit_lockpicks(state, status_row, function(sequence, row)
+        if sequence > lockpicks_published and SilverfishEnqueueLocalBridgeInput(row .. "\n") == true then
+            lockpicks_published = sequence
         end
     end)
 end
@@ -859,6 +926,7 @@ function input.rows(state, phase, status_row, fields, separate_details, requeste
         for _, row in ipairs(observed) do rows[#rows + 1] = row end
     end
     if type(SilverfishReadNativeLootCrateReceipts) == "function" then append_receipts(rows, state, status_row) end
+    if phase == "connected" then visit_lockpicks(state, status_row, function(_, row) rows[#rows + 1] = row end) end
     if tool_report and phase == "hosting" and tool_report.map == state.map then
         local report = tool_report
         rows[#rows + 1] = status_row("native-loot-guest-" .. report.kind .. "-use", report.map, report.crate, report.pawn,

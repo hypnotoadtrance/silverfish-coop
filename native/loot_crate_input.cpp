@@ -1,6 +1,7 @@
 #include "loot_crate_input.hpp"
 #include "authored_loot_registry.hpp"
 #include "electronic_locker.hpp"
+#include "guest_item.hpp"
 #include "interaction_input.hpp"
 #include "shared_loot.hpp"
 
@@ -9,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <utility>
 #include <cstdlib>
 #include <string_view>
 #include <vector>
@@ -240,7 +242,19 @@ namespace
     std::vector<std::size_t> pending_receipts;
     std::uint64_t sequence{};
     std::atomic<bool> installed{};
-    std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID};
+    std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
+
+    struct LockpickResult
+    {
+        U::FWeakObjectPtr pawn, crate, tool;
+        std::string guid;
+        int before{}, spent{};
+        bool unlocked{};
+        std::uint64_t sequence{};
+        Clock::time_point deadline{};
+    };
+    LockpickResult pending_lockpick;
+    std::vector<LockpickResult> lockpick_results;
 
     bool ready() { return U::IsInGameThreadRaw() && installed.load(std::memory_order_acquire); }
 
@@ -249,6 +263,86 @@ namespace
         return method->GetOuterPrivate() == crate->GetClassPrivate() && method->GetNumParms() == count &&
             method->GetParmsSize() == size && !method->GetReturnProperty() &&
             !method->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net);
+    }
+
+    // Both stock lockpick classes resume the attempt after their Blueprint Delay at entry 38.
+    bool lockpick_completion(U::UObject* tool, U::UFunction* method, const void* args)
+    {
+        static const U::FName standard{STR("ExecuteUbergraph_Eqp_LockPick")};
+        static const U::FName heavy{STR("ExecuteUbergraph_Eqp_LockPick_Hev")};
+        const auto name = method->GetFName();
+        if (!args || (name != standard && name != heavy) || !stock_function(tool, method, 1, sizeof(std::int32_t))) return false;
+        const auto path = name == standard ? STR("/Game/Classes/Equipment/Eqp_LockPick.Eqp_LockPick_C") :
+            STR("/Game/Classes/Equipment/Eqp_LockPick_Hev.Eqp_LockPick_Hev_C");
+        auto* entry = parameter<U::FIntProperty>(method, STR("EntryPoint"), 0);
+        return exact(tool, path) && entry && entry->GetPropertyValueInContainer(args) == 38;
+    }
+
+    void begin_lockpick(Iteration& call, U::UObject* tool, U::UFunction* method, const void* args)
+    {
+        if (!ready() || !tool || !method || call.OriginalFunctionCallPrevented() || !lockpick_completion(tool, method, args)) return;
+        auto* pawn = object(tool, STR("Player_Ref"));
+        if (!pawn || silverfish::native_interaction_input::current_guest_pawn(reinterpret_cast<std::uintptr_t>(pawn)) != pawn ||
+            !boolean(pawn, STR("Dead"), false) || object(pawn, STR("EquipedItem")) != tool) return;
+        auto* crate = object(tool, STR("LockRef"));
+        if (!crate || crate != object(tool, STR("TargetActor"))) return;
+        const auto* profile = silverfish::shared_loot::authored_profile(crate);
+        if (!profile || !profile->stock_class->pry_entry || profile->stock_class->key_unlock_only ||
+            !boolean(crate, STR("Locked"), true) || !boolean(crate, STR("Looted"), false) ||
+            !actor_in_world(crate, static_cast<U::AActor*>(pawn)->GetWorld())) return;
+        auto* ammo = field<U::FIntProperty>(tool, STR("Ammo"));
+        auto* chance = field<U::FDoubleProperty>(tool, STR("Target_PickChance"));
+        if (!ammo || !chance || !(chance->GetPropertyValueInContainer(tool) > 0.0)) return;
+        const auto units = ammo->GetPropertyValueInContainer(tool);
+        auto guid = silverfish::native_guest_item::local_equipped_identity(pawn, tool);
+        if (units < 1 || guid.empty()) return;
+        pending_lockpick = {pawn, crate, tool, std::move(guid), units};
+    }
+
+    void finish_lockpick(Iteration& call, U::UObject* tool, U::UFunction* method, const void* args)
+    {
+        if (!ready() || !tool || !method || pending_lockpick.tool.Get(true) != tool ||
+            !lockpick_completion(tool, method, args)) return;
+        auto completed = std::exchange(pending_lockpick, {});
+        auto* crate = completed.crate.Get();
+        auto* pawn = completed.pawn.Get();
+        if (call.OriginalFunctionCallPrevented() || !live(pawn) || !live(crate) || sequence == max_sequence) return;
+        auto* ammo = field<U::FIntProperty>(tool, STR("Ammo"));
+        if (!ammo) return;
+        const auto spent = completed.before - ammo->GetPropertyValueInContainer(tool);
+        if (spent < 0 || spent > 1) return;
+        completed.unlocked = boolean(crate, STR("Locked"), false);
+        if (!completed.unlocked && !spent) return;
+        completed.spent = spent;
+        completed.sequence = ++sequence;
+        const auto now = Clock::now();
+        completed.deadline = now + receipt_lifetime;
+        std::erase_if(lockpick_results, [now](const auto& row) { return row.deadline <= now || !row.pawn.Get(); });
+        if (lockpick_results.size() < 16) lockpick_results.push_back(std::move(completed));
+    }
+
+    int read_lockpicks(const Lua& lua)
+    {
+        if (!ready() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto address = lua.get_integer();
+        auto* pawn = address > 0 ? silverfish::native_interaction_input::current_guest_pawn(address) : nullptr;
+        if (!pawn) return 0;
+        int fields = 0;
+        const auto now = Clock::now();
+        for (const auto& result : lockpick_results)
+        {
+            if (result.pawn.Get() != pawn || result.deadline <= now) continue;
+            const auto* profile = silverfish::shared_loot::authored_profile(result.crate.Get());
+            if (!profile) continue;
+            lua.set_integer(static_cast<std::int64_t>(profile - profiles.data() + 1));
+            lua.set_integer(static_cast<std::int64_t>(result.sequence));
+            lua.set_string(result.guid);
+            lua.set_bool(result.unlocked);
+            lua.set_integer(result.before);
+            lua.set_integer(result.spent);
+            fields += 6;
+        }
+        return fields;
     }
 
     bool same_scope(const Scope& scope, U::UObject* crate, Local local)
@@ -582,11 +676,14 @@ namespace silverfish::native_loot_crate_input
         callbacks[0] = Hook::RegisterProcessEventPreCallback(
             [](Iteration& call, U::UObject* crate, U::UFunction* method, void* parameters) {
                 intercept(call, crate, method, parameters);
+                begin_lockpick(call, crate, method, parameters);
             }, {false, false, STR("SilverfishCoopNative"), STR("Route qualified authored crate input")});
         callbacks[1] = Hook::RegisterProcessLocalScriptFunctionPreCallback(
             [](Iteration& call, U::UObject* crate, U::FFrame& frame, void*) {
                 intercept(call, crate, frame.Node(), frame.Locals());
             }, {false, false, STR("SilverfishCoopNative"), STR("Route qualified authored crate script")});
+        callbacks[2] = Hook::RegisterProcessEventPostCallback(finish_lockpick,
+            {false, false, STR("SilverfishCoopNative"), STR("Read completed stock lockpick attempts")});
         if (std::ranges::find(callbacks, Hook::ERROR_ID) != callbacks.end())
         {
             uninstall_hooks();
@@ -612,6 +709,7 @@ namespace silverfish::native_loot_crate_input
         lua.register_function("SilverfishSetNativeLootCrateInputScope", set_scope);
         lua.register_function("SilverfishReadNativeLootCrateInput", status);
         lua.register_function("SilverfishReadNativeLootCrateReceipts", receipts);
+        lua.register_function("SilverfishReadNativeLockpickResults", read_lockpicks);
         lua.register_function("SilverfishClearNativeLootCrateInput", clear);
         lua.register_function("SilverfishArmNativeGuestVehiclePry", arm_guest_pry);
         lua.register_function("SilverfishCancelNativeGuestVehiclePry", cancel_guest_pry);
@@ -623,6 +721,8 @@ namespace silverfish::native_loot_crate_input
         {
             scopes = {};
             pending_receipts.clear();
+            pending_lockpick = {};
+            lockpick_results.clear();
             silverfish::electronic_locker::clear();
         }
     }

@@ -3141,6 +3141,62 @@ namespace
             boolean(actor, STR("bActorIsBeingDestroyed"), false);
     }
 
+    int settle_lockpick(const Lua& lua)
+    {
+        const auto refuse = [&](std::string_view reason) { return result(lua, false, reason); };
+        if (!env("SILVERFISH_COOP_NATIVE_GUEST_SAVE") || !Unreal::IsInGameThreadRaw() ||
+            lua.get_stack_size() != 5 || !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3) ||
+            !lua.is_integer(4) || !lua.is_bool(5)) return refuse("stock_lockpick_refused_arguments");
+        const auto pawn = lua.get_integer(), save = lua.get_integer();
+        Context context;
+        if (pawn <= 0 || save <= 0 || !parse_guid(lua.get_string(), context.guid) ||
+            !resolve_owner(context, pawn, save).empty() || !ready_pawn(context)) return refuse("stock_lockpick_refused_owner");
+        const auto units = lua.get_integer();
+        const bool spent = lua.get_bool();
+        Inventory inventory;
+        if (units < 1 || units > INT32_MAX || !locate(context, inventory).empty() || !inventory.item || inventory.equipment_index < 0 ||
+            inventory.ammo->GetPropertyValueInContainer(inventory.item) != units) return refuse("stock_lockpick_refused_stack");
+        context.weapon = Unreal::Cast<Unreal::UClass>(inventory.row_class(inventory.item));
+        if (!live(context.weapon)) return refuse("stock_lockpick_refused_class");
+        const auto path = context.weapon->GetPathName();
+        if (path != STR("/Game/Classes/Equipment/Eqp_LockPick.Eqp_LockPick_C") &&
+            path != STR("/Game/Classes/Equipment/Eqp_LockPick_Hev.Eqp_LockPick_Hev_C")) return refuse("stock_lockpick_refused_class");
+        if (!spent) return result(lua, true, "retained");
+        const auto slot = inventory.equipment_index;
+        auto* held = inventory.selected->GetPropertyValueInContainer(context.save) == slot
+            ? object(context.pawn, STR("EquipedItem")) : nullptr;
+        if (held && !held_for_unequip(context, held)) return refuse("stock_lockpick_refused_held_item");
+        if (units == 1)
+        {
+            RemoveEquipmentCall remove;
+            if (!remove.valid(context, inventory)) return refuse("stock_lockpick_refused_remove_function");
+            if (!remove.invoke(context, inventory) || !ownership_current(context))
+                return refuse("mutation_unverified_stock_lockpick_depletion");
+            Unreal::FScriptArrayHelper slots(inventory.equipment, inventory.equipment->ContainerPtrToValuePtr<void>(context.save));
+            if (slots.Num() <= slot || inventory.row_class(slots.GetRawPtr(slot)) || inventory.identity(slots.GetRawPtr(slot)) != Guid{})
+                return refuse("mutation_unverified_stock_lockpick_depletion");
+            auto* selected = field<Unreal::FObjectProperty>(context.pawn, STR("EquipedItem"));
+            if (held && selected && object(context.pawn, STR("EquipedItem")) == held)
+                selected->SetObjectPropertyValue(selected->ContainerPtrToValuePtr<void>(context.pawn), nullptr);
+        }
+        else
+        {
+            auto* ammo = field<Unreal::FIntProperty>(held, STR("Ammo"));
+            auto* weight = field<Unreal::FDoubleProperty>(held, STR("Weight"));
+            auto* defaults = context.weapon->GetClassDefaultObject().Get();
+            if (held && (!ammo || !weight || !defaults || !std::isfinite(weight->GetPropertyValueInContainer(defaults))))
+                return refuse("stock_lockpick_refused_held_schema");
+            const auto remaining = static_cast<std::int32_t>(units - 1);
+            inventory.ammo->SetPropertyValueInContainer(inventory.item, remaining);
+            if (held)
+            {
+                ammo->SetPropertyValueInContainer(held, remaining);
+                weight->SetPropertyValueInContainer(held, weight->GetPropertyValueInContainer(defaults) * remaining);
+            }
+        }
+        return result(lua, true, "spent");
+    }
+
     int unequip_stock_equipment(const Lua& lua)
     {
         Context context;
@@ -3906,6 +3962,7 @@ bool silverfish::native_guest_item::split_stock_stack(Unreal::UObject* context, 
 
 void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
+    lua.register_function("SilverfishSettleNativeGuestLockpick", settle_lockpick);
     lua.register_function("SilverfishBindNativeShotTarget", bind_contact_reference);
     if (env("SILVERFISH_COOP_NATIVE_INTERACT_INPUT"))
     {

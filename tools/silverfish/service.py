@@ -96,7 +96,8 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_inventory.STORE_EQUIPMENT, native_inventory.UNEQUIP,
                         native_stash.LIST, native_stash.MOVE,
                         native_guest_ui.ACTION,
-                        "native-loot-inspect", "native-loot-open", "native-loot-claim", *native_loot.PRY_TOOL_ACTIONS.values(),
+                        "native-loot-inspect", "native-loot-open", "native-loot-claim", native_loot.LOCKPICK,
+                        *native_loot.PRY_TOOL_ACTIONS.values(),
                         native_stock_door.ACTION, *native_stock_door.PRY_ACTIONS.values(), native_stock_switch.ACTION,
                         *native_guest_drop.ACTIONS,
                         "native-wipe-items", "native-wipe-recover",
@@ -2279,6 +2280,8 @@ class Host:
             elif action in ("native-loot-inspect", "native-loot-open", "native-loot-claim"):
                 result = await native_loot.perform(self, bridge, character, action.removeprefix("native-loot-"),
                                                    target, request["operation_id"], defer_save=True)
+            elif action == native_loot.LOCKPICK:
+                result = await native_loot.settle_lockpick(self, bridge, character, target, request["operation_id"])
             elif action in native_loot.PRY_TOOL_ACTIONS.values():
                 async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                     result = await native_loot.use_vehicle_pry_tool(self, bridge, character, target, request["operation_id"], action)
@@ -5219,6 +5222,7 @@ class Client:
         self.inventory_drop_scope = None
         self.crate_intents = native_loot.OpenIntents()
         self.crate_lids = native_loot.GuestCrateProjection()
+        self.last_lockpick_result = 0
         self.last_broker_intent = 0
         self.wire_board = native_wire_board.WireBoardView(bridge, control) if invite.get("native_wire_board") else None
         self.dead_drop_projection = (None, 0.0)
@@ -5772,7 +5776,9 @@ class Client:
         if not self.invite.get("native_loot_input"):
             return
         session, epoch = self.host_session, self.zone_epoch
-        intents = self.crate_intents.take(self.last_game, self.bridge.native_crate_inputs())
+        inputs = self.bridge.native_crate_inputs()
+        await self.service_lockpick_results(scope, inputs)
+        intents = self.crate_intents.take(self.last_game, inputs)
         for sequence, crate, _, source in intents:
             if scope is None or self.stock_interaction_scope() != scope:
                 continue
@@ -5794,6 +5800,35 @@ class Client:
                 if (self.bridge.local_bridge is not None and self.stock_interaction_scope() == scope
                         and roll is not None and roll == result.get("native_loot_roll")):
                     await self.crate_lids.sync(self, confirmed_crate=crate)
+
+    async def service_lockpick_results(self, scope, inputs) -> None:
+        if scope is None or self.stock_interaction_scope() != scope:
+            return
+        session, epoch, area, pawn = scope
+        outcomes = {row["sequence"]: row for row in self.last_game.get(native_loot.LOCKPICK_INPUTS, ())}
+        for record in inputs:
+            if not record.startswith(b"loot-lockpick\t"):
+                continue
+            try:
+                row = native_loot.parse_lockpick(record.decode("ascii").rstrip("\r\n").split("\t"))
+            except ValueError:
+                continue
+            outcomes[row["sequence"]] = row
+        for sequence, row in sorted(outcomes.items()):
+            if sequence <= self.last_lockpick_result or (row["map"], row["pawn"]) != (area, pawn):
+                continue
+            if self.stock_interaction_scope() != scope:
+                return
+            self.last_lockpick_result = sequence
+            operation = uuid.uuid5(self.bridge.input_namespace, f"{session}:{epoch}:{pawn}:lockpick:{sequence}").hex
+            target = "@".join((epoch, *(row[key] for key in ("crate", "guid", "unlocked", "quantity", "spent"))))
+            started = time.monotonic()
+            try:
+                result = await self.gameplay_action(native_loot.LOCKPICK, operation, target)
+                self.control.event("native_guest_lockpick", sequence=sequence, milliseconds=round(1000 * (time.monotonic() - started)),
+                                   **result)
+            except (ValueError, OSError, RuntimeError) as error:
+                self.control.event("native_guest_lockpick_rejected", sequence=sequence, reason=str(error))
 
     async def service_broker_input(self, active: bool) -> None:
         if not self.invite.get("native_broker_input"):

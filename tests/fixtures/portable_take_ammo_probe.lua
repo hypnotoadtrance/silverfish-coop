@@ -1,3 +1,14 @@
+    if fields[2] == "fixture-stock-lockpick-locker" and headless
+        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
+        local locker = StaticFindObject("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.LootLocker_Small_BP_C_0")
+        assert(valid(locker) and locker.Looted == false and type(locker.Locked) == "boolean")
+        if fields[3] == "arm" then
+            assert(phase == "hosting" or phase == "connected")
+            locker["Pick Chance"] = 1.0
+            locker.Locked = true
+        end
+        return locker.Locked and "locked" or "unlocked"
+    end
     if fields[2] == "fixture-stock-take-ammo-backpack" and headless
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
         assert(phase == "connected" and #fields == 3)

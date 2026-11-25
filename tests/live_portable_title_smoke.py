@@ -3392,6 +3392,8 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     checkpoint = campaign_save_hashes(host.campaign)
     host_inventory = (await submit(host_run, "native-inventory-list"))["native_inventory"]
+    crate, = [name for name, area in native_loot.CRATES.items() if area == OBSERVATORY
+              and name.endswith(":PersistentLevel.LootLocker_Small_BP_C_0")]
     proofs = []
     for kind, units in (("lockpick", 2), ("heavy-lockpick", 3)):
         seeded = await host.bridge.command("fixture-stock-take-ammo-seed", pawn, kind, str(units))
@@ -3426,7 +3428,35 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str) -> dict:
                     break
                 await asyncio.sleep(.08)
         assert held["actor_ammo"] == held["stored_ammo"] == units, held
-        proofs.append({"class_path": item["class_path"], "slot": slot, "units": units})
+        for seat in (host, guest):
+            armed = await seat.bridge.command("fixture-stock-lockpick-locker", "arm")
+            assert armed["ack"]["message"] == "locked", armed["ack"]
+        approached = await host.bridge.command("native-loot-approach", pawn, crate)
+        position, = [row["location"] for row in approached["pawns"].values() if row["name"] == pawn]
+        await wait_resident_status(guest_run, lambda frame:
+            (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location")) and math.dist(point, position) < 50)
+        started = time.monotonic()
+        press = await guest.bridge.command("native-loot-lockpick-input-fixture", crate)
+        assert press["ack"]["message"] == "stock lockpick started", press["ack"]
+        async with asyncio.timeout(12):
+            while True:
+                receipt = next((row for row in await resident_events(guest_run, frame)
+                                if row["event"] in ("native_guest_lockpick", "native_guest_lockpick_rejected")), None)
+                if receipt:
+                    break
+                await asyncio.sleep(.06)
+        result = receipt[native_loot.LOCKPICK_RESULT]
+        assert result["guid"] == guid and result["locked"] is False, receipt
+        assert result["remaining"] in (units, units - 1), receipt
+        assert kind != "heavy-lockpick" or result["remaining"] == units - 1, receipt
+        for seat in (host, guest):
+            lock = await seat.bridge.command("fixture-stock-lockpick-locker", "read")
+            assert lock["ack"]["message"] == "unlocked", lock["ack"]
+        proofs.append({"class_path": item["class_path"], "slot": slot, "units": units,
+                       "remaining": result["remaining"], "result_roundtrip_ms": receipt["milliseconds"],
+                       "press_to_ack_ms": round((time.monotonic() - started) * 1000)})
+    roll = await submit(guest_run, "native-loot-open", target=crate)
+    assert roll["ok"] and roll["native_loot_roll"]["crate"] == crate, roll
     assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_inventory
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"stock_lockpicks": proofs}
