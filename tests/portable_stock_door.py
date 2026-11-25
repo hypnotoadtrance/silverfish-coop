@@ -59,19 +59,24 @@ async def verify_stock_crossroads_door(host, guest, pawn):
 
     async def toggle(expected_open):
         attempts = []
-        for side in range(4):
-            approach = await submit(host_run, door.STAGE_FIXTURE, target=f"guest@{WOOD_DOOR}", amount=side)
-            if not approach.get("ok"):
-                attempts.append(approach)
-                continue
-            point = approach["position"]
+        current = observed(await wait_resident_status(host_run, lambda frame:
+            observed(frame).get("open") is not expected_open and bool(observed(frame))))
+        x, y, z = current["knob_location"]
+        for dx, dy in ((110, 0), (0, 110), (-110, 0), (0, -110)):
+            moved = await host.bridge.restore("guest", {"location": [x + dx, y + dy, z]})
+            assert moved["pawns"]["guest"]["name"] == arrival["game"]["native_guest_save"]["pawn"]
+            point = moved["pawns"]["guest"]["location"]
             await wait_resident_status(guest_run, lambda frame:
                 math.dist(frame["game"].get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), point) < 55)
             started = time.time()
-            pressed = await submit(guest_run, door.INPUT_FIXTURE, target=WOOD_DOOR)
-            if pressed.get("ok"):
+            try:
+                await guest.bridge.command(door.INPUT_FIXTURE, WOOD_DOOR)
+            except RuntimeError as error:
+                if "stock_fixture_focus_unavailable" not in str(error):
+                    raise
+                attempts.append(str(error))
+            else:
                 break
-            attempts.append(pressed)
         else:
             raise RuntimeError(f"No stock approach reached the Crossroads hinge knob: {attempts}")
 

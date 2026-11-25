@@ -197,6 +197,19 @@ def tutorial_dock_zone_overlay(game: Path):
     return portable_script_overlay(game, "native_zone.lua", allow_dock_position)
 
 
+def stock_crossroads_door_overlay(game: Path):
+    def allow_door_fixtures(script):
+        for gate in ("SILVERFISH_COOP_NATIVE_FIXTURES", "SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES"):
+            expected = f'headless and os.getenv("{gate}") == "1"'
+            if script.count(expected) != 1:
+                raise ValueError("The private replica lacks its stock door fixture gate")
+            script = script.replace(expected, expected
+                                    + '\n    or headless and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"', 1)
+        return script
+
+    return portable_script_overlay(game, "native_stock_door.lua", allow_door_fixtures)
+
+
 def stock_wipe_chooser_overlay(game: Path):
     def allow_stock_fixture(script):
         gate = 'local stock_fixture = os.getenv("SILVERFISH_COOP_STOCK_WIPE_TEST") == "1"'
@@ -6044,6 +6057,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if stock_loki_control or stock_loki_guest:
             proof["stock_loki_control_overlays"] = [
                 probes.enter_context(guest_weapon_fixture_overlay(game, "portable_loki_control_probe.lua")) for game in games
+            ]
+        if stock_crossroads_door:
+            proof["stock_crossroads_door_overlays"] = [
+                probes.enter_context(stock_crossroads_door_overlay(game)) for game in games
             ]
         if stock_warehouse_switch:
             proof["warehouse_switch_overlays"] = [probes.enter_context(warehouse_switch_overlay(game)) for game in games]
