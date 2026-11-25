@@ -62,6 +62,8 @@ Development build `rc-0d64597` reuses unchanged ground-fire status and skips the
 
 `rc-469f5b6` reuses a guest's verified transition walls for up to half a second. World or pawn changes and invalid walls trigger an immediate refresh. In a short Crossroads walking sample, the guest refreshed wall sources six times during 26 zone updates. Median zone synchronization took 0.062 ms, compared with 0.238 ms on `rc-0d64597`. One muted Direct IP pair passed travel and weather, stock door toggles, the Lingering Teleport, and fall recovery and revival for both players. The original saves were preserved. The largest guest interval during the short Crossroads walking sample was 10 ms, compared with 30 ms in the previous pair. Both are headless samples, so rendered frame pacing and Steam latency remain open.
 
+Development candidate `rc-8700ea5` sends stock exit requests through the resident in-process queue. An exit can retry briefly if the queue is full and releases its request if the source pawn changes or the retry expires. Two muted Direct IP launches verified the Observatory crossing, the Northeast Rail door into ShopKeep, Crossroads weather, a stock door toggle, mushroom regrowth, and the ShopKeep bounty turn-in. The crossing advanced the campaign checkpoint, the exit requests created no mailbox files, and the original saves were preserved. The guest's visible transition and two-PC Steam behavior still need playtesting.
+
 ## `rc-6690ff4` playtest
 
 | Area | Two-PC observation |
