@@ -84,6 +84,7 @@ INDEPENDENT_RESIDENT_MAPS = {
     "stock_footsteps": {OBSERVATORY}, "stock_impact_cues": {OBSERVATORY},
     "stock_lockpicks": {OBSERVATORY}, "stock_observatory_tv": {OBSERVATORY},
     "stock_critters": {CROSSROADS}, "stock_lingering_teleport": {CROSSROADS}, "stock_mushrooms": {CROSSROADS},
+    "stock_crossroads_recovery": {CROSSROADS},
     "stock_placed_item": {CROSSROADS}, "stock_cash_popup": {CROSSROADS}, "stock_weather_travel": {OBSERVATORY},
     "stock_canister": {CROSSROADS},
     "stock_warehouse_switch": {OBSERVATORY, WAREHOUSE_DOCK}, "stock_warehouse_radio": {OBSERVATORY, WAREHOUSE_DOCK},
@@ -6803,6 +6804,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
                  stock_weather_travel: bool = False, stock_lightning: bool = False, stock_storm_ambience: bool = False,
                  crossroads_profile: bool = False, stock_crossroads_door: bool = False, stock_dock_gate: bool = False,
+                 stock_crossroads_recovery: bool = False,
                  stock_melee_family: bool = False, stock_melee_edges: bool = False,
                  stock_warehouse_switch: bool = False, stock_warehouse_board: bool = False, stock_bottle: bool = False,
                  stock_roaming_barter: bool = False, stock_castaway_dialogue: bool = False,
@@ -6843,7 +6845,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  resident_cabinet_checkpoint: Path | None = None,
                  resident_cabinet_candidate_sha256: str | None = None) -> None:
     guest_world_start = guest_world_start or guest_world_start_travel
-    stock_weather_travel = stock_weather_travel or crossroads_profile or stock_canister
+    stock_weather_travel = stock_weather_travel or crossroads_profile or stock_canister or stock_crossroads_recovery
+    from portable_crossroads_profile import instrument_kill_volume, verify_crossroads_recovery
     guest_stash_memory = guest_stash_memory or guest_stash_large_memory
     container_nearby = container_nearby or guest_ui_memory
     roots = (work, first_game, second_game, original)
@@ -7006,6 +7009,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_placed_item, "crossroads", "stock_cash_popup",
          lambda host, guest, pawn: verify_stock_cash_popup(host, guest, pawn, portable_probe_command, campaign_save_hashes)),
         (stock_mushrooms, "crossroads", "stock_mushrooms", verify_stock_mushrooms),
+        (stock_crossroads_recovery, "crossroads", "stock_crossroads_recovery", verify_crossroads_recovery),
         (stock_canister, "crossroads", "stock_canister", lambda host, guest, pawn:
          verify_crossroads_canister(host, guest, pawn, resident_events, campaign_save_hashes)),
         (stock_buried_placements, "buried_placements" if stock_shovel_quest else "crossroads",
@@ -7055,6 +7059,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                        or guest_stash_memory or nonmirrored_startup or stock_unequip or stock_fire_mode_reopen
                        or resident_cabinet_archive is not None)
     try:
+        if crossroads_profile or stock_crossroads_recovery:
+            for game in games:
+                probes.enter_context(portable_script_overlay(
+                    game, "native_kill_volume.lua",
+                    lambda text: instrument_kill_volume(text, measure=crossroads_profile,
+                                                        recovery_fixture=stock_crossroads_recovery),
+                ))
         if crossroads_profile:
             from portable_crossroads_profile import (
                 instrument_anomaly_work, instrument_death_poll, instrument_flashlight_scope,
@@ -7891,6 +7902,8 @@ if __name__ == "__main__":
                         help="verify stock guest opening and closing animation on the Intro bars gate")
     parser.add_argument("--stock-crossroads-door", action="store_true",
                         help="verify stock guest door toggles, replay, and panel collision in Crossroads")
+    parser.add_argument("--stock-crossroads-recovery", action="store_true",
+                        help="verify both players recover from the stock Crossroads kill volume")
     parser.add_argument("--crossroads-profile", action="store_true",
                         help="measure co-op frame and subsystem times around the stock weather travel check")
     parser.add_argument("--stock-lightning", action="store_true",
@@ -8100,6 +8113,7 @@ if __name__ == "__main__":
                        stock_simmi_jammers=args.stock_simmi_jammers,
                        stock_weather_travel=args.stock_weather_travel,
                        crossroads_profile=args.crossroads_profile, stock_crossroads_door=args.stock_crossroads_door,
+                       stock_crossroads_recovery=args.stock_crossroads_recovery,
                        stock_dock_gate=args.stock_dock_gate,
                        stock_lightning=args.stock_lightning,
                        stock_storm_ambience=args.stock_storm_ambience,

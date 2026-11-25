@@ -6,7 +6,7 @@ import math
 import re
 
 from portable_guest_world_start import wait_resident_status
-from tools.silverfish import native_package_handoff_journal
+from tools.silverfish import native_kill_volume, native_package_handoff_journal
 from tools.silverfish.control import current_status, submit
 from tools.silverfish.travel import CROSSROADS
 
@@ -40,6 +40,59 @@ def instrument_profile(source):
     assert before.count(fallback_query) == 1
     before = before.replace(fallback_query, f'{wrapper}("player_actor_fallback", FindAllOf, "Player_FP_C")')
     return before + "status_publication.profile = (function()\n" + code + "\nend)()\n\n" + anchor + rest
+
+
+def instrument_kill_volume(source, *, measure=False, recovery_fixture=False):
+    if measure:
+        anchor = "local geometry = stock_box(state)"
+        assert source.count(anchor) == 1
+        source = source.replace(anchor, 'local geometry = SilverfishProfileCrossroadsCall("kill_volume_geometry", stock_box, state)')
+    if recovery_fixture:
+        gate = 'and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"'
+        assert source.count(gate) == 1
+        source = source.replace(gate, 'and (os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"'
+                                ' or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1")')
+    return source
+
+
+async def verify_crossroads_recovery(host, guest, _pawn):
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    receipts = {}
+    for role, slot, helper_slot, helper_run in (
+        ("guest", "guest", "local", host_run), ("host", "local", "guest", guest_run),
+    ):
+        before = await wait_resident_status(host_run, lambda frame:
+            frame.get("link_connected")
+            and frame["game"].get(native_kill_volume.KEY, {}).get("state") == "armed"
+            and frame["game"].get("player_effects", {}).get(slot, {}).get("state") == "standing")
+        game = before["game"]
+        victim, helper = game["pawns"][slot], game["pawns"][helper_slot]
+        victim_name = victim["name"]
+        prior = game.get(native_kill_volume.RECOVERED, {}).get(victim_name, {}).get("sequence", 0)
+        drop = await host.bridge.command(native_kill_volume.FIXTURE, victim_name, timeout=5)
+        assert native_kill_volume.pending(drop), drop.get(native_kill_volume.KEY)
+        fallen = await wait_resident_status(host_run, lambda frame:
+            frame["game"].get(native_kill_volume.RECOVERED, {}).get(victim_name, {}).get("sequence", 0) > prior
+            and frame["game"].get("player_effects", {}).get(slot, {}).get("state") == "downed")
+        receipt = fallen["game"][native_kill_volume.RECOVERED][victim_name]
+        status = fallen["game"][native_kill_volume.KEY]
+        assert receipt["placement"] == "teammate" and receipt["native_health_at_down"] == 0, receipt
+        assert math.dist(receipt["location"], helper["location"]) <= 250, receipt
+        assert status["overlaps_vetoed"] > game[native_kill_volume.KEY]["overlaps_vetoed"] and not status["fault"], status
+        assert fallen["link_connected"] and (fallen["generation"], fallen["zone_epoch"]) == (before["generation"], before["zone_epoch"])
+        projected_slot = "local" if role == "guest" else "guest"
+        await wait_resident_status(guest_run, lambda frame:
+            frame.get("zone_epoch") == before["zone_epoch"]
+            and frame["game"].get("player_effects", {}).get(projected_slot, {}).get("state") == "downed")
+        revived = await submit(helper_run, "native-interaction-fixture")
+        assert revived["ok"] and revived["native_interaction_fixture"], revived
+        after = await wait_resident_status(host_run, lambda frame:
+            frame["game"].get("player_effects", {}).get(slot, {}).get("state") == "standing"
+            and frame["game"]["pawns"][slot]["name"] == victim_name
+            and frame["game"]["pawns"][slot]["health"] > 0)
+        assert after["game"]["pawns"][helper_slot]["health"] == helper["health"], after["game"]["pawns"]
+        receipts[role] = {"recovered": receipt, "revived_health": after["game"]["pawns"][slot]["health"]}
+    return {"stock_crossroads_recovery": receipts}
 
 
 def instrument_input_mappings(source):

@@ -22,6 +22,7 @@ local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SIL
 local color = {R = 0, G = 0, B = 0, A = 0}
 local near_offsets = {{110, 0}, {-110, 0}, {0, 110}, {0, -110}, {115, 115}, {115, -115}, {-115, 115}, {-115, -115}}
 local fallback_offsets = {{0, 0}, {110, 0}, {-110, 0}, {0, 110}, {0, -110}}
+local ground_sample_interval = 0.25
 local current
 
 local function valid(object) return object ~= nil and object ~= false and object:IsValid() end
@@ -219,11 +220,18 @@ local function service(state, phase, geometry, lead)
     return moved
 end
 
+local function awaiting_downed_projection()
+    for _, result in pairs(current.recovered) do
+        if not result.projected then return true end
+    end
+    return false
+end
+
 function volume_guard.sync(state, phase)
     if not active(state, phase) then current = nil; return false end
     local driver = state.world.NetDriver
     if not current or not same(current.world, state.world) or not same(driver, current.driver) or phase ~= current.phase then
-        current = {world = state.world, driver = driver, phase = phase, ground = {}, recovered = {}}
+        current = {world = state.world, driver = driver, phase = phase, ground = {}, recovered = {}, next_ground = 0}
     end
     if current.fault then return false end
     if type(SilverfishReadNativeKillVolume) ~= "function" then return false end
@@ -232,11 +240,16 @@ function volume_guard.sync(state, phase)
     current.overlaps, current.reloads = overlaps, reloads
     if phase ~= "hosting" then current.armed = true; return false end
     local ok, moved = pcall(function()
+        local now = os.clock()
+        local crossing = SilverfishNextNativeKillVolumeCrossing(0)
+        -- Sample fallback ground periodically. A crossing or pending recovery uses live geometry and ownership immediately.
+        if crossing == 0 and not current.pending and not awaiting_downed_projection()
+            and now < current.next_ground then return false end
+        current.next_ground = now + ground_sample_interval
         local geometry = stock_box(state)
         current.armed = geometry ~= nil
         if not geometry then
-            local next_hit = SilverfishNextNativeKillVolumeCrossing(0)
-            if next_hit ~= 0 then error("stock_volume_geometry_unavailable", 0) end
+            if crossing ~= 0 then error("stock_volume_geometry_unavailable", 0) end
             return false
         end
         return service(state, phase, geometry, authority(state, phase))
@@ -256,8 +269,7 @@ end
 function volume_guard.capture_blocked(state, phase)
     if volume_guard.blocked(state, phase) then return true end
     if not current or phase ~= "hosting" or not same(current.world, state.world) then return false end
-    for _, result in pairs(current.recovered) do if not result.projected then return true end end
-    return false
+    return awaiting_downed_projection()
 end
 
 function volume_guard.command(fields, state, phase)
