@@ -864,10 +864,22 @@ local function population_weapons_at(world, points)
     return tostring(added)
 end
 
+local function population_weapon_in_world(weapon, world)
+    if not valid(weapon) or not same(weapon:GetWorld(), world) or weapon:IsActorBeingDestroyed() then return false end
+    local actors = {}
+    statics:GetAllActorsOfClass(world, weapon:GetClass(), actors)
+    for _, parameter in ipairs(actors.OutActors or actors) do
+        local actor = type(parameter.type) == "function" and parameter:type() == "RemoteUnrealParam"
+            and parameter:get() or parameter
+        if same(actor, weapon) then return true end
+    end
+    return false
+end
+
 local function tracked_population_weapons(world)
     local remaining = {}
     for kind, weapon in pairs(population_weapons) do
-        if valid(weapon) and same(weapon:GetWorld(), world) and not weapon:IsActorBeingDestroyed() then
+        if population_weapon_in_world(weapon, world) then
             remaining[#remaining + 1] = kind
         end
     end
@@ -875,10 +887,10 @@ local function tracked_population_weapons(world)
     return #remaining > 0 and table.concat(remaining, ",") or "empty"
 end
 
-local function population_weapon_details()
+local function population_weapon_details(world)
     local records = {}
     for kind, weapon in pairs(population_weapons) do
-        if valid(weapon) and not weapon:IsActorBeingDestroyed() then
+        if population_weapon_in_world(weapon, world) then
             local owner, instigator, root = weapon:GetOwner(), weapon.Instigator, weapon.RootComponent
             local mount = valid(root) and root:GetAttachParent()
             records[#records + 1] = table.concat({kind, weapon:GetFullName(), weapon:GetLocalRole(), tostring(weapon.bReplicates),
@@ -1679,7 +1691,7 @@ local function run(action, actor_path)
         return tracked_population_weapons(world)
     elseif action == "dock-population-weapon-details" then
         assert(world:GetFullName() == "World " .. dock)
-        return population_weapon_details()
+        return population_weapon_details(world)
     elseif action == "dock-population-cleanup" then
         for _, actor in pairs(population_fixture) do
             if valid(actor) and not actor:IsActorBeingDestroyed() then actor:K2_DestroyActor() end
