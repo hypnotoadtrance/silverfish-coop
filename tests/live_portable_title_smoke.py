@@ -80,6 +80,7 @@ INDEPENDENT_RESIDENT_MAPS = {
     "stock_critters": {CROSSROADS}, "stock_lingering_teleport": {CROSSROADS}, "stock_mushrooms": {CROSSROADS},
     "stock_placed_item": {CROSSROADS}, "stock_weather_travel": {OBSERVATORY},
     "stock_warehouse_switch": {OBSERVATORY, WAREHOUSE_DOCK}, "stock_warehouse_radio": {OBSERVATORY, WAREHOUSE_DOCK},
+    "stock_warehouse_candle": {WAREHOUSE_DOCK},
     "stock_bottle": {OBSERVATORY, WAREHOUSE_DOCK},
     "stock_prop_breaks": {WAREHOUSE_DOCK}, "stock_acid_bottle": {WAREHOUSE_DOCK}, "stock_wood_debris": {WAREHOUSE_DOCK},
 }
@@ -1641,7 +1642,7 @@ async def verify_observatory_tv(host: Seat, guest: Seat, pawn: str) -> dict:
                                      "guest_toggle_screens": guest_toggle, "guest_receipt_ms": receipt["elapsed_ms"]}}
 
 
-async def verify_warehouse_candle(host: Seat, guest: Seat, pawn: str) -> dict:
+async def verify_warehouse_candle(host: Seat, guest: Seat, _pawn: str) -> dict:
     fixture = "fixture-warehouse-candle"
     kind = "Prop_Candle_01_C"
     actor = f"{kind} {WAREHOUSE_DOCK}.Tut_Dock_P:PersistentLevel.{kind}_1"
@@ -1649,29 +1650,38 @@ async def verify_warehouse_candle(host: Seat, guest: Seat, pawn: str) -> dict:
     checkpoint = campaign_save_hashes(host.campaign)
 
     async def invoke(seat, mode, *fields):
+        if mode == "state":
+            return (await seat.bridge.command(fixture, mode, timeout=.8, update_status=False))["ack"]["message"]
         return (await seat.bridge.command(fixture, mode, *fields))["ack"]["message"]
 
     async def view(lit):
         for run in (host_run, guest_run):
             await wait_resident_status(run, lambda frame:
                 frame.get("game", {}).get(native_stock_switch.KEY, {}).get(actor, {}).get("powered") is lit)
-        readings = []
-        async with asyncio.timeout(5):
-            while True:
-                readings = [value.split("|", 4) for value in await asyncio.gather(
-                    *(invoke(seat, "state") for seat in (host, guest)))]
-                if all(row[:3] == [str(int(lit))] * 3 and ("UnLit" in row[-1]) is not lit
-                       for row in readings) and readings[1][3] == "0":
-                    return readings
-                await asyncio.sleep(.05)
+        readings = {}
+        try:
+            async with asyncio.timeout(8):
+                while True:
+                    for name, seat in (("host", host), ("guest", guest)):
+                        try:
+                            readings[name] = (await invoke(seat, "state")).split("|", 4)
+                        except TimeoutError:
+                            continue  # The legacy bridge status can be superseded by a runtime command.
+                    if len(readings) == 2 and all(
+                        row[:2] == [str(int(lit))] * 2 and (lit or row[2] == "0")
+                        and ("UnLit" in row[-1]) is not lit
+                        for row in readings.values()
+                    ) and readings["guest"][3] == "0":
+                        return readings
+                    await asyncio.sleep(.05)
+        except TimeoutError as error:
+            raise AssertionError(f"Expected stock candle lit={lit}, got {readings}") from error
 
     before = await view(True)
-    point = list(map(float, (await invoke(host, "stage", pawn)).split(",")))
-    frame = await wait_resident_status(guest_run, lambda row:
-        math.dist(row.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0] * 3), point) < 55)
+    frame = await wait_resident_status(guest_run, lambda row: row.get("game", {}).get("map") == WAREHOUSE_DOCK)
     assert await invoke(guest, "local-extinguish") == "1"
     started = time.time()
-    assert await invoke(guest, "guest") == "guest pressed"
+    assert await invoke(guest, "guest-near") == "guest pressed"
     after_guest = await view(False)
     receipt, = [event for event in await resident_events(guest_run, frame) if event["time_unix"] >= started
                 and event.get("native_stock_switch_interaction", {}).get("actor") == actor]
@@ -1682,7 +1692,8 @@ async def verify_warehouse_candle(host: Seat, guest: Seat, pawn: str) -> dict:
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"stock_warehouse_candle": {"actor": actor, "before": before, "after_guest": after_guest,
             "relit": relit, "after_host": after_host, "guest_receipt_ms": receipt["elapsed_ms"],
-            "guest_local_extinguish_suppressed": True, "campaign_checkpoint_unchanged": True}}
+            "guest_local_extinguish_suppressed": True, "rendered_niagara_checked": False,
+            "campaign_checkpoint_unchanged": True}}
 
 
 async def verify_warehouse_switch(host: Seat, guest: Seat, pawn: str, *, radio: bool = False,

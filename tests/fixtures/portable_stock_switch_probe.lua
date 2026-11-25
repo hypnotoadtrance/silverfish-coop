@@ -54,8 +54,10 @@
         elseif mode == "guest" and phase == "connected" then
             stock_focus(state.local_pawn.pawn, entry.box)
             return "guest pressed"
-        elseif mode == "stage" and phase == "hosting" then
-            local pawn = assert(guest_save.exact_item_context(state, phase, fields[4]))
+        elseif mode == "stage" and phase == "hosting" or candle and mode == "guest-near" and phase == "connected" then
+            local local_press = mode == "guest-near"
+            local pawn = local_press and state.local_pawn.pawn
+                or assert(guest_save.exact_item_context(state, phase, fields[4]))
             local center = entry.box:K2_GetComponentLocation()
             local origin = pawn:K2_GetActorLocation()
             for _, axis in ipairs({entry.box:GetForwardVector(), entry.box:GetRightVector()}) do
@@ -63,6 +65,10 @@
                     local point = {X = center.X + offset * axis.X, Y = center.Y + offset * axis.Y, Z = center.Z - 42}
                     if pawn:K2_SetActorLocation(point, false, {}, true)
                         and pcall(stock_focus, pawn, entry.box, function() return true end) then
+                        if local_press then
+                            stock_focus(pawn, entry.box)
+                            return "guest pressed"
+                        end
                         return ("%f,%f,%f"):format(point.X, point.Y, point.Z)
                     end
                 end
