@@ -6621,6 +6621,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  guest_shop_lease: bool = False, guest_stash_memory: bool = False, guest_stash_large_memory: bool = False,
                  stock_pause_exit: bool = False,
                  lab_terminal_check=None,
+                 oil_lamps_check=None,
                  zone_lease_preflight: bool = False,
                  resident_cabinet_archive: Path | None = None,
                  resident_cabinet_checkpoint: Path | None = None,
@@ -6761,6 +6762,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_roaming_barter, "observatory", "stock_roaming_barter", verify_roaming_barter),
         (stock_castaway_dialogue, "observatory", "stock_castaway_dialogue", verify_stock_castaway_dialogue),
         (lab_terminal_check, "lab_terminal", "stock_lab_terminal", lab_terminal_check),
+        (oil_lamps_check, "oil_lamps", "stock_oil_lamps", oil_lamps_check),
         (stock_crate_ring and crossroads_profile, "crossroads", "stock_crate_ring",
          lambda host, guest, pawn: verify_stock_crate_ring(host, guest, pawn, memory_positions=True, cold=True)),
         (stock_weather_travel, "crossroads", "stock_weather_travel",
@@ -7312,7 +7314,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_shot_view", "tutorial_dock_buckshot",
                     "tutorial_dock_melee", "tutorial_dock_late_join", "dock_population",
                     "crossroads", "crossroads_anomaly", "quarry_photo", "buried_placements",
-                    "lab_east_wing_acid", "lab_terminal", "shopkeep", "simmi"
+                    "lab_east_wing_acid", "lab_terminal", "oil_lamps", "shopkeep", "simmi"
                 } or stock_host_prop_observer and campaign == prop_campaign else ("save_and_quit",)
                 after_reconnect = None
                 if campaign == "crossroads" and stock_shovel_quest and not stock_shovel_host_quest:

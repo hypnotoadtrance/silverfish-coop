@@ -8,10 +8,14 @@ from . import native_stock_door, party
 TAG = "native-stock-switch"
 KEY = "native_stock_switches"
 ACTION = TAG + "-interact"
+IGNITE = TAG + "-ignite"
+ACTIONS = (ACTION, IGNITE)
 TARGET = "stock-switch:"
+IGNITION_TARGET = "stock-switch-ignite:"
+_LANTERN = "Prop_Lantern_01_C"
 _CLASSES = {"CircutBox_BP_C", "LightSwitch_BP_C", "LightSwitch_02_BP_C", "Prop_Radio01_C",
             "Prop_TV_01_C", "Prop_TV_02_C", "Prop_TV_03_C",
-            "Prop_Candle_01_C", "Prop_Candle_02_C", "Prop_Candle_03_C"}
+            "Prop_Candle_01_C", "Prop_Candle_02_C", "Prop_Candle_03_C", _LANTERN}
 
 
 def actor_map(actor):
@@ -23,6 +27,16 @@ def actor_map(actor):
 def target_actor(value):
     if isinstance(value, str) and value.startswith(TARGET) and actor_map(actor := value[len(TARGET):]):
         return actor
+    return None
+
+
+def input_target(value):
+    if isinstance(value, str) and value.startswith(IGNITION_TARGET):
+        actor = value[len(IGNITION_TARGET):]
+        if actor.partition(" ")[0] == _LANTERN and actor_map(actor):
+            return IGNITE, actor
+    if actor := target_actor(value):
+        return ACTION, actor
     return None
 
 
@@ -43,18 +57,19 @@ def parse(fields, phase, area):
     return {"powered": fields[3] == "1", "angles": angles, "panel": fields[7], "lights": lights}
 
 
-async def interact(host, bridge, character, requested, operation):
+async def interact(host, bridge, character, requested, operation, action=ACTION):
     epoch, _, actor = requested.partition("@") if isinstance(requested, str) else ("", "", "")
     game = host.last_game
     member = host.native_recipients().get(character, {})
     player = host.party["players"].get(character)
-    if (not epoch or epoch != host.zone_epoch or actor_map(actor) != game.get("map")
+    if (action not in ACTIONS or action == IGNITE and actor.partition(" ")[0] != _LANTERN
+            or not epoch or epoch != host.zone_epoch or actor_map(actor) != game.get("map")
             or actor not in game.get(KEY, {}) or game.get("state") != "hosting" or host.transitioning
             or host.stopping or host.native_checkpoint_unsafe or not member.get("connected")
             or not player or player["downed"] or host.party["wipe"]
             or character in host.party["pending_spawns"] or not party.REQUEST_ID.fullmatch(operation)):
         raise party.RuleError("stock_switch_scope_unavailable")
-    fingerprint = [ACTION, requested, None]
+    fingerprint = [action, requested, None]
     receipts = host.party["receipts"].setdefault(character, [])
     for receipt in receipts:
         if receipt["id"] == operation:
@@ -62,7 +77,7 @@ async def interact(host, bridge, character, requested, operation):
                 raise party.RuleError("operation_id_conflict")
             return receipt["result"]
     try:
-        snapshot = await bridge.command(ACTION, actor, member["pawn"], timeout=3)
+        snapshot = await bridge.command(action, actor, member["pawn"], timeout=3)
     except RuntimeError as error:
         if str(error).startswith("stock_switch_"):
             raise party.RuleError(str(error)) from error

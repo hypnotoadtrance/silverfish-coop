@@ -17,6 +17,17 @@ class StockSwitchResponseTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 switches.parse([switches.TAG, area, actor, "1", "0", "0", "0", "-", "-"], "hosting", "/wrong-map")
 
+    def test_oil_lamps_use_placed_switch_state_and_accept_guest_ignition(self):
+        area = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+        prefix = area + ".CrossRoads_P:PersistentLevel."
+        actor = "Prop_Lantern_01_C " + prefix + "Prop_Lantern_01_C_3"
+        self.assertEqual(switches.input_target(switches.IGNITION_TARGET + actor), (switches.IGNITE, actor))
+        self.assertEqual(switches.input_target(switches.TARGET + actor), (switches.ACTION, actor))
+        self.assertTrue(switches.parse([switches.TAG, area, actor, "1", "0", "0", "0", "-", "-"],
+                                       "connected", area)["powered"])
+        candle = "Prop_Candle_01_C " + prefix + "Prop_Candle_01_C_1"
+        self.assertIsNone(switches.input_target(switches.IGNITION_TARGET + candle))
+
     async def test_reply_applies_exact_switch_before_another_world_snapshot(self):
         area = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
         epoch = "e" * 32

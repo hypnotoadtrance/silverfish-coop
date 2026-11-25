@@ -15,6 +15,9 @@ end
 for _, name in ipairs({"Prop_Candle_01", "Prop_Candle_02", "Prop_Candle_03"}) do
     profiles[name .. "_C"] = {path = props .. name .. "." .. name .. "_C", power = "Lit", candle = true}
 end
+profiles.Prop_Lantern_01_C = {
+    path = props .. "Prop_Lantern_01.Prop_Lantern_01_C", power = "Lit", candle = true, lantern = true,
+}
 for kind, profile in pairs(profiles) do
     profile.path = profile.path or root .. kind:sub(1, -3) .. "." .. kind
 end
@@ -49,7 +52,8 @@ local function parts(actor, scope)
         if not same(mesh, actor.RootComponent) or not same(mesh:GetOwner(), actor)
             or not valid(light) or not same(light:GetOwner(), actor)
             or not valid(flame) or not same(flame:GetOwner(), actor) then return end
-        return {actor = actor, box = box, mesh = mesh, light = light, flame = flame, power = profile.power, candle = true}
+        return {actor = actor, box = box, mesh = mesh, light = light, flame = flame, power = profile.power,
+            candle = true, lantern = profile.lantern}
     end
     if profile.power then return {actor = actor, box = box, power = profile.power, television = profile.television} end
     local lever, panel = actor[profile[1]], actor[profile[2]]
@@ -204,6 +208,7 @@ local function project(entry, powered, angles, lights)
     local actor, lever = entry.actor, entry.lever
     if entry.candle then
         if actor.Lit ~= powered then actor:SetLitUnlit(powered, false) end
+        suppress_candle_overlap(actor:GetFullName(), entry.box)
         if actor.Lit ~= powered or entry.light:IsVisible() ~= powered then error("stock_switch_candle_unverified", 0) end
         return
     end
@@ -229,12 +234,13 @@ end
 
 function switches.command(fields, state, phase)
     local action = fields[2]
-    if action ~= "native-stock-switch-project" and action ~= "native-stock-switch-interact" then return end
+    local ignite = action == "native-stock-switch-ignite"
+    if not ignite and action ~= "native-stock-switch-project" and action ~= "native-stock-switch-interact" then return end
     local entry = find_switch(state, phase, fields[3])
     if not entry or not valid(entry.actor) or entry.actor:IsActorBeingDestroyed() then
         error("stock_switch_unavailable", 0)
     end
-    if action == "native-stock-switch-interact" and phase == "hosting" and #fields == 4 then
+    if (ignite or action == "native-stock-switch-interact") and phase == "hosting" and #fields == 4 then
         local pawn = guest_save.exact_item_context(state, phase, fields[4])
         if not valid(pawn) or pawn.Dead ~= false then error("stock_switch_guest_unavailable", 0) end
         local power = entry.power or "Powered"
@@ -242,8 +248,13 @@ function switches.command(fields, state, phase)
         -- The guest routes the exact stock interaction component it just hit.
         if not valid(entry.box) or not same(entry.box:GetOwner(), entry.actor) then error("stock_switch_unavailable", 0) end
         if entry.television and entry.actor.Working ~= true then error("stock_switch_unavailable", 0) end
-        if not entry.candle or before then entry.actor:SendInteractionToActor(pawn, entry.box) end
-        local expected = not entry.candle and not before
+        if ignite then
+            if not entry.lantern then error("stock_switch_unavailable", 0) end
+            if not before then entry.actor:SetOnFire(5, 0.2, pawn) end
+        elseif not entry.candle or before then
+            entry.actor:SendInteractionToActor(pawn, entry.box)
+        end
+        local expected = ignite or not entry.candle and not before
         if not valid(entry.actor) or entry.actor[power] ~= expected then error("stock_switch_toggle_unverified", 0) end
         return "stock switch interaction dispatched"
     end

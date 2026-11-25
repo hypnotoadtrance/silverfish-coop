@@ -98,7 +98,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_guest_ui.ACTION,
                         "native-loot-inspect", "native-loot-open", "native-loot-claim", native_loot.LOCKPICK,
                         *native_loot.PRY_TOOL_ACTIONS.values(),
-                        native_stock_door.ACTION, *native_stock_door.PRY_ACTIONS.values(), native_stock_switch.ACTION,
+                        native_stock_door.ACTION, *native_stock_door.PRY_ACTIONS.values(), *native_stock_switch.ACTIONS,
                         native_ladder.ACTION,
                         *native_guest_drop.ACTIONS,
                         "native-wipe-items", "native-wipe-recover",
@@ -2298,8 +2298,8 @@ class Host:
                 result = await self.stock_doors.dispatch(self, bridge, character, target, request["operation_id"], future)
                 if result is None:
                     return
-            elif action == native_stock_switch.ACTION:
-                result = await native_stock_switch.interact(self, bridge, character, target, request["operation_id"])
+            elif action in native_stock_switch.ACTIONS:
+                result = await native_stock_switch.interact(self, bridge, character, target, request["operation_id"], action)
             elif action in native_stock_door.PRY_ACTIONS.values():
                 kind = action.removeprefix("native-guest-door-")
                 async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
@@ -5527,7 +5527,7 @@ class Client:
         elif action in (native_guest_melee.SWING, native_host_dig_live.GUEST_ACTION):
             target = native_guest_melee.request_target(target, self.zone_epoch)
         elif (action in native_loot.PRY_TOOL_ACTIONS.values()
-              or action in (native_stock_door.ACTION, native_stock_switch.ACTION, native_critters.ACTION,
+              or action in (native_stock_door.ACTION, *native_stock_switch.ACTIONS, native_critters.ACTION,
                             native_host_dig_live.COLLECT)
               or action in native_stock_door.PRY_ACTIONS.values()):
             target = f"{self.zone_epoch}@{target}"
@@ -5593,7 +5593,7 @@ class Client:
                         self.last_game = await native_stock_door.project(self.bridge, self.last_game, delta, epoch)
                     except (OSError, RuntimeError, TimeoutError) as error:
                         self.control.event("native_stock_door_projection_deferred", reason=str(error))
-            if target and action == native_stock_switch.ACTION:
+            if target and action in native_stock_switch.ACTIONS:
                 try:
                     await native_stock_switch.apply_interaction(self, reply.get(native_stock_switch.KEY), target.split("@", 1)[1])
                 except (OSError, RuntimeError, TimeoutError) as error:
@@ -6844,8 +6844,9 @@ class Client:
             if self.stock_interaction_scope() == scope:
                 self.guest_ui.queue_stock_inventory(self)
             return result
-        if switch := native_stock_switch.target_actor(target):
-            return await self.gameplay_action(native_stock_switch.ACTION, operation, switch)
+        if switch := native_stock_switch.input_target(target):
+            action, actor = switch
+            return await self.gameplay_action(action, operation, actor)
         if native_lantern.target_angles(target):
             result = await self.gameplay_action(native_lantern.EXTINGUISH, operation, f"{self.zone_epoch}@{target}")
             if self.stock_interaction_scope() == scope:

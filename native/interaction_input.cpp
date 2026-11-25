@@ -66,7 +66,6 @@ namespace
     constexpr auto valve_class = STR("/Game/Classes/ScriptingActors/ValveSwitch_BP.ValveSwitch_BP_C");
     constexpr auto valve_interaction = STR("/Game/Classes/ScriptingActors/ValveSwitch_BP.ValveSwitch_BP_C:SendInteractionToActor");
     constexpr auto stash_class = STR("/Game/Classes/Actors/Stash_Master_BP.Stash_Master_BP_C");
-    constexpr auto lantern_path = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.Prop_Lantern_01_C_1");
     constexpr auto lantern_class = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Lantern_01.Prop_Lantern_01_C");
     constexpr auto lantern_interaction = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_01.Prop_Candle_01_C:SendInteractionToActor");
     constexpr auto lantern_ignite = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_01.Prop_Candle_01_C:SetOnFire");
@@ -290,6 +289,7 @@ namespace
     Scope scope;
     PropCarryMovement prop_movement;
     ScopedInteraction wire_board, dialogue_input, valve_input, stash_input, lantern_input;
+    ScopedInteraction lantern_ignition;
 
     ScopedInteraction npc_barter_input, npc_barter_confirm;
     Unreal::FWeakObjectPtr npc_barter_screen;
@@ -1034,15 +1034,25 @@ namespace
         stash_input.pending = {++stash_sequence, stash_input.expires};
     }
 
-    void remember_lantern_press(Unreal::UObject* pawn, Unreal::UObject* actor, Unreal::UObject* component)
+    bool stock_lantern(Unreal::UObject* actor)
+    {
+        auto* world = scope.world.Get();
+        return live(world) && live(actor) && actor->HasAnyFlags(Unreal::RF_WasLoaded) &&
+            actor->GetClassPrivate() == find<Unreal::UClass>(lantern_class) &&
+            actor->GetOuterPrivate() == object_field(world, STR("PersistentLevel")) &&
+            (live_actor(actor, world, 1) || live_actor(actor, world, 3));
+    }
+
+    void remember_lantern_press(ScopedInteraction& input, Unreal::UObject* pawn,
+                               Unreal::UObject* actor, Unreal::UObject* component)
     {
         const auto expires = Clock::now() + receipt_lifetime;
-        lantern_input.actor = actor;
-        lantern_input.component = component;
-        lantern_input.pawn = pawn;
-        lantern_input.accepting = true;
-        lantern_input.expires = expires;
-        lantern_input.pending = {++lantern_sequence, expires};
+        input.actor = actor;
+        input.component = component;
+        input.pawn = pawn;
+        input.accepting = true;
+        input.expires = expires;
+        input.pending = {++lantern_sequence, expires};
     }
 
     bool queue_visible_lantern_press(Unreal::UObject* pawn)
@@ -1050,9 +1060,7 @@ namespace
         if (scope.host || lantern_sequence == max_sequence || Clock::now() >= scope.expires ||
             live(object_field(pawn, STR("InteractionTarget_Component")))) return false;
         auto* actor = object_field(pawn, STR("ActorBeingLookedAt"));
-        if (!live(actor) || actor->GetClassPrivate() != find<Unreal::UClass>(lantern_class) ||
-            actor != find<Unreal::UObject>(lantern_path) || !live_actor(actor, scope.world.Get(), 1) ||
-            !live_scope(scope) || !standing(pawn)) return false;
+        if (!stock_lantern(actor) || !live_scope(scope) || !standing(pawn)) return false;
         auto* lit = field<Unreal::FBoolProperty>(actor, STR("Lit"));
         auto* mesh = object_field(actor, STR("PropMesh"));
         if (!lit || !lit->GetPropertyValueInContainer(actor) || !live(mesh) ||
@@ -1060,7 +1068,7 @@ namespace
             !interaction_in_reach(pawn, actor, mesh)) return false;
         // The visibility trace can select the lantern at a frame where the
         // stock interaction trace has no component at its clipped endpoint.
-        remember_lantern_press(pawn, actor, mesh);
+        remember_lantern_press(lantern_input, pawn, actor, mesh);
         return true;
     }
 
@@ -1072,12 +1080,21 @@ namespace
         if (scope.host || !actor || !function || call.OriginalFunctionCallPrevented()) return;
         const auto name = function->GetFName();
         if ((name != interact && name != ignite && name != extinguish) ||
-            Clock::now() >= scope.expires || !live_scope(scope) ||
-            actor->GetClassPrivate() != find<Unreal::UClass>(lantern_class) ||
-            actor != find<Unreal::UObject>(lantern_path) || actor->GetPathName() != lantern_path ||
-            !live_actor(actor, scope.world.Get(), 1)) return;
-        if ((name == ignite && function == find<Unreal::UFunction>(lantern_ignite)) ||
-            (name == extinguish && function == find<Unreal::UFunction>(lantern_extinguish)))
+            Clock::now() >= scope.expires || !stock_lantern(actor) || !live_scope(scope)) return;
+        if (name == ignite && function == find<Unreal::UFunction>(lantern_ignite))
+        {
+            call.PreventOriginalFunctionCall();
+            if (!call.OriginalFunctionCallPrevented() || !parameters || lantern_sequence == max_sequence) return;
+            auto* instigator = input<Unreal::FObjectProperty>(function, STR("Instigator"), 2 * sizeof(double));
+            auto* pawn = scope.pawn.Get();
+            auto* mesh = object_field(actor, STR("PropMesh"));
+            auto* lit = field<Unreal::FBoolProperty>(actor, STR("Lit"));
+            if (instigator && pawn && standing(pawn) && live(mesh) && lit && !lit->GetPropertyValueInContainer(actor) &&
+                instigator->GetObjectPropertyValue(instigator->ContainerPtrToValuePtr<void>(parameters)) == pawn)
+                remember_lantern_press(lantern_ignition, pawn, actor, mesh);
+            return;
+        }
+        if (name == extinguish && function == find<Unreal::UFunction>(lantern_extinguish))
         {
             call.PreventOriginalFunctionCall();
             return;
@@ -1099,7 +1116,7 @@ namespace
             object_field(pawn, STR("InteractionTarget_Component")) != component ||
             !interaction_in_reach(pawn, actor, component) ||
             !silverfish::native_interaction_input::consume_current_press(pawn)) return;
-        remember_lantern_press(pawn, actor, component);
+        remember_lantern_press(lantern_input, pawn, actor, component);
     }
 
     void intercept_npc_barter(Iteration&, Unreal::UObject*, Unreal::UFunction*);
@@ -1750,7 +1767,24 @@ namespace
 
     int take_dialogue_press(const Lua& lua) { return take_interaction_press(lua, dialogue_input); }
     int take_valve_press(const Lua& lua) { return take_interaction_press(lua, valve_input); }
-    int take_lantern_press(const Lua& lua) { return take_interaction_press(lua, lantern_input); }
+    int take_lantern_press(const Lua& lua)
+    {
+        if (!available() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto address = lua.get_integer();
+        for (auto* input : {&lantern_ignition, &lantern_input})
+        {
+            auto* actor = input->actor.Get();
+            if (!input->pending.sequence || !stock_lantern(actor)) continue;
+            if (const auto accepted = take_interaction_sequence(address, *input))
+            {
+                lua.set_integer(static_cast<std::int64_t>(accepted));
+                lua.set_string(RC::to_string(actor->GetFullName()));
+                lua.set_bool(input == &lantern_ignition);
+                return 3;
+            }
+        }
+        return 0;
+    }
 
     int take_stash_press(const Lua& lua)
     {
@@ -2097,6 +2131,7 @@ namespace silverfish::native_interaction_input
         valve_input = {};
         stash_input = {};
         lantern_input = {};
+        lantern_ignition = {};
         clear_npc_barter_screen();
         npc_barter_input = {};
         npc_barter_confirm = {};

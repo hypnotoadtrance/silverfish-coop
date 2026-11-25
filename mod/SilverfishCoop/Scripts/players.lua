@@ -139,12 +139,11 @@ local function drain_native_interact()
     local valve = SilverfishTakeNativeSubwayValvePress
     if type(valve) == "function" and valve(address) then write_interaction(pawn, "subway-valve") end
     local lantern = SilverfishTakeNativeLanternPress
-    if type(lantern) == "function" and lantern(address) and valid(pawn.Camera) then
-        local aim = pawn.Camera:GetForwardVector()
-        if aim and type(aim.X) == "number" and type(aim.Y) == "number" and type(aim.Z) == "number" then
-            local pitch = math.deg(math.atan(aim.Z, math.sqrt(aim.X^2 + aim.Y^2)))
-            local yaw = math.deg(math.atan(aim.Y, aim.X))
-            write_interaction(pawn, string.format("observatory-lantern:%.2f:%.2f", pitch, yaw))
+    if type(lantern) == "function" then
+        for _ = 1, 2 do
+            local _, actor, ignite = lantern(address)
+            if type(actor) ~= "string" then break end
+            write_interaction(pawn, (ignite and "stock-switch-ignite:" or "stock-switch:") .. actor)
         end
     end
     local released = native_ladder.release_target(pawn)
