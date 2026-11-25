@@ -53,7 +53,9 @@ The `rc-f0b1c06` Crossroads baseline used two muted Direct IP instances. During 
 | Guest melee swings | The guest can swing once. Switching to another weapon and back allows one more swing. |
 | Lamp activation | Players still disagree on whether a lamp is lit. |
 | Trading | The guest successfully traded with a Wanderer, a regular trader, and NPCs offering barter. |
-| Ammunition selection | Holding R on the guest does not show the stock ammunition selector. This report concerns the hold action. |
+| Ammunition selection | Holding R on the guest does not show the stock ammunition selector. The guest reload hook consumes the stock event that opens it. The stock selector also returns the previous load and starts a reload when a new type is selected. Both steps need to settle on the host. |
+| Grenade launcher reload | Most guns reload for the guest. Tap R does not reload the grenade launcher, while a dry fire can trigger its stock reload. |
+| Friendly fire | Co-op currently blocks damage attributed to a teammate. A host setting to allow it is queued. |
 
 ## `rc-1799e4b` playtest
 
