@@ -14,6 +14,8 @@ local local_pawn, peer, flame, last, armed, failure
 local previous_position = {}
 local overlays, hit_sounds, muted_hits, local_fire, peer_fire, hurt_voices = 0, 0, 0, 0, 0, 0
 local remote_offset = 0
+local voice_attenuation = "SoundAttenuation /Game/Assets/Sounds/SoundClasses/Vocal_Attenuation.Vocal_Attenuation"
+local voice_replays, voice_origin = {}, nil
 
 local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -78,6 +80,14 @@ local function arm()
             end
         end
     end))
+    RegisterHook("/Script/Engine.GameplayStatics:PlaySoundAtLocation", watch(function(_, context, sound, point, _, gain, pitch, _, radius)
+        local settings, cue = radius:get(), sound:get()
+        if not same(context:get(), local_pawn) or not valid(settings) or settings:GetFullName() ~= voice_attenuation then return end
+        assert(valid(cue), "the voice relay needs a stock sound")
+        local where = point:get()
+        voice_replays[#voice_replays + 1] = ("%s,%.6f,%.6f,%.3f,%.3f,%.3f"):format(
+            cue:GetFullName(), gain:get(), pitch:get(), where.X, where.Y, where.Z)
+    end))
     RegisterHook(pawn_path .. "Speak", watch(function(context, cue)
         if same(context:get(), local_pawn) and same(cue:get(), local_pawn.Vox_Hurt) then hurt_voices = hurt_voices + 1 end
     end))
@@ -109,6 +119,33 @@ local function run(action)
         overlays, hit_sounds, muted_hits, local_fire, peer_fire, hurt_voices, failure = 0, 0, 0, 0, 0, 0, nil
         remote_offset = 0
         return "cleared"
+    end
+    if action == "voice-read" then
+        assert(not failure, failure)
+        return table.concat(voice_replays, "|")
+    end
+    if action == "voice-clear" then
+        voice_replays = {}
+        return "cleared"
+    end
+    if action == "voice-near" or action == "voice-far" or action == "voice-restore" then
+        local authority = local_pawn:HasAuthority()
+        local guest, host = authority and peer or local_pawn, authority and local_pawn or peer
+        local movement = guest.CharacterMovement
+        movement:StopMovementImmediately()
+        if action == "voice-restore" then
+            assert(voice_origin)
+            guest:K2_SetActorLocation(voice_origin, false, {}, true)
+            movement:SetMovementMode(1, 0)
+            voice_origin = nil
+        else
+            if not voice_origin then voice_origin = copy(guest:K2_GetActorLocation()) end
+            local position = copy(host:K2_GetActorLocation())
+            position.Z = position.Z + (action == "voice-near" and 3000 or 6000)
+            movement:SetMovementMode(5, 0)
+            guest:K2_SetActorLocation(position, false, {}, true)
+        end
+        return "moved"
     end
     if action == "enter-peer" or action == "leave-peer" then
         assert(local_pawn:HasAuthority() and peer:HasAuthority() and valid(peer.Save) and not same(peer.Save, local_pawn.Save),

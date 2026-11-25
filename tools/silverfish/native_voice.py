@@ -13,7 +13,7 @@ KEY = "native_voice"
 COMMAND = "native-sound-voice"
 EVENTS = {"hurt", "cough", "gasp", "drown", "death", "stunned"}
 _PERSONALITY = re.compile(r"[A-Za-z0-9_]{1,30}")
-RANGE = 1800
+RANGE = 5030  # Stock Vocal_Attenuation inner radius plus falloff.
 LIMIT = 12
 
 
@@ -66,8 +66,11 @@ class VoiceQueue:
         if key in self.seen:
             return
         voice = game.get("native_voice_speakers", {}).get(pawn)
-        origin = next((entry.get("location") for entry in game.get("pawns", {}).values() if entry.get("name") == pawn), None)
-        if not voice or not valid_position(origin):
+        if not voice:
+            return
+        origin = voice[2] if len(voice) == 3 else next(
+            (entry.get("location") for entry in game.get("pawns", {}).values() if entry.get("name") == pawn), None)
+        if not valid_position(origin):
             return
         self.seen.append(key)
         now = time.monotonic()
@@ -75,7 +78,7 @@ class VoiceQueue:
             return
         self.previous = {key: seen for key, seen in self.previous.items() if now - seen < 3}
         self.previous[pawn, kind] = now
-        self.events.append((now + 2.5, pawn, local, [uuid.uuid4().hex, kind, *voice, origin]))
+        self.events.append((now + 2.5, pawn, local, [uuid.uuid4().hex, kind, *voice[:2], origin]))
 
     def frame(self, game, epoch, listener, *, host=False):
         if not listener or not self._qualify(game, epoch):
@@ -121,9 +124,9 @@ class Playback:
             result = await bridge.command(COMMAND, game["map"], epoch, *arguments, timeout=1.5)
         except (OSError, RuntimeError, TimeoutError):
             return game
-        self.seen.extend(selected)
         for nonce in result.get("ack", {}).get("message", "").split(","):
             if nonce in selected:
-                kind, personality = selected[nonce]
+                self.seen.append(nonce)
+                kind, personality = selected.pop(nonce)
                 control.event("native_voice_played", cue=kind, personality=personality)
         return result

@@ -4067,6 +4067,53 @@ async def verify_stock_flashlights(host: Seat, guest: Seat, _pawn: str) -> dict:
                                   "cleared_on_holster": True, "campaign_checkpoint_unchanged": True}}
 
 
+async def verify_resident_voices(host, guest, command):
+    async def move(action):
+        assert await asyncio.gather(*(command(seat, action) for seat in (host, guest))) == ["moved", "moved"]
+
+    def at_distance(frame, minimum, maximum):
+        pawns = frame.get("pawns", {})
+        local, remote = (pawns.get(seat, {}).get("location") for seat in ("local", "guest"))
+        return local and remote and minimum <= math.dist(local, remote) <= maximum
+
+    receipts = {}
+    await move("voice-near")
+    try:
+        audible = await host.bridge.wait_for(lambda frame: at_distance(frame, 2800, 3300)
+                                            and len(frame.get("native_voice_speakers", {})) == 2)
+        await guest.bridge.wait_for(lambda frame: at_distance(frame, 2800, 3300))
+        for sender, listener, role, kind in ((host, guest, "local", "hurt"), (guest, host, "guest", "cough")):
+            profile = audible["native_voice_speakers"][audible["pawns"][role]["name"]]
+            assert len(profile) == 3, profile
+            assert await asyncio.gather(*(command(seat, "voice-clear") for seat in (host, guest))) == ["cleared", "cleared"]
+            await sender.bridge.command("native-voice-fixture", kind)
+            async with asyncio.timeout(6):
+                while not (heard := await command(listener, "voice-read")):
+                    await asyncio.sleep(.05)
+            await asyncio.sleep(.35)
+            assert await command(listener, "voice-read") == heard and not await command(sender, "voice-read")
+            cue, gain, pitch, x, y, z = heard.split(",")
+            point = [float(x), float(y), float(z)]
+            assert cue.startswith("SoundCue /Game/Assets/Sounds/CUEs/") and float(gain) == 2
+            assert abs(float(pitch) - profile[1]) < .001 and math.dist(point, profile[2]) < 35, (profile, heard)
+            receipts[kind] = {"cue": cue, "gain": float(gain), "pitch": float(pitch), "origin": point,
+                              "listener_distance_cm": math.dist(audible["pawns"]["local"]["location"],
+                                                                audible["pawns"]["guest"]["location"]),
+                              "observer_replays": 1, "sender_echoes": 0}
+        await move("voice-far")
+        await asyncio.gather(*(seat.bridge.wait_for(lambda frame: at_distance(frame, 5700, 6300))
+                               for seat in (host, guest)))
+        assert await asyncio.gather(*(command(seat, "voice-clear") for seat in (host, guest))) == ["cleared", "cleared"]
+        far = await guest.bridge.command("native-voice-fixture", "gasp")
+        assert far["ack"]["message"] == "stock voice call-out invoked"
+        await asyncio.sleep(1.5)
+        assert not await command(host, "voice-read") and not await command(guest, "voice-read")
+        receipts["out_of_range"] = True
+    finally:
+        await move("voice-restore")
+    return receipts
+
+
 async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-campfire", action)
@@ -4096,6 +4143,8 @@ async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
     checkpoint = campaign_save_hashes(host.campaign)
     guest_frame = await wait_resident_status(guest_run, lambda frame: frame.get("local_bridge") == "memory")
     assert all(result == "armed" for result in await asyncio.gather(*(command(seat, "arm") for seat in (host, guest))))
+    voices = await verify_resident_voices(host, guest, command)
+    assert all(result == "cleared" for result in await asyncio.gather(*(command(seat, "clear") for seat in (host, guest))))
     baseline = await sample(host)
     assert not baseline["local_overlap"] and not baseline["remote_overlap"], baseline
     sickness, coefficient, floor, maximum = map(float, (await command(host, "regen-policy")).split(","))
@@ -4144,7 +4193,7 @@ async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
     guest_observed = await sample(guest)
     assert guest_observed["overlays"] == guest_observed["burn_hits"] == 0, guest_observed
     assert campaign_save_hashes(host.campaign) == checkpoint, "Campfire damage triggered an early save"
-    return {"resident_campfire": {"guest_authority_damage": remote_hit, "host_observer": host_observed,
+    return {"resident_stock_voices": voices, "resident_campfire": {"guest_authority_damage": remote_hit, "host_observer": host_observed,
                                   "guest_feedback": guest_heard, "guest_feedback_events": received,
                                   "stock_guest_regeneration_ceiling": expected_ceiling,
                                   "guest_recovered": guest_recovered, "authoritative_guest_recovered": remote_recovered,

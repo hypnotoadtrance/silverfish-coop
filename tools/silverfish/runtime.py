@@ -1871,11 +1871,15 @@ class Bridge:
                     cues = data.setdefault(native_damage_feedback.KEY, [])
                     if len(cues) < native_damage_feedback.LIMIT and (cue := native_damage_feedback.parse(fields)):
                         cues.append(cue)
-                elif fields[0] == "native-voice-speaker" and len(fields) == 4 and data.get("state") == "hosting":
-                    name, personality, pitch = fields[1:]
+                elif fields[0] == "native-voice-speaker" and len(fields) in {4, 7} and data.get("state") == "hosting":
+                    name, personality, pitch = fields[1:4]
                     pitch = _finite(pitch)
+                    position = [_finite(axis) for axis in fields[4:]]
                     if name.startswith("Player_FP_C ") and native_voice.speaker(personality, pitch):
-                        data.setdefault("native_voice_speakers", {})[name] = [personality, pitch]
+                        profile = [personality, pitch]
+                        if native_guest_drop_record.valid_position(position):
+                            profile.append(position)
+                        data.setdefault("native_voice_speakers", {})[name] = profile
                 elif fields[0] == "native-voice-event" and len(fields) == 4 and data.get("state") in {"hosting", "connected"}:
                     events = data.setdefault("native_voice_events", [])
                     nonce, kind, name = fields[1:]

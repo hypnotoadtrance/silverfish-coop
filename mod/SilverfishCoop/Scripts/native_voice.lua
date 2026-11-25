@@ -3,7 +3,8 @@ local guest_save = require("guest_save")
 local creator = require("native_guest_creator")
 local player = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
-local attenuation_path = "/Game/Assets/Sounds/SoundClasses/SmallSound_Attenuation.SmallSound_Attenuation"
+local attenuation_path = "/Game/Assets/Sounds/SoundClasses/Vocal_Attenuation.Vocal_Attenuation"
+local stock_volume, voice_range = 2, 5030
 local voices_path = "/Game/Classes/Libraries/DataTables/Player_Vox_DT.Player_Vox_DT"
 local fields = {
     hurt = {"Vox_Hurt", "Hurt_12_75EF6B0846F3DB6C14A2B7A0B87D768B"},
@@ -84,7 +85,12 @@ function audio.sync(state, phase)
                 end
                 if valid(save) then
                     local personality, pitch = creator.voice(save.Character)
-                    if personality then profiles[entry.name] = {personality, pitch} end
+                    if personality then
+                        local emitter = pawn.Voice
+                        local point = valid(emitter) and same(emitter:GetOwner(), pawn)
+                            and emitter:K2_GetComponentLocation() or nil
+                        profiles[entry.name] = point and {personality, pitch, point.X, point.Y, point.Z} or {personality, pitch}
+                    end
                 end
             end
         end
@@ -111,7 +117,7 @@ local function play(pawn, kind, personality, pitch, point)
     local attenuation, statics = asset(attenuation_path), StaticFindObject(statics_path)
     if not valid(cue) or not cue:IsA(StaticFindObject("/Script/Engine.SoundBase"))
         or not valid(attenuation) or not valid(statics) then return false end
-    statics:PlaySoundAtLocation(pawn, cue, point, {Pitch = 0, Yaw = 0, Roll = 0}, 1, pitch, 0,
+    statics:PlaySoundAtLocation(pawn, cue, point, {Pitch = 0, Yaw = 0, Roll = 0}, stock_volume, pitch, 0,
         attenuation, nil, pawn, nil)
     return true
 end
@@ -141,7 +147,7 @@ function audio.command(args, state, phase)
             "^([0-9a-f]+)|([a-z]+)|([%w_]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
         pitch, x, y, z = tonumber(pitch), tonumber(x), tonumber(y), tonumber(z)
         if id and #id == 32 and not seen[id] and fields[kind] and #personality <= 30 and pitch and pitch > 0 and pitch <= 3
-            and x and y and z and (origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2 <= 1800^2 then
+            and x and y and z and (origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2 <= voice_range^2 then
             local ok, heard = pcall(play, pawn, kind, personality, pitch, {X = x, Y = y, Z = z})
             if ok and heard then
                 played[#played + 1], history[#history + 1], seen[id] = id, id, true
