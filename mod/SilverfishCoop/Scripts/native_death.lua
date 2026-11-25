@@ -26,6 +26,7 @@ local heartbeat_path
 local sequence = 0
 local last_damage
 local friendly_fire
+local allow_friendly_fire = false
 local host_revived_health
 local client_visit, client_scope
 
@@ -178,8 +179,10 @@ local function publish_scope(eligible)
     if not next(eligible) then return clear_scope() end
     local host, guest = eligible["local"], eligible.guest
     local refreshed, accepted, token
-    if eligible.guest2 then
-        if not host or type(SilverfishSetNativeDeathRoster) ~= "function" then
+    if eligible.guest2 or allow_friendly_fire and host then
+        local setter = SilverfishSetNativeDeathRoster
+        if allow_friendly_fire then setter = SilverfishSetNativeDeathRosterRule end
+        if not host or type(setter) ~= "function" then
             clear_scope(true)
             return false, "Waiting for the C++ multi-guest death hook export"
         end
@@ -187,7 +190,11 @@ local function publish_scope(eligible)
         for _, slot in ipairs(guest_slots) do
             if eligible[slot] then addresses[#addresses + 1] = eligible[slot].address end
         end
-        refreshed, accepted, token = pcall(SilverfishSetNativeDeathRoster, table.unpack(addresses))
+        if allow_friendly_fire then
+            refreshed, accepted, token = pcall(setter, true, table.unpack(addresses))
+        else
+            refreshed, accepted, token = pcall(setter, table.unpack(addresses))
+        end
     else
         refreshed, accepted, token = pcall(SilverfishSetNativeDeathScope, host and host.address or 0, guest.address)
     end
@@ -534,6 +541,18 @@ end
 
 function native_death.command(fields, state, phase)
     local command = fields[2]
+    if command == "native-friendly-fire-rule" then
+        local requested = fields[3]
+        local pawn = state.local_pawn and state.local_pawn.pawn
+        if #fields ~= 3 or (requested ~= "0" and requested ~= "1") or not scoped
+            or not active(state, phase) or not state.listening or state.server ~= false
+            or not valid(pawn) or not pawn:IsLocallyControlled() or not pawn:HasAuthority()
+            or type(SilverfishSetNativeDeathRosterRule) ~= "function" then
+            error("The co-op host damage rule is unavailable", 0)
+        end
+        allow_friendly_fire = requested == "1"
+        return "co-op friendly fire " .. (allow_friendly_fire and "enabled" or "disabled")
+    end
     if command == "native-client-remote-damage-fixture" then
         local scope, visit = client_scope, client_visit
         local remote = #state.guests == 1 and state.guests[1].pawn

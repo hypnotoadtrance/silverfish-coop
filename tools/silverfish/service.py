@@ -4672,7 +4672,10 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     embedded_port: int | None = None, runtime_listener: bool = False,
                     resident_engine: EmbeddedEngine | None = None, direct_password: str | None = None,
                     stock_creator: bool = False, resume_existing: bool = False,
-                    steam_session=None, steam_access: str | None = None) -> None:
+                    steam_session=None, steam_access: str | None = None, friendly_fire: bool = False) -> None:
+    configure_friendly_fire = native_events and staged_script(work, "native_death.lua", "native-friendly-fire-rule")
+    if friendly_fire and not configure_friendly_fire:
+        raise ValueError("Friendly fire requires the current native co-op damage hooks")
     if steam_session is not None and (bind != "127.0.0.1" or steam_access not in ("invite", "friends", "public")):
         raise ValueError("Steam hosting requires a local listener and a Steam lobby access mode")
     if resume_existing and (resident_engine is None or stock_creator or start_preset):
@@ -4880,6 +4883,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             else:
                 await bridge.command("host", entry_map, *arguments)
                 initial_game = await bridge.wait_for(lambda state: state["state"] == "hosting")
+            if configure_friendly_fire:
+                await bridge.command("native-friendly-fire-rule", "1" if friendly_fire else "0")
             if extraction_rules:
                 initial_game = await bridge.wait_for(
                     lambda game: all(game.get("native_rules", {}).get(key) == value

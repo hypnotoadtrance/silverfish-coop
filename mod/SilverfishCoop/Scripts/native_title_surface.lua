@@ -84,8 +84,9 @@ local function prompt(view, field, y)
 end
 
 local function checkbox(view, spec, y)
-    if type(spec.key) ~= "string" or spec.key == "" or type(spec.target) ~= "string" or spec.target == ""
-        or type(spec.label) ~= "string" or spec.label == "" or view.toggles[spec.key] or view.linked[spec.target] then
+    if type(spec.key) ~= "string" or spec.key == "" or type(spec.label) ~= "string" or spec.label == ""
+        or view.toggles[spec.key] or (spec.target ~= nil and
+            (type(spec.target) ~= "string" or spec.target == "" or view.linked[spec.target])) then
         error("title_surface_toggle_unavailable", 0)
     end
     local widget = child(view.tree, check_box)
@@ -98,7 +99,7 @@ local function checkbox(view, spec, y)
     place(cell(view.canvas, widget), padding, y, width - padding * 2, control_height, 1)
     local toggle = {widget = widget, target = spec.target}
     view.toggles[spec.key] = toggle
-    view.linked[spec.target] = toggle
+    if spec.target then view.linked[spec.target] = toggle end
 end
 
 local function toggle_attached(view, toggle)
@@ -106,11 +107,13 @@ local function toggle_attached(view, toggle)
 end
 
 local function reconcile(view, toggle)
-    local input = toggle and view.inputs[toggle.target]
-    if not toggle_attached(view, toggle) or not input or not exact(input.widget, editable)
-        or not same(input.widget:GetParent(), view.canvas) then return nil end
+    if not toggle_attached(view, toggle) then return nil end
     local checked = toggle.widget:IsChecked()
     if type(checked) ~= "boolean" then return nil end
+    if not toggle.target then return checked end
+    local input = view.inputs[toggle.target]
+    if not input or not exact(input.widget, editable)
+        or not same(input.widget:GetParent(), view.canvas) then return nil end
     if checked ~= toggle.checked then
         if not checked then input.widget:SetText(FText("")) end
         input.widget:SetIsEnabled(checked)

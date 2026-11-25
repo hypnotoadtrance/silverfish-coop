@@ -74,7 +74,7 @@ local function stock_prop_fixture(args, state, phase)
             part:ForceNetUpdate()
             return "moved"
         end
-        if mode == "pool-near" or mode == "pool-remove" then
+        if mode == "pool-near" or mode == "pool-remove" or mode == "pool-damage" then
             local found
             for _, candidate in ipairs(FindAllOf("AcidPool_BP_C") or {}) do
                 if current(candidate) and near(candidate, assert(args[4])) then
@@ -87,6 +87,20 @@ local function stock_prop_fixture(args, state, phase)
                 assert(phase == "hosting" and found:HasAuthority() and found.FizzledOut)
                 found:K2_DestroyActor()
                 return "removed"
+            end
+            if mode == "pool-damage" then
+                assert(phase == "hosting" and found:HasAuthority() and found.DotVolume.DotActive)
+                local remote = #state.guests == 1 and state.guests[1].pawn
+                local thrower = args[5] == "guest" and remote or pawn
+                local target = args[6] == "guest" and remote or pawn
+                assert(valid(thrower) and valid(target) and found.DotVolume:FindInstigator():GetAddress() == thrower:GetAddress(),
+                    "the stock pool lost the player's instigator")
+                local hp = target.Save.PlayerHealth
+                local other = args[6] == "guest" and pawn or remote
+                local other_hp = other.Save.PlayerHealth
+                found.DotVolume:DamageActor(target, 0.4)
+                assert(other.Save.PlayerHealth == other_hp, "stock acid changed the wrong player's health")
+                return ("%f,%f"):format(hp, target.Save.PlayerHealth)
             end
             local shape = StaticFindObject("/Script/Engine.SphereComponent")
             local point = found:K2_GetActorLocation()
@@ -301,8 +315,9 @@ local function stock_prop_fixture(args, state, phase)
             end
             local total, lethal = {}, {}
             local before = actor.Health
+            local instigator = args[5] == "guest" and state.guests[1].pawn or pawn
             actor:DealDamage({BluntForce_6_6923B3964740DE281BD773BCCAAC2772 = 800},
-                {Location = point, ImpactPoint = point}, pawn, {X = 0, Y = 0, Z = 0}, true, total, lethal)
+                {Location = point, ImpactPoint = point}, instigator, {X = 0, Y = 0, Z = 0}, true, total, lethal)
             if current(actor) and not actor.Broken then
                 error(("Stock prop survived the staged impact: %s health=%s->%s damage=%s lethal=%s"):format(path,
                     tostring(before), tostring(actor.Health), tostring(total.TotalDamage), tostring(lethal.IsLethal)))

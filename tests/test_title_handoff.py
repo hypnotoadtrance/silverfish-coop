@@ -171,6 +171,24 @@ class TitleHandoffTests(unittest.TestCase):
                                       stock_resume=True, steam_access="public"))
         self.assertNotIn("secret", repr(claim))
 
+    def test_resident_host_friendly_fire_flag_is_explicit_for_either_transport(self):
+        for version, values, expected in (
+            (b"3", b"campaign\t127.0.0.1\t7777\tpass", True),
+            (b"4", b"campaign\t127.0.0.1\t7777\t\tcreator", True),
+            (b"5", b"campaign\t127.0.0.1\t7777\t\tresume", False),
+            (b"6", b"campaign\tfriends\tpass\tresume", True),
+        ):
+            with self.subTest(version=version):
+                self.handoff = TitleHandoff(self.handoff.request_path.parent, clock=lambda: self.now)
+                generation = self.publish({"host": self.host})
+                envelope = f"\t{generation}\t{'a' * 32}\thost\t".encode("ascii")
+                prefix = version + envelope + values
+                self.handoff.request_path.write_bytes(prefix + b"\t0\n")
+                self.assert_refused("malformed_request", ready(2))
+                self.handoff.request_path.write_bytes(prefix + (b"\t1\n" if expected else b"\n"))
+                self.assertIsNone(self.handoff.poll(ready(2)))
+                self.assertIs(self.handoff.poll(ready(3)).friendly_fire, expected)
+
     def test_rejects_stale_generation_and_unadvertised_action(self):
         original = self.publish({"join": self.join})
         current = self.publish({"host": self.host}, sequence=2)

@@ -1977,7 +1977,7 @@ async def wait_stock_prop_break(host, guest, frame, path, started, point=None, *
         await asyncio.sleep(.12)
 
 
-async def verify_stock_bottle(host: Seat, guest: Seat, pawn: str) -> dict:
+async def reach_bottle_warehouse(host: Seat, guest: Seat, pawn: str) -> tuple[dict, dict]:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
     current = await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("native_zone", {}).get("state") == "ready")
@@ -1988,7 +1988,12 @@ async def verify_stock_bottle(host: Seat, guest: Seat, pawn: str) -> dict:
                                          and not frame.get("awaiting_zone_guest"), timeout=60)
     guest_frame = await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("map") == dock
                                              and frame.get("zone_epoch") == arrival["zone_epoch"], timeout=30)
+    return arrival, guest_frame
 
+
+async def verify_stock_bottle(host: Seat, guest: Seat, pawn: str) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    arrival, guest_frame = await reach_bottle_warehouse(host, guest, pawn)
     operate = warehouse_prop_probe
     path = await operate(host, "find")
     async with asyncio.timeout(6):
@@ -2126,6 +2131,25 @@ async def verify_stock_acid_bottle(host: Seat, guest: Seat, _pawn: str) -> dict:
     return {"stock_acid_bottle": {"cue": cue, "host_pool": authority, "guest_pool": projected, "extinguished": expired,
                                   "guest_local_break_veto": True, "removed_on_both_seats": True,
                                   "checkpoint_unchanged": True}}
+
+
+async def verify_stock_friendly_fire(host: Seat, guest: Seat, pawn: str, *, enabled: bool) -> dict:
+    await reach_bottle_warehouse(host, guest, pawn)
+    await host.bridge.wait_for(lambda game: game.get("native_death", {}).get("scope") == "party")
+    checkpoint = campaign_save_hashes(host.campaign)
+    damage = {}
+    for source, target in (("guest", "host"), ("host", "guest")):
+        path, _, _ = await stage_warehouse_prop(host, guest, "Prop_AcidBottle")
+        impact = await warehouse_prop_probe(host, "floor-impact", path, source)
+        hp = await warehouse_prop_probe(host, "pool-damage", impact, source, target)
+        before, after = map(float, hp.split(","))
+        assert (after < before if enabled else after == before), (enabled, source, before, after)
+        hp = await warehouse_prop_probe(host, "pool-damage", impact, source, source)
+        self_before, self_after = map(float, hp.split(","))
+        assert self_after < self_before, (enabled, source, self_before, self_after)
+        damage[source] = {"teammate": [before, after], "self": [self_before, self_after]}
+    assert campaign_save_hashes(host.campaign) == checkpoint
+    return {"stock_friendly_fire": {"enabled": enabled, "acid_damage": damage, "checkpoint_unchanged": True}}
 
 
 async def verify_stock_wood_debris(host: Seat, guest: Seat, pawn: str) -> dict:
@@ -6620,6 +6644,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  compact_crate_status: bool = False, compact_world_view: bool = False,
                  guest_shop_lease: bool = False, guest_stash_memory: bool = False, guest_stash_large_memory: bool = False,
                  stock_pause_exit: bool = False,
+                 stock_friendly_fire=False,
                  lab_terminal_check=None,
                  oil_lamps_check=None,
                  mail_packages_check=None,
@@ -6807,6 +6832,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, _pawn: verify_warehouse_late_join(host, guest, warehouse_prejoin)),
         (stock_bandage_revisit, "tutorial_dock", "stock_bandage_revisit", verify_tutorial_bandage_revisit),
         (stock_warehouse_board, "tutorial_dock", "stock_warehouse_board", verify_warehouse_board),
+        (stock_friendly_fire, "friendly_fire_enabled", "stock_friendly_fire_enabled",
+         lambda host, guest, pawn: verify_stock_friendly_fire(host, guest, pawn, enabled=True)),
+        (stock_friendly_fire, "friendly_fire_default", "stock_friendly_fire_default",
+         lambda host, guest, pawn: verify_stock_friendly_fire(host, guest, pawn, enabled=False)),
         (stock_bottle, "tutorial_dock", "stock_bottle", verify_stock_bottle),
         (stock_bottle, "tutorial_dock", "stock_prop_breaks", verify_stock_prop_breaks),
         (stock_bottle, "tutorial_dock", "stock_acid_bottle", verify_stock_acid_bottle),
@@ -6999,7 +7028,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                    'local host_fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"', 1)))
         if stock_warehouse_board:
             proof["warehouse_board_overlays"] = [probes.enter_context(warehouse_board_overlay(game)) for game in games]
-        if stock_bottle:
+        if stock_bottle or stock_friendly_fire:
             proof["stock_bottle_overlays"] = [probes.enter_context(stock_bottle_overlay(game)) for game in games]
         if stock_roaming_barter:
             proof["roaming_barter_overlays"] = [probes.enter_context(roaming_barter_overlay(game)) for game in games]
@@ -7046,7 +7075,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if (tutorial_dock_combat or tutorial_dock_melee or stock_dock_population
                 or stock_bandage_revisit or stock_shovel or stock_buried_placements
                 or stock_simmi_jammers or stock_weather_travel or stock_lightning
-                or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_critters or stock_placed_item
+                or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_friendly_fire
+                or stock_critters or stock_placed_item
                 or stock_crossroads_door or stock_dock_gate
                 or stock_board_offers or stock_quarry_photo or stock_eye_stacks or stock_lingering_teleport or stock_acid_pool or stock_mushrooms):
             overlay_key = ("weather_zone_overlays" if stock_weather_travel or stock_lightning else
@@ -7322,7 +7352,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_shot_view", "tutorial_dock_buckshot",
                     "tutorial_dock_melee", "tutorial_dock_late_join", "dock_population",
                     "crossroads", "crossroads_anomaly", "quarry_photo", "buried_placements",
-                    "lab_east_wing_acid", "lab_terminal", "oil_lamps", "shopkeep", "simmi", "missing_contact_untracked"
+                    "lab_east_wing_acid", "lab_terminal", "oil_lamps", "shopkeep", "simmi", "missing_contact_untracked",
+                    "friendly_fire_enabled", "friendly_fire_default"
                 } or stock_host_prop_observer and campaign == prop_campaign else ("save_and_quit",)
                 after_reconnect = None
                 if campaign == "crossroads" and stock_shovel_quest and not stock_shovel_host_quest and not missing_contact_open_check:
@@ -7349,7 +7380,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     before_join=before_join.get(campaign),
                     initial_map=WAREHOUSE_DOCK if campaign == "tutorial_dock_late_join" else OBSERVATORY,
                     wait_status=wait_resident_status, host_exit_actions=exit_actions,
-                    after_reconnect=after_reconnect))
+                    after_reconnect=after_reconnect, friendly_fire=campaign == "friendly_fire_enabled"))
                 watcher = asyncio.create_task(unexpected_process_exit())
                 try:
                     done, _ = await asyncio.wait((session, watcher), return_when=asyncio.FIRST_COMPLETED)

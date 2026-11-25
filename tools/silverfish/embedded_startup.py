@@ -434,7 +434,8 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
     if host_options is None:
         host_options = service.MENU_HOST_OPTIONS
 
-    def host_plan(selected, bind, port, password="", *, creator_requested=False, resume_area=None, steam_access=None):
+    def host_plan(selected, bind, port, password="", *, creator_requested=False, resume_area=None,
+                  steam_access=None, friendly_fire=False):
         if steam_access is not None:
             if steam is None or steam.pump.done():
                 raise ValueError("Steam networking is unavailable")
@@ -461,7 +462,7 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
                 session = service.host_game(
                     work, selected, bind, port, headless, resident_engine=engine,
                     direct_password=password, stock_creator=use_creator, resume_existing=resume_area is not None,
-                    max_guests=service.MENU_HOST_GUEST_LIMIT, **host_options,
+                    max_guests=service.MENU_HOST_GUEST_LIMIT, friendly_fire=friendly_fire, **host_options,
                     **({"start_preset": mode} if mode == "wanderer" and not use_creator else {}),
                     **({"steam_session": steam, "steam_access": steam_access} if steam_access is not None else {}),
                 )
@@ -498,7 +499,7 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
         if claim.stock_resume:
             selected, area = saved_campaign(campaign, saved, name)
             return host_plan(selected, bind, port, claim.direct_password or "", resume_area=area,
-                             steam_access=claim.steam_access)
+                             steam_access=claim.steam_access, friendly_fire=claim.friendly_fire)
         selected = campaign
         if not name and claim.stock_creator and automatic_campaigns:
             selected = _reserve_campaign(work, campaign.parent)
@@ -509,7 +510,7 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
             if selected != campaign.parent / name:
                 raise ValueError("The campaign directory is redirected")
         return host_plan(selected, bind, port, claim.direct_password or "", creator_requested=claim.stock_creator,
-                         steam_access=claim.steam_access)
+                         steam_access=claim.steam_access, friendly_fire=claim.friendly_fire)
 
     async def no_selection():
         raise ValueError("Choose a host campaign first")

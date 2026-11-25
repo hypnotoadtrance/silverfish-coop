@@ -76,12 +76,17 @@ function form.rows(draft, resident, show_name)
         rows[#rows + 1] = {field = {key = field.key, label = field.label,
             limit = field.limit, secret = field.secret, value = draft[field.key]}}
     end
+    if resident then
+        rows[#rows + 1] = {toggle = {key = "friendly_fire", label = "Friendly fire",
+            checked = draft.friendly_fire == true}}
+    end
     return rows
 end
 
 function form.selection(view, draft, resident, saved_name, show_name)
     local invalid
     draft.require_password = resident and surface.checked(view, "require_password") == true
+    draft.friendly_fire = resident and surface.checked(view, "friendly_fire") == true
     for _, field in ipairs(active_fields(draft, resident, show_name)) do
         local value = surface.read(view, field.key)
         if field.secret and not draft.require_password then value = "" end

@@ -43,6 +43,7 @@ namespace
     constexpr auto glass_thread_class = STR("/Game/Classes/Anomalies/GlassThread_BP.GlassThread_BP_C");
     constexpr auto electrode_class = STR("/Game/Classes/Anomalies/Electrode_BP.Electrode_BP_C");
     constexpr auto acid_pool_class = STR("/Game/Classes/Anomalies/AcidPool_BP.AcidPool_BP_C");
+    constexpr auto player_pawn_class = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto acid_dot_class = STR("/Game/Classes/Actors/StatusEffect_Actors/DotVolume.DotVolume_C");
     constexpr auto spinning_class = STR("/Game/Classes/Anomalies/SpinningBall_Anomaly.SpinningBall_Anomaly_C");
     constexpr auto radiation_class = STR("/Game/Classes/Anomalies/RadSource_BP.RadSource_BP_C");
@@ -817,7 +818,7 @@ namespace
     struct PropBreak
     {
         const Iteration* call{};
-        U::FWeakObjectPtr actor, world;
+        U::FWeakObjectPtr actor, world, acid_instigator;
         std::array<double, 3> point{};
         std::string_view kind;
     };
@@ -897,7 +898,47 @@ namespace
         std::memcpy(point.data(), locals, sizeof(point));
         if (!std::ranges::all_of(point, [](double value) { return std::isfinite(value) && std::abs(value) <= 1e7; }))
             return;
-        *slot = {&call, actor, world, point, media->kind};
+        U::UObject* acid_instigator = nullptr;
+        if (acid_override)
+        {
+            auto* source = instigator->GetObjectPropertyValue(instigator->ContainerPtrToValuePtr<void>(locals));
+            if (!source) source = object(actor, STR("Instigator"));
+            auto* source_type = source ? source->GetClassPrivate() : nullptr;
+            auto* source_role = property<U::FByteProperty>(source, STR("Role"));
+            if (source_type && source_type->GetPathName() == player_pawn_class && !source->IsUnreachable() &&
+                source_role && source_role->GetPropertyValueInContainer(source) == 3 &&
+                static_cast<U::AActor*>(source)->GetWorld() == world)
+                acid_instigator = source;
+        }
+        *slot = {&call, actor, world, acid_instigator, point, media->kind};
+    }
+
+    void capture_acid_instigator(Iteration& call, U::AActor* pool)
+    {
+        if (!pool || !U::IsInGameThreadRaw() || guest_session || call.OriginalFunctionCallPrevented() ||
+            !pool->GetClassPrivate() || pool->GetClassPrivate()->GetFName() != acid_pool_name) return;
+        auto* world = stock_acid_pool(pool);
+        auto* role = property<U::FByteProperty>(pool, STR("Role"));
+        auto* instigator = property<U::FObjectProperty>(pool, STR("Instigator"));
+        if (!world || !role || role->GetPropertyValueInContainer(pool) != 3 || !instigator ||
+            object(pool, STR("Instigator"))) return;
+
+        // The stock bottle finishes spawning the pool synchronously at HitLoc.
+        // DotVolume reads its owning pool's Instigator when it deals damage.
+        const auto location = pool->K2_GetActorLocation();
+        auto* source = static_cast<U::UObject*>(nullptr);
+        for (const auto& active : prop_breaks)
+        {
+            auto* candidate = active.acid_instigator.Get();
+            if (!active.call || !candidate || active.world.Get() != world) continue;
+            const auto x = active.point[0] - location.X(), y = active.point[1] - location.Y(),
+                       z = active.point[2] - location.Z();
+            if (x * x + y * y + z * z > 4.0) continue;
+            if (source && candidate != source) return;
+            source = candidate;
+        }
+        if (source && static_cast<U::AActor*>(source)->GetWorld() == world)
+            instigator->SetObjectPropertyValue(instigator->ContainerPtrToValuePtr<void>(pool), source);
     }
 
     void queue_spatial_cue(U::UObject* world, const std::array<double, 3>& point, std::string_view kind)
@@ -1453,6 +1494,7 @@ namespace silverfish::native_anomaly_fields
             [](Iteration& call, U::AActor* actor) {
                 capture_lingering(call, actor);
                 capture_drum_fire(call, actor);
+                capture_acid_instigator(call, actor);
                 if (observer_enabled) capture_observer_reward(call, actor);
             }, {false, false, owner, STR("Track actual stock anomaly and prop child actors")});
         if (!installed()) uninstall_hooks();

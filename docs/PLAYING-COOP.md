@@ -30,7 +30,7 @@ Set `$sfPython` and `$sfCli` again when opening a new terminal. The workspace pa
 
 ## Host from the co-op title
 
-Choose **Multiplayer** on the first screen, then **Host**. **New Game** opens the stock character creator and creates a co-op save automatically. **Load Game** lists saves by location and last-saved time. The selected save restores its character and world. Use **Network** to select the connection method. The Direct IP form starts with the configured UDP port and listening address. Select **Require password** to enable the password field for either method. Up to four guests can join.
+Choose **Multiplayer** on the first screen, then **Host**. **New Game** opens the stock character creator and creates a co-op save automatically. **Load Game** lists saves by location and last-saved time. The selected save restores its character and world. Use **Network** to select the connection method. The Direct IP form starts with the configured UDP port and listening address. Select **Require password** to enable the password field for either method. **Friendly fire** is off by default. Check it when starting or loading a campaign to allow damage attributed to another player for that hosting session. Self-inflicted damage follows the normal game rules. Up to four guests can join.
 
 Host container pickups take effect immediately. Rest, Save and Quit, level transitions, and the loss of an enrolled guest connection can save the live campaign. If the game closes unexpectedly before a save, the campaign resumes at the last saved checkpoint.
 

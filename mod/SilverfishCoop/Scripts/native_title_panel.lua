@@ -196,7 +196,7 @@ local function request_id()
     if id:find("[^0]") then return id end
 end
 
-local function write_request(generation, action, form_values)
+local function write_request(generation, action, form_values, friendly_fire)
     local pending = io.open(request_path, "rb")
     if pending then
         pending:close()
@@ -214,6 +214,7 @@ local function write_request(generation, action, form_values)
     end
     local row = form_values and {version, generation, id, action, table.unpack(form_values)}
         or {"1", generation, id, action}
+    if friendly_fire then row[#row + 1] = "1" end
     local written = file:write(table.concat(row, "\t"), "\n")
     local closed = file:close()
     -- Windows rename refuses an existing destination. Never remove or replace a pending request.
@@ -240,7 +241,7 @@ local function active_offer(action, context)
     return latest
 end
 
-local function choose(action, context, form_values)
+local function choose(action, context, form_values, friendly_fire)
     if not can_choose(context) then return false, "title_panel_not_ready" end
     if action == "hide" then
         dismissed = session.offer.generation
@@ -250,7 +251,7 @@ local function choose(action, context, form_values)
     end
     local latest, reason = active_offer(action, context)
     if not latest then return false, reason end
-    if write_request(latest.generation, action, form_values) then
+    if write_request(latest.generation, action, form_values, friendly_fire) then
         submitted = latest.generation
         close_form(session)
         report = {state = "pending", choices = latest.choices}
@@ -416,7 +417,7 @@ local function handle_host_form(action, context)
     if form.values.steam_access then values[4] = form.saved_name and "resume" or "creator"
     elseif form.saved_name then values[5] = "resume"
     elseif resident and (action == "creator" or not form.fixture) then values[5] = "creator" end
-    return choose("host", context, values)
+    return choose("host", context, values, form.values.friendly_fire)
 end
 
 local function publish_steam_join_state(path, nonce, action)
@@ -707,6 +708,13 @@ local function host_form_fixture_command(fields, state, phase)
             error("title_host_form_fixture_arguments", 0)
         end
         return "title_host_form_port_entered"
+    end
+    if operation == "friendly-fire" then
+        if surface.checked(session.view, "friendly_fire") ~= false
+            or not surface.set_checked(session.view, "friendly_fire", true) then
+            error("title_host_form_fixture_arguments", 0)
+        end
+        return "title_host_form_friendly_fire_enabled"
     end
     if operation == "password" then
         if not surface.set_checked(session.view, "require_password", true)

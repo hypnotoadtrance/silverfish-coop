@@ -241,6 +241,7 @@ namespace
         ControllerBinding local_controller;
         ListenerBinding listener;
         FriendlyFire friendly_fire;
+        bool allow_friendly_fire{};
         Unreal::FWeakObjectPtr world;
         Unreal::UFunction* fall_mode{};
         Unreal::UFunction* fall_landed{};
@@ -732,7 +733,8 @@ namespace
         return binding;
     }
 
-    [[nodiscard]] bool configure_scope(std::uintptr_t host_address, std::span<std::uintptr_t> addresses)
+    [[nodiscard]] bool configure_scope(std::uintptr_t host_address, std::span<std::uintptr_t> addresses,
+                                        bool allow_friendly_fire)
     {
         const auto generation = bridge_generation.load(std::memory_order_acquire);
         if (!scope_hooks_ready.load(std::memory_order_acquire) || (generation & 1) == 0) return false;
@@ -750,6 +752,7 @@ namespace
             {
                 for (auto& guest : death_scope.guests()) guest.fall_episode = {};
             }
+            death_scope.allow_friendly_fire = allow_friendly_fire;
             death_scope.expires = now + scope_timeout;
             return true;
         }
@@ -794,6 +797,7 @@ namespace
                 }
             }
         }
+        next.allow_friendly_fire = allow_friendly_fire;
         next.generation = generation;
         next.token = ++next_scope_token;
         next.expires = Clock::now() + scope_timeout;
@@ -801,8 +805,10 @@ namespace
         return true;
     }
 
-    [[nodiscard]] bool read_scope(const Lua& lua, bool roster)
+    [[nodiscard]] bool read_scope(const Lua& lua, bool roster, bool has_rule)
     {
+        if (has_rule && !lua.is_bool(1)) return false;
+        const bool allow_friendly_fire = has_rule && lua.get_bool();
         const auto count = lua.get_stack_size();
         if (roster ? count < 1 || count > 1 + static_cast<int>(max_guests) : count != 2) return false;
         for (int index = 1; index <= count; ++index)
@@ -828,15 +834,15 @@ namespace
             if (value <= 0) return false;
             address = static_cast<std::uintptr_t>(value);
         }
-        return configure_scope(static_cast<std::uintptr_t>(host), addresses);
+        return configure_scope(static_cast<std::uintptr_t>(host), addresses, allow_friendly_fire);
     }
 
-    int publish_scope(const Lua& lua, bool roster)
+    int publish_scope(const Lua& lua, bool roster, bool has_rule = false)
     {
         bool accepted = false;
         if (Unreal::IsInGameThreadRaw())
         {
-            accepted = read_scope(lua, roster);
+            accepted = read_scope(lua, roster, has_rule);
             if (!accepted) death_scope = {};
         }
         lua.set_bool(accepted);
@@ -846,6 +852,7 @@ namespace
 
     int lua_set_scope(const Lua& lua) { return publish_scope(lua, false); }
     int lua_set_roster(const Lua& lua) { return publish_scope(lua, true); }
+    int lua_set_roster_rule(const Lua& lua) { return publish_scope(lua, true, true); }
 
     int lua_clear_scope(const Lua&)
     {
@@ -1490,8 +1497,9 @@ namespace
     void intercept_friendly_fire(Iteration& iteration, Unreal::UObject* context, void* parameters, Unreal::FFrame* frame)
     {
         const auto generation = bridge_generation.load(std::memory_order_acquire);
-        if (!context || !death_scope.local.address || death_scope.generation != generation || !ready() ||
-            Clock::now() >= death_scope.expires || iteration.OriginalFunctionCallPrevented())
+        if (death_scope.allow_friendly_fire || !context || !death_scope.local.address ||
+            death_scope.generation != generation || !ready() || Clock::now() >= death_scope.expires ||
+            iteration.OriginalFunctionCallPrevented())
         {
             return;
         }
@@ -1816,6 +1824,7 @@ namespace
             {
                 lua.register_function("SilverfishSetNativeDeathScope", lua_set_scope);
                 lua.register_function("SilverfishSetNativeDeathRoster", lua_set_roster);
+                lua.register_function("SilverfishSetNativeDeathRosterRule", lua_set_roster_rule);
                 lua.register_function("SilverfishClearNativeDeathScope", lua_clear_scope);
                 lua.register_function("SilverfishHasScopedNativeDeathHit", lua_has_scoped_hit);
                 lua.register_function("SilverfishTakeScopedNativeDeathHit", lua_take_scoped_hit);

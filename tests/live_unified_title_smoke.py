@@ -45,7 +45,7 @@ async def start_pair(host, guest, character_name, *, on_join=None, create_charac
                      before_join=None, after_reconnect=None, wait_status=wait,
                      host_exit_actions=("save_and_quit",), after_exit=None, load_existing=False,
                      wait_for_host_pause=None, resume_character=None, guest_stock_exit=False,
-                     initial_map=OBSERVATORY):
+                     initial_map=OBSERVATORY, friendly_fire=False):
     if resume_character is not None and (not load_existing or create_character is not None):
         raise ValueError("Rejoining a saved character requires an existing campaign")
     host_run, guest_run = host.campaign / "run", guest.client / "run"
@@ -64,6 +64,9 @@ async def start_pair(host, guest, character_name, *, on_join=None, create_charac
     else:
         await host.bridge.command(host_form, "campaign", host.campaign.name)
     await host.bridge.command(host_form, "port", str(host.port))
+    if friendly_fire:
+        confirmed = await host.bridge.command(host_form, "friendly-fire")
+        assert confirmed["ack"]["message"] == "title_host_form_friendly_fire_enabled", confirmed["ack"]
     await host.bridge.command(host_form, "submit")
     hosted = await wait_status(host_run, lambda frame: frame.get("state") == "hosting")
     assert hosted["pid"] == host_pid
