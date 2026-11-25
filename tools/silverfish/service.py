@@ -5519,14 +5519,14 @@ class Client:
                     else:
                         if clip := local_view.get("ack", {}).get("message"):
                             self.control.event("native_guest_reload_view_played", operation_id=operation_id, clip=clip)
-            # Feed the confirmed roll or pickup to the normal projection before
-            # the next periodic host snapshot.
+            # Make the confirmed roll available before the next periodic host snapshot.
             roll = reply.get("native_loot_roll")
             if (action == "native-loot-open" and isinstance(roll, dict)
                     and (roll.get("map"), roll.get("crate")) == (area, target)
                     and native_loot.CRATES.get(target) == area):
                 await self.cancel_gameplay_snapshot()
-                self.gameplay.setdefault(native_loot.STATE_KEY, {})[target] = roll
+                if (self.last_game.get("map"), self.zone_epoch, self.host_session) == (area, epoch, session):
+                    self.gameplay.setdefault(native_loot.STATE_KEY, {})[target] = roll
             placed = reply.get("native_authored_pickup_claim")
             if action == native_authored_pickup.ACTION and isinstance(placed, dict):
                 source = target.partition("@")[0] if target else None
@@ -5750,14 +5750,13 @@ class Client:
             except (ValueError, OSError, RuntimeError) as error:
                 self.control.event(event + "_rejected", operation_id=operation, sequence=sequence, reason=str(error))
 
-    async def service_crate_interaction(self, active: bool) -> None:
+    async def service_crate_interaction(self, scope) -> None:
         if not self.invite.get("native_loot_input"):
             return
         session, epoch = self.host_session, self.zone_epoch
         intents = self.crate_intents.take(self.last_game, self.bridge.native_crate_inputs())
         for sequence, crate, _, source in intents:
-            if (not active or self.stopping or not session or not epoch
-                    or (self.host_session, self.zone_epoch) != (session, epoch)):
+            if scope is None or self.stock_interaction_scope() != scope:
                 continue
             operation = uuid.uuid5(self.bridge.input_namespace,
                                    f"{session}:{epoch}:{self.invite['character_id']}:crate:{sequence}:{crate}").hex
@@ -5768,6 +5767,11 @@ class Client:
             except (ValueError, OSError, RuntimeError) as error:
                 self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, operation_id=operation,
                                    crate=crate, input_source=source, reason=str(error))
+            else:
+                roll = self.gameplay.get(native_loot.STATE_KEY, {}).get(crate)
+                if (self.bridge.local_bridge is not None and self.stock_interaction_scope() == scope
+                        and roll is not None and roll == result.get("native_loot_roll")):
+                    await self.crate_lids.sync(self, confirmed_crate=crate)
 
     async def service_broker_input(self, active: bool) -> None:
         if not self.invite.get("native_broker_input"):
@@ -6273,7 +6277,7 @@ class Client:
             except (OSError, RuntimeError) as error:
                 self.next_projection = time.monotonic() + 2
                 self.control.event("gameplay_projection_error", reason=str(error))
-        if self.invite.get("native_loot_input"):
+        if self.bridge.local_bridge is None and self.invite.get("native_loot_input"):
             await self.crate_lids.sync(self)
 
     async def project_world_view(self) -> None:
@@ -6640,15 +6644,23 @@ class Client:
         return None
 
     async def run_stock_interactions(self) -> None:
-        # Only this task consumes ordinary Interact and crate presses. Keep
-        # their order while snapshot, inventory and presentation work proceeds.
+        # Preserve the order of ordinary Interact presses while container requests settle independently.
         while not self.stopping:
-            if self.bridge.stock_interaction_ready(crates=self.invite.get("native_loot_input", False)):
+            if self.bridge.stock_interaction_ready(crates=False):
                 await self.service_stock_interactions(self.stock_interaction_scope())
             await asyncio.sleep(.012)
 
+    async def run_stock_crates(self) -> None:
+        next_lids = 0
+        while not self.stopping:
+            if self.bridge.stock_interaction_ready(crates=True):
+                await self.service_crate_interaction(self.stock_interaction_scope())
+            if not self.stopping and time.monotonic() >= next_lids:
+                await self.crate_lids.sync(self)
+                next_lids = time.monotonic() + self.crate_lids.turn_seconds
+            await asyncio.sleep(.012)
+
     async def service_stock_interactions(self, scope) -> None:
-        await self.service_crate_interaction(scope is not None)
         for operation, target in self.bridge.interactions():
             if scope is None or self.stock_interaction_scope() != scope:
                 break
@@ -6731,16 +6743,18 @@ class Client:
         footstep_io = asyncio.create_task(native_footsteps.follow(self)) if native_footsteps.enabled(self.bridge) else None
         resident = self.bridge.local_bridge is not None
         interact = asyncio.create_task(self.run_stock_interactions()) if resident else None
+        crates = (asyncio.create_task(self.run_stock_crates())
+                  if resident and self.invite.get("native_loot_input") else None)
         cues = asyncio.create_task(self.run_weapon_cues()) if resident else None
         prop_poses = (asyncio.create_task(self.prop_carry.stream_local_poses())
                       if self.prop_carry.has_local_pose_stream else None)
         try:
             await self.run_session(pause_exit=pause_exit)
         finally:
-            for task in (interact, cues):
+            for task in (interact, crates, cues):
                 if task is not None:
                     task.cancel()
-            for task in (interact, cues):
+            for task in (interact, crates, cues):
                 if task is not None:
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
@@ -6821,7 +6835,9 @@ class Client:
             await self.service_primary_input(active)
             await self.service_reload_input(active)
             if self.bridge.local_bridge is None:
-                await self.service_stock_interactions(self.stock_interaction_scope())
+                scope = self.stock_interaction_scope()
+                await self.service_crate_interaction(scope)
+                await self.service_stock_interactions(scope)
             flashlight = (self.gameplay.get(native_flashlight.KEY)
                           if active and self.transport.game_access and time.monotonic() - self.gameplay_seen < 3 else None)
             with contextlib.suppress(OSError, RuntimeError):

@@ -824,7 +824,8 @@ class Bridge:
         return self._take_local_inputs(self._local_crate_records)
 
     def stock_interaction_ready(self, *, crates=False) -> bool:
-        return bool(self._local_interaction_records or crates and self._local_crate_records
+        pending = self._local_crate_records if crates else self._local_interaction_records
+        return bool(pending
                     or self.local_bridge is not None and self.local_bridge.input_ready())
 
     def native_melee_input_requests(self):

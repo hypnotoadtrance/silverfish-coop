@@ -5493,6 +5493,9 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
     opened = await wait(guest_run, lambda state: crate in state.get("gameplay", {}).get(native_loot.STATE_KEY, {}))
     visible_at = time.monotonic()
     roll = opened["gameplay"][native_loot.STATE_KEY][crate]
+    await wait(guest_run, lambda state: state.get("game", {}).get("native_loot_crates", {}).get(crate, {}).get("state")
+               == "exhausted")
+    lid_at = time.monotonic()
     await asyncio.sleep(.65)  # Let the compatible status copies arrive after the ring receipt.
 
     async def events(run, state, name):
@@ -5510,6 +5513,7 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
         "saves_unchanged_after_open": True,
         "probe_request_to_press_reply_ms": round(1000 * (pressed_at - request_at), 2),
         "probe_request_to_visible_roll_ms": round(1000 * (visible_at - request_at), 2),
+        "probe_request_to_guest_lid_ms": round(1000 * (lid_at - request_at), 2),
     }
 
 

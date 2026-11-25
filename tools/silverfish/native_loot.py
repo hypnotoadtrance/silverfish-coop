@@ -329,19 +329,27 @@ class GuestCrateProjection:
         if previous is None or (previous[0], previous[2]) != (desired, reason):
             client.control.event("native_loot_guest_lid_deferred", crate=crate, reason=reason)
 
-    async def sync(self, client) -> None:
-        game, now = client.last_game, time.monotonic()
+    @staticmethod
+    def _scope(client, game):
         area = game.get("map")
         pawn = game.get("pawns", {}).get("local", {}).get("name")
         scope = (client.host_session, client.zone_epoch, area, pawn)
         if (client.stopping or client.needs_travel or client.server_transitioning or not client.transport.game_access
                 or game.get("state") != "connected" or area != client.expected_zone or not all(scope)):
+            return None
+        return scope
+
+    async def sync(self, client, *, confirmed_crate=None) -> None:
+        game, now = client.last_game, time.monotonic()
+        scope = self._scope(client, game)
+        if scope is None:
             self.reset()
             return
+        area = scope[2]
         if scope != self.scope:
             self.reset()
             self.scope = scope
-        if now - client.gameplay_seen >= 3:
+        if confirmed_crate is None and now - client.gameplay_seen >= 3:
             return
 
         rolls = _rolls_in_area(client.gameplay.get(STATE_KEY, {}), area)
@@ -353,7 +361,9 @@ class GuestCrateProjection:
             order = order[start:] + order[:start]
         # A fresh local press should see its confirmed lid before the restored backlog.
         pressed = interaction(game, self.prioritized_sequence)
-        if pressed and pressed[1] in rolls:
+        if confirmed_crate is not None:
+            order = [confirmed_crate] if confirmed_crate in rolls else []
+        elif pressed and pressed[1] in rolls:
             self.prioritized_sequence, crate = pressed
             order.remove(crate)
             order.insert(0, crate)
@@ -362,7 +372,8 @@ class GuestCrateProjection:
         attempts = 0
         for crate in order:
             now = time.monotonic()
-            if attempts >= self.attempts_per_turn or now >= deadline or now - client.gameplay_seen >= 3:
+            if (attempts >= self.attempts_per_turn or now >= deadline
+                    or (confirmed_crate is None and now - client.gameplay_seen >= 3)):
                 break
             lid = random_lid(crate)
             roll = rolls[crate]
@@ -384,16 +395,19 @@ class GuestCrateProjection:
                 # Include queue waiting as well as the native acknowledgement in the turn's budget.
                 async with asyncio.timeout(remaining):
                     snapshot = await client.bridge.command(
-                        "native-loot-crate-project", "exhausted", crate, *arguments, timeout=remaining)
-                if (snapshot.get("state"), snapshot.get("map"), snapshot.get("pawns", {}).get("local", {}).get("name")) != (
-                        "connected", area, pawn):
-                    client.last_game = snapshot
+                        "native-loot-crate-project", "exhausted", crate, *arguments, timeout=remaining, update_status=False)
+                if self._scope(client, client.last_game) != scope or self._scope(client, snapshot) != scope:
                     self.reset()
                     return
                 _verify_opened(snapshot, area, crate, lid, angle)
-                client.last_game = game = snapshot
+                if snapshot.get("sequence", 0) >= client.last_game.get("sequence", 0):
+                    client.last_game = snapshot
+                game = client.last_game
                 self.deferred.pop(crate, None)
             except (OSError, RuntimeError) as error:
+                if self._scope(client, client.last_game) != scope:
+                    self.reset()
+                    return
                 self._defer(client, crate, desired, error)
 
 

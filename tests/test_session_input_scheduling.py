@@ -62,7 +62,6 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         client = self.guest(AsyncMock())
         epoch, item, operation = "a" * 32, "b" * 32, "c" * 32
         scope = ("session", epoch, OBSERVATORY, "guest pawn")
-        client.service_crate_interaction = AsyncMock()
         client.stock_interaction_scope = Mock(return_value=scope)
         client.apply_stock_interaction = AsyncMock(side_effect=ValueError("item_already_claimed"))
         client.bridge.command = AsyncMock()
@@ -141,8 +140,9 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(task, 1)
         client.bridge.command.assert_awaited_once()
 
-    async def test_lid_restoration_keeps_its_turn_during_other_projection_backoff(self):
+    async def test_legacy_lid_restoration_keeps_its_turn_during_other_projection_backoff(self):
         client = self.guest(AsyncMock())
+        client.bridge.local_bridge = None
         client.invite["native_loot_input"] = True
         client.last_game = {"state": "connected", "map": "CrossRoads"}
         attempts = []

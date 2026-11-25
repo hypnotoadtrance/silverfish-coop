@@ -802,7 +802,7 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         ]
         called, presses = [], []
 
-        async def project(action, status, crate, *pose, timeout):
+        async def project(action, status, crate, *pose, timeout, update_status):
             self.assertEqual((action, status), ("native-loot-crate-project", "exhausted"))
             self.assertGreater(timeout, 0)
             called.append(crate)
@@ -829,7 +829,7 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         client, crates, observed = self.crate_guest(3)
         cancelled = asyncio.Event()
 
-        async def project(_action, status, crate, *pose, timeout):
+        async def project(_action, status, crate, *pose, timeout, update_status):
             if crate == crates[0]:
                 try:
                     await asyncio.Future()
@@ -858,7 +858,7 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         client.last_game["native_loot_crates"] = dict(observed)
         attempts = []
 
-        async def project(_action, status, crate, *pose, timeout):
+        async def project(_action, status, crate, *pose, timeout, update_status):
             attempts.append(crate)
             if crate == refused and attempts.count(crate) <= 2:
                 if attempts.count(crate) == 1:
@@ -906,9 +906,32 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         client.zone_epoch = "c" * 32
         await view.sync(client)
         self.assertEqual([request.args[2] for request in bridge.command.await_args_list], [first, sibling, first])
-        self.assertEqual(client.last_game["pawns"]["local"]["name"], "different native pawn")
+        self.assertEqual(client.last_game["pawns"]["local"]["name"], PAWN)
         self.assertIsNone(view.scope)
         self.assertEqual(view.deferred, {})
+
+    async def test_immediate_lid_only_projects_the_new_roll_and_discards_a_previous_visit_reply(self):
+        client, (waiting, confirmed), observed = self.crate_guest(2)
+        previous_game = client.last_game
+        client.gameplay_seen -= 4
+
+        async def project(_action, status, crate, *pose, timeout, update_status):
+            self.assertEqual(crate, confirmed)
+            self.assertFalse(update_status)
+            client.zone_epoch = "c" * 32
+            client.last_game = dict(previous_game, sequence=11)
+            changed = dict(observed[confirmed], state=status)
+            if lid := random_lid(crate):
+                changed[lid[0]] = float(pose[0])
+            return dict(previous_game, sequence=12, native_loot_crates={confirmed: changed})
+
+        client.bridge = SimpleNamespace(command=AsyncMock(side_effect=project))
+        view = native_loot.GuestCrateProjection()
+        await view.sync(client, confirmed_crate=confirmed)
+        self.assertEqual(client.bridge.command.await_count, 1)
+        self.assertEqual(client.last_game["sequence"], 11)
+        self.assertEqual(client.last_game["native_loot_crates"][waiting]["state"], "ready")
+        self.assertIsNone(view.scope)
 
     async def test_vehicle_lock_projection_applies_host_state_to_the_exact_active_vehicle(self):
         car = full_name(CROSSROADS, "StaticMeshActor_488", "Loot_Car_01_BP_C")
