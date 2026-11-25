@@ -76,3 +76,14 @@ class StockDoorActionTests(unittest.IsolatedAsyncioTestCase):
         self.actions.settle(self.host)
         self.assertEqual(await pending, {"ok": False, "error": "stock_door_scope_unavailable"})
         self.assertFalse(self.host.party["receipts"]["guest"])
+
+    def test_same_host_frame_applies_both_door_receipts(self):
+        other = self.actor.replace("_1719", "_1720")
+        delta = {"map": CROSSROADS, "epoch": self.epoch, "sequence": 9}
+        gameplay = {door.KEY: {**delta, "sequence": 8, "doors": {other: self.closed}}}
+        self.assertIsNotNone(door.accept_delta(gameplay, {**delta, "doors": {self.actor: self.closed}},
+                                               CROSSROADS, self.epoch, self.actor))
+        opened = dict(self.closed, open=True, yaw=90)
+        self.assertIsNotNone(door.accept_delta(gameplay, {**delta, "doors": {other: opened}},
+                                               CROSSROADS, self.epoch, other))
+        self.assertEqual(gameplay[door.KEY]["doors"], {self.actor: self.closed, other: opened})

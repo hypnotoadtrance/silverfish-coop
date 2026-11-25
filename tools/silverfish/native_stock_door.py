@@ -93,7 +93,8 @@ def accept_delta(gameplay, delta, area, epoch, actor):
     previous = gameplay.get(KEY, {})
     if (previous.get("map"), previous.get("epoch")) != (area, epoch):
         gameplay[KEY] = delta
-    elif sequence > previous.get("sequence", 0):
+    elif (sequence > previous.get("sequence", 0)
+          or sequence == previous.get("sequence") and previous["doors"].get(actor) != doors[actor]):
         gameplay[KEY] = dict(delta, doors=previous["doors"] | doors)
     else:
         return
