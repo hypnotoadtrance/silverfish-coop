@@ -7351,9 +7351,12 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableWeaponCueProbe",
                                                      fixture="avatar_presentation_probe.lua"))
         if stock_avatar_lean:
-            from avatar_lean_probe import installed_probe as installed_lean_probe
-            for game in games:
-                probes.enter_context(installed_lean_probe(game))
+            fixture = (Path(__file__).with_name("fixtures") / "avatar_lean_probe.lua").read_text(encoding="utf-8")
+            proof["stock_avatar_lean_overlays"] = [
+                probes.enter_context(portable_main_overlay(game, lambda script:
+                    script + "\n;(function()\n" + fixture + "\nend)()\n"))
+                for game in games
+            ]
         if resident_weapon_cues or stock_footsteps:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableFootstepProbe",

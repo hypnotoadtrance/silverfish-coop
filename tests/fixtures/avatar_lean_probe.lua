@@ -107,13 +107,14 @@ local function input_action(run)
         and (config.LeanBehavior == 0 or config.LeanBehavior == 2),
         "the isolated lean input trial requires stock Hold or Hybrid input behavior")
     run.action, run.subsystem = action, subsystem
+    run.input_method = type(SilverfishProbeContinuousLean) == "function" and "continuous" or "vector"
     run.behavior = config.LeanBehavior
     install_hooks()
 end
 
 LoopInGameThreadWithDelay(1, function()
     local run = trial
-    if not run or run.drive ~= "input" or not run.down_at or run.up_at or run.input_error
+    if not run or run.input_method ~= "vector" or not run.down_at or run.up_at or run.input_error
         or os.clock() - run.down_at >= 1 then return end
     if not same(run.controller.Pawn, run.pawn) or not same(run.pawn:GetWorld(), run.world)
         or not run.pawn:IsLocallyControlled() then return end
@@ -177,6 +178,14 @@ local function restore_solver(run)
     run.solver_request = nil
 end
 
+local function stop_input(run)
+    if run.injecting then
+        local stopped, reason = SilverfishProbeContinuousLean(run.pawn:GetAddress(), run.side, false)
+        assert(stopped, reason)
+        run.injecting = nil
+    end
+end
+
 local function sample(run, now)
     local time, phase = now - run.start, "baseline"
     assert(same(run.pawn:GetWorld(), run.world) and same(run.remote:GetWorld(), run.world)
@@ -185,12 +194,18 @@ local function sample(run, now)
     if time >= .2 and not run.down_at then
         run.down_at = now
         if run.drive == "solver" then start_solver(run) end
+        if run.input_method == "continuous" then
+            local started, reason = SilverfishProbeContinuousLean(run.pawn:GetAddress(), run.side, true)
+            assert(started, reason)
+            run.injecting, run.injections = true, 1
+        end
     end
     if run.down_at then
         local held = now - run.down_at
         phase = run.up_at and "released" or "held"
         if not run.up_at and held >= 1 then
             restore_solver(run)
+            stop_input(run)
             run.up_at, phase = now, "released"
         end
     end
@@ -218,12 +233,16 @@ LoopInGameThreadWithDelay(50, function()
     if trial then
         local ok, done = pcall(sample, trial, now)
         if not ok then
-            local restored, failure = pcall(restore_solver, trial)
+            local restored, failure = pcall(function()
+                stop_input(trial)
+                restore_solver(trial)
+            end)
             answer(trial.id, "error\t" .. tostring(done) .. (restored and "" or " | restore: " .. tostring(failure)))
         elseif done then
             answer(trial.id, table.concat({"ok", trial.side, trial.pawn:GetFullName(), trial.remote:GetFullName(),
                 trial.pawn.LeanAngle, #trial.rows, trial.injections, trial.starts, trial.completes, trial.drive,
-                trial.triggers, trial.started_request or "-", trial.started_limit or "-", trial.behavior or "-"},
+                trial.triggers, trial.started_request or "-", trial.started_limit or "-", trial.behavior or "-",
+                trial.input_method or "-"},
                 "\t"), trial.rows)
         else
             return false

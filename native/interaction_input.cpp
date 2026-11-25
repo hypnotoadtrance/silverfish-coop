@@ -1908,8 +1908,9 @@ namespace
         Unreal::UFunction* function{};
         Unreal::FDoubleProperty* x{};
         Unreal::FStructProperty* output{};
+        std::uint8_t action_value_type{};
 
-        bool bind(Unreal::UObject* action, Unreal::UScriptStruct* value_type)
+        bool bind(Unreal::UObject* action, Unreal::UScriptStruct* value_type, std::uint8_t maximum_value_type = 0)
         {
             library = find<Unreal::UObject>(STR("/Script/EnhancedInput.Default__EnhancedInputLibrary"));
             function = find<Unreal::UFunction>(STR("/Script/EnhancedInput.EnhancedInputLibrary:MakeInputActionValueOfType"));
@@ -1923,13 +1924,24 @@ namespace
             auto* value = input<Unreal::FEnumProperty>(function, STR("ValueType"), 0x18);
             auto* action_value = field<Unreal::FEnumProperty>(action, STR("ValueType"));
             auto* number = action_value ? action_value->GetUnderlyingProperty() : nullptr;
+            if (!enum_type || !action_value || action_value->GetEnum().Get() != enum_type ||
+                !number || number->GetSize() != 1) return false;
+            const auto action_type = number->GetUnsignedIntPropertyValue(
+                action_value->ContainerPtrToValuePtr<void>(action));
+            if (action_type > maximum_value_type) return false;
+            action_value_type = static_cast<std::uint8_t>(action_type);
             return x && input<Unreal::FDoubleProperty>(function, STR("Y"), 8) &&
-                input<Unreal::FDoubleProperty>(function, STR("Z"), 0x10) && enum_type &&
+                input<Unreal::FDoubleProperty>(function, STR("Z"), 0x10) &&
                 value && value->GetEnum().Get() == enum_type && value->GetSize() == 1 &&
-                action_value && action_value->GetEnum().Get() == enum_type && number && number->GetSize() == 1 &&
-                number->GetUnsignedIntPropertyValue(action_value->ContainerPtrToValuePtr<void>(action)) == 0 &&
                 output && output == function->GetReturnProperty() && output->GetOffset_Internal() == 0x20 &&
                 output->GetSize() == 0x20 && output->GetStruct().Get() == value_type;
+        }
+
+        void make_value(void* parameters, double axis) const
+        {
+            x->SetPropertyValueInContainer(parameters, axis);
+            static_cast<std::byte*>(parameters)[0x18] = std::byte{action_value_type};
+            library->ProcessEvent(function, parameters);
         }
 
         void dispatch(Unreal::UObject* pawn, Unreal::UObject* action, const Wrapper& wrapper, bool pressed) const
@@ -1938,9 +1950,7 @@ namespace
             alignas(std::max_align_t) std::array<std::byte, 0x30> parameters{};
             StructParameter result(output, factory.data());
             StructParameter value(wrapper.value, parameters.data());
-            // Boolean action type, Y and Z are zero-initialized.
-            x->SetPropertyValueInContainer(factory.data(), pressed ? 1.0 : 0.0);
-            library->ProcessEvent(function, factory.data());
+            make_value(factory.data(), pressed ? 1.0 : 0.0);
             wrapper.value->CopyCompleteValue(wrapper.value->ContainerPtrToValuePtr<void>(parameters.data()),
                 output->ContainerPtrToValuePtr<void>(factory.data()));
             wrapper.elapsed->SetPropertyValueInContainer(parameters.data(), pressed ? 0.0f : 0.05f);
@@ -1949,6 +1959,89 @@ namespace
             pawn->ProcessEvent(static_cast<Unreal::UFunction*>(wrapper.function.Get()), parameters.data());
         }
     };
+
+    bool lean_fixture_enabled()
+    {
+        return env_flag("SILVERFISH_COOP_HEADLESS") && env_flag("SILVERFISH_COOP_TITLE_FIXTURES");
+    }
+
+    Unreal::UObject* lean_player_subsystem()
+    {
+        auto* type = find<Unreal::UClass>(STR("/Script/EnhancedInput.EnhancedInputLocalPlayerSubsystem"));
+        auto* library = find<Unreal::UObject>(STR("/Script/Engine.Default__SubsystemBlueprintLibrary"));
+        auto* function = find<Unreal::UFunction>(
+            STR("/Script/Engine.SubsystemBlueprintLibrary:GetLocalPlayerSubSystemFromPlayerController"));
+        auto* player = input<Unreal::FObjectProperty>(function, STR("PlayerController"), 0);
+        auto* cls = input<Unreal::FClassProperty>(function, STR("Class"), sizeof(void*));
+        auto* output = function ? Unreal::CastField<Unreal::FObjectProperty>(function->GetReturnProperty()) : nullptr;
+        if (!type || !library || !library->HasAnyFlags(Unreal::RF_ClassDefaultObject) ||
+            library->IsUnreachable() || !function || !function->HasAnyFunctionFlags(Unreal::FUNC_Native) ||
+            function->GetOuterPrivate() != library->GetClassPrivate() || function->GetNumParms() != 3 ||
+            function->GetParmsSize() != 3 * sizeof(void*) || !player || !cls || !output ||
+            output->GetOffset_Internal() != 2 * sizeof(void*)) return nullptr;
+        std::array<Unreal::UObject*, 3> parameters{scope.controller.Get(), type};
+        library->ProcessEvent(function, parameters.data());
+        auto* subsystem = parameters[2];
+        return live(subsystem) && subsystem->GetClassPrivate() == type && subsystem->GetOuterPrivate() == scope.player.Get()
+            ? subsystem : nullptr;
+    }
+
+    int probe_continuous_lean(const Lua& lua)
+    {
+        if (!available() || !lean_fixture_enabled() || lua.get_stack_size() != 3 ||
+            !lua.is_integer(1) || !lua.is_string(2) || !lua.is_bool(3))
+            return report(lua, false, "lean_fixture_unavailable");
+        const auto requested = lua.get_integer();
+        const auto side = lua.get_string();
+        const bool pressed = lua.get_bool();
+        auto* pawn = scope.pawn.Get();
+        if (!pawn || address(pawn) != requested || Clock::now() >= scope.expires || !live_scope(scope) ||
+            (pressed && !standing(pawn)) || (side != "left" && side != "right"))
+            return report(lua, false, "lean_fixture_exact_local_pawn_required");
+        auto* subsystem = lean_player_subsystem();
+        if (!subsystem) return report(lua, false, "lean_fixture_local_subsystem_unavailable");
+        auto* action = find<Unreal::UObject>(side == "left"
+            ? STR("/Game/Classes/Player/Player_Inputs/IA_Lean_Left.IA_Lean_Left")
+            : STR("/Game/Classes/Player/Player_Inputs/IA_Lean_Right.IA_Lean_Right"));
+        auto* function = find<Unreal::UFunction>(pressed
+            ? STR("/Script/EnhancedInput.EnhancedInputSubsystemInterface:StartContinuousInputInjectionForAction")
+            : STR("/Script/EnhancedInput.EnhancedInputSubsystemInterface:StopContinuousInputInjectionForAction"));
+        auto* source = input<Unreal::FObjectProperty>(function, STR("Action"), 0);
+        if (!live(action) || !function || !function->HasAnyFunctionFlags(Unreal::FUNC_Native) ||
+            !source || source->GetPropertyClass().Get() != action->GetClassPrivate() || function->GetReturnProperty())
+            return report(lua, false, "lean_fixture_injection_unavailable");
+        if (!pressed)
+        {
+            if (function->GetParmsSize() != sizeof(void*) || function->GetNumParms() != 1)
+                return report(lua, false, "lean_fixture_stop_schema_unavailable");
+            subsystem->ProcessEvent(function, &action);
+            return report(lua, true, "stopped");
+        }
+
+        auto* raw = field<Unreal::FStructProperty>(function, STR("RawValue"));
+        auto* modifiers = field<Unreal::FArrayProperty>(function, STR("Modifiers"));
+        auto* triggers = field<Unreal::FArrayProperty>(function, STR("Triggers"));
+        ValueFactory factory;
+        if (function->GetNumParms() != 4 || function->GetParmsSize() != 0x48 || !raw ||
+            !raw->HasAnyPropertyFlags(Unreal::CPF_Parm) ||
+            raw->GetOffset_Internal() != 8 || raw->GetSize() != 0x20 ||
+            !modifiers || modifiers->GetOffset_Internal() != 0x28 ||
+            !triggers || triggers->GetOffset_Internal() != 0x38)
+            return report(lua, false, "lean_fixture_start_schema_unavailable");
+        // Build the scalar value with the action's reflected Boolean or Axis1D type.
+        if (!factory.bind(action, raw->GetStruct().Get(), 1))
+            return report(lua, false, "lean_fixture_value_factory_unavailable");
+        alignas(std::max_align_t) std::array<std::byte, 0x40> generated{};
+        alignas(std::max_align_t) std::array<std::byte, 0x48> arguments{};
+        StructParameter made(factory.output, generated.data());
+        StructParameter value(raw, arguments.data());
+        factory.make_value(generated.data(), 1.0);
+        raw->CopyCompleteValue(raw->ContainerPtrToValuePtr<void>(arguments.data()),
+            factory.output->ContainerPtrToValuePtr<void>(generated.data()));
+        source->SetObjectPropertyValue(arguments.data(), action);
+        subsystem->ProcessEvent(function, arguments.data());
+        return report(lua, true, "started");
+    }
 
     int probe_radio_playback(const Lua& lua)
     {
@@ -2142,8 +2235,11 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishDispatchNativeSubwayValve", dispatch_valve);
         mosby_station_input::register_lua(lua);
         mindcore_input::register_lua(lua);
-        if (env_flag("SILVERFISH_COOP_HEADLESS") && env_flag("SILVERFISH_COOP_TITLE_FIXTURES"))
+        if (lean_fixture_enabled())
+        {
             lua.register_function("SilverfishProbeNativeRadioPlayback", probe_radio_playback);
+            lua.register_function("SilverfishProbeContinuousLean", probe_continuous_lean);
+        }
         if (fixture_enabled()) lua.register_function("SilverfishProbeNativeInteractInput", probe);
     }
 

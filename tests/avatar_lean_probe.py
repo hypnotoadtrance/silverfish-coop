@@ -59,7 +59,7 @@ async def capture(seat, side, local, remote, *, drive):
             header = lines[0].split("\t") if lines else []
             if header[:2] == [ticket, "error"]:
                 raise AssertionError(" ".join(header[2:]))
-            if header[:2] == [ticket, "ok"] and len(header) == 15 and len(lines) == 1 + int(header[6]):
+            if header[:2] == [ticket, "ok"] and len(header) == 16 and len(lines) == 1 + int(header[6]):
                 assert header[2:5] == [side, local, remote] and header[10] == drive, header
                 rows = []
                 for line in lines[1:]:
@@ -73,7 +73,8 @@ async def capture(seat, side, local, remote, *, drive):
                 assert all(gap > 0 for gap in gaps), rows
                 injections, started, completed = map(int, header[7:10])
                 return {"caller": local, "observer_for": remote, "side": side, "drive": drive, "samples": rows,
-                        "injections": injections, "stock_started": started, "stock_completed": completed,
+                        "injections": injections, "input_method": header[15],
+                        "stock_started": started, "stock_completed": completed,
                         "stock_triggered": int(header[11]),
                         "started_requested_degrees": float(header[12]) if header[12] != "-" else None,
                         "started_limit_degrees": float(header[13]) if header[13] != "-" else None,
@@ -89,7 +90,8 @@ def input_diagnostic(result):
         return {"verified": False, "status": "fixture_unavailable", "reason": str(result)}
     held = [row for row in result["samples"] if row["phase"] == "held"]
     sign = -1 if result["side"] == "left" else 1
-    if result["injections"] < 8:
+    minimum_injections = 1 if result["input_method"] == "continuous" else 8
+    if result["injections"] < minimum_injections:
         status = "insufficient_input_samples"
     elif not (result["stock_started"] >= 1 and result["stock_completed"] >= 1):
         status = "stock_events_unobserved"
