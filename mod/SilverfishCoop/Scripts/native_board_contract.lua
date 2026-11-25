@@ -67,11 +67,12 @@ local function shape(save, row)
     if row[keys.kind] ~= 2 or not int(step) or not int(final) or final < 1 or not int(cash) or cash < 0
         or not int(xp) or xp < 0 or not int(row[keys.redeem]) or len(row[keys.items]) ~= 0
         or len(row[keys.chained]) ~= 0 or not ping_supported
-        or not ((quantity == 0 and consumed == false) or (quantity == 1 and consumed == true))
+        or not (quantity == 0 and type(consumed) == "boolean" or quantity == 1 and consumed == true)
         or not row[keys.flags] or #row[keys.flags] > 16 or not row[keys.rep] or #row[keys.rep] > 16 then
         refuse("specialized_recipe")
     end
-    local result = {step = step, final = final, cash = cash, xp = xp, objective = quantity == 1 and row[keys.objective][1] or nil}
+    local result = {step = step, final = final, cash = cash, xp = xp,
+        objective = quantity == 1 and row[keys.objective][1] or nil, empty_consumption = quantity == 0 and consumed}
     if quantity == 1 then
         if not valid(result.objective) then refuse("objective_class_unqualified") end
         result.path = result.objective:GetFullName():match("^BlueprintGeneratedClass (/Game/[%w_./%-]+)$")
@@ -109,6 +110,23 @@ end
 
 local function balances(context)
     return wire.stock_flag(context.instance, "Player_Cash"), wire.stock_flag(context.instance, "Player_Xp")
+end
+
+local function turn_in(context, library, active, empty_consumption)
+    if empty_consumption then
+        -- An empty list has nothing to consume. Stock's item check returns false for it.
+        -- Use the normal stock payout and restore the original field on the active row.
+        active[keys.consumed] = false
+    end
+    local out = {}
+    local ok = pcall(library.TurnIn_Quest, library, context.key, context.instance, true, context.host, out, out)
+    if empty_consumption then
+        local after = wire.stock_row(context.save.ActiveQuests, context.key)
+        if not after then return false end
+        after[keys.consumed] = true
+        if wire.stock_row(context.save.ActiveQuests, context.key)[keys.consumed] ~= true then return false end
+    end
+    return ok and out.Success == true and not valid(out.ConfirmationPopup)
 end
 
 local function expected_effects(context, row)
@@ -333,11 +351,7 @@ function board_contract.command(fields, state, phase)
             context.instance:AddQuest_ByName(context.key)
             context.board:Configure_Stock()
         else
-            if not guest_deposit then
-                local out = {}
-                library:TurnIn_Quest(context.key, context.instance, true, context.host, out, out)
-                if out.Success ~= true or valid(out.ConfirmationPopup) then return end
-            end
+            if not guest_deposit and not turn_in(context, library, active, contract.empty_consumption) then return end
             if has_deposit then
                 local observed = backpack_objectives(context.receiving_save, contract, guest_deposit)
                 if outcome.remaining > 0 then

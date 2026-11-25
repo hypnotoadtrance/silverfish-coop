@@ -4123,6 +4123,21 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
         return receipt
 
     followup_quest = "Asn_Panzer_01"
+    photo_quest = "Photo_BrnzQuarry"
+    photo_selection = native_board_contract.menu_target(guest_frame["zone_epoch"], OBSERVATORY_BOUNTY_BOARD, photo_quest)
+    assert await command(host, "add-photo-contract") == "1"
+    assert photo_quest not in (await board_catalog())["turnins"]
+    incomplete = await submit(guest_run, "native-quest-turnin", target=photo_selection)
+    assert not incomplete["ok"] and incomplete["error"] == "stock_board_contract_objective_not_complete", incomplete
+    assert await command(host, "complete-photo-objective") == "2"
+    photo_receipt = await settle(photo_quest, 100)
+    assert "objective_guid" not in photo_receipt
+    assert await command(host, "photo-consumption-field") == "true"
+    replay = await submit(guest_run, "native-quest-turnin", target=photo_selection)
+    assert replay["ok"] and replay["effect"] == "native_quest_already_settled" and replay["wallet"] == photo_receipt["wallet"]
+    wallet_after = await wait_resident_status(host_run, lambda frame: type(frame.get("game", {}).get("native_wallet")) is int)
+    assert wallet_after["game"]["native_wallet"] == photo_receipt["wallet"]
+    assert campaign_save_hashes(host.campaign) == checkpoint
     objective_step = int(await command(host, "stage-turnin-followup", followup_quest))
     assert objective_step > 0
     inspected = (await host.bridge.command(native_board_contract.COMMAND, "turnin", "inspect",
@@ -4168,6 +4183,7 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
                                       "accepted": quest, "journal_step": int(observed[0]),
                                       "tracked_turnins": tracked_quests, "followup_turnin": followup_receipt,
                                       "stale_turnin_refused_before_stock_callback": True,
+                                      "empty_deposit_turnin": photo_receipt, "photo_objective_staged": True,
                                       "campaign_checkpoint_unchanged": True}}
 
 

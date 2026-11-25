@@ -101,10 +101,13 @@ package.loaded.native_wire_quest = {
     stock_row = function(rows, key) return rows[key] end,
     stock_flag = function(_, key) return host_flags[key] or 0, host_flags[key] ~= nil end,
 }
+local fail_stock_call = false
 local function stock_finalize(_, key, instance, no_confirmation, host, out)
     assert(instance == game_instance and host == player and no_confirmation)
     local contract = assert(store.ActiveQuests[key])
-    if contract[objective]:GetArrayNum() > 0 and contract[consumed] then
+    if fail_stock_call then error("stock callback interrupted") end
+    if contract[consumed] then
+        if contract[objective]:GetArrayNum() == 0 then out.Success = false; return end
         assert(store.PlayerBackpack[1] == portion)
         store.PlayerBackpack = array({})
     else
@@ -250,11 +253,23 @@ assert(host_flags.Player_Cash == 3818)
 
 local photo = "Photo_BrnzQuarry"
 local photo_recipe = quest(0, nil, 100)
-photo_recipe[consumed], photo_recipe[step] = true, 2
+photo_recipe[consumed] = true
 store.ActiveQuests[photo] = photo_recipe
 assert(catalog()[8] == "-")
-denied("specialized_recipe", "turnin", "inspect", photo)
-assert(photo_recipe[step] == 2 and host_flags.Player_Cash == 3818)
+denied("objective_not_complete", "turnin", "inspect", photo)
+photo_recipe[step] = 2
+assert(catalog()[8] == photo)
+action("turnin", "inspect", photo)
+assert(proof()[18] == "-" and photo_recipe[consumed] and host_flags.Player_Cash == 3818)
+fail_stock_call = true
+local applied, failure = pcall(action, "turnin", "apply", photo, "-")
+assert(not applied and failure == "mutation_unverified_stock_board_contract", failure)
+assert(photo_recipe[step] == 2 and photo_recipe[consumed] and host_flags.Player_Cash == 3818)
+fail_stock_call = false
+action("turnin", "apply", photo, "-")
+assert(proof()[10] == -10 and photo_recipe[consumed] and host_flags.Player_Cash == 3918)
+action("turnin", "inspect", photo)
+assert(proof()[8] == "already" and host_flags.Player_Cash == 3918)
 assert(store.PlayerBackpack[1] == host_stack and bag.PlayerBackpack[1] == row_item and #stock_pings == 1)
 
 local missing, display = "Note_Farmhouse", "Note_FarmHouse"

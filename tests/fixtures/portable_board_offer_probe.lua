@@ -14,6 +14,7 @@ local consumes_items = "ObjectiveItemsAreConsumed_61_4669760345DABF3B531CBF8AFAB
 local chained = "Add_Quests_OnComplete_66_06ACA8C44193595C2DFAD8A85B7FC8B9"
 local track = "TrackFlag_ForStep_111_31112EA54B887C1D869E1291BC819774"
 local ping = "GlobalPing_OnTurnIn_108_68CA1968452BFC635A107EBB1EE3AA7F"
+local photo_key = "Photo_BrnzQuarry"
 local tracked = {
     Sab_Fuel_01 = {flag = "Kill_ForestTank", threshold = 7, progress = 6},
     Sab_Factory = {flag = "PB_Factory_Kill", threshold = 5, progress = 4},
@@ -109,6 +110,24 @@ local function run(action, quest)
             followup_hook = true
         end
         return tostring(row[final])
+    end
+    if action == "add-photo-contract" or action == "complete-photo-objective" or action == "photo-consumption-field" then
+        local instance = world.OwningGameInstance
+        assert(pawn:HasAuthority() and same(pawn.Save, instance.SaveSlot_Ref))
+        local save, key = pawn.Save, FName(photo_key, EFindName.FNAME_Find)
+        if action == "add-photo-contract" then
+            assert(not save.ActiveQuests:Contains(key))
+            instance:AddQuest_ByName(key)
+        end
+        local row = save.ActiveQuests:Find(key):get()
+        assert(row and row[objective_items]:GetArrayNum() == 0 and not set_name(row[track]))
+        if action == "photo-consumption-field" then return tostring(row[consumes_items]) end
+        assert(row[step] == 1 and row[consumes_items] == true)
+        if action == "complete-photo-objective" then
+            row[step] = row[final]
+            assert(save.ActiveQuests:Find(key):get()[step] == row[final])
+        end
+        return tostring(row[step])
     end
     if action == "turnin-followups" then
         assert(pawn:HasAuthority())
