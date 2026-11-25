@@ -2,6 +2,7 @@
 
 import asyncio
 import math
+import time
 
 from live_multi_smoke import campaign_save_hashes
 from portable_guest_world_start import resident_events, wait_resident_status
@@ -22,6 +23,9 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
 
     async def weather(seat, action):
         return (await probe(seat.bridge, "weather-travel", action)).strip()
+
+    async def warning_profile(action):
+        return (await probe(guest.bridge, "crossroads-profile", action, reply_end="|end")).removesuffix("|end")
 
     initial = await wait_resident_status(guest_run, lambda f: f["game"]["map"] == OBSERVATORY
                                          and f["game"].get("native_world_view", {}).get("weather_verified") is True)
@@ -78,6 +82,9 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
         before = await weather(guest, "localrain")
         assert math.isclose(float(before.split(";")[0]), .85, abs_tol=.001), before
 
+        if profile:
+            assert await warning_profile("arm") == "armed"
+        warning_started = time.time()
         await weather(host, "wet")
         wet = await applied(.55)
         async with asyncio.timeout(5):
@@ -89,6 +96,19 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
         dry = await applied(0)
         assert await weather(guest, "particles") == "0"
         assert await weather(guest, "siren") == "1"
+        if profile:
+            from portable_crossroads_profile import read_comparison
+
+            async with asyncio.timeout(7):
+                while (sample := await warning_profile("read")) == "sampling":
+                    await asyncio.sleep(.2)
+            performance["warning_sources"] = read_comparison(sample)["tick_sources"]
+        guest_now = await wait_resident_status(guest_run, lambda frame: frame.get("state") == "connected")
+        matching = [event for event in await resident_events(guest_run, guest_now)
+                    if event.get("event") == "native_weather_siren_played" and event.get("cue") == 3
+                    and event.get("time_unix", 0) >= warning_started]
+        warning, = matching
+        warning = {**warning, "fixture_request_to_playback_ms": round((warning["time_unix"] - warning_started) * 1000)}
         local = (await weather(guest, "read")).split(";")
         assert len(local) == 5 and local[1:3] == ["false", "false"] and all(float(v) == 0 for v in local[3:]), local
         assert clear["epoch"] == wet["epoch"] == dry["epoch"] and clear["epoch"] != initial["zone_epoch"]
@@ -100,7 +120,8 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
     result = {"stock_weather_travel": {"clear": clear, "wet": wet, "dry": dry,
                                       "departure": departure, "exit_mailboxes": 0, "checkpoint_updated": True,
                                       "guest_local_rain_before": before, "guest_local_rain_suppressed": local,
-                                      "guest_stock_siren_callbacks": 1, "guest_wet_particle_count": int(wet_particles)}}
+                                      "guest_stock_siren_callbacks": 1, "siren_receipt": warning,
+                                      "guest_wet_particle_count": int(wet_particles)}}
     if performance:
         result["crossroads_profile"] = performance
     return result

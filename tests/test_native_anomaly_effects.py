@@ -9,9 +9,10 @@ from tools.silverfish.native_anomaly_effects import (
     project_fixed_explosives, project_observer_opacity, project_sensors, valid_acid_pools,
 )
 from tools.silverfish.native_damage_feedback import Playback as HurtPlayback
+from tools.silverfish.runtime import Bridge
 from tools.silverfish.service import Host
 from tools.silverfish.native_weather_view import (
-    LIGHTNING, LIGHTNING_PLAYBACK, LightningPlayback, SirenPlayback,
+    LIGHTNING, LIGHTNING_PLAYBACK, SIREN_PLAY, SIREN_REPLY, LightningPlayback, SirenPlayback,
     lightning_frame, parse_lightning, parse_lightning_playback,
 )
 
@@ -337,6 +338,28 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
                           if call.args == ("native_weather_siren_played",)], [2])
         await playback.sync(bridge, control, game, [[4, first, 4, 3]], epoch, snapshot_age=4)
         self.assertEqual(bridge.command.await_count, 3)
+
+    async def test_compact_siren_reply_checks_visit_and_keeps_the_current_snapshot(self):
+        epoch, nonce = "a" * 32, "b" * 32
+        area, pawn, source = "Crossroads", "local guest pawn", "/Game/Crossroads:Siren_1"
+        request = (nonce, SIREN_PLAY, epoch, "3", source, "2", "10")
+        raw = f"{SIREN_REPLY}\t1\t{nonce}\t{area}\t{pawn}\t{epoch}\t3\taccepted\tstock weather siren played\n"
+        result = Bridge._local_siren_reply(raw, request)
+        game = {"state": "connected", "map": area, "pawns": {"local": {"name": pawn}},
+                "native_world_view": {"mode": "applied", "map": area, "epoch": epoch}}
+        bridge, control = Mock(command=AsyncMock(return_value=result)), Mock()
+        playback = SirenPlayback()
+        warnings = [[3, source, 2, 10.0]]
+        self.assertIs(await playback.sync(bridge, control, game, warnings, epoch), game)
+        self.assertIs(await playback.sync(bridge, control, game, warnings, epoch), game)
+        bridge.command.assert_awaited_once()
+        control.event.assert_called_once_with("native_weather_siren_played", cue=2, source=source, serial=3,
+                                              local_reply_bytes=len(raw))
+        other = {**game, "pawns": {"local": {"name": "replacement pawn"}}}
+        self.assertIs(await SirenPlayback().sync(bridge, control, other, warnings, epoch), other)
+        self.assertEqual(control.event.call_args.args, ("native_weather_siren_unavailable",))
+        with self.assertRaises(RuntimeError):
+            Bridge._local_siren_reply(raw.replace(epoch, "c" * 32), request)
 
     async def test_sensor_projection_only_updates_changed_placed_actors_in_the_current_visit(self):
         epoch = "b" * 32

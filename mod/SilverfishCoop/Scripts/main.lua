@@ -1830,6 +1830,17 @@ local function tick(fields, pending, periodic)
             native_guest_clock.command_reply(fields, state, current_phase, sequence, status_row))
         return true
     end
+    if fields and pending and fields[2] == "native-weather-siren-play" and not periodic
+        and current_phase == "connected" and world_view_enabled
+        and status_publication.compact() and status_publication.steady(state, current_phase) then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        local accepted, message = pcall(run_command, fields, state, current_phase)
+        local reply = status_row("native-weather-siren-reply", 1, fields[1], state.map, state.local_pawn.name,
+            fields[3] or "-", fields[4] or "-", accepted and "accepted" or "error", message)
+        SilverfishPublishLocalBridgeReply(pending.ticket, reply .. "\n")
+        return true
+    end
     if fields and pending and (fields[2] == "native-world-view-apply-local" or fields[2] == "native-weather-ambience-apply")
         and not periodic and current_phase == "connected"
         and world_view_enabled and status_publication.compact() and status_publication.steady(state, current_phase)

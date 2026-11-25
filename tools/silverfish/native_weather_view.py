@@ -8,6 +8,9 @@ import time
 from .native_guest_drop_record import valid_id, valid_position
 
 KEY = "native_weather_sirens"
+SIREN_PLAY = "native-weather-siren-play"
+SIREN_REPLY = "native-weather-siren-reply"
+SIREN_LOCAL_PAWN = "native_weather_siren_local_pawn"
 LIGHTNING = "native_weather_lightning"
 LIGHTNING_TAG = "native-weather-lightning"
 LIGHTNING_PLAY = "native-weather-lightning-play"
@@ -178,8 +181,12 @@ class SirenPlayback:
             if retry_serial == serial and now < retry_at:
                 continue
             try:
-                result = await bridge.command("native-weather-siren-play", epoch, str(serial), source,
+                result = await bridge.command(SIREN_PLAY, epoch, str(serial), source,
                                               str(cue), str(round(remaining, 3)), timeout=1.5)
+                local_pawn = result.get(SIREN_LOCAL_PAWN)
+                if local_pawn is not None and (result.get("map") != scope[0]
+                        or game.get("pawns", {}).get("local", {}).get("name") != local_pawn):
+                    raise RuntimeError("The siren playback receipt belongs to another guest or visit")
             except (OSError, RuntimeError) as error:
                 delay = min(delay * 2, 4) if retry_serial == serial else 0.5
                 self.retry_by_source[source] = serial, time.monotonic() + delay, delay
@@ -192,6 +199,8 @@ class SirenPlayback:
                 self.last_by_source[source] = serial
                 self.retry_by_source.pop(source, None)
                 if receipt == "stock weather siren played":
-                    control.event("native_weather_siren_played", cue=cue, source=source, serial=serial)
-            game = result
+                    size = {"local_reply_bytes": result["local_reply_bytes"]} if local_pawn is not None else {}
+                    control.event("native_weather_siren_played", cue=cue, source=source, serial=serial, **size)
+            if local_pawn is None:
+                game = result
         return game

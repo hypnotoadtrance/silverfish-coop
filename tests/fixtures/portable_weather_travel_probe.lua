@@ -7,7 +7,7 @@ local rain_class = "/Game/Classes/Actors/Rain_BP.Rain_BP_C"
 local rain_asset = "NiagaraSystem /Game/Assets/PFX/NI_Rain_01.NI_Rain_01"
 local siren_hook = "/Game/Classes/Actors/AlarmSiren_BP.AlarmSiren_BP_C:StormSiren"
 local cue_path = "/Game/Assets/Sounds/CUEs/Alarm_Cues/StormSiren_03_Cue.StormSiren_03_Cue"
-local last, monitored, heard, host_clock
+local last, monitored, heard, host_clock, siren_hook_installed
 
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -19,14 +19,15 @@ local function find(path)
 end
 
 local function observe_siren(world)
-    if monitored then return end
+    if not same(monitored, world) then monitored, heard = world, 0 end
+    if siren_hook_installed then return end
     if not valid(StaticFindObject(siren_hook)) then return end
-    monitored, heard = world, 0
     RegisterHook(siren_hook, function(context, cue)
         local actor, sound = context:get(), cue:get()
         if valid(actor) and same(actor:GetWorld(), monitored) and valid(sound)
             and sound:GetFullName() == "SoundCue " .. cue_path then heard = heard + 1 end
     end)
+    siren_hook_installed = true
 end
 
 local function rain_state(day)

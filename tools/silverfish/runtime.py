@@ -3738,6 +3738,19 @@ class Bridge:
                 "ack": {"id": ack[1], "result": ack[2], "message": ack[3]}, native_storm_ambience.GUEST: proof}
 
     @staticmethod
+    def _local_siren_reply(raw: str, fields: tuple[str, ...]) -> dict:
+        row = raw[:-1].split("\t") if len(raw) <= 2048 and raw.endswith("\n") and "\n" not in raw[:-1] else []
+        tag = native_weather_view.SIREN_REPLY
+        if (len(row) != 9 or row[:3] != [tag, "1", fields[0]]
+                or len(fields) != 7 or row[5:7] != list(fields[2:4]) or not 0 < len(row[4]) <= 512):
+            raise RuntimeError("The siren playback receipt did not match the request")
+        _, _, nonce, area, pawn, _, _, result, message = row
+        if result != "accepted":
+            raise RuntimeError(message or "The stock siren playback was refused")
+        return {"state": "connected", "map": area, native_weather_view.SIREN_LOCAL_PAWN: pawn,
+                "ack": {"id": nonce, "result": result, "message": message}, "local_reply_bytes": len(raw.encode("utf-8"))}
+
+    @staticmethod
     def _local_guest_clock_reply(raw: str, fields: tuple[str, ...]) -> dict:
         rows = [line.split("\t") for line in raw.splitlines()] if len(raw) <= 2048 and raw.endswith("\n") else []
         if (not rows or len(rows[0]) != 6 or rows[0][:3] != [native_guest_clock.REPLY, "1", fields[0]]
@@ -3831,6 +3844,8 @@ class Bridge:
                 return self._local_world_view_reply(raw, fields)
             if action == native_storm_ambience.COMMAND and raw.startswith(native_storm_ambience.REPLY + "\t"):
                 return self._local_storm_ambience_reply(raw, fields)
+            if action == native_weather_view.SIREN_PLAY and raw.startswith(native_weather_view.SIREN_REPLY + "\t"):
+                return self._local_siren_reply(raw, fields)
             if (action in (native_stock_door.DISPATCH, native_stock_switch.PROJECT, *native_stock_switch.ACTIONS)
                     and raw.startswith("native-stock-interaction-reply\t")):
                 return self._local_stock_interaction_reply(raw, fields)
