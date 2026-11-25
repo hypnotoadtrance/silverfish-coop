@@ -3251,12 +3251,15 @@ namespace
         int occupied = -1;
         for (int index = 0; index < quick_slots; ++index)
         {
-            if (index == selected || (requested_slot >= 0 && index != requested_slot) ||
+            if ((requested_slot >= 0 && index != requested_slot) ||
                 !accepts_stock_quick_slot(index, type, item_kind)) continue;
             const auto* row = equipment.GetRawPtr(index);
             const auto id = inventory.identity(row);
             auto* current_class = inventory.row_class(row);
-            if (!current_class && id == Guid{})
+            const bool empty = !current_class && id == Guid{};
+            // A fresh character can select the melee slot before any item is held.
+            if (index == selected && (!empty || live(object(context.pawn, STR("EquipedItem"))))) continue;
+            if (empty)
             {
                 target = index;
                 break;
@@ -3322,6 +3325,11 @@ namespace
                     return result(lua, false, "native_inventory_equip_refused_rolled_back");
             }
             return result(lua, false, "mutation_unverified_native_inventory_equip");
+        }
+        if (target == selected)
+        {
+            EquipCall call;
+            if (call.valid(context.pawn)) call.invoke(context.pawn, target);
         }
         result(lua, true, "stored");
         lua.set_integer(target);

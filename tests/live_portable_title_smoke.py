@@ -5038,6 +5038,8 @@ async def verify_stock_unequip(first, second, evidence):
         assert len(ids) == len(set(ids)) == 3 and all(re.fullmatch(r"[0-9A-F]{32}", guid) for guid in ids)
         authority = unequip_seat(await portable_probe_command(host.bridge, probe, f"remote-read\t{pawn}"))["rows"]
         assert [row["guid"] for row in authority] == ids
+        melee = await portable_probe_command(host.bridge, probe, f"remote-melee-seed\t{pawn}")
+        assert re.fullmatch(r"[0-9A-F]{32}", melee), melee
         # TAB can reuse the authenticated join view before the next ordinary inventory poll.
         # Wait for the newly seeded exact slots before the screen builds its quick-slot cards.
         projection = {"expected": ids}
@@ -5046,11 +5048,17 @@ async def verify_stock_unequip(first, second, evidence):
             while True:
                 seen = (await portable_probe_command(guest.bridge, probe, "guest-projection")).split(",")
                 projection["observed"] = seen
-                if seen == ids:
+                if seen == ids and melee in (await portable_probe_command(guest.bridge, probe, "guest-worn-backpack")).split(","):
                     break
                 await asyncio.sleep(.25)
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
         await leaves_stock_open()
+        assert await portable_probe_command(guest.bridge, probe, f"guest-equip-melee\t{melee}") == "pressed"
+        stored = await witness("native_stock_inventory_action", native_inventory.STORE_KEY, melee)
+        assert stored[native_inventory.STORE_KEY]["slot"] == 0, stored
+        evidence["guest_melee_equip"] = {"receipt": stored, "local_move": await local_move(stored, "equip", melee, 0)}
+        assert await portable_probe_command(guest.bridge, probe, f"guest-melee-held\t{melee}") == "held"
+        assert await portable_probe_command(host.bridge, probe, f"remote-melee-held\t{pawn}") == "held"
         guest_before = unequip_seat(await portable_probe_command(guest.bridge, probe, "guest-ready\t" + ",".join(ids)))
         assert guest_before["rows"] == authority
         selection = await witness("native_guest_equipment_selected", "native_guest_weapon", ids[0])
@@ -5062,7 +5070,9 @@ async def verify_stock_unequip(first, second, evidence):
         assert canceled == host_before
         current = await wait_resident_status(guest_run, lambda row: row.get("state") == "connected")
         entries = await resident_events(guest_run, current)
-        assert all(row.get("event") != "native_stock_inventory_action" for row in entries), entries
+        assert [row["operation_id"] for row in entries if row["event"] == "native_stock_inventory_action"] == [
+            stored["operation_id"]
+        ], entries
         await portable_probe_command(guest.bridge, probe, "guest-press-inactive")
         inactive = await witness("native_stock_inventory_action", "native_inventory_unequip", ids[2])
         assert (inactive["native_inventory_unequip"]["slot"], inactive["stock_inventory_proof"]) == (

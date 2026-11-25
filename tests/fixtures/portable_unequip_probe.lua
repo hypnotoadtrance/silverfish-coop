@@ -21,6 +21,7 @@ local worn_classes = {
     "/Game/Classes/Armor_Items/Helm_FaceMask.Helm_FaceMask_C",
     "/Game/Classes/Armor_Items/Armor_LabCoat.Armor_LabCoat_C",
 }
+local melee_class = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
 local stored_rounds, live_rounds = 5, 3
 local seed, remote_seed, last
 
@@ -98,7 +99,6 @@ local function select_pistol(pawn, ids)
     for index, spec in ipairs(specs) do
         assert(identity(save.PlayerEquipment[spec.index]) == ids[index], "fixture expected stock equipment projection")
     end
-    assert(not valid(pawn.EquipedItem), "fixture expected empty hands before stock selection")
     pawn:Equip_NextItem(specs[1].index - 1, false)
     assert(item_actor(pawn, specs[1]) and save.PlayerEquipIndex == specs[1].index - 1,
         "fixture stock pistol selection did not equip")
@@ -173,7 +173,7 @@ local function drop_helmet(pawn, guid)
     menu:BndEvt__ItemContextMenu_Button_Drop_K2Node_ComponentBoundEvent_6_Pressed__DelegateSignature()
 end
 
-local function equip_worn(pawn, guid, drag_to_chest)
+local function backpack_card(pawn, guid)
     local stack = pawn.Controller.MenuStack
     local screen = widget_at(stack, stack:GetArrayNum())
     local manager = valid(screen) and screen.ItemManager
@@ -183,15 +183,25 @@ local function equip_worn(pawn, guid, drag_to_chest)
         local candidate = widget_at(cards, index)
         if valid(candidate) and identity(candidate.Item) == guid then card = candidate; break end
     end
-    assert(card and same(card.InventoryWidget, screen.BackpackPanel), "fixture wearable card unavailable")
+    assert(card and same(card.InventoryWidget, screen.BackpackPanel), "fixture backpack card unavailable")
+    return manager, card
+end
+
+local function drag_from_backpack(pawn, guid, index)
+    local manager, card = backpack_card(pawn, guid)
+    manager.HoveredCard = card
+    manager:InitiateItemTake()
+    manager:FinalTakeItem()
+    assert(manager.HoldingItem and identity(manager.HeldItem) == guid, "fixture did not pick up the exact backpack item")
+    manager:InsertItem(widget_at(manager.EquipSlots, index), 1)
+    assert(not manager.HoldingItem, "stock equipment drag did not release the cursor")
+end
+
+local function equip_worn(pawn, guid, drag_to_chest)
     if drag_to_chest then
-        manager.HoveredCard = card
-        manager:InitiateItemTake()
-        manager:FinalTakeItem()
-        assert(manager.HoldingItem and identity(manager.HeldItem) == guid, "fixture did not pick up the chest armor")
-        manager:InsertItem(widget_at(manager.EquipSlots, 10), 1)
-        assert(not manager.HoldingItem, "stock chest armor drag did not release the cursor")
+        drag_from_backpack(pawn, guid, 10)
     else
+        local manager, card = backpack_card(pawn, guid)
         manager:OpenContextMenu(card)
         local menu = manager.ItemContextMenu
         assert(same(menu["Item Card"], card) and valid(menu.Button_Equip) and menu.Button_Equip:IsVisible(),
@@ -199,6 +209,18 @@ local function equip_worn(pawn, guid, drag_to_chest)
         menu:BndEvt__ItemContextMenu_Button_Equip_K2Node_ComponentBoundEvent_3_Pressed__DelegateSignature()
         if menu:IsVisible() then manager:CloseContextMenu() end
     end
+end
+
+local function seed_melee(pawn)
+    local class, out = asset(melee_class), {}
+    asset(factory):MakeDefaultItem(class, pawn, out)
+    local row = out.Item or out
+    assert(same(row[item_class], class), "fixture melee creation failed")
+    local save = pawn.Save
+    local index = save.PlayerBackpack:GetArrayNum() + 1
+    assert(identity(save.PlayerEquipment[1]) == "-", "fixture expected the stock melee slot empty")
+    save.PlayerBackpack[index] = row
+    return identity(save.PlayerBackpack[index])
 end
 
 local function exercise(pawn, ids)
@@ -241,7 +263,7 @@ local function run(action, argument)
         and valid(control) and control:IsLocalController() and same(control.Pawn, pawn)
         and same(pawn.Save, world.OwningGameInstance.SaveSlot_Ref), "fixture exact private player scope unavailable")
     if action == "remote-seed" or action == "remote-ready" or action == "remote-ammo" or action == "remote-read"
-        or action == "remote-worn-seed" then
+        or action == "remote-worn-seed" or action == "remote-melee-seed" or action == "remote-melee-held" then
         assert(not guest and #driver.ClientConnections == 1, "one enrolled guest required")
         local name = argument and argument:match("^Player_FP_C (.+)$")
         local remote = name and StaticFindObject(name)
@@ -255,7 +277,16 @@ local function run(action, argument)
         end
         assert(remote_seed and same(remote_seed.pawn, remote) and same(remote_seed.save, remote.Save),
             "fixture authoritative detached owner changed")
-        if action == "remote-worn-seed" then
+        if action == "remote-melee-seed" then
+            assert(not remote_seed.melee, "fixture melee item already seeded")
+            remote_seed.melee = seed_melee(remote)
+            return remote_seed.melee
+        elseif action == "remote-melee-held" then
+            assert(remote_seed.melee and identity(remote.Save.PlayerEquipment[1]) == remote_seed.melee
+                and remote.Save.PlayerEquipIndex == 0 and item_actor(remote, {class = melee_class}),
+                "fixture expected the exact Old Pipe equipped on the host")
+            return "held"
+        elseif action == "remote-worn-seed" then
             assert(not remote_seed.worn, "fixture worn items already seeded")
             local save, ids = remote.Save, {}
             assert(worn_state(remote) == "-,-", "fixture expected unoccupied worn slots")
@@ -302,10 +333,20 @@ local function run(action, argument)
         return identity(pawn.Save.PlayerHelmet)
     elseif action == "baseline" then
         assert(not guest and #driver.ClientConnections == 0 and not seed, "fixture needs its private solo host")
-        seed = {pawn = pawn, ids = make_rows(pawn)}
-        select_pistol(pawn, seed.ids)
         assert(control.MenuStack:GetArrayNum() == 0, "fixture expected closed solo inventory")
         local input = asset("/Game/Classes/Player/Player_Inputs/IA_Inventory.IA_Inventory")
+        local melee = seed_melee(pawn)
+        local initial = pawn.Save.PlayerEquipIndex
+        assert(initial == 0 and not valid(pawn.EquipedItem), "fixture expected the initially selected empty melee slot")
+        control:InpActEvt_IA_Inventory_K2Node_EnhancedInputActionEvent_0({}, 0, 0, input)
+        drag_from_backpack(pawn, melee, 1)
+        assert(identity(pawn.Save.PlayerEquipment[1]) == melee, "vanilla did not accept the Old Pipe in the first slot")
+        assert(item_actor(pawn, {class = melee_class}), "vanilla did not draw the newly equipped melee weapon")
+        unequip(pawn, 1, melee, 1)
+        assert(identity(pawn.Save.PlayerEquipment[1]) == "-", "vanilla did not clear the melee slot")
+        control:CloseMenu({})
+        seed = {pawn = pawn, ids = make_rows(pawn)}
+        select_pistol(pawn, seed.ids)
         control:InpActEvt_IA_Inventory_K2Node_EnhancedInputActionEvent_0({}, 0, 0, input)
         local result = exercise(pawn, seed.ids)
         control:CloseMenu({})
@@ -353,11 +394,21 @@ local function run(action, argument)
             tostring(pistol:HasAuthority()), tostring(same(pistol.Instigator, pawn)),
             tostring(pistol.HeldByPlayer), tostring(pistol:IsActorBeingDestroyed()),
         }, ",")
+    elseif action == "guest-equip-melee" then
+        assert(guest and not seed and pawn.Save.PlayerEquipIndex == 0 and not valid(pawn.EquipedItem)
+            and identity(pawn.Save.PlayerEquipment[1]) == "-", "fixture expected the initially selected empty melee slot")
+        drag_from_backpack(pawn, argument, 1)
+        return "pressed"
+    elseif action == "guest-melee-held" then
+        assert(guest and not seed, "fixture guest owner changed")
+        assert(identity(pawn.Save.PlayerEquipment[1]) == argument and pawn.Save.PlayerEquipIndex == 0
+            and item_actor(pawn, {class = melee_class}), "fixture expected the stock Old Pipe in hand")
+        return "held"
     elseif action == "guest-worn-state" then
         assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")
         return worn_state(pawn)
     elseif action == "guest-worn-backpack" then
-        assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")
+        assert(guest and (not seed or same(pawn, seed.pawn)), "fixture guest owner changed")
         local pack, result = pawn.Save.PlayerBackpack, {}
         for index = 1, pack:GetArrayNum() do result[index] = identity(pack[index]) end
         return table.concat(result, ",")
