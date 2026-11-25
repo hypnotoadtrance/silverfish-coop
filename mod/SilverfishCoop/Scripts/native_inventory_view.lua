@@ -725,6 +725,7 @@ local function preview_stock_layout(action)
     action.displayed = action.save.PlayerBackpack:GetArrayNum()
     if slot then action.expected = slot + 1 end
     local screen = action.screen
+    if action.entry == "split" then screen.ItemManager:CancelSplitStack() end
     if not action.sort then screen.ItemManager:CloseContextMenu() end
     screen.BackpackPanel:FullRefresh()
     if slot then
@@ -1110,6 +1111,8 @@ function inventory_view.command(fields, state, phase)
                         and stock_cards(screen, stock_session.save, source, before - amount)
                         and stock_cards(screen, stock_session.save, pending.layout_preview, amount),
                         "stock split did not display both stacks before yielding")
+                    assert(not manager.IsSplittingStack and not manager.SplitStackPopup:IsVisible(),
+                        "stock split did not dismiss the popup before yielding")
                     return pending.layout_preview
                 end
             end

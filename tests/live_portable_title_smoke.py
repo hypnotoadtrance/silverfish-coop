@@ -324,6 +324,18 @@ def guest_weapon_fixture_overlay(game: Path, name: str):
     return portable_script_overlay(game, "native_guest_weapon.lua", add_weapon_fixture)
 
 
+def stock_split_refusal_overlay(game: Path):
+    fixture = (Path(__file__).with_name("fixtures") / "portable_stock_split_refusal_probe.lua").read_text(encoding="utf-8")
+
+    def add_refusal_fixture(script):
+        marker = '    if operation == "native-inventory-stock-split-click-fixture" and #fields == 5'
+        if script.count(marker) != 1:
+            raise ValueError("The replica lacks the live stock split fixture")
+        return script.replace(marker, fixture + marker, 1)
+
+    return portable_script_overlay(game, "native_inventory_view.lua", add_refusal_fixture)
+
+
 def warehouse_switch_overlay(game: Path):
     fixture = (Path(__file__).with_name("fixtures") / "portable_stock_switch_probe.lua").read_text(encoding="utf-8")
 
@@ -6068,6 +6080,34 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         split_proof = await stock_split_item(ammo, min(2, ammo["quantity"] - 1))
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
         await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
+        stale_pair = await guest.bridge.command("native-inventory-stock-split-click-fixture", bandage["guid"], "4", "1", "stale")
+        phantom = stale_pair["ack"]["message"].split(",")
+        assert len(phantom) == 2 and all(re.fullmatch(r"[0-9A-F]{32}", guid) for guid in phantom)
+        async with asyncio.timeout(15):
+            while True:
+                frame = await wait_resident_status(guest_run, lambda row: row.get("state") == "connected")
+                entries = await resident_events(guest_run, frame)
+                previews = [row for row in entries if row.get("event") == "native_stock_inventory_local_preview"
+                            and row.get("result") in phantom]
+                refused = {row["operation_id"]: row for row in entries if row.get("event") == "native_stock_inventory_rejected"}
+                if len(previews) == 2 and all(row["operation_id"] in refused for row in previews):
+                    break
+                await asyncio.sleep(.1)
+        assert [row["result"] for row in previews] == phantom
+        reasons = [refused[row["operation_id"]]["reason"] for row in previews]
+        assert "native_inventory_split_refused_stale_quantity" in reasons[0], reasons
+        assert "native_inventory_split_refused_source" in reasons[1], reasons
+        async with asyncio.timeout(15):
+            while True:
+                restored = (await guest.bridge.command("native-inventory-stock-split-click-fixture",
+                                                       bandage["guid"], *phantom, "verify"))["ack"]["message"]
+                if restored == "restored stock stack without either speculative card":
+                    break
+                assert restored == "waiting for stock split reconciliation", restored
+                await asyncio.sleep(.1)
+        reconciled = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
+        assert [row for row in reconciled["items"] if row["guid"] in [bandage["guid"], *phantom]] == [bandage]
+        assert campaign_save_hashes(host.campaign) == checkpoint
         pressed = await guest.bridge.command("native-inventory-stock-split-click-fixture", bandage["guid"], "4", "1")
         split_id, nested_id = pressed["ack"]["message"].split(",")
         assert all(re.fullmatch(r"[0-9A-F]{32}", guid) for guid in (split_id, nested_id))
@@ -6088,7 +6128,8 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
             preview = previews[receipt["operation_id"]]
             assert (preview["guid"], preview["result"]) == (proof["source_guid"], proof["new_guid"])
             assert preview["time_unix"] <= receipt["time_unix"] and "local split" in receipt["stock_inventory_proof"]
-        bandage_split = {"first": receipts[0], "nested": receipts[1], "previews": [previews[row["operation_id"]] for row in receipts]}
+        bandage_split = {"first": receipts[0], "nested": receipts[1], "previews": [previews[row["operation_id"]] for row in receipts],
+                         "refusal": {"discarded": phantom, "reasons": reasons, "proof": restored}}
         after = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
         wanted = {bandage["guid"]: 5, split_id: 3, nested_id: 1}
         assert {row["guid"]: row["quantity"] for row in after["items"] if row["guid"] in wanted} == wanted
@@ -6899,6 +6940,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if stock_split:
             proof["stock_split_overlay"] = [probes.enter_context(
                 guest_weapon_fixture_overlay(game, "portable_stock_split_probe.lua")) for game in games]
+            proof["stock_split_refusal_overlays"] = [
+                probes.enter_context(stock_split_refusal_overlay(game)) for game in games
+            ]
         if (stock_take_ammo or stock_shotguns or stock_impact_cues or stock_loki_guest or resident_held_queue
                 or stock_interaction_feedback or stock_wipe_chooser):
             proof["stock_take_ammo_overlays"] = [
