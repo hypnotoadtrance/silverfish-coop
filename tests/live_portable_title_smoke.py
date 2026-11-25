@@ -2951,9 +2951,15 @@ async def verify_dock_npc_population(host: Seat, guest: Seat, _pawn: str) -> dic
         await wait_for_population(guest, authoritative_points, "bandit=1,state=1")
         paths = await asyncio.gather(*(command(seat, f"dock-population-paths\t{authoritative_points}")
                                        for seat in (host, guest)))
-        staged = int(await command(guest, f"dock-population-arm-view\t{authoritative_points}"))
+        try:
+            async with asyncio.timeout(5):
+                while await command(guest, f"dock-population-observe-view\t{authoritative_points}") != "bandit,state":
+                    await asyncio.sleep(.05)
+        except TimeoutError as error:
+            details = await command(guest, "dock-population-weapon-details")
+            raise AssertionError(f"Guest stock NPCs did not equip both firearms. {details}") from error
         for seat in (guest, host):
-            equipped = await command(seat, "dock-population-weapons")
+            equipped = await command(seat, "dock-population-weapons\tequipped")
             assert equipped == "bandit,state", (
                 seat is host, equipped, await command(seat, "dock-population-weapon-details"),
             )
@@ -2962,12 +2968,25 @@ async def verify_dock_npc_population(host: Seat, guest: Seat, _pawn: str) -> dic
         await guest_weapons_clear()
         return {"tutorial_dock_npc_population": {"client_only_retired": 2, "host_authorities": 2,
                 "guest_replicas": 2, "host_removal_seen": True, "client_only_weapons_retired": 2,
-                "replica_weapons_retired": 2, "stock_equip_calls_on_npc_replicas": staged,
+                "replica_weapons_retired": 2, "stock_equip_calls_on_npc_replicas": 0,
                 "actor_names": dict(zip(("host", "guest"), paths))}}
     finally:
         assert await asyncio.gather(command(host, "dock-population-cleanup"), command(guest, "dock-population-cleanup")) == [
             "cleared", "cleared",
         ]
+
+
+async def verify_stock_dock_population(host: Seat, guest: Seat, pawn: str) -> dict:
+    await travel_pair_to_dock(host, guest, pawn)
+    trials, failures = [], {}
+    for trial in range(1, 5):
+        try:
+            evidence = await verify_dock_npc_population(host, guest, pawn)
+            trials.append(evidence["tutorial_dock_npc_population"])
+        except (AssertionError, OSError, RuntimeError) as error:
+            failures[trial] = str(error)
+    assert not failures, {"passed_trials": len(trials), "failures": failures}
+    return {"stock_dock_population": trials}
 
 
 async def verify_dock_garage_shots(host: Seat, guest: Seat, frame: dict, command, *,
@@ -3271,7 +3290,11 @@ async def verify_dock_garage_buckshot(host: Seat, guest: Seat, pawn: str) -> dic
             try:
                 result.update(await verify_dock_garage_shots(host, guest, frame, command, pellets=9, family=family))
             except Exception as error:
-                failures[family] = traceback.format_exception_only(type(error), error)[-1].strip() or type(error).__name__
+                where = traceback.extract_tb(error.__traceback__)[-1]
+                failures[family] = {
+                    "check": where.line,
+                    "error": traceback.format_exception_only(type(error), error)[-1].strip() or type(error).__name__,
+                }
         assert not failures, (failures, list(result))
         turret_shots = result["tutorial_dock_turret_mismatch"]["shots"]
         ammo = turret_shots[-1]["native_guest_weapon"]["after"]
@@ -6467,7 +6490,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_use: bool = False, stock_food: bool = False, stock_campfire: bool = False, stock_cooked_meal: bool = False,
                  stock_personal_consumable: bool = False,
                  stock_wipe_chooser: bool = False,
-                 stock_npc_override: bool = False, stock_board_offers: bool = False, stock_quarry_photo: bool = False,
+                 stock_npc_override: bool = False, stock_dock_population: bool = False,
+                 stock_board_offers: bool = False, stock_quarry_photo: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
                  stock_weather_travel: bool = False, stock_lightning: bool = False, stock_storm_ambience: bool = False,
                  crossroads_profile: bool = False, stock_crossroads_door: bool = False, stock_dock_gate: bool = False,
@@ -6689,6 +6713,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (tutorial_dock_shot_view, shot_view_campaign, "tutorial_dock_shot_view",
          lambda host, guest, pawn: verify_tutorial_dock_combat(host, guest, pawn, shot_view=True)),
         (tutorial_dock_shot_view, shot_view_campaign, "tutorial_dock_npc_population", verify_dock_npc_population),
+        (stock_dock_population, "dock_population", "stock_dock_population", verify_stock_dock_population),
         (tutorial_dock_shot_view, "tutorial_dock_buckshot", "tutorial_dock_buckshot", verify_dock_garage_buckshot),
         (tutorial_dock_melee, "tutorial_dock_melee", "tutorial_dock_melee", verify_tutorial_dock_melee),
         (stock_eye_stacks, "shopkeep", "stock_eye_stacks", verify_stock_eye_stacks),
@@ -6902,11 +6927,12 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if (stock_npc_override and resident_weapon_cues) or stock_melee_family or tutorial_dock_melee:
             proof["npc_combat_overlays"] = [probes.enter_context(host_npc_combat_overlay(game)) for game in games]
         elif (stock_host_corpse_carry or stock_npc_rivalry or stock_npc_override or stock_melee_edges
-              or tutorial_dock_combat):
+              or tutorial_dock_combat or stock_dock_population):
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
                                                      fixture="portable_npc_override_probe.lua"))
-        if (tutorial_dock_combat or tutorial_dock_melee or stock_bandage_revisit or stock_shovel or stock_buried_placements
+        if (tutorial_dock_combat or tutorial_dock_melee or stock_dock_population
+                or stock_bandage_revisit or stock_shovel or stock_buried_placements
                 or stock_simmi_jammers or stock_weather_travel or stock_lightning
                 or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_critters or stock_placed_item
                 or stock_crossroads_door or stock_dock_gate
@@ -7180,7 +7206,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
 
                 exit_actions = ("prompt", "confirm") if campaign in {
                     "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_shot_view", "tutorial_dock_buckshot",
-                    "tutorial_dock_melee", "tutorial_dock_late_join",
+                    "tutorial_dock_melee", "tutorial_dock_late_join", "dock_population",
                     "crossroads", "crossroads_anomaly", "quarry_photo", "buried_placements",
                     "lab_east_wing_acid", "shopkeep", "simmi"
                 } or stock_host_prop_observer and campaign == prop_campaign else ("save_and_quit",)
@@ -7429,6 +7455,8 @@ if __name__ == "__main__":
                         help="save a guest's stock LightAR selector choice and reopen the same campaign")
     parser.add_argument("--tutorial-dock-combat", action="store_true",
                         help="follow the stock exit to Tutorial Dock and dispatch a shot at a placed worker")
+    parser.add_argument("--stock-dock-population", action="store_true",
+                        help="check repeated stock NPC births and weapon retirement in one Tutorial Dock visit")
     parser.add_argument("--tutorial-dock-retaliation", action="store_true",
                         help="observe the stock AI's response to a nonlethal guest shot at a placed worker")
     parser.add_argument("--tutorial-dock-gait", action="store_true",
@@ -7604,7 +7632,7 @@ if __name__ == "__main__":
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
     resident_check_options = {"stock_unequip", "stock_food", "stock_personal_consumable", "stock_wipe_chooser",
-                              "stock_campfire", "stock_npc_override",
+                              "stock_campfire", "stock_npc_override", "stock_dock_population",
                               "stock_board_offers", "stock_quarry_photo", "resident_weapon_cues", "resident_held_queue", "resident_stale_quick_slot",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "tutorial_dock_pursuit",
                               "tutorial_dock_held_mask", "tutorial_dock_gait",
@@ -7658,7 +7686,8 @@ if __name__ == "__main__":
     if args.crossroads_profile:
         resident_check_options.add("stock_crate_ring")
     if any((args.stock_food, args.stock_cooked_meal, args.stock_personal_consumable, args.stock_wipe_chooser,
-            args.stock_campfire, args.stock_npc_override, args.stock_board_offers, args.stock_quarry_photo, args.tutorial_dock_melee,
+            args.stock_campfire, args.stock_npc_override, args.stock_dock_population,
+            args.stock_board_offers, args.stock_quarry_photo, args.tutorial_dock_melee,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_buried_placements,
             args.stock_take_ammo, args.stock_shotguns,
             args.stock_impact_cues, args.stock_avatar_tail, args.stock_avatar_binoculars, args.stock_interaction_feedback,
@@ -7713,7 +7742,8 @@ if __name__ == "__main__":
                        stock_cooked_meal=args.stock_cooked_meal,
                        stock_personal_consumable=args.stock_personal_consumable,
                        stock_wipe_chooser=args.stock_wipe_chooser,
-                       stock_npc_override=args.stock_npc_override, stock_board_offers=args.stock_board_offers,
+                       stock_npc_override=args.stock_npc_override, stock_dock_population=args.stock_dock_population,
+                       stock_board_offers=args.stock_board_offers,
                        stock_quarry_photo=args.stock_quarry_photo,
                        stock_npc_rivalry=args.stock_npc_rivalry,
                        stock_host_corpse_carry=args.stock_host_corpse_carry,

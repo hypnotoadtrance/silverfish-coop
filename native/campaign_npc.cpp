@@ -776,7 +776,8 @@ namespace
         const auto* base = find<U::UClass>(npc_weapon_base);
         return base && live(weapon) && weapon->GetWorld() == world && weapon->IsA(base) &&
             !weapon->HasAnyFlags(U::RF_WasLoaded) && byte_field(weapon, STR("Role")) == 3 &&
-            bool_field(weapon, STR("bReplicates"), false);
+            bool_field(weapon, STR("bReplicates"), false) && bool_field(weapon, STR("HeldByPlayer"), false) &&
+            bool_field(weapon, STR("bActorIsBeingDestroyed"), false);
     }
 
     U::AActor* npc_weapon(U::AActor* npc, U::UWorld* world)
@@ -834,7 +835,7 @@ namespace
             const auto active = network(npc->GetWorld(), true, true);
             if (active.seat == Seat::Client)
             {
-                if (auto* weapon = npc_weapon(npc, active.world)) weapon->K2_DestroyActor();
+                queue_retiring_weapon(npc, active);
                 npc->K2_DestroyActor();
             }
             else if (active.seat == Seat::Host && (!bool_field(actor, STR("bReplicates"), true) ||
