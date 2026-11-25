@@ -50,6 +50,8 @@ The `rc-f0b1c06` Crossroads baseline used two muted Direct IP instances. During 
 
 `rc-0d2cac2` reads crate contents from the stock spawn results in C++. The host checks the exact spawned actors before adding them to the shared roll. One muted Direct IP pair passed a cold crate with two spawned items, Crossroads weather travel, door opening and closing, placed-item carry and pickup, shared cash popups, and mushroom harvesting and regrowth. The original saves were preserved. In single samples, host crate processing took 34.7 ms before the change and 34.0 ms afterward. The last item appeared for the guest after 146 ms and 175 ms, respectively. These samples leave crate latency, rendered performance, and Steam latency open.
 
+`rc-07a576d` signals the idle host as soon as a guest action enters its queue. In an isolated scheduling check, median queue-signal-to-wake time fell from 20 ms to under 0.1 ms. In two muted Direct IP runs, the last crate item appeared after 118 and 148 ms, compared with 175 ms in one previous-build sample. The host confirmed the rolls after 72 and 89 ms. Crate, Crossroads doors and weather, frog pickup, shared cash, and mushrooms passed in both runs. The placed-item pose probe needed a focused rerun after a diagnostic timeout and an unavailable host test command. With bounded retries for the read-only probe, carry, drop, and pickup all passed on the same ZIP. The six isolated launches preserved the original saves. Rendered hitching and Steam latency remain open.
+
 ## `rc-6690ff4` playtest
 
 | Area | Two-PC observation |

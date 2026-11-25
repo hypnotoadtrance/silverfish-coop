@@ -55,11 +55,11 @@ async def verify_stock_placed_item(host, guest, pawn):
     item_class = selected["class_path"]
     current_pawn = census["game"]["native_guest_save"]["pawn"]
 
-    async def fixture(seat, action, target=""):
-        return (await seat.bridge.command(carry.FIXTURE, action, target, timeout=6))["ack"]["message"]
+    async def fixture(seat, action, target="", *, timeout=6):
+        return (await seat.bridge.command(carry.FIXTURE, action, target, timeout=timeout))["ack"]["message"]
 
     async def sample(seat):
-        return tuple(float(value) for value in (await fixture(seat, "sample", path)).split("|")[:3])
+        return tuple(float(value) for value in (await fixture(seat, "sample", path, timeout=1.5)).split("|")[:3])
 
     assert await fixture(host, "select", path) == "selected the enrolled authored physics prop"
     await fixture(host, "approach", current_pawn)
@@ -67,14 +67,17 @@ async def verify_stock_placed_item(host, guest, pawn):
     async def shared_pose():
         async with asyncio.timeout(10):
             while True:
-                try:
-                    authority, replica = await asyncio.gather(sample(host), sample(guest))
-                except RuntimeError as error:
-                    if "native_prop_carry_fixture_sample_unavailable" not in str(error):
-                        raise
-                else:
-                    if math.dist(authority, replica) <= 10:
-                        return authority, replica
+                observations = await asyncio.gather(sample(host), sample(guest), return_exceptions=True)
+                for observation in observations:
+                    if isinstance(observation, Exception) and not (
+                        isinstance(observation, TimeoutError)
+                        or "native_prop_carry_fixture_sample_unavailable" in str(observation)
+                    ):
+                        raise observation
+                authority, replica = observations
+                if isinstance(authority, tuple) and isinstance(replica, tuple) and math.dist(authority, replica) <= 10:
+                    return authority, replica
+                # These reads are safe to repeat if the resident command lane is busy.
                 await asyncio.sleep(.12)
 
     _, position = await shared_pose()
