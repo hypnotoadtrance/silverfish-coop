@@ -1774,8 +1774,7 @@ local function tick(fields, pending, periodic)
         return true
     end
     local pickup_presentation = fields and status_publication.pickup_presentation[fields[2]]
-    if fields and pending and (fields[2] == "native-weapon-play-shots"
-        or pickup_presentation and status_publication.compact() and status_publication.steady(state, current_phase)) then
+    if fields and pending and (fields[2] == "native-weapon-play-shots" or pickup_presentation) then
         if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
         pending.dispatched = true
         local tag = pickup_presentation and "pickup-presentation-ack" or "weapon-cue-ack"
