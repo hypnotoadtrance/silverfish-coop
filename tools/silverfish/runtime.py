@@ -28,7 +28,7 @@ from . import native_authored_pickup, native_borough_barter, native_dead_drop, n
 from . import native_npc_barter
 from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lift, native_mindcore, native_mindcore_carry, native_mindcore_fixture, native_mindcore_view
 from . import native_dust_cabinet, native_savlo_locker
-from . import native_inventory, native_sewer_barter, native_stash
+from . import native_guest_weapon, native_inventory, native_sewer_barter, native_stash
 from . import native_guest_drop_projection, native_guest_drop_record, native_guest_stack_drop
 from . import native_loot, native_pickup_audio, native_world_loot
 from . import native_loose_pickup
@@ -904,6 +904,7 @@ class Bridge:
         self._file_command_lock = asyncio.Lock()
         self._local_world_view = None
         self._local_wallet = None
+        self._local_guest_weapon = None
 
     async def wait_for_interaction(self, timeout: float, *, wake_if=None, wake_event: asyncio.Event | None = None,
                                    guest=False) -> None:
@@ -1470,6 +1471,15 @@ class Bridge:
                 frame = {**frame, "native_wallet": balance}
             else:
                 self._local_wallet = None
+        if self._local_guest_weapon is not None and frame is not None:
+            sequence, area, pawn, weapon = self._local_guest_weapon
+            bound = frame.get("native_guest_save", {})
+            if (self.local_bridge is not None and frame.get("sequence", -1) <= sequence
+                    and (frame.get("state"), frame.get("map"), bound.get("state"), bound.get("pawn"))
+                    == ("hosting", area, "bound", pawn)):
+                frame = self._with_guest_weapon(frame, pawn, weapon)
+            else:
+                self._local_guest_weapon = None
         if self._local_world_view is not None and frame is not None:
             at_sequence, pawn, proof = self._local_world_view
             if (self.local_bridge is not None and frame.get("sequence", 0) <= at_sequence
@@ -1485,6 +1495,16 @@ class Bridge:
         if type(sequence) is int and pawn:
             self._local_wallet = sequence, receipt["map"], pawn, balance
         return {**game, "native_wallet": balance}
+
+    @staticmethod
+    def _with_guest_weapon(game, pawn, weapon):
+        key = native_guest_weapon.EQUIPPED
+        return {**game, key: {**game.get(key, {}), pawn: weapon}}
+
+    def remember_local_guest_weapon(self, game, receipt, pawn):
+        weapon = receipt[native_guest_weapon.EQUIPPED][pawn]
+        self._local_guest_weapon = receipt["sequence"], receipt["map"], pawn, weapon
+        return self._with_guest_weapon(game, pawn, weapon)
 
     def _parse_status(self, text: str, *, cache: bool = True) -> dict | None:
         try:
@@ -3937,6 +3957,16 @@ class Bridge:
                 if ack["result"] != "accepted":
                     raise RuntimeError(ack["message"] or f"The game declined the {action} command")
                 receipt[native_loot.CLAIM_REPLY_BYTES] = len(raw.encode("utf-8"))
+                return receipt
+            if action in native_guest_weapon.COMPACT_ACTIONS and raw.startswith(native_guest_weapon.REPLY_HEADER):
+                receipt = self._parse_status(raw.removeprefix(native_guest_weapon.REPLY_HEADER), cache=False)
+                if (not receipt or receipt.get("mode") != "host" or receipt.get("state") != "hosting"
+                        or type(receipt.get("sequence")) is not int or receipt.get("ack", {}).get("id") != fields[0]):
+                    raise RuntimeError("The local weapon receipt did not match the request")
+                ack = receipt["ack"]
+                if ack["result"] != "accepted":
+                    raise RuntimeError(ack["message"] or f"The game declined the {action} command")
+                receipt[native_guest_weapon.REPLY_BYTES] = len(raw.encode("utf-8"))
                 return receipt
             if action == native_world_loot.FRAME and raw.startswith(native_world_loot.FRAME_REPLY + "\t"):
                 return native_world_loot.parse_frame_reply(raw, fields)

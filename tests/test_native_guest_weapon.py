@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock
 
 from tools.silverfish import (
-    generate_guest_weapon_registry, guest_weapon_profiles, native_guest_consumable, native_guest_weapon, party, service,
+    generate_guest_weapon_registry, guest_weapon_profiles, native_guest_consumable, native_guest_weapon, party, runtime, service,
 )
 
 
@@ -327,6 +327,42 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.command.await_args_list[1].args,
                          (native_guest_weapon.SET_FIRE_MODE, "exact pawn", guid, "semi"))
         host.queue_guest_save.assert_called_once_with("character", "exact pawn")
+        host.checkpoint_native.assert_not_awaited()
+
+    async def test_compact_fire_receipt_survives_older_world_equipment_until_the_next_frame(self):
+        host = self.host()
+        pawn, guid = "exact pawn", "1" * 32
+        action = "native-guest-weapon-fire"
+        scope = "session\thost\thosting\tzone\t1\t0\n"
+        def equipped(rounds):
+            return f"native-guest-equipped-weapon\t{pawn}\t{guid}\trusty-pistol\t{rounds}\t-\t-\n"
+        def frame(sequence, rounds):
+            return (f"schema\t1\nseq\t{sequence}\n" + scope + f"native-guest-save\tbound\t{pawn}\n"
+                    + "wallet\t50\n" + equipped(rounds))
+        async def reply(payload, timeout):
+            nonce, sent, owner, weapon = payload.decode().strip().split("\t")
+            self.assertEqual((sent, owner, weapon, timeout), (action, pawn, guid, 5))
+            return (native_guest_weapon.REPLY_HEADER + "schema\t1\nseq\t40\n" + scope
+                    + f"ack\t{nonce}\taccepted\tguest shot\n" + equipped(7)
+                    + f"native-guest-weapon\tzone\tfire\t{pawn}\t{guid}\t1\tequipped\t8\t7\t7\t7\t1\t-\t-\t-\n")
+        bridge = runtime.Bridge(Path("."), None)
+        command = AsyncMock(side_effect=reply)
+        bridge.local_bridge = SimpleNamespace(command=command, read_status=Mock(return_value=frame(40, 8)))
+        host.last_game = bridge.snapshot()
+        host.last_game["native_guest_save_retention"] = True
+        host.pending_guest_saves = {"character": (pawn, {})}
+
+        result = await native_guest_weapon.perform(host, bridge, "character", "a" * 32, action, guid)
+        self.assertEqual(result["native_guest_weapon"]["after"], 7)
+        self.assertLess(result[native_guest_weapon.REPLY_BYTES], 600)
+        self.assertEqual(host.last_game["native_wallet"], 50)
+        self.assertEqual(host.last_game[native_guest_weapon.EQUIPPED][pawn]["rounds"], 7)
+        self.assertEqual(bridge.snapshot()[native_guest_weapon.EQUIPPED][pawn]["rounds"], 7)
+        self.assertIsNone(bridge._local_status)
+        bridge.local_bridge.read_status.return_value = frame(41, 6)
+        self.assertEqual(bridge.snapshot()[native_guest_weapon.EQUIPPED][pawn]["rounds"], 6)
+        self.assertEqual(await native_guest_weapon.perform(host, bridge, "character", "a" * 32, action, guid), result)
+        command.assert_awaited_once()
         host.checkpoint_native.assert_not_awaited()
 
     async def test_stale_binding_denies_weapon_request_without_stopping_host(self):

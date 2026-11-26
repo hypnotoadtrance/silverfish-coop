@@ -567,7 +567,54 @@ function guest_weapon.command(fields, state, phase)
         ok = ok == true, status = status, before = before, after = after,
         actor_ammo = actor_ammo, stored_ammo = stored_ammo, projectiles = projectiles,
         reserve_before = reserve_before, reserve_after = reserve_after, ammo_class = ammo_class }
-    return "native guest weapon operation reported"
+    return "native guest weapon operation reported", pawn, detached
+end
+
+local function weapon_result_row(row, status_row)
+    return status_row("native-guest-weapon", row.map, row.action, row.pawn, row.guid, row.ok and 1 or 0,
+        row.status, row.before or "-", row.after or "-", row.actor_ammo or "-", row.stored_ammo or "-",
+        row.projectiles or "-", row.reserve_before or "-", row.reserve_after or "-", row.ammo_class or "-")
+end
+
+local function equipped_row(state, name, pawn, save, status_row)
+    local ok, guid, kind, rounds, mode, ammo_path, shell_count, shell_path, barrel_mode = pcall(function()
+        if not pawn or not save then return end
+        local id, profile, row = equipped_guid(pawn, save, state.world)
+        local held = row and pawn.EquipedItem
+        local amount = row and row[ammo_field]
+        if held and weapon_profiles.paths[profile] and amount == held.Ammo and valid_rounds(held, amount) then
+            local mode = weapon_profiles.held_fire[profile] and held.HasSelectFire == true
+                and saved_mode(save, id, row[class_field])
+            local path = weapon_profiles.ammo_options[profile] and mounted_ammo_path(held)
+            local child = guest_weapon.loki_child(held, pawn, profile)
+            local shell = child and mounted_ammo_path(child)
+            local count = allowed_ammo("bolt-action-shotgun-loki", shell) and child.Ammo
+            return id, profile, amount, mode, allowed_ammo(profile, path) and path or nil,
+                count or nil, count and shell or nil, count and saved_mode(save, id, row[class_field], "barrel") or nil
+        end
+        return id, profile
+    end)
+    if not ok or not guid or not kind then return end
+    local shell = shell_count and {shell_count, shell_path, barrel_mode} or {}
+    return status_row("native-guest-equipped-weapon", name, guid, kind,
+        rounds or "-", mode or "-", ammo_path or "-", table.unpack(shell))
+end
+
+function guest_weapon.local_reply(fields, state, phase, sequence, status_row)
+    local previous = observation
+    observation = nil
+    local accepted, message, pawn, save = pcall(guest_weapon.command, fields, state, phase)
+    local result = observation
+    observation = previous
+    if accepted and not result then accepted, message = false, "guest_weapon_readback_unavailable" end
+    local rows = {"native-guest-weapon-reply\t1", status_row("schema", 1), status_row("seq", sequence),
+        status_row("ack", fields[1], accepted and "accepted" or "error", message),
+        status_row("session", "host", phase, state.map, state.clients, state.server and 1 or 0)}
+    if accepted then
+        rows[#rows + 1] = weapon_result_row(result, status_row)
+        if result.ok then rows[#rows + 1] = equipped_row(state, result.pawn, pawn, save, status_row) end
+    end
+    return table.concat(rows, "\n") .. "\n"
 end
 
 function guest_weapon.reset()
@@ -595,35 +642,11 @@ function guest_weapon.rows(state, phase, status_row)
     end
     if not enabled or phase ~= "hosting" then return rows end
     for _, detail in ipairs(state.guests) do
-        local ok, guid, kind, rounds, mode, ammo_path, shell_count, shell_path, barrel_mode = pcall(function()
-            local pawn, save = guest_save.exact_item_context(state, phase, detail.name)
-            if not pawn or not save then return end
-            local id, profile, row = equipped_guid(pawn, save, state.world)
-            local held = row and pawn.EquipedItem
-            local amount = row and row[ammo_field]
-            if held and weapon_profiles.paths[profile] and amount == held.Ammo and valid_rounds(held, amount) then
-                local mode = weapon_profiles.held_fire[profile] and held.HasSelectFire == true
-                    and saved_mode(save, id, row[class_field])
-                local path = weapon_profiles.ammo_options[profile] and mounted_ammo_path(held)
-                local child = guest_weapon.loki_child(held, pawn, profile)
-                local shell = child and mounted_ammo_path(child)
-                local count = allowed_ammo("bolt-action-shotgun-loki", shell) and child.Ammo
-                return id, profile, amount, mode, allowed_ammo(profile, path) and path or nil,
-                    count or nil, count and shell or nil, count and saved_mode(save, id, row[class_field], "barrel") or nil
-            end
-            return id, profile
-        end)
-        if ok and guid and kind then
-            local shell = shell_count and {shell_count, shell_path, barrel_mode} or {}
-            rows[#rows + 1] = status_row("native-guest-equipped-weapon", detail.name, guid, kind,
-                rounds or "-", mode or "-", ammo_path or "-", table.unpack(shell))
-        end
+        local ok, pawn, save = pcall(guest_save.exact_item_context, state, phase, detail.name)
+        if ok then rows[#rows + 1] = equipped_row(state, detail.name, pawn, save, status_row) end
     end
     local row = observation
-    if not row or row.map ~= state.map then return rows end
-    rows[#rows + 1] = status_row("native-guest-weapon", row.map, row.action, row.pawn, row.guid, row.ok and 1 or 0,
-        row.status, row.before or "-", row.after or "-", row.actor_ammo or "-", row.stored_ammo or "-",
-        row.projectiles or "-", row.reserve_before or "-", row.reserve_after or "-", row.ammo_class or "-")
+    if row and row.map == state.map then rows[#rows + 1] = weapon_result_row(row, status_row) end
     return rows
 end
 

@@ -1786,6 +1786,11 @@ status_publication.pickup_presentation = {
     ["native-world-loot-present-host-claim"] = native_guest_drop_projection.command,
 }
 
+status_publication.guest_weapon_actions = {
+    ["native-guest-weapon-fire"] = true,
+    ["native-guest-weapon-reload"] = true,
+}
+
 status_publication.pickup_claims = {
     ["native-authored-pickup-claim"] = native_authored_pickup.claim_reply,
     ["native-loose-pickup-claim"] = native_authored_pickup.claim_reply,
@@ -1895,6 +1900,15 @@ local function tick(fields, pending, periodic)
         pending.dispatched = true
         SilverfishPublishLocalBridgeReply(pending.ticket,
             status_publication.pickup_claim_reply(pickup_claim, fields, state, current_phase))
+        if not periodic then return true end
+        fields, pending = nil, nil
+    end
+    if fields and pending and status_publication.guest_weapon_actions[fields[2]]
+        and current_phase == "hosting" and status_publication.steady(state, current_phase) then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        SilverfishPublishLocalBridgeReply(pending.ticket,
+            native_guest_weapon.local_reply(fields, state, current_phase, sequence, status_row))
         if not periodic then return true end
         fields, pending = nil, nil
     end
@@ -2187,7 +2201,7 @@ if resident_title and status_publication.installed then
         local action = fields[2]
         if action == "native-world-loot-frame" or action == "native-loot-open" or action == "native-loot-inspect"
             or status_publication.stock_interactions[action] or status_publication.pickup_presentation[action]
-            or status_publication.pickup_claims[action] then
+            or status_publication.pickup_claims[action] or status_publication.guest_weapon_actions[action] then
             status_publication.dispatch(os.clock(), fields, pending, false)
         end
     end)

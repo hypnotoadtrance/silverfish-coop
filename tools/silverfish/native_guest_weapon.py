@@ -8,6 +8,10 @@ from . import guest_weapon_profiles, native_guest_melee, native_inventory, party
 
 GUEST_ACTIONS = ("native-guest-weapon-inspect", "native-guest-weapon-equip", "native-guest-weapon-fire",
                  "native-guest-weapon-reload")
+COMPACT_ACTIONS = frozenset(("native-guest-weapon-fire", "native-guest-weapon-reload"))
+REPLY_HEADER = "native-guest-weapon-reply\t1\n"
+REPLY_BYTES = "native_guest_weapon_reply_bytes"
+EQUIPPED = "native_guest_equipped_weapons"
 GUID = re.compile(r"[0-9A-F]{32}\Z")
 SHOT_DIRECTION = re.compile(r"-?[01]\.[0-9]{6}(?:,-?[01]\.[0-9]{6}){2}")
 SHOT_POSITION = re.compile(r"-?[0-9]{1,7}\.[0-9]{3}(?:,-?[0-9]{1,7}\.[0-9]{3}){2}")
@@ -356,8 +360,12 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
         elif (proof.get("status") not in READBACK_STATES or type(stored) is not int or stored < 0
               or type(actor) is not int or actor != (stored if proof["status"] == "equipped" else -1)):
             raise RuntimeError("Native guest stock weapon ammunition did not verify")
+        equipped = snapshot.get(EQUIPPED, {}).get(pawn, {})
+        compact = REPLY_BYTES in snapshot
+        if compact and (equipped.get("guid") != observed_guid
+                        or equipped.get("underbarrel_rounds" if underbarrel else "rounds") != stored):
+            raise RuntimeError("The stock weapon reply did not verify the exact equipped magazine")
         if operation == "fire":
-            equipped = snapshot.get("native_guest_equipped_weapons", {}).get(pawn, {})
             shot_kind = equipped.get("kind") if equipped.get("guid") == guid else None
             ammo_class = equipped.get("ammo_class")
             mounted = (LOKI_AMMO[proof["ammo_class"]] if underbarrel else
@@ -377,8 +385,13 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
                     or selected_round is not None and proof.get("ammo_class") != selected_round):
                 raise RuntimeError("Stock reserve ammunition did not move exactly into the guest magazine")
 
-        host.last_game, host.last_seen = snapshot, time.monotonic()
+        if compact:
+            host.last_game = bridge.remember_local_guest_weapon(host.last_game, snapshot, pawn)
+        else:
+            host.last_game, host.last_seen = snapshot, time.monotonic()
         result = {"native_guest_weapon": dict(proof, kind="camera", class_path=CAMERA_PATH) if camera else proof}
+        if compact:
+            result[REPLY_BYTES] = snapshot[REPLY_BYTES]
         if shot_view is not None:
             geometry, _, contact = shot_view.partition("|")
             direction, has_geometry, points = geometry.partition(";")
@@ -403,7 +416,12 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
                 raise RuntimeError("The stock Bandit shot did not verify the exact aim receipt")
             result["native_bandit_aim"] = aim
         if mutates:
-            candidate = party.load_party(host.party)
+            if deferred:
+                candidate = host.party.copy()
+                candidate["receipts"] = host.party["receipts"].copy()
+                candidate["receipts"][character] = list(candidate["receipts"].get(character, ()))
+            else:
+                candidate = party.load_party(host.party)
             receipts = candidate["receipts"].setdefault(character, [])
             receipts.append({"id": operation_id, "request": fingerprint, "result": result})
             del receipts[:-party.RECENT_ACTIONS]
