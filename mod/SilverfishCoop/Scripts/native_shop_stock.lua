@@ -1,5 +1,6 @@
 local stock = {}
 local scope = require("native_save_scope")
+local shared_wallet = require("wallet")
 local screen_path = "/Game/Classes/GUI/New/ShopScreen.ShopScreen_C"
 local save_path = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local item_base = "/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"
@@ -148,10 +149,7 @@ function stock.render(session, actor, state, phase, wallet, path, total)
         or not valid(class) or not valid(widgets) or not valid(widget_class) then
         error("The native merchant cannot bind the isolated guest", 0)
     end
-    local cash = FName("Player_Cash")
-    if save.Flags:Contains(cash) then save.Flags:Remove(cash) end
-    save.Flags:Add(cash, wallet)
-    if not save.Flags:Contains(cash) or save.Flags:Find(cash):get() ~= wallet then error("The shared cash did not project", 0) end
+    if not shared_wallet.project_guest(save, wallet) then error("The shared cash did not project", 0) end
 
     local first, frames, backups = not session.screen, {}, {}
     for i, side in ipairs(sides) do

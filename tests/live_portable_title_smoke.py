@@ -72,7 +72,7 @@ from portable_stock_shovel import verify_stock_buried_placements, verify_stock_s
 from portable_mushrooms import instrument_mushroom_sampler, verify_stock_mushrooms
 from portable_placed_item import placed_item_overlay, verify_stock_placed_item
 from portable_pickup_preview import pickup_preview_overlay, recorded_drop_motion, verified_drop_preview
-from portable_cash_popup import cash_pickup_overlay, verify_stock_cash_popup
+from portable_cash_popup import cash_pickup_overlay, verify_reported_wallet, verify_stock_cash_popup
 from portable_crossroads_canister import allow_portable_canister_fixture, instrument_canisters, verify_crossroads_canister
 from portable_world_view_receipt import patch_world_view_receipts, verify_world_view_receipt
 from tools.silverfish.title_session import STATUS_FILE as TITLE_STATUS_FILE
@@ -91,7 +91,7 @@ INDEPENDENT_RESIDENT_MAPS = {
     "stock_lockpicks": {OBSERVATORY}, "stock_observatory_tv": {OBSERVATORY},
     "stock_critters": {CROSSROADS}, "stock_lingering_teleport": {CROSSROADS}, "stock_mushrooms": {CROSSROADS},
     "stock_crossroads_recovery": {CROSSROADS}, "stock_crossroads_door": {CROSSROADS},
-    "stock_placed_item": {CROSSROADS}, "stock_cash_popup": {CROSSROADS}, "stock_weather_travel": {OBSERVATORY},
+    "stock_placed_item": {CROSSROADS}, "stock_cash_popup": {CROSSROADS}, "guest_reported_wallet": {CROSSROADS}, "stock_weather_travel": {OBSERVATORY},
     "stock_canister": {CROSSROADS},
     "stock_warehouse_switch": {OBSERVATORY, WAREHOUSE_DOCK}, "stock_warehouse_radio": {OBSERVATORY, WAREHOUSE_DOCK},
     "stock_warehouse_candle": {WAREHOUSE_DOCK}, "stock_dock_gate": {WAREHOUSE_DOCK},
@@ -7366,6 +7366,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_placed_item, "crossroads", "stock_placed_item", verify_stock_placed_item),
         (stock_placed_item, "crossroads", "stock_cash_popup",
          lambda host, guest, pawn: verify_stock_cash_popup(host, guest, pawn, portable_probe_command, campaign_save_hashes)),
+        (stock_placed_item, "crossroads", "guest_reported_wallet",
+         lambda host, guest, pawn: verify_reported_wallet(host, guest, pawn, submit, campaign_save_hashes)),
         (stock_crossroads_door, "crossroads", "stock_crossroads_door",
          lambda host, guest, pawn: verify_stock_crossroads_door(
              host, guest, pawn, lockpick=verify_stock_lockpicks if stock_interaction_feedback else None)),

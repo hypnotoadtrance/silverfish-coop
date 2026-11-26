@@ -838,6 +838,7 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         host.game_link_connected = Mock(return_value=True)
         host.zone_epoch = "a" * 32
         host.stock_doors = native_stock_door.Interactions()
+        host.guest_wallet_receipts = {}
         doors = native_stock_door.KEY
         switches = service.native_stock_switch.KEY
         host.last_game = {"state": "hosting", "map": OBSERVATORY, "sequence": 4,

@@ -1,6 +1,7 @@
 local guest_ui = {}
 local guest_save = require("guest_save")
 local scope = require("native_save_scope")
+local wallet = require("wallet")
 local creator = require("native_guest_creator")
 local appearance = require("native_avatar_character_view")
 local native_world = require("native_world")
@@ -342,15 +343,8 @@ local function project(state, phase, character, path, raw, sequence)
     end
     old.JournalEntries = view.JournalEntries
     old.ActiveQuests = view.ActiveQuests
-    if balance ~= nil then
-        local cash, flags = FName("Player_Cash"), old.Flags
-        if not flags:Contains(cash) or flags:Find(cash):get() ~= balance then
-            if flags:Contains(cash) then flags:Remove(cash) end
-            flags:Add(cash, balance)
-        end
-        if not flags:Contains(cash) or flags:Find(cash):get() ~= balance then
-            error("The attached co-op wallet failed readback", 0)
-        end
+    if balance ~= nil and not wallet.project_guest(old, balance) then
+        error("The attached co-op wallet failed readback", 0)
     end
     if reputation then
         local flags, previous = old.Flags, {}

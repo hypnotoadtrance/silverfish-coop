@@ -2,6 +2,7 @@ local barter = {}
 local guest_save = require("guest_save")
 local wire = require("native_wire_quest")
 local identity = require("native_npc_barter_identity")
+local wallet = require("wallet")
 
 local npc_class = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local trader_class = "/Game/Classes/Actors/Barter_BP.Barter_BP_C"
@@ -300,10 +301,7 @@ local function amounts(items)
 end
 
 local function apply_catalog(actor, save, cash, seed, minimum, accepts, entries, taste)
-    local flag = FName("Player_Cash")
-    if save.Flags:Contains(flag) then save.Flags:Remove(flag) end
-    save.Flags:Add(flag, cash)
-    if not save.Flags:Contains(flag) or save.Flags:Find(flag):get() ~= cash then fail("view_wallet_projection") end
+    if not wallet.project_guest(save, cash) then fail("view_wallet_projection") end
     actor.MinWeaponValue = minimum
     actor.AcceptCash = accepts == "1"
     if not set_preferences(actor, taste, seed) or actor.MinWeaponValue ~= minimum

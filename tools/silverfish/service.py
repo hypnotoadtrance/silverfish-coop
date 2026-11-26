@@ -35,7 +35,7 @@ from .native_pickup import NativePickup, STAGED_SHOPS
 from . import native_guest_drop, native_guest_drop_projection, native_guest_drop_record
 from . import native_world_loot, native_zone_lease
 from . import native_guest_melee
-from . import native_guest_ui
+from . import native_guest_ui, native_wallet
 from . import native_host_dig, native_host_dig_live, native_host_landmine, native_package_handoff_journal
 from . import native_kill_volume
 from .native_roster import RosterEnrollment, _census
@@ -102,7 +102,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         "native-inventory-list", native_inventory.SPLIT, native_inventory.TAKE_AMMO, native_inventory.SORT,
                         native_inventory.STORE_EQUIPMENT, native_inventory.UNEQUIP,
                         native_stash.LIST, native_stash.MOVE,
-                        native_guest_ui.ACTION,
+                        native_guest_ui.ACTION, native_wallet.REPORT,
                         "native-loot-inspect", "native-loot-open", "native-loot-claim", native_loot.LOCKPICK,
                         *native_loot.PRY_TOOL_ACTIONS.values(),
                         native_stock_door.ACTION, *native_stock_door.PRY_ACTIONS.values(), *native_stock_switch.ACTIONS,
@@ -392,6 +392,7 @@ class Host:
         self.next_projection = 0.0
         self.zone_epoch = uuid.uuid4().hex
         self.gameplay_snapshots = gameplay_snapshot.HostSnapshots()
+        self.guest_wallet_receipts = {}
         self.transitioning = False
         self.stock_photo_in_progress = False
         self.loading_zone: str | None = None
@@ -1996,6 +1997,8 @@ class Host:
             gameplay[native_inventory.UNEQUIP_WORN_CAPABILITY] = 1
         roles = self.roles()
         character = roles.get(role, "")
+        if self.native_guest and self.native_profile and "shared_wallet" in gameplay:
+            gameplay[native_wallet.ACK] = self.guest_wallet_receipts.get(character, [])
         gameplay["native_backpacks"] = native_inventory_death.visible_bags(self.party, character)
         if self.prop_carry_bridge is not None and native_prop_carry.HELD in self.last_game:
             if confirmation := self.prop_carry.grip_confirmation(character):
@@ -2359,6 +2362,8 @@ class Host:
                 result = await native_flare.perform(self, bridge, character, target, request["operation_id"])
             elif action == native_guest_ui.ACTION:
                 result = await native_guest_ui.capture(self, bridge, character, target)
+            elif action == native_wallet.REPORT:
+                result = await native_wallet.settle(self, bridge, character, target, request["operation_id"])
             elif action == "native-inventory-list":
                 offset = target if target is not None else "0"
                 if not isinstance(offset, str) or not offset.isascii() or not offset.isdigit() or len(offset) > 4:
@@ -4586,7 +4591,8 @@ class Host:
         switch_flags = {actor: (row["powered"], row.get("lamp"), row["lights"])
                         for actor, row in game.get(native_stock_switch.KEY, {}).items()}
         # Crate opens and claims replace the ledger or its affected rows.
-        state = door_flags, switch_flags, self.party.get(native_loot.STATE_KEY, {})
+        state = (door_flags, switch_flags, self.party.get(native_loot.STATE_KEY, {}),
+                 game.get("native_wallet"), tuple(sorted(self.guest_wallet_receipts.items())))
         if scope == self.gameplay_change_scope and state != self.gameplay_change_state:
             # Guests still fetch the authorized snapshot. A lost notice only delays that fetch.
             transport.send_gameplay_change(epoch)
@@ -5324,6 +5330,7 @@ class Client:
         self.last_inventory_drop = 0
         self.last_stock_inventory_action = 0
         self.guest_ui = native_guest_ui.GuestView()
+        self.guest_wallet = native_wallet.GuestWallet()
         self.inventory_view_scope = None
         self.inventory_drop_scope = None
         self.crate_intents = native_loot.OpenIntents()
@@ -7126,6 +7133,7 @@ class Client:
                         await task
             await self.cancel_gameplay_snapshot()
             await self.guest_ui.close()
+            await self.guest_wallet.close()
             if pause_exit is not None:
                 pause_exit.close()
             if self.mindcore_carry:
@@ -7240,6 +7248,7 @@ class Client:
                 current = active and not self.stopping and self.host_session and self.zone_epoch and time.monotonic() - self.gameplay_seen < 2
                 epoch = f"{self.host_session}:{self.zone_epoch}"
                 self.last_game = await self.dialogue_view.sync(self.last_game, epoch, current, self.gameplay_action)
+            await self.guest_wallet.sync(self)
             if self.npc_barter_view:
                 await self.npc_barter_view.sync(self, active and not self.stopping and time.monotonic() - self.gameplay_seen < 2)
             if self.mosby_station:

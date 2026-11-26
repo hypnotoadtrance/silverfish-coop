@@ -37,7 +37,7 @@ from . import native_prop_carry
 from . import native_flare
 from . import native_stock_enemy_drops
 from . import native_flashlight, native_lantern, native_stock_door, native_stock_switch
-from . import native_player_avatar
+from . import native_player_avatar, native_wallet
 from . import native_weapon_fire_view
 from . import native_damage_feedback, native_guest_clock, native_storm_ambience, native_weather_view
 from . import native_voice
@@ -3530,6 +3530,8 @@ class Bridge:
                     })
                 elif fields[0] == "wallet" and len(fields) == 2:
                     data["native_wallet"] = None if fields[1] == "-" else int(fields[1])
+                elif fields[0] == "wallet-guest-change" and len(fields) == 5 and data.get("state") == "connected":
+                    data[native_wallet.CHANGE] = native_wallet.parse_change(fields)
                 elif fields[0] == "vitals" and len(fields) == 6:
                     data["native_vitals_probe"] = {
                         "mode": fields[1], "host_health": _finite(fields[2]), "guest_health": _finite(fields[3]),
