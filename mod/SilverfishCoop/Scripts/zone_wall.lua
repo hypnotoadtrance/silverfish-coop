@@ -9,6 +9,8 @@ local named_fixtures = expanded and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES")
 local authored_routes = enabled and expanded and require("authored_wall_routes") or {}
 local trigger_class = "/Script/Engine.TriggerBox"
 local exit_class = "Level_Exit_BP_C"
+local exit_path = "/Game/Classes/ScriptingActors/Level_Exit_BP.Level_Exit_BP_C"
+local statics_path = "/Script/Engine.Default__GameplayStatics"
 local door_class = "Dungeon_TransitionDoor_BP_C"
 local no_collision, query_only = 0, 1
 local world_static, pawn_channel = 0, 2
@@ -23,6 +25,7 @@ local retry_at = {}
 local scanned_world
 local scanned_actors = {}
 local scan_after = 0
+local discovered_world, discovered_sources, discover_after = nil, {}, 0
 local approach_scope, open_exit
 local verified_walls
 local wall_check_interval = 0.5
@@ -87,6 +90,7 @@ function wall.clear()
     observation = nil
     primary_key, approach_scope, open_exit = nil, nil, nil
     scanned_world, scanned_actors, scan_after = nil, {}, 0
+    discovered_world, discovered_sources, discover_after = nil, {}, 0
     verified_walls = nil
     status, failure = "inactive", ""
     regroup.clear()
@@ -180,7 +184,7 @@ local function host_can_pass(state, local_pawn, world, accepting)
     return #blockers == 0, blockers
 end
 
-local function sync_shape(index, world, fixture, desired)
+local function sync_shape(index, world, fixture, desired, discovered)
     local record = records[index]
     if not valid(fixture) then
         clear_record(index)
@@ -188,7 +192,10 @@ local function sync_shape(index, world, fixture, desired)
     end
     if record and (not same(record.fixture, fixture) or not same(record.world, world)
         or not valid(record.actor) or not valid(record.component)
-        or not same(record.original, fixture.Box)) then
+        or not same(record.original, fixture.Box)
+        or (discovered and (distance_squared(record.center, fixture.Box:K2_GetComponentLocation()) > 0.01
+            or distance_squared(record.component:GetScaledBoxExtent(), fixture.Box:GetScaledBoxExtent()) > 0.01
+            or not same_rotation(record.component:K2_GetComponentRotation(), fixture.Box:K2_GetComponentRotation())))) then
         clear_record(index)
         record = nil
     end
@@ -323,6 +330,38 @@ local function scan_authored(world, plans)
     scan_after = now + 1
 end
 
+local function discovered_walls(world, known)
+    if not expanded or type(SilverfishInspectDiscoveredOverlap) ~= "function" then return {} end
+    if not same(discovered_world, world) then
+        discovered_world, discovered_sources, discover_after = world, {}, 0
+    end
+    local now = os.time()
+    if now < discover_after then return discovered_sources end
+    discover_after = now + 1
+    local statics, class = StaticFindObject(statics_path), StaticFindObject(exit_path)
+    if not valid(statics) or not valid(class) then return {} end
+    local found, sources = {}, {}
+    statics:GetAllActorsOfClass(world, class, found)
+    local candidates = found.OutActors or found
+    for index = 1, math.min(#candidates, 128) do
+        local actor = candidates[index]
+        if type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
+        if in_world(actor, world) and same(actor:GetOuter(), world.PersistentLevel)
+            and not valid(actor:GetParentComponent()) and actor:GetActorEnableCollision() then
+            local name = actor:GetFullName():match(":PersistentLevel%.([A-Za-z0-9_%-]+)$")
+            local box = name and not known[name] and actor.Box
+            if box and valid(box) and box:GetGenerateOverlapEvents() then
+                local destination, tag = SilverfishInspectDiscoveredOverlap(name, actor:GetAddress())
+                if destination and zones[destination] and tag then
+                    sources[name] = {fixture = actor, tag = tag, kind = "overlap", discovered = true}
+                end
+            end
+        end
+    end
+    discovered_sources = sources
+    return discovered_sources
+end
+
 local function wall_sources(world, map, route, fixture, secondary)
     local sources = {}
     if route.fixture then
@@ -342,6 +381,7 @@ local function wall_sources(world, map, route, fixture, secondary)
             sources[plan.actor] = source
         end
     end
+    for key, source in pairs(discovered_walls(world, sources)) do sources[key] = source end
     return sources
 end
 
@@ -379,6 +419,10 @@ local function sync_geometry(scope, route)
         if not sources[key] then clear_record(key) end
     end
     primary_key = route.fixture or (route.door and route.door.fixture)
+    if not next(sources) then
+        status, failure = "inactive", ""
+        return
+    end
     local first_ready, diagnostics, had_error = nil, {}, false
     for key, source in pairs(sources) do
         local source_actor = in_world(source.fixture, world) and source.fixture or nil
@@ -390,7 +434,7 @@ local function sync_geometry(scope, route)
         else
             target = desired
         end
-        local ready, problem = sync_shape(key, world, source_actor, target)
+        local ready, problem = sync_shape(key, world, source_actor, target, source.discovered)
         if not ready then
             had_error = had_error or problem ~= nil
             diagnostics[#diagnostics + 1] = key .. " (" .. (problem or source.problem or "waiting for wall geometry") .. ")"
@@ -416,7 +460,7 @@ function wall.sync(state, phase, fixture, accepting, secondary)
     local local_pawn = state.local_pawn and state.local_pawn.pawn
     local route = zones[state.map]
     if (not hosting and phase ~= "connected") or not route or not valid(local_pawn)
-        or (not route.fixture and not authored_routes[state.map]) then
+        or (not route.fixture and not authored_routes[state.map] and not expanded) then
         wall.clear()
         return
     end

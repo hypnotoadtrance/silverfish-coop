@@ -44,14 +44,16 @@ async def live_exit(host, guest, pawn, probe, **options):
     actual_name = actor.rsplit(".", 1)[-1]
     assert actual_name != route.actor and not any(row.source == OBSERVATORY and row.actor == actual_name
                                                   for row in AUTHORED_ROUTES)
-    start = await suite.wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == OBSERVATORY)
-    denied_before = start["game"]["native_zone"]["too_far"]
-    assert (await probe(host.bridge, "portable-discovered-exit", "alone")).strip() == "entered"
-    refused = await suite.wait_resident_status(host_run, lambda frame: (
-        frame.get("game", {}).get("map") == OBSERVATORY
-        and frame["game"].get("native_zone", {}).get("too_far", 0) > denied_before))
+    start = await suite.wait_resident_status(host_run, lambda frame: (
+        frame.get("game", {}).get("map") == OBSERVATORY and not frame["game"]["native_zone_wall"]["host_open"]))
+    # The native census runs once a second. Give both role scopes a chance to load the cloned shape.
+    await asyncio.sleep(2)
+    assert (await probe(host.bridge, "portable-discovered-exit", "alone")).strip() == "wall"
+    refused = await suite.wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == OBSERVATORY)
     assert refused["zone_epoch"] == start["zone_epoch"]
-    assert (await probe(host.bridge, "portable-discovered-exit", "reset")).strip() == "reset"
+    assert (await probe(host.bridge, "portable-discovered-exit", "regroup")).strip() == "near"
+    await suite.wait_resident_status(host_run, lambda frame: (
+        frame.get("game", {}).get("map") == OBSERVATORY and frame["game"]["native_zone_wall"]["host_open"]))
     assert (await probe(host.bridge, "portable-discovered-exit", "cross")).strip() == "entered"
 
     reached = await wait_for_party(host_run, guest_run, CROSSROADS)
@@ -66,7 +68,7 @@ async def live_exit(host, guest, pawn, probe, **options):
     assert fallback["native_authored_arrival"]["placement"] == "stock-spawn:entrance-unavailable"
     assert fallback["state"] == "hosting" and fallback["map"] == CROSSROADS
     assert all(not (seat.bridge.directory / "native-authored-exit-events").exists() for seat in (host, guest))
-    return {"stock_exit_discovery": departure, "arrival": arrival, "out_of_range_refusal": True}
+    return {"stock_exit_discovery": departure, "arrival": arrival, "discovered_wall_blocked_and_opened": True}
 
 
 if __name__ == "__main__":

@@ -904,6 +904,42 @@ namespace
             : discover_exit(exit, crossing.box.Get(), world) == crossing.discovered;
     }
 
+    Unreal::UObject* exit_by_name(std::string_view name)
+    {
+        if (name.empty() || name.size() > 96 || scope.authored_world.empty()) return nullptr;
+        const auto actor_name = RC::to_wstring(name);
+        if (!exit_token(actor_name)) return nullptr;
+        RC::StringType path{scope.authored_world};
+        path += STR(":PersistentLevel.");
+        path += actor_name;
+        return find<Unreal::UObject>(path.c_str());
+    }
+
+    std::optional<DiscoveredExit> unregistered_exit(Unreal::UObject* exit, Unreal::UWorld* world)
+    {
+        if (!live_object(exit) || expanded_route(scope, exit) || is_route_exit(scope, exit, world)) return {};
+        const auto route = discover_exit(exit, read_object(field<Unreal::FObjectProperty>(exit, STR("Box")), exit), world);
+        if (!route) return {};
+        auto destination = route->destination;
+        destination += STR(".");
+        destination += RC::StringViewType{route->destination}.substr(route->destination.rfind(STR('/')) + 1);
+        return expanded_world(destination).empty() ? std::nullopt : route;
+    }
+
+    int lua_discovered_overlap(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || scope.generation != generation.load(std::memory_order_acquire) ||
+            Clock::now() >= scope.expires || lua.get_stack_size() != 2 || !lua.is_string(1) || !lua.is_integer(2)) return 0;
+        auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
+        auto* exit = exit_by_name(lua.get_string());
+        if (!world || !exit || address(exit) != static_cast<Address>(lua.get_integer())) return 0;
+        const auto route = unregistered_exit(exit, world);
+        if (!route) return 0;
+        lua.set_string(RC::to_string(route->destination));
+        lua.set_string(RC::to_string(route->entrance));
+        return 2;
+    }
+
     int lua_exit_approach(const Lua& lua)
     {
         bool allowed{};
@@ -913,32 +949,31 @@ namespace
             const auto name = lua.get_string();
             auto* local = scope.local.Get();
             if (scope.crossing.ticket && !scope.authored_request && !crossing_current(local)) revoke_crossing();
-            if (!name.empty() && name.size() <= 80 && !scope.authored_world.empty())
+            auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
+            if (!name.empty() && name.size() <= 96 && world && !scope.authored_world.empty())
             {
-                const auto* route = Authored::find(scope.authored_world, RC::to_wstring(name));
-                if (scope.crossing.route && scope.crossing.route == route)
+                const auto actor_name = RC::to_wstring(name);
+                auto* exit = scope.crossing.actor.Get();
+                if (exit && exit->GetName() == actor_name)
                 {
                     allowed = scope.authored_request || crossing_current(local);
                 }
-                else if (route && route->mode == Authored::Mode::overlap && host_is_ready(local))
+                else if (host_is_ready(local))
                 {
                     const auto position = actor_position(local);
-                    auto* exit = scope.approach.actor.Get();
+                    exit = scope.approach.actor.Get();
                     if (!allows_distance_from(scope, position))
                     {
-                        allowed = exit && exit->GetName() == route->source_actor && approaching(exit, position);
+                        allowed = exit && exit->GetName() == actor_name && approaching(exit, position);
                     }
                     else
                     {
-                        auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
-                        if (!exit || exit->GetName() != route->source_actor)
-                        {
-                            auto path = RC::StringType(route->source_world);
-                            path += STR(":PersistentLevel.");
-                            path += route->source_actor;
-                            exit = find<Unreal::UObject>(path.c_str());
-                        }
-                        if (is_expanded_exit(scope, exit, world, *route) && matches_expanded_exit(exit, *route))
+                        if (!exit || exit->GetName() != actor_name) exit = exit_by_name(name);
+                        const auto* route = expanded_route(scope, exit);
+                        const bool qualified = route
+                            ? is_expanded_exit(scope, exit, world, *route) && matches_expanded_exit(exit, *route)
+                            : unregistered_exit(exit, world).has_value();
+                        if (qualified)
                         {
                             scope.approach.actor = exit;
                             scope.approach.position = position;
@@ -1173,7 +1208,8 @@ namespace
             scope.probing_exit.Reset();
             scope.probing_box.Reset();
             if (!iteration.OriginalFunctionCallPrevented() || !host_is_ready(local_pawn) ||
-                !allows_distance(scope, local_pawn) || crossing_sequence >= (std::int64_t{1} << 53) - 1) return;
+                (!approaching(context, actor_position(local_pawn)) && !allows_distance(scope, local_pawn)) ||
+                crossing_sequence >= (std::int64_t{1} << 53) - 1) return;
             if (auto route = discover_exit(context, box, static_cast<Unreal::UWorld*>(world)))
             {
                 scope.crossing.actor = context;
@@ -1193,7 +1229,7 @@ namespace
             auto* box = read_object(scope.overlap_component, locals);
             if (discover_exit(context, box, static_cast<Unreal::UWorld*>(world)))
             {
-                if (allows_distance(scope, other))
+                if (approaching(context, actor_position(other)) || allows_distance(scope, other))
                 {
                     scope.probing_exit = context;
                     scope.probing_box = box;
@@ -1474,6 +1510,7 @@ namespace silverfish::native_zone
         lua.register_function("SilverfishClearNativeZoneScope", lua_clear);
         lua.register_function("SilverfishPauseNativeZoneScope", lua_pause);
         lua.register_function("SilverfishSetNativeExitApproach", lua_exit_approach);
+        lua.register_function("SilverfishInspectDiscoveredOverlap", lua_discovered_overlap);
         lua.register_function("SilverfishCheckNativeExitCrossing", lua_exit_crossing);
         lua.register_function("SilverfishTakeNativeZoneEvent", lua_take_event);
         lua.register_function("SilverfishTakeNativeAuthoredRoute", lua_take_authored_route);
