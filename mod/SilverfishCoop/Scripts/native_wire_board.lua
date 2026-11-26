@@ -286,10 +286,14 @@ local function fixture_context(seat, name)
     return selected_context(seat, path or (profile and profile.path))
 end
 
-local function fresh(now)
+local function fresh()
     if type(SilverfishReadLocalStockBoardHeartbeat) == "function" then
         local attached, timestamp = SilverfishReadLocalStockBoardHeartbeat()
-        if attached then return timestamp ~= nil and timestamp <= now and now <= timestamp + 2 end
+        if attached then
+            -- The resident worker can publish a new second during a stock menu callback.
+            local now = os.time()
+            return timestamp ~= nil and timestamp <= now and now <= timestamp + 2
+        end
     end
     if embedded then return false end
     local file = io.open(heartbeat, "rb")
@@ -298,6 +302,7 @@ local function fresh(now)
     file:close()
     local value = raw and raw:match("^(%d+)%s*$")
     local stamp = value and #value <= 12 and tonumber(value)
+    local now = os.time()
     return stamp and stamp <= now and now <= stamp + 2 or false
 end
 
@@ -306,12 +311,12 @@ local function distance_squared(first, second)
     return (first.X - second.X)^2 + (first.Y - second.Y)^2 + (first.Z - second.Z)^2
 end
 
-local function can_use(current, now, pending_readings)
+local function can_use(current, pending_readings)
     local pawn, controller = current.pawn, current.controller
     local stack, range = controller.MenuStack, pawn.InteractionRange
     if controller.Loading ~= false or not stack or stack:GetArrayNum() ~= 0
         or pawn.Dead ~= false or type(is_downed) ~= "function" or is_downed(pawn) ~= false
-        or type(range) ~= "number" or not (range > 0 and range <= 1000) or not (pending_readings or fresh(now)) then return false end
+        or type(range) ~= "number" or not (range > 0 and range <= 1000) or not (pending_readings or fresh()) then return false end
     local location = pawn:K2_GetActorLocation()
     return distance_squared(location, current.board:K2_GetActorLocation()) <= range^2
         and distance_squared(location, current.box:K2_GetComponentLocation()) <= range^2
@@ -398,8 +403,8 @@ local function emit(current, sequence, kind, now, fixture)
     return success
 end
 
-local function current_stock_menu(current, now)
-    if not current or not fresh(now) or current.controller.Loading ~= false or current.pawn.Dead ~= false
+local function current_stock_menu(current)
+    if not current or not fresh() or current.controller.Loading ~= false or current.pawn.Dead ~= false
         or type(is_downed) ~= "function" or is_downed(current.pawn) ~= false then return end
     local stack = current.controller.MenuStack
     local count = stack and stack:GetArrayNum()
@@ -453,7 +458,7 @@ local function read_menu_rows(menu, list, class, allowed, expected)
     return true
 end
 
-local function show_stock_menu(current, sequence, offers_arg, ready_arg, now, existing_menu)
+local function show_stock_menu(current, sequence, offers_arg, ready_arg, existing_menu)
     local offer_names, offers = stock_ids(offers_arg)
     local ready_names, ready = stock_ids(ready_arg)
     local table_data = require("native_wire_quest").stock_quest_table()
@@ -466,7 +471,7 @@ local function show_stock_menu(current, sequence, offers_arg, ready_arg, now, ex
     end
 
     if not existing_menu then current.board:Send_PowerSignal(true, current.pawn) end
-    local menu = current_stock_menu(current, now)
+    local menu = current_stock_menu(current)
     if not menu or existing_menu and not same(menu, existing_menu) then error("wire_board_stock_menu_missing", 0) end
     local pawn_address, menu_address = current.pawn:GetAddress(), menu:GetAddress()
     local started = SilverfishRenderNativeStockBoard(pawn_address, menu_address, true)
@@ -491,15 +496,15 @@ local function show_stock_menu(current, sequence, offers_arg, ready_arg, now, ex
         end)
     end
     local finished, validations = SilverfishRenderNativeStockBoard(pawn_address, menu_address, false)
-    if not drawn or finished ~= true or validations ~= 1 or not same(current_stock_menu(current, now), menu) then
-        if same(current_stock_menu(current, now), menu) then current.controller:CloseMenu({}) end
+    if not drawn or finished ~= true or validations ~= 1 or not same(current_stock_menu(current), menu) then
+        if same(current_stock_menu(current), menu) then current.controller:CloseMenu({}) end
         error(reason or "wire_board_stock_menu_unverified", 0)
     end
     stock_projection = {menu = menu, sequence = sequence, offers = offers, ready = ready}
 end
 
 local function drain_stock(current, now)
-    local menu = current_stock_menu(current, now)
+    local menu = current_stock_menu(current)
     if stock_session and (stock_session.expires <= now or not same(menu, stock_session.menu)) then stock_session = nil end
     if not menu or type(SilverfishTakeNativeStockBoardAction) ~= "function" then return end
     local sequence, kind, quest = SilverfishTakeNativeStockBoardAction(current.pawn:GetAddress())
@@ -524,18 +529,18 @@ end
 
 local function stock_fixture(current, fields, now)
     local quest, verb = fields[3], fields[4]
-    local menu = current_stock_menu(current, now)
+    local menu = current_stock_menu(current)
     local projected = stock_projection and same(menu, stock_projection.menu)
     local allowed = projected and (verb == "start" and stock_projection.offers or stock_projection.ready)
     if not headless or not (input_fixtures or current.host and host_fixtures) or #fields ~= 4
         or (verb ~= "start" and verb ~= "turnin")
         or projected and not allowed[quest]
-        or not projected and (not supported_stock_action(current, quest) or not can_use(current, now)) then
+        or not projected and (not supported_stock_action(current, quest) or not can_use(current)) then
         error("wire_board_stock_fixture_scope", 0)
     end
     if not projected then
         current.board:Send_PowerSignal(true, current.pawn)
-        menu = current_stock_menu(current, now)
+        menu = current_stock_menu(current)
     end
     if not menu then error("wire_board_stock_fixture_menu_missing", 0) end
     if verb == "start" then
@@ -567,14 +572,14 @@ local function stock_fixture(current, fields, now)
     return "verified stock bounty button intercepted"
 end
 
-local function take_press(seat, now)
+local function take_press(seat)
     local raw, path, already_open = SilverfishTakeNativeWireBoardPress(seat.pawn:GetAddress())
     local sequence = math.tointeger(raw)
     if not sequence or sequence <= last_sequence or sequence >= max_sequence then return end
     last_sequence = sequence
     local current = selected_context(seat, path)
     if already_open then
-        local menu = current and current_stock_menu(current, now)
+        local menu = current and current_stock_menu(current)
         if not menu then return end
         return sequence, current, menu
     end
@@ -604,20 +609,20 @@ function board_view.sync(state, phase)
     if not seat then board_view.clear(); return end
     local now = os.time()
     local current = bound_context(seat)
-    if not fresh(now) then
+    if not fresh() then
         if current and session and session.quest == readings and session.pending
-            and session.expires > now and can_use(current, now, true) then return end
+            and session.expires > now and can_use(current, true) then return end
         board_view.clear()
         return
     end
     if binding and not current then board_view.clear() end
     if stock_pending and (stock_pending.expires <= now
-        or stock_pending.menu and not same(current_stock_menu(current, now), stock_pending.menu)) then stock_pending = nil end
-    if stock_projection and not same(current_stock_menu(current, now), stock_projection.menu) then stock_projection = nil end
+        or stock_pending.menu and not same(current_stock_menu(current), stock_pending.menu)) then stock_pending = nil end
+    if stock_projection and not same(current_stock_menu(current), stock_projection.menu) then stock_projection = nil end
 
     if input_armed and not stock_pending and not stock_projection then
-        local sequence, pressed, menu = take_press(seat, now)
-        if pressed and (menu or can_use(pressed, now, true) and focused(pressed)) then
+        local sequence, pressed, menu = take_press(seat)
+        if pressed and (menu or can_use(pressed, true) and focused(pressed)) then
             if not same_context(current, pressed) then select_board(pressed) end
             current = pressed
             queue_stock_view(current, sequence, now, false, menu)
@@ -632,14 +637,14 @@ function board_view.sync(state, phase)
         if current then select_board(current) end
     end
     if not current then return end
-    local usable = can_use(current, now, true)
+    local usable = can_use(current, true)
     if session and (session.expires <= now or not usable) then session = nil end
     drain_stock(current, now)
     if session then present(current, session.state) else hide() end
     binding.status = usable and (focused(current) and "focused" or "armed") or "waiting"
 end
 
-local function probe_press(current, now)
+local function probe_press(current)
     local pawn, controller = current.pawn, current.controller
     local original, cursor = pawn.InteractionTarget_Component, controller.bShowMouseCursor
     pawn.InteractionTarget_Component = current.box
@@ -649,7 +654,7 @@ local function probe_press(current, now)
     pawn.InteractionTarget_Component = valid(original) and original or nil
     if not armed or not invoked or ok ~= true or reason ~= "stock_started_consumed"
         or controller.MenuStack:GetArrayNum() ~= 0 or controller.bShowMouseCursor ~= cursor then return end
-    local sequence, pressed, menu = take_press(current, now)
+    local sequence, pressed, menu = take_press(current)
     if not menu and same_context(current, pressed) then return sequence end
 end
 
@@ -666,22 +671,22 @@ function board_view.command(fields, state, phase)
             or stock_pending.expires <= now or fields[4] ~= current.profile.map or fields[5] ~= current.name
             or type(SilverfishRenderNativeStockBoard) ~= "function" then error("wire_board_stock_open_stale", 0) end
         local menu = stock_pending.menu
-        if menu and not same(current_stock_menu(current, now), menu)
-            or not menu and (not can_use(current, now) or not stock_pending.fixture and not focused(current)) then
+        if menu and not same(current_stock_menu(current), menu)
+            or not menu and (not can_use(current) or not stock_pending.fixture and not focused(current)) then
             error("wire_board_stock_open_stale", 0)
         end
         stock_pending = nil
-        show_stock_menu(current, sequence, fields[6], fields[7], now, menu)
+        show_stock_menu(current, sequence, fields[6], fields[7], menu)
         return "verified the host options in the native bounty board menu"
     end
     if action == "native-wire-board-stock-f-fixture" then
         local chosen = fixture_context(seat, fields[3])
         if (#fields ~= 2 and #fields ~= 3) or not chosen or not (input_fixtures or chosen.host and host_fixtures)
-            or not can_use(chosen, now) or type(SilverfishProbeNativeInteractInput) ~= "function" then
+            or not can_use(chosen) or type(SilverfishProbeNativeInteractInput) ~= "function" then
             error("wire_board_stock_f_fixture_scope", 0)
         end
         if not same_context(current, chosen) then select_board(chosen) end
-        local sequence = probe_press(chosen, now)
+        local sequence = probe_press(chosen)
         if not sequence then error("wire_board_stock_f_fixture_receipt", 0) end
         if not queue_stock_view(chosen, sequence, now, true) then error("wire_board_stock_f_fixture_unverified", 0) end
         return "verified stock bounty board Interact press"
@@ -696,13 +701,13 @@ function board_view.command(fields, state, phase)
         if #fields ~= 7 or not same_context(current, binding) or not stock_session or stock_session.sequence ~= sequence
             or fields[4] ~= current.profile.map or fields[5] ~= current.name or fields[6] ~= stock_session.quest
             or not (result == "accepted" or result == "completed" or result == "unavailable")
-            or not same(stock_session.menu, current_stock_menu(current, now)) then error("wire_board_stock_result_stale", 0) end
+            or not same(stock_session.menu, current_stock_menu(current)) then error("wire_board_stock_result_stale", 0) end
         stock_session = nil
         if result ~= "unavailable" then current.controller:CloseMenu({}) end
         return "verified stock bounty action result " .. result
     end
     local readings_pending = action == "native-wire-board-render" and session and session.quest == readings and session.pending
-    if not same_context(current, binding) or not can_use(current, now, readings_pending) then error("wire_board_scope_unavailable", 0) end
+    if not same_context(current, binding) or not can_use(current, readings_pending) then error("wire_board_scope_unavailable", 0) end
     if action == "native-wire-board-fixture" then
         local quests, selected = current.profile.quests, nil
         if #fields == 2 then

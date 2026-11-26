@@ -290,4 +290,24 @@ function FName(text)
 end
 assert(stock_keys.stock_quest_key(missing):ToString() == display)
 assert(stock_keys.stock_quest_id("Other_Quest") == "Other_Quest")
+
+local sync = require("native_wire_board").sync
+local fresh
+for index = 1, debug.getinfo(sync, "u").nups do
+    local name, value = debug.getupvalue(sync, index)
+    if name == "fresh" then fresh = value; break end
+end
+assert(type(fresh) == "function")
+local stock_time, current_second, heartbeat = os.time, 100, 101
+os.time = function() return current_second end
+SilverfishReadLocalStockBoardHeartbeat = function()
+    current_second = 101
+    return true, heartbeat
+end
+assert(fresh(100), "The bridge renewed the board heartbeat across a second boundary")
+heartbeat = 98
+assert(not fresh(101), "An expired board heartbeat must still be refused")
+heartbeat = 102
+assert(not fresh(101), "A future board heartbeat must still be refused")
+os.time, SilverfishReadLocalStockBoardHeartbeat = stock_time, nil
 print("Stock board live-row qualification and settlement passed")

@@ -4290,7 +4290,7 @@ async def verify_stock_castaway_dialogue(host: Seat, guest: Seat, pawn: str) -> 
     return {"stock_castaway_dialogue": responses}
 
 
-async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> dict:
+async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str, *, world_objectives: bool = True) -> dict:
     from tools.silverfish import native_anomaly_effects, native_board_contract, native_inventory
     from tools.silverfish.authored_routes import AUTHORED_ROUTES
     from tools.silverfish.native_flood_jammer import OBSERVATORY_BOUNTY_BOARD
@@ -4562,7 +4562,7 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
     assert campaign_save_hashes(host.campaign) == checkpoint
 
     tracked_quests = []
-    for tracked, key, progress, cash, areas, actors, cue in objectives:
+    for tracked, key, progress, cash, areas, actors, cue in objectives if world_objectives else ():
         checkpoint = campaign_save_hashes(host.campaign)
         offers = await board_catalog()
         assert tracked in offers["offers"] and tracked not in offers["turnins"], offers
