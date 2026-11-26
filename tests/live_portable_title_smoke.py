@@ -4379,9 +4379,34 @@ async def verify_stock_castaway_dialogue(host: Seat, guest: Seat, pawn: str) -> 
     def view(frame):
         return frame.get("game", {}).get("native_dialogue_view", {})
 
+    async def castaway(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-castaway", action)
+
+    async def stock_menu(seat, action):
+        async with asyncio.timeout(5):
+            while (result := await castaway(seat, action)) == "waiting":
+                await asyncio.sleep(.08)
+        return result.split("|")
+
+    try:
+        assert await castaway(host, "open") == "started"
+        host_choices = await stock_menu(host, "choices")
+        assert len(host_choices) == 3, host_choices
+        assert await castaway(host, "trade") == "pressed"
+        screen, shop, data, barter_only = await stock_menu(host, "shop")
+    finally:
+        assert await castaway(host, "close") == "0"
+    assert (screen, shop, data, barter_only) == (
+        "WidgetBlueprintGeneratedClass /Game/Classes/GUI/New/ShopScreen.ShopScreen_C",
+        f"Shop_BP_C {native_dialogue.LEVEL}Shop_BP_C_3",
+        "MerchantData_C /Game/Classes/Libraries/DataAssets/Merchants/Castaway_TradeData.Castaway_TradeData",
+        "false",
+    ), (screen, shop, data, barter_only)
+
     await host.bridge.command(native_dialogue.APPROACH, pawn)
     await wait_resident_status(guest_run, lambda frame: view(frame).get("state") == "armed")
     responses = []
+    guest_choices = []
     for button, row in (("open", native_dialogue.ROOT), ("3", native_dialogue.STORY),
                         ("1", native_dialogue.ROOT), ("1", "-")):
         result = await submit(guest_run, native_dialogue.FIXTURE, target=button)
@@ -4391,9 +4416,13 @@ async def verify_stock_castaway_dialogue(host: Seat, guest: Seat, pawn: str) -> 
         frame = await wait_resident_status(guest_run, lambda frame: view(frame).get("sequence") == sequence
             and view(frame).get("row") == row and (view(frame).get("state"), view(frame).get("surface")) == expected)
         responses.append(view(frame))
+        if button == "open":
+            guest_choices = await stock_menu(guest, "choices")
     assert not (guest.bridge.directory / "native-dialogue-events").exists(), "Dialogue wrote an input mailbox"
     assert campaign_save_hashes(host.campaign) == checkpoint
-    return {"stock_castaway_dialogue": responses}
+    return {"stock_castaway_dialogue": responses,
+            "castaway_trade_route": {"host_choices": host_choices, "guest_choices": guest_choices,
+                                     "host_screen": screen, "host_shop": shop, "merchant_data": data}}
 
 
 async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str, *, world_objectives: bool = True) -> dict:
@@ -7521,6 +7550,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["stock_bottle_overlays"] = [probes.enter_context(stock_bottle_overlay(game)) for game in games]
         if stock_roaming_barter:
             proof["roaming_barter_overlays"] = [probes.enter_context(roaming_barter_overlay(game)) for game in games]
+        if stock_castaway_dialogue:
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableCastawayProbe",
+                                                     fixture="portable_castaway_probe.lua"))
         if stock_critters:
             proof["stock_critter_overlays"] = [probes.enter_context(stock_critter_overlay(game)) for game in games]
         projected_drops = stock_shovel_host_quest or tutorial_dock_combat
