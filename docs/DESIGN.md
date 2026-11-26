@@ -1,6 +1,6 @@
 # Project Silverfish Co-op Design
 
-Rules 1–18 are locked.
+The rules below describe the intended co-op behavior. The trusted-participant changes in rules 4, 9, 10, and 16 are being implemented.
 
 Project Silverfish co-op is a shared, host-run campaign. The party shares the world and wallet. Each player controls a character with their own inventory in that campaign.
 
@@ -12,7 +12,7 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 
 3. **Save isolation.** Single-player and co-op use independent save storage. Loading, autosaving, restoring, and deleting saves in either mode affect that mode's saves only.
 
-4. **Host authority.** The host owns game settings, world seed, reputation, quest state, time of day, weather, world events, and shared world flags. The host resolves updates and distributes the authoritative state to the party.
+4. **Trusted participants and shared state.** Each admitted player can report gameplay outcomes with the same trust as the host, including changes made through in-game cheat tools. The host keeps one ordered record of shared changes, applies each report once, and distributes the resulting campaign state. Match reports to the current session, character, and world objects so reconnects, late reports, and simultaneous changes converge. Campaign hosting settings and save operations still belong to the host.
 
 5. **Character selection.** All co-op characters, including guest characters, live in the host's campaign save. The host can start a new co-op campaign through the full stock character creator or load an existing co-op campaign. Joining players can create a character or select one of their existing characters for that campaign.
 
@@ -22,9 +22,9 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 
 8. **Shops, NPCs, and quests.** Players can interact with shops and NPCs independently. Any player can start and complete quests on the host's behalf. The host resolves world-changing choices and synchronizes progress for the party. Each eligible character receives their personal rewards. Shared cash follows rule 16.
 
-9. **Shared wallet.** Every player draws from the same money pool. The host owns the balance and validates changes to it.
+9. **Shared wallet.** Every player draws from the same pool and can add or remove money, including through in-game cheat tools. The host adds or subtracts each reported change once against the current shared balance. A late report of an old balance cannot overwrite another player's transaction.
 
-10. **Independent inventories.** Each character has their own inventory and private rest-site stash contents. The host tracks and saves both with that character. Players use the same physical stash box at a rest site and each sees only their character's items. With the host's combined-stash setting enabled, each character can access the same private contents from every rest site. With it disabled, their contents are stored separately for each stock stash ID. Any nearby party member can collect an item deliberately dropped in the world. The host settles the first valid pickup exactly once and saves the item with the recipient.
+10. **Independent inventories.** Each player owns the state of their character's inventory, including equipment, held items, and locally added items. The host mirrors and saves that state. Each character also has private rest-site stash contents. Players use the same physical stash box at a rest site and each sees only their character's items. With the host's combined-stash setting enabled, each character can access the same private contents from every rest site. With it disabled, their contents are stored separately for each stock stash ID. Any nearby party member can collect an item deliberately dropped in the world. The host settles the first valid pickup exactly once and saves the item with the recipient.
 
 11. **Host-only zone transitions.** Only the host can initiate zone transitions. Zone boundaries block guests. A walk-through exit admits the host when all active characters are within 15 meters. Transition doors check the same distance when the host interacts and still require the door's normal conditions. Party travel follows rule 18.
 
@@ -36,7 +36,7 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 
 15. **Consistent host saves.** Keep the world, wallet, characters, inventories, checkpoint, and dropped backpacks together in one consistent campaign snapshot with a backup. Commit a save on rest, zone travel, and orderly host exit. Resume from the last committed co-op save after a crash. The original host resumes the campaign in the first release.
 
-16. **Authoritative rewards and transactions.** For each quest completion, grant personal rewards once to every character eligible at completion, including characters within reconnect grace. Credit the listed quest cash once per party to the shared wallet. The host settles each quest outcome once. A shop transaction validates funds and stock and commits the wallet, stock, and item transfer together. The host arbitrates simultaneous loot claims, shop purchases, and quest turn-ins.
+16. **Shared outcomes and transactions.** For each reported quest completion, grant personal rewards once to every character eligible at completion, including characters within reconnect grace. Credit the listed quest cash once per party to the shared wallet. Accept personal actions and matching world outcomes from each admitted player. Settle simultaneous claims to the same loot, shop stock, and quest rewards in one shared order. A shop transaction updates the wallet, stock, and item transfer together.
 
 17. **Revive and wipe details.** Revive requires a living teammate outside the downed state and within interaction range. Revive restores 10% of the target's maximum health, with a minimum of 1 HP. The initial defaults are no bleed-out timer and friendly fire off. A downed host continues hosting. Once a party wipe starts, lock the roster and give each player a bounded item-selection window if retention is enabled. Resolve each character's item retention and owner-only backpack drop once before the party respawns.
 
@@ -47,8 +47,8 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 - Keep local movement, camera, input feedback, and presentation running while a co-op action is pending. Use Unreal prediction and smoothing for movement and keep socket I/O and durable disk work on background workers.
 - Apply gameplay changes on the game thread when their inputs and current world are ready. Use exact, bounded requests and budget bulk discovery and projection across frames.
 - Send player actions and lasting outcomes reliably. Settle competing claims at the host in accepted order, using one result per operation ID. Apply a confirmed inventory transfer, trade, revive, or quest change to the relevant players. Use a current baseline on late join, travel, or reconnect.
-- Give gameplay traffic and action receipts priority over bulky snapshots and diagnostics. Use short-lived messages for replaceable visual and audio effects. Keep the host's saved state and per-character ownership authoritative through a delay or disconnect.
-- Keep routine campaign changes in memory until the next checkpoint. Save on explicit requests, travel, and session exit, with a one-minute fallback during play. Keep immediate durable commits for ownership transfers, shared-money transactions, and one-time rewards.
+- Give gameplay traffic and action receipts priority over bulky snapshots and diagnostics. Use short-lived messages for replaceable visual and audio effects. Keep each character's latest accepted state and the shared ledger consistent through a delay or disconnect.
+- Keep routine campaign changes in memory until the next checkpoint. Save on rest, travel, Save and Quit, or an explicit save request.
 
 ## Implementation milestones
 
