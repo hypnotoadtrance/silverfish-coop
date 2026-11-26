@@ -58,6 +58,14 @@ local function set_ignore(component, actor, should_ignore)
     end
 end
 
+local function set_host_capsule(record, desired)
+    if (record.host_capsule or desired) and not same(record.host_capsule, desired) then
+        set_ignore(record.host_capsule, record.actor, false)
+        set_ignore(desired, record.actor, true)
+        record.host_capsule = desired
+    end
+end
+
 local function clear_record(index)
     local record = records[index]
     if not record then return end
@@ -191,11 +199,7 @@ local function sync_shape(index, world, fixture, desired)
             record = create(world, fixture)
             records[index] = record
         end
-        if (record.host_capsule or desired) and not same(record.host_capsule, desired) then
-            set_ignore(record.host_capsule, record.actor, false)
-            set_ignore(desired, record.actor, true)
-            record.host_capsule = desired
-        end
+        set_host_capsule(record, desired)
         return true
     end)
     if not ok then
@@ -343,7 +347,7 @@ end
 
 local function intact(scope, previous)
     if not previous or previous.map ~= scope.map or previous.hosting ~= scope.hosting
-        or previous.permitted ~= scope.permitted or previous.manages_overlap ~= scope.manages_overlap
+        or previous.manages_overlap ~= scope.manages_overlap
         or previous.fixture ~= scope.fixture or previous.secondary ~= scope.secondary or os.clock() >= previous.expires
         or not same(previous.world, scope.world) or not same(previous.pawn, scope.pawn)
         or not same(previous.capsule, scope.capsule) then return false end
@@ -351,6 +355,20 @@ local function intact(scope, previous)
         if not valid(record.actor) or not valid(record.component) or not valid(record.fixture)
             or not valid(record.original) then return false end
     end
+    return true
+end
+
+local function sync_permissions(scope, previous)
+    if previous.permitted == scope.permitted then return true end
+    local desired = scope.permitted and scope.capsule or nil
+    for key, record in pairs(records) do
+        if not record.managed and (not in_world(record.fixture, scope.world)
+            or not same(record.original, record.fixture.Box) or not pcall(set_host_capsule, record, desired)) then
+            clear_record(key)
+            return false
+        end
+    end
+    previous.permitted = scope.permitted
     return true
 end
 
@@ -417,7 +435,7 @@ function wall.sync(state, phase, fixture, accepting, secondary)
     local scope = {map = state.map, world = world, pawn = local_pawn, capsule = local_capsule,
         hosting = hosting, permitted = permitted == true, manages_overlap = manages_overlap,
         fixture = fixture, secondary = secondary}
-    if not intact(scope, verified_walls) then
+    if not intact(scope, verified_walls) or not sync_permissions(scope, verified_walls) then
         verified_walls = nil
         sync_geometry(scope, route)
     end

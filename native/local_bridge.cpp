@@ -47,15 +47,16 @@ namespace
 
     enum class State { idle, queued, taken, running, replied, too_large };
     std::mutex mutex;
+    std::mutex status_mutex;
     std::condition_variable changed;
     bool ready{};
     bool attached{};
-    bool status_enabled{};
     std::int64_t last_ticket{};
     std::int64_t active_ticket{};
     State state{State::idle};
     std::string command;
     std::shared_ptr<const std::string> reply;
+    bool status_enabled{};
     std::shared_ptr<const std::string> status_frame;
     std::uint64_t status_revision{};
     std::deque<std::string> input;
@@ -240,7 +241,8 @@ namespace
             ? std::make_shared<const std::string>(std::move(frame)) : nullptr;
         bool published{};
         {
-            std::lock_guard lock(mutex);
+            // Snapshot publication should not wait for gameplay ticket or input queue work.
+            std::lock_guard lock(status_mutex);
             if (status_enabled)
             {
                 published = snapshot != nullptr;
@@ -515,7 +517,7 @@ extern "C" __declspec(dllexport) int SilverfishBridgeOpenV1()
 
 extern "C" __declspec(dllexport) void SilverfishBridgeCloseV1()
 {
-    std::lock_guard lock(mutex);
+    std::scoped_lock lock(mutex, status_mutex);
     attached = false;
     status_enabled = false;
     status_frame.reset();
@@ -537,14 +539,14 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCloseV1()
 
 extern "C" __declspec(dllexport) int SilverfishBridgeEnableStatusV1()
 {
-    std::lock_guard lock(mutex);
+    std::scoped_lock lock(mutex, status_mutex);
     status_enabled = attached;
     return status_enabled;
 }
 
 extern "C" __declspec(dllexport) std::uint64_t SilverfishBridgeStatusRevisionV1()
 {
-    std::lock_guard lock(mutex);
+    std::lock_guard lock(status_mutex);
     return status_frame ? status_revision : 0;
 }
 
@@ -555,7 +557,7 @@ extern "C" __declspec(dllexport) std::uint32_t SilverfishBridgeCopyStatusV1(
     std::shared_ptr<const std::string> snapshot;
     std::uint64_t version{};
     {
-        std::lock_guard lock(mutex);
+        std::lock_guard lock(status_mutex);
         if (!status_frame || status_revision == previous) return 0;
         snapshot = status_frame;
         version = status_revision;
@@ -821,7 +823,7 @@ namespace silverfish::local_bridge
 
     void stop()
     {
-        std::lock_guard lock(mutex);
+        std::scoped_lock lock(mutex, status_mutex);
         ready = false;
         attached = false;
         status_enabled = false;

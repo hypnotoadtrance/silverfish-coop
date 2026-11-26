@@ -139,8 +139,18 @@ assert(host.ignores[walls[2000]], "Legacy scope opens for a nearby guest")
 after_host_setup = shape_reads
 guest.at = point(4000)
 wall.sync(state, "hosting", nil, true)
-assert(shape_reads > after_host_setup and not host.ignores[walls[2000]],
-    "Host wall permission changes before the geometry cache expires")
+assert(shape_reads == after_host_setup and not host.ignores[walls[2000]],
+    "Host wall closes immediately without rechecking unrelated exit geometry")
+guest.at = point(1400)
+wall.sync(state, "hosting", nil, true)
+assert(shape_reads == after_host_setup and host.ignores[walls[2000]],
+    "Host permission reopens a still-qualified wall without scanning the route")
+local previous_second = walls[2000]
+exits[2].Box = shape(exits[2], point(2000))
+guest.at = point(4000)
+wall.sync(state, "hosting", nil, true)
+assert(shape_reads > after_host_setup and not host.ignores[walls[2000]] and walls[2000] ~= previous_second,
+    "A replaced stock box must requalify before setting the new permission")
 guest.at = point(1400)
 SilverfishSetNativeExitApproach = approve_approach
 wall.sync(state, "connected", nil, true)

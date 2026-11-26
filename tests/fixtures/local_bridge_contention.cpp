@@ -35,6 +35,15 @@ int main()
     lua.set_string("busy");
     assert(publish_avatar_pose(lua) == 1 && !lua_toboolean(stack, 1));
     lua_settop(stack, 0);
+    constexpr std::string_view concurrent_status = "status while command queue is busy\n";
+    lua.set_string(concurrent_status);
+    assert(publish_status(lua) == 1 && lua_toboolean(stack, 1));
+    lua_settop(stack, 0);
+    char status_buffer[concurrent_status.size()]{};
+    std::uint64_t first_revision{};
+    assert(SilverfishBridgeCopyStatusV1(0, status_buffer, sizeof status_buffer, &first_revision) == sizeof status_buffer);
+    assert(first_revision == 1 && SilverfishBridgeStatusRevisionV1() == first_revision);
+    assert(std::string_view(status_buffer, sizeof status_buffer) == concurrent_status);
     release.set_value();
     worker.join();
 
@@ -81,18 +90,18 @@ int main()
     std::atomic<bool> done{};
     std::vector<char> output(packet_size);
     std::jthread reader([&] {
-        std::uint64_t seen{};
+        std::uint64_t seen = first_revision;
         while (!done || seen != SilverfishBridgeStatusRevisionV1())
         {
             std::uint64_t revision{};
             const auto size = SilverfishBridgeCopyStatusV1(seen, output.data(), packet_size, &revision);
             if (!size) continue;
             assert(size == packet_size && revision > seen);
-            const char expected = static_cast<char>('A' + (revision - 1) % 26);
+            const char expected = static_cast<char>('A' + (revision - first_revision - 1) % 26);
             assert(std::ranges::all_of(output, [expected](char value) { return value == expected; }));
             seen = revision;
         }
-        assert(seen == 200);
+        assert(seen == first_revision + 200);
     });
     for (int i = 0; i < 200; ++i)
     {
@@ -111,8 +120,8 @@ int main()
     assert(publish_status_rows(lua) == 1 && lua_toboolean(stack, -1));
     lua_settop(stack, 0);
     std::uint64_t version{};
-    const auto row_bytes = SilverfishBridgeCopyStatusV1(200, output.data(), packet_size, &version);
-    assert(version == 201 && std::string_view(output.data(), row_bytes) == std::string_view("schema\t1\nopaque\t\0data\n", 22));
+    const auto row_bytes = SilverfishBridgeCopyStatusV1(first_revision + 200, output.data(), packet_size, &version);
+    assert(version == first_revision + 201 && std::string_view(output.data(), row_bytes) == std::string_view("schema\t1\nopaque\t\0data\n", 22));
 
     lua_newtable(stack);
     lua_pushboolean(stack, true);
