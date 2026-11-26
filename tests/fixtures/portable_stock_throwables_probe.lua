@@ -15,7 +15,7 @@ local profiles = {
     pipebomb = {"Gren_PipeBomb", "PipeBomb_Projectile_BP_C"},
 }
 local shots, blasts, last, landed = {}, {}, nil, nil
-local watch_pawn, short_bolt_samples
+local watch_pawn, short_bolt_samples, watching
 
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -94,20 +94,25 @@ local function stage_bolt(pawn, world, owner_side)
 end
 
 RegisterBeginPlayPostHook(function(context)
+    if not watching then return end
     local actor = context:get()
-    if not valid(actor) or actor:IsActorBeingDestroyed() then return end
+    if not valid(actor) then return end
     local name = actor:GetClass():GetFullName()
+    local ground = watching == "bolt" and name == "BlueprintGeneratedClass /Game/Classes/Equipment/Eqp_Bolt.Eqp_Bolt_C"
+    local blast = watching == "pipebomb" and name == "BlueprintGeneratedClass /Game/Classes/Actors/ExplosionActor_BP.ExplosionActor_BP_C"
+    local projectile = name:find(projectile_folder, 1, true) and name:sub(-#profiles[watching][2]) == profiles[watching][2]
+    if not (ground or blast or projectile) or actor:IsActorBeingDestroyed() then return end
     local world = actor:GetWorld()
-    if not valid(world) or not valid(world.NetDriver) or world:GetFullName() ~= world_name then return end
-    if name == "BlueprintGeneratedClass /Game/Classes/Equipment/Eqp_Bolt.Eqp_Bolt_C" and actor:HasAuthority()
-        and shots.bolt and valid(shots.bolt.actor.RootComponent) then
+    if not valid(world) or world:GetFullName() ~= world_name or not valid(world.NetDriver) then return end
+    if ground and actor:HasAuthority() and shots.bolt and valid(shots.bolt.actor)
+        and valid(shots.bolt.actor.RootComponent) then
         local projectile, ground = shots.bolt.actor:K2_GetActorLocation(), actor:K2_GetActorLocation()
         if (ground.X - projectile.X)^2 + (ground.Y - projectile.Y)^2 + (ground.Z - projectile.Z)^2 < 10^2 then
             landed = actor
         end
         return
     end
-    if name == "BlueprintGeneratedClass /Game/Classes/Actors/ExplosionActor_BP.ExplosionActor_BP_C" then
+    if blast then
         local sources = actor["Actors to Ignore"]
         local source = sources and sources[1]
         if valid(source) and same(source, shots.pipebomb and shots.pipebomb.actor) then
@@ -118,20 +123,22 @@ RegisterBeginPlayPostHook(function(context)
         end
         return
     end
-    if not name:find(projectile_folder, 1, true) then return end
-    for kind, profile in pairs(profiles) do
-        if name:sub(-#profile[2]) == profile[2] then
-            local point = actor:K2_GetActorLocation()
-            shots[kind] = {actor = actor, class = actor:GetClass(), role = actor:GetLocalRole(), name = actor:GetFullName(),
-                clock = StaticFindObject("/Script/Engine.Default__GameplayStatics"), world = world,
-                x = point.X, y = point.Y, z = point.Z, peak = 0, fuse = actor.FuseTime, visible = 0}
-            shots[kind].began = shots[kind].clock:GetTimeSeconds(world)
-        end
+    if projectile then
+        local point = actor:K2_GetActorLocation()
+        local clock = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+        shots[watching] = {actor = actor, class = actor:GetClass(), role = actor:GetLocalRole(), name = actor:GetFullName(),
+            clock = clock, world = world, x = point.X, y = point.Y, z = point.Z, peak = 0, fuse = actor.FuseTime,
+            visible = 0, began = clock:GetTimeSeconds(world)}
     end
 end)
 
 local function run(action, kind, arg)
     local profile = assert(profiles[kind], "unknown throwable kind")
+    if action == "disarm" then
+        watching, watch_pawn, short_bolt_samples, landed = nil, nil, nil, nil
+        shots, blasts = {}, {}
+        return "disarmed"
+    end
     if action == "blasts" then return #blasts .. ":" .. table.concat(blasts, ";") end
     if action == "visual" then return short_bolt_samples or 0 end
     if action == "shot" then
@@ -156,7 +163,8 @@ local function run(action, kind, arg)
     assert(valid(pawn) and pawn:IsLocallyControlled() and same(pawn.Save, world.OwningGameInstance.SaveSlot_Ref),
         "the local stock pawn is not ready")
     if action == "reset" then
-        shots[kind] = nil
+        watching = kind
+        shots = {}
         if kind == "bolt" then landed = nil end
         if kind == "pipebomb" then blasts = {} end
         watch_pawn, short_bolt_samples = kind == "bolt" and pawn or nil, 0

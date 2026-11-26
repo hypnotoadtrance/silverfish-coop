@@ -2490,6 +2490,8 @@ async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str)
                         break
                     await asyncio.sleep(.05)
         verified[f"{side}_{kind}"] = record
+        for seat in (host, guest):
+            assert await probe(seat, "disarm", kind) == "disarmed"
     assert campaign_save_hashes(host.campaign) == checkpoint
     assert not weapon_cue_files(host, guest)
     return {"stock_throwables": verified}
