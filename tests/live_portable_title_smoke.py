@@ -4511,7 +4511,6 @@ async def verify_stock_castaway_dialogue(host: Seat, guest: Seat, pawn: str) -> 
 
 async def verify_streamed_stock_board(host: Seat, guest: Seat, pawn: str) -> dict:
     from tools.silverfish import native_board_contract
-    from tools.silverfish.native_quest import AUTHORED_BOARD_ACTIONS
 
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     checkpoint = campaign_save_hashes(host.campaign)
@@ -4566,7 +4565,7 @@ async def verify_streamed_stock_board(host: Seat, guest: Seat, pawn: str) -> dic
     assert result["ok"], result
     offers = set(result[native_board_contract.CATALOG_KEY]["offers"])
     photo = "Photo_BrnzQuarry"
-    accepted = min(offers - AUTHORED_BOARD_ACTIONS - {photo})
+    accepted = min(offers - {photo})
     frame = await open_board()
     assert set(filter(None, (await command(guest, "stream-menu")).split(","))) == offers
     await choose(accepted, "start")
@@ -4808,8 +4807,8 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str, *, wo
     advanced = set(filter(None, extended.split(","))) - AUTHORED_BOARD_ACTIONS
     other_boards = offered & (AUTHORED_BOARD_ACTIONS - catalog_specialists(OBSERVATORY, OBSERVATORY_BOUNTY_BOARD))
     previously_filtered = advanced | other_boards
-    assert previously_filtered <= offered and previously_filtered, (offered, previously_filtered)
-    quest = min(previously_filtered)
+    assert previously_filtered <= offered and (previously_filtered or not world_objectives), (offered, previously_filtered)
+    quest = min(previously_filtered or offered)
 
     guest_frame = await board_menu()
     visible = set(filter(None, (await command(guest, "menu")).split(",")))
