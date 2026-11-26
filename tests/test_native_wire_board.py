@@ -191,7 +191,7 @@ class WireBoardTests(unittest.IsolatedAsyncioTestCase):
         bridge = SimpleNamespace(input_namespace=uuid.uuid4(), native_wire_board_requests=Mock(), command=AsyncMock())
         view = wire.WireBoardView(bridge, Mock())
         action = AsyncMock()
-        self.assertEqual(wire.catalog_specialists(area, board), {quest, other})
+        self.assertEqual(wire.catalog_specialists(area, board), {quest, other, wire.FLOOD_JAMMER.quest})
         self.assertFalse(wire.catalog_specialists(area, board.removesuffix("_2") + "_9"))
 
         def snapshot(state, sequence, opened, choice):

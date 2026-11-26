@@ -144,15 +144,15 @@ local function read_menu(controller, completed)
     return ("%s;%s;%s"):format(menu.BountyBoard_Ref:GetFullName(), menu:GetAddress(), table.concat(ids, ","))
 end
 
-local function journal(state)
+local function journal(state, flood)
     local save = state.local_pawn.pawn.Save
     assert(valid(save) and same(save, state.world.OwningGameInstance.SaveSlot_Ref))
-    local quests = {Jmr_CrossRoads = "-", Jmr_Lake = "-"}
+    local quests = {Jmr_CrossRoads = "-", Jmr_Lake = "-", Jmr_FloodPlains = "-"}
     save.ActiveQuests:ForEach(function(key, row)
         local id = key:get():ToString()
         if quests[id] then quests[id] = tostring(row:get()[step_field]) end
     end)
-    return quests.Jmr_CrossRoads .. "," .. quests.Jmr_Lake
+    return flood and quests.Jmr_FloodPlains or quests.Jmr_CrossRoads .. "," .. quests.Jmr_Lake
 end
 
 local function accept_lake_quest(state)
@@ -268,6 +268,7 @@ local function sync(state, phase)
     if not token or #token ~= 32 then return end
     local ok, result = pcall(function()
         if operation == "journal" then return journal(state) end
+        if operation == "floodjournal" then return journal(state, true) end
         if portable and phase == "connected" and operation == "selectpistol" then
             return select_pistol(state.local_pawn.pawn, slot)
         end

@@ -24,14 +24,15 @@ COUP_REPORT = native_computer_board.COUP_REPORT
 DEPOT_DOCUMENTS = native_computer_board.DEPOT_DOCUMENTS
 LAKE_JAMMER = native_flood_jammer.BLACK_LAKE
 CROSSROADS_JAMMER = native_flood_jammer.CROSSROADS_JAMMER
+FLOOD_JAMMER = native_flood_jammer.FLOOD
 LENNY = native_flood_jammer.LENNY
 SPRATT = native_flood_jammer.SPRATT
 QUESTS = {
     SHOPKEEP: frozenset({native_computer_board.MOLASSES.quest_id}),
     OBSERVATORY: frozenset({native_computer_board.SAVLO_KEYCARD.quest_id, native_computer_board.DEAD_DROP.quest_id,
-                            native_computer_board.BLACK_BOX.quest_id, CROSSROADS_JAMMER.quest, LAKE_JAMMER.quest}),
+                            native_computer_board.BLACK_BOX.quest_id, *native_flood_jammer.OBSERVATORY_BOUNTIES}),
     BOROUGH: frozenset({QUEST, native_computer_board.QUEST_ID, native_turret_photo.QUEST_ID, COUP_REPORT.quest_id,
-                        native_subway_valve.QUEST}),
+                        native_subway_valve.QUEST, FLOOD_JAMMER.quest}),
     SCIENTIST_SHOP: frozenset({native_computer_board.QUEST_ID, native_mosby_tape.MOSBY_QUEST, native_prototype_drill.QUEST_ID}),
     SCAV_BAR: frozenset({DEPOT_DOCUMENTS.quest_id, native_computer_board.POCKET_WATCH.quest_id,
                          native_computer_board.SAVLO_RING.quest_id}),
@@ -45,6 +46,7 @@ PREFLIGHTS = {
     native_subway_valve.QUEST: (native_subway_valve.PREFLIGHT, native_subway_valve.BOARD_KEY),
     LAKE_JAMMER.quest: (LAKE_JAMMER.command("preflight"), LAKE_JAMMER.key),
     CROSSROADS_JAMMER.quest: (CROSSROADS_JAMMER.command("preflight"), CROSSROADS_JAMMER.key),
+    FLOOD_JAMMER.quest: (FLOOD_JAMMER.command("preflight"), FLOOD_JAMMER.key),
     LENNY.quest: (LENNY.command("preflight"), LENNY.key),
     SPRATT.quest: (SPRATT.command("preflight"), SPRATT.key),
     QUEST: (native_wire_quest.PREFLIGHT, "native_wire_quest"),
@@ -54,11 +56,11 @@ PREFLIGHTS = {
     **{spec.quest_id: (spec.command("preflight"), spec.key) for spec in native_computer_board.CONTRACTS.values()},
 }
 HIDDEN_OFFERS = {"stock_turret_photo_quest_not_offered", "stock_lake_jammer_quest_not_offered", "stock_lenny_quest_not_offered",
-                 "stock_crossroads_jammer_quest_not_offered",
+                 "stock_crossroads_jammer_quest_not_offered", "stock_flood_jammer_quest_not_offered",
                  "stock_spratt_quest_not_offered",
                  "stock_subway_valve_quest_not_offered",
                  *{f"stock_{spec.key.removeprefix('native_')}_quest_not_offered" for spec in native_computer_board.CONTRACTS.values()}}
-STOCK_MENU = {LAKE_JAMMER.quest: LAKE_JAMMER, CROSSROADS_JAMMER.quest: CROSSROADS_JAMMER}
+STOCK_MENU = {spec.quest: spec for spec in (LAKE_JAMMER, CROSSROADS_JAMMER, FLOOD_JAMMER)}
 
 
 def catalog_specialists(area, board):
@@ -296,7 +298,7 @@ class WireBoardView:
             return self._wire_status(proof)
         step = proof.get("step_after")
         last = 3 if quest == native_turret_photo.QUEST_ID else 2
-        if quest in (LAKE_JAMMER.quest, CROSSROADS_JAMMER.quest) and step == -7:
+        if quest in native_flood_jammer.OBSERVATORY_BOUNTIES and step == -7:
             return "completed"
         if "step_after" not in proof or step not in (None, -10, *range(1, last + 1)):
             raise RuntimeError("The host board report did not verify the selected stock quest step")
@@ -320,7 +322,7 @@ class WireBoardView:
             return "completed"
         if quest == SPRATT.quest:
             return "ready" if step == 2 and proof.get("objective_qualified") is True else "missing"
-        if quest in (native_turret_photo.QUEST_ID, LAKE_JAMMER.quest, CROSSROADS_JAMMER.quest, LENNY.quest,
+        if quest in (native_turret_photo.QUEST_ID, LAKE_JAMMER.quest, CROSSROADS_JAMMER.quest, FLOOD_JAMMER.quest, LENNY.quest,
                      native_subway_valve.QUEST):
             return "ready" if step == last else "missing"
         spec = native_computer_board.CONTRACTS[quest]

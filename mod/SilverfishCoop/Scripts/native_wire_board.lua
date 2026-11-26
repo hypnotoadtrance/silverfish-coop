@@ -25,6 +25,7 @@ local ring = "Clct_EvilEye"
 local pump_room = "Clt_EatherPumpTape"
 local lake_jammer = "Jmr_Lake"
 local crossroads_jammer = "Jmr_CrossRoads"
+local flood_jammer = "Jmr_FloodPlains"
 local lenny = "Asn_Lenny_01"
 local spratt = "Asn_Spratt"
 local readings = "Clt_Tape_StoneMaze_01"
@@ -39,8 +40,8 @@ end
 local profiles = {
     [shopkeep] = board_profile(shopkeep, "Shop_ShopKeep_P", "1", 2, {molasses}),
     [observatory] = board_profile(observatory, "Observitory_P", "0", 3, {keycard, dead_drop, black_box,
-        crossroads_jammer, lake_jammer}, true),
-    [borough] = board_profile(borough, "Borough", "3", 5, {wire, computer, photo, report, flood_control}),
+        crossroads_jammer, lake_jammer, flood_jammer}, true),
+    [borough] = board_profile(borough, "Borough", "3", 5, {wire, computer, photo, report, flood_control, flood_jammer}),
     [scientist] = board_profile(scientist, "Shop_Scientist_01", "2", 4, {computer, readings, prototype}),
     [scav_bar] = board_profile(scav_bar, "Shop_ScavBar_P", "2", 10, {depot, pocket_watch, ring}, true),
     [black_market] = board_profile(black_market, "Shop_BlackMarket_01", "0", 1, {brandy, pump_room, lake_jammer, lenny,
@@ -52,7 +53,8 @@ local titles = {[molasses] = "Get Molasses", [keycard] = "Hall Pass", [wire] = "
     [lenny] = "Lenny's House", [flood_control] = "Flood Control", [stolen_bag] = "Stolen Goods",
     [dead_drop] = "CrossRoads Dead Drop", [metro_drop] = "Metro Dead Drop",
     [black_box] = "Black Box", [missing_contact] = "Missing Contact",
-    [spratt] = "Kill Spratt", [prototype] = "Prototype Drill", [crossroads_jammer] = "Signal Jammer: Crossroads"}
+    [spratt] = "Kill Spratt", [prototype] = "Prototype Drill", [crossroads_jammer] = "Signal Jammer: Crossroads",
+    [flood_jammer] = "Signal Jammer: Flood Plains"}
 local board_class = "/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C"
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
@@ -174,6 +176,11 @@ local contract_prompt = {
         offer = "Disable the signal jammer at Crossroads.\nInteract again to accept the contract.",
         missing = "Disable the signal jammer at Crossroads.\nInteract to check the contract again.",
         ready = "Turn in the contract for 200 shared cash.\nInteract again to turn it in.",
+    },
+    [flood_jammer] = {
+        offer = "Disable the signal jammer at Flood Plains.\nInteract again to accept the contract.",
+        missing = "Disable the signal jammer at Flood Plains.\nInteract to check the contract again.",
+        ready = "Turn in the contract for 350 shared cash.\nInteract again to turn it in.",
     },
     [lenny] = {
         offer = "Find Lenny in the Rail Yard.\nInteract again to accept the contract.",
@@ -417,6 +424,7 @@ local function supported_stock_action(current, quest)
     if current.profile ~= profiles[map] then return false end
     return quest == lake_jammer and (map == black_market or map == observatory)
         or quest == crossroads_jammer and map == observatory
+        or quest == flood_jammer and (map == borough or map == observatory)
 end
 
 local function queue_stock_view(current, sequence, now, fixture, menu)

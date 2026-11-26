@@ -166,6 +166,28 @@ class FloodJammerObjectiveTests(unittest.IsolatedAsyncioTestCase):
         host.checkpoint_native.assert_not_awaited()
         self.assertIs(host.pending_host_save, False)
 
+    async def test_guest_accepts_flood_plains_through_simmi(self):
+        spec, area, board = jammer.FLOOD, jammer.OBSERVATORY, jammer.SIMMI_BOARD
+        host = self.host(None, spec=spec)
+        host.last_game = {"state": "hosting", "map": area}
+        host.allowed_maps = {area}
+        host.zone_epoch = "d3" * 16
+        pawn = "exact guest pawn"
+        reputation = {faction: {"before": 0, "after": 0} for faction in spec.factions}
+        stock = dict(map=area, pawn=pawn, board=board, quest=spec.quest, step_before=None,
+                     cash_before=0, cash_after=0, xp_before=0, xp_after=0, reputation=reputation)
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=(
+            {**host.last_game, spec.key: dict(stock, operation=spec.command("preflight"), step_after=None)},
+            {**host.last_game, spec.key: dict(stock, operation=spec.command("start"), step_after=1)},
+        )))
+        selected = native_board_contract.menu_target(host.zone_epoch, board, spec.quest)
+        result = await native_quest.action(host, bridge, "guest-character", "native-quest-start", selected)
+        self.assertEqual((result["step"], result[spec.key]["board"]), (1, board))
+        self.assertEqual([call.args for call in bridge.command.await_args_list], [
+            (spec.command("preflight"), pawn), (spec.command("start"), pawn),
+        ])
+        host.checkpoint_native.assert_not_awaited()
+
     async def test_crossroads_can_adopt_an_authored_objective_accepted_in_an_older_host_save(self):
         spec = jammer.CROSSROADS_JAMMER
         host = self.host(1, spec=spec)

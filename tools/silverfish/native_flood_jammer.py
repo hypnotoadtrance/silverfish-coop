@@ -47,9 +47,10 @@ class JammerProfile(StockKillContract):
 
 
 FLOOD_PLAINS = "/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P"
-FLOOD = JammerProfile("Jmr_FloodPlains", "native_flood_jammer", BOROUGH, native_wire_quest.BOARD, FLOOD_PLAINS, 350, frozenset({"2", "5"}))
 BLACK_MARKET_BOARD = f"BountyBoard_BP_C {BLACK_MARKET}.Shop_BlackMarket_01:PersistentLevel.BountyBoard_BP_C_0"
 SIMMI_BOARD = f"BountyBoard_BP_C {OBSERVATORY}.Observitory_P:PersistentLevel.BountyBoard_BP_C_0"
+FLOOD = JammerProfile("Jmr_FloodPlains", "native_flood_jammer", BOROUGH, native_wire_quest.BOARD, FLOOD_PLAINS, 350,
+                      frozenset({"2", "5"}), alternate_boards=((OBSERVATORY, SIMMI_BOARD),))
 BLACK_LAKE = JammerProfile("Jmr_Lake", "native_lake_jammer", BLACK_MARKET, BLACK_MARKET_BOARD, LAKE, 400,
                            frozenset({"5", "8"}), alternate_boards=((OBSERVATORY, SIMMI_BOARD),))
 CROSSROADS_JAMMER = JammerProfile("Jmr_CrossRoads", "native_crossroads_jammer", OBSERVATORY, SIMMI_BOARD, CROSSROADS,
@@ -59,7 +60,7 @@ SPRATT = StockKillContract(native_spratt.QUEST, "native_spratt", BLACK_MARKET, B
                            native_spratt.AREA, 5000, frozenset({"5", "8"}), fixture_xp=7)
 CONTRACTS = {spec.quest: spec for spec in (FLOOD, BLACK_LAKE, CROSSROADS_JAMMER, LENNY, SPRATT)}
 OBSERVATORY_BOUNTY_BOARD = SIMMI_BOARD.removesuffix("_0") + "_2"
-OBSERVATORY_BOUNTIES = frozenset({CROSSROADS_JAMMER.quest, BLACK_LAKE.quest})
+OBSERVATORY_BOUNTIES = frozenset(spec.quest for spec in (FLOOD, BLACK_LAKE, CROSSROADS_JAMMER))
 OBJECTIVES = {spec.objective_map: spec for spec in (FLOOD, BLACK_LAKE, CROSSROADS_JAMMER)}
 COMMANDS = {
     spec.command(verb): spec

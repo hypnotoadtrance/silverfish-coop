@@ -10,7 +10,7 @@ from tools.silverfish import native_inventory
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.control import current_status, submit
 from tools.silverfish.native_flood_jammer import (
-    BLACK_LAKE, CROSSROADS_JAMMER, OBSERVATORY_BOUNTY_BOARD, POSE, SIMMI_BOARD, same_pose,
+    BLACK_LAKE, CROSSROADS_JAMMER, FLOOD, OBSERVATORY_BOUNTY_BOARD, POSE, SIMMI_BOARD, same_pose,
 )
 from tools.silverfish.travel import CROSSROADS, LAKE, OBSERVATORY
 
@@ -186,16 +186,20 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
 
     checkpoint = campaign_save_hashes(host.campaign)
     offers = await board(guest, physical=True)
-    assert set(journal_rows) <= offers, offers
+    expected_offers = {*journal_rows, FLOOD.quest}
+    assert expected_offers <= offers, offers
     await close(guest, physical=True)
-    for seat, spec in ((guest, CROSSROADS_JAMMER), (host, BLACK_LAKE)):
+    for seat, spec in ((guest, FLOOD), (guest, CROSSROADS_JAMMER), (host, BLACK_LAKE)):
         assert spec.quest in await board(seat)
         await accept(seat, spec)
         await asyncio.gather(*(quest_on(peer, spec, 1) for peer in peers))
         await close(seat)
     accepted_journal = await journal("1,1")
+    async with asyncio.timeout(9):
+        while (flood_journal := await asyncio.gather(*(command(seat, "floodjournal") for seat in peers))) != ["1", "1"]:
+            await asyncio.sleep(.14)
     remaining = await board(guest, physical=True)
-    assert remaining == offers - set(journal_rows), (offers, remaining)
+    assert remaining == offers - expected_offers, (offers, remaining)
     await close(guest, physical=True)
     assert campaign_save_hashes(host.campaign) == checkpoint, "Opening or accepting a bounty wrote a save"
 
@@ -321,6 +325,7 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
     assert campaign_save_hashes(host.campaign) == payout_checkpoint, "Stock turn-in wrote a save before the normal checkpoint"
     return {"stock_simmi_jammers": {
         "offered": sorted(offers), "remaining": sorted(remaining), "initial_journals": accepted_journal,
+        "flood_plains_journals_after_simmi_acceptance": flood_journal,
         "crossroads": crossroads, "lake": lake, "visits": [outbound, lake_out, lake_return, final_visit],
         "visits_verified_after_fixture_timeout": travel_receipts,
         "weapon_before_travel": before_travel, "weapon_after_travel": restored,
