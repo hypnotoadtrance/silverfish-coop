@@ -7,7 +7,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call, patch
 
-from tools.silverfish import native_host_save, native_loose_pickup, native_loot, native_stock_enemy_drops, party, runtime
+from tools.silverfish import (
+    native_host_save, native_loose_pickup, native_loot, native_stock_enemy_drops, native_world_loot, party, runtime,
+)
 from tools.silverfish.authored_loot import (CRATES, CRATE_NAMES_BY_INDEX, LEGACY_CRATE, OFFICE_DESK,
                                            PLACEMENTS, OVERRIDDEN_PLACEMENTS, SMALL_CABINET, full_name,
                                            lockable_container, loot_capacity, random_lid)
@@ -290,6 +292,22 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
             BRIDGE_CRATE: self.roll(DEAD_BRIDGE, BRIDGE_CRATE, "3" * 32),
         }
         self.assertEqual(native_loot.published(records, CROSSROADS), {OTHER_CRATE: native_loot.public_roll(roll)})
+
+    def test_distant_crate_item_remains_visible_near_guest_or_while_held(self):
+        transform = {"position": [3000., 0., 0.], "rotation": [0., 0., 0.], "scale": [1., 1., 1.]}
+        roll = self.roll(CROSSROADS, OTHER_CRATE, "1" * 32)
+        roll["items"][0]["transform"] = transform
+        rolls = {OTHER_CRATE: roll}
+        pawns = {"local": {"name": f"Player_FP_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Player_FP_C_0",
+                           "location": [0., 0., 0.]}}
+        game = self.game(CROSSROADS, pawns=pawns)
+        identity = native_world_loot.crate_identity(roll["id"], ITEM["guid"])
+        self.assertEqual(native_world_loot.nearby(game, rolls, OPERATION), {})
+        self.assertIn(identity, native_world_loot.nearby(game, rolls, OPERATION, pinned={identity}))
+        pawns["guest"] = {"location": transform["position"]}
+        self.assertIn(identity, native_world_loot.nearby(game, rolls, OPERATION))
+        transform["scale"] = [0., 1., 1.]
+        self.assertEqual(native_world_loot.nearby(game, rolls, OPERATION, pinned={identity}), {})
 
     async def test_legacy_crate_uses_the_unoccupied_stock_slot_without_rerolling(self):
         claimed = {"position": [21., 20., 30.], "rotation": [0., 0., 0.], "scale": [1., 1., 1.]}

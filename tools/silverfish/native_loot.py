@@ -46,6 +46,11 @@ CLAIM_REPLY_HEADER = "native-pickup-claim-reply\t1\n"
 CLAIM_REPLY_BYTES = "native_pickup_claim_reply_bytes"
 
 
+_CRATES_BY_MAP = {}
+for _crate, _map in CRATES.items():
+    _CRATES_BY_MAP.setdefault(_map, []).append(_crate)
+
+
 def copy_pending_loot(state, *ledgers, character=None, cash=False):
     """Copy the sections changed by a verified loot action committed in memory."""
     candidate = state.copy()
@@ -188,14 +193,14 @@ def interaction(game: dict, last_sequence: int) -> tuple[int, str] | None:
         return sequence, crate
 
 
-def _rolls_in_area(rolls: dict, area: str) -> dict:
-    return {crate: roll for crate, map_name in CRATES.items() if map_name == area
-            and (roll := rolls.get(crate)) and (roll.get("crate"), roll.get("map")) == (crate, area)}
+def rolls_in_area(rolls: dict, area: str) -> dict:
+    return {crate: roll for crate in _CRATES_BY_MAP.get(area, ())
+            if (roll := rolls.get(crate)) and (roll.get("crate"), roll.get("map")) == (crate, area)}
 
 
 def published(rolls: dict, area: str, *, game=None) -> dict:
     replenished = _replenished(game, rolls) if game is not None else {}
-    return {crate: public_roll(roll) for crate, roll in _rolls_in_area(rolls, area).items()
+    return {crate: public_roll(roll) for crate, roll in rolls_in_area(rolls, area).items()
             if crate not in replenished}
 
 
@@ -206,8 +211,12 @@ def _replenished(game, rolls):
     pawn = game.get("pawns", {}).get("local", {}).get("name")
     observed = game.get(REPLENISHED, {})
     stock = game.get("native_loot_crates", {})
-    return {crate: roll for crate, roll in _rolls_in_area(rolls, area).items()
-            if pawn and observed.get(crate) == dict(map=area, crate=crate, pawn=pawn)
+    if not pawn or area is None:
+        return {}
+    return {crate: roll for crate, proof in observed.items()
+            if CRATES.get(crate) == area and (roll := rolls.get(crate))
+            and (roll.get("crate"), roll.get("map")) == (crate, area)
+            and proof == dict(map=area, crate=crate, pawn=pawn)
             and stock.get(crate, {}).get("state") == "ready"}
 
 
@@ -238,7 +247,7 @@ async def retire_replenished(host, bridge):
 
 async def restore_legacy_placement(host, bridge) -> None:
     area = host.last_game.get("map")
-    rolls = _rolls_in_area(host.party.get(STATE_KEY, {}), area)
+    rolls = rolls_in_area(host.party.get(STATE_KEY, {}), area)
     for crate, roll in rolls.items():
         if not any(not row.get("claimed_by") and "transform" not in row for row in roll["items"]):
             continue
@@ -324,7 +333,7 @@ async def project_opened(bridge, game: dict, rolls: dict) -> dict:
     """Project saved open crates in this map without replaying stock rolls."""
     area = game.get("map")
     replenished = _replenished(game, rolls or {})
-    for crate, roll in _rolls_in_area(rolls or {}, area).items():
+    for crate, roll in rolls_in_area(rolls or {}, area).items():
         if crate in replenished:
             continue
         lid = random_lid(crate)
@@ -384,7 +393,7 @@ class GuestCrateProjection:
         if confirmed_crate is None and now - client.gameplay_seen >= 3:
             return
 
-        rolls = _rolls_in_area(client.gameplay.get(STATE_KEY, {}), area)
+        rolls = rolls_in_area(client.gameplay.get(STATE_KEY, {}), area)
         for crate in self.deferred.keys() - rolls.keys():
             del self.deferred[crate]
         order = list(rolls)
@@ -726,7 +735,7 @@ class LootView:
         view = game.get("native_loot_view", {})
         pawn = game.get("pawns", {}).get("local", {}).get("name")
         area = game.get("map")
-        eligible = _rolls_in_area(rolls or {}, area)
+        eligible = rolls_in_area(rolls or {}, area)
         candidates = {}
         nearby = game.get("native_loot_view_candidates", {})
         for crate, roll in eligible.items():
@@ -851,7 +860,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
     pawn = _scope(host, character)
     if not pawn or character not in host.party["players"]:
         raise party.RuleError("native_loot_opener_unavailable")
-    rolls = _rolls_in_area(host.party.get(STATE_KEY, {}), area)
+    rolls = rolls_in_area(host.party.get(STATE_KEY, {}), area)
     crate = target
     if action == "claim":
         guid, separator, crate = target.partition("@")

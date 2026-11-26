@@ -5,6 +5,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from itertools import chain
 
 from . import (native_enemy_shells, native_guest_drop_record, native_host_dig_live, native_loot,
@@ -149,12 +150,13 @@ class Item:
         return self.claim_action in {CRATE_CLAIM, native_guest_drop_record.PICKUP_ACTION, native_stock_enemy_drops.CLAIM}
 
 
+@lru_cache(maxsize=4096)
 def crate_identity(roll_id, guid):
     return uuid.uuid5(uuid.NAMESPACE_OID, f"{roll_id}:{guid}").hex
 
 
 def _crate_items(rolls, area):
-    for crate, roll in native_loot.published(rolls, area).items():
+    for crate, roll in native_loot.rolls_in_area(rolls, area).items():
         roll_id = roll.get("id")
         if not isinstance(roll_id, str) or not party.REQUEST_ID.fullmatch(roll_id):
             continue
@@ -282,15 +284,17 @@ def nearby(game, rolls, zone, *, enemy_frame=None, enemy_rolls=None, player_drop
         elif item.carried_motion:
             # Such a frame needs a matching stock ledger item from this campaign.
             continue
-        if (item.identity in visible or not isinstance(item.class_path, str) or len(item.class_path) > 256
-                or not _CLASS.fullmatch(item.class_path) or not valid_item_transform(item.transform)):
+        position = item.transform.get("position") if type(item.transform) is dict else None
+        if item.identity in visible or not valid_position(position):
             continue
-        position = item.transform["position"]
         distance = math.dist(origin, position)
         if item.carryable and distance > _VISIBILITY_RADIUS and other_origins:
             distance = min(math.dist(other, position) for other in other_origins)
         held = item.identity in pinned
-        if held or distance <= _VISIBILITY_RADIUS:
+        if not held and distance > _VISIBILITY_RADIUS:
+            continue
+        if (isinstance(item.class_path, str) and len(item.class_path) <= 256
+                and _CLASS.fullmatch(item.class_path) and valid_item_transform(item.transform)):
             visible[item.identity] = (not held, distance, item)
     ordered = sorted(visible.values(), key=lambda entry: (entry[0], entry[1], entry[2].identity))
     return {item.identity: item for _, _, item in ordered[:_MAX_VISIBLE]}
