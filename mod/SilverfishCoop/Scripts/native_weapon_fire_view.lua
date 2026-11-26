@@ -23,6 +23,7 @@ local sound_at_location = "/Script/Engine.GameplayStatics:PlaySoundAtLocation"
 local trigger_click = "/Game/Assets/Sounds/CUEs/Weapon_Cues/Reload_Cues/TriggerClick_Cue.TriggerClick_Cue"
 local math_path = "/Script/Engine.Default__KismetMathLibrary"
 local stock_rest_inverse = {Pitch = 0, Yaw = 90, Roll = 0}
+local stock_rest_rotation = {Pitch = 0, Yaw = -90, Roll = 0}
 local turret_concurrency = "/Game/Assets/Sounds/SoundClasses/Weapons_SoundConcurrency.Weapons_SoundConcurrency"
 local attenuation_path = "/Game/Assets/Sounds/SoundClasses/Weapon_Attenuation.Weapon_Attenuation"
 local local_attenuation = "/Game/Assets/Sounds/SoundClasses/SmallSound_Attenuation.SmallSound_Attenuation"
@@ -542,6 +543,19 @@ local function local_muzzle(pawn, path)
     end
 end
 
+local function play_local_recoil(pawn, weapon, path, kick)
+    if not valid(weapon) or pawn.Dead ~= false or not same(weapon.User, pawn) then return end
+    local receiver = path == loki_path and pawn.EquipedItem or weapon
+    local base = StaticFindObject(weapon_base)
+    local math_api = StaticFindObject(math_path)
+    if not valid(base) or not valid(math_api) or not valid(receiver) or not receiver:IsA(base)
+        or not same(receiver, pawn.EquipedItem) or not same(receiver.User, pawn)
+        or not valid(StaticFindObject(weapon_base .. ":ApplyRecoil")) then return end
+    local rotation = math_api:ComposeRotators(stock_rest_rotation, {Pitch = kick[4], Yaw = kick[5], Roll = kick[6]})
+    receiver:ApplyRecoil({X = kick[1], Y = kick[2], Z = kick[3]}, rotation, {Pitch = 0, Yaw = 0, Roll = 0})
+    return true
+end
+
 local function play(pawn, path, point, rotation, scale, volume, pitch, distance, muzzle, firing_weapon)
     local turret = stock_turret(path)
     local class, base = asset(path), asset(turret and turret_base or weapon_base)
@@ -731,11 +745,16 @@ function view.command(args, state, phase, avatar)
                 local ok, particles, audio, stock_sound = pcall(play, pawn, path, point, rotation,
                     scale, volume, pitch, distance, muzzle, firing_weapon)
                 local recoil = false
-                if #values == 19 and source ~= local_id then
+                if #values == 19 then
                     local kick = {}
                     for index = 1, 7 do kick[index] = tonumber(values[12 + index]) end
                     if valid_recoil(source, kick) then
-                        local applied, moved = pcall(avatar.play_recoil, state.world, source, path, id, kick)
+                        local applied, moved
+                        if source == local_id then
+                            applied, moved = pcall(play_local_recoil, pawn, firing_weapon, path, kick)
+                        else
+                            applied, moved = pcall(avatar.play_recoil, state.world, source, path, id, kick)
+                        end
                         recoil = applied and moved
                     end
                 end

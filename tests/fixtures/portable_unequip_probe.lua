@@ -262,6 +262,54 @@ local function run(action, argument)
         and valid(pawn) and pawn:IsLocallyControlled() and pawn:HasAuthority() ~= guest and pawn.Dead == false
         and valid(control) and control:IsLocalController() and same(control.Pawn, pawn)
         and same(pawn.Save, world.OwningGameInstance.SaveSlot_Ref), "fixture exact private player scope unavailable")
+    if action == "melee-lane" then
+        assert(not guest and #driver.ClientConnections == 1, "one enrolled guest required")
+        local remote = StaticFindObject(assert(argument:match("^Player_FP_C (.+)$")))
+        assert(valid(remote) and remote:HasAuthority() and same(remote:GetWorld(), world)
+            and not same(remote.Save, pawn.Save), "authoritative melee target unavailable")
+        local trace = asset("/Script/Engine.Default__KismetSystemLibrary")
+        local center, here = pawn:K2_GetActorLocation(), pawn.Camera:K2_GetComponentLocation()
+        local clear = {R = 0, G = 0, B = 0, A = 0}
+        for _, yaw in ipairs({0, 90, 180, -90}) do
+            local angle = math.rad(yaw)
+            local x, y = center.X + 160 * math.cos(angle), center.Y + 160 * math.sin(angle)
+            local hit = {}
+            if trace:LineTraceSingle(pawn, {X = x, Y = y, Z = center.Z + 100},
+                {X = x, Y = y, Z = center.Z - 170}, 0, false, {pawn, remote}, 0, hit, true, clear, clear, 0) then
+                local floor = hit.OutHit or hit
+                local z = floor.ImpactPoint.Z + remote.CapsuleComponent:GetScaledCapsuleHalfHeight() + 3
+                if math.abs(z - center.Z) < 30 and floor.ImpactNormal.Z > .85
+                    and not trace:LineTraceSingle(pawn, here, {X = x, Y = y, Z = z + 10},
+                        0, false, {pawn, remote}, 0, {}, true, clear, clear, 0)
+                    and remote:K2_TeleportTo({X = x, Y = y, Z = z}, {Pitch = 0, Yaw = yaw + 180, Roll = 0}) then
+                    remote:ForceNetUpdate()
+                    pawn.Controller:SetControlRotation({Pitch = -8, Yaw = yaw, Roll = 0})
+                    if not valid(pawn.Save.PlayerEquipment[1][item_class]) then seed_melee(pawn) end
+                    pawn:Equip_NextItem(0, false)
+                    return tostring(yaw)
+                end
+            end
+        end
+        error("fixture could not find a clear melee lane")
+    elseif action == "melee-aim" then
+        assert(guest and tonumber(argument), "guest melee aim unavailable")
+        pawn.Controller:SetControlRotation({Pitch = -8, Yaw = tonumber(argument), Roll = 0})
+        return "aimed"
+    elseif action == "melee-press" then
+        assert(not guest and item_actor(pawn, {class = melee_class}), "host stock melee item unavailable")
+        local input = asset("/Game/Classes/Player/Player_Inputs/IA_Use_Primary.IA_Use_Primary")
+        local library = asset("/Script/EnhancedInput.Default__EnhancedInputLibrary")
+        pawn:InpActEvt_IA_Use_Primary_K2Node_EnhancedInputActionEvent_36(
+            library:MakeInputActionValueOfType(1, 0, 0, 0), 0, 0, input)
+        pawn:InpActEvt_IA_Use_Primary_K2Node_EnhancedInputActionEvent_37(
+            library:MakeInputActionValueOfType(0, 0, 0, 0), .05, .05, input)
+        return "pressed"
+    elseif action == "melee-health" then
+        local remote = argument and StaticFindObject(assert(argument:match("^Player_FP_C (.+)$")))
+        return ("%.6f;%s;%d"):format(pawn.Save.PlayerHealth,
+            valid(remote) and ("%.6f"):format(remote.Save.PlayerHealth) or "-",
+            pawn.CapsuleComponent:GetCollisionResponseToChannel(18))
+    end
     if action == "remote-seed" or action == "remote-ready" or action == "remote-ammo" or action == "remote-read"
         or action == "remote-worn-seed" or action == "remote-melee-seed" or action == "remote-melee-held"
         or action == "remote-quick-ammo" or action == "remote-quick-retired" then
@@ -292,7 +340,7 @@ local function run(action, argument)
             local save, ids = remote.Save, {}
             assert(worn_state(remote) == "-,-", "fixture expected unoccupied worn slots")
             local classes = {worn_classes[1], worn_classes[2], worn_classes[1],
-                "/Game/Classes/Armor_Items/Armor_HunterJacket.Armor_HunterJacket_C"}
+                "/Game/Classes/Armor_Items/Armor_ExpiditionLight.Armor_ExpiditionLight_C"}
             for index, name in ipairs(classes) do
                 local class, out = asset(name), {}
                 asset(factory):MakeDefaultItem(class, remote, out)

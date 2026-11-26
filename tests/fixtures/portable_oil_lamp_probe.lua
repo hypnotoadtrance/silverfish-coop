@@ -18,13 +18,14 @@ local last
 local function valid(o) return o and o:IsValid() end
 local function same(a,b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
 
-local function scene(id)
+local function scene(id, allow_absent)
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
     local package = valid(world) and world:GetFullName():match("^World (.+)$")
     assert(maps[package], "no stock oil-lamp verification map")
     assert(id:match("^Prop_Lantern_01_C_%d+$"), "invalid authored oil lamp")
     local lamp = StaticFindObject(package .. ":PersistentLevel." .. id)
+    if allow_absent and (not valid(lamp) or lamp:IsActorBeingDestroyed()) then return end
     assert(valid(lamp) and same(lamp:GetWorld(), world) and same(lamp:GetOuter(), world.PersistentLevel)
         and lamp:GetClass():GetFullName() == class and not lamp:IsActorBeingDestroyed(), "exact stock oil lamp is unavailable")
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
@@ -161,7 +162,17 @@ local function lighter_input(pawn, lamp, pressed)
 end
 
 local function run(action,id)
+    if action == "break-state" then
+        local lamp = scene(id, true)
+        if not valid(lamp) or lamp.bHidden and not lamp:GetActorEnableCollision() then return "removed" end
+        return lamp.Broken_0 and not lamp.SM_Prop_Lantern_01_Glass:IsVisible() and "broken" or "intact"
+    end
     local lamp,pawn,world = scene(id)
+    if action == "break" then
+        assert(pawn:HasAuthority() and lamp.Broken_0 == false, "fixture requires the host's intact lamp")
+        lamp:PropBroken(lamp:K2_GetActorLocation(),pawn)
+        return "dispatched"
+    end
     if action == "state" then
         return table.concat({tostring(lamp.Lit), tostring(lamp.PointLight:IsVisible()),
             tostring(lamp.FX_CandleFlame_01_Converted:IsActive()), tostring(lamp.Sphere:GetGenerateOverlapEvents())},";")

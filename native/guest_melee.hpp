@@ -5,6 +5,11 @@
 namespace RC::LuaMadeSimple { class Lua; }
 namespace RC::Unreal { class UObject; class UWorld; }
 
+namespace silverfish::native_death
+{
+    bool friendly_fire_pair(RC::Unreal::UObject* attacker, RC::Unreal::UObject* target);
+}
+
 namespace silverfish::native_guest_melee
 {
     void register_lua(RC::LuaMadeSimple::Lua& lua);

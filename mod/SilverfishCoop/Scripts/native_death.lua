@@ -27,6 +27,8 @@ local sequence = 0
 local last_damage
 local friendly_fire
 local allow_friendly_fire = false
+local melee_capsules = {}
+local melee_channel, overlap = 18, 1
 local host_revived_health
 local client_visit, client_scope
 
@@ -168,7 +170,34 @@ local function heartbeat_fresh()
     return heartbeat.fresh(heartbeat_path, 12)
 end
 
+local function sync_melee_collision(eligible)
+    local targets = {}
+    for _, record in pairs(eligible) do
+        local capsule = record.pawn.CapsuleComponent
+        if valid(capsule) and same(capsule:GetOwner(), record.pawn) then
+            targets[capsule:GetAddress()] = capsule
+        end
+    end
+    for address, previous in pairs(melee_capsules) do
+        if not same(previous.capsule, targets[address]) then
+            local capsule = previous.capsule
+            if valid(capsule) and capsule:GetCollisionResponseToChannel(melee_channel) == overlap then
+                capsule:SetCollisionResponseToChannel(melee_channel, previous.response)
+            end
+            melee_capsules[address] = nil
+        end
+    end
+    for address, capsule in pairs(targets) do
+        local response = capsule:GetCollisionResponseToChannel(melee_channel)
+        if response ~= overlap then
+            capsule:SetCollisionResponseToChannel(melee_channel, overlap)
+            melee_capsules[address] = melee_capsules[address] or {capsule = capsule, response = response}
+        end
+    end
+end
+
 local function clear_scope(force)
+    if next(melee_capsules) then sync_melee_collision({}) end
     if not force and not next(scope_records) then return true end
     local cleared = pcall(SilverfishClearNativeDeathScope)
     if cleared then scope_records, scope_token = {}, nil end
@@ -203,6 +232,9 @@ local function publish_scope(eligible)
         return false, "The C++ death hook declined the authority scope"
     end
     scope_records, scope_token = eligible, token
+    if allow_friendly_fire or next(melee_capsules) then
+        sync_melee_collision(allow_friendly_fire and eligible or {})
+    end
     return true
 end
 

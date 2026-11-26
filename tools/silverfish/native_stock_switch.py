@@ -42,7 +42,7 @@ def input_target(value):
 
 
 def parse(fields, phase, area):
-    if (len(fields) != 9 or fields[1] != area or actor_map(fields[2]) != area
+    if (len(fields) not in (9, 10) or fields[1] != area or actor_map(fields[2]) != area
             or phase not in ("hosting", "connected") or fields[3] not in ("0", "1")):
         raise ValueError("Invalid stock switch frame")
     angles = [round(float(value), 2) for value in fields[4:7]]
@@ -55,7 +55,12 @@ def parse(fields, phase, area):
                 or power not in ("0", "1") or visible not in ("0", "1")):
             raise ValueError("Invalid linked light state")
         lights[name] = [power == "1", visible == "1"]
-    return {"powered": fields[3] == "1", "angles": angles, "panel": fields[7], "lights": lights}
+    state = {"powered": fields[3] == "1", "angles": angles, "panel": fields[7], "lights": lights}
+    if len(fields) == 10:
+        if fields[2].partition(" ")[0] != _LANTERN or fields[9] not in ("intact", "broken", "removed"):
+            raise ValueError("Invalid stock oil lamp state")
+        state["lamp"] = fields[9]
+    return state
 
 
 async def interact(host, bridge, character, requested, operation, action=ACTION):
@@ -137,6 +142,11 @@ async def project(bridge, game, frame, epoch):
         known = local[actor]["lights"]
         bulbs = [f"{name}|{int(state[0])}|{int(state[1])}" for name, state in lights.items()
                  if name in known and isinstance(state, list) and len(state) == 2 and all(type(bit) is bool for bit in state)]
+        if actor.partition(" ")[0] == _LANTERN:
+            lamp = target.get("lamp", "intact")
+            if lamp not in ("intact", "broken", "removed"):
+                continue
+            bulbs = [lamp]
         updated = await bridge.command(PROJECT, actor, area, str(int(target["powered"])),
                                        *map(str, angles), *bulbs, timeout=2)
         if (updated.get("state"), updated.get("map")) != ("connected", area):

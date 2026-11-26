@@ -5273,7 +5273,44 @@ async def verify_stock_unequip(first, second, evidence):
         evidence["guest_melee_equip"] = {"receipt": stored, "local_move": await local_move(stored, "equip", melee, 0)}
         assert await portable_probe_command(guest.bridge, probe, f"guest-melee-held\t{melee}") == "held"
         assert await portable_probe_command(host.bridge, probe, f"remote-melee-held\t{pawn}") == "held"
+
+        async def melee_health():
+            value = await portable_probe_command(host.bridge, probe, f"melee-health\t{pawn}")
+            local_hp, guest_hp, response = value.split(";")
+            return float(local_hp), float(guest_hp), int(response)
+
+        async def guest_swing(hits):
+            frame = await wait_resident_status(guest_run, lambda value:
+                value.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == melee)
+            receipt, = await stock_melee_edge_receipts(guest_run, frame, await stock_melee_edge(guest_run, melee, "tap"))
+            proof = await stock_melee_terminal(host_run, receipt)
+            assert proof["hits"] == hits and proof["contacts"] == 1, proof
+
+        yaw = int(await portable_probe_command(host.bridge, probe, f"melee-lane\t{pawn}"))
+        assert await portable_probe_command(guest.bridge, probe, f"melee-aim\t{yaw + 180}") == "aimed"
+        untouched = await melee_health()
+        await portable_probe_command(host.bridge, probe, "melee-press")
+        await close_stock()
+        await guest_swing(0)
+        assert await melee_health() == untouched, "Melee did damage while Friendly Fire was disabled"
+        await host.bridge.command("native-friendly-fire-rule", "1")
+        async with asyncio.timeout(4):
+            while (await melee_health())[2] != 1:
+                await asyncio.sleep(.06)
+        await portable_probe_command(host.bridge, probe, "melee-press")
+        async with asyncio.timeout(5):
+            while (after_host := await melee_health())[1] >= untouched[1]:
+                await asyncio.sleep(.06)
+        assert after_host[0] == untouched[0], after_host
+        await guest_swing(1)
+        after_guest = await melee_health()
+        assert after_guest[0] < untouched[0] and after_guest[1] <= after_host[1], (untouched, after_host, after_guest)
+        await host.bridge.command("native-friendly-fire-rule", "0")
+        evidence["melee_friendly_fire"] = {"before": untouched, "host_hit": after_host, "guest_hit": after_guest}
+
         guest_before = unequip_seat(await portable_probe_command(guest.bridge, probe, "guest-ready\t" + ",".join(ids)))
+        assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+        await leaves_stock_open()
         assert guest_before["rows"] == authority
         selection = await witness("native_guest_equipment_selected", "native_guest_weapon", ids[0])
         host_before = unequip_seat(await portable_probe_command(host.bridge, probe, f"remote-ready\t{pawn}"))
@@ -5368,6 +5405,8 @@ async def verify_stock_unequip(first, second, evidence):
             receipt = await witness("native_stock_inventory_action", key, guid)
             assert receipt["stock_inventory_proof"] == f"verified stock equipment slot {slot}", receipt
             assert receipt[key]["replaced_guid"] == displaced, receipt
+            if slot == 9:
+                assert receipt[key]["class_path"].endswith("/Armor_ExpiditionLight.Armor_ExpiditionLight_C"), receipt
             assert (await portable_probe_command(guest.bridge, probe, "guest-worn-state")).split(",") == replacements
             inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
             sources = {row["guid"]: row["source"] for row in inventory}

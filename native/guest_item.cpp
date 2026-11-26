@@ -81,6 +81,7 @@ namespace
     constexpr auto spade_path = STR("/Game/Classes/Equipment/MeleeWep_Spade.MeleeWep_Spade_C");
     constexpr std::int32_t blowtorch_capacity = 3;
     constexpr auto equipment_base_path = STR("/Game/Classes/Equipment/Equipment_Master_BP.Equipment_Master_BP_C");
+    constexpr auto landmine_path = STR("/Game/Classes/Equipment/Eqp_LandMine.Eqp_LandMine_C");
     constexpr auto grenade_base_path = STR("/Game/Classes/Equipment/Grenade_Master_BP.Grenade_Master_BP_C");
     constexpr auto grenade_spawn_path = STR("/Game/Classes/Equipment/Grenade_Master_BP.Grenade_Master_BP_C:SpawnNade");
     constexpr auto grenade_throw_path = STR("/Game/Classes/Equipment/Grenade_Master_BP.Grenade_Master_BP_C:ThrowNade");
@@ -3315,7 +3316,9 @@ namespace
         auto* defaults = live(type) && base && type != base && type->IsChildOf(base) ? type->GetClassDefaultObject().Get() : nullptr;
         auto* item_type = field<Unreal::FByteProperty>(defaults, STR("ItemType"));
         auto* payload = field<Unreal::FStructProperty>(inventory.type->GetStruct().Get(), payload_name);
-        if (!defaults || !item_type || !supported_stack_equipment(type, defaults) || !payload ||
+        const bool stock_landmine = defaults && type == find<Unreal::UClass>(landmine_path) &&
+            boolean(defaults, STR("Stacks"), true) && boolean(defaults, STR("Armed"), false);
+        if (!defaults || !item_type || (!stock_landmine && !supported_stack_equipment(type, defaults)) || !payload ||
             payload->GetStruct().Get() != find<Unreal::UScriptStruct>(STR("/Script/StructUtils.InstancedStruct")))
             return result(lua, false, "native_inventory_equip_refused_item");
 

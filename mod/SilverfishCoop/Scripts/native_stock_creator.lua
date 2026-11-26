@@ -24,6 +24,12 @@ local function text(value)
     return type(value) == "userdata" and value:ToString() or value
 end
 
+local function character_name(value)
+    local name = type(value) == "string" and value:match("^%s*(.-)%s*$")
+    local length = name and utf8.len(name)
+    if length and length > 0 and length <= 64 and not name:find("%c") then return name end
+end
+
 local function leaf(name)
     return type(name) == "string" and name:match("([^/]+)$") or nil
 end
@@ -116,7 +122,13 @@ local function captured_profile(record)
     else
         recipe = "kit" .. tostring(menu.Setting_Selector_Kit.IndexOutput)
     end
-    return appearance.observe(character), guest_profile.observe(character, recipe), text(character[guest_profile.name_field])
+    local name
+    if record.route == "custom" and valid(menu.EditableTextBox_Name) then
+        -- Read the visible field even when Confirm follows typing without a text commit.
+        name = character_name(text(menu.EditableTextBox_Name:GetText()))
+    end
+    return appearance.observe(character), guest_profile.observe(character, recipe),
+        name or character_name(text(character[guest_profile.name_field]))
 end
 
 local function guest_departure(target, absolute, options)
@@ -131,10 +143,7 @@ local function guest_departure(target, absolute, options)
                 local ok, model, profile, name = pcall(captured_profile, record)
                 if ok and model ~= "-" and appearance.decode(model) then
                     record.result, record.model, record.profile = "captured", model, profile
-                    name = name and name:match("^%s*(.-)%s*$")
-                    if name and utf8.len(name) and utf8.len(name) > 0 and utf8.len(name) <= 64 and not name:find("%c") then
-                        record.name = name
-                    end
+                    record.name = name or record.name
                 elseif not ok then
                     print("[SilverfishCoop] Guest creator could not capture the stock selection: " .. tostring(model))
                 end

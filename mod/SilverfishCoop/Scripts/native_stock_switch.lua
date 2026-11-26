@@ -127,7 +127,7 @@ local function census(state, phase)
                     if entry.power then
                         if not entries[name] or not same(entries[name].actor, actor) then
                             entries[name] = {actor = actor, class = class, power = entry.power,
-                                path = name:match("^%S+ (.+)$"), candle = entry.candle}
+                                path = name:match("^%S+ (.+)$"), candle = entry.candle, lantern = entry.lantern}
                         end
                     elseif not entries[name] or not same(entries[name].actor, actor) then
                         entry.lights = light_links(actor, world)
@@ -172,7 +172,12 @@ function switches.read_row(entry, name, state, phase, row)
         if not qualified(actor, state.world) then
             if not entry.path then return end
             actor = StaticFindObject(entry.path)
-            if not qualified(actor, state.world) or not same(actor:GetClass(), entry.class) then return end
+            if not qualified(actor, state.world) or not same(actor:GetClass(), entry.class) then
+                if entry.lantern and phase == "hosting" then
+                    return row("native-stock-switch", state.map, name, 0, 0, 0, 0, "-", "-", "removed")
+                end
+                return
+            end
             entry.actor = actor
         end
         local powered = actor[entry.power]
@@ -181,9 +186,17 @@ function switches.read_row(entry, name, state, phase, row)
                 local sphere = actor.Sphere
                 if valid(sphere) and same(sphere:GetOwner(), actor) then suppress_candle_overlap(name, sphere) end
             end
-            if entry.row_power ~= powered or entry.row_encoder ~= row or entry.row_map ~= state.map then
-                entry.status_row = row("native-stock-switch", state.map, name, bit(powered), 0, 0, 0, "-", "-")
-                entry.row_power, entry.row_encoder, entry.row_map = powered, row, state.map
+            local lamp_state
+            if entry.lantern then
+                lamp_state = entry.retired and "removed" or actor.Broken_0 == true and "broken" or "intact"
+            end
+            if entry.row_power ~= powered or entry.row_lamp ~= lamp_state or entry.row_encoder ~= row or entry.row_map ~= state.map then
+                if lamp_state then
+                    entry.status_row = row("native-stock-switch", state.map, name, bit(powered), 0, 0, 0, "-", "-", lamp_state)
+                else
+                    entry.status_row = row("native-stock-switch", state.map, name, bit(powered), 0, 0, 0, "-", "-")
+                end
+                entry.row_power, entry.row_lamp, entry.row_encoder, entry.row_map = powered, lamp_state, row, state.map
             end
             return entry.status_row
         end
@@ -222,9 +235,31 @@ function switches.focused_target(pawn, pressed_component)
     local box = StaticFindObject(pressed_component)
     local actor = valid(box) and box:GetOwner()
     local entry = parts(actor, pawn:GetWorld())
-    if entry and (same(box, entry.box) or entry.candle and same(box, entry.mesh)) then
+    if entry and not (entry.lantern and actor.Broken_0 == true)
+        and (same(box, entry.box) or entry.candle and same(box, entry.mesh)) then
         return "stock-switch:" .. actor:GetFullName()
     end
+end
+
+local function project_lamp(entry, cached, state)
+    local actor, glass = entry.actor, entry.actor.SM_Prop_Lantern_01_Glass
+    if not valid(glass) or not same(glass:GetOwner(), actor) then error("stock_switch_lamp_parts_unavailable", 0) end
+    local intact = state == "intact"
+    if actor.Broken_0 ~= not intact then
+        actor.Broken_0 = not intact
+        glass:SetVisibility(intact, true)
+    end
+    if state == "removed" and not cached.retired then
+        cached.hidden, cached.collision = actor.bHidden == true, actor:GetActorEnableCollision()
+        actor:SetActorHiddenInGame(true)
+        actor:SetActorEnableCollision(false)
+        cached.retired = true
+    elseif state ~= "removed" and cached.retired then
+        actor:SetActorHiddenInGame(cached.hidden)
+        actor:SetActorEnableCollision(cached.collision)
+        cached.retired = nil
+    end
+    entry.retired = cached.retired
 end
 
 local function project(entry, powered, angles, lights)
@@ -264,6 +299,7 @@ function switches.command(fields, state, phase)
         error("stock_switch_unavailable", 0)
     end
     if (ignite or action == "native-stock-switch-interact") and phase == "hosting" and #fields == 4 then
+        if entry.lantern and entry.actor.Broken_0 == true then error("stock_switch_lamp_broken", 0) end
         local pawn = guest_save.exact_item_context(state, phase, fields[4])
         if not valid(pawn) or pawn.Dead ~= false then error("stock_switch_guest_unavailable", 0) end
         local power = entry.power or "Powered"
@@ -288,6 +324,15 @@ function switches.command(fields, state, phase)
             error("stock_switch_state_unavailable", 0)
         end
         local lights = {}
+        if entry.lantern then
+            local lamp = fields[9]
+            if #fields ~= 9 or (lamp ~= "intact" and lamp ~= "broken" and lamp ~= "removed") then
+                error("stock_switch_lamp_state_unavailable", 0)
+            end
+            project(entry, power == "1", {Pitch = pitch, Yaw = yaw, Roll = roll}, lights)
+            project_lamp(entry, entries[fields[3]], lamp)
+            return "stock switch state projected", entry
+        end
         for index = 9, #fields do
             local id, on, visible = fields[index]:match("^([^|]+)|([01])|([01])$")
             if not id then error("stock_switch_light_unavailable", 0) end

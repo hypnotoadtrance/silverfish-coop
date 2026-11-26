@@ -207,6 +207,15 @@ function actions.guestnext(menu, switch)
     return "page=3"
 end
 
+function actions.guestrename(menu, switch)
+    page_is(switch, 1)
+    local field = menu.EditableTextBox_Name
+    assert(valid(field), "stock guest character name field unavailable")
+    field:SetText(FText("Changed in the editor"))
+    assert(field:GetText():ToString() == "Changed in the editor", "stock guest editor did not accept the name")
+    return "name entered"
+end
+
 function actions.cancel(menu, switch, page)
     page_is(switch, 0)
     click(menu, page, "Button_Class_2", "BndEvt__Character_Editor_Widget_Button_Class_2_K2Node_ComponentBoundEvent_47_Pressed__DelegateSignature")

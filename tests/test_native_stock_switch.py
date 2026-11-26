@@ -28,6 +28,22 @@ class StockSwitchResponseTests(unittest.IsolatedAsyncioTestCase):
         candle = "Prop_Candle_01_C " + prefix + "Prop_Candle_01_C_1"
         self.assertIsNone(switches.input_target(switches.IGNITION_TARGET + candle))
 
+    async def test_late_join_projects_removed_oil_lamp_in_the_current_visit(self):
+        area = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+        actor = f"Prop_Lantern_01_C {area}.Observitory_P:PersistentLevel.Prop_Lantern_01_C_1"
+        fields = [switches.TAG, area, actor, "0", "0", "0", "0", "-", "-"]
+        intact = switches.parse([*fields, "intact"], "connected", area)
+        removed = switches.parse([*fields, "removed"], "hosting", area)
+        epoch = "e" * 32
+        game = {"map": area, "state": "connected", switches.KEY: {actor: intact}}
+        updated = {**game, switches.KEY: {actor: removed}}
+        bridge = SimpleNamespace(command=AsyncMock(return_value=updated))
+        frame = {"map": area, "epoch": epoch, "switches": {actor: removed}}
+        self.assertIs(await switches.project(bridge, game, frame, "f" * 32), game)
+        bridge.command.assert_not_awaited()
+        self.assertIs(await switches.project(bridge, game, frame, epoch), updated)
+        bridge.command.assert_awaited_once_with(switches.PROJECT, actor, area, "0", "0.0", "0.0", "0.0", "removed", timeout=2)
+
     async def test_reply_applies_exact_switch_before_another_world_snapshot(self):
         area = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
         epoch = "e" * 32

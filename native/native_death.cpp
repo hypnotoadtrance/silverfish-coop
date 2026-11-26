@@ -1885,6 +1885,14 @@ namespace
     };
 }
 
+bool silverfish::native_death::friendly_fire_pair(RC::Unreal::UObject* attacker, RC::Unreal::UObject* target)
+{
+    return Unreal::IsInGameThreadRaw() && ready() && attacker != target && death_scope.allow_friendly_fire &&
+        death_scope.generation == bridge_generation.load(std::memory_order_acquire) &&
+        Clock::now() < death_scope.expires && includes_pawn(death_scope, attacker) &&
+        includes_pawn(death_scope, target) && qualified_roster(death_scope);
+}
+
 extern "C" __declspec(dllexport) RC::CppUserModBase* start_mod()
 {
     return new SilverfishNativeMod();

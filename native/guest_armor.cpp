@@ -422,6 +422,8 @@ namespace
         profile.helmet = head;
         storage.path = klass->GetPathName();
         profile.path = storage.path.c_str();
+        if (!head && storage.path == STR("/Game/Classes/Armor_Items/Armor_ExpiditionLight.Armor_ExpiditionLight_C"))
+            profile.passive = STR("HeavyHolster");
         auto* value = field<U::FIntProperty>(defaults, STR("Value"));
         if (!value) return nullptr;
         profile.value = value->GetPropertyValueInContainer(defaults);
