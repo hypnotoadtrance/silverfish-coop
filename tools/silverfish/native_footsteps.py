@@ -1,4 +1,4 @@
-"""Relay the stock player surface sounds over the transient co-op cue lane."""
+"""Relay short stock player sounds over the transient co-op cue lane."""
 
 import asyncio
 from collections import deque
@@ -9,9 +9,9 @@ from .native_player_avatar import KEY as OUTFITS, valid_id as valid_player_id
 from .party import REQUEST_ID
 
 
-_SURFACES = frozenset({
+_CUES = frozenset({
     "Brush", "Carpet", "ChainLink", "Default", "Dirt", "Glass", "Goop", "Grass", "Metal",
-    "MetalLadder", "Sand", "Stone", "Water_Deep", "Water_Shallow", "Wood", "Trash",
+    "MetalLadder", "Sand", "Stone", "Water_Deep", "Water_Shallow", "Wood", "Trash", "CameraShutter",
 })
 _UPLOAD = struct.Struct("!16sIHH")
 _DOWNLOAD = struct.Struct("!16sIIHH")
@@ -33,7 +33,7 @@ def _scope(owner, game):
 
 
 def _valid(serial, cue, volume, pitch):
-    return 0 < serial < 2**32 and cue in _SURFACES and 0 < volume <= 4000 and 0 < pitch <= 1000
+    return 0 < serial < 2**32 and cue in _CUES and 0 < volume <= 4000 and 0 < pitch <= 1000
 
 
 def _local(data, area, pawn):
@@ -129,15 +129,17 @@ class HostFootsteps:
         if player is None or player == _player_id(self.host.last_game, scope[2]):
             return
         now = time.monotonic()
-        if guest not in self.recent and len(self.recent) >= _MAX_BATCH:
+        shutter = cue == "CameraShutter"
+        key = guest, shutter
+        if key not in self.recent and len(self.recent) >= 2 * _MAX_BATCH:
             self.recent = {key: record for key, record in self.recent.items() if now - record[2] < 1.5}
-            if len(self.recent) >= _MAX_BATCH:
+            if len(self.recent) >= 2 * _MAX_BATCH:
                 return
-        previous = self.recent.get(guest)
+        previous = self.recent.get(key)
         if previous and previous[0] == pawn and now - previous[2] < 1.5:
             if serial <= previous[1] or now - previous[2] < _MIN_INTERVAL:
                 return
-        self.recent[guest] = pawn, serial, now
+        self.recent[key] = pawn, serial, now
         self.pending.append((now, player, cue, volume, pitch))
         self._send(visit, player, step, excluded=guest)
 
@@ -182,14 +184,15 @@ async def follow(client):
                 if (epoch != visit or player > 2147483647 or player == local_player
                         or not _valid(serial, cue, volume, pitch)):
                     continue
-                sequence, last = latest.get(player, (0, 0.))
+                key = player, cue == "CameraShutter"
+                sequence, last = latest.get(key, (0, 0.))
                 if serial <= sequence and now - last < 1.5:
                     continue
-                if player not in latest and len(latest) >= _MAX_BATCH:
+                if key not in latest and len(latest) >= 2 * _MAX_BATCH:
                     latest = {key: record for key, record in latest.items() if now - record[1] < 1.5}
-                    if len(latest) >= _MAX_BATCH:
+                    if len(latest) >= 2 * _MAX_BATCH:
                         continue
-                latest[player] = serial, now
+                latest[key] = serial, now
                 steps.append((player, cue, volume, pitch))
             _project(mailbox, scope, steps)
         await asyncio.sleep(_INTERVAL)

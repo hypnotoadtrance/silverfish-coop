@@ -25,6 +25,9 @@ async def verify_quarry_photo(host, guest, pawn, probe):
     async def command(seat, action):
         return await probe(seat.bridge, "portable-quarry-photo", action)
 
+    async def shutter_count(seat):
+        return int(await probe(seat.bridge, "avatar-probe", "shuttercount"))
+
     guid = await command(host, "seed")
     assert valid_guid(guid), guid
     moved = await submit(guest_run, native_inventory.STORE_EQUIPMENT, target=guid)
@@ -63,6 +66,7 @@ async def verify_quarry_photo(host, guest, pawn, probe):
         and row["game"].get("native_guest_primary_scope", {}).get("guid") == guid))
 
     async def shutter():
+        observer_before, owner_before = await shutter_count(host), await shutter_count(guest)
         press = await submit(guest_run, "native-guest-primary-input-fixture")
         assert press["ok"], press
         seq = press["native_guest_primary_fixture"]["sequence"]
@@ -70,6 +74,10 @@ async def verify_quarry_photo(host, guest, pawn, probe):
             while True:
                 for row in await resident_events(guest_run, frame):
                     if row.get("sequence") == seq and row["event"] in ("native_guest_camera_shutter", "native_guest_camera_shutter_rejected"):
+                        while await shutter_count(host) == observer_before:
+                            await asyncio.sleep(.08)
+                        assert await shutter_count(host) == observer_before + 1
+                        assert await shutter_count(guest) == owner_before
                         return row
                 await asyncio.sleep(.1)
 
@@ -89,10 +97,12 @@ async def verify_quarry_photo(host, guest, pawn, probe):
     async with asyncio.timeout(10):
         while await asyncio.gather(command(host, "journal"), command(guest, "journal")) != ["2", "2"]:
             await asyncio.sleep(.2)
+    before_replay = await shutter_count(host)
     replay = await submit(guest_run, native_turret_photo.STOCK_SHUTTER,
                           target=f"{guid}@{frame['zone_epoch']}@{capture['shutter_view']}",
                           operation_id=capture["operation_id"])
     assert replay["ok"] and replay[native_turret_photo.STOCK_PROOF] == photo, replay
+    assert await shutter_count(host) == before_replay
     assert campaign_save_hashes(host.campaign) == checkpoint
     onward = (SOUTHERN_ROAD, NORTHEAST_RAIL, CROSSROADS, DEAD_BRIDGE, OVERWORLD + "StoneMaze_P",
               OVERWORLD + "PineRidge_P", QUARRY)

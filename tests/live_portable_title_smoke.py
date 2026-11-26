@@ -3735,6 +3735,18 @@ async def verify_stock_avatar_binoculars(host: Seat, guest: Seat, _pawn: str) ->
             lowered = await view(observer, "lowered")
             assert await command(owner, "raise") == "input"
             raised = await view(observer, "raised")
+            if name == "viewfinder":
+                async def count(seat):
+                    return int(await portable_probe_command(seat.bridge, "avatar-probe", "shuttercount\n"))
+
+                owner_before, observer_before = await count(owner), await count(observer)
+                assert await command(owner, "shutter") == "input"
+                async with asyncio.timeout(4):
+                    while await count(observer) == observer_before:
+                        await asyncio.sleep(.08)
+                await asyncio.sleep(.25)
+                assert await count(observer) == observer_before + 1
+                assert await count(owner) == owner_before
             assert await command(owner, "lower") == "input"
             returned = await view(observer, "lowered")
             assert lowered[1] == raised[1] == returned[1], (lowered, raised, returned)
@@ -7407,7 +7419,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(portable_script_overlay(game, "native_guest_ui.lua", add_stale_quick_slot_witness))
                 for game in games
             ]
-        if resident_weapon_cues or stock_avatar_tail or stock_avatar_binoculars:
+        if resident_weapon_cues or stock_avatar_tail or stock_avatar_binoculars or stock_quarry_photo:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableWeaponCueProbe",
                                                      fixture="avatar_presentation_probe.lua"))

@@ -864,6 +864,7 @@ class Bridge:
         self._local_cooked_meals = deque(maxlen=16)
         self._local_prop_carry_records = deque(maxlen=64)
         self._local_primary_records = deque(maxlen=64)
+        self._local_host_camera_records = deque(maxlen=64)
         self._local_held_fire_records = deque(maxlen=64)
         self._local_held_aim = None
         self.status_source = "file"
@@ -928,7 +929,7 @@ class Bridge:
     def _take_local_inputs(self, pending: deque[bytes]) -> list[bytes]:
         # Keep unread interaction, combat, and travel inputs in the native FIFO until their collectors have room.
         room = 64 - max(len(self._local_interaction_records), len(self._local_crate_records), len(self._local_door_confirmations),
-                        len(self._local_primary_records), len(self._local_held_fire_records),
+                        len(self._local_primary_records), len(self._local_held_fire_records), len(self._local_host_camera_records),
                         len(self._local_death_records), len(self._local_zone_records),
                         len(self._local_authored_zone_records), len(self._local_stardust_records),
                         len(self._local_fruiting_stardust_records), len(self._local_prop_carry_records))
@@ -960,6 +961,8 @@ class Bridge:
                     self._local_prop_carry_records.append(record)
                 elif record.startswith(b"native-guest-primary-intent\t"):
                     self._local_primary_records.append(record)
+                elif record.startswith(b"native-host-camera-intent\t"):
+                    self._local_host_camera_records.append(record)
                 elif record.startswith(b"native-guest-held-fire-intent\t"):
                     self._local_held_fire_records.append(record)
                 elif record.startswith(b"native-guest-held-aim\t"):
@@ -1125,17 +1128,11 @@ class Bridge:
         return events
 
     def native_host_camera_requests(self) -> list[tuple[int, str, str, str]]:
-        try:
-            with (self.directory / "native-host-camera-events").open("rb") as stream:
-                stream.seek(self.host_camera_input_offset)
-                batch = stream.read(4096)
-        except OSError:
-            return []
-        end = batch.rfind(b"\n") + 1
-        self.host_camera_input_offset += end if end else len(batch) if len(batch) == 4096 else 0
+        rows = self._native_guest_input_records(
+            self._local_host_camera_records, "native-host-camera-events", "host_camera_input_offset")
         events = []
-        for line in batch[:end].splitlines():
-            fields = line.decode("utf-8", errors="replace").split("\t")
+        for line in rows:
+            fields = line.decode("utf-8", errors="replace").rstrip("\r\n").split("\t")
             if (len(fields) == 5 and fields[0] == "native-host-camera-intent"
                     and fields[1].isascii() and fields[1].isdigit() and len(fields[1]) <= 16
                     and 0 < (sequence := int(fields[1])) < 2**53

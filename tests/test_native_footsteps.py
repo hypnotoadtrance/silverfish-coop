@@ -67,6 +67,20 @@ class HostFootstepsTests(unittest.TestCase):
         self.assertTrue(allowed("sender"))
         self.transport.send_footstep.assert_called_once()
 
+    def test_shutter_and_footstep_relay_in_same_tick_without_echo_or_replay(self):
+        self.steps.receive("sender", self.upload())
+        shutter = self.upload(serial=2, cue=b"CameraShutter")
+        self.steps.receive("sender", shutter)
+        self.steps.receive("sender", shutter)
+        self.assertEqual(self.transport.send_footstep.call_count, 2)
+        data, allowed = self.transport.send_footstep.call_args.args
+        self.assertEqual(feet._decode(data, feet._DOWNLOAD), ((VISIT_BYTES, 8, 2, 800, 940), "CameraShutter"))
+        self.assertFalse(allowed("sender"))
+        self.assertTrue(allowed("listener"))
+        self.steps.flush()
+        self.bridge.local_bridge.publish_footsteps.assert_called_once_with(
+            f"{AREA}\nhost pawn\n8|Stone|800|940\n8|CameraShutter|800|940\n".encode("ascii"))
+
 
 class GuestFootstepsTests(unittest.IsolatedAsyncioTestCase):
     async def test_guest_upload_and_authenticated_host_projection_use_separate_scopes(self):

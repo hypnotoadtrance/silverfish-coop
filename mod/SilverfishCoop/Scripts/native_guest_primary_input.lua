@@ -17,6 +17,7 @@ local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local camera_quest = "Photo_DB_Turrets"
 local event_path, held_event_path, is_downed, binding, fixture_proof, held_fixture_proof, melee_fixture_proof, shovel_intent
 local pending_pry
+local footsteps = require("native_footsteps")
 local publications = {}
 local held_edges = {press = true, release = true, cancel = true}
 local held_proofs = {["mapped-key"] = true, ["edge-window"] = true, ["headless-fixture"] = true}
@@ -231,6 +232,7 @@ local function drain_taps(current, address)
             end
             if not publish("tap", event_path, current, address, sequence,
                 {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind, view}) then break end
+            if kind == "camera" then footsteps.intercepted_shutter(current.pawn) end
         end
         emitted = emitted + 1
     end

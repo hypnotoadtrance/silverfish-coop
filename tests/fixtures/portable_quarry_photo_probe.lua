@@ -109,6 +109,9 @@ local function run(action, argument)
                     if not blocked then
                         visible = visible + 1
                         if guest:K2_TeleportTo(point, {Pitch=0,Yaw=0,Roll=0}) then
+                            local observer = {X=point.X+210,Y=point.Y,Z=point.Z}
+                            assert(pawn:K2_TeleportTo(observer, {Pitch=0,Yaw=0,Roll=0}), "host cannot observe stock shutter")
+                            pawn:ForceNetUpdate()
                             guest:ForceNetUpdate()
                             return ("%.3f,%.3f,%.3f"):format(point.X,point.Y,point.Z)
                         end

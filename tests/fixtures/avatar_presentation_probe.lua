@@ -442,6 +442,7 @@ local optic_profiles = {
         mesh = "StaticMesh /Game/Classes/Equipment/Equipment_Assets/Equipment_Meshs/SM_Camera_01.SM_Camera_01"},
 }
 local optic_cues = {in_count = 0, out_count = 0}
+local shutter_cues = 0
 if portable_fixture or portable_guest then
     RegisterHook("/Script/Engine.GameplayStatics:PlaySoundAtLocation", function(_, source, sound)
         local pawn, cue = source:get(), sound:get()
@@ -450,6 +451,7 @@ if portable_fixture or portable_guest then
         local name = cue:GetFName():ToString()
         if name == "Scope_In_Cue" then optic_cues.in_count = optic_cues.in_count + 1 end
         if name == "Scope_Out_Cue" then optic_cues.out_count = optic_cues.out_count + 1 end
+        if name == "Cam_TakePhoto_Cue" then shutter_cues = shutter_cues + 1 end
     end)
 end
 
@@ -495,6 +497,12 @@ local function optic_operation(operation, profile)
         assert(valid(held) and same(held:GetClass(), item) and same(held.User, local_pawn), "stock optic not held")
         held:Use_Item_Secondary(operation == "raise")
         return "input"
+    elseif operation == "shutter" and profile == optic_profiles.viewfinder then
+        local held = local_pawn.EquipedItem
+        assert(valid(held) and same(held:GetClass(), item) and same(held.User, local_pawn), "stock camera not held")
+        held:Use_Item_Primary(true, 1)
+        held:Use_Item_Primary(false, 1)
+        return "input"
     end
 
     local meshes = remote_pawn:K2_GetComponentsByClass(asset("/Script/Engine.StaticMeshComponent"))
@@ -517,6 +525,7 @@ local function optic_operation(operation, profile)
 end
 
 local function run(operation)
+    if (portable_fixture or portable_guest) and operation == "shuttercount" then return tostring(shutter_cues) end
     if portable_guest and operation == "soundclear" then
         bandage_audio = {}
         return "cleared"

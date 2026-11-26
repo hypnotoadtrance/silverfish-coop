@@ -1,7 +1,9 @@
 local camera = {}
+local footsteps = require("native_footsteps")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_HOST_CAMERA_PRIMARY_INPUT") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
+local embedded = os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
@@ -15,7 +17,7 @@ local step_field = "Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A"
 local final_field = "Objective_FinalStep_57_F5A16DBF4E231A030BBD9F864F62A14B"
 local item_class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
-local event_path, is_downed, binding, fixture, equipped_fixture
+local event_path, is_downed, binding, fixture, equipped_fixture, pending
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -57,7 +59,8 @@ local function equipped_guid(held, save)
 end
 
 local function inspect(state, phase, preparing)
-    if not enabled or not event_path or phase ~= "hosting" or state.listening ~= true or state.server ~= false
+    if not enabled or (embedded and type(SilverfishEnqueueLocalBridgeInput) ~= "function")
+        or (not embedded and not event_path) or phase ~= "hosting" or state.listening ~= true or state.server ~= false
         or state.map ~= map or not valid(state.world) or state.world:GetFullName() ~= "World " .. map .. ".DeadBridge_P"
         or type(is_downed) ~= "function" then return end
     local detail, controller, world = state.local_pawn, state.controller, state.world
@@ -108,7 +111,16 @@ function camera.reset()
     if binding and type(SilverfishClearNativeHostCameraScope) == "function" then
         SilverfishClearNativeHostCameraScope()
     end
-    binding, fixture, equipped_fixture = nil, nil, nil
+    binding, fixture, equipped_fixture, pending = nil, nil, nil, nil
+end
+
+local function publish(record)
+    if embedded then return SilverfishEnqueueLocalBridgeInput(record) == true end
+    local file = io.open(event_path, "ab")
+    if not file then return false end
+    local written = file:write(record)
+    local closed = file:close()
+    return written and closed
 end
 
 local function drain(current)
@@ -118,13 +130,14 @@ local function drain(current)
     end
     local address, emitted = current.pawn:GetAddress(), 0
     for _ = 1, 8 do
-        local sequence, owner, guid, kind = SilverfishTakeNativeHostCameraIntent(address)
-        if not sequence_valid(sequence) or owner ~= address or guid ~= current.guid or kind ~= "camera" then break end
-        local file = io.open(event_path, "ab")
-        if not file then break end
-        local written = file:write(table.concat({"native-host-camera-intent", sequence, map, current.name, guid}, "\t"), "\n")
-        local closed = file:close()
-        if not written or not closed then break end
+        if not pending then
+            local sequence, owner, guid, kind = SilverfishTakeNativeHostCameraIntent(address)
+            if not sequence_valid(sequence) or owner ~= address or guid ~= current.guid or kind ~= "camera" then break end
+            pending = table.concat({"native-host-camera-intent", sequence, map, current.name, guid}, "\t") .. "\n"
+        end
+        if not publish(pending) then break end
+        pending = nil
+        footsteps.intercepted_shutter(current.pawn)
         emitted = emitted + 1
     end
     return emitted
@@ -213,7 +226,7 @@ function camera.rows(state, phase, status_row)
 end
 
 function camera.start(bridge, downed)
-    event_path = enabled and bridge and bridge ~= "" and bridge .. "/native-host-camera-events" or nil
+    event_path = enabled and not embedded and bridge and bridge ~= "" and bridge .. "/native-host-camera-events" or nil
     is_downed = downed
 end
 
