@@ -73,6 +73,18 @@ world.actors[radio_class] = {paths[radio_path]}
 callbacks[radio]()
 result = switches.rows(state, "hosting", row)
 assert(#result == 2 and scans[radio_class] == 1 and scans[wall_class] == 1, "Only the newly available class needs discovery")
+local function radio_readback()
+    for _, device_row in ipairs(switches.rows(state, "hosting", row)) do
+        if device_row[3] == radio_name then return device_row end
+    end
+end
+local unpowered = radio_readback()
+assert(unpowered[4] == "0" and radio_readback() == unpowered, "An unchanged radio reuses its status row")
+paths[radio_path].Powered = true
+local powered = radio_readback()
+assert(powered[4] == "1" and powered ~= unpowered, "A power change immediately replaces the cached row")
+paths[radio_path].IsActorBeingDestroyed = function() return true end
+assert(not radio_readback(), "A destroyed radio cannot publish a cached row")
 state.world = object({PersistentLevel = object({}), actors = {}})
 assert(#switches.rows(state, "hosting", row) == 0, "A previous world's devices must not leak across travel")
 print("Stock switch discovery enrolls both wall switch profiles and refreshes only the late class")

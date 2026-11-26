@@ -41,6 +41,7 @@ local swings = {}
 local uses = {}
 local observations, client_outfits = {}, {}
 local observed_weapons = {}
+local observed_characters, observed_world = {}, nil
 local client_world, client_map, client_receipt
 local host_world, host_aim_receipt, host_aims
 local holding_aim, lighter_mode
@@ -171,10 +172,13 @@ end
 local function observe(state, phase)
     observations = {}
     if phase ~= "hosting" then
-        observed_weapons = {}
+        observed_weapons, observed_characters, observed_world = {}, {}, nil
         return
     end
-    local known, weapons = {}, {}
+    if not same(observed_world, state.world) then
+        observed_characters, observed_world = {}, state.world
+    end
+    local known, weapons, characters = {}, {}, {}
     for _, details in ipairs(state.pawns) do
         local ok, id = pcall(player_id, details)
         if ok and id ~= nil then
@@ -196,7 +200,13 @@ local function observe(state, phase)
                 if read and body then
                     local address = pawn:GetAddress()
                     local read_weapon, weapon, cached = pcall(weapon_view.observe, pawn, save, observed_weapons[address])
-                    local read_appearance, appearance = pcall(character_view.observe, save.Character)
+                    local previous = observed_characters[address]
+                    local sample = previous and same(previous.save, save) and previous or nil
+                    local read_appearance, appearance, appearance_sample = pcall(character_view.observe, save.Character, sample)
+                    if read_appearance and appearance_sample then
+                        appearance_sample.save = save
+                        characters[address] = appearance_sample
+                    end
                     if read_weapon then weapons[address] = cached end
                     local gun = aim_kind(read_weapon and cached and cached.actor or nil)
                     local firearm = gun ~= "-" and cached.actor:GetClass():GetFullName():match("^BlueprintGeneratedClass (.+)$")
@@ -213,7 +223,7 @@ local function observe(state, phase)
             end
         end
     end
-    observed_weapons = weapons
+    observed_weapons, observed_characters = weapons, characters
 end
 
 local function attach_component(entry, field, parent, socket_name, class)
@@ -697,7 +707,9 @@ local function aim_head(entry, now, lean_changed, math_api)
         end
         entry.head_pivot:K2_SetWorldRotation(aim, false, {}, true)
         entry.aim_roll = entry.head_pivot:K2_GetComponentRotation().Roll
-        entry.head_aim = {pitch = pitch, yaw = yaw, time = now}
+        previous = previous or {}
+        previous.pitch, previous.yaw, previous.time = pitch, yaw, now
+        entry.head_aim = previous
     end
 end
 
@@ -877,7 +889,11 @@ function avatar.sync(state, phase)
                         local outfit = outfits[entry.id]
                         if entry.status == "default_body" then
                             local appearance = outfit and outfit.appearance or "-"
-                            local cosmetics = character_view.decode(appearance)
+                            if entry.cosmetic_model ~= appearance then
+                                entry.cosmetics = outfit and outfit.cosmetics or character_view.decode(appearance)
+                                entry.cosmetic_model = appearance
+                            end
+                            local cosmetics = entry.cosmetics
                             if not cosmetics then error("Invalid remote character appearance") end
                             apply_outfit(entry, outfit, cosmetics)
                             pcall(visor.sync, entry, visors[entry.id] == true and not pawn.Dead, state.local_pawn.pawn)
@@ -971,19 +987,23 @@ function avatar.command(fields, state, phase)
         error("Invalid remote avatar outfit scope")
     end
     local outfits = {}
+    local previous_outfits = client_world == state.world:GetAddress() and client_map == state.map and client_outfits
     for index = first, #fields, 9 do
         local id = math.tointeger(tonumber(fields[index]))
         local body, head, weapon, appearance = fields[index + 1], fields[index + 2], fields[index + 3], fields[index + 4]
         local aim, firearm, sprint = fields[index + 5], fields[index + 6], fields[index + 7]
         local motion = fields[index + 8]
+        local previous = previous_outfits and previous_outfits[id]
+        local cosmetics = previous and previous.appearance == appearance and previous.cosmetics
+            or character_view.decode(appearance)
         if not id or id < 0 or id > 2147483647 or outfits[id] or not outfit_path(body) or not outfit_path(head)
-            or not weapon_view.decode(weapon) or not character_view.decode(appearance)
+            or not (previous and previous.weapon == weapon or weapon_view.decode(weapon)) or not cosmetics
             or not firearm_path(firearm) or weapon == "-" and firearm ~= "-" or sprint ~= "0" and sprint ~= "1"
             or motion ~= "0" and motion ~= "1" and motion ~= "-"
             or aim ~= "-" and (weapon == "-" or not aimed[aim]) then
             error("Invalid remote avatar outfit")
         end
-        outfits[id] = {body = body, head = head, weapon = weapon, appearance = appearance, aim = aim,
+        outfits[id] = {body = body, head = head, weapon = weapon, appearance = appearance, cosmetics = cosmetics, aim = aim,
             firearm = firearm, sprinting = sprint == "1"}
         if motion ~= "-" then outfits[id].moving = motion == "1" end
     end

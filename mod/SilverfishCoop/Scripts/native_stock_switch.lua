@@ -166,12 +166,18 @@ end
 function switches.read_row(entry, name, state, phase, row)
     if entry.power then
         local actor = entry.actor or StaticFindObject(entry.path)
-        if qualified(actor, state.world) and type(actor[entry.power]) == "boolean" then
+        local powered
+        if qualified(actor, state.world) then powered = actor[entry.power] end
+        if type(powered) == "boolean" then
             if entry.candle and phase == "connected" then
                 local sphere = actor.Sphere
                 if valid(sphere) and same(sphere:GetOwner(), actor) then suppress_candle_overlap(name, sphere) end
             end
-            return row("native-stock-switch", state.map, name, bit(actor[entry.power]), 0, 0, 0, "-", "-")
+            if entry.row_power ~= powered or entry.row_encoder ~= row or entry.row_map ~= state.map then
+                entry.status_row = row("native-stock-switch", state.map, name, bit(powered), 0, 0, 0, "-", "-")
+                entry.row_power, entry.row_encoder, entry.row_map = powered, row, state.map
+            end
+            return entry.status_row
         end
     elseif valid(entry.actor) and not entry.actor:IsActorBeingDestroyed() and valid(entry.lever) then
         local angles = entry.lever.RelativeRotation
@@ -179,7 +185,12 @@ function switches.read_row(entry, name, state, phase, row)
         local lights = {}
         for id, link in pairs(entry.lights) do
             if valid(link.target) and valid(link.bulb) then
-                lights[#lights + 1] = table.concat({id, bit(link.target.Powered), bit(link.bulb:IsVisible())}, "|")
+                local powered, visible = bit(link.target.Powered), bit(link.bulb:IsVisible())
+                if link.row_power ~= powered or link.row_visible ~= visible then
+                    link.status_row = id .. "|" .. powered .. "|" .. visible
+                    link.row_power, link.row_visible = powered, visible
+                end
+                lights[#lights + 1] = link.status_row
             end
         end
         table.sort(lights)

@@ -77,26 +77,38 @@ function view.decode(model)
     return cosmetics
 end
 
-function view.observe(character)
+function view.observe(character, sample)
     if not character then return "-" end
-    local fields = {}
+    sample = sample or {fields = {}, addresses = {}, colors = {}}
+    local fields, changed = sample.fields, sample.model == nil
     for index, field in ipairs(asset_fields) do
         local object = character[field[1]]
-        local path = valid(object) and object:GetFullName():match("^%S+ (%S+)$")
-        fields[index] = path and stock_asset(path, index) and path or "-"
+        local address = valid(object) and object:GetAddress() or false
+        if sample.addresses[index] ~= address then
+            local path = address and object:GetFullName():match("^%S+ (%S+)$")
+            fields[index] = path and stock_asset(path, index) and path or "-"
+            sample.addresses[index], changed = address, true
+        end
     end
     for index, field in ipairs(color_fields) do
         local color = character[field]
-        local value = "-"
-        if color and color_valid(color.R) and color_valid(color.G) and color_valid(color.B) and color_valid(color.A)
-            and color.R + color.G + color.B + color.A > 0 then
-            value = string.format("%.5f,%.5f,%.5f,%.5f", color.R, color.G, color.B, color.A)
+        local r, g, b, a
+        if color then r, g, b, a = color.R, color.G, color.B, color.A end
+        local previous = sample.colors[index]
+        if not previous or previous[1] ~= r or previous[2] ~= g or previous[3] ~= b or previous[4] ~= a then
+            local value = "-"
+            if color_valid(r) and color_valid(g) and color_valid(b) and color_valid(a) and r + g + b + a > 0 then
+                value = string.format("%.5f,%.5f,%.5f,%.5f", r, g, b, a)
+            end
+            fields[6 + index], sample.colors[index], changed = value, {r, g, b, a}, true
         end
-        fields[6 + index] = value
     end
     local eye = math.tointeger(character[eye_field])
-    fields[10] = eye and eye >= 0 and eye <= 20 and tostring(eye) or "-"
-    return table.concat(fields, "|")
+    if fields[10] == nil or sample.eye ~= eye then
+        fields[10], sample.eye, changed = eye and eye >= 0 and eye <= 20 and tostring(eye) or "-", eye, true
+    end
+    if changed then sample.model = table.concat(fields, "|") end
+    return sample.model, sample
 end
 
 local function checked_asset(path, index, asset)
