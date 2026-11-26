@@ -92,18 +92,32 @@ async def toggle_door(host, guest, actor, pawn, expected_open, *, inspect_during
         recent = [event for event in events if event.get("event") in
                   {"interaction_rejected", "local_interaction", "native_stock_door_motion_played"}]
         raise AssertionError(f"No stock door receipt for {actor}: {recent}") from None
-    authority = observed(await wait_resident_status(host_run, lambda frame:
-        observed(frame).get("open") is expected_open and observed(frame).get("locked") is False))
+    authority_frame = await wait_resident_status(host_run, lambda frame:
+        observed(frame).get("open") is expected_open and observed(frame).get("locked") is False)
+    authority = observed(authority_frame)
     replica = await wait_resident_status(guest_run, lambda frame: door.matches(observed(frame), authority))
     assert receipt[door.RESULT]["open"] is expected_open
     if inspected:
-        # The guest records completion before writing the runner's response file.
+        # Require an overlapping request on the wire. Where the two replies
+        # fall depends on how much hinge travel was left when the runner sent it.
+        operation = inspected["command_id"]
+        sent, = [event for event in events if event.get("event") == "guest_interaction_sent"
+                 and event.get("operation_id") == operation]
+        received, = [event for event in events if event.get("event") == "guest_interaction_received"
+                     and event.get("operation_id") == operation and event.get("ok")]
+        host_reply, = [event for event in await resident_events(host_run, authority_frame)
+                       if event.get("event") == "host_interaction_finished"
+                       and event.get("operation_id") == operation and event.get("ok")]
         completion, = [event for event in events if event.get("event") == "client_command"
                        and event.get("action") == "native-loot-inspect"
-                       and event.get("command_id") == inspected["command_id"]]
+                       and event.get("command_id") == operation]
         inspected["completed_at"] = completion["time_unix"]
         inspected["request_to_guest_receipt_ms"] = round((completion["time_unix"] - inspected["requested_at"]) * 1000, 1)
-        assert inspected["requested_at"] <= completion["time_unix"] < receipt["time_unix"], (inspected, receipt)
+        inspected["request_to_send_ms"] = round((sent["time_unix"] - inspected["requested_at"]) * 1000, 1)
+        inspected["send_to_guest_reply_ms"] = round((received["time_unix"] - sent["time_unix"]) * 1000, 1)
+        inspected["host_reply_before_door_receipt_ms"] = round((receipt["time_unix"] - host_reply["time_unix"]) * 1000, 1)
+        assert inspected["requested_at"] <= sent["time_unix"] < receipt["time_unix"], (inspected, receipt)
+        assert sent["time_unix"] <= host_reply["time_unix"] <= received["time_unix"] <= completion["time_unix"], inspected
         receipt["independent_inspection"] = inspected
     motion, = [event for event in await resident_events(guest_run, replica)
                if event.get("time_unix", 0) >= started and event.get("event") == "native_stock_door_motion_played"
