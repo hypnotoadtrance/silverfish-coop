@@ -292,6 +292,11 @@ local function append_scene(rows, state_row, map, instance)
         notes[#notes + 1] = "reputation flags"
     end
 
+    local ok, static_seed = pcall(world_seed.static_placement_seed, save)
+    if ok and static_seed ~= nil then
+        rows[#rows + 1] = state_row("native-static-world-seed", map, static_seed)
+    end
+
     rows[#rows + 1] = state_row("native-scene", map, level, entrance, rest_level, bed, seed, seconds,
         weather, storm, artifacts, temporary, storm_events, track_seed, track_on, storm_asset,
         #notes == 0 and "ok" or "partial", brief(table.concat(notes, ", ")))

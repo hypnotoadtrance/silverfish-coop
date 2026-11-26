@@ -1,5 +1,6 @@
 """Deliver fresh host time to the connected guest's stock clock widget."""
 
+import re
 import time
 
 
@@ -8,7 +9,20 @@ APPLY = "native-guest-clock-apply"
 REPLY = "native-guest-clock-reply"
 KEY = "native_guest_clock"
 WORLD_START = "native_guest_world_start"
+STATIC_WORLD_SEED = "static_world_seed"
 MAX_MILLISECONDS = 922_337_203_685_477
+
+
+def valid_static_seed(value):
+    return value is None or (type(value) is int and -2_147_483_648 <= value <= 2_147_483_647)
+
+
+def parse_static_seed(value):
+    if value == "-":
+        return None
+    if not re.fullmatch(r"-?[0-9]{1,10}", value) or not valid_static_seed(result := int(value)):
+        raise ValueError("Invalid static world seed")
+    return result
 
 
 def parse_report(fields):

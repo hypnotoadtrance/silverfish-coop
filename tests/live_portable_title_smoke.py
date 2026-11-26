@@ -7933,6 +7933,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if guest_world_start:
             probes.enter_context(installed_probe(second_game, mod="SilverfishPortableGuestWorldStartProbe",
                                                  fixture="portable_guest_world_start_probe.lua"))
+        if guest_world_start_travel:
+            probes.enter_context(installed_probe(first_game, mod="SilverfishPortableGuestWorldStartProbe",
+                                                 fixture="portable_guest_world_start_probe.lua"))
         if guest_world_start_travel or stock_acid_pool:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableRuinExitProbe",
                                                  fixture="portable_ruin_exit_probe.lua"))

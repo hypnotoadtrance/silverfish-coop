@@ -1601,7 +1601,7 @@ class Bridge:
                     data["save_scope"] = None if fields[1] == "-" else fields[1]
                 elif fields[0] == "native-guest-world-start":
                     key = native_guest_clock.WORLD_START
-                    if (len(fields) != 6 or key in data or data.get("mode") != "client"
+                    if (len(fields) not in (6, 7) or key in data or data.get("mode") != "client"
                             or data.get("state") not in ("joining", "connected")
                             or not all(re.fullmatch(r"[0-9a-f]{32}", value) and value != "0" * 32 for value in fields[1:3])
                             or not valid_campaign_package(fields[3])
@@ -1614,6 +1614,14 @@ class Bridge:
                         raise ValueError("Unqualified guest world start status")
                     data[key] = dict(zip(("session", "epoch", "map"), fields[1:4]),
                                      seed=seed, milliseconds=milliseconds)
+                    if len(fields) == 7:
+                        data[key][native_guest_clock.STATIC_WORLD_SEED] = native_guest_clock.parse_static_seed(fields[6])
+                elif fields[0] == "native-static-world-seed":
+                    key = native_guest_clock.STATIC_WORLD_SEED
+                    if (len(fields) != 3 or key in data or data.get("state") != "hosting"
+                            or fields[1] != data.get("map") or not valid_campaign_package(fields[1])):
+                        raise ValueError("Invalid static world seed scope")
+                    data[key] = {"map": fields[1], "value": native_guest_clock.parse_static_seed(fields[2])}
                 elif fields[0] == native_title_entry.TAG:
                     if native_title_entry.KEY in data:
                         raise ValueError("Repeated stock title report")

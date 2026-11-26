@@ -1102,13 +1102,13 @@ local function run_command(fields, state, current_phase)
         })
         return "authenticated host sun and sky projected", proof
     elseif command == "join" then
-        if (#fields ~= 3 and #fields ~= 6 and #fields ~= 8) or not loopback_endpoint(argument) then
+        if (#fields ~= 3 and #fields ~= 6 and #fields ~= 8 and #fields ~= 9) or not loopback_endpoint(argument) then
             error("Expected the local relay endpoint 127.0.0.1:port", 0)
         end
         if role == "host" or state.server or leaving or native_stock_creator.guest_busy() then
             error("Leave the current session before joining", 0)
         end
-        if #fields == 8 and (not native_save_scope.selected() or current_phase ~= "ready"
+        if #fields >= 8 and (not native_save_scope.selected() or current_phase ~= "ready"
             or state.map ~= main_menu or not supported_map(fields[6])) then
             error("The host world start requires the private guest title", 0)
         end
@@ -1124,7 +1124,8 @@ local function run_command(fields, state, current_phase)
         if #fields >= 6 then native_death.admit_client(fields[4], fields[5], fields[6]) end
         if native_save_scope.selected() then
             native_save_scope.prepare_guest(state)
-            native_save_scope.prepare_guest_world(state, current_phase, fields[4], fields[5], fields[6], fields[7], fields[8])
+            native_save_scope.prepare_guest_world(state, current_phase, fields[4], fields[5], fields[6],
+                fields[7], fields[8], fields[9])
         end
         open_level(state.controller, argument, "")
         native_anomaly_fields.guest(true)

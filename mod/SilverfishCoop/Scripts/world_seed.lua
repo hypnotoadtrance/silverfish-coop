@@ -19,6 +19,42 @@ local function is_int32(value)
         and value >= -2147483648 and value <= 2147483647
 end
 
+function world_seed.static_placement_seed(save)
+    if not valid(save) or not save.Flags then return end
+    local key = FName("Static_WorldSeed", EFindName.FNAME_Find)
+    local flags = save.Flags
+    if key:GetComparisonIndex() == 0 or not flags:Contains(key) then return "-" end
+    local value = flags:Find(key):get()
+    if is_int32(value) then return math.tointeger(value) end
+end
+
+function world_seed.set_static_placement_seed(save, value)
+    local prior = world_seed.static_placement_seed(save)
+    if prior == nil or (value ~= "-" and not is_int32(value)) then return false end
+    if prior == value then return true end
+    local flags, key = save.Flags, FName("Static_WorldSeed")
+    local function write(seed)
+        if seed == "-" then
+            flags:Remove(key)
+        elseif flags:Contains(key) then
+            flags:Find(key):Set(seed)
+        else
+            flags:Add(key, seed)
+        end
+    end
+    local applied, verified = pcall(function()
+        write(value)
+        return world_seed.static_placement_seed(save) == value
+    end)
+    if applied and verified then return true end
+    local restored, unchanged = pcall(function()
+        if world_seed.static_placement_seed(save) ~= prior then write(prior) end
+        return world_seed.static_placement_seed(save) == prior
+    end)
+    if not restored or not unchanged then error("mutation_unverified_guest_static_world_seed", 0) end
+    return false
+end
+
 local function stock_object(object, class)
     if not valid(object) then return false end
     local name = object:GetFullName()

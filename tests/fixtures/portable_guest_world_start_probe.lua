@@ -26,6 +26,13 @@ local function same(a, b)
 end
 local function text(value) return type(value) == "userdata" and value:ToString() or value end
 
+local function static_seed(save)
+    local flags = save.Flags
+    local key = FName("Static_WorldSeed", EFindName.FNAME_Find)
+    if key:GetComparisonIndex() == 0 or not flags:Contains(key) then return "-" end
+    return tostring(flags:Find(key):get())
+end
+
 local function observe(phase, entry, world, actor)
     if not valid(actor) or actor:GetFullName() ~= entry.actor
         or not valid(world) or world:GetFullName() ~= entry.world
@@ -52,8 +59,8 @@ local function observe(phase, entry, world, actor)
     local milliseconds = (((parts.Days * 24 + parts.Hours) * 60 + parts.Minutes) * 60 + parts.Seconds) * 1000
         + parts.Milliseconds
     local output = assert(io.open(reply, "ab"))
-    output:write(("%s\t%s\t%s\t%s\t%s\t%d\t%d\t%.12g\n"):format(phase, session, arm, entry.map, slot,
-        save.InstanceSeed, milliseconds, instance.Travel_TimeStep))
+    output:write(("%s\t%s\t%s\t%s\t%s\t%d\t%d\t%.12g\t%s\n"):format(phase, session, arm, entry.map, slot,
+        save.InstanceSeed, milliseconds, instance.Travel_TimeStep, static_seed(save)))
     output:close()
 end
 
@@ -61,6 +68,39 @@ RegisterBeginPlayPreHook(function(context)
     local actor = context:get()
     local entry = valid(actor) and by_actor[actor:GetFullName()]
     if entry then observe("begin-play-pre", entry, actor:GetWorld(), actor) end
+end)
+
+local randomizer_class = "/Game/Classes/Actors/Generic_LocationRandomizer_BP.Generic_LocationRandomizer_BP_C"
+local cross_world = "World " .. maps .. "CrossRoads_P.CrossRoads_P"
+RegisterBeginPlayPostHook(function(context)
+    local actor = context:get()
+    local class = valid(actor) and actor:GetClass()
+    if not valid(class) or class:GetFullName() ~= "BlueprintGeneratedClass " .. randomizer_class then return end
+    local world = actor:GetWorld()
+    if not valid(world) or world:GetFullName() ~= cross_world
+        or not same(actor:GetOuter(), world.PersistentLevel) then return end
+    local instance = world.OwningGameInstance
+    local save = valid(instance) and instance.SaveSlot_Ref
+    local target = actor.Target_Actor
+    if not valid(target) or not valid(save) or not same(target:GetWorld(), world) then return end
+
+    local position, rotation = target:K2_GetActorLocation(), target:K2_GetActorRotation()
+    local points, picked = actor.RandomizedPoints, "-"
+    for index = 1, points:GetArrayNum() do
+        local point = points[index]
+        if valid(point) then
+            local at = point:K2_GetActorLocation()
+            if (position.X-at.X)^2 + (position.Y-at.Y)^2 + (position.Z-at.Z)^2 < .1 then
+                picked = point:GetFullName()
+                break
+            end
+        end
+    end
+    local file = assert(io.open(mailbox .. "/portable-placed-randomizer.tsv", "ab"))
+    file:write(("%s\t%s\t%s\t%s\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\n"):format(
+        actor:GetFullName(), target:GetFullName(), static_seed(save), picked,
+        position.X, position.Y, position.Z, rotation.Pitch, rotation.Yaw, rotation.Roll))
+    file:close()
 end)
 
 RegisterLoadMapPostHook(function(_, loaded)

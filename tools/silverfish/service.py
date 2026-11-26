@@ -2058,8 +2058,14 @@ class Host:
         milliseconds = round(seconds * 1000)
         if not 0 < milliseconds <= native_guest_clock.MAX_MILLISECONDS:
             return None
-        return {"session": self.control.generation, "epoch": epoch, "map": area,
-                "seed": int(seed), "milliseconds": milliseconds}
+        start = {"session": self.control.generation, "epoch": epoch, "map": area,
+                 "seed": int(seed), "milliseconds": milliseconds}
+        key = native_guest_clock.STATIC_WORLD_SEED
+        static = game.get(key)
+        if (isinstance(static, dict) and static.get("map") == area
+                and "value" in static and native_guest_clock.valid_static_seed(static["value"])):
+            start[key] = static["value"]
+        return start
 
     def snapshot_for_guest(self, guest_id: str, role: str) -> dict:
         gameplay = self.public_gameplay()
@@ -5550,14 +5556,21 @@ class Client:
                 or reply.get("travel_in_progress") is not False or (reply.get("zone_epoch"), reply.get("zone")) != (epoch, area)):
             return ()
         start = reply.get(native_guest_clock.WORLD_START)
-        if (not isinstance(start, dict) or start.keys() != {"session", "epoch", "map", "seed", "milliseconds"}
+        static_key = native_guest_clock.STATIC_WORLD_SEED
+        if (not isinstance(start, dict) or start.keys() - {static_key} != {"session", "epoch", "map", "seed", "milliseconds"}
                 or (start["session"], start["epoch"], start["map"]) != (session, epoch, area)):
             return ()
         seed, milliseconds = start["seed"], start["milliseconds"]
         if (type(seed) is not int or not -2147483648 <= seed <= 2147483647
                 or type(milliseconds) is not int or not 0 < milliseconds <= native_guest_clock.MAX_MILLISECONDS):
             return ()
-        return str(seed), str(milliseconds)
+        values = (str(seed), str(milliseconds))
+        if static_key in start:
+            static = start[static_key]
+            if not native_guest_clock.valid_static_seed(static):
+                return ()
+            return (*values, "-" if static is None else str(static))
+        return values
 
     async def open_game_link(self, *, timeout: float = 18, renew_endpoint: bool = False) -> None:
         if renew_endpoint:

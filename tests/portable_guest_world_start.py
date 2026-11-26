@@ -115,11 +115,14 @@ class GuestWorldStartProof:
         assert raw.startswith(self.log_bytes)
         samples = {}
         for row in raw[len(self.log_bytes):].decode("ascii").splitlines():
-            phase, session, sample_arm, sample_map, slot, seed, milliseconds, step = row.split("\t")
+            phase, session, sample_arm, sample_map, slot, seed, milliseconds, step, static = row.split("\t")
             assert phase in {"begin-play-pre", "load-map-post"} and phase not in samples
             assert (session, sample_arm, sample_map, slot) == (self.session, arm, area, f"SFCoopGuest_{self.character}")
             assert int(seed) == receipt["seed"]
-            samples[phase] = {"seed": int(seed), "milliseconds": int(milliseconds), "travel_step": float(step)}
+            recorded_seed = None if static == "-" else int(static)
+            assert native_guest_clock.STATIC_WORLD_SEED in receipt and recorded_seed == receipt[native_guest_clock.STATIC_WORLD_SEED]
+            samples[phase] = {"seed": int(seed), "milliseconds": int(milliseconds), "travel_step": float(step),
+                              "static_world_seed": recorded_seed}
         assert samples, f"The stock {area} startup recorded no read for the armed visit"
         self.log_bytes = raw
         if require_begin_play:
@@ -255,6 +258,9 @@ class GuestWorldStartProof:
             startup = self._read(arrived, guest_arrived, destination, epoch, arm, earliest_ms, require_begin_play=True)
             transitions.append({"source": source, "destination": destination, "entrance": entrance, "actor": actor,
                                 "guest_pawn": next_pawn, "startup": startup})
+            if destination == CROSSROADS:
+                self.evidence["stock_location_randomizer"] = self._compare_randomizers(
+                    host, guest, arrived["game"]["static_world_seed"]["value"])
 
             widget = await verify_stock_clock(guest_run, destination, epoch, next_pawn)
             live_host = await wait_resident_status(host_run, lambda frame: host_ready(frame, destination))
@@ -277,6 +283,28 @@ class GuestWorldStartProof:
             if blocker_name is not None:
                 self._zone_files_absent(host, guest)
                 transitions[-1]["zone_files_absent"] = True
+
+    @staticmethod
+    def _compare_randomizers(host, guest, expected_seed):
+        def records(seat):
+            path = seat.bridge.directory / "portable-placed-randomizer.tsv"
+            assert path.is_file(), f"Stock randomizer BeginPlay produced no evidence in {path.parent}"
+            result = {}
+            for line in path.read_text(encoding="utf-8").splitlines():
+                randomizer, target, seed, point, *pose = line.split("\t")
+                assert randomizer not in result and point != "-", (randomizer, point)
+                result[randomizer] = {"target": target, "seed": int(seed), "point": point, "pose": list(map(float, pose))}
+            return result
+
+        authority, replica = records(host), records(guest)
+        assert authority.keys() == replica.keys() and authority
+        for name, first in authority.items():
+            other = replica[name]
+            assert first["seed"] == other["seed"] == expected_seed and expected_seed != 0
+            assert (first["target"], first["point"]) == (other["target"], other["point"]), (first, other)
+            assert math.dist(first["pose"][:3], other["pose"][:3]) < .1
+            assert all(abs((a - b + 180) % 360 - 180) < .05 for a, b in zip(first["pose"][3:], other["pose"][3:]))
+        return authority
 
     async def verify_travel_exit(self, host, stopped, saved, character):
         last = self.evidence["stock_travel"][-1]

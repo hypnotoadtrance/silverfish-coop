@@ -145,7 +145,14 @@ class ZoneRejoinIntegrationTests(IsolatedAsyncioTestCase):
         transport.request.assert_awaited_once_with({"action": "snapshot", "zone_epoch": visit, WORLD_START: True},
                                                    timeout=1)
 
-        invalid = (old_snapshot, {"ok": False, "error": "unknown_action"},
+        for seed, argument in ((217526, "217526"), (None, "-"), (-2147483648, "-2147483648")):
+            bridge.command.reset_mock()
+            transport.request.return_value = {**reply, WORLD_START: {**startup, "static_world_seed": seed}}
+            await client.open_game_link()
+            bridge.command.assert_awaited_once_with(*expected, "-123", "113312523", argument)
+
+        invalid = (old_snapshot, {**reply, WORLD_START: {**startup, "static_world_seed": True}},
+                   {**reply, WORLD_START: {**startup, "static_world_seed": 2147483648}}, {"ok": False, "error": "unknown_action"},
                    {**reply, "zone_epoch": "d" * 32}, {**reply, "zone": BOROUGH}, {**reply, "travel_in_progress": True},
                    {**reply, WORLD_START: {**startup, "session": "d" * 32}},
                    {**reply, WORLD_START: {**startup, "epoch": "d" * 32}},
@@ -181,6 +188,12 @@ class ZoneRejoinIntegrationTests(IsolatedAsyncioTestCase):
         self.assertEqual(Host.guest_request(host, "authenticated-guest", query)[WORLD_START],
                          {"session": session, "epoch": visit, "map": CITY, "seed": -123, "milliseconds": 113312523})
         self.assertNotIn(WORLD_START, Host.guest_request(host, "authenticated-guest", {"action": "snapshot"}))
+        game["static_world_seed"] = {"map": CITY, "value": -56}
+        self.assertEqual(Host.guest_request(host, "authenticated-guest", query)[WORLD_START]["static_world_seed"], -56)
+        game["static_world_seed"]["value"] = None
+        self.assertIsNone(Host.guest_request(host, "authenticated-guest", query)[WORLD_START]["static_world_seed"])
+        game["static_world_seed"]["map"] = BOROUGH
+        self.assertNotIn("static_world_seed", Host.guest_request(host, "authenticated-guest", query)[WORLD_START])
 
     async def test_client_zone_change_recovers_zero_packet_attempt_at_fresh_local_port(self):
         game = {"map": BOROUGH, "state": "connected", "mode": "client", "server_connection": True,

@@ -1,4 +1,5 @@
 local scope = {}
+local world_seed = require("world_seed")
 
 local active
 local registered = {}
@@ -67,12 +68,14 @@ local function bounded_integer(value, low, high)
     return integer and integer >= low and integer <= high and integer or nil
 end
 
-function scope.prepare_guest_world(state, phase, session, visit, map, seed_text, time_text)
+function scope.prepare_guest_world(state, phase, session, visit, map, seed_text, time_text, static_text)
     local guest = active and active.guest
     if guest then guest.world_start = nil end
     if seed_text == nil and time_text == nil then return end
     local seed = bounded_integer(seed_text, -2147483648, 2147483647)
     local milliseconds = bounded_integer(time_text, 1, max_ms)
+    local static_seed = static_text == "-" and "-" or bounded_integer(static_text, -2147483648, 2147483647)
+    if static_text ~= nil and static_seed == nil then error("Invalid host static world seed", 0) end
     local world, controller = state.world, state.controller
     if not seed or not milliseconds or not guest or phase ~= "ready" or state.listening or state.server
         or not valid(world) or world:GetFullName() ~= title_world or not valid(controller)
@@ -91,7 +94,11 @@ function scope.prepare_guest_world(state, phase, session, visit, map, seed_text,
     end
     if observed_seed ~= seed or observed_ms ~= milliseconds or type(previous_step) ~= "number"
         or guest.instance.Travel_TimeStep ~= 0 then error("mutation_unverified_guest_world_receipt", 0) end
-    guest.world_start = {session = session, visit = visit, map = map, seed = observed_seed, milliseconds = observed_ms}
+    if static_seed ~= nil and not world_seed.set_static_placement_seed(guest.save, static_seed) then
+        error("The private guest save did not retain the host static world seed", 0)
+    end
+    guest.world_start = {session = session, visit = visit, map = map, seed = observed_seed,
+        milliseconds = observed_ms, static_seed = static_seed}
 end
 
 function scope.guest_world_start_row(state, phase, status_row)
@@ -99,6 +106,10 @@ function scope.guest_world_start_row(state, phase, status_row)
     local start = guest and guest.world_start
     if not start or not valid(state.world) or not same(state.world.OwningGameInstance, guest.instance)
         or (phase ~= "joining" and (phase ~= "connected" or state.map ~= start.map)) then return end
+    if start.static_seed ~= nil then
+        return status_row("native-guest-world-start", start.session, start.visit, start.map,
+            start.seed, start.milliseconds, start.static_seed)
+    end
     return status_row("native-guest-world-start", start.session, start.visit, start.map, start.seed, start.milliseconds)
 end
 
