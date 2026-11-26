@@ -30,9 +30,9 @@ for blueprint, label in pairs({
 end
 
 function drop_items.stock_actor_class(class)
-    if type(class) ~= "string" or #class > 256
-        or not class:match("^/Game/Classes/[%w_/%-]+%.[%w_%-]+_C$") then return end
-    local asset, actor = class:match("/([%w_%-]+)%.([%w_%-]+_C)$")
+    if type(class) ~= "string" or #class > 256 or class:find("//", 1, true) then return end
+    local package, actor = class:match("^/Game/([A-Za-z0-9_/%-]+)%.([A-Za-z0-9_%-]+_C)$")
+    local asset = package and package:match("([A-Za-z0-9_%-]+)$")
     if asset and actor == asset .. "_C" then return actor end
 end
 

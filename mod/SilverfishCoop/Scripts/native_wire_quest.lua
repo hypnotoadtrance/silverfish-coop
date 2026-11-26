@@ -138,7 +138,9 @@ local function controlled(detail, world, local_player)
 end
 
 function meet.qualified_stock_board(world, instance, board)
-    if not exact(board, board_class) or not same(board:GetWorld(), world) or board:IsActorBeingDestroyed()
+    local base = StaticFindObject(board_class)
+    if not valid(board) or not valid(base) or not board:IsA(base)
+        or not same(board:GetWorld(), world) or board:IsActorBeingDestroyed()
         or not board:HasAnyFlags(EObjectFlags.RF_WasLoaded) or not same(board:GetOuter(), world.PersistentLevel)
         or not same(board["As Game Instance FP"], instance) or not int32(board.TurnIn_ID)
         or board.TurnIn_ID < 0 or board.TurnIn_ID > 11 or board.ShowAllContracts ~= false
@@ -429,14 +431,16 @@ function meet.live_stock_board_context(state, phase, name, full_board_name, ques
     local map = state.map
     local leaf = type(map) == "string" and map:match("^/Game/Classes/Maps/[%w_/]+/([%w_]+)$")
     local world = leaf and map .. "." .. leaf
-    local prefix = world and "BountyBoard_BP_C " .. world .. ":PersistentLevel."
-    local actor = prefix and type(full_board_name) == "string" and full_board_name:sub(#prefix + 1)
-    if not actor or full_board_name:sub(1, #prefix) ~= prefix or not actor:match("^[A-Za-z0-9_]+$") then
+    local path = type(full_board_name) == "string"
+        and full_board_name:match("^[A-Za-z0-9_%-]+_C (.+)$")
+    local prefix = world and world .. ":PersistentLevel."
+    if not path or not prefix or path:sub(1, #prefix) ~= prefix
+        or not path:sub(#prefix + 1):match("^[A-Za-z0-9_%-]+$") then
         refused("board_unqualified")
     end
     local speaker = full_board_name == simmi_jobs.board_name and simmi_jobs.speaker or nil
     return context_for(state, phase, name, false, {map = map, world_path = world,
-        board_path = full_board_name:sub(#"BountyBoard_BP_C " + 1), board_name = full_board_name,
+        board_path = path, board_name = full_board_name,
         quest_id = quest, quest_display_alias = quest == missing_contact_id and missing_contact_display or nil,
         dynamic = true, speaker = speaker})
 end

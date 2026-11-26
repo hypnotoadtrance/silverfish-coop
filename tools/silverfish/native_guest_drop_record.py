@@ -5,6 +5,7 @@ import re
 
 from .authored_loot import valid_item_transform
 from .authored_routes import MAPS as NORMAL_CAMPAIGN_MAPS
+from .content_paths import item_class_name
 from .guest_weapon_profiles import MAX_TAKE_AMMO_ROUNDS, NINE_MM_BALL, STOCK_AMMO
 from .native_guest_consumable import MEALS, MISSING_CONTACT_ENTRY, RESULT as CONSUMABLE_RESULTS
 from .native_gold import valid_guid
@@ -36,7 +37,6 @@ WORN_DROP_ENTRIES = ("worn_drop_context_menu", "worn_drop_ctrl_click", "worn_dro
 QUICK_DROP_ENTRIES = ("quick_drop_context_menu", "quick_drop_ctrl_click", "quick_drop_drag_to_floor")
 _RECORD_FIELDS = {"owner", "guid", "quantity", "class_path", "map", "location", "claim_id"}
 _MERGE_FIELDS = {"inventory_guid", "stack_merge"}
-_CLASS = re.compile(r"/Game/Classes/(?:[A-Za-z0-9_-]+/)*([A-Za-z0-9_-]+)\.\1_C\Z")
 
 
 def valid_id(value) -> bool:
@@ -125,7 +125,7 @@ def actor_matches(area, name, class_path=None) -> bool:
 
 
 def valid_class(path) -> bool:
-    return isinstance(path, str) and len(path) <= 256 and _CLASS.fullmatch(path) is not None
+    return item_class_name(path) is not None
 
 
 def valid_quantity(path, count) -> bool:

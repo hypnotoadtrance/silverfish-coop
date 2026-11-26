@@ -1,4 +1,5 @@
 #include "guest_drop_projection.hpp"
+#include "content_paths.hpp"
 #include "guest_drop_items.hpp"
 #include "guest_drop_maps.hpp"
 #include "interaction_input.hpp"
@@ -187,16 +188,6 @@ namespace
     }
 
     bool coordinate(double axis) { return std::isfinite(axis) && std::abs(axis) <= 1e7; }
-
-    bool stock_item_path(std::string_view path)
-    {
-        return path.starts_with("/Game/Classes/") && path.ends_with("_C") && path.size() <= 256 &&
-            std::ranges::all_of(path, [](char character) {
-                return (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z') ||
-                    (character >= '0' && character <= '9') || character == '_' || character == '/' ||
-                    character == '.' || character == '-';
-            });
-    }
 
     bool same_scene(const Lease& lease)
     {
@@ -883,7 +874,7 @@ namespace
         for (auto& axis : source) axis = lua.get_number();
         const double visual = lua.get_number();
         const auto class_path = arguments >= 8 ? lua.get_string() : std::string_view{};
-        if (arguments >= 8 && !stock_item_path(class_path))
+        if (arguments >= 8 && !silverfish::content_paths::item_class(class_path))
         {
             clear(entry);
             return report(lua, false, "stock_drop_projection_class_unqualified");

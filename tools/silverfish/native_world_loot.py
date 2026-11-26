@@ -11,6 +11,7 @@ from itertools import chain
 from . import (native_enemy_shells, native_guest_drop_record, native_host_dig_live, native_loot,
                native_mushrooms, native_stock_enemy_drops, party)
 from .authored_loot import valid_item_transform
+from .content_paths import item_class_name
 from .native_gold import valid_guid
 from .native_guest_drop_record import valid_position
 
@@ -34,7 +35,6 @@ SHARED_PICKUPS_VERSION = 2
 CRATE_CLAIM = "native-loot-claim"
 ENEMY_CLAIM = "native-enemy-loot-claim"
 _TARGET = re.compile(r"world-loot:([0-9a-f]{32}):([0-9a-f]{32})(?::([1-9][0-9]{0,15}))?\Z")
-_CLASS = re.compile(r"/Game/Classes/[A-Za-z0-9_./-]+\.([A-Za-z0-9_-]+_C)\Z")
 _AREA = re.compile(r"/Game/Classes/Maps/[A-Za-z0-9_/]+/([A-Za-z0-9_-]+)\Z")
 _MAX_VISIBLE = 64
 _VISIBILITY_RADIUS = 1800
@@ -65,12 +65,11 @@ def parse(fields, phase, area):
             or (len(fields) == 9 and (phase != "connected" or fields[8] != "moving"))):
         raise ValueError("Unexpected stock world loot report")
     _, world, epoch, identity, pawn, actor, press, item_class = fields[:8]
-    match = _CLASS.fullmatch(item_class)
-    if (world != area or not pawn_matches(area, pawn) or not match or len(item_class) > 256
+    class_name = item_class_name(item_class)
+    if (world != area or not pawn_matches(area, pawn) or not class_name
             or not party.REQUEST_ID.fullmatch(epoch) or not party.REQUEST_ID.fullmatch(identity)
             or not re.fullmatch(r"(?:0|[1-9][0-9]{0,15})", press) or int(press) >= 2**53):
         raise ValueError("Invalid stock world loot report")
-    class_name = match[1]
     prefix = f"{class_name} {area}.{area.rsplit('/', 1)[-1]}:PersistentLevel.{class_name}_"
     if not actor.startswith(prefix) or not re.fullmatch(r"[0-9]{1,10}", actor[len(prefix):]):
         raise ValueError("Invalid projected stock loot actor")
@@ -84,7 +83,7 @@ def parse_projection_error(fields, phase, area):
     if len(fields) != 6 or phase not in {"hosting", "connected"}:
         raise ValueError("Unexpected stock world loot projection error")
     _, world, epoch, identity, item_class, reason = fields
-    if (world != area or not _CLASS.fullmatch(item_class) or len(item_class) > 256
+    if (world != area or not item_class_name(item_class)
             or not party.REQUEST_ID.fullmatch(epoch) or not party.REQUEST_ID.fullmatch(identity)
             or not reason.startswith("stock_drop_projection_") or len(reason) > 256):
         raise ValueError("Invalid stock world loot projection error")
@@ -94,7 +93,7 @@ def parse_projection_error(fields, phase, area):
 def parse_physics(fields, phase, area):
     _, world, epoch, identity, item_class, state, *values = fields
     if (phase != "hosting" or world != area or len(values) != 9
-            or state not in {"moving", "settled"} or len(item_class) > 256 or not _CLASS.fullmatch(item_class)
+            or state not in {"moving", "settled"} or not item_class_name(item_class)
             or not party.REQUEST_ID.fullmatch(epoch) or not party.REQUEST_ID.fullmatch(identity)):
         raise ValueError("Invalid stock world loot physics report")
     pose = list(map(float, values))
@@ -293,8 +292,7 @@ def nearby(game, rolls, zone, *, enemy_frame=None, enemy_rolls=None, player_drop
         held = item.identity in pinned
         if not held and distance > _VISIBILITY_RADIUS:
             continue
-        if (isinstance(item.class_path, str) and len(item.class_path) <= 256
-                and _CLASS.fullmatch(item.class_path) and valid_item_transform(item.transform)):
+        if item_class_name(item.class_path) and valid_item_transform(item.transform):
             visible[item.identity] = (not held, distance, item)
     ordered = sorted(visible.values(), key=lambda entry: (entry[0], entry[1], entry[2].identity))
     return {item.identity: item for _, _, item in ordered[:_MAX_VISIBLE]}

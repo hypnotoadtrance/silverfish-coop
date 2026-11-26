@@ -173,6 +173,14 @@ Build `rc-e78fc64` verified three successive guest Bandage grants over Direct IP
 4. Expand compatibility through the stock game’s runtime discovery. Read live quest offers, progress, rewards, and map transitions from the game’s existing data and events. Discover items and interactables by their stock classes and supported interfaces. Keep standard behavior shared across maps and mod content, and document which custom scripts need explicit integration.
 5. Add an optional update check for the latest published GitHub release candidate.
 
+### Compatibility with game updates and content mods
+
+Use the host's live quest journal, bounty-board offers, and campaign state as the shared source. Quests added through the game's stock data can appear without a per-quest registration. Supported progress and ordinary turn-ins use the stock quest rules. Randomized objectives, special payouts and scripted dialogue can still need integration when they depend on world actors or state outside those rules.
+
+The shared loot and inventory paths use the exact loaded Blueprint and stock item properties. Content mounted under `/Game/` can use those paths when the item inherits the supported stock behavior. Placed boards can inherit the stock interaction and stock menu functions. Peers need the same content installed. A valid package path by itself only identifies the asset.
+
+For maps and level transitions, co-op still relies on its supported route data. The work remaining is to discover live exit destinations and arrival tags from the host's stock actors, qualify those routes in the current session, and test stock-style interactables and streamed levels outside the verified routes. Custom handlers that skip the stock paths need an explicit integration point.
+
 <details>
 <summary>Development measurements and earlier candidate checks</summary>
 

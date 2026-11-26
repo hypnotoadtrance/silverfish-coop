@@ -252,14 +252,15 @@ end
 local function selected_context(seat, path, actor)
     if not seat or type(path) ~= "string" or #path > 490 then return end
     local prefix = seat.world_path .. ":PersistentLevel."
-    if path:sub(1, #prefix) ~= prefix or not path:sub(#prefix + 1):match("^[A-Za-z0-9_]+$") then return end
+    if path:sub(1, #prefix) ~= prefix or not path:sub(#prefix + 1):match("^[A-Za-z0-9_%-]+$") then return end
     local board = actor or StaticFindObject(path)
     local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     local instance = valid(statics) and statics:GetGameInstance(seat.pawn)
     if not exact(instance, instance_class) then return end
     local box = stock.qualified_stock_board(seat.world, instance, board)
-    local name = "BountyBoard_BP_C " .. path
-    if not box or board:GetFullName() ~= name or (seat.host and not board:HasAuthority()) then return end
+    if not box or (seat.host and not board:HasAuthority()) then return end
+    local name = board:GetFullName()
+    if name:match("^[A-Za-z0-9_%-]+_C (.+)$") ~= path then return end
     local authored = profiles[seat.area]
     local profile = authored and authored.path == path and board.TurnIn_ID == authored.id
         and board.BountyBoard_RedeemableHere == true and board.AcceptAllGlobalContracts == true
@@ -436,21 +437,16 @@ local function queue_stock_view(current, sequence, now, fixture, menu)
 end
 
 local function stock_ids(raw)
-    if raw == "-" then return {}, {} end
-    if type(raw) ~= "string" or #raw > 8192 or not raw:match("^[A-Za-z0-9_,]+$") then
-        error("wire_board_catalog_invalid", 0)
-    end
-    local names, allowed = {}, {}
-    for id in raw:gmatch("[^,]+") do
-        local key = #id <= 96 and stock.stock_quest_key(id)
-        if not key or allowed[id] or #names >= 128 then
+    if raw == "-" then return {} end
+    if type(raw) ~= "string" or #raw > 8192 then error("wire_board_catalog_invalid", 0) end
+    local ids, seen = {}, {}
+    for id in (raw .. ","):gmatch("([^,]*),") do
+        if #id > 96 or not id:match("^[A-Za-z0-9_]+$") or seen[id] or #ids >= 128 then
             error("wire_board_catalog_invalid", 0)
         end
-        names[#names + 1] = key
-        allowed[id] = true
+        ids[#ids + 1], seen[id] = id, true
     end
-    if #names == 0 then error("wire_board_catalog_invalid", 0) end
-    return names, allowed
+    return ids
 end
 
 local function read_menu_rows(menu, list, class, allowed, expected)
@@ -467,15 +463,31 @@ local function read_menu_rows(menu, list, class, allowed, expected)
 end
 
 local function show_stock_menu(current, sequence, offers_arg, ready_arg, existing_menu)
-    local offer_names, offers = stock_ids(offers_arg)
-    local ready_names, ready = stock_ids(ready_arg)
-    local table_data = require("native_wire_quest").stock_quest_table()
-    local templates = {}
-    for index, key in ipairs(offer_names) do
-        local display = key:ToString()
-        local row = table_data:FindRow(display)
-        if not row or ready[stock.stock_quest_id(display)] then error("wire_board_catalog_row_missing", 0) end
-        templates[index] = row
+    local offered, redeemable = stock_ids(offers_arg), stock_ids(ready_arg)
+    local offer_names, offers, ready_names, ready = {}, {}, {}, {}
+    local table_data = stock.stock_quest_table()
+    local templates, missing = {}, {}
+    for _, id in ipairs(redeemable) do
+        local key = stock.stock_quest_key(id)
+        if key then
+            ready_names[#ready_names + 1], ready[id] = key, true
+        else
+            missing[#missing + 1] = id
+        end
+    end
+    for _, id in ipairs(offered) do
+        if ready[id] then error("wire_board_catalog_invalid", 0) end
+        local key = stock.stock_quest_key(id)
+        local row = key and table_data:FindRow(key:ToString())
+        if row then
+            offer_names[#offer_names + 1], offers[id] = key, true
+            templates[#templates + 1] = row
+        else
+            missing[#missing + 1] = id
+        end
+    end
+    if #missing > 0 then
+        print("[SilverfishCoop] Board quests missing from local game data: " .. table.concat(missing, ", "))
     end
 
     if not existing_menu then current.board:Send_PowerSignal(true, current.pawn) end

@@ -5,6 +5,7 @@ import re
 import time
 
 from . import native_inventory, native_loot, native_pickup_audio, party
+from .content_paths import item_class_name
 from .native_gold import valid_guid
 from .native_guest_drop_record import valid_position
 
@@ -27,7 +28,6 @@ CHECK_KEY = "native_loose_pickup_check"
 RESPAWN_HIDDEN_ROW = "native-loose-pickup-respawn-hidden"
 RESPAWN_HIDDEN = "native_loose_pickup_respawn_hidden"
 _PREFIX = "loose:"
-_CLASS = re.compile(r"/Game/Classes/(?:[A-Za-z0-9_]+/)*([A-Za-z0-9_]+)\.\1_C")
 _PATH = re.compile(r"(/Game/Classes/Maps/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):PersistentLevel\.[A-Za-z0-9_]+")
 _SLOT = re.compile(r"SFCoop_[0-9a-f]{32}")
 
@@ -46,8 +46,8 @@ def target_path(value):
 
 
 def _stock_source(area, path, class_path, mode):
-    return (isinstance(area, str) and actor_map(path) == area and isinstance(class_path, str)
-            and len(class_path) <= 256 and _CLASS.fullmatch(class_path) and type(mode) is int and mode in (0, 1, 2))
+    return (isinstance(area, str) and actor_map(path) == area and item_class_name(class_path)
+            and type(mode) is int and mode in (0, 1, 2))
 
 
 def parse(fields, phase, area):

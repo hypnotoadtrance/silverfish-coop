@@ -1,5 +1,7 @@
 #pragma once
 
+#include "content_paths.hpp"
+
 #include <optional>
 
 #include <Unreal/CoreUObject/UObject/Class.hpp>
@@ -15,7 +17,7 @@ namespace silverfish::drop_item_class
             STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"));
         if (!type || !base || type == base || !type->IsChildOf(base) || type->IsUnreachable()) return {};
         const auto path = type->GetPathName();
-        if (!path.starts_with(STR("/Game/Classes/")) || !path.ends_with(STR("_C")) || path.size() > 256 ||
+        if (!content_paths::item_class(std::basic_string_view{path.data(), path.size()}) ||
             U::UObjectGlobals::StaticFindObject<U::UClass*>(nullptr, nullptr, path.c_str()) != type) return {};
 
         auto* defaults = type->GetClassDefaultObject().Get();

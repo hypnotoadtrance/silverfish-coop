@@ -306,6 +306,18 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await board.catalog(host, bridge, "guest", actor), {board.CATALOG_KEY: proof})
         bridge.command.assert_awaited_once_with(board.CATALOG, PAWN, actor, "-", "-", timeout=5)
 
+    async def test_catalog_uses_unregistered_board_and_contract_identities(self):
+        host = self.host()
+        actor = f"Community-Bounties_C {SHOPKEEP}.Shop_ShopKeep_P:PersistentLevel.SideBoard_1"
+        quest = "Community_Missing_Supplies"
+        proof = {"map": SHOPKEEP, "pawn": PAWN, "board": actor, "offers": [quest], "turnins": []}
+        bridge = SimpleNamespace(command=AsyncMock(return_value={
+            "state": "hosting", "map": SHOPKEEP, board.CATALOG_KEY: proof,
+        }))
+        self.assertEqual(await board.catalog(host, bridge, "guest", actor), {board.CATALOG_KEY: proof})
+        bridge.command.assert_awaited_once_with(board.CATALOG, PAWN, actor, "-", "-", timeout=5)
+        self.assertIsNone(board.board_map(actor.replace(".Shop_ShopKeep_P", ".Other")))
+
     async def test_resident_catalog_receipt_does_not_replace_world_status(self):
         host = self.host()
         original = host.last_game, host.last_seen

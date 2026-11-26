@@ -1,4 +1,5 @@
 #include "loot_escrow.hpp"
+#include "content_paths.hpp"
 #include "stock_enemy_drops.hpp"
 #include "enemy_loot.hpp"
 #include "shared_loot.hpp"
@@ -699,8 +700,8 @@ namespace
             const auto item = RC::to_utf8_string(actor->GetClassPrivate()->GetPathName());
             const auto name = RC::to_utf8_string(actor->GetPathName());
             auto* ammo = field<Unreal::FIntProperty>(actor, STR("Ammo"));
-            if (!ammo || !item.starts_with("/Game/Classes/") || !name.starts_with("/Game/") ||
-                item.find_first_of("\r\n\t") != std::string::npos || name.find_first_of("\r\n\t") != std::string::npos)
+            if (!ammo || !silverfish::content_paths::item_class(std::string_view{item}) || !name.starts_with("/Game/") ||
+                name.find_first_of("\r\n\t") != std::string::npos)
                 continue;
             const auto angle = actor->K2_GetActorRotation();
             const auto scale = actor->GetActorScale3D();

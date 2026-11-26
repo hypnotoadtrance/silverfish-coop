@@ -9,6 +9,7 @@ import uuid
 
 from . import native_pickup_audio, party
 from .authored_loot import valid_item_transform
+from .content_paths import item_class_name
 from .native_gold import valid_guid
 from .travel import BLACK_MARKET
 
@@ -30,7 +31,6 @@ CLAIM = "native-stock-enemy-loot-claim"
 CLAIMED = "native-stock-enemy-loot-claimed"
 CLAIM_KEY = "native_stock_enemy_loot_claim"
 _MAP = re.compile(r"/Game/Classes/Maps(?:/[A-Za-z0-9_]+)+")
-_CLASS = re.compile(r"/Game/Classes/[A-Za-z0-9_/]+\.([A-Za-z0-9_]+_C)")
 _SERIAL = re.compile(r"[1-9][0-9]{0,15}")
 MOTION_INTERVAL = .08
 MOTION_TTL = .75
@@ -49,11 +49,11 @@ def parse(fields, state, area):
     if motion not in ("gone", "moving", "settled") or (height is not None and not abs(height) <= 1e7):
         raise ValueError("Invalid stock enemy drop motion")
     prefix = re.escape(f" {area}.{area.rsplit('/', 1)[1]}:PersistentLevel.")
-    item_class = _CLASS.fullmatch(class_path) if len(class_path) <= 256 else None
+    item_class = item_class_name(class_path)
     if (not item_class or any(len(name) > 512 for name in (source, killer, actor))
             or not re.fullmatch(r"[A-Za-z0-9_]+_C" + prefix + r"[A-Za-z0-9_]+", source)
             or (killer != "-" and not re.fullmatch(r"Player_FP_C" + prefix + r"Player_FP_C_[0-9]+", killer))
-            or not re.fullmatch(re.escape(item_class[1]) + prefix + r"[A-Za-z0-9_]+", actor)):
+            or not re.fullmatch(re.escape(item_class) + prefix + r"[A-Za-z0-9_-]+", actor)):
         raise ValueError("Invalid stock enemy, killer, or item identity")
     report = dict(sequence=int(sequence), roll=int(roll), map=area, source=source,
                   killer=None if killer == "-" else killer, actor=actor, class_path=class_path, live_at_capture=live == "1",
@@ -140,7 +140,7 @@ def active_frames(data, members):
         visual_id = row.get("visual_id")
         ammo, killer, claimant = (row.get(key) for key in ("ammo", "killer", "claimed_by"))
         if (not isinstance(area, str) or not _MAP.fullmatch(area)
-                or not isinstance(class_path, str) or len(class_path) > 256 or not _CLASS.fullmatch(class_path)
+                or not item_class_name(class_path)
                 or not isinstance(source, str) or len(source) > 512
                 or not isinstance(actor, str) or len(actor) > 512
                 or (visual_id is not None and (not isinstance(visual_id, str) or not party.REQUEST_ID.fullmatch(visual_id)))
@@ -150,7 +150,7 @@ def active_frames(data, members):
             raise ValueError("Invalid stock enemy loot payload")
         level = re.escape(f"{area}.{area.rsplit('/', 1)[1]}:PersistentLevel.")
         if (not re.fullmatch(level + r"[A-Za-z0-9_]+", source)
-                or not re.fullmatch(re.escape(class_path.rsplit(".", 1)[1]) + " " + level + r"[A-Za-z0-9_]+", actor)):
+                or not re.fullmatch(re.escape(item_class_name(class_path)) + " " + level + r"[A-Za-z0-9_-]+", actor)):
             raise ValueError("Invalid stock enemy loot source")
         if claimant is None:
             if not isinstance(frame := row.get("escrow"), dict) or frame.get("map") != area:
@@ -307,8 +307,8 @@ class MotionPlayback:
                 continue
             _, _, serial, identity, class_path, axes = frame[:6]
             if (type(serial) is not int or not 0 < serial < 2**53 or not isinstance(identity, str)
-                    or not party.REQUEST_ID.fullmatch(identity) or not isinstance(class_path, str)
-                    or len(class_path) > 256 or not _CLASS.fullmatch(class_path) or not isinstance(axes, list) or len(axes) != 9):
+                    or not party.REQUEST_ID.fullmatch(identity) or not item_class_name(class_path)
+                    or not isinstance(axes, list) or len(axes) != 9):
                 continue
             last = self.items.get(identity)
             if (last and serial <= last[1]) or (not last and len(self.items) >= MOTION_LIMIT):

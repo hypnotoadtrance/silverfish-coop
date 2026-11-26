@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record, native_world_loot, party
 from tools.silverfish import native_guest_drop_projection as projection
-from tools.silverfish import native_stock_enemy_drops
+from tools.silverfish import native_inventory, native_loose_pickup, native_stock_enemy_drops
 
 
 MAP = record.OBSERVATORY
@@ -52,6 +52,26 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
                 projection.parse(changed, state, MAP)
         self.assertEqual(projection.target_parts(f"stack-drop:{epoch}:{ID}"), (epoch, ID))
         self.assertIsNone(projection.target_parts(f"stack-drop:{epoch}:{ID.upper()}"))
+
+    def test_unregistered_item_keeps_its_exact_class_across_shared_loot(self):
+        item = "/Game/Mods/Example/Packed-Medkit.Packed-Medkit_C"
+        spawn = f"Packed-Medkit_C {WORLD}Packed-Medkit_C_12"
+        self.assertTrue(record.valid_quantity(item, 3))
+        self.assertTrue(record.actor_matches(MAP, spawn, item))
+        self.assertTrue(native_inventory.split_class_path(item))
+        row = [native_world_loot.ROW, MAP, ID, OPERATION, PAWN, spawn, "4", item]
+        self.assertEqual(native_world_loot.parse(row, "connected", MAP)["class_path"], item)
+        fields = [native_stock_enemy_drops.TAG, MAP, "3", "1", f"Robot_C {WORLD}Robot_C_1", PAWN, spawn, item, "1"]
+        self.assertEqual(native_stock_enemy_drops.parse(fields, "hosting", MAP)["class_path"], item)
+        loose = f"{WORLD}PlacedMedkit_1"
+        self.assertTrue(native_loose_pickup._stock_source(MAP, loose, item, 0))
+        for bad_item in ("/Game/Mods//Medkit.Medkit_C", "/Game/Mods/Medkit.Other_C",
+                         "/Game/Mods/../Medkit.Medkit_C", "/Script/Engine.Actor"):
+            with self.subTest(path=bad_item):
+                self.assertFalse(record.valid_class(bad_item))
+                self.assertFalse(native_inventory.split_class_path(bad_item))
+                with self.assertRaises(ValueError):
+                    native_world_loot.parse([*row[:-1], bad_item], "connected", MAP)
 
     async def test_committed_world_pickup_is_not_recreated_by_an_older_snapshot(self):
         client, view = self.client(), native_world_loot.Projection()

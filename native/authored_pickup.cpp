@@ -1,4 +1,5 @@
 #include "authored_pickup.hpp"
+#include "content_paths.hpp"
 #include "guest_drop_projection.hpp"
 #include "guest_regen.hpp"
 #include "guest_weapon_registry.hpp"
@@ -2177,8 +2178,9 @@ namespace
         const auto seat = respawn_seat(world, world_path);
         if (seat == RespawnSeat::Inactive) return;
         const auto path = actor->GetPathName();
+        const auto item = actor->GetClassPrivate()->GetPathName();
         if (authored_path(path) || !source_box(actor) ||
-            !actor->GetClassPrivate()->GetPathName().starts_with(STR("/Game/Classes/")) ||
+            !silverfish::content_paths::item_class(std::basic_string_view{item.data(), item.size()}) ||
             generic_payload_fault(actor, silverfish::stock_cash::is_family(actor->GetClassPrivate()))) return;
 
         if (seat == RespawnSeat::Guest)
@@ -2263,7 +2265,8 @@ namespace
         if ((!actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false)) &&
             (seat.host || (!guest_loose_hidden.contains(source) && !remotely_hidden_loose(actor)))) return nullptr;
         const auto class_path = actor->GetClassPrivate()->GetPathName();
-        if (authored_path(path) || !class_path.starts_with(STR("/Game/Classes/"))) return nullptr;
+        if (authored_path(path) ||
+            !silverfish::content_paths::item_class(std::basic_string_view{class_path.data(), class_path.size()})) return nullptr;
         const bool cash = silverfish::stock_cash::is_family(actor->GetClassPrivate());
         if (generic_payload_fault(actor, cash)) return nullptr;
 

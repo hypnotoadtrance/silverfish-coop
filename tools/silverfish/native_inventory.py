@@ -7,6 +7,7 @@ import time
 import uuid
 
 from . import native_host_save, party
+from .content_paths import item_class_name
 from .guest_weapon_profiles import (
     AMMO_BY_PATH, BOLT_ACTION_AMMO, BOLT_ACTION_UNLOAD_CAPACITY, BOLT_ACTION_UNLOADS,
     MAX_TAKE_AMMO_ROUNDS, TAKE_AMMO_MAGAZINES,
@@ -49,13 +50,12 @@ UNEQUIP_WORN_CAPABILITY = "native_inventory_unequip_worn_capability"
 UNEQUIP_KEY = "native_inventory_unequip"
 _STORE_TARGET = re.compile(r"([0-9A-F]{32})(?:\|([0-7])(?:\|([0-9a-f]{32}))?)?\Z")
 _UNEQUIP_TARGET = re.compile(r"([0-9A-F]{32})\|([0-9])(?:\|([0-9a-f]{32}))?\Z")
-_STOCK_CLASS = re.compile(r"/Game/Classes/[A-Za-z0-9_./-]+_C\Z")
 
 
 def _equipment_identity(fields, area, slots="01234567"):
     _, world, pawn, item, slot, item_class = fields[:6]
     if (world != area or not valid_guid(item) or slot not in slots or len(slot) != 1
-            or len(item_class) > 256 or not _STOCK_CLASS.fullmatch(item_class)):
+            or not item_class_name(item_class)):
         raise ValueError("Invalid stock equipment slot report")
     return dict(map=world, pawn=pawn, guid=item, slot=int(slot), class_path=item_class)
 
@@ -112,7 +112,7 @@ def split_target(value):
 
 
 def split_class_path(path):
-    return isinstance(path, str) and len(path) <= 256 and ".." not in path and _STOCK_CLASS.fullmatch(path) is not None
+    return item_class_name(path) is not None
 
 
 def splittable(row):

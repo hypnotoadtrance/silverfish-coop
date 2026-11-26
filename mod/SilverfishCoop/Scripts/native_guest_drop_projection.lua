@@ -285,9 +285,9 @@ local function item_frame(fields, state, phase)
         local snap, moving = mode == "ground" or mode == "carry-ground", mode == "moving"
         local carryable = mode == "carry" or mode == "carry-ground"
         local stack_count = math.tointeger(values[#values])
-        if (#values ~= 12 and not snap and not moving and not carryable) or not identifier(id) or incoming[id] or #class > 256
+        if (#values ~= 12 and not snap and not moving and not carryable) or not identifier(id) or incoming[id]
             or not stack_count or stack_count < 0 or stack_count > 2147483647
-            or not class:match("^/Game/Classes/[%w_./%-]+_C$") then error("world_loot_item_identity_invalid", 0) end
+            or not drop_items.stock_actor_class(class) then error("world_loot_item_identity_invalid", 0) end
         local transform = {}
         for axis = mode and 4 or 3, #values - 1 do
             local value = tonumber(values[axis])
@@ -318,7 +318,9 @@ local function item_frame(fields, state, phase)
         end
         if slot then
             occupied[slot] = true
-            if not valid(StaticFindObject(item.class)) then LoadAsset(item.class) end
+            if (not previous or previous.class ~= item.class) and not valid(StaticFindObject(item.class)) then
+                pcall(LoadAsset, item.class)
+            end
             local motion = previous and previous.motion
             if motion and motion.settled and not item.snap and same_pose(motion.pose, item.transform) then motion = nil end
             local t = motion and motion.pose or item.transform

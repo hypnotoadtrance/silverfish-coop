@@ -18,8 +18,8 @@ REFUSAL = "stock_board_contract_"
 QUEST_ID = re.compile(r"[A-Za-z0-9_]{1,96}")
 VISIT_ID = re.compile(r"[0-9a-f]{32}")
 BOARD_PATH = re.compile(
-    r"BountyBoard_BP_C (?P<map>/Game/Classes/Maps/[A-Za-z0-9_/]+)\.(?P<level>[A-Za-z0-9_]+)"
-    r":PersistentLevel\.[A-Za-z0-9_]+"
+    r"[A-Za-z0-9_-]+_C (?P<map>/Game/Classes/Maps/[A-Za-z0-9_/]+)\.(?P<level>[A-Za-z0-9_]+)"
+    r":PersistentLevel\.[A-Za-z0-9_-]+"
 )
 COMPLETE = -10
 _INSPECTED_FIELDS = ("step_before", "expected_step", "cash", "xp", "remaining")

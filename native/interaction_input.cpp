@@ -476,9 +476,26 @@ namespace
         return nullptr;
     }
 
+    bool uses_stock_board_functions(Unreal::UClass* type)
+    {
+        auto* base = find<Unreal::UClass>(wire_board_class);
+        if (!type || !base || !type->IsChildOf(base)) return false;
+        if (type == base) return true;
+        static const std::array functions{
+            Unreal::FName{STR("SendInteractionToActor")},
+            Unreal::FName{STR("Send_PowerSignal")},
+            Unreal::FName{STR("Configure_Stock")},
+            Unreal::FName{STR("TurnIn_Contracts")},
+        };
+        return std::ranges::all_of(functions, [base, type](const auto& name) {
+            auto* stock = base->GetFunctionByNameInChain(name);
+            return stock && type->GetFunctionByNameInChain(name) == stock;
+        });
+    }
+
     bool placed_wire_board(Unreal::UObject* world, Unreal::UObject* actor, Unreal::UObject* box)
     {
-        if (!live(actor) || actor->GetClassPrivate() != find<Unreal::UClass>(wire_board_class) ||
+        if (!live(actor) || !uses_stock_board_functions(actor->GetClassPrivate()) ||
             !actor->HasAnyFlags(Unreal::RF_WasLoaded)) return false;
         auto* placed = static_cast<Unreal::AActor*>(actor);
         auto* destroying = field<Unreal::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
@@ -545,7 +562,7 @@ namespace
         if (name != interaction && name != script) return;
         auto* pawn = wire_board.pawn.Get();
         if (!pawn || pawn != scope.pawn.Get() || !live_scope(scope) ||
-            function->GetOuterPrivate() != actor->GetClassPrivate() || function->GetReturnProperty() ||
+            function->GetReturnProperty() ||
             function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
         auto* world = scope.world.Get();
         if (name == script)
@@ -607,7 +624,6 @@ namespace
             Clock::now() >= stock_board_menu.render_lease || call.OriginalFunctionCallPrevented()) return;
         static const Unreal::FName validate{STR("TurnIn_Contracts")};
         if (function->GetFName() != validate || function != find<Unreal::UFunction>(wire_validate_contracts) ||
-            function->GetOuterPrivate() != actor->GetClassPrivate() ||
             function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
             function->GetNumParms() != 0 || function->GetParmsSize() != 0 || function->GetReturnProperty() ||
             stock_menu_board(stock_board_menu.menu.Get()) != actor) return;
