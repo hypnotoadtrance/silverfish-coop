@@ -1,6 +1,7 @@
 local guest_save = require("guest_save")
 local players = require("players")
-local world_leaf = require("world_path").leaf
+local board_world = require("world_path")
+local world_leaf = board_world.leaf
 local simmi_jobs = require("native_jammer_profiles").by_tag["native-crossroads-jammer"]
 
 local meet = {
@@ -141,23 +142,25 @@ end
 function meet.qualified_stock_board(world, instance, board)
     local base = StaticFindObject(board_class)
     if not valid(board) or not valid(base) or not board:IsA(base)
-        or not same(board:GetWorld(), world) or board:IsActorBeingDestroyed()
-        or not board:HasAnyFlags(EObjectFlags.RF_WasLoaded) or not same(board:GetOuter(), world.PersistentLevel)
+        or not board:HasAnyFlags(EObjectFlags.RF_WasLoaded)
         or not same(board["As Game Instance FP"], instance) or not int32(board.TurnIn_ID)
         or board.TurnIn_ID < 0 or board.TurnIn_ID > 11 or board.ShowAllContracts ~= false
         or type(board.BountyBoard_RedeemableHere) ~= "boolean"
         or type(board.AcceptAllGlobalContracts) ~= "boolean"
         or type(board.Display_GlobalContracts) ~= "boolean" then return end
+    local level = board_world.visible_actor_level(board, world)
+    if not level then return end
     local box = board.Box
     if not exact(box, "/Script/Engine.BoxComponent") or not same(box:GetOwner(), board) then return end
     local collision = box:GetCollisionEnabled()
-    if collision == 1 or collision == 3 then return box end
+    if collision == 1 or collision == 3 then return box, level end
 end
 
 local function live_board(world, instance, profile)
     local board = StaticFindObject(profile.board_path)
-    local box = meet.qualified_stock_board(world, instance, board)
+    local box, level = meet.qualified_stock_board(world, instance, board)
     if not box or board:GetFullName() ~= profile.board_name or not board:HasAuthority()
+        or (profile.streamed == true) == same(level, world.PersistentLevel)
         or (not profile.dynamic and (board.TurnIn_ID ~= profile.board_id or board.BountyBoard_RedeemableHere ~= true
             or board.AcceptAllGlobalContracts ~= true or board.Display_GlobalContracts ~= (profile.global_contracts == true))) then
         refused("board_unqualified")
@@ -432,16 +435,16 @@ function meet.live_stock_board_context(state, phase, name, full_board_name, ques
     local map = state.map
     local leaf = world_leaf(map)
     local world = leaf and map .. "." .. leaf
-    local path = type(full_board_name) == "string"
-        and full_board_name:match("^[A-Za-z0-9_%-]+_C (.+)$")
-    local prefix = world and world .. ":PersistentLevel."
-    if not path or not prefix or path:sub(1, #prefix) ~= prefix
-        or not path:sub(#prefix + 1):match("^[A-Za-z0-9_%-]+$") then
-        refused("board_unqualified")
-    end
-    local speaker = full_board_name == simmi_jobs.board_name and simmi_jobs.speaker or nil
+    if type(full_board_name) ~= "string" or #full_board_name > 512 then refused("board_unqualified") end
+    local streamed = full_board_name:sub(1, 7) == "stream:"
+    local board_name = streamed and full_board_name:sub(8) or full_board_name
+    local path = board_name:match("^[A-Za-z0-9_%-]+_C (.+)$")
+    local package, export = board_world.level_actor_package(path)
+    if not world or not package or (streamed and package == map)
+        or (not streamed and (package ~= map or export ~= leaf)) then refused("board_unqualified") end
+    local speaker = board_name == simmi_jobs.board_name and simmi_jobs.speaker or nil
     return context_for(state, phase, name, false, {map = map, world_path = world,
-        board_path = path, board_name = full_board_name,
+        board_path = path, board_name = board_name, streamed = streamed,
         quest_id = quest, quest_display_alias = quest == missing_contact_id and missing_contact_display or nil,
         dynamic = true, speaker = speaker})
 end

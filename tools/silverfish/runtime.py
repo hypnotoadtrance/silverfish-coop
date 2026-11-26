@@ -3930,7 +3930,7 @@ class Bridge:
         row = rows[1]
         reply = {"state": phase, "map": area, tag: True, "ack": {"id": nonce, "result": result, "message": message}}
         if fields[1] == native_board_contract.CATALOG and len(fields) in (4, 5, 6):
-            if (phase != "hosting" or native_board_contract.board_map(fields[3]) != area
+            if (phase != "hosting" or not native_board_contract.board_matches_map(fields[3], area)
                     or row[:4] != [fields[1], area, *fields[2:4]]):
                 raise RuntimeError("The stock board catalog did not match the current world")
             try:
@@ -3942,7 +3942,7 @@ class Bridge:
             sequence, expected_area, pawn = fields[2:5]
             board = row[3]
             if (phase in ("hosting", "connected") and expected_area == area
-                    and native_board_contract.board_map(board) == area and _held_input_sequence(sequence)
+                    and native_board_contract.board_matches_map(board, area) and _held_input_sequence(sequence)
                     and row == ["native-wire-board-stock", area, pawn, board, "-", "visible", sequence, sequence]):
                 reply[native_board_contract.MENU_KEY] = {"map": area, "pawn": pawn, "board": board, "quest": "-",
                                                         "state": "visible", "sequence": int(sequence), "open": int(sequence)}

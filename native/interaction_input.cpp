@@ -522,9 +522,8 @@ namespace
         auto* placed = static_cast<Unreal::AActor*>(actor);
         auto* destroying = field<Unreal::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
         return destroying && !destroying->GetPropertyValueInContainer(actor) &&
-            placed->GetWorld() == world &&
-            placed->GetLevel() == object_field(world, STR("PersistentLevel")) &&
-            (!scope.host || live_actor(actor, world, 3)) &&
+            silverfish::native_zone::visible_actor_level(placed, static_cast<Unreal::UWorld*>(world)) &&
+            (!scope.host || live_actor_role(actor, 3)) &&
             object_field(actor, STR("As Game Instance FP")) == scope.instance.Get() &&
             live(box) && box->GetClassPrivate() == find<Unreal::UClass>(wire_board_box) &&
             box->GetOuterPrivate() == actor && object_field(actor, STR("Box")) == box;
@@ -668,9 +667,15 @@ namespace
             !live_scope(scope)) return;
         auto* world = scope.world.Get();
         auto* log = object_field(widget, STR("QuestLog_MenuRef"));
+        if (widget->GetWorld() != world) return;
         auto* board = stock_menu_board(log);
         const bool projected = board && log == stock_board_menu.menu.Get() && board == stock_board_menu.board.Get();
-        if (!board || widget->GetWorld() != world) return;
+        if (!board)
+        {
+            if (log && log == stock_board_menu.menu.Get() && log == top_menu())
+                iteration.PreventOriginalFunctionCall();
+            return;
+        }
         const auto path = board->GetPathName();
         iteration.PreventOriginalFunctionCall();
         const auto now = Clock::now();

@@ -1,6 +1,7 @@
 local board_view = {}
 local stock = require("native_wire_quest")
-local world_leaf = require("world_path").leaf
+local board_world = require("world_path")
+local world_leaf = board_world.leaf
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_DEATH") == "cpp"
@@ -252,16 +253,23 @@ end
 
 local function selected_context(seat, path, actor)
     if not seat or type(path) ~= "string" or #path > 490 then return end
-    local prefix = seat.world_path .. ":PersistentLevel."
-    if path:sub(1, #prefix) ~= prefix or not path:sub(#prefix + 1):match("^[A-Za-z0-9_%-]+$") then return end
+    local package, export = board_world.level_actor_package(path)
+    if not package then return end
     local board = actor or StaticFindObject(path)
     local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     local instance = valid(statics) and statics:GetGameInstance(seat.pawn)
     if not exact(instance, instance_class) then return end
-    local box = stock.qualified_stock_board(seat.world, instance, board)
+    local box, level = stock.qualified_stock_board(seat.world, instance, board)
     if not box or (seat.host and not board:HasAuthority()) then return end
     local name = board:GetFullName()
     if name:match("^[A-Za-z0-9_%-]+_C (.+)$") ~= path then return end
+    local streamed = not same(level, seat.world.PersistentLevel)
+    if streamed then
+        if package == seat.area then return end
+        name = "stream:" .. name
+    elseif package ~= seat.area or export ~= world_leaf(seat.area) then
+        return
+    end
     local authored = profiles[seat.area]
     local profile = authored and authored.path == path and board.TurnIn_ID == authored.id
         and board.BountyBoard_RedeemableHere == true and board.AcceptAllGlobalContracts == true
@@ -290,9 +298,12 @@ end
 local function fixture_context(seat, name)
     if not seat or not headless or not (input_fixtures or not seat.host or host_fixtures) then return end
     local profile = profiles[seat.area]
-    local path = type(name) == "string" and name:match("^BountyBoard_BP_C (.+)$") or nil
-    if name and not path then return end
-    return selected_context(seat, path or (profile and profile.path))
+    if name == nil then return selected_context(seat, profile and profile.path) end
+    if type(name) ~= "string" then return end
+    local raw_name = name:sub(1, 7) == "stream:" and name:sub(8) or name
+    local path = raw_name:match("^[A-Za-z0-9_%-]+_C (.+)$")
+    local current = selected_context(seat, path)
+    if current and current.profile.name == name then return current end
 end
 
 local function fresh()
@@ -412,13 +423,17 @@ local function emit(current, sequence, kind, now, fixture)
     return success
 end
 
-local function current_stock_menu(current)
-    if not current or not fresh() or current.controller.Loading ~= false or current.pawn.Dead ~= false
-        or type(is_downed) ~= "function" or is_downed(current.pawn) ~= false then return end
+local function bound_stock_menu(current)
     local stack = current.controller.MenuStack
     local count = stack and stack:GetArrayNum()
     local menu = count and count > 0 and stack[count]
     if exact(menu, quest_log_path) and menu.BountyBoard == true and same(menu.BountyBoard_Ref, current.board) then return menu end
+end
+
+local function current_stock_menu(current)
+    if not current or not fresh() or current.controller.Loading ~= false or current.pawn.Dead ~= false
+        or type(is_downed) ~= "function" or is_downed(current.pawn) ~= false then return end
+    return bound_stock_menu(current)
 end
 
 local function supported_stock_action(current, quest)
@@ -630,6 +645,10 @@ function board_view.sync(state, phase)
     if not seat then board_view.clear(); return end
     local now = os.time()
     local current = bound_context(seat)
+    if binding and not current and same_seat(seat, binding)
+        and binding.profile.name:sub(1, 7) == "stream:" and bound_stock_menu(binding) then
+        seat.controller:CloseMenu({})
+    end
     if not fresh() then
         if current and session and session.quest == readings and session.pending
             and session.expires > now and can_use(current, true) then return end

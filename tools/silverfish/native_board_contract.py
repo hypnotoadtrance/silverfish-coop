@@ -22,6 +22,7 @@ BOARD_PATH = re.compile(
     r"[A-Za-z0-9_-]+_C (?P<map>/[A-Za-z0-9_/]+)\.(?P<level>[A-Za-z0-9_]+)"
     r":PersistentLevel\.[A-Za-z0-9_-]+"
 )
+STREAM_PREFIX = "stream:"
 COMPLETE = -10
 _INSPECTED_FIELDS = ("step_before", "expected_step", "cash", "xp", "remaining")
 
@@ -38,13 +39,32 @@ def board_map(name):
     return None
 
 
+def _streamed_board_package(name):
+    if not isinstance(name, str) or len(name) > 512 or not name.startswith(STREAM_PREFIX):
+        return None
+    match = BOARD_PATH.fullmatch(name.removeprefix(STREAM_PREFIX))
+    if match and valid_campaign_package(match["map"]) and match["map"] not in PLAYTEST_MAPS:
+        return match["map"]
+    return None
+
+
+def board_matches_map(board, area):
+    if not valid_campaign_package(area) or area in PLAYTEST_MAPS:
+        return False
+    if board_map(board) == area:
+        return True
+    sublevel = _streamed_board_package(board)
+    # The game-thread board checks verify that the named sublevel is visible in this world.
+    return sublevel is not None and sublevel != area
+
+
 def menu_selection(target):
     if not isinstance(target, str) or len(target) > 642:
         raise party.RuleError("native_board_contract_selection_invalid")
     visit, separator, remainder = target.partition("|")
     board, second, quest = remainder.partition("|")
     if (not separator or not second or not VISIT_ID.fullmatch(visit)
-            or not board_map(board) or not quest_id(quest)):
+            or not (board_map(board) or _streamed_board_package(board)) or not quest_id(quest)):
         raise party.RuleError("native_board_contract_selection_invalid")
     return visit, board, quest
 
@@ -110,7 +130,7 @@ def scope(host, actor, selected_board):
     player = host.party["players"].get(actor)
     area = host.last_game.get("map")
     board = native_computer_board.BOARDS.get(area) if selected_board is None else selected_board
-    if (not area or area not in host.allowed_maps or board_map(board) != area
+    if (not area or area not in host.allowed_maps or not board_matches_map(board, area)
             or not host.native_profile or not host.native_zones or not host.native_guest
             or host.transitioning or host.stopping or host.native_checkpoint_unsafe or host.party["wipe"]
             or host.last_game.get("state") != "hosting" or time.monotonic() - host.last_seen > 3

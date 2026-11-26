@@ -342,6 +342,17 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "did not match the current world"):
             await bridge.command(board.CATALOG, "Player_FP_C Other", BOARD, "-", "-")
 
+    def test_streamed_board_identity_is_explicit_and_current_map_remains_separate(self):
+        area = SHOPKEEP
+        raw = "BountyBoard_BP_C /ContentPack/Maps/MarketInstance.Market:PersistentLevel.BountyBoard_BP_C_3"
+        target = "stream:" + raw
+        self.assertTrue(board.board_matches_map(target, area))
+        self.assertFalse(board.board_matches_map(raw, area))
+        self.assertFalse(board.board_matches_map(target, "/ContentPack/Maps/MarketInstance"))
+        self.assertFalse(board.board_matches_map(target, "/Game/Classes/Maps/MainMenu_P"))
+        visit = "a" * 32
+        self.assertEqual(board.menu_selection(board.menu_target(visit, target, "Clt_Example")), (visit, target, "Clt_Example"))
+
     async def test_resident_stock_menu_accepts_full_catalog_and_rejects_a_stale_readback(self):
         bridge = runtime.Bridge(Path("unused"), None)
         options = ",".join(f"Unregistered_Quest_Number_{index}" for index in range(64))

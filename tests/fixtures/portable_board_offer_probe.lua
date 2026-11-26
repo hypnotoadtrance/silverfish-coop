@@ -22,6 +22,7 @@ local tracked = {
 }
 local followup_count, followup_hook = 0, false
 local last
+local streamed
 
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -93,6 +94,34 @@ local function run(action, quest)
     local board = StaticFindObject(board_path)
     assert(valid(pawn) and pawn:IsLocallyControlled() and valid(board) and same(board:GetWorld(), world)
         and same(board.Box:GetOwner(), board), "The local stock board is unavailable")
+    if action == "stream-load" then
+        local loading = StaticFindObject("/Script/Engine.Default__LevelStreamingDynamic")
+        local level = loading:LoadLevelInstance(world, "/Game/Classes/Maps/Maps_OverWorld/Observitory_P",
+            {X = 65000, Y = 65000, Z = 2500}, {Pitch = 0, Yaw = 0, Roll = 0}, {}, "CoopBoardSublevel", nil, false)
+        assert(valid(level), "Could not stream the stock board fixture")
+        streamed = {world = world, level = level}
+        return "loading"
+    elseif action == "stream-hide" or action == "stream-show" or action == "stream-unload" then
+        assert(streamed and same(streamed.world, world) and valid(streamed.level))
+        streamed.level:SetShouldBeVisible(action == "stream-show")
+        if action == "stream-unload" then streamed.level:SetShouldBeLoaded(false) end
+        return action
+    elseif action == "stream-board" then
+        assert(streamed and same(streamed.world, world) and valid(streamed.level))
+        if not streamed.level:IsLevelVisible() then return "waiting" end
+        local level = streamed.level:GetLoadedLevel()
+        local path = level:GetFullName():match("^%S+ (.+)$") .. ".BountyBoard_BP_C_2"
+        local selected = StaticFindObject(path)
+        assert(valid(selected) and same(selected:GetOuter(), level), "The sublevel is missing the stock board")
+        local stock = selected["As Game Instance FP"]
+        if not same(stock, world.OwningGameInstance) then return "initializing" end
+        assert(selected:K2_SetActorLocationAndRotation(board:K2_GetActorLocation(), board:K2_GetActorRotation(),
+            false, {}, true), "Could not stage the loaded board near the guest")
+        streamed.board = selected
+        return "stream:" .. selected:GetFullName()
+    elseif action == "stream-visible" then
+        return tostring(valid(streamed.level) and streamed.level:IsLevelVisible())
+    end
     if action == "approach" then
         local connections = world.NetDriver.ClientConnections
         assert(pawn:HasAuthority() and connections:GetArrayNum() == 1)
@@ -182,11 +211,12 @@ local function run(action, quest)
         table.sort(extended)
         return table.concat(offered,",") .. ";" .. table.concat(extended,",")
     end
-    if action == "menu" then
+    if action == "menu" or action == "stream-menu" then
         local stack = pawn.Controller.MenuStack
         local panel = stack[stack:GetArrayNum()]
         if panel and type(panel.type) == "function" and panel:type() == "RemoteUnrealParam" then panel = panel:get() end
-        assert(valid(panel) and same(panel:GetClass(), StaticFindObject(menu_class)) and same(panel.BountyBoard_Ref, board),
+        local expected = action == "stream-menu" and streamed.board or board
+        assert(valid(panel) and same(panel:GetClass(), StaticFindObject(menu_class)) and same(panel.BountyBoard_Ref, expected),
             "The stock Observatory board is not open")
         local list = panel.VerticalBox_ContractsList
         local visible = {}

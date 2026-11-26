@@ -4509,6 +4509,102 @@ async def verify_stock_castaway_dialogue(host: Seat, guest: Seat, pawn: str) -> 
                                      "guest_purchase": purchase, "regular_shop": regular}}
 
 
+async def verify_streamed_stock_board(host: Seat, guest: Seat, pawn: str) -> dict:
+    from tools.silverfish import native_board_contract
+    from tools.silverfish.native_quest import AUTHORED_BOARD_ACTIONS
+
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    checkpoint = campaign_save_hashes(host.campaign)
+
+    async def command(seat, action, quest=None):
+        request = f"{action}\t{quest}" if quest is not None else action
+        return await portable_probe_command(seat.bridge, "portable-board-offer", request)
+
+    async def stream(seat):
+        assert await command(seat, "stream-load") == "loading"
+        async with asyncio.timeout(20):
+            while (identity := await command(seat, "stream-board")) in {"waiting", "initializing"}:
+                await asyncio.sleep(.1)
+        return identity
+
+    async def visibility(seat, visible):
+        async with asyncio.timeout(12):
+            while await command(seat, "stream-visible") != str(visible).lower():
+                await asyncio.sleep(.1)
+
+    approach = tuple(map(float, (await command(host, "approach")).split(",")))
+    await wait_resident_status(guest_run, lambda frame:
+        (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
+        and math.dist(point, approach) <= 25)
+    board, guest_board = await asyncio.gather(stream(host), stream(guest))
+    assert board == guest_board and board.startswith("stream:") and "CoopBoardSublevel" in board, (board, guest_board)
+
+    async def catalog():
+        return await submit(guest_run, native_board_contract.CATALOG, target=board)
+
+    async def open_board():
+        result = await submit(guest_run, "native-wire-board-stock-f-fixture", target=board)
+        assert result["ok"], result
+        return await wait_resident_status(guest_run, lambda frame:
+            (menu := frame.get("game", {}).get(native_board_contract.MENU_KEY))
+            and menu["board"] == board and menu["state"] == "visible")
+
+    async def choose(quest, action):
+        result = await submit(guest_run, "native-wire-board-stock-fixture", target=f"{quest}|{action}")
+        assert result["ok"], result
+        await wait_resident_status(guest_run, lambda frame: not frame["game"].get(native_board_contract.MENU_KEY))
+
+    async def journals(quest, step=None):
+        async with asyncio.timeout(10):
+            while True:
+                values = await asyncio.gather(*(command(seat, "journal", quest) for seat in (host, guest)))
+                if values[0] == values[1] and values[0] != "-" and (step is None or values[0] == str(step)):
+                    return int(values[0])
+                await asyncio.sleep(.1)
+
+    result = await catalog()
+    assert result["ok"], result
+    offers = set(result[native_board_contract.CATALOG_KEY]["offers"])
+    photo = "Photo_BrnzQuarry"
+    accepted = min(offers - AUTHORED_BOARD_ACTIONS - {photo})
+    frame = await open_board()
+    assert set(filter(None, (await command(guest, "stream-menu")).split(","))) == offers
+    await choose(accepted, "start")
+    started = await journals(accepted)
+    assert started > 0
+
+    assert await command(host, "add-photo-contract") == "1"
+    assert await command(host, "complete-photo-objective") == "2"
+    ready = await catalog()
+    assert ready["ok"] and photo in ready[native_board_contract.CATALOG_KEY]["turnins"], ready
+    host_frame = await wait_resident_status(host_run, lambda view: type(view["game"].get("native_wallet")) is int)
+    before = host_frame["game"]["native_wallet"]
+    await open_board()
+    await choose(photo, "turnin")
+    settled = await wait_resident_status(host_run, lambda frame:
+        frame.get("gameplay", {}).get("native_quests", {}).get(photo, {}).get("step") == -10)
+    payout = settled["gameplay"]["native_quests"][photo]
+    assert payout["cash"] == 100 and payout["wallet"] == before + 100 and payout["actor"] == frame["character_id"], payout
+    await journals(photo, -10)
+    await wait_resident_status(guest_run, lambda view: view["game"].get("native_wallet") == before + 100)
+
+    assert await command(host, "stream-hide") == "stream-hide"
+    await visibility(host, False)
+    denied = await catalog()
+    assert not denied["ok"] and denied["error"] == "stock_board_contract_interaction_unqualified", denied
+    assert await command(host, "stream-show") == "stream-show"
+    await visibility(host, True)
+    await open_board()
+    assert await command(guest, "stream-hide") == "stream-hide"
+    await visibility(guest, False)
+    await wait_resident_status(guest_run, lambda view: not view["game"].get(native_board_contract.MENU_KEY))
+    for seat in (host, guest):
+        assert await command(seat, "stream-unload") == "stream-unload"
+    assert campaign_save_hashes(host.campaign) == checkpoint, "Ordinary quest actions wrote the campaign save"
+    return {"board": board, "offers": sorted(offers), "accepted": accepted, "journal_step": started,
+            "turnin": payout, "hidden_board_refused": True, "hidden_guest_menu_closed": True, "saved_early": False}
+
+
 async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str, *, world_objectives: bool = True) -> dict:
     from tools.silverfish import native_anomaly_effects, native_board_contract, native_inventory
     from tools.silverfish.authored_routes import AUTHORED_ROUTES
@@ -7411,7 +7507,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_npc_override: bool = False, stock_dock_population: bool = False,
                  manage_saves: bool = False,
                  stock_dead_drops: bool = False,
-                 stock_board_offers: bool = False, stock_quarry_photo: bool = False,
+                 stock_board_offers: bool = False, stock_streamed_board: bool = False, stock_quarry_photo: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
                  stock_weather_travel: bool = False, stock_lightning: bool = False, stock_storm_ambience: bool = False,
                  crossroads_profile: bool = False, crossroads_gc_trial: bool | str = False,
@@ -7550,6 +7646,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, _pawn: verify_dead_drop(host, guest, native_computer_board.METRO_DEAD_DROP,
                                                      native_dead_drop.METRO_DROP)),
         (stock_board_offers, "stock_board_offers", "stock_board_offers", verify_resident_board_offers),
+        (stock_streamed_board, "streamed_board", "stock_streamed_board", verify_streamed_stock_board),
         (stock_quarry_photo, "quarry_photo", "stock_quarry_photo",
          lambda host, guest, pawn: verify_quarry_photo(host, guest, pawn, portable_probe_command)),
         (stock_host_corpse_carry, "observatory", "stock_host_corpse_carry", verify_stock_host_corpse_carry),
@@ -7947,7 +8044,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if stock_eye_stacks:
             for game in games:
                 probes.enter_context(eye_board_overlay(game))
-        if stock_board_offers:
+        if stock_board_offers or stock_streamed_board:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableBoardOfferProbe",
                                                      fixture="portable_board_offer_probe.lua"))
@@ -7966,7 +8063,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 or stock_critters or stock_placed_item
                 or stock_crossroads_door or stock_dock_gate
                 or stock_dead_drops
-                or stock_board_offers or stock_quarry_photo or stock_eye_stacks or stock_lingering_teleport or stock_acid_pool or stock_mushrooms):
+                or stock_board_offers or stock_streamed_board or stock_quarry_photo or stock_eye_stacks
+                or stock_lingering_teleport or stock_acid_pool or stock_mushrooms):
             overlay_key = ("weather_zone_overlays" if stock_weather_travel or stock_lightning else
                            "jammer_zone_overlays" if stock_simmi_jammers else
                            "acid_pool_zone_overlays" if stock_acid_pool else "dock_zone_overlays")

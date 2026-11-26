@@ -82,7 +82,7 @@ def renew(bridge, area, timestamp):
 def stock_fixture_board(area, target):
     if target is None:
         return ()
-    if not area or native_board_contract.board_map(target) != area:
+    if not native_board_contract.board_matches_map(target, area):
         raise party.RuleError("Choose an exact stock board on the current map")
     return (target,)
 
@@ -153,7 +153,7 @@ class WireBoardView:
         shown = snapshot.get("native_wire_board_stock" if stock_menu else "native_wire_board", {})
         expected_quest = (quest == "-" and opened == sequence if kind == "stock-view" else
                           native_board_contract.quest_id(quest) if stock_menu else quest in QUESTS.get(area, ()))
-        board_matches = native_board_contract.board_map(board) == area if stock_menu else board == BOARDS.get(area)
+        board_matches = native_board_contract.board_matches_map(board, area) if stock_menu else board == BOARDS.get(area)
         if (sequence <= self.latest or area != snapshot.get("map") or actor != pawn or not board_matches
                 or not expected_quest
                 or tuple(shown.get(name) for name in ("map", "pawn", "board", "quest", "state", "sequence", "open"))
