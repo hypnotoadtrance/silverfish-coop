@@ -31,6 +31,10 @@ local function sight(world)
 end
 
 local function point_for(target)
+    if target.TrackedQuest.RowName:ToString() == quarry_quest then
+        -- The camera view is sampled independently from the guest. The host owns the binding.
+        return target:GetOwner().StaticMeshComponent:K2_GetComponentLocation()
+    end
     assert(target.Targets:GetArrayNum() == 1 and valid(target.Targets[1]), "stock photo primitive unavailable")
     return target.Targets[1]:K2_GetComponentLocation()
 end
@@ -46,7 +50,10 @@ local function run(action, argument)
     local save, key = pawn.Save, FName(quest, EFindName.FNAME_Find)
     if action == "binding" then
         local target = sight(world)
-        return target.Targets:GetArrayNum() == 1 and valid(target.Targets[1]) and "bound" or "unbound"
+        local primitive = target.Targets:GetArrayNum() == 1 and target.Targets[1]
+        if not primitive or not valid(primitive) then return "unbound" end
+        if quest == quarry_quest then assert(same(primitive, target:GetOwner().StaticMeshComponent)) end
+        return "bound"
     end
     if action == "journal" then
         return save.ActiveQuests:Contains(key) and tostring(save.ActiveQuests:Find(key):get()[step]) or "-"

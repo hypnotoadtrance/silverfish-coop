@@ -35,6 +35,10 @@ local commune, base_rep, advantage = 2, 50, 150
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local camera_class = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local component_class = "/Game/Classes/Actors/ActorAssets/CameraTarget_BP.CameraTarget_BP_C"
+local quarry_world = "/Game/Classes/Maps/Maps_OverWorld/Quarry_01_P.Quarry_01_P"
+local quarry_actor = quarry_world .. ":PersistentLevel.StaticMeshActor_1147"
+local quarry_mesh = "/Game/Assets/StaticMeshes/Mesh_Environment/SM_CliffTop_2.SM_CliffTop_2"
+local quarry_material = "/Game/Assets/Materials/M_LivingBronze_Small.M_LivingBronze_Small"
 local table_path = "/Game/Classes/Libraries/DataTables/Quests_DT.Quests_DT"
 local schema_path = "/Game/Classes/Libraries/Structs/Quest_Struct.Quest_Struct"
 local code = "/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C"
@@ -435,11 +439,40 @@ local function field_recipe(save, source, target)
     return {key = key, quest = quest, step = step, next_step = step + increment, distance = distance, threshold = score}
 end
 
+local function bind_quarry_target(world, source)
+    if world:GetFullName() ~= "World " .. quarry_world then return end
+    local actor = StaticFindObject(quarry_actor)
+    local component = StaticFindObject(quarry_actor .. ".CameraTarget_BP")
+    if not exact(actor, "/Script/Engine.StaticMeshActor") or not actor:HasAuthority()
+        or actor:IsActorBeingDestroyed() or not same(actor:GetWorld(), world)
+        or not exact(component, component_class) or not same(component:GetOwner(), actor) then return end
+    local handle = component.TrackedQuest
+    local targets = component.Targets
+    if not handle or not same(handle.DataTable, source) or handle.RowName:ToString() ~= "Photo_BrnzQuarry"
+        or count(targets) ~= 0 or count(component.TargetPoints) ~= 1 or component.SumOfWeights ~= 1 then return end
+    local point = component.TargetPoints[1]
+    if point.Primitive_6_8BEB66464DF62A10BABD8A9ECF81CFDE:ToString() ~= "SM_Prop_Whale_Skeleton_01_Head_01"
+        or point.Bone_5_72242274417DBE90A274A88BB32BC0A1:ToString() ~= "None"
+        or point.Weight_9_10321D2441683E2EC000A9BBFCDFAB5E ~= 1 then return end
+    local mesh = actor.StaticMeshComponent
+    if not exact(mesh, "/Script/Engine.StaticMeshComponent") or not same(mesh, actor.RootComponent)
+        or not same(mesh:GetOwner(), actor) or not same(mesh.StaticMesh, StaticFindObject(quarry_mesh))
+        or not same(mesh:GetMaterial(0), StaticFindObject(quarry_material)) then return end
+    -- The authored tracker belongs to the bronze formation. Its stale component name
+    -- came from a whale mesh that the map no longer contains.
+    targets[1] = mesh
+end
+
 local function field_ready(state, phase)
     if not enabled or phase ~= "hosting" or not state.listening or state.server ~= false or not valid(state.world) then return end
+    local source
+    if state.world:GetFullName() == "World " .. quarry_world then
+        source = quest_table()
+        bind_quarry_target(state.world, source)
+    end
     for _, guest in ipairs(state.guests or {}) do
         if valid(guest.pawn) and exact(guest.pawn.EquipedItem, camera_class) then
-            local source = quest_table()
+            source = source or quest_table()
             local save = state.world.OwningGameInstance.SaveSlot_Ref
             if not valid(save) or not same(save, state.local_pawn.pawn.Save) then return end
             for _, target in ipairs(field_components(state.world)) do

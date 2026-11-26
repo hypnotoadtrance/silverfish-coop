@@ -1,4 +1,4 @@
-"""Trace a guest shutter to a bound stock photo target and check the unbound Quarry target."""
+"""Verify two stock photo objectives using the guest camera and shared journal."""
 
 import asyncio
 import math
@@ -51,71 +51,67 @@ async def verify_quarry_photo(host, guest, pawn, probe):
         await wait_resident_status(guest_run, lambda frame: frame.get("zone_epoch") == arrival["zone_epoch"]
                                    and frame.get("game", {}).get("map") == destination, timeout=35)
 
+    async def verify_subject(area, quest, actor):
+        assert await command(host, "journal") == "1"
+        assert await command(host, "binding") == "bound"
+        checkpoint = campaign_save_hashes(host.campaign)
+        point = tuple(map(float, (await command(host, "position")).split(",")))
+        await wait_resident_status(guest_run, lambda frame: (
+            (position := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
+            and math.dist(position, point) < 30))
+        frame = await wait_resident_status(guest_run, lambda row: (
+            row.get("gameplay", {}).get("native_equipped_weapon", {}).get("quest") == native_turret_photo.STOCK_SCOPE
+            and row["game"].get("native_guest_primary_scope", {}).get("guid") == guid))
+
+        async def shutter():
+            observer_before, owner_before = await shutter_count(host), await shutter_count(guest)
+            press = await submit(guest_run, "native-guest-primary-input-fixture")
+            assert press["ok"], press
+            seq = press["native_guest_primary_fixture"]["sequence"]
+            async with asyncio.timeout(8):
+                while True:
+                    for row in await resident_events(guest_run, frame):
+                        if row.get("sequence") == seq and row["event"] in ("native_guest_camera_shutter", "native_guest_camera_shutter_rejected"):
+                            while await shutter_count(host) == observer_before:
+                                await asyncio.sleep(.08)
+                            assert await shutter_count(host) == observer_before + 1
+                            assert await shutter_count(guest) == owner_before
+                            return row
+                    await asyncio.sleep(.1)
+
+        await command(guest, "miss")
+        await asyncio.sleep(.35)
+        missed = await shutter()
+        assert missed.get("reason", "").startswith("stock_photo_no_objective_in_frame:1:"), missed
+        assert await command(host, "journal") == "1"
+        await asyncio.sleep(3.1)
+        await command(guest, "aim")
+        capture = await shutter()
+        assert capture.get("effect") == "native_quest_changed", capture
+        photo = capture[native_turret_photo.STOCK_PROOF]
+        assert (photo["map"], photo["quest"], photo["camera"], photo["step_before"], photo["step_after"]) == (
+            area, quest, guid, 1, 2), photo
+        assert photo["target"].endswith(actor) and photo["visibility"] >= .75, photo
+        async with asyncio.timeout(10):
+            while await asyncio.gather(command(host, "journal"), command(guest, "journal")) != ["2", "2"]:
+                await asyncio.sleep(.2)
+        before_replay = await shutter_count(host)
+        replay = await submit(guest_run, native_turret_photo.STOCK_SHUTTER,
+                              target=f"{guid}@{frame['zone_epoch']}@{capture['shutter_view']}",
+                              operation_id=capture["operation_id"])
+        assert replay["ok"] and replay[native_turret_photo.STOCK_PROOF] == photo, replay
+        assert await shutter_count(host) == before_replay
+        assert campaign_save_hashes(host.campaign) == checkpoint
+        return {"miss_refused": missed["reason"], "capture": photo, "replay_preserved_progress": True}
+
     outbound = (OBSERVATORY, CROSSROADS, NORTHEAST_RAIL, SOUTHERN_ROAD)
     for source, destination in zip(outbound, outbound[1:]):
         await travel(source, destination)
-    assert await command(host, "journal") == "1"
-    assert await command(host, "binding") == "bound"
-    checkpoint = campaign_save_hashes(host.campaign)
-    point = tuple(map(float, (await command(host, "position")).split(",")))
-    await wait_resident_status(guest_run, lambda frame: (
-        (position := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
-        and math.dist(position, point) < 30))
-    frame = await wait_resident_status(guest_run, lambda row: (
-        row.get("gameplay", {}).get("native_equipped_weapon", {}).get("quest") == native_turret_photo.STOCK_SCOPE
-        and row["game"].get("native_guest_primary_scope", {}).get("guid") == guid))
-
-    async def shutter():
-        observer_before, owner_before = await shutter_count(host), await shutter_count(guest)
-        press = await submit(guest_run, "native-guest-primary-input-fixture")
-        assert press["ok"], press
-        seq = press["native_guest_primary_fixture"]["sequence"]
-        async with asyncio.timeout(8):
-            while True:
-                for row in await resident_events(guest_run, frame):
-                    if row.get("sequence") == seq and row["event"] in ("native_guest_camera_shutter", "native_guest_camera_shutter_rejected"):
-                        while await shutter_count(host) == observer_before:
-                            await asyncio.sleep(.08)
-                        assert await shutter_count(host) == observer_before + 1
-                        assert await shutter_count(guest) == owner_before
-                        return row
-                await asyncio.sleep(.1)
-
-    await command(guest, "miss")
-    await asyncio.sleep(.35)
-    missed = await shutter()
-    assert missed.get("reason", "").startswith("stock_photo_no_objective_in_frame:1:"), missed
-    assert await command(host, "journal") == "1"
-    await asyncio.sleep(3.1)
-    await command(guest, "aim")
-    capture = await shutter()
-    assert capture.get("effect") == "native_quest_changed", capture
-    photo = capture[native_turret_photo.STOCK_PROOF]
-    assert (photo["map"], photo["quest"], photo["camera"], photo["step_before"], photo["step_after"]) == (
-        SOUTHERN_ROAD, TOWER_QUEST, guid, 1, 2), photo
-    assert photo["target"].endswith("StaticMeshActor_3458") and photo["visibility"] >= .75, photo
-    async with asyncio.timeout(10):
-        while await asyncio.gather(command(host, "journal"), command(guest, "journal")) != ["2", "2"]:
-            await asyncio.sleep(.2)
-    before_replay = await shutter_count(host)
-    replay = await submit(guest_run, native_turret_photo.STOCK_SHUTTER,
-                          target=f"{guid}@{frame['zone_epoch']}@{capture['shutter_view']}",
-                          operation_id=capture["operation_id"])
-    assert replay["ok"] and replay[native_turret_photo.STOCK_PROOF] == photo, replay
-    assert await shutter_count(host) == before_replay
-    assert campaign_save_hashes(host.campaign) == checkpoint
+    tower = await verify_subject(SOUTHERN_ROAD, TOWER_QUEST, "StaticMeshActor_3458")
     onward = (SOUTHERN_ROAD, NORTHEAST_RAIL, CROSSROADS, DEAD_BRIDGE, OVERWORLD + "StoneMaze_P",
               OVERWORLD + "PineRidge_P", QUARRY)
     for source, destination in zip(onward, onward[1:]):
         await travel(source, destination)
-    assert await command(host, "journal") == "1"
-    assert await command(host, "binding") == "unbound"
-    await wait_resident_status(host_run, lambda state: (
-        state["game"].get("native_guest_equipped_weapons", {}).get(pawn, {}).get("guid") == guid
-        and not state["game"].get(native_turret_photo.STOCK_READY)))
-    await wait_resident_status(guest_run, lambda state: (
-        not state.get("gameplay", {}).get("native_equipped_weapon")
-        and not state["game"].get("native_guest_primary_scope")))
-    return {"stock_photo": {"miss_refused": missed["reason"], "capture": photo, "same_journal_step": 2,
-                            "replay_preserved_progress": True, "checkpoint_unchanged_after_travel": True,
-                            "unbound_quest": QUEST, "unbound_primary_not_intercepted": True}}
+    quarry = await verify_subject(QUARRY, QUEST, "StaticMeshActor_1147")
+    return {"stock_photo": {"south_east_road": tower, "bronze_quarry": quarry,
+                            "same_journal_step": 2, "checkpoint_unchanged_after_travel": True}}
