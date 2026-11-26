@@ -56,9 +56,25 @@ local function supported_turret(actor)
     return valid(actor) and valid(turret_class) and actor:IsA(turret_class)
 end
 
+local function corpse_level(actor, world)
+    if not valid(actor) or not valid(world) then return end
+    local level = actor:GetOuter()
+    if same(level, world.PersistentLevel) then
+        if same(actor:GetWorld(), world) then return level end
+    elseif valid(level) and same(level.OwningWorld, world) then
+        return level
+    end
+end
+
+local function corpse_visible(actor, world)
+    local level = corpse_level(actor, world)
+    return valid(level) and (same(level, world.PersistentLevel) or level.bIsVisible == true)
+end
+
 local function world_driver(actor, guest)
-    local world = valid(actor) and actor:GetWorld()
-    local driver = valid(world) and world.NetDriver
+    local world = active_world
+    if not corpse_visible(actor, world) then return end
+    local driver = world.NetDriver
     if not valid(driver) or not same(driver.World, world) or valid(driver.ServerConnection) ~= guest then return end
     return world
 end
@@ -266,7 +282,8 @@ local function apply(marker, world)
     if not valid(marker) or not same(marker:GetWorld(), world) then return true end
     if actor_reference.is_reference(marker) then return true end
     local actor = marker:GetOwner()
-    if not valid(actor) or not same(actor:GetWorld(), world) or actor:IsActorBeingDestroyed() then return true end
+    if not valid(actor) or not corpse_level(actor, world) or actor:IsActorBeingDestroyed() then return true end
+    if not corpse_visible(actor, world) then return end
     local body = supported_corpse(actor)
     if not body and not valid(turret_class) then turret_class = StaticFindObject(turret_path) end
     local turret = not body and supported_turret(actor)
@@ -468,6 +485,8 @@ local function mirror_positions(world, pawn, now)
             retire_turret(mirror)
             restore_corpse_physics(mirror)
             mirrors[address], corrections[address], observed_grips[address] = nil, nil, nil
+        elseif not corpse_visible(actor, world) then
+            corrections[address] = nil
         elseif mirror.turret then
             if actor:GetLocalRole() == 1 and present_turret(mirror, actor, pawn) then mirrors[address] = nil end
         elseif actor:GetLocalRole() == 1 and actor.Alive == false then
@@ -498,7 +517,7 @@ function corpses.animate(get_world)
     end
     for address, mirror in pairs(observed_grips) do
         local actor = valid(mirror.marker) and mirror.marker:GetOwner()
-        if valid(actor) and not actor:IsActorBeingDestroyed() and same(actor:GetWorld(), world) then
+        if valid(actor) and not actor:IsActorBeingDestroyed() and corpse_visible(actor, world) then
             follow_corpse(address, mirror, actor, mirror.pawn, now)
         else
             restore_corpse_physics(mirror)

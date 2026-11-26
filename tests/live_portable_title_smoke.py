@@ -5046,9 +5046,13 @@ async def verify_stock_streamed_npc(host: Seat, guest: Seat, _pawn: str) -> dict
     assert await command(guest, "damage") == "damage denied", ownership
     assert await command(host, "status") == host_before, ownership
     assert await command(host, "damage") == "killed"
-    async with asyncio.timeout(8):
-        while not (await command(guest, "status")).endswith(",true"):
-            await asyncio.sleep(.1)
+    observed_after = "unavailable"
+    try:
+        async with asyncio.timeout(8):
+            while not (observed_after := await command(guest, "status")).endswith(",true"):
+                await asyncio.sleep(.1)
+    except TimeoutError as error:
+        raise AssertionError(f"Streamed NPC ragdoll did not replicate. Guest saw {observed_after}. {ownership}") from error
     after = [await command(seat, "status") for seat in (host, guest)]
     assert all(row.split(",")[1] == "false" and row.endswith(",true") for row in after), after
     assert campaign_save_hashes(host.campaign) == checkpoint
