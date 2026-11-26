@@ -19,6 +19,10 @@ local next_sample, corpse_number = 0, 0
 local host_pawn, grip_marker, next_grip_sample
 local sample_period = .1
 local grip_period = .05
+local settle_timeout = 2
+local settle_stationary = .25
+local settle_contacts = .35
+local stopped = {X = 0, Y = 0, Z = 0}
 local byte_angle = 360 / 256
 local anchor_limit = 120
 local host_grip_bit = 0x8000
@@ -314,6 +318,19 @@ local function locally_carried(pawn, actor, mesh)
     return valid(grip) and same(grip:GetGrabbedComponent(), mesh)
 end
 
+local function stop_grip_motion(mesh)
+    mesh:SetAllPhysicsLinearVelocity(stopped, false)
+    mesh:SetAllPhysicsAngularVelocityInRadians(stopped, false)
+end
+
+local function restore_grip_collision(grip)
+    if not grip.responses or not valid(grip.mesh) then return end
+    for channel, response in pairs(grip.responses) do
+        grip.mesh:SetCollisionResponseToChannel(channel, response)
+    end
+    grip.responses = nil
+end
+
 local function restore_corpse_physics(mirror, released_by_host)
     local original = mirror.host_grip
     if not original then return end
@@ -322,18 +339,10 @@ local function restore_corpse_physics(mirror, released_by_host)
         original.handle:ReleaseComponent()
         if valid(original.actor) then original.handle:K2_DestroyComponent(original.actor) end
     end
-    if valid(original.mesh) then
-        if released_by_host then
-            -- Drop the motion from the observer's temporary grip before
-            -- restoring collision. Subsequent host poses guide the fall.
-            local stopped = {X = 0, Y = 0, Z = 0}
-            original.mesh:SetAllPhysicsLinearVelocity(stopped, false)
-            original.mesh:SetAllPhysicsAngularVelocityInRadians(stopped, false)
-        end
-        for channel, response in pairs(original.responses) do
-            original.mesh:SetCollisionResponseToChannel(channel, response)
-        end
+    if released_by_host and valid(original.mesh) then
+        stop_grip_motion(original.mesh)
     end
+    restore_grip_collision(original)
 end
 
 local function project_host_grip(mirror, actor, mesh)
@@ -347,7 +356,7 @@ local function project_host_grip(mirror, actor, mesh)
     if not valid(handle) then return end
     local responses = {}
     local rotation = mesh:GetSocketRotation(bone)
-    mirror.host_grip = {actor = actor, mesh = mesh, responses = responses, handle = handle, rotation = rotation}
+    mirror.host_grip = {actor = actor, mesh = mesh, responses = responses, handle = handle, bone = bone, rotation = rotation}
     -- Keep the skeletal bodies in the physics scene so the guest still sees the
     -- ragdoll pose. The host solves contacts while the guest follows its position.
     for channel = 0, 31 do
@@ -359,9 +368,7 @@ local function project_host_grip(mirror, actor, mesh)
             end
         end
     end
-    local stopped = {X = 0, Y = 0, Z = 0}
-    mesh:SetAllPhysicsLinearVelocity(stopped, false)
-    mesh:SetAllPhysicsAngularVelocityInRadians(stopped, false)
+    stop_grip_motion(mesh)
     handle:SetInterpolationSpeed(20)
     handle:GrabComponentAtLocationWithRotation(mesh, bone, point, rotation)
     if not same(handle:GetGrabbedComponent(), mesh) then
@@ -371,24 +378,51 @@ local function project_host_grip(mirror, actor, mesh)
     return mirror.host_grip
 end
 
+local function settle_host_release(grip, target, now)
+    if not valid(grip.handle) or not valid(grip.mesh) or not grip.mesh:IsSimulatingPhysics(grip.bone) then return false end
+    local anchor = grip.mesh:GetSocketLocation(grip.bone)
+    local release = grip.release
+    if not release then
+        -- Follow the falling host anchor with a free pivot. Allow ground
+        -- contact once the host settles, while the handle can absorb bounce.
+        grip.handle:ReleaseComponent()
+        stop_grip_motion(grip.mesh)
+        grip.handle:GrabComponentAtLocation(grip.mesh, grip.bone, anchor)
+        if not same(grip.handle:GetGrabbedComponent(), grip.mesh) then return false end
+        release = {deadline = now + settle_timeout, still_since = now, target = target}
+        grip.release = release
+    end
+    if now >= release.deadline then return false end
+    local _, travel = between(release.target, target)
+    if travel > 5^2 then
+        release.still_since, release.target = now, target
+    end
+    grip.handle:SetTargetLocation(target)
+    local _, gap = between(anchor, target)
+    if not release.contacts and now - release.still_since >= settle_stationary and gap < 30^2 then
+        restore_grip_collision(grip)
+        release.contacts = now
+    end
+    return not release.contacts or now - math.max(release.contacts, release.still_since) < settle_contacts or gap > 16^2
+end
+
 local function follow_corpse(address, mirror, actor, pawn, now)
     local mesh = actor.Mesh
     local _, host_grip = marker_state(mirror.marker:K2_GetActorRotation())
     local local_grip = valid(mesh) and locally_carried(pawn, actor, mesh)
-    if not host_grip or local_grip then
-        local released_by_host = mirror.host_grip and not local_grip
-        if mirror.host_grip then
-            corrections[address] = nil
-            mirror.host_released = released_by_host
-        end
-        restore_corpse_physics(mirror, released_by_host)
+    if local_grip or not valid(mesh) then
+        restore_corpse_physics(mirror)
+        mirror.host_released = nil
         observed_grips[address] = nil
-    end
-    if not valid(mesh) or not (mesh:IsAnySimulatingPhysics() or mirror.host_grip) or local_grip then
         corrections[address] = nil
         return
     end
-    local period = host_grip and grip_period or sample_period
+    local observer = mirror.host_grip
+    if not (observer or mesh:IsAnySimulatingPhysics()) then
+        corrections[address] = nil
+        return
+    end
+    local period = (host_grip or observer) and grip_period or sample_period
     if now < (mirror.next_pose or 0) then return end
     mirror.next_pose = now + period
     local target = mirror.marker:K2_GetActorLocation()
@@ -397,9 +431,17 @@ local function follow_corpse(address, mirror, actor, pawn, now)
         mirror.pawn = pawn
         observed_grips[address] = mirror
         corrections[address] = nil
+        if observer and observer.release then restore_corpse_physics(mirror, true) end
         local grip = project_host_grip(mirror, actor, mesh)
         if grip then grip.handle:SetTargetLocationAndRotation(target, grip.rotation) end
         return
+    end
+    if observer then
+        corrections[address] = nil
+        if settle_host_release(observer, target, now) then return end
+        restore_corpse_physics(mirror, true)
+        mirror.host_released, mirror.target_z = true, target.Z
+        observed_grips[address] = nil
     end
     local offset, error_squared = between(corpses.position(actor), target)
     if mirror.host_released and mirror.target_z == target.Z and math.abs(offset.Z) < 100 then

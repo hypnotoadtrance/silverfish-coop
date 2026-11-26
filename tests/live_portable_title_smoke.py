@@ -4669,6 +4669,7 @@ async def verify_stock_host_corpse_carry(host: Seat, guest: Seat, _pawn: str) ->
     guest_spin = max(row[14] for row in guest_held)
     assert guest_spin < 180, (guest_spin, guest_held[::10])
     assert guest_view["samples"][-1][7:11] == (0, 3, 0, 1), guest_view["samples"][-1]
+    assert guest_view["samples"][-1][15] == host_view["samples"][-1][15] != 0, "Ground collision did not recover"
     origin, end = host_held[0][1:4], host_held[-1][1:4]
     distance = math.dist(origin, end)
     guest_distance = math.dist(guest_held[0][1:4], guest_held[-1][1:4])
@@ -4681,13 +4682,16 @@ async def verify_stock_host_corpse_carry(host: Seat, guest: Seat, _pawn: str) ->
     assert end_gap < 75, end_gap
     settled_gap = math.dist(*(view["samples"][-1][1:4] for view in views.values()))
     assert settled_gap < 40, (settled_gap, [view["samples"][-1] for view in views.values()])
+    released = [row for row in guest_view["samples"][guest_view["held_samples"]:] if row[7] == 0]
+    release_lift = max(row[3] - row[6] for row in released)
     assert await carry(guest, "ready") == "ready", "the guest corpse did not resume ragdoll physics after the drop"
     assert await carry(guest, "focus") == "focused", "stock guest LookTrace could not select the released body"
     assert campaign_save_hashes(host.campaign) == checkpoint, "Carrying a corpse caused an early checkpoint"
     return {"stock_host_corpse_carry": {"host_displacement_cm": distance, "guest_displacement_cm": guest_distance,
                                       "guest_peak_anchor_spin_deg_per_sec": guest_spin,
                                       "guest_max_backstep_cm": reverse, "end_gap_cm": end_gap,
-                                      "settled_gap_cm": settled_gap, "guest_stock_focus_restored": True,
+                                      "settled_gap_cm": settled_gap, "guest_release_lift_cm": release_lift,
+                                      "guest_ground_collision_restored": True, "guest_stock_focus_restored": True,
                                       "campaign_checkpoint_unchanged": True, "live_combat_reference": references[0], **views}}
 
 
@@ -6932,8 +6936,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     shot_view_campaign = "tutorial_dock_shot_view" if tutorial_dock_pursuit else weapon_campaign
     dock_world_checks = stock_bandage_revisit or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_dock_gate
     prop_campaign = "tutorial_dock" if dock_world_checks else "observatory"
-    if prop_campaign == "observatory" and (stock_food or stock_cooked_meal):
-        # The impact and consumable fixtures both alter health and recovery state.
+    if prop_campaign == "observatory" and (stock_food or stock_cooked_meal or stock_host_corpse_carry):
+        # Impact, consumable, and corpse fixtures change the Observatory's actors and health.
         prop_campaign = "observatory_prop_impacts"
     stock_radio_media = stock_warehouse_switch and all(
         next((game / "SilverFish/Content/Music/Radio").glob("*.wav"), None) for game in games)

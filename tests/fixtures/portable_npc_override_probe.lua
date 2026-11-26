@@ -106,10 +106,11 @@ local function corpse_carry(action, world, pawn, actor, host)
             local angle = mesh:GetSocketRotation(anchor)
             local angular = mesh:GetPhysicsAngularVelocityInDegrees(anchor)
             local speed = math.sqrt(angular.X^2 + angular.Y^2 + angular.Z^2)
-            watch.rows[#watch.rows + 1] = ("%.3f %.2f %.2f %.2f %.2f %.2f %.2f %d %d %d %d %.2f %.2f %.2f %.2f"):format(
+            watch.rows[#watch.rows + 1] = ("%.3f %.2f %.2f %.2f %.2f %.2f %.2f %d %d %d %d %.2f %.2f %.2f %.2f %d"):format(
                 now-watch.start, point.X, point.Y, point.Z, target.X, target.Y, target.Z, phase and 1 or 0,
                 mesh:GetCollisionEnabled(), holds_corpse(pawn, actor) and 1 or 0,
-                mesh:IsSimulatingPhysics(anchor) and 1 or 0, angle.Pitch, angle.Yaw, angle.Roll, speed)
+                mesh:IsSimulatingPhysics(anchor) and 1 or 0, angle.Pitch, angle.Yaw, angle.Roll, speed,
+                mesh:GetCollisionResponseToChannel(0))
             if watch.sweep then
                 local step = math.min(1, (now-watch.sweep.start)/1.2)
                 local start, finish = watch.sweep.origin, carry_retreat
