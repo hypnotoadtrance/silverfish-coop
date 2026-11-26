@@ -4,7 +4,6 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_TI
 
 local prefix = bridge .. "/portable-board-offer-"
 local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
-local forest = "/Game/Classes/Maps/Maps_OverWorld/Forest_01_P.Forest_01_P"
 local dry_dock = "/Game/Classes/Maps/Maps_Dungeons/DryDock_P.DryDock_P"
 local board_path = map .. ":PersistentLevel.BountyBoard_BP_C_2"
 local menu_class = "/Game/Classes/GUI/Menu_QuestLog_Widget.Menu_QuestLog_Widget_C"
@@ -83,25 +82,6 @@ local function run(action, quest)
             end
         end
         return tostring(count)
-    end
-    if action == "fixed-sample" then
-        assert(world_path == forest or world_path == dry_dock, "A stock sabotage map is required")
-        assert(quest and quest:match("^Prop_[A-Za-z_]+_C_%d+$"), "An authored prop name is required")
-        local path = world_path .. ":PersistentLevel." .. quest
-        local actor = StaticFindObject(path)
-        assert(valid(actor) and same(actor:GetWorld(), world) and SilverfishQualifyNativePlacedFixedExplosive(path))
-        local address, world_address = actor:GetAddress(), world:GetAddress()
-        local alive, destroyed, health = SilverfishReadNativePlacedFixedExplosive(address, world_address)
-        assert(alive == not actor:IsActorBeingDestroyed() and destroyed == actor.Destroyed and health == actor.Health)
-        assert(SilverfishReadNativePlacedFixedExplosive(address, 0) == nil, "A missing world was accepted")
-        local iterations = 256
-        local start = os.clock()
-        for _ = 1, iterations do alive, destroyed, health = SilverfishReadNativePlacedFixedExplosive(address, world_address) end
-        local native = os.clock() - start
-        start = os.clock()
-        for _ = 1, iterations do alive, destroyed, health = not actor:IsActorBeingDestroyed(), actor.Destroyed, actor.Health end
-        local lua = os.clock() - start
-        return ("%.6f,%.6f,%d,%s,%.4f"):format(native, lua, iterations, tostring(destroyed), health)
     end
     assert(world_path == map, "The fixture requires the stock Observatory")
     local board = StaticFindObject(board_path)

@@ -4399,7 +4399,8 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str, *, wo
         async def sample_prop(destroyed):
             samples = {}
             for name, seat in (("host", host), ("guest", guest)):
-                native, lua, reads, broken, health = (await command(seat, "fixed-sample", actor)).split(",")
+                reply = await seat.bridge.command("native-fixed-explosive-sample-fixture", target)
+                native, lua, reads, broken, health = reply["ack"]["message"].split(",")
                 assert broken == str(destroyed).lower(), (name, target, broken)
                 samples[name] = {"native_ms": float(native) * 1000, "lua_ms": float(lua) * 1000,
                                  "reads": int(reads), "health": float(health)}

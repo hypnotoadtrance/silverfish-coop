@@ -209,6 +209,24 @@ function fixed.command(args, state, phase)
     if args[2] ~= "native-fixed-explosives-apply" then
         if fixture and args[2]:match("^native%-fixed%-explosive%-.+%-fixture$") then
             local entry = resolve(args[3], state)
+            if args[2] == "native-fixed-explosive-sample-fixture" and #args == 3 and entry
+                and (phase == "hosting" or phase == "connected") and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
+                local read = SilverfishReadNativePlacedFixedExplosive
+                local actor = entry.actor
+                local address, world_address = actor:GetAddress(), state.world:GetAddress()
+                if type(read) ~= "function" then error("Stock explosive native reader is unavailable", 0) end
+                local alive, destroyed, health = read(address, world_address)
+                if alive ~= not actor:IsActorBeingDestroyed() or destroyed ~= actor.Destroyed or health ~= actor.Health
+                    or read(address, 0) ~= nil then error("Stock explosive native readback did not match", 0) end
+                local iterations = 1024
+                local start = os.clock()
+                for _ = 1, iterations do alive, destroyed, health = read(address, world_address) end
+                local native = os.clock() - start
+                start = os.clock()
+                for _ = 1, iterations do alive, destroyed, health = not actor:IsActorBeingDestroyed(), actor.Destroyed, actor.Health end
+                local lua = os.clock() - start
+                return ("%.6f,%.6f,%d,%s,%.4f"):format(native, lua, iterations, tostring(destroyed), health)
+            end
             if args[2] == "native-fixed-explosive-aim-fixture" and entry and #args == 5 then
                 return aim_fixture.aim_target(state, phase, args[4], args[5], "native-fixed-explosive",
                     entry.actor, nil, entry.mesh)
