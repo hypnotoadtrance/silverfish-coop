@@ -45,7 +45,7 @@ local slots = { backpack = "PlayerBackpack", equipment = "PlayerEquipment",
 local axes = {"A", "B", "C", "D"}
 local max_size, max_rows = 20000, 128
 local min_int32, max_int32, completed_step = -2147483648, 2147483647, -10
-local quest_warning
+local journal_view
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -132,6 +132,66 @@ local function photo(name)
     if exact(object, texture_class) then return object end
 end
 
+local function append_quests(canonical, rows)
+    local address = canonical:GetAddress()
+    if not journal_view or journal_view.address ~= address then
+        journal_view = {address = address, sequence = 0, active = {}, completed = {}}
+    end
+    journal_view.sequence = journal_view.sequence + 1
+    local active, completed, quests = {}, {}, {}
+    canonical.ActiveQuests:ForEach(function(raw_key, raw_value)
+        local id, entry = raw_key:get():ToString(), raw_value:get()
+        if not content_paths.quest_id(id) then return end
+        local ok, step = pcall(function()
+            return integer(quest_catalog.tracked_step(canonical, entry), min_int32, max_int32)
+        end)
+        if not ok then return end
+        if step > 0 then
+            active[id] = true
+        elseif step == completed_step then
+            completed[id] = journal_view.active[id] and journal_view.sequence or journal_view.completed[id]
+        end
+        quests[#quests + 1] = {id = id, step = step, finished = completed[id] or 0}
+    end)
+    journal_view.active, journal_view.completed = active, completed
+    table.sort(quests, function(first, second)
+        if (first.step > 0) ~= (second.step > 0) then return first.step > 0 end
+        if first.finished ~= second.finished then return first.finished > second.finished end
+        return first.id < second.id
+    end)
+
+    local size, included = 0, 0
+    for _, row in ipairs(rows) do size = size + #row + 1 end
+    for _, candidate in ipairs(quests) do
+        if #rows >= max_rows or size >= max_size then break end
+        local ok, frame = pcall(function()
+            local key = FName(candidate.id, EFindName.FNAME_Find)
+            local entry = canonical.ActiveQuests:Find(key):get()
+            local images = fields(entry[quest.images], photo_name)
+            local objectives = {}
+            for index = 1, count(entry[quest.objectives]) do
+                local path = item_path(entry[quest.objectives][index])
+                if path then objectives[#objectives + 1] = path end
+            end
+            local row = {#objectives > 0 and "quest-objectives" or "quest", candidate.id,
+                integer(entry[quest.kind], 0, 255), candidate.step, integer(entry[quest.final], 0, max_int32),
+                encode(entry[quest.name]), encode(entry[quest.giver]), photo_name(entry[quest.icon]), table.concat(images, ",")}
+            if #objectives > 0 then row[#row + 1] = table.concat(objectives, ",") end
+            for _, description in ipairs(fields(entry[quest.descriptions], encode)) do row[#row + 1] = description end
+            return table.concat(row, "\t")
+        end)
+        if ok and size + #frame + 1 <= max_size then
+            rows[#rows + 1], size = frame, size + #frame + 1
+            included = included + 1
+        end
+    end
+    local omitted = #canonical.ActiveQuests - included
+    if omitted > 0 and omitted ~= journal_view.omitted then
+        print(("[SilverfishCoop] Guest Journal omitted %d quest rows due to unsupported data or view limits\n"):format(omitted))
+    end
+    journal_view.omitted = omitted
+end
+
 local function capture(state, phase, pawn_name)
     local pawn, save, character = guest_save.exact_item_context(state, phase, pawn_name)
     local host = state.local_pawn and state.local_pawn.pawn
@@ -187,46 +247,7 @@ local function capture(state, phase, pawn_name)
         rows[#rows+1] = table.concat({"note", encode(entry[notes.header]), photo_name(entry[notes.image]),
             table.unpack(fields(entry[notes.body], encode))}, "\t")
     end
-    local quests = {}
-    canonical.ActiveQuests:ForEach(function(key, value)
-        local id, entry = key:get():ToString(), value:get()
-        if not content_paths.quest_id(id) then return end
-        local ok, frame = pcall(function()
-            local images = fields(entry[quest.images], photo_name)
-            local objectives = {}
-            for index = 1, count(entry[quest.objectives]) do
-                local path = item_path(entry[quest.objectives][index])
-                if path then objectives[#objectives + 1] = path end
-            end
-            local step = integer(quest_catalog.tracked_step(canonical, entry), min_int32, max_int32)
-            local row = {#objectives > 0 and "quest-objectives" or "quest", id, integer(entry[quest.kind], 0, 255),
-                step, integer(entry[quest.final], 0, max_int32), encode(entry[quest.name]),
-                encode(entry[quest.giver]), photo_name(entry[quest.icon]), table.concat(images, ",")}
-            if #objectives > 0 then row[#row + 1] = table.concat(objectives, ",") end
-            for _, description in ipairs(fields(entry[quest.descriptions], encode)) do row[#row + 1] = description end
-            return {id = id, active = step > 0, row = table.concat(row, "\t")}
-        end)
-        if ok then quests[#quests + 1] = frame end
-    end)
-    table.sort(quests, function(first, second)
-        if first.active ~= second.active then return first.active end
-        return first.id < second.id
-    end)
-    local size, included = 0, 0
-    for _, row in ipairs(rows) do size = size + #row + 1 end
-    for _, frame in ipairs(quests) do
-        local row_size = #frame.row + 1
-        if #rows < max_rows and size + row_size <= max_size then
-            rows[#rows + 1], size = frame.row, size + row_size
-            included = included + 1
-        end
-    end
-    local omitted = #canonical.ActiveQuests - included
-    local warning = omitted > 0 and (state.map .. ":" .. omitted) or nil
-    if warning and warning ~= quest_warning then
-        print(("[SilverfishCoop] Guest Journal omitted %d quest rows due to unsupported data or view limits\n"):format(omitted))
-    end
-    quest_warning = warning
+    append_quests(canonical, rows)
     local contents = table.concat(rows, "\n") .. "\n"
     if #rows > max_rows or #contents > max_size then error("The co-op view exceeds its transfer bounds", 0) end
     return contents
