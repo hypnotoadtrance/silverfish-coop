@@ -735,6 +735,25 @@ function board_view.command(fields, state, phase)
         or "authenticated bounty board state rendered"
 end
 
+function board_view.stock_row(status_row)
+    local profile = binding.profile
+    if stock_session then
+        return status_row("native-wire-board-stock", profile.map, binding.name, profile.name,
+            stock_session.quest, stock_session.state, stock_session.sequence, stock_session.open)
+    elseif stock_pending then
+        return status_row("native-wire-board-stock", profile.map, binding.name, profile.name,
+            "-", "loading", stock_pending.sequence, stock_pending.sequence)
+    elseif stock_projection then
+        return status_row("native-wire-board-stock", profile.map, binding.name, profile.name,
+            "-", "visible", stock_projection.sequence, stock_projection.sequence)
+    end
+end
+
+function board_view.open_reply(fields, state, phase, status_row)
+    local message = board_view.command(fields, state, phase)
+    return message, board_view.stock_row(status_row)
+end
+
 function board_view.rows(state, phase, status_row)
     if not binding or state.map ~= binding.profile.map or phase ~= binding.phase or not same(state.world, binding.world)
         or not state.local_pawn or not same(state.local_pawn.pawn, binding.pawn) then return {} end
@@ -744,16 +763,8 @@ function board_view.rows(state, phase, status_row)
         rows[1] = status_row("native-wire-board", profile.map, binding.name, profile.name, profile.quests[selection],
             session and session.state or binding.status or "waiting", session and session.sequence or 0, session and session.open or 0)
     end
-    if stock_session then
-        rows[#rows + 1] = status_row("native-wire-board-stock", profile.map, binding.name, profile.name,
-            stock_session.quest, stock_session.state, stock_session.sequence, stock_session.open)
-    elseif stock_pending then
-        rows[#rows + 1] = status_row("native-wire-board-stock", profile.map, binding.name, profile.name,
-            "-", "loading", stock_pending.sequence, stock_pending.sequence)
-    elseif stock_projection then
-        rows[#rows + 1] = status_row("native-wire-board-stock", profile.map, binding.name, profile.name,
-            "-", "visible", stock_projection.sequence, stock_projection.sequence)
-    end
+    local stock_row = board_view.stock_row(status_row)
+    if stock_row then rows[#rows + 1] = stock_row end
     return rows
 end
 

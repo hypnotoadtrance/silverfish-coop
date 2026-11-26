@@ -174,8 +174,8 @@ class WireBoardTests(unittest.IsolatedAsyncioTestCase):
         action.return_value = {native_board_contract.CATALOG_KEY: {
             "map": area, "pawn": "Player_FP_C AuthorityGuest", "board": board, "offers": [], "turnins": [quest],
         }}
-        bridge.command.return_value = frame("visible", 5, 5, "-")
-        self.assertEqual((await press("stock-view", 5, 5, "-"))["native_wire_board_stock"]["state"], "visible")
+        bridge.command.return_value = {**frame("visible", 5, 5, "-"), native_board_contract.MENU_REPLY: True}
+        self.assertEqual(await press("stock-view", 5, 5, "-"), frame("loading", 5, 5, "-"))
         self.assertEqual(bridge.command.await_args.args, ("native-wire-board-stock-open", "5", area, pawn, "-", quest))
         action.return_value = {"quest_id": quest, "step": -10}
         await press("stock-turnin", 6, 5, quest)

@@ -3793,6 +3793,39 @@ class Bridge:
                 "ack": {"id": nonce, "result": result, "message": message}, native_guest_clock.KEY: proof}
 
     @staticmethod
+    def _local_board_menu_reply(raw: str, fields: tuple[str, ...]) -> dict:
+        tag = native_board_contract.MENU_REPLY
+        rows = [line.split("\t") for line in raw[:-1].split("\n")] if len(raw) <= 32768 and raw.endswith("\n") else []
+        if not rows or len(rows[0]) != 7 or rows[0][:3] != [tag, "1", fields[0]]:
+            raise RuntimeError("The stock board receipt did not match the request")
+        _, _, nonce, phase, area, result, message = rows[0]
+        if result != "accepted":
+            raise RuntimeError(message or "The stock board command was refused")
+        if len(rows) != 2:
+            raise RuntimeError("The stock board receipt did not verify the requested menu")
+        row = rows[1]
+        reply = {"state": phase, "map": area, tag: True, "ack": {"id": nonce, "result": result, "message": message}}
+        if fields[1] == native_board_contract.CATALOG and len(fields) in (4, 5, 6):
+            if (phase != "hosting" or native_board_contract.board_map(fields[3]) != area
+                    or row[:4] != [fields[1], area, *fields[2:4]]):
+                raise RuntimeError("The stock board catalog did not match the current world")
+            try:
+                reply[native_board_contract.CATALOG_KEY] = native_board_contract.parse_catalog(row)
+            except ValueError as error:
+                raise RuntimeError("The stock board catalog receipt was malformed") from error
+            return reply
+        if fields[1] == native_board_contract.MENU_OPEN and len(fields) == 7 and len(row) == 8:
+            sequence, expected_area, pawn = fields[2:5]
+            board = row[3]
+            if (phase in ("hosting", "connected") and expected_area == area
+                    and native_board_contract.board_map(board) == area and _held_input_sequence(sequence)
+                    and row == ["native-wire-board-stock", area, pawn, board, "-", "visible", sequence, sequence]):
+                reply[native_board_contract.MENU_KEY] = {"map": area, "pawn": pawn, "board": board, "quest": "-",
+                                                        "state": "visible", "sequence": int(sequence), "open": int(sequence)}
+                return reply
+        raise RuntimeError("The stock board receipt did not verify the requested menu")
+
+    @staticmethod
     def _local_stock_interaction_reply(raw: str, fields: tuple[str, ...]) -> dict:
         rows = [line.split("\t") for line in raw.splitlines()] if len(raw) <= 16384 and raw.endswith("\n") else []
         if (not rows or len(rows[0]) != 9 or rows[0][:3] != ["native-stock-interaction-reply", "1", fields[0]]
@@ -3822,7 +3855,8 @@ class Bridge:
     async def command(self, action: str, *arguments: str, timeout: float = 8, update_status: bool = True,
                       stash_payload: bytes | None = None) -> dict:
         fields = (uuid.uuid4().hex, action, *arguments)
-        if any(len(value) > 1024 or "\t" in value or "\r" in value or "\n" in value for value in fields):
+        if any(len(value) > (8192 if action == native_board_contract.MENU_OPEN and index in (5, 6) else 1024)
+               or "\t" in value or "\r" in value or "\n" in value for index, value in enumerate(fields)):
             raise ValueError("Invalid game bridge command value")
         request = "\t".join(fields) + "\n"
         if action == native_stash.RENDER_MEMORY:
@@ -3865,6 +3899,9 @@ class Bridge:
             if (action in (native_stock_door.DISPATCH, native_stock_switch.PROJECT, *native_stock_switch.ACTIONS)
                     and raw.startswith("native-stock-interaction-reply\t")):
                 return self._local_stock_interaction_reply(raw, fields)
+            if (action in (native_board_contract.CATALOG, native_board_contract.MENU_OPEN)
+                    and raw.startswith(native_board_contract.MENU_REPLY + "\t")):
+                return self._local_board_menu_reply(raw, fields)
             if action == native_guest_clock.APPLY and raw.startswith(native_guest_clock.REPLY + "\t"):
                 return self._local_guest_clock_reply(raw, fields)
             status = self._parse_status(raw)

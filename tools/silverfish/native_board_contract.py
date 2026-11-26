@@ -11,6 +11,9 @@ COMMAND = "native-board-contract"
 KEY = "native_board_contract"
 CATALOG = "native-board-contract-catalog"
 CATALOG_KEY = "native_board_contract_catalog"
+MENU_OPEN = "native-wire-board-stock-open"
+MENU_KEY = "native_wire_board_stock"
+MENU_REPLY = "native-board-menu-reply"
 REFUSAL = "stock_board_contract_"
 QUEST_ID = re.compile(r"[A-Za-z0-9_]{1,96}")
 VISIT_ID = re.compile(r"[0-9a-f]{32}")
@@ -191,7 +194,8 @@ async def catalog(host, bridge, actor, selected_board=None, *, specialized=(), e
     if (snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("pawn"), proof.get("board")) != (
             "hosting", area, area, pawn, board):
         raise RuntimeError("The stock board catalog did not identify the current actor and board")
-    host.last_game, host.last_seen = snapshot, time.monotonic()
+    if not snapshot.get(MENU_REPLY):
+        host.last_game, host.last_seen = snapshot, time.monotonic()
     return {CATALOG_KEY: proof}
 
 

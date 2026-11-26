@@ -306,6 +306,47 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await board.catalog(host, bridge, "guest", actor), {board.CATALOG_KEY: proof})
         bridge.command.assert_awaited_once_with(board.CATALOG, PAWN, actor, "-", "-", timeout=5)
 
+    async def test_resident_catalog_receipt_does_not_replace_world_status(self):
+        host = self.host()
+        original = host.last_game, host.last_seen
+        bridge = runtime.Bridge(Path("unused"), None)
+        bridge._local_status = host.last_game
+
+        async def reply(request, timeout):
+            nonce = request.split(b"\t", 1)[0].decode()
+            return (f"{board.MENU_REPLY}\t1\t{nonce}\thosting\t{SHOPKEEP}\taccepted\tverified\n"
+                    f"{board.CATALOG}\t{SHOPKEEP}\t{PAWN}\t{BOARD}\t1\t1\t{UNREGISTERED_KILL}\t{EYE}\n")
+
+        bridge.local_bridge = SimpleNamespace(command=reply)
+        answer = await board.catalog(host, bridge, "guest", BOARD)
+        self.assertEqual(answer[board.CATALOG_KEY]["offers"], [UNREGISTERED_KILL])
+        self.assertEqual(answer[board.CATALOG_KEY]["turnins"], [EYE])
+        self.assertIs(bridge._local_status, original[0])
+        self.assertIs(host.last_game, original[0])
+        self.assertEqual(host.last_seen, original[1])
+        with self.assertRaisesRegex(RuntimeError, "did not match the current world"):
+            await bridge.command(board.CATALOG, "Player_FP_C Other", BOARD, "-", "-")
+
+    async def test_resident_stock_menu_accepts_full_catalog_and_rejects_a_stale_readback(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        options = ",".join(f"Unregistered_Quest_Number_{index}" for index in range(64))
+        self.assertGreater(len(options), 1024)
+        original = {"state": "connected", "map": SHOPKEEP}
+        bridge._local_status = original
+
+        async def reply(request, timeout):
+            nonce, action, _, area, pawn, offered, ready = request.decode().rstrip("\n").split("\t")
+            self.assertEqual((action, area, pawn, offered, ready), (board.MENU_OPEN, SHOPKEEP, PAWN, options, "-"))
+            return (f"{board.MENU_REPLY}\t1\t{nonce}\tconnected\t{area}\taccepted\tverified\n"
+                    f"native-wire-board-stock\t{area}\t{pawn}\t{BOARD}\t-\tvisible\t12\t12\n")
+
+        bridge.local_bridge = SimpleNamespace(command=reply)
+        answer = await bridge.command(board.MENU_OPEN, "12", SHOPKEEP, PAWN, options, "-")
+        self.assertEqual(answer[board.MENU_KEY]["open"], 12)
+        self.assertIs(bridge._local_status, original)
+        with self.assertRaisesRegex(RuntimeError, "did not verify the requested menu"):
+            await bridge.command(board.MENU_OPEN, "13", SHOPKEEP, PAWN, options, "-")
+
     def test_repeated_proof_rows_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             bridge = runtime.Bridge(Path(directory), None)

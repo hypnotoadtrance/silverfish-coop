@@ -1768,6 +1768,11 @@ status_publication.stock_interactions = {
     ["native-stock-switch-project"] = {phase = "connected", command = native_stock_switch.command},
 }
 
+status_publication.board_menu = {
+    ["native-board-contract-catalog"] = native_board_contract.catalog_reply,
+    ["native-wire-board-stock-open"] = native_wire_board.open_reply,
+}
+
 local function tick(fields, pending, periodic)
     if fields and pending and fields[2] == "native-guest-smg-hold-aim" then
         if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
@@ -1777,6 +1782,20 @@ local function tick(fields, pending, periodic)
     end
     local state, current_phase = observe_session()
     if not state then return end
+    local board_menu = fields and status_publication.board_menu[fields[2]]
+    if board_menu and pending and not periodic
+        and status_publication.compact() and status_publication.steady(state, current_phase) then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        local accepted, message, readback = pcall(board_menu, fields, state, current_phase, status_row)
+        if accepted and not readback then
+            accepted, message = false, "stock_board_menu_readback_unavailable"
+        end
+        local reply = status_row("native-board-menu-reply", 1, fields[1], current_phase, state.map,
+            accepted and "accepted" or "error", message) .. "\n"
+        SilverfishPublishLocalBridgeReply(pending.ticket, accepted and reply .. readback .. "\n" or reply)
+        return true
+    end
     local interaction = fields and status_publication.stock_interactions[fields[2]]
     if interaction and pending and not periodic and current_phase == interaction.phase
         and status_publication.compact() and status_publication.steady(state, current_phase) then

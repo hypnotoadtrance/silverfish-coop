@@ -252,14 +252,25 @@ local function catalog(fields, state, phase)
     if not unchanged(context, state, phase, pawn, board_name) then refuse("catalog_scope_changed") end
     table.sort(offers)
     table.sort(ready)
-    last = {mode = "catalog", pawn = pawn, board = board_name, context = context, offers = offers, ready = ready}
-    return "Verified the current stock board options"
+    return {mode = "catalog", pawn = pawn, board = board_name, context = context, offers = offers, ready = ready}
+end
+
+local function catalog_row(state, result, status_row)
+    return status_row(catalog_operation, state.map, result.pawn, result.board, #result.offers, #result.ready,
+        #result.offers > 0 and table.concat(result.offers, ",") or "-",
+        #result.ready > 0 and table.concat(result.ready, ",") or "-")
+end
+
+function board_contract.catalog_reply(fields, state, phase, status_row)
+    local result = catalog(fields, state, phase)
+    return "Verified the current stock board options", catalog_row(state, result, status_row)
 end
 
 function board_contract.command(fields, state, phase)
     if fields[2] == catalog_operation then
         last = nil
-        return catalog(fields, state, phase)
+        last = catalog(fields, state, phase)
+        return "Verified the current stock board options"
     end
     if fields[2] ~= operation then return end
     last = nil
@@ -391,9 +402,7 @@ function board_contract.rows(state, phase, status_row)
         return {}
     end
     if last.mode == "catalog" then
-        return {status_row(catalog_operation, state.map, last.pawn, last.board, #last.offers, #last.ready,
-            #last.offers > 0 and table.concat(last.offers, ",") or "-",
-            #last.ready > 0 and table.concat(last.ready, ",") or "-")}
+        return {catalog_row(state, last, status_row)}
     end
     return {status_row(operation, last.verb, last.mode, state.map, last.pawn, last.board, last.quest,
         last.state, last.before, last.after, last.expected_step or "-", last.cash_before, last.cash_after,

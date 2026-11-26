@@ -192,16 +192,17 @@ class WireBoardView:
                     or not all(native_board_contract.quest_id(quest) for quest in (*offers, *turnins))
                     or len(set(offers + turnins)) != len(offers) + len(turnins)):
                 raise RuntimeError("The host board catalog contains invalid options")
-            rendered = await self.bridge.command("native-wire-board-stock-open", str(sequence), area, pawn,
+            rendered = await self.bridge.command(native_board_contract.MENU_OPEN, str(sequence), area, pawn,
                                                   ",".join(offers) or "-", ",".join(turnins) or "-", timeout=3)
-            report = rendered.get("native_wire_board_stock", {})
+            report = rendered.get(native_board_contract.MENU_KEY, {})
             if tuple(report.get(name) for name in ("map", "pawn", "board", "quest", "state", "sequence", "open")) != (
                     area, pawn, board, "-", "visible", sequence, sequence):
                 raise RuntimeError("The game did not verify the native bounty board menu")
             self.stock_open = StockMenu((epoch, area, pawn, board, sequence), frozenset(offers), frozenset(turnins))
+            compact = rendered.get(native_board_contract.MENU_REPLY, False)
             self.control.event("native_wire_board_stock_opened", operation_id=operation, board=board, sequence=sequence,
-                               offers=len(offers), turnins=len(turnins))
-            return rendered
+                               offers=len(offers), turnins=len(turnins), compact=compact)
+            return snapshot if compact else rendered
         except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
             self.control.event("native_wire_board_stock_unavailable", operation_id=operation, board=board, reason=str(error))
             return snapshot
