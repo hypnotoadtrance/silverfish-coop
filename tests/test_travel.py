@@ -90,6 +90,25 @@ class TravelGateTests(unittest.TestCase):
 
 
 class AuthoredCrossingEventTests(unittest.TestCase):
+    def test_unregistered_exit_uses_its_live_route_and_requires_a_crossing_ticket(self):
+        route = next(row for row in AUTHORED_ROUTES if row.kind == "overlap")
+        fields = ["authored-request", "4", route.source, route.destination, "LiveEntrance_8", "CustomExit_72",
+                  "discovered-overlap", "37", "19"]
+        pending = ["\t".join(row).encode() for row in (
+            fields, fields[:-1], [*fields[:5], route.actor, *fields[6:]],
+            [*fields[:3], "/Game/Classes/Maps/../Other", *fields[4:]], [*fields[:7], "2147483648", "19"],
+        )]
+        bridge = Bridge(Path("unused"), Mock())
+        bridge.local_bridge = Mock(input_ready=lambda: bool(pending), read_input=lambda limit: [
+            pending.pop(0) for _ in range(min(limit, len(pending)))
+        ])
+        (sequence, live_route, ticket), = bridge.authored_zone_requests()
+        self.assertEqual((sequence, ticket), (4, 19))
+        self.assertEqual((live_route.source, live_route.destination, live_route.kind, live_route.discovered),
+                         (route.source, route.destination, "overlap", True))
+        self.assertEqual((live_route.entrance, live_route.actor, live_route.travel_time_step),
+                         ("LiveEntrance_8", "CustomExit_72", 37))
+
     def test_only_exact_stock_overlaps_carry_a_positive_ticket(self):
         overlap = next(route for route in AUTHORED_ROUTES if route.kind == "overlap")
         door = next(route for route in AUTHORED_ROUTES if route.kind == "door")

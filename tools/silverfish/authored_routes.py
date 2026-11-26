@@ -33,6 +33,7 @@ class AuthoredRoute:
     child: str | None = None
     arrival_child: str | None = None
     arrival_entrance: str | None = None
+    discovered: bool = False
 
 
 _PACKAGES = {

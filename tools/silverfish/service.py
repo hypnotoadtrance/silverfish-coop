@@ -1451,7 +1451,8 @@ class Host:
         if (not self.expanded_zones or self.stopping or self.transitioning or self.item_travel_pending()
                 or self.last_game.get("state") != "hosting" or self.last_game.get("map") != route.source):
             return {"ok": False, "error": "authored_route_unavailable"}
-        if exit_crossing is not None and (route.kind != "overlap" or not self.last_game.get("native_zone_party_guard")):
+        if ((route.discovered and exit_crossing is None)
+                or exit_crossing is not None and (route.kind != "overlap" or not self.last_game.get("native_zone_party_guard"))):
             return {"ok": False, "error": "exit_crossing_unavailable"}
         roles = self.roles()
         if refusal := self.travel_refusal(route.destination, roles, exit_crossing=exit_crossing):
@@ -4181,7 +4182,7 @@ class Host:
                 result = await self.travel_authored(bridge, transport, route, exit_crossing=crossing)
                 self.control.event("native_authored_zone_request", sequence=sequence, source=route.source,
                                    destination=route.destination, actor=route.actor, entrance=route.entrance,
-                                   kind=route.kind, travel_time_step=route.travel_time_step,
+                                   kind=route.kind, travel_time_step=route.travel_time_step, discovered=route.discovered,
                                    exit_crossing=crossing, result=result)
                 if not result["ok"]:
                     await self.release_native_exit(bridge, route.source)

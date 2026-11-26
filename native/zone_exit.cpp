@@ -9,7 +9,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 
 #include <Helpers/String.hpp>
@@ -205,7 +207,7 @@ namespace
 
     std::atomic<std::uint64_t> generation{};
     std::atomic<bool> installed{};
-    std::array<Hook::GlobalCallbackId, 2> callbacks{Hook::ERROR_ID, Hook::ERROR_ID};
+    std::array<Hook::GlobalCallbackId, 4> callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
 
     struct RemotePlayer
     {
@@ -246,11 +248,22 @@ namespace
         Clock::time_point expires{};
     };
 
+    struct DiscoveredExit
+    {
+        RC::StringType destination;
+        RC::StringType entrance;
+        std::int32_t time_step{};
+        bool operator==(const DiscoveredExit&) const = default;
+    };
+
     struct ExitCrossing
     {
         Unreal::FWeakObjectPtr actor;
+        Unreal::FWeakObjectPtr box;
         const Authored::Route* route{};
+        DiscoveredExit discovered;
         std::int64_t ticket{};
+        bool published{};
     };
 
     struct Scope
@@ -302,6 +315,8 @@ namespace
         const Authored::Route* authored_request{};
         ExitApproach approach;
         ExitCrossing crossing;
+        Unreal::FWeakObjectPtr probing_exit;
+        Unreal::FWeakObjectPtr probing_box;
         const CountdownRoute* countdown{};
         const ScriptedDreamRoute* scripted_dream{};
         std::string_view event;
@@ -531,6 +546,45 @@ namespace
     {
         auto* level = read_object(field<Unreal::FObjectProperty>(world, STR("PersistentLevel")), world);
         return level && static_cast<Unreal::AActor*>(actor)->GetLevel() == level;
+    }
+
+    bool exit_token(RC::StringViewType text)
+    {
+        return !text.empty() && std::ranges::all_of(text, [](RC::CharType c) {
+            return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+        });
+    }
+
+    std::optional<DiscoveredExit> discover_exit(Unreal::UObject* exit, Unreal::UObject* box, Unreal::UWorld* world)
+    {
+        if (scope.authored_world.empty() || !scope.exit_class || !live_object(exit) || !live_object(box) ||
+            !exit->GetClassPrivate()->IsChildOf(scope.exit_class) || !in_persistent_level(exit, world) ||
+            !exit_token(exit->GetName()) || exit->GetName().size() > 96 ||
+            box->GetOuterPrivate() != exit || box != read_object(field<Unreal::FObjectProperty>(exit, STR("Box")), exit) ||
+            box->GetClassPrivate() != find<Unreal::UClass>(STR("/Script/Engine.BoxComponent"))) return {};
+        for (auto* stock : {scope.overlap, scope.activate, scope.exit_power})
+        {
+            if (!stock || exit->GetClassPrivate()->GetFunctionByNameInChain(stock->GetFName()) != stock) return {};
+        }
+        auto* level = field<Unreal::FSoftObjectProperty>(exit, STR("NextLevel"));
+        auto* tag = field<Unreal::FStrProperty>(exit, STR("Entrance Tag"));
+        auto* duration = field<Unreal::FDoubleProperty>(exit, STR("Travel_TimeStep"));
+        if (!level || !tag || !duration || level->GetPropertyClass().Get() != find<Unreal::UClass>(STR("/Script/Engine.World")))
+            return {};
+        const auto& path = level->ContainerPtrToValuePtr<Unreal::FSoftObjectPtr>(exit)->ToSoftObjectPath();
+        if (!path.GetSubPathString().IsEmpty()) return {};
+        const auto asset = path.GetAssetPathString();
+        const RC::StringViewType object{*asset};
+        const RC::StringViewType entrance{*tag->GetPropertyValueInContainer(exit)};
+        const auto split = object.find(STR('.'));
+        const auto slash = object.rfind(STR('/'));
+        if (object.size() > 240 || !object.starts_with(STR("/Game/Classes/Maps/")) ||
+            split == object.npos || slash >= split || object.substr(slash + 1, split - slash - 1) != object.substr(split + 1) ||
+            !exit_token(object.substr(split + 1)) || object == scope.authored_world ||
+            entrance.size() > 64 || entrance == STR("None") || !exit_token(entrance)) return {};
+        const double time = duration->GetPropertyValueInContainer(exit);
+        if (!std::isfinite(time) || time < 0 || time > 2147483647 || std::trunc(time) != time) return {};
+        return DiscoveredExit{RC::StringType{object.substr(0, split)}, RC::StringType{entrance}, static_cast<std::int32_t>(time)};
     }
 
     const Authored::Route* expanded_route(const Scope& current, Unreal::UObject* actor)
@@ -841,10 +895,12 @@ namespace
         auto* exit = crossing.actor.Get();
         // The exact stock overlap commits the route. Keep that decision while the
         // source checkpoints, provided the world, pawn, exit and live roster still match.
-        return scope.request_latched && crossing.ticket && crossing.route && world && scope.host &&
-            live_object(local) && actor_world(local) == world && is_local_pawn(local) &&
-            scope.role->GetPropertyValueInContainer(local) == 3 && !game_roster_failure(scope) &&
-            is_expanded_exit(scope, exit, world, *crossing.route) && matches_expanded_exit(exit, *crossing.route);
+        if (!scope.request_latched || !crossing.ticket || !world || !scope.host ||
+            !live_object(local) || actor_world(local) != world || !is_local_pawn(local) ||
+            scope.role->GetPropertyValueInContainer(local) != 3 || game_roster_failure(scope)) return false;
+        return crossing.route
+            ? is_expanded_exit(scope, exit, world, *crossing.route) && matches_expanded_exit(exit, *crossing.route)
+            : discover_exit(exit, crossing.box.Get(), world) == crossing.discovered;
     }
 
     int lua_exit_approach(const Lua& lua)
@@ -906,10 +962,12 @@ namespace
             const auto ticket = lua.get_integer();
             const auto destination = lua.get_string();
             const auto step = lua.get_integer();
-            const bool matching = ticket > 0 && ticket == scope.crossing.ticket && scope.crossing.route &&
-                destination == RC::to_utf8_string(scope.crossing.route->destination_package) &&
-                step == scope.crossing.route->travel_time_step.value_or(0);
-            if (matching && !scope.authored_request)
+            const auto& crossing = scope.crossing;
+            const RC::StringViewType expected = crossing.route ? crossing.route->destination_package : crossing.discovered.destination;
+            const auto time = crossing.route ? crossing.route->travel_time_step.value_or(0) : crossing.discovered.time_step;
+            const bool matching = ticket > 0 && ticket == crossing.ticket &&
+                destination == RC::to_utf8_string(expected) && step == time;
+            if (matching && crossing.published)
             {
                 accepted = crossing_current(scope.local.Get());
                 if (!accepted) revoke_crossing();
@@ -1028,6 +1086,15 @@ namespace
         if (params.overlapping) scope.dream_return_requested = true;
     }
 
+    void finish_exit_probe(Iteration&, Unreal::UObject* actor, Unreal::UFunction* function, void*)
+    {
+        if (Unreal::IsInGameThreadRaw() && actor == scope.probing_exit.Get() && function == scope.overlap)
+        {
+            scope.probing_exit.Reset();
+            scope.probing_box.Reset();
+        }
+    }
+
     void intercept(Iteration& iteration, Unreal::UObject* context, Unreal::UFunction* callee, void* locals)
     {
         if (!Unreal::IsInGameThreadRaw() || !context || !callee || !installed.load(std::memory_order_acquire) ||
@@ -1095,8 +1162,47 @@ namespace
             return;
         }
 
+        // Let the stock overlap evaluate its own conditions on a new exit. Only a
+        // nested, stock ActivateLevel can commit it; every direct load stays blocked.
+        auto* local_pawn = scope.local.Get();
+        if (callee == scope.activate && context == scope.probing_exit.Get())
+        {
+            iteration.PreventOriginalFunctionCall();
+            auto* box = scope.probing_box.Get();
+            scope.probing_exit.Reset();
+            scope.probing_box.Reset();
+            if (!iteration.OriginalFunctionCallPrevented() || !host_is_ready(local_pawn) ||
+                !allows_distance(scope, local_pawn) || crossing_sequence >= (std::int64_t{1} << 53) - 1) return;
+            if (auto route = discover_exit(context, box, static_cast<Unreal::UWorld*>(world)))
+            {
+                scope.crossing.actor = context;
+                scope.crossing.box = box;
+                scope.crossing.discovered = std::move(*route);
+                scope.crossing.ticket = ++crossing_sequence;
+                scope.request_latched = true;
+            }
+            return;
+        }
+
         auto* other = is_overlap ? read_object(scope.overlap_actor, locals) : nullptr;
         if (other && other->GetClassPrivate() != scope.pawn_class) return;
+        if (is_overlap && other && other == local_pawn && host_is_ready(other) &&
+            !expanded_route(scope, context) && !is_route_exit(scope, context, static_cast<Unreal::UWorld*>(world)))
+        {
+            auto* box = read_object(scope.overlap_component, locals);
+            if (discover_exit(context, box, static_cast<Unreal::UWorld*>(world)))
+            {
+                if (allows_distance(scope, other))
+                {
+                    scope.probing_exit = context;
+                    scope.probing_box = box;
+                    return;
+                }
+                iteration.PreventOriginalFunctionCall();
+                scope.event = "too_far";
+                return;
+            }
+        }
         iteration.PreventOriginalFunctionCall();
         if (!is_overlap || !iteration.OriginalFunctionCallPrevented() || scope.request_latched || !other) return;
         auto* local = scope.local.Get();
@@ -1236,9 +1342,11 @@ namespace
 
     int lua_take_authored_route(const Lua& lua)
     {
-        if (!Unreal::IsInGameThreadRaw() || scope.generation != generation.load(std::memory_order_acquire) ||
-            !scope.authored_request) return 0;
+        if (!Unreal::IsInGameThreadRaw() || scope.generation != generation.load(std::memory_order_acquire)) return 0;
         const auto* route = scope.authored_request;
+        const auto& crossing = scope.crossing;
+        const bool discovered = crossing.ticket && !crossing.route && !crossing.published;
+        if (!route && !discovered) return 0;
         scope.authored_request = nullptr;
         auto* local = scope.local.Get();
         if (scope.crossing.ticket ? !crossing_current(local) : !active_host(local) || !allows_distance(scope, local))
@@ -1248,8 +1356,19 @@ namespace
             scope.event = "request_unavailable";
             return 0;
         }
-        const auto source_package = route->source_world.substr(0, route->source_world.rfind(STR('.')));
-        lua.set_string(RC::to_string(source_package));
+        scope.crossing.published = scope.crossing.ticket != 0;
+        const auto source = discovered ? scope.authored_world : route->source_world;
+        lua.set_string(RC::to_string(source.substr(0, source.rfind(STR('.')))));
+        if (discovered)
+        {
+            lua.set_string(RC::to_string(crossing.discovered.destination));
+            lua.set_string(RC::to_string(crossing.discovered.entrance));
+            lua.set_string(RC::to_string(crossing.actor.Get()->GetName()));
+            lua.set_string("discovered-overlap");
+            lua.set_integer(crossing.discovered.time_step);
+            lua.set_integer(crossing.ticket);
+            return 7;
+        }
         lua.set_string(RC::to_string(route->destination_package));
         lua.set_string(RC::to_string(route->entrance));
         lua.set_string(RC::to_string(route->source_actor));
@@ -1325,7 +1444,13 @@ namespace silverfish::native_zone
             [](Iteration& iteration, Unreal::UObject* context, Unreal::FFrame& frame, void*) {
                 intercept(iteration, context, frame.Node(), frame.Locals());
             }, {false, false, owner, STR("Stock level exit script")});
-        installed.store(callbacks[0] != Hook::ERROR_ID && callbacks[1] != Hook::ERROR_ID, std::memory_order_release);
+        callbacks[2] = Hook::RegisterProcessEventPostCallback(finish_exit_probe,
+            {false, false, owner, STR("Release the stock exit overlap probe")});
+        callbacks[3] = Hook::RegisterProcessLocalScriptFunctionPostCallback(
+            [](Iteration& iteration, Unreal::UObject* context, Unreal::FFrame& frame, void*) {
+                finish_exit_probe(iteration, context, frame.Node(), frame.Locals());
+            }, {false, false, owner, STR("Release the stock exit script probe")});
+        installed.store(std::ranges::all_of(callbacks, [](auto id) { return id != Hook::ERROR_ID; }), std::memory_order_release);
     }
 
     void uninstall_hooks()
