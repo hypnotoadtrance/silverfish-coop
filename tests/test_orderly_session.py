@@ -32,6 +32,7 @@ class OrderlySessionTests(unittest.IsolatedAsyncioTestCase):
         host.pickup_audio = Mock(frame=Mock(return_value=None))
         host.party = party.new_party()
         host.native_requests = asyncio.Queue(maxsize=8)
+        host.native_request_ready = asyncio.Event()
         host.prepared_guest_leaves = {}
         host.confirmed_guest_leaves = set()
         guest = store.activate(invitation["guest_id"], invitation["credential"], invitation["character_id"])
@@ -50,7 +51,7 @@ class OrderlySessionTests(unittest.IsolatedAsyncioTestCase):
             return reply
         task = asyncio.create_task(reply)
         await asyncio.sleep(0)
-        await host.service_guest_native_requests("bridge")
+        await host.service_guest_native_batch("bridge")
         return await task
 
     async def test_guest_leave_requires_own_paired_frame_and_exact_confirmation(self):

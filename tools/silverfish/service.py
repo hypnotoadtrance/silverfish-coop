@@ -84,6 +84,8 @@ NOTHING_VOLUME = f"KillVolume_BP_C {NOTHING}.Nothing_P:PersistentLevel.KillVolum
 _TIMED_INTERACTIONS = (frozenset({"native-loot-inspect", "native-loot-open", "native-loot-claim",
                                   native_authored_pickup.ACTION, native_loose_pickup.CLAIM})
                        if os.environ.get("SILVERFISH_COOP_TITLE_FIXTURES") == "1" else frozenset())
+_NATIVE_REQUESTS_PER_PASS = 3
+_NATIVE_REQUEST_PASS_SECONDS = .025
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
                         native_dialogue.OPEN, native_dialogue.CHOOSE, native_borough_barter.ACTION, native_borough_barter.CRAFT_ACTION,
                         native_borough_barter.CRAFT_PREFLIGHT,
@@ -2251,6 +2253,24 @@ class Host:
         return bool(guest_id in self.confirmed_guest_leaves or prior and prior.epoch == self.zone_epoch
                     and prior.expires > time.monotonic())
 
+    async def service_guest_native_batch(self, bridge: Bridge) -> None:
+        if self.stopping or self.native_checkpoint_unsafe or self.native_requests.empty():
+            return
+        visit = (self.zone_epoch, self.last_game.get("map"))
+        deadline = time.monotonic() + _NATIVE_REQUEST_PASS_SECONDS
+        # An action already in progress must finish. Only start additional work while
+        # the same world is playable and before the next pass would be crowded out.
+        can_batch = not self.transitioning and not self.party.get("wipe")
+        await self.service_guest_native_requests(bridge)
+        if not can_batch:
+            return
+        for _ in range(_NATIVE_REQUESTS_PER_PASS - 1):
+            if (self.native_requests.empty() or self.stopping or self.native_checkpoint_unsafe
+                    or self.transitioning or self.party.get("wipe") or self.last_game.get("state") != "hosting"
+                    or (self.zone_epoch, self.last_game.get("map")) != visit or time.monotonic() >= deadline):
+                break
+            await self.service_guest_native_requests(bridge)
+
     async def service_guest_native_requests(self, bridge: Bridge) -> None:
         if self.native_requests.empty():
             return
@@ -4374,8 +4394,7 @@ class Host:
                     await native_loot.restore_key_unlocks(self, bridge)
                 except (OSError, ValueError, RuntimeError) as error:
                     self.control.event("native_loot_key_restore_unavailable", reason=str(error))
-            if not self.stopping and not self.native_checkpoint_unsafe:
-                await self.service_guest_native_requests(bridge)
+            await self.service_guest_native_batch(bridge)
             if not self.stopping:
                 if not self.transitioning:
                     with contextlib.suppress(OSError, RuntimeError, TimeoutError):

@@ -639,6 +639,83 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
             await host.service_guest_native_requests(bridge)
             self.assertFalse(host.native_request_ready.is_set())
 
+    async def test_host_batches_ready_guests_in_fifo_without_overlapping_claims(self):
+        host = service.Host.__new__(service.Host)
+        host.native_requests = asyncio.Queue()
+        host.native_request_ready = asyncio.Event()
+        host.stopping = host.native_checkpoint_unsafe = host.transitioning = False
+        host.party = {"wipe": None}
+        host.zone_epoch = "visit"
+        host.last_game = {"map": OBSERVATORY, "state": "hosting"}
+        host.authenticated_guest = lambda guest: ("guest", f"character-{guest}")
+        host.guest_leave_pending = Mock(return_value=False)
+        host.pickup_audio = Mock()
+        host.pickup_audio.frame.return_value = None
+        bridge = Mock()
+        order = []
+
+        async def claim(owner, game, character, target, operation):
+            self.assertIs(owner, host)
+            self.assertIs(game, bridge)
+            self.assertEqual(target, "same-world-item")
+            self.assertEqual(operation, character.removeprefix("character-"))
+            order.append(f"begin-{operation}")
+            await asyncio.sleep(0)
+            order.append(f"finish-{operation}")
+            if len(order) != 2:
+                raise service.party.RuleError("already_claimed")
+            return {"claimed_by": character}
+
+        def enqueue(guest):
+            return asyncio.create_task(host.enqueue_native_request(guest, {
+                "action": service.native_loose_pickup.CLAIM, "target": "same-world-item", "operation_id": guest,
+            }))
+
+        with patch.object(service.native_loose_pickup, "claim", side_effect=claim), patch.object(
+                service, "time", SimpleNamespace(monotonic=lambda: 100.0)), patch.object(service, "_TIMED_INTERACTIONS", frozenset()):
+            tasks = [enqueue(str(index)) for index in range(4)]
+            for task in tasks:
+                self.addAsyncCleanup(self.cancel_wait, task)
+            await asyncio.sleep(0)
+            await host.service_guest_native_batch(bridge)
+            self.assertEqual(order, ["begin-0", "finish-0", "begin-1", "finish-1", "begin-2", "finish-2"])
+            self.assertTrue(host.native_request_ready.is_set())
+            self.assertEqual(host.native_requests.qsize(), 1)
+            await host.service_guest_native_batch(bridge)
+            self.assertFalse(host.native_request_ready.is_set())
+            self.assertEqual(order[-2:], ["begin-3", "finish-3"])
+            self.assertEqual(await asyncio.gather(*tasks), [
+                {"ok": True, "claimed_by": "character-0"}, *([{"ok": False, "error": "already_claimed"}] * 3),
+            ])
+
+    async def test_host_batch_yields_after_slow_action_or_scope_change(self):
+        for boundary in ("time", "visit", "unsafe", "wipe"):
+            with self.subTest(boundary=boundary):
+                clock = Mock(return_value=100)
+                host = service.Host.__new__(service.Host)
+                host.native_requests = Mock()
+                host.native_requests.empty.return_value = False
+                host.last_game = {"map": OBSERVATORY, "state": "hosting"}
+                host.zone_epoch = "visit"
+                host.party = {"wipe": None}
+                host.stopping = host.native_checkpoint_unsafe = host.transitioning = False
+
+                async def dispatch(_bridge):
+                    if boundary == "time":
+                        clock.return_value = 100.030
+                    elif boundary == "visit":
+                        host.zone_epoch = "new-visit"
+                    elif boundary == "unsafe":
+                        host.native_checkpoint_unsafe = True
+                    else:
+                        host.party["wipe"] = {"id": "active-wipe"}
+
+                bridge = Mock()
+                host.service_guest_native_requests = AsyncMock(side_effect=dispatch)
+                with patch.object(service, "time", SimpleNamespace(monotonic=clock)):
+                    await host.service_guest_native_batch(bridge)
+                host.service_guest_native_requests.assert_awaited_once_with(bridge)
+
     async def test_guest_idle_wait_wakes_for_supported_gameplay_events(self):
         streams = (
             ("native-guest-primary-events", "primary_input_offset"),
