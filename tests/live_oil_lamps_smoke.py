@@ -131,10 +131,18 @@ async def verify_streamed_switch(host, guest, pawn):
         raise AssertionError(await probe(host, "diagnose", actor)) from error
     assert original["lights"], original
     assert await probe(host, "host", actor) == "host pressed"
-    on_host = row(await suite.wait_resident_status(host_run, lambda frame:
-        (found := row(frame, actor)) and found["powered"] != original["powered"]), actor)
+    await suite.wait_resident_status(host_run, lambda frame:
+        (found := row(frame, actor)) and found["powered"] != original["powered"])
+    await asyncio.sleep(.6)  # The stock lever is still moving when its power state first changes.
+    on_host = await observe(host_run, actor)
+    assert on_host["powered"] != original["powered"]
     assert await load(guest) == actor
-    assert await observe(guest_run, actor, equal=on_host) == on_host
+    try:
+        assert await observe(guest_run, actor, equal=on_host) == on_host
+    except RuntimeError as error:
+        host_now = row(await suite.wait_resident_status(host_run, lambda frame: row(frame, actor)), actor)
+        guest_now = row(await suite.wait_resident_status(guest_run, lambda frame: row(frame, actor)), actor)
+        raise AssertionError(f"Late streamed switch expected {on_host}, host {host_now}, guest {guest_now}") from error
 
     assert await probe(guest, "hide") == "hide"
     await suite.wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("map") == OBSERVATORY

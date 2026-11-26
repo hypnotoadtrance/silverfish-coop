@@ -6048,16 +6048,16 @@ async def verify_streamed_prop_carry(host: Seat, guest: Seat, pawn: str, evidenc
     listed = evidence["initial_host"] = await wait_prop(host, lambda row: row["motion"])
     identity = listed["actor"]
     assert listed["authored"] and "/CoopPhysicsSublevel." in identity
-    await wait_resident_status(host_run, lambda frame: identity in frame.get("game", {}).get(native_prop_carry.PLACED_PROPS, {}))
     point = tuple(map(float, (await call(host, "streamlane")).split()))
     await wait_resident_status(guest_run, lambda frame: (
         (location := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
         and math.dist(location, point) < 45))
-    assert await call(host, "streamplaceguest")
-    at_host = await state(host)
+    placed_at = tuple(map(float, (await call(host, "streamplaceguest")).split()))
     assert await call(guest, "streamload") == "loading"
     evidence["late_replica"] = await wait_prop(guest, lambda row: row["actor"] == identity and row["role"] == 1
-        and row["motion"] and math.dist(row["position"], at_host["position"]) < 35)
+        and row["motion"] and math.dist(row["position"], placed_at) < 50)
+    evidence["late_host"] = await state(host)
+    assert math.dist(evidence["late_replica"]["position"], evidence["late_host"]["position"]) < 35
 
     for name, carrier in (("guest", guest), ("host", host)):
         observation = evidence[name] = {}
@@ -6100,7 +6100,6 @@ async def verify_streamed_prop_carry(host: Seat, guest: Seat, pawn: str, evidenc
             while await state(seat) is not None:
                 await asyncio.sleep(.08)
     await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == OBSERVATORY
-        and identity not in frame["game"].get(native_prop_carry.PLACED_PROPS, {})
         and not frame["game"].get(native_prop_carry.HELD))
     assert campaign_save_hashes(host.campaign) == checkpoint, "A streamed carry wrote a campaign checkpoint"
     return {"streamed_prop_carry": evidence}

@@ -421,7 +421,13 @@ local function streamed_probe(action, world, pawn, source_prop)
         local dx, dy = to.X-from.X, to.Y-from.Y
         local distance = math.sqrt(dx*dx+dy*dy)
         assert(distance > 250, "the streamed carry lane is too short")
-        local point = {X=from.X+110*dx/distance,Y=from.Y+110*dy/distance,Z=from.Z-25}
+        local x, y = from.X + 110*dx/distance, from.Y + 110*dy/distance
+        local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+        local hit = {}
+        assert(trace:LineTraceSingle(thrower, {X=x,Y=y,Z=from.Z+20}, {X=x,Y=y,Z=from.Z-170}, 0,
+            true, {pawn, other, actor}, 0, hit, true, color, color, 0), "no floor for the streamed prop")
+        hit = hit.OutHit or hit
+        local point = {X=x,Y=y,Z=hit.ImpactPoint.Z+12}
         assert(actor:K2_SetActorLocation(point, false, {}, true))
         local zero, bone = {X=0,Y=0,Z=0}, FName("None")
         root:SetPhysicsLinearVelocity(zero, false, bone)
