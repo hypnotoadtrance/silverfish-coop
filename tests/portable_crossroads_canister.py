@@ -76,10 +76,11 @@ def instrument_canisters(source):
         for index = 1, 6 do assert(native[index] == reflected[index], "Canister sample differs at field " .. index) end
         assert(SilverfishReadNativePlacedCanister(address, world_address + 1, hosting, false, true) == nil,
             "The sampler accepted a different world")
-        local saved_sample, calls = entry.sample, 0
-        local function count_rows(...)
+        local saved_sample, calls, encoded_path = entry.sample, 0, nil
+        local function count_rows(tag, path)
             calls = calls + 1
-            return ...
+            encoded_path = path
+            return tag
         end
         local _, burning, health, x, y, z = table.unpack(native, 1, native.n)
         observed_row(entry, count_rows, burning, false, health, x, y, z)
@@ -90,6 +91,12 @@ def instrument_canisters(source):
         observed_row(entry, count_rows, not burning, true, health, x + 1, y, z)
         observed_row(entry, count_rows, not burning, true, health - 1, x + 1, y, z)
         assert(calls == 5, "A changed canister sample reused a stale row")
+        assert(encoded_path == entry.path, "The diagnostic row lost its full actor path")
+        observed_row(entry, count_rows, not burning, true, health - 1, x + 1, y, z, true)
+        assert(calls == 6 and placed_prefix .. encoded_path:sub(2) == entry.path and encoded_path:sub(1, 1) == "@",
+            "The compact row did not identify the same placed canister")
+        observed_row(entry, count_rows, not burning, true, health - 1, x + 1, y, z, true)
+        assert(calls == 6, "An unchanged compact row was formatted again")
         entry.sample = saved_sample
         local count = 512
         local function time_reads(read, ...)
@@ -113,7 +120,7 @@ local function observe_canister(path)
     return canister_witness[path]
 end""")
     for line, observation in (
-        ('                rows[#rows + 1] = observed_row(entry, row, burning, particles_active, health, x, y, z)',
+        ('                rows[#rows + 1] = observed_row(entry, row, burning, particles_active, health, x, y, z, compact)',
          '                local witness = observe_canister(entry.path)\n'
          '                if burning then witness.frames = witness.frames + 1 end\n'
          '                if particles_active then witness.active = witness.active + 1 end\n'),
