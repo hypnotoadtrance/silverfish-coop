@@ -77,7 +77,7 @@ async def probe(bridge, operation, *, prefix="eye-board", timeout=8):
                 return response
 
 
-async def verify_eye_board(run, remote, bridge, character, *, wait_status=wait, mounted_board=None):
+async def verify_eye_board(run, remote, bridge, character, *, wait_status=wait, mounted_board=None, guest_bridge=None):
     host, guest = run, remote
 
     async def action(directory, verb, **fields):
@@ -100,6 +100,16 @@ async def verify_eye_board(run, remote, bridge, character, *, wait_status=wait, 
                                .get(QUEST, {}).get("step") == step)
         return authority["gameplay"]["native_quests"][QUEST]
 
+    async def shared_journal(step):
+        if guest_bridge is None:
+            return
+        async with asyncio.timeout(8):
+            while True:
+                journals = await asyncio.gather(*(probe(seat, "journal") for seat in (bridge, guest_bridge)))
+                if journals == [str(step), str(step)]:
+                    return journals
+                await asyncio.sleep(.1)
+
     board = mounted_board or BOARD
     if not mounted_board:
         selected_board, *coordinates = (await probe(bridge, "approachturnin")).split(";")
@@ -116,6 +126,7 @@ async def verify_eye_board(run, remote, bridge, character, *, wait_status=wait, 
     first_menu = await open_native_board()
     await action(guest, native_wire_board.STOCK_FIXTURE, target=f"{QUEST}|start")
     await progress(1)
+    adopted = await shared_journal(1)
     await wait_status(remote, lambda frame: not frame.get("game", {}).get("native_wire_board_stock"))
     without_item = (await action(guest, dynamic.CATALOG, target=board))[dynamic.CATALOG_KEY]
     assert QUEST not in without_item["offers"] and QUEST not in without_item["turnins"], without_item
@@ -135,6 +146,7 @@ async def verify_eye_board(run, remote, bridge, character, *, wait_status=wait, 
     second_menu = await open_native_board()
     await action(guest, native_wire_board.STOCK_FIXTURE, target=f"{QUEST}|turnin")
     paid = await progress(-10)
+    completed = await shared_journal(-10)
     assert (paid["cash"], paid["xp"], paid["objective_guid"], paid["objective_owner"]) == (801, 1, guid, character), paid
     assert (paid["objective_units_before"], paid["objective_units_consumed"], paid["objective_units_remaining"]) == (2, 1, 1), paid
     consumed = paid["consumed_guid"]
@@ -154,6 +166,9 @@ async def verify_eye_board(run, remote, bridge, character, *, wait_status=wait, 
     evidence = {"verified": True, "menus": [first_menu, second_menu], "ready": ready,
                 "item": item, "remainder": remaining, "untouched_eye_stack": spare, "untouched_host_stack": host_stack,
                 "receipt": paid, "replay": replay, "deferred_writes": True}
+    if guest_bridge is not None:
+        await wait_status(remote, lambda frame: frame.get("game", {}).get("native_wallet") == paid["wallet"])
+        evidence["journals"] = {"accepted": adopted, "completed": completed}
     return evidence
 
 

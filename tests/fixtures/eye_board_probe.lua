@@ -11,7 +11,8 @@ local factory_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default_
 local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local amount_field = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
-local previous, leveled, seeded
+local step_field = "Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A"
+local previous, prepared_save, leveled, seeded
 local streamed
 local discovered_path = shopkeep .. ".Shop_ShopKeep_P:PersistentLevel.BountyBoard_BP_C_2"
 local turnin_path = shopkeep .. ".Shop_ShopKeep_P:PersistentLevel.BountyBoard_BP_C_1"
@@ -63,6 +64,9 @@ local function prepare(state, host, operation)
     local instance, driver = world.OwningGameInstance, world.NetDriver
     local connections = driver.ClientConnections
     assert(host:HasAuthority() and same(host.Save, instance.SaveSlot_Ref) and connections:GetArrayNum() == 1)
+    if not same(prepared_save, host.Save) then
+        prepared_save, leveled, seeded = host.Save, false, false
+    end
     if operation == "xp" or operation == "globalxp" then
         assert(not leveled and #host.Save.ActiveQuests == 0)
         local before, after = {}, {}
@@ -143,8 +147,7 @@ local function mounted_board(state, pawn, operation)
 end
 
 local function sync(state, phase)
-    if not state.local_pawn or (state.map ~= overview
-        and (phase ~= "hosting" or state.map ~= shopkeep or state.clients ~= 1)) then return end
+    if not state.local_pawn or (state.map ~= overview and state.map ~= shopkeep) then return end
     local pawn = state.local_pawn.pawn
     local input = io.open(bridge .. "/eye-board-probe", "rb")
     if not input then return end
@@ -154,8 +157,19 @@ local function sync(state, phase)
     previous = request
     local operation, nonce = request:gsub("\r$", ""):match("^(%a+)|(%x+)$")
     if not nonce then return end
-    local run = (operation == "stream" or operation == "placeboard") and state.map == overview and mounted_board or prepare
-    local ok, result = pcall(run, state, pawn, operation)
+    local ok, result
+    if operation == "journal" then
+        ok, result = pcall(function()
+            local row = require("native_wire_quest").stock_row(pawn.Save.ActiveQuests, FName("Clt_Eye_02", EFindName.FNAME_Find))
+            return row and row[step_field] or "-"
+        end)
+    elseif (operation == "stream" or operation == "placeboard") and state.map == overview then
+        ok, result = pcall(mounted_board, state, pawn, operation)
+    elseif phase == "hosting" and state.clients == 1 then
+        ok, result = pcall(prepare, state, pawn, operation)
+    else
+        return
+    end
     local output = assert(io.open(bridge .. "/eye-board-reply", "wb"))
     output:write(nonce, "|", ok and "ok|" or "error|", tostring(result))
     output:close()

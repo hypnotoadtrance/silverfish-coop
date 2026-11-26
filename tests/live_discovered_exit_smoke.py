@@ -8,7 +8,7 @@ from functools import partial
 from pathlib import Path
 
 import live_portable_title_smoke as suite
-from live_dynamic_board_smoke import probe as eye_probe, staged_probe as eye_overlay, verify_eye_board
+from live_dynamic_board_smoke import probe as eye_probe, verify_eye_board
 from live_unified_title_smoke import start_pair
 from portable_stock_shovel import stock_inventory
 from tools.silverfish import native_guest_drop as drop, native_host_stack_drop as host_drop, native_world_loot as loot
@@ -120,7 +120,8 @@ async def live_mounted_quest(host, guest):
     board, guest_board = await asyncio.gather(stream(host), stream(guest))
     assert board == guest_board and board.startswith("stream:") and "CoopEyeBoardSublevel" in board, (board, guest_board)
     return await verify_eye_board(host_run, guest_run, host.bridge.directory, reached["character_id"],
-                                  wait_status=suite.wait_resident_status, mounted_board=board)
+                                  wait_status=suite.wait_resident_status, mounted_board=board,
+                                  guest_bridge=guest.bridge.directory)
 
 
 async def live_mounted_items(host, guest, area):
@@ -365,8 +366,5 @@ if __name__ == "__main__":
         if args.mounted_items:
             for game in (first, second):
                 probes.enter_context(suite.installed_probe(game))
-        if args.mounted_quest:
-            for game in (first, second):
-                probes.enter_context(eye_overlay(game))
         asyncio.run(suite.verify(work, first, second, saves, stock_weather_travel=True,
-                                 stock_placed_item=not args.resume_unlisted))
+                                 stock_placed_item=not args.resume_unlisted, stock_eye_stacks=args.mounted_quest))
