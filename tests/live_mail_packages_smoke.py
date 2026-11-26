@@ -10,6 +10,12 @@ from portable_personal_consumable import stock_inventory_open, use_stock_item
 from tools.silverfish import native_guest_consumable as consumable, native_world_loot
 
 
+STOCK_MAIL_NAMES = {
+    "/Game/Classes/Items/Package_Mail.Package_Mail_C": "Large Package",
+    "/Game/Classes/Items/Package_Mail_Small.Package_Mail_Small_C": "Small Package",
+}
+
+
 async def verify_mail_packages(host, guest, pawn):
     host_run = host.campaign / "run"
     guest_run = guest.client / "run"
@@ -35,6 +41,12 @@ async def verify_mail_packages(host, guest, pawn):
 
     host_pack = await inventory(host_run)
     authority = await suite.wait_resident_status(host_run, lambda state: state.get("state") == "hosting")
+    catalogue = {}
+    for row in (await probe(host, "mail-catalog")).split(";"):
+        item_class, display_name, default_contents = row.split(",")
+        catalogue[item_class] = {"display_name": display_name, "default_contents": int(default_contents)}
+    assert STOCK_MAIL_NAMES.keys() == consumable.MAIL_CLASSES
+    assert {path: catalogue[path]["display_name"] for path in consumable.MAIL_CLASSES} == STOCK_MAIL_NAMES, catalogue
     seeded = time.time()
     mail_pairs = [(await probe(host, "seed-mail")).split(";") for _ in range(4)]
     guids = [guid for pair in mail_pairs for guid in pair]
@@ -49,7 +61,7 @@ async def verify_mail_packages(host, guest, pawn):
     evidence = {}
     key = consumable.RESULT[consumable.MAIL_PACKAGE]
     for index, guid in enumerate(guids):
-        drag = index % 2 == 1
+        drag = index // 2 % 2 == 1
         class_name = guest_pack[guid]["class_path"].rsplit(".", 1)[1]
         host_before, guest_before = await asyncio.gather(props(host, "true"), props(guest, "false"))
         started = time.time()
@@ -82,13 +94,16 @@ async def verify_mail_packages(host, guest, pawn):
         assert await inventory(host_run) == host_pack
         assert suite.campaign_save_hashes(host.campaign) == saves, "Opening a mail package wrote an early save"
         evidence[guid] = {"gesture": "drag" if drag else "context", "receipt": receipt,
+                          "display_name": STOCK_MAIL_NAMES[receipt["class_path"]],
                           "shared_props": host_new, "shared_items": [item["class_path"] for item in banked]}
-        if index >= 1 and any(row["shared_props"] for row in evidence.values()) and any(
+        if index >= 3 and any(row["shared_props"] for row in evidence.values()) and any(
                 row["shared_items"] for row in evidence.values()):
             break
     assert any(row["shared_props"] for row in evidence.values()), "The stock rolls did not produce a shared prop"
     assert any(row["shared_items"] for row in evidence.values()), "The stock rolls did not produce a shared item"
-    return {"stock_mail_packages": evidence, "deferred_save": True}
+    assert {(row["display_name"], row["gesture"]) for row in evidence.values()} == {
+        (name, gesture) for name in STOCK_MAIL_NAMES.values() for gesture in ("context", "drag")}
+    return {"stock_mail_packages": evidence, "stock_package_catalogue": catalogue, "deferred_save": True}
 
 
 if __name__ == "__main__":

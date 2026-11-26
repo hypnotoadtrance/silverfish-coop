@@ -189,6 +189,14 @@ local function run(action)
     local pawn = asset("/Script/Engine.Default__GameplayStatics"):GetPlayerPawn(world, 0)
     local save = valid(pawn) and pawn.Save
     assert(valid(save) and pawn:IsLocallyControlled() and same(save, world.OwningGameInstance.SaveSlot_Ref), "bound local co-op pawn unavailable")
+    if action == "mail-catalog" then
+        local rows = {}
+        for _, path in ipairs({mail_paths[1], mail_paths[2], "/Game/Classes/Items/Package_Item.Package_Item_C"}) do
+            local package = asset(path):GetCDO()
+            rows[#rows + 1] = ("%s,%s,%d"):format(path, package.DisplayName:ToString(), package.Contents:GetArrayNum())
+        end
+        return table.concat(rows, ";")
+    end
     if action == "sample-mail" then
         local types, seen, props = {}, {}, {}
         for _, path in ipairs(mail_paths) do
