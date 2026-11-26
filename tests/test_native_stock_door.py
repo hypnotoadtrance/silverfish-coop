@@ -83,6 +83,15 @@ class StockDoorActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response[door.DELTA]["doors"][self.actor]["yaw"], 10)
         self.assertIs(self.host.last_game, snapshot)
         self.assertEqual((await self.interact())[door.DELTA], response[door.DELTA])
+        published = self.actions.world_frame(self.host.last_game, self.epoch)
+        self.assertEqual(published, response[door.DELTA])
+        other = self.actor.replace("_1719", "_1720")
+        same_frame = {**snapshot, "sequence": 12, door.KEY: {self.actor: opening, other: self.closed}}
+        self.assertEqual(self.actions.world_frame(same_frame, self.epoch)["doors"],
+                         {self.actor: response[door.DELTA]["doors"][self.actor], other: self.closed})
+        newer = {**same_frame, "sequence": 13}
+        self.assertEqual(self.actions.world_frame(newer, self.epoch), door.frame(newer, self.epoch))
+        self.assertFalse(self.actions.confirmed)
 
     async def test_compact_dispatch_still_waits_for_exact_target_transform(self):
         dispatch, host_pawn = "c" * 32, "host pawn"

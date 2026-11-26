@@ -589,6 +589,33 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         await client.gameplay_action(door.ACTION, "a" * 32, actor)
         self.assertEqual(client.bridge.command.await_count, 1)
 
+    async def test_older_world_snapshot_cannot_reverse_a_confirmed_door_pose(self):
+        door = native_stock_door
+        area, epoch = OBSERVATORY, "c" * 32
+        actor = f"Door_BP_C {area}.Observitory_P:PersistentLevel.Door_BP_C_1"
+        closed = dict(locked=False, broken=False, open=False, pitch=0, yaw=0, roll=0, x=0, y=0, z=0)
+        opened = dict(closed, open=True, yaw=90)
+        older = {"map": area, "epoch": epoch, "sequence": 9, "doors": {actor: closed}}
+        confirmed = {**older, "sequence": 10, "doors": {actor: opened}}
+        request = AsyncMock(return_value={"ok": True, door.DELTA: confirmed})
+        client = self.guest(request)
+        client.transport.connected = True
+        client.zone_epoch = epoch
+        client.last_game = {"state": "connected", "map": area, door.KEY: {actor: closed}}
+        client.bridge.command = AsyncMock(return_value={**client.last_game, door.KEY: {actor: opened}})
+        await client.gameplay_action(door.ACTION, "a" * 32, actor)
+        request.return_value = {"ok": True, "zone": area, "zone_epoch": epoch, gameplay_snapshot.REVISION: "d" * 32,
+                                "gameplay": {door.KEY: older, "host_world": {"clock": 9}}}
+        await client.refresh_gameplay(project=False)
+        self.assertEqual(client.gameplay[door.KEY], confirmed)
+        self.assertEqual(client.gameplay["host_world"], {"clock": 9})
+        request.return_value = {**request.return_value, gameplay_snapshot.BASE: "d" * 32, gameplay_snapshot.REVISION: "e" * 32,
+                                gameplay_snapshot.DELTA: {"changed": {door.KEY: {**older, "sequence": 11}}, "removed": []}}
+        del request.return_value["gameplay"]
+        client.next_snapshot = 0
+        await client.refresh_gameplay(project=False)
+        self.assertEqual(client.gameplay[door.KEY], {**older, "sequence": 11})
+
     async def test_bridge_idle_wait_wakes_for_a_host_request_without_local_input(self):
         with TemporaryDirectory() as temporary:
             bridge = runtime.Bridge(Path(temporary), Mock())

@@ -121,6 +121,16 @@ def accept_delta(gameplay, delta, area, epoch, actor):
     return delta
 
 
+def preserve_newer_frame(previous_gameplay, gameplay):
+    before, after = previous_gameplay.get(KEY), gameplay.get(KEY)
+    if (isinstance(before, dict) and isinstance(after, dict)
+            and (before.get("map"), before.get("epoch")) == (after.get("map"), after.get("epoch"))
+            and type(before.get("sequence")) is int and type(after.get("sequence")) is int
+            and before["sequence"] > after["sequence"]):
+        # Preserve the live door view while the snapshot decoder keeps its unmodified wire baseline.
+        gameplay[KEY] = before
+
+
 def matches(report, desired):
     return (all(report.get(flag) is desired[flag] for flag in _FLAGS)
             and all(abs((report.get(key, math.inf) - desired[key] + 180) % 360 - 180) <= .05 for key in _ANGLES)
@@ -207,6 +217,29 @@ class Interactions:
 
     def __init__(self):
         self.pending = {}
+        self.confirmed_scope = None
+        self.confirmed = {}
+
+    def _confirm_scope(self, area, epoch):
+        scope = area, epoch
+        if scope != self.confirmed_scope:
+            self.confirmed_scope = scope
+            self.confirmed.clear()
+
+    def world_frame(self, game, epoch):
+        area = game.get("map")
+        self._confirm_scope(area, epoch)
+        if self.confirmed and game.get("state") == "hosting":
+            sequence, doors = game.get("sequence", 0), game.get(KEY, {})
+            for actor, (settled_at, _) in tuple(self.confirmed.items()):
+                if sequence > settled_at:
+                    del self.confirmed[actor]
+            if self.confirmed:
+                # A native settlement can precede the periodic world frame containing it.
+                latest = max(sequence, *(version for version, _ in self.confirmed.values()))
+                merged = doors | {actor: row for actor, (_, row) in self.confirmed.items()}
+                return frame({**game, KEY: merged, "sequence": latest}, epoch)
+        return frame(game, epoch)
 
     async def dispatch(self, host, bridge, character, requested, operation, future):
         epoch, _, actor = requested.partition("@") if isinstance(requested, str) else ("", "", "")
@@ -270,6 +303,8 @@ class Interactions:
                         and not (host.stopping or host.transitioning or host.party["wipe"]))
             if in_visit and actor in completed:
                 sample, elapsed = completed[actor]
+                self._confirm_scope(motion.area, motion.epoch)
+                self.confirmed[actor] = sample["sequence"], sample[KEY][actor]
                 response = {"ok": True, **motion.result(host, sample, settle_ms=elapsed)}
             elif in_visit and motion.settled(game):
                 # The door moved even if its guest disconnected. Keep its receipt for a rejoin.
@@ -287,6 +322,7 @@ class Interactions:
         for motion in self.pending.values():
             motion.respond({"ok": False, "error": "stock_door_scope_unavailable"})
         self.pending.clear()
+        self.confirmed.clear()
 
 
 async def _start_motion(host, bridge, character, pawn, area, epoch, actor, operation, fingerprint, future):

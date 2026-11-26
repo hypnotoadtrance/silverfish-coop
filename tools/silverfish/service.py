@@ -1028,7 +1028,7 @@ class Host:
             view[native_lantern.KEY] = lantern
         if flashlight := native_flashlight.frame(self):
             view[native_flashlight.KEY] = flashlight
-        if doors := native_stock_door.frame(self.last_game, self.zone_epoch):
+        if doors := self.stock_doors.world_frame(self.last_game, self.zone_epoch):
             view[native_stock_door.KEY] = doors
         if switches := self.last_game.get(native_stock_switch.KEY):
             view[native_stock_switch.KEY] = {"map": self.last_game["map"], "epoch": self.zone_epoch, "switches": switches}
@@ -6308,7 +6308,9 @@ class Client:
                     return
                 self.snapshot_request = None
                 if reply.get("ok"):
-                    self.gameplay = self.gameplay_snapshots.read(reply)
+                    gameplay = self.gameplay_snapshots.read(reply)
+                    native_stock_door.preserve_newer_frame(self.gameplay, gameplay)
+                    self.gameplay = gameplay
                     viewer = reply.get("viewer_role")
                     if viewer in ("guest", "guest2", "guest3", "guest4"):
                         self.viewer_role = viewer
