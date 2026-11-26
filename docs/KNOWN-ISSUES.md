@@ -179,6 +179,8 @@ Use the host's live quest journal, bounty-board offers, and campaign state as th
 
 The shared loot and inventory paths use the exact loaded Blueprint and stock item properties. Content mounted under `/Game/` can use those paths when the item inherits the supported stock behavior. Placed boards can inherit the stock interaction and stock menu functions. Peers need the same content installed. A valid package path by itself only identifies the asset.
 
+In `rc-0671d2a`, focused tests covered an unregistered board and quest identity and an item from a custom content folder. Four muted Direct IP launches verified that a guest could carry and pick up placed soup in Crossroads, both players saw the shared cash changes, and the Observatory board showed all three live offers. The guest accepted Flood Plains and both journals updated. The broader board fixture expected an additional offer that the active campaign never generated. Both trials preserved the source saves. Third-party assets and live Steam coverage still need playtesting. [Release notes](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-0671d2a)
+
 For maps and level transitions, co-op still relies on its supported route data. The work remaining is to discover live exit destinations and arrival tags from the host's stock actors, qualify those routes in the current session, and test stock-style interactables and streamed levels outside the verified routes. Custom handlers that skip the stock paths need an explicit integration point.
 
 <details>
