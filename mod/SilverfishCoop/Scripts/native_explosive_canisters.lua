@@ -10,7 +10,7 @@ register("Prop_PropaneTank_Small", "OnFire", "canister")
 register("Prop_PropaneTank_Tall", "Fireing", "canister")
 register("Prop_FuelDrum", "Burning_0", "fueldrum", true)
 local pending, active, removed = {}, {}, {}
-local world, area
+local world, area, placed_prefix
 
 local function valid(object)
     return object and object:IsValid()
@@ -98,20 +98,30 @@ local function sample_lua(entry, hosting)
     return true, burning, actor.Health, location and location.X, location and location.Y, location and location.Z
 end
 
-local function observed_row(entry, row, burning, particles_active, health, x, y, z)
+local function status_path(path, compact)
+    if compact and placed_prefix and path:sub(1, #placed_prefix) == placed_prefix then
+        return "@" .. path:sub(#placed_prefix + 1)
+    end
+    return path
+end
+
+local function observed_row(entry, row, burning, particles_active, health, x, y, z, compact)
     local sample = entry.sample
-    if sample and sample.row == row and sample.burning == burning and sample.particles_active == particles_active
+    if sample and sample.row == row and sample.compact == compact
+        and sample.burning == burning and sample.particles_active == particles_active
         and sample.health == health and sample.x == x and sample.y == y and sample.z == z then return sample.text end
-    local text = row("native-explosive-canister", entry.path, burning and 1 or 0, particles_active and 1 or 0,
-        entry.changed and 1 or 0, health, x or "-", y or "-", z or "-")
-    entry.sample = {row = row, burning = burning, particles_active = particles_active, health = health, x = x, y = y, z = z,
-        text = text}
+    local text = row("native-explosive-canister", status_path(entry.path, compact), burning and 1 or 0,
+        particles_active and 1 or 0, entry.changed and 1 or 0, health, x or "-", y or "-", z or "-")
+    entry.sample = {row = row, compact = compact, burning = burning, particles_active = particles_active, health = health,
+        x = x, y = y, z = z, text = text}
     return text
 end
 
-function canisters.rows(state, phase, row)
+function canisters.rows(state, phase, row, compact)
     if not same(state.world, world) or state.map ~= area then
         world, area, active, removed = state.world, state.map, {}, {}
+        local asset = area:match("^/Game/Classes/Maps/.+/([^/]+)$")
+        placed_prefix = asset and (area .. "." .. asset .. ":PersistentLevel.")
     end
     for address, entry in pairs(pending) do
         local actor = entry.actor
@@ -146,7 +156,7 @@ function canisters.rows(state, phase, row)
                 entry.changed = entry.changed or burning
                 local particles = burning and phase == "connected" and fire_components(entry.actor)
                 local particles_active = particles and particles:IsActive() == true or false
-                rows[#rows + 1] = observed_row(entry, row, burning, particles_active, health, x, y, z)
+                rows[#rows + 1] = observed_row(entry, row, burning, particles_active, health, x, y, z, compact)
             end
         else
             if entry.path then removed[entry.path] = true end
@@ -154,7 +164,7 @@ function canisters.rows(state, phase, row)
         end
     end
     for path in pairs(removed) do
-        rows[#rows + 1] = row("native-explosive-canister", path, 2, 0, 1, "-", "-", "-", "-")
+        rows[#rows + 1] = row("native-explosive-canister", status_path(path, compact), 2, 0, 1, "-", "-", "-", "-")
     end
     return rows
 end

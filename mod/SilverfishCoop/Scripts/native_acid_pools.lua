@@ -143,16 +143,44 @@ local function transform(actor)
         actor.SizeScaler)
 end
 
+local function placed_states(current)
+    local changed = false
+    for _, id in ipairs(current.ids) do
+        local entry = current.entries[id]
+        local phase = not entry.ended and live(entry.actor) and stock_phase(entry.actor) or nil
+        if entry.phase ~= phase then
+            entry.phase, changed = phase, true
+        end
+    end
+    if changed or not current.placed_states then
+        local states = {}
+        for _, id in ipairs(current.ids) do
+            local phase = current.entries[id].phase
+            if phase then states[#states + 1] = id .. ":" .. phase end
+        end
+        current.placed_states, current.placed_row = states, nil
+    end
+    return current.placed_states
+end
+
 function pools.rows(state, phase, row)
     local current = census(state, phase)
     if not current or not current.complete then return end
     if current.guest then return row("native-acid-pool-view", current.area, current.epoch or "-") end
 
-    local states, dynamic_ids = {}, {}
-    for _, id in ipairs(current.ids) do
-        local entry = current.entries[id]
-        if not entry.ended and live(entry.actor) then states[#states + 1] = id .. ":" .. stock_phase(entry.actor) end
+    local placed = placed_states(current)
+    if not next(current.dynamic) then
+        current.published = current.published or #current.ids > 0
+        if not current.published then return end
+        if not current.placed_row or current.placed_writer ~= row then
+            current.placed_row = row("native-acid-pool-roster", current.area,
+                #placed > 0 and table.concat(placed, "|") or "-")
+            current.placed_writer = row
+        end
+        return current.placed_row
     end
+
+    local states, dynamic_ids = {table.unpack(placed)}, {}
     for id, entry in pairs(current.dynamic) do
         if live(entry.actor) then
             dynamic_ids[#dynamic_ids + 1] = id

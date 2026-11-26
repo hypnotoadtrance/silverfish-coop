@@ -865,7 +865,7 @@ function fields.rows(state, phase, row, compact)
         rows[#rows + 1] = row("native-fixed-explosive-blocked", blocked_fixed or 0)
         effects.retire_charges()
     end
-    for _, canister in ipairs(canisters.rows(state, phase, row)) do rows[#rows + 1] = canister end
+    for _, canister in ipairs(canisters.rows(state, phase, row, compact)) do rows[#rows + 1] = canister end
     for _, view in ipairs(drum_fire.rows(state, phase, row)) do rows[#rows + 1] = view end
     for _, item in ipairs(fixed.rows(state, phase, row)) do rows[#rows + 1] = item end
     rows[#rows + 1] = destructibles.rows(state, phase, row)

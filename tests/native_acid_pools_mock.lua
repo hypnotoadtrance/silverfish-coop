@@ -4,6 +4,7 @@ local pools = require("native_acid_pools")
 local area = "/Game/Classes/Maps/Maps_Dungeons/Lab_EastWing_P"
 local epoch = string.rep("9", 32)
 local worlds, actors = {}, {}
+EObjectFlags = {RF_WasLoaded = 1}
 
 local function object(properties)
     properties.IsValid = function() return true end
@@ -13,11 +14,16 @@ end
 
 local function pool(world, id, address, authored)
     local actor = object({address = address, bHidden = false, FizzledOut = false, collision = true,
-        world = world, authored = authored, calls = 0})
+        world = world, authored = authored, calls = 0, SizeScaler = 1, x = 10})
     actor.path = world.map .. ".Lab_EastWing_P:PersistentLevel." .. id
     actor.GetFullName = function(self) return "AcidPool_BP_C " .. self.path end
     actor.GetWorld = function(self) return self.world end
     actor.HasAuthority = function(self) return not self.world.guest end
+    actor.HasAnyFlags = function(self, flag) assert(flag == EObjectFlags.RF_WasLoaded); return self.authored end
+    actor.GetFName = function() return {ToString = function() return id end} end
+    actor.K2_GetActorLocation = function(self) return {X = self.x, Y = 20, Z = 30} end
+    actor.K2_GetActorRotation = function() return {Pitch = 0, Yaw = 0, Roll = 0} end
+    actor.GetActorScale3D = function() return {X = 1, Y = 1, Z = 1} end
     actor.IsActorBeingDestroyed = function(self) return self.ended == true end
     actor.SetActorHiddenInGame = function(self, value) self.bHidden = value end
     actor.GetActorEnableCollision = function(self) return self.collision end
@@ -35,9 +41,9 @@ local function pool(world, id, address, authored)
 end
 
 FindAllOf = function(name) assert(name == "AcidPool_BP_C"); return actors end
-SilverfishNativeAuthoredAcidPool = function(path, world, target)
+SilverfishNativeAcidPool = function(path, world, target)
     for _, actor in ipairs(actors) do
-        if actor.path == path and actor.world.address == world and actor.authored then
+        if actor.path == path and actor.world.address == world then
             if target then
                 assert(actor.world.guest)
                 actor.calls = actor.calls + 1
@@ -64,11 +70,20 @@ local dynamic = pool(guest.world, "Dynamic_Test", 7, false)
 local function row(...) return {...} end
 
 assert(pools.rows(host, "hosting", row)[3] == first .. ":a|" .. second .. ":a")
+local unchanged = pools.rows(host, "hosting", row)
+assert(pools.rows(host, "hosting", row) == unchanged)
 host_first.FizzleOut_Mat.playing = true
 assert(pools.rows(host, "hosting", row)[3] == first .. ":f|" .. second .. ":a")
 host_first.FizzledOut = true
 assert(pools.rows(host, "hosting", row)[3] == first .. ":e|" .. second .. ":a")
 pools.ended(host_first.address, true)
+assert(pools.rows(host, "hosting", row)[3] == second .. ":a")
+local dynamic_host = pool(host.world, "Dynamic_Test", 8, false)
+pools.created(dynamic_host, "host")
+assert(pools.rows(host, "hosting", row)[3]:find("spawned_Dynamic_Test:a:10.000", 1, true))
+dynamic_host.x = 20
+assert(pools.rows(host, "hosting", row)[3]:find("spawned_Dynamic_Test:a:20.000", 1, true))
+pools.ended(dynamic_host.address, true)
 assert(pools.rows(host, "hosting", row)[3] == second .. ":a")
 
 assert(pools.rows(guest, "connected", row)[3] == "-")
@@ -86,6 +101,6 @@ apply(first .. ":e", second .. ":a")
 assert(guest_first.calls == 2 and guest_first.FizzledOut)
 apply(second .. ":a")
 assert(guest_first.bHidden and not guest_first.collision and not guest_first.Sizzle_SFX.playing)
-assert(not guest_second.bHidden and not dynamic.bHidden and pools.rows(guest, "connected", row)[3] == epoch)
+assert(not guest_second.bHidden and dynamic.bHidden and not dynamic.collision and pools.rows(guest, "connected", row)[3] == epoch)
 pools.clear()
 assert(not guest_first.bHidden and guest_first.collision)

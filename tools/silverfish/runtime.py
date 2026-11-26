@@ -3135,6 +3135,8 @@ class Bridge:
                     area = data.get("map", "")
                     path, mode, lit, changed, health, *coordinates = fields[1:]
                     prefix = f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel."
+                    if path.startswith("@"):
+                        path = prefix + path[1:]
                     if (area.startswith("/Game/Classes/Maps/") and path.startswith(prefix) and len(path) <= 512
                             and len(props) < native_anomaly_effects.MAX_SENSORS
                             and mode in {"0", "1", "2"} and lit in {"0", "1"} and changed in {"0", "1"}

@@ -328,6 +328,13 @@ class GameplayStatusTests(unittest.TestCase):
             retired: {"phase": 2, "particles_active": False, "changed": True, "health": None},
         })
         self.assertEqual((status["native_canister_capture"], status["native_fuel_drum_capture"]), (3, 1))
+        compact = rows.replace(f"\t{prefix}", "\t@") + (
+            "native-explosive-canister\t@/OtherMap.Prop_FuelDrum_C_34\t0\t0\t1\t30\t-\t-\t-\n"
+        )
+        self.assertEqual(bridge._parse_status(frame + compact)["native_explosive_canisters"],
+                         status["native_explosive_canisters"])
+        other_map = bridge._parse_status(frame.replace(area, "Title") + compact)
+        self.assertEqual(other_map["native_explosive_canisters"], {})
         legacy = bridge._parse_status(frame + "native-anomaly-capture\t0\t0\t0\t0\t3\n")
         self.assertEqual((legacy["native_canister_capture"], legacy["native_fuel_drum_capture"]), (3, 0))
 
