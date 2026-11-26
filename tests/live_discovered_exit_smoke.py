@@ -8,6 +8,7 @@ from functools import partial
 from pathlib import Path
 
 import live_portable_title_smoke as suite
+from live_dynamic_board_smoke import probe as eye_probe, staged_probe as eye_overlay, verify_eye_board
 from live_unified_title_smoke import start_pair
 from portable_stock_shovel import stock_inventory
 from tools.silverfish import native_guest_drop as drop, native_host_stack_drop as host_drop, native_world_loot as loot
@@ -37,7 +38,7 @@ async def wait_for_party(host_run, guest_run, destination):
 
 
 async def live_exit(host, guest, pawn, probe, *, unlisted_only=False, save_in_shop=False, with_door=False,
-                    unlisted_map=UNLISTED_SHOP, mounted_items=False, **options):
+                    unlisted_map=UNLISTED_SHOP, mounted_items=False, mounted_quest=False, **options):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     unlisted_world = "/Game/Classes/Maps/Maps_OverWorld/Campus_04_P"
     shop = unlisted_map
@@ -93,12 +94,33 @@ async def live_exit(host, guest, pawn, probe, *, unlisted_only=False, save_in_sh
     try:
         if mounted_items:
             evidence["mounted_items"] = await live_mounted_items(host, guest, shop)
+        if mounted_quest:
+            assert shop == UNLISTED_DEMO
+            evidence["mounted_quest"] = await live_mounted_quest(host, guest)
     finally:
         if not save_in_shop:
             returned = await cross_unlisted(host, guest, probe, "return", shop, CROSSROADS)
     if save_in_shop:
         return dict(evidence, entered_unlisted_map=outbound)
     return dict(evidence, unlisted_map_round_trip=[outbound, returned])
+
+
+async def live_mounted_quest(host, guest):
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    reached = await suite.wait_resident_status(guest_run, lambda frame:
+        frame.get("state") == "connected" and frame.get("game", {}).get("map") == UNLISTED_DEMO)
+
+    async def stream(seat):
+        assert await eye_probe(seat.bridge.directory, "stream") == "loading"
+        async with asyncio.timeout(15):
+            while (board := await eye_probe(seat.bridge.directory, "placeboard")) == "waiting":
+                await asyncio.sleep(.1)
+        return board
+
+    board, guest_board = await asyncio.gather(stream(host), stream(guest))
+    assert board == guest_board and board.startswith("stream:") and "CoopEyeBoardSublevel" in board, (board, guest_board)
+    return await verify_eye_board(host_run, guest_run, host.bridge.directory, reached["character_id"],
+                                  wait_status=suite.wait_resident_status, mounted_board=board)
 
 
 async def live_mounted_items(host, guest, area):
@@ -316,13 +338,17 @@ if __name__ == "__main__":
     parser.add_argument("--discovered-door", action="store_true")
     parser.add_argument("--outside-tree", action="store_true")
     parser.add_argument("--mounted-items", action="store_true")
+    parser.add_argument("--mounted-quest", action="store_true")
     args = parser.parse_args()
+    if args.mounted_quest and not args.outside_tree:
+        parser.error("--mounted-quest requires --outside-tree")
     work, first, second, saves = (path.resolve() for path in (args.work, args.first_game, args.second_game, args.vanilla_saved))
     work.mkdir(parents=True, exist_ok=True)
     unlisted = UNLISTED_DEMO if args.outside_tree else UNLISTED_SHOP
     suite.verify_weather_travel = partial(live_exit, unlisted_only=args.unlisted_only or args.resume_unlisted,
                                         save_in_shop=args.resume_unlisted, with_door=args.discovered_door,
-                                        unlisted_map=unlisted, mounted_items=args.mounted_items)
+                                        unlisted_map=unlisted, mounted_items=args.mounted_items,
+                                        mounted_quest=args.mounted_quest)
     if args.resume_unlisted:
         suite.start_pair = partial(check_unlisted_resume, unlisted_map=unlisted)
     if args.mounted_items:
@@ -339,5 +365,8 @@ if __name__ == "__main__":
         if args.mounted_items:
             for game in (first, second):
                 probes.enter_context(suite.installed_probe(game))
+        if args.mounted_quest:
+            for game in (first, second):
+                probes.enter_context(eye_overlay(game))
         asyncio.run(suite.verify(work, first, second, saves, stock_weather_travel=True,
                                  stock_placed_item=not args.resume_unlisted))

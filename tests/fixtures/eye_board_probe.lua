@@ -1,5 +1,6 @@
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 local shopkeep = "/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P"
+local overview = "/Game/PolygonHorrorAsylum/Maps/Overview"
 if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not bridge
     or not (bridge:find("eye%-board%-%x+") or bridge:find("portable%-title%-%x+"))
     or (os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") ~= "1"
@@ -11,6 +12,7 @@ local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local amount_field = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local previous, leveled, seeded
+local streamed
 local discovered_path = shopkeep .. ".Shop_ShopKeep_P:PersistentLevel.BountyBoard_BP_C_2"
 local turnin_path = shopkeep .. ".Shop_ShopKeep_P:PersistentLevel.BountyBoard_BP_C_1"
 
@@ -110,9 +112,40 @@ local function prepare(state, host, operation)
     return table.concat({guid, spare, host_guid}, ";")
 end
 
+local function mounted_board(state, pawn, operation)
+    local world = state.world
+    if operation == "stream" then
+        local loading = StaticFindObject("/Script/Engine.Default__LevelStreamingDynamic")
+        streamed = loading:LoadLevelInstance(world, shopkeep, {X = 40000, Y = 40000, Z = 4000},
+            {Pitch = 0, Yaw = 0, Roll = 0}, {}, "CoopEyeBoardSublevel", nil, false)
+        assert(valid(streamed), "Could not load the stock board sublevel")
+        return "loading"
+    end
+    assert(operation == "placeboard" and valid(streamed))
+    if not streamed:IsLevelVisible() then return "waiting" end
+    local level = streamed:GetLoadedLevel()
+    local name = level:GetFullName():match("^%S+ (.+)$") .. ".BountyBoard_BP_C_1"
+    local board = StaticFindObject(name)
+    assert(valid(board) and same(board:GetOuter(), level), "The streamed ShopKeep board is unavailable")
+    if not same(board["As Game Instance FP"], world.OwningGameInstance) then return "waiting" end
+    local pilot = pawn
+    if pawn:HasAuthority() then
+        local connections = world.NetDriver.ClientConnections
+        assert(connections:GetArrayNum() == 1)
+        pilot = connections[1].PlayerController.Pawn
+        assert(valid(pilot) and not same(pilot, pawn))
+    end
+    local point = pilot:K2_GetActorLocation()
+    local origin = {X = point.X + 80, Y = point.Y, Z = point.Z}
+    assert(board:K2_SetActorLocationAndRotation(origin, {Pitch = 0, Yaw = 0, Roll = 0}, false, {}, true),
+        "Could not place the stock board next to the guest")
+    return "stream:" .. board:GetFullName()
+end
+
 local function sync(state, phase)
-    if phase ~= "hosting" or state.map ~= shopkeep or state.clients ~= 1 or not state.local_pawn then return end
-    local host = state.local_pawn.pawn
+    if not state.local_pawn or (state.map ~= overview
+        and (phase ~= "hosting" or state.map ~= shopkeep or state.clients ~= 1)) then return end
+    local pawn = state.local_pawn.pawn
     local input = io.open(bridge .. "/eye-board-probe", "rb")
     if not input then return end
     local request = input:read("*l")
@@ -121,7 +154,8 @@ local function sync(state, phase)
     previous = request
     local operation, nonce = request:gsub("\r$", ""):match("^(%a+)|(%x+)$")
     if not nonce then return end
-    local ok, result = pcall(prepare, state, host, operation)
+    local run = (operation == "stream" or operation == "placeboard") and state.map == overview and mounted_board or prepare
+    local ok, result = pcall(run, state, pawn, operation)
     local output = assert(io.open(bridge .. "/eye-board-reply", "wb"))
     output:write(nonce, "|", ok and "ok|" or "error|", tostring(result))
     output:close()

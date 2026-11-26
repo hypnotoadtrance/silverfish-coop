@@ -3,6 +3,7 @@
 #include "guest_item.hpp"
 #include "loot_escrow.hpp"
 #include "stock_wallet.hpp"
+#include "world_path.hpp"
 
 #include <algorithm>
 #include <array>
@@ -200,13 +201,8 @@ namespace
         });
         if (!exact(world, find<U::UClass>(STR("/Script/Engine.World")))) return nullptr;
         const auto path = world->GetPathName();
-        constexpr std::wstring_view prefix{STR("/Game/Classes/Maps/")};
-        const auto separator = path.find('.');
-        if (!path.starts_with(prefix) || separator == std::wstring::npos) return nullptr;
-        const auto leaf = path.rfind('/', separator);
-        const std::wstring_view name{path};
-        if (leaf == std::wstring::npos || separator == leaf + 1 ||
-            name.substr(leaf + 1, separator - leaf - 1) != name.substr(separator + 1)) return nullptr;
+        if (!silverfish::world_path::object(std::wstring_view{path}) ||
+            path == STR("/Game/Classes/Maps/MainMenu_P.MainMenu_P")) return nullptr;
         return find<U::UWorld>(path.c_str()) == world ? world : nullptr;
     }
 

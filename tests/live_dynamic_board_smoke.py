@@ -77,7 +77,7 @@ async def probe(bridge, operation, *, prefix="eye-board", timeout=8):
                 return response
 
 
-async def verify_eye_board(run, remote, bridge, character, *, wait_status=wait):
+async def verify_eye_board(run, remote, bridge, character, *, wait_status=wait, mounted_board=None):
     host, guest = run, remote
 
     async def action(directory, verb, **fields):
@@ -86,8 +86,8 @@ async def verify_eye_board(run, remote, bridge, character, *, wait_status=wait):
         return reply
 
     async def open_native_board():
-        pending = (await action(guest, native_wire_board.STOCK_F_FIXTURE, target=BOARD))["native_wire_board_stock"]
-        assert pending["state"] == "loading" and pending["board"] == BOARD and pending["quest"] == "-", pending
+        pending = (await action(guest, native_wire_board.STOCK_F_FIXTURE, target=board))["native_wire_board_stock"]
+        assert pending["state"] == "loading" and pending["board"] == board and pending["quest"] == "-", pending
         seen = await wait_status(remote, lambda frame: (view := frame.get("game", {}).get("native_wire_board_stock", {}))
                           and view["state"] == "visible" and view["sequence"] == pending["sequence"])
         return seen["game"]["native_wire_board_stock"]
@@ -100,22 +100,24 @@ async def verify_eye_board(run, remote, bridge, character, *, wait_status=wait):
                                .get(QUEST, {}).get("step") == step)
         return authority["gameplay"]["native_quests"][QUEST]
 
-    selected_board, *coordinates = (await probe(bridge, "approachturnin")).split(";")
-    assert selected_board == BOARD and len(coordinates) == 3, (selected_board, coordinates)
-    position = tuple(map(float, coordinates))
-    await wait_status(remote, lambda frame: (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
-               and math.dist(point, position) <= 25)
+    board = mounted_board or BOARD
+    if not mounted_board:
+        selected_board, *coordinates = (await probe(bridge, "approachturnin")).split(";")
+        assert selected_board == board and len(coordinates) == 3, (selected_board, coordinates)
+        position = tuple(map(float, coordinates))
+        await wait_status(remote, lambda frame: (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
+                   and math.dist(point, position) <= 25)
     assert await probe(bridge, "xp") == "5"
     before = campaign_save_hashes(run.parent)
     current = await wait_status(run, lambda frame: type(frame.get("game", {}).get("native_wallet")) is int)
     wallet = current["game"]["native_wallet"]
-    offer = (await action(guest, dynamic.CATALOG))[dynamic.CATALOG_KEY]
+    offer = (await action(guest, dynamic.CATALOG, target=board))[dynamic.CATALOG_KEY]
     assert QUEST in offer["offers"] and QUEST not in offer["turnins"], offer
     first_menu = await open_native_board()
     await action(guest, native_wire_board.STOCK_FIXTURE, target=f"{QUEST}|start")
     await progress(1)
     await wait_status(remote, lambda frame: not frame.get("game", {}).get("native_wire_board_stock"))
-    without_item = (await action(guest, dynamic.CATALOG))[dynamic.CATALOG_KEY]
+    without_item = (await action(guest, dynamic.CATALOG, target=board))[dynamic.CATALOG_KEY]
     assert QUEST not in without_item["offers"] and QUEST not in without_item["turnins"], without_item
 
     guid, spare_guid, host_guid = (await probe(bridge, "eye")).split(";")
@@ -128,7 +130,7 @@ async def verify_eye_board(run, remote, bridge, character, *, wait_status=wait):
     assert not {guid, spare_guid} & original_host_pack.keys() and host_guid not in before_pack
     host_stack = original_host_pack[host_guid]
     assert (host_stack["class_path"], host_stack["quantity"], host_stack["source"]) == (ITEM, 3, "backpack"), host_stack
-    ready = (await action(guest, dynamic.CATALOG))[dynamic.CATALOG_KEY]
+    ready = (await action(guest, dynamic.CATALOG, target=board))[dynamic.CATALOG_KEY]
     assert QUEST in ready["turnins"] and QUEST not in ready["offers"], ready
     second_menu = await open_native_board()
     await action(guest, native_wire_board.STOCK_FIXTURE, target=f"{QUEST}|turnin")
@@ -143,7 +145,8 @@ async def verify_eye_board(run, remote, bridge, character, *, wait_status=wait):
     remaining = guest_pack[guid]
     assert remaining == {**item, "quantity": 1}, (item, remaining)
     assert guest_pack[spare_guid] == spare
-    replay = await action(guest, "native-quest-turnin", target=QUEST)
+    visit = (await wait_status(remote, lambda frame: frame.get("zone_epoch")))["zone_epoch"]
+    replay = await action(guest, "native-quest-turnin", target=dynamic.menu_target(visit, board, QUEST))
     assert replay["effect"] == "native_quest_already_settled" and replay["wallet"] == paid["wallet"], replay
     after_replay = await inventory(guest)
     assert after_replay[guid] == remaining and after_replay[spare_guid] == spare
