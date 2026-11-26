@@ -24,6 +24,7 @@ BOARD_PATH = re.compile(
 )
 STREAM_PREFIX = "stream:"
 COMPLETE = -10
+MAX_OBJECTIVES = 16
 _INSPECTED_FIELDS = ("step_before", "expected_step", "cash", "xp", "remaining")
 
 
@@ -103,13 +104,14 @@ def parse(fields):
     proof["additional_deposits"] = []
     extra = fields[21] if len(fields) == 22 else "-"
     if extra != "-":
-        if len(extra) > 1200 or proof["guid"] == "-":
+        # Two GUIDs, two int32 counts and four separators per additional deposit.
+        if len(extra) > (MAX_OBJECTIVES - 1) * 88 or proof["guid"] == "-":
             raise ValueError("Unexpected additional board deposits")
         pending, spent = {proof["guid"]}, {proof["consumed"]}
         for row in extra.split(","):
             guid, count, left, consumed = row.split(":")
             part = {"guid": guid, "units": int(count), "remaining": int(left), "consumed": consumed}
-            if (len(proof["additional_deposits"]) >= 15 or not _valid_deposit(proof, part)
+            if (len(proof["additional_deposits"]) >= MAX_OBJECTIVES - 1 or not _valid_deposit(proof, part)
                     or guid in pending or (consumed != "-" and consumed in spent)):
                 raise ValueError("Unqualified additional board deposit")
             pending.add(guid)

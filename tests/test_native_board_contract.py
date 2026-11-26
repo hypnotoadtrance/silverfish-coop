@@ -105,6 +105,13 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "Unexpected additional"):
             result(EYE, "start", "inspect", None, 1, additional=f"{GUID}:1:0:-")
 
+    def test_largest_supported_objective_receipt_survives_parsing(self):
+        deposited = ",".join(f"{index:032X}:2147483647:2147483646:{index + 100:032X}"
+                             for index in range(1, board.MAX_OBJECTIVES))
+        self.assertGreater(len(deposited), 1200)
+        proof = result(EYE, "turnin", "apply", 1, -10, guid=GUID, additional=deposited)
+        self.assertEqual(len(proof[board.KEY]["additional_deposits"]), board.MAX_OBJECTIVES - 1)
+
     async def test_selected_board_cannot_be_substituted_by_another_board_in_the_same_map(self):
         host = self.host()
         host.zone_epoch = VISIT
