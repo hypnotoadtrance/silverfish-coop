@@ -125,7 +125,7 @@ class TitleSession:
                  startup_timeout: float = 120, stall_timeout: float = 60, control: Control | None = None,
                  join_settings=None, resident: bool = False,
                  host_campaign_scan: Callable[[], tuple[CampaignEntry, ...]] | None = None,
-                 host_defaults: HostDefaults | None = None):
+                 host_defaults: HostDefaults | None = None, host_campaign_manage=None):
         self._plans = dict(plans)
         if any(action not in ACTIONS or not isinstance(plan, SessionPlan) for action, plan in self._plans.items()):
             raise ValueError("Expected supervisor plans for the Host and Join actions")
@@ -140,7 +140,10 @@ class TitleSession:
             raise ValueError("Saved campaigns and Host defaults require a resident Host offer")
         self._bridge = bridge
         self._host_defaults = host_defaults
-        self._host_campaigns = TitleHostCampaigns(bridge.directory, host_campaign_scan) if host_campaign_scan else None
+        if host_campaign_manage is not None and host_campaign_scan is None:
+            raise ValueError("Campaign management requires the resident campaign list")
+        self._host_campaigns = (TitleHostCampaigns(bridge.directory, host_campaign_scan, host_campaign_manage)
+                                if host_campaign_scan else None)
         self._status_path = bridge.directory / STATUS_FILE
         self._retire_title = retire_title or partial(runtime.stop_game, bridge.process)
         self._on_title_ready = on_title_ready
@@ -267,7 +270,9 @@ class TitleSession:
                 plans = {} if self._resident and snapshot is not None and not self._solo_title(snapshot) else self._plans
                 offered = self._handoff.refresh(snapshot, plans, host_defaults=self._host_defaults)
                 if self._host_campaigns is not None:
-                    self._host_campaigns.poll(self._handoff.generation if offered else None)
+                    generation = self._handoff.generation if offered else None
+                    self._host_campaigns.poll(generation)
+                    await self._host_campaigns.service(generation)
                 if self._on_title_ready is not None:
                     panel = snapshot.get(native_title_entry.PANEL_KEY, {}) if snapshot else {}
                     frame = _isolated_stock_title(snapshot, self._title_saved_directory) if offered else None

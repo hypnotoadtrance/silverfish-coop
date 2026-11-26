@@ -1,0 +1,217 @@
+local manager = {}
+local page_size = 4
+
+local function button(key, label, detail)
+    return {key = key, label = label, detail = detail}
+end
+
+local function clip(value, limit)
+    local offset = utf8.offset(value, limit + 1)
+    return offset and value:sub(1, offset - 1) .. "…" or value
+end
+
+local function save_label(entry)
+    return entry.name:match("^campaign%-[0-9a-f]+$") and entry.area or entry.name
+end
+
+local function page_rows(rows, entries, first, row_for)
+    for index = first, math.min(#entries, first + page_size - 1) do
+        rows[#rows + 1] = {row_for(entries[index])}
+    end
+    local navigation = {}
+    if first > 1 then navigation[#navigation + 1] = button("previous", "Previous") end
+    if first + page_size <= #entries then navigation[#navigation + 1] = button("next", "Next") end
+    if #navigation > 0 then rows[#rows + 1] = navigation end
+end
+
+local function draw(state, note)
+    local rows, heading = {}, "Manage Saves"
+    local save = state.save
+    if state.screen == "list" then
+        if not state.saves then
+            note = note or "Loading co-op saves…"
+        elseif #state.saves == 0 then
+            note = note or "No co-op saves."
+        else
+            page_rows(rows, state.saves, state.first, function(entry)
+                local detail = entry.deleted and "Deleted" or entry.timestamp
+                return button("save:" .. entry.id, clip(save_label(entry), 25), detail)
+            end)
+        end
+        rows[#rows + 1] = {button("back", "Back")}
+    elseif state.screen == "save" then
+        heading = clip(save_label(save), 32)
+        note = note or (save.deleted and "Deleted co-op campaign" or save.area .. "  ·  " .. save.timestamp)
+        if save.deleted then
+            rows[#rows + 1] = {button("restore-save", "Restore Save")}
+        else
+            rows[#rows + 1] = {button("characters", "Manage Characters")}
+            rows[#rows + 1] = {button("delete-save", "Delete Save")}
+        end
+        rows[#rows + 1] = {button("back", "Back")}
+    elseif state.screen == "characters" then
+        heading = "Manage Characters"
+        note = note or clip(save_label(save), 32)
+        if #state.characters == 0 then note = "No guest characters in this save." end
+        page_rows(rows, state.characters, state.character_first, function(character)
+            return button("character:" .. character.id, clip(character.name, 25), character.deleted and "Deleted" or "Guest")
+        end)
+        rows[#rows + 1] = {button("back", "Back")}
+    elseif state.screen == "character" then
+        local character = state.character
+        heading = clip(character.name, 32)
+        note = note or (character.deleted and "Deleted guest character" or "Guest character")
+        rows[1] = {button(character.deleted and "restore-character" or "delete-character",
+            character.deleted and "Restore Character" or "Delete Character")}
+        rows[2] = {button("back", "Back")}
+    elseif state.screen == "confirm" then
+        local character = state.confirm == "delete-character"
+        heading = character and "Delete Character?" or "Delete Save?"
+        note = (character and clip(state.character.name, 32) .. " will be removed from Join."
+            or clip(save_label(save), 32) .. " and its characters will be removed from Load Game.")
+            .. " You can restore it from Manage Saves."
+        rows = {{button("back", "Cancel"), button("confirm", character and "Delete Character" or "Delete Save")}}
+    else
+        note = note or "Updating co-op saves…"
+    end
+    state.present({title = heading, note = note, rows = rows})
+end
+
+local function open_list(state, note)
+    state.screen, state.save, state.character = "list", nil, nil
+    state.saves = state.catalog()
+    if state.saves and state.first > #state.saves then
+        state.first = math.max(1, (#state.saves - 1) // page_size * page_size + 1)
+    end
+    draw(state, note)
+end
+
+local function request(state, action)
+    local id = state.new_id()
+    if not id or not state.save then return false end
+    local pending = io.open(state.request, "rb")
+    if pending then pending:close(); return false end
+    local tmp = state.request .. "." .. id .. ".tmp"
+    local file = io.open(tmp, "wb")
+    if not file then return false end
+    local character = action:match("%-character$") and state.character.id or "-"
+    local fields = {"1", state.generation, id, action, state.save.name, state.save.id, state.save.revision, character}
+    local written = file:write(table.concat(fields, "\t"), "\n")
+    local closed = file:close()
+    if not written or not closed or not os.rename(tmp, state.request) then
+        os.remove(tmp)
+        return false
+    end
+    state.pending = {id = id, action = action, until_at = os.time() + 20}
+    state.screen = "waiting"
+    draw(state, action == "characters" and "Loading guest characters…" or nil)
+    return true
+end
+
+local function start_request(state, action)
+    if not request(state, action) then draw(state, "The save request could not be submitted. Try again.") end
+end
+
+local function find(entries, key)
+    for _, entry in ipairs(entries) do
+        if entry.id == key then return entry end
+    end
+end
+
+function manager.open(bridge, generation, new_id, catalog, present)
+    local state = {generation = generation, new_id = new_id, catalog = catalog, present = present,
+        request = bridge .. "/title-save-request.tsv", response = bridge .. "/title-save-response.tsv",
+        first = 1, character_first = 1}
+    open_list(state)
+    return state
+end
+
+function manager.press(state, action)
+    local screen = state.screen
+    if screen == "waiting" then return end
+    if action == "back" then
+        if screen == "list" then return "leave" end
+        if screen == "save" then open_list(state); return end
+        if screen == "characters" then state.screen = "save"
+        elseif screen == "character" then state.screen = "characters"
+        elseif screen == "confirm" then state.screen = state.confirm == "delete-save" and "save" or "character" end
+    elseif (action == "previous" or action == "next") and (screen == "list" or screen == "characters") then
+        local list = screen == "list"
+        local entries = list and state.saves or state.characters
+        local field = list and "first" or "character_first"
+        local index = state[field] + (action == "next" and page_size or -page_size)
+        if entries and index >= 1 and index <= #entries then state[field] = index end
+    elseif screen == "list" then
+        local entry = find(state.saves or {}, action:match("^save:(.+)$"))
+        if not entry then return end
+        state.save, state.screen, state.character_first = entry, "save", 1
+    elseif screen == "save" and action == "characters" and not state.save.deleted then
+        start_request(state, action)
+        return
+    elseif screen == "characters" then
+        local entry = find(state.characters, action:match("^character:(.+)$"))
+        if not entry then return end
+        state.character, state.screen = entry, "character"
+    elseif (screen == "save" and action == "delete-save" and not state.save.deleted)
+        or (screen == "character" and action == "delete-character" and not state.character.deleted) then
+        state.confirm, state.screen = action, "confirm"
+    elseif screen == "confirm" and action == "confirm" then
+        start_request(state, state.confirm)
+        return
+    elseif (screen == "save" and action == "restore-save" and state.save.deleted)
+        or (screen == "character" and action == "restore-character" and state.character.deleted) then
+        start_request(state, action)
+        return
+    else
+        return
+    end
+    draw(state)
+end
+
+local function response(state)
+    local file = io.open(state.response, "rb")
+    if not file then return end
+    local data = file:read(98305)
+    file:close()
+    if not data or #data > 98304 then return end
+    local generation, id, status, value, first = data:match("^1\t([0-9a-f]+)\t([0-9a-f]+)\t([a-z]+)\t([a-z0-9]+)\n()")
+    if generation ~= state.generation or id ~= state.pending.id then return end
+    if status == "error" then return nil, value end
+    local count = tonumber(value)
+    if status ~= "ok" or not count or count > 256 then return end
+    local entries = {}
+    for _ = 1, count do
+        local ending = data:find("\n", first, true)
+        if not ending then return end
+        local key, name, flag = data:sub(first, ending - 1):match("^([0-9a-f%-]+)\t([^\t]+)\t([a-z]+)$")
+        if not key or #key ~= 36 or not utf8.len(name) or name:find("%c")
+            or (flag ~= "active" and flag ~= "deleted") then return end
+        entries[#entries + 1] = {id = key, name = name, deleted = flag == "deleted"}
+        first = ending + 1
+    end
+    if first == #data + 1 then return entries end
+end
+
+function manager.poll(state)
+    if state.screen == "list" and not state.saves and state.catalog() then
+        open_list(state)
+        return
+    end
+    local pending = state.pending
+    if not pending then return end
+    local entries, failure = response(state)
+    if not entries and not failure and os.time() <= pending.until_at then return end
+    state.pending = nil
+    if failure or not entries then
+        open_list(state, failure == "busy" and "Close the hosted campaign before managing this save."
+            or "Could not complete the save request. Reopen the save and try again.")
+    elseif pending.action == "characters" then
+        state.characters, state.screen = entries, "characters"
+        draw(state)
+    else
+        local name = pending.action:match("%-character$") and "Character" or "Save"
+        open_list(state, name .. (pending.action:match("^restore") and " restored." or " moved to Deleted."))
+    end
+end
+
+return manager

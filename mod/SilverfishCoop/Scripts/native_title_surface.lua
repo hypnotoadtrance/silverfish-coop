@@ -154,11 +154,12 @@ function surface.remove(view)
 end
 
 function surface.mount(context, spec, on_action)
-    local first = spec.note and 110 or 66
+    local first = spec.note and 126 or 66
     local height = first + #spec.rows * (control_height + gap) + padding
     local view = {buttons = {}, inputs = {}, toggles = {}, linked = {}, active = false}
     local widget = display.mount(context, "",
-        {width = width, height = height, center = spec.center ~= false, top_level = true})
+        {width = width, height = height, center = spec.center ~= false, top_level = true,
+            navigation = spec.navigation == true})
     view.widget = widget
     local ok, reason = pcall(function()
         local tree = widget.WidgetTree
@@ -167,19 +168,21 @@ function surface.mount(context, spec, on_action)
             error("title_surface_canvas_unavailable", 0)
         end
         view.tree, view.canvas = tree, canvas
-        local background = child(tree, "/Script/UMG.Border")
-        background:SetBrushColor(rgba(0.015, 0.023, 0.022, 0.98))
-        background:SetVisibility(3)
-        place(cell(canvas, background), 0, 0, width, height, -1)
-        local divider = child(tree, "/Script/UMG.Border")
-        divider:SetBrushColor(rgba(0.83, 0.48, 0.13))
-        divider:SetVisibility(3)
-        place(cell(canvas, divider), 0, 0, width, 3, 0)
+        if not spec.navigation then
+            local background = child(tree, "/Script/UMG.Border")
+            background:SetBrushColor(rgba(0.032, 0.028, 0.020, 0.98))
+            background:SetVisibility(3)
+            place(cell(canvas, background), 0, 0, width, height, -1)
+            local divider = child(tree, "/Script/UMG.Border")
+            divider:SetBrushColor(rgba(0.83, 0.48, 0.13))
+            divider:SetVisibility(3)
+            place(cell(canvas, divider), 0, 0, width, 3, 0)
+        end
         text(view, spec.title, 27, rgba(0.94, 0.71, 0.36), padding, 15, width - padding * 2, 41)
         if spec.note then
-            text(view, spec.note, 17, rgba(0.83, 0.87, 0.86), padding, 58, width - padding * 2, 48, true)
+            text(view, spec.note, 17, rgba(0.89, 0.87, 0.81), padding, 58, width - padding * 2, 65, true)
         end
-        local input_order = {}
+        local input_order, first_button = {}, nil
         for index, row in ipairs(spec.rows) do
             local y = first + (index - 1) * (control_height + gap)
             if row.field then
@@ -192,13 +195,15 @@ function surface.mount(context, spec, on_action)
             elseif row.toggle then
                 checkbox(view, row.toggle, y)
             else
-                local w = math.floor((width - padding * 2 - gap * (#row - 1)) / #row)
+                local button_area = spec.navigation and 350 or width - padding * 2
+                local w = math.floor((button_area - gap * (#row - 1)) / #row)
                 for column, action in ipairs(row) do
                     local x = padding + (column - 1) * (w + gap)
                     local button = controls.create(context, canvas, action.label, function()
                         if view.active then on_action(action.key) end
                     end, #row > 1 and 20 or 22)
                     view.buttons[action.key] = button
+                    first_button = first_button or button.inner
                     place(button.slot, x, y, w, control_height, 1)
                     if action.detail then
                         button.widget.TextBlock_0:SetRenderOpacity(0)
@@ -211,12 +216,14 @@ function surface.mount(context, spec, on_action)
         widget:SetVisibility(4)
         view.active = true
         if not surface.sync(view) then error("title_surface_toggle_unavailable", 0) end
+        local focus = first_button
         for _, input in ipairs(input_order) do
             if input:GetIsEnabled() == true then
-                input:SetUserFocus(context.controller)
+                focus = input
                 break
             end
         end
+        if focus then focus:SetUserFocus(context.controller) end
     end)
     if not ok then
         surface.remove(view)

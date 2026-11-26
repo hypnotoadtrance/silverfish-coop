@@ -51,6 +51,10 @@ function display.mount(context, text, layout_options)
         local panel_width, panel_height = options.width or 344, options.height or 148
         local x = options.center and (width / scale - panel_width) / 2 or width / scale - panel_width - 20
         local y = options.center and (tonumber(size.Y) / scale - panel_height) / 2 or 62
+        if options.navigation then
+            x = width / scale * 0.07
+            y = tonumber(size.Y) / scale * 0.82 - panel_height
+        end
         widget:SetDesiredSizeInViewport({X = panel_width, Y = panel_height})
         widget:SetPositionInViewport({X = math.max(12, x), Y = math.max(12, y)}, false)
         display.text(widget, text)

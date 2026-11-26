@@ -5,19 +5,27 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import islice
+import logging
 import os
 from pathlib import Path
 import re
 import stat
+import uuid
 
 from . import native_host_save, runtime
+from .campaign import CampaignError, CampaignFormatError, CampaignStore, DELETED, StoreBusyError
 from .control import NAME
-from .title_handoff import _unlink
+from .title_handoff import TOKEN, _unlink
 
 
 FILE = "title-host-campaigns.tsv"
+REQUEST = "title-save-request.tsv"
+RESPONSE = "title-save-response.tsv"
+MAX_CHARACTERS = 256
+_OPERATIONS = {"characters", "delete-save", "restore-save", "delete-character", "restore-character"}
 MAX_CAMPAIGNS = 64
 _SCAN_LIMIT = 256
+_LOG = logging.getLogger(__name__)
 _DEVICE = re.compile(r"(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])", re.IGNORECASE)
 _MAP_NAMES = {
     "Anex_01_P": "Annex",
@@ -39,6 +47,9 @@ class CampaignEntry:
     map_label: str
     saved_at: str
     modified_ns: int
+    campaign_id: str = ""
+    revision: int = 0
+    deleted: bool = False
 
 
 def _map_label(area: str) -> str:
@@ -76,6 +87,8 @@ def _qualified_campaign(campaign: Path, saved: Path, name: str) -> tuple[Path, d
 def saved_campaign(campaign: Path, saved: Path, name: str) -> tuple[Path, str]:
     """Verify a named campaign against this title's active native save profile."""
     selected, checkpoint = _qualified_campaign(campaign, saved, name)
+    if checkpoint["world"].get(DELETED) is True:
+        raise ValueError("Restore this co-op campaign in Manage Saves before hosting it")
     return selected, checkpoint["world"]["map"]
 
 
@@ -86,7 +99,9 @@ def _entry(campaign: Path, saved: Path, name: str) -> CampaignEntry:
     modified_ns = native_host_save.slot_path(storage, slot).stat().st_mtime_ns
     local = datetime.fromtimestamp(modified_ns // 1_000_000_000)
     saved_at = f"{local:%Y-%m-%d %H:%M:%S}"
-    return CampaignEntry(name, _map_label(checkpoint["world"]["map"]), saved_at, modified_ns)
+    return CampaignEntry(name, _map_label(checkpoint["world"]["map"]), saved_at, modified_ns,
+                         uuid.UUID(checkpoint["campaign_id"]).hex, checkpoint["revision"],
+                         checkpoint["world"].get(DELETED) is True)
 
 
 def campaign_entries(campaign: Path, saved: Path) -> tuple[CampaignEntry, ...]:
@@ -110,12 +125,57 @@ def campaign_entries(campaign: Path, saved: Path) -> tuple[CampaignEntry, ...]:
     return tuple(valid[:MAX_CAMPAIGNS])
 
 
-class TitleHostCampaigns:
-    """Publish read-only scan results for the exact active Host offer."""
+def manage_campaign(campaign: Path, saved: Path, entry: CampaignEntry, action: str, character: str | None,
+                    cloud_backups=None) -> tuple[tuple[str, str, bool], ...]:
+    from .service import _MENU_CHECKPOINT_BYTES, _require_resident_host_checkpoint, verify_travel_checkpoint
 
-    def __init__(self, bridge: Path, scan: Callable[[], tuple[CampaignEntry, ...]]):
+    selected, checkpoint = _qualified_campaign(campaign, saved, entry.name)
+    campaign_id = str(uuid.UUID(entry.campaign_id))
+    if (checkpoint["campaign_id"], checkpoint["revision"]) != (campaign_id, entry.revision):
+        raise CampaignError("This co-op save has changed.")
+
+    def characters(data):
+        rows = ((key, value["name"], value["state"].get(DELETED) is True)
+                for key, value in data["characters"].items())
+        return tuple(sorted(rows, key=lambda row: (row[2], row[1].casefold(), row[0]))[:MAX_CHARACTERS])
+
+    if action == "characters":
+        return characters(checkpoint)
+    lock = selected / "save" / ".campaign.lock"
+    if os.path.lexists(lock):
+        info = lock.lstat()
+        if (not stat.S_ISREG(info.st_mode) or lock.resolve(strict=True) != lock
+                or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+            raise CampaignFormatError("The campaign lock is redirected.")
+
+    def verify(data):
+        _require_resident_host_checkpoint(saved.parent, data)
+        native_host_save.verify_checkpoint(saved.parent, data)
+
+    with CampaignStore(selected / "save", require_existing=True, verify_world=verify_travel_checkpoint,
+                       verify_checkpoint=verify, max_read_bytes=_MENU_CHECKPOINT_BYTES) as store:
+        store.set_deleted(campaign_id, entry.revision, action.startswith("delete-"), character_id=character)
+    if cloud_backups is not None:
+        # The deletion is already durable locally. A future host checkpoint can retry a failed mirror.
+        try:
+            cloud_backups.publish(selected)
+        except (OSError, CampaignError, ValueError, RuntimeError) as error:
+            _LOG.warning("Could not mirror the updated co-op save: %s", error)
+    return ()
+
+
+class TitleHostCampaigns:
+    """Publish and manage saved campaigns for the exact active Host offer."""
+
+    def __init__(self, bridge: Path, scan: Callable[[], tuple[CampaignEntry, ...]], manage=None):
         self.path = bridge / FILE
+        self.request = bridge / REQUEST
+        self.response = bridge / RESPONSE
         self._scan = scan
+        self._manage = manage
+        if manage:
+            _unlink(self.request)
+            _unlink(self.response)
         self._generation = None
         self._entries = None
         self._job = None
@@ -141,8 +201,13 @@ class TitleHostCampaigns:
                 self._job = generation, asyncio.create_task(asyncio.to_thread(self._scan))
             return
         if not self._published:
-            body = f"2\t{generation}\t{len(self._entries)}\n"
-            body += "".join(f"{entry.name}\t{entry.map_label}\t{entry.saved_at}\n" for entry in self._entries)
+            version = 3 if self._manage else 2
+            body = f"{version}\t{generation}\t{len(self._entries)}\n"
+            for entry in self._entries:
+                fields = (entry.name, entry.map_label, entry.saved_at)
+                if self._manage:
+                    fields += (entry.campaign_id, str(entry.revision), "deleted" if entry.deleted else "active")
+                body += "\t".join(fields) + "\n"
             try:
                 runtime.write_text(self.path, body, newline="\n")
             except OSError:
@@ -151,10 +216,56 @@ class TitleHostCampaigns:
 
     def contains(self, generation: str, name: str) -> bool:
         return (self._published and generation == self._generation
-                and any(entry.name == name for entry in self._entries))
+                and any(entry.name == name and not entry.deleted for entry in self._entries))
+
+    async def service(self, generation: str | None) -> None:
+        if self._manage is None or not generation:
+            return
+        try:
+            info = self.request.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_size > 384
+                    or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+                return
+            with self.request.open("rb") as stream:
+                payload = stream.read(385)
+        except OSError:
+            return
+        if not _unlink(self.request) or len(payload) > 384:
+            return
+        try:
+            version, offered, request_id, action, name, key, revision, character = payload.decode("ascii").rstrip("\n").split("\t")
+        except (UnicodeError, ValueError):
+            return
+        if version != "1" or offered != generation or not TOKEN.fullmatch(request_id) or not request_id.strip("0"):
+            return
+        entry = next((entry for entry in self._entries or () if
+                      (entry.name, entry.campaign_id, str(entry.revision)) == (name, key, revision)), None)
+        status, data = "error", "stale"
+        try:
+            needs_character = action in {"delete-character", "restore-character"}
+            valid_character = (character == "-" if not needs_character else str(uuid.UUID(character)) == character)
+            if entry and self._published and action in _OPERATIONS and valid_character:
+                rows = await asyncio.to_thread(self._manage, entry, action, None if character == "-" else character)
+                status, data = "ok", str(len(rows))
+                data += "".join(f"\n{key}\t{name}\t{'deleted' if deleted else 'active'}" for key, name, deleted in rows)
+        except StoreBusyError:
+            data = "busy"
+        except (OSError, CampaignError, ValueError, RuntimeError):
+            data = "unavailable"
+        if action != "characters":
+            self._published = False
+            self._entries = None
+            _unlink(self.path)
+        try:
+            runtime.write_text(self.response, f"1\t{generation}\t{request_id}\t{status}\t{data}\n", newline="\n")
+        except OSError:
+            return
 
     def close(self) -> None:
         if self._job is not None:
             self._job[1].cancel()
             self._job = None
         self.poll(None)
+        if self._manage:
+            _unlink(self.request)
+            _unlink(self.response)

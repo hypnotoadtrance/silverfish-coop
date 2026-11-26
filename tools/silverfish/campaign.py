@@ -26,6 +26,9 @@ _CREDENTIAL_RE = re.compile(r"[A-Za-z0-9_-]{43}")
 _DIGEST_RE = re.compile(r"[a-f0-9]{64}")
 
 
+DELETED = "coop_deleted"
+
+
 class CampaignError(RuntimeError):
     """The requested campaign operation could not complete."""
 
@@ -393,6 +396,32 @@ class CampaignStore:
             self._data = candidate
         return candidate["revision"]
 
+    def set_deleted(self, campaign_id, revision, deleted, *, character_id=None):
+        """Remove or restore a campaign or guest character while it is offline."""
+        if type(deleted) is not bool or not _is_uuid(campaign_id) or type(revision) is not int:
+            raise CharacterError("The selected co-op save is invalid.")
+        with self._writer, self._mutex:
+            self._require_open()
+            if (campaign_id, revision) != (self._data["campaign_id"], self._data["revision"]):
+                raise CharacterError("This co-op save changed. Reopen it to review the latest version.")
+            self._expire_leases(self._clock())
+            if self._lease_by_id:
+                raise StoreBusyError("Close the hosted campaign before managing its saves.")
+            candidate = copy.deepcopy(self._data)
+            target = candidate["world"]
+            if character_id is not None:
+                character = candidate["characters"].get(character_id) if _is_uuid(character_id) else None
+                if character is None or target.get(DELETED) is True:
+                    raise CharacterError("The saved character is unavailable.")
+                target = character["state"]
+            if (target.get(DELETED) is True) != deleted:
+                if deleted:
+                    target[DELETED] = True
+                else:
+                    target.pop(DELETED, None)
+                self._commit(candidate)
+            return self._data["revision"]
+
     @staticmethod
     def _add_guest(candidate, name):
         guest_id = str(uuid.uuid4())
@@ -489,7 +518,7 @@ class CampaignStore:
             return [
                 {"character_id": character_id, "name": character["name"]}
                 for character_id, character in self._data["characters"].items()
-                if character["guest_id"] == guest_id
+                if character["guest_id"] == guest_id and character["state"].get(DELETED) is not True
             ]
 
     def create_linked_character(self, guest_id, name, operation_id, *, appearance=None, profile=None):
@@ -514,7 +543,8 @@ class CampaignStore:
             character_id = str(uuid.uuid5(uuid.UUID(guest_id), operation_id))
             existing = self._data["characters"].get(character_id)
             if existing is not None:
-                if (existing["guest_id"] != guest_id or existing["name"] != name
+                if (existing["state"].get(DELETED) is True
+                        or existing["guest_id"] != guest_id or existing["name"] != name
                         or existing["state"].get("creator_appearance") != appearance
                         or existing["state"].get("creator_profile") != profile):
                     raise CharacterError("Character creation operation ID is already in use.")
@@ -535,7 +565,7 @@ class CampaignStore:
             return [
                 self._public_character(character_id)
                 for character_id, character in characters.items()
-                if character["guest_id"] == guest_id
+                if character["guest_id"] == guest_id and character["state"].get(DELETED) is not True
             ]
 
     def create_character(self, guest_id, credential, name, state=None):
@@ -571,7 +601,7 @@ class CampaignStore:
             self._authenticate(guest_id, credential)
             grace_seconds = _valid_grace(grace_seconds)
             character = self._data["characters"].get(character_id) if _is_uuid(character_id) else None
-            if character is None or character["guest_id"] != guest_id:
+            if character is None or character["guest_id"] != guest_id or character["state"].get(DELETED) is True:
                 raise CharacterError("The selected character is unavailable to this guest.")
 
             self._expire_leases(self._clock())
@@ -642,7 +672,7 @@ class CampaignStore:
     @staticmethod
     def _update_character_state(character, state):
         selections = {key: value for key, value in character["state"].items()
-                      if key in {"creator_appearance", "creator_profile"}}
+                      if key in {"creator_appearance", "creator_profile", DELETED}}
         character["state"] = copy.deepcopy(state)
         character["state"].update(selections)
 

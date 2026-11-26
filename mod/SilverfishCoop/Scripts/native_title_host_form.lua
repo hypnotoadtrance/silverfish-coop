@@ -1,7 +1,7 @@
 local form = {}
 local surface = require("native_title_surface")
 local fields = {
-    {key = "campaign", label = "Save name", limit = 64,
+    {key = "campaign", label = "Save name", hint = "Optional", limit = 64,
         error = "Use letters, numbers, underscores or hyphens for the save name."},
     {key = "port", label = "UDP port", limit = 5,
         error = "Enter a UDP port from 1 to 65535."},
@@ -74,7 +74,7 @@ function form.rows(draft, resident, show_name)
                 target = field.key, checked = draft.require_password == true}}
         end
         rows[#rows + 1] = {field = {key = field.key, label = field.label,
-            limit = field.limit, secret = field.secret, value = draft[field.key]}}
+            hint = field.hint, limit = field.limit, secret = field.secret, value = draft[field.key]}}
     end
     if resident then
         rows[#rows + 1] = {toggle = {key = "friendly_fire", label = "Friendly fire",

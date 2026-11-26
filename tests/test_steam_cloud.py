@@ -8,7 +8,7 @@ import uuid
 from zipfile import ZipFile
 
 from tools.silverfish import direct_ip, native_host_save, runtime, service
-from tools.silverfish.campaign import CampaignStore
+from tools.silverfish.campaign import CampaignStore, DELETED
 from tools.silverfish.steam_cloud import CloudBackups
 from tools.silverfish.travel import CROSSROADS
 
@@ -82,6 +82,26 @@ class CloudBackupTests(unittest.TestCase):
         native_host_save.slot_path(storage, self.world["native_host_save"]["slot"]).unlink()
         self.second.restore()
         self.assertEqual((primary.read_bytes(), previous.read_bytes()), before)
+
+    def test_deletion_revision_survives_an_older_cloud_backup(self):
+        self.assertTrue(self.first.publish(self.campaign))
+        old = self.backup.read_bytes()
+        self.download.write_bytes(old)
+        self.second.restore()
+        with CampaignStore(self.campaign / "save", require_existing=True) as store:
+            identity = store.status()["campaign_id"]
+            store.set_deleted(identity, store.revision, True, character_id=self.character)
+            store.set_deleted(identity, store.revision, True)
+        self.assertTrue(self.first.publish(self.campaign))
+        shutil.copyfile(self.backup, self.download)
+        self.second.restore()
+        deleted = self.checkpoint(self.second, self.restored)
+        self.assertIs(deleted["world"][DELETED], True)
+        self.assertIs(deleted["characters"][self.character]["state"][DELETED], True)
+        self.download.write_bytes(old)
+        self.second.restore()
+        self.assertEqual(self.checkpoint(self.second, self.restored), deleted)
+        self.assertEqual((self.second.root / "20260101-101010.sav").read_bytes(), b"unchanged solo slot")
 
     def test_newer_backup_updates_same_campaign_and_keeps_previous_checkpoint(self):
         self.first.publish(self.campaign)

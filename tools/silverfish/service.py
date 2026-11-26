@@ -22,7 +22,7 @@ from . import (direct_ip, link, matrix_service, native_authored_pickup, native_b
                native_guest_weapon, native_host_save, native_host_stack_drop, native_inventory, native_inventory_death, native_loot, native_matrix, native_meet_broker, native_stash, native_wire_quest,
                native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards, native_shop_view, native_turret_photo,
                native_wipe_view, native_wire_board, native_zone_rejoin, party, wipe)
-from .campaign import CampaignError, CampaignFormatError, CampaignStore, DEFAULT_RECONNECT_GRACE
+from .campaign import CampaignError, CampaignFormatError, CampaignStore, DEFAULT_RECONNECT_GRACE, DELETED
 from . import native_npc_barter, native_spratt, native_spratt_fixture
 from .authored_routes import AUTHORED_ROUTES, MAPS as EXPANDED_MAPS, AuthoredRoute
 from .authored_world_view import WORLD_VIEW_ACTORS
@@ -4782,6 +4782,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
     ) as store:
         campaign = store.status()
         old_world = campaign["world"]
+        if old_world.get(DELETED) is True:
+            raise ValueError("Restore this co-op campaign in Manage Saves before hosting it")
         if start_zone and old_world.get("map") not in (None, start_zone):
             raise ValueError("An existing campaign resumes in its saved zone")
         if start_preset and old_world.get("map"):

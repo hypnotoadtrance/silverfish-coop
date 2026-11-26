@@ -665,7 +665,7 @@ async def _resident_unified(work: Path, seat: Path, mailbox: Path, saved: Path, 
 
 async def _resident_title(mailbox, saved, directory, plans, *, join_settings=None, host_campaign=None,
                           host_defaults=None, cloud_backups=None):
-    from .title_host_campaigns import campaign_entries
+    from .title_host_campaigns import campaign_entries, manage_campaign
     from .title_session import TitleSession
 
     title = EmbeddedEngine(os.getpid(), mailbox, saved, None, session_directory=directory)
@@ -674,10 +674,14 @@ async def _resident_title(mailbox, saved, directory, plans, *, join_settings=Non
             cloud_backups.restore()
         return campaign_entries(host_campaign, saved)
 
+    def manage(entry, action, character):
+        return manage_campaign(host_campaign, saved, entry, action, character, cloud_backups=cloud_backups)
+
     host_campaign_scan = scan_campaigns if host_campaign is not None else None
     await TitleSession(title.bridge, plans, resident=True, title_saved_directory=saved,
                        on_title_ready=lambda: None, join_settings=join_settings,
-                       host_campaign_scan=host_campaign_scan, host_defaults=host_defaults).run()
+                       host_campaign_scan=host_campaign_scan, host_defaults=host_defaults,
+                       host_campaign_manage=manage if host_campaign is not None else None).run()
 
 
 def run() -> None:

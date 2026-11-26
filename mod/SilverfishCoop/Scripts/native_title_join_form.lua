@@ -130,7 +130,9 @@ local function page_count(draft)
 end
 
 local function render_surface(draft, screen, hint, initial)
-    local title, rows = draft.steam_port and "Join through Steam" or "Join co-op", {}
+    local title = draft.steam_port and "Join via Steam"
+        or draft.direct and "Join by Direct IP" or "Join by Invitation"
+    local rows = {}
     local note = hint
     local back = button("back", "Back")
     if endpoint_screens[screen] then

@@ -59,6 +59,7 @@ from portable_loki_control import verify_guest_loki, verify_guest_loki_reconnect
 from portable_lingering_teleport import lingering_overlay, verify_stock_lingering_teleport
 from portable_personal_consumable import verify_personal_consumable_reconnect, verify_stock_personal_consumable
 from portable_wipe_chooser import verify_stock_wipe_chooser
+from portable_save_management import verify_save_management
 from portable_simmi_jammer import instrument_jammer_sampler, verify_stock_simmi_jammers
 from portable_quarry_photo import verify_quarry_photo
 from portable_weather_travel import verify_weather_travel
@@ -6939,6 +6940,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_personal_consumable: bool = False,
                  stock_wipe_chooser: bool = False,
                  stock_npc_override: bool = False, stock_dock_population: bool = False,
+                 manage_saves: bool = False,
                  stock_dead_drops: bool = False,
                  stock_board_offers: bool = False, stock_quarry_photo: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
@@ -7215,7 +7217,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     single_scenario = (bool(resident_campaigns) or stock_prop_grip
                        or stock_crate_ring or guest_world_start
                        or guest_ui_memory or compact_crate_status or compact_world_view or guest_shop_lease
-                       or guest_stash_memory or nonmirrored_startup or stock_unequip or stock_fire_mode_reopen
+                       or guest_stash_memory or nonmirrored_startup or stock_unequip or stock_fire_mode_reopen or manage_saves
                        or resident_cabinet_archive is not None)
     try:
         if crossroads_profile or stock_crossroads_recovery:
@@ -7667,6 +7669,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                       before_join=startup.arm, on_join=startup.joined,
                                                       after_reconnect=check_reconnect,
                                                       wait_status=wait_resident_status, **exit_options))
+        elif manage_saves:
+            managed = proof["save_management"] = await verify_save_management(first, second)
+            proof["sessions"].extend((managed["created"], managed["reopened"]))
         elif stock_fire_mode_reopen:
             proof["sessions"].extend(await verify_fire_mode_reopen(
                 first, second, portable_probe_command, proof.setdefault("stock_fire_mode_reopen", {})))
@@ -7987,6 +7992,8 @@ if __name__ == "__main__":
     parser.add_argument("--stock-personal-consumable", action="store_true",
                         help="use an unlisted stock consumable through the guest inventory and recover it across reconnect")
     parser.add_argument("--stock-campfire", action="store_true", help="verify stock campfire damage and feedback, combinable with food and weapon cues")
+    parser.add_argument("--manage-saves", action="store_true",
+                        help="Delete, restore and resume saves through the installed title")
     parser.add_argument("--stock-dead-drops", action="store_true",
                         help="Verify the Crossroads and Metro Dead Drops in one resident pair")
     parser.add_argument("--stock-board-offers", action="store_true",
@@ -8329,6 +8336,7 @@ if __name__ == "__main__":
                        stock_personal_consumable=args.stock_personal_consumable,
                        stock_wipe_chooser=args.stock_wipe_chooser,
                        stock_npc_override=args.stock_npc_override, stock_dock_population=args.stock_dock_population,
+                       manage_saves=args.manage_saves,
                        stock_dead_drops=args.stock_dead_drops,
                        stock_board_offers=args.stock_board_offers,
                        stock_quarry_photo=args.stock_quarry_photo,

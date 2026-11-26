@@ -60,10 +60,10 @@ end
 local function read_campaigns(generation)
     local file = io.open(bridge_path .. "/title-host-campaigns.tsv", "rb")
     if not file then return end
-    local data = file:read(12289)
+    local data = file:read(16385)
     file:close()
-    if not data or #data > 12288 then return end
-    local version, offered, size, start = data:match("^([12])\t([0-9a-f]+)\t([0-9][0-9]?)\r?\n()")
+    if not data or #data > 16384 then return end
+    local version, offered, size, start = data:match("^([123])\t([0-9a-f]+)\t([0-9][0-9]?)\r?\n()")
     if offered ~= generation then return end
     local count = tonumber(size)
     if not count or count > 64 then return end
@@ -72,17 +72,22 @@ local function read_campaigns(generation)
         local ending = data:find("\n", start, true)
         if not ending then return end
         local row = data:sub(start, ending - 1):gsub("\r$", "")
-        local name, area, timestamp
+        local name, area, timestamp, id, revision, flag
         if version == "1" then
             name = row:match("^[A-Za-z0-9][A-Za-z0-9_-]*$")
             area = name
+        elseif version == "3" then
+            name, area, timestamp, id, revision, flag = row:match(
+                "^([A-Za-z0-9][A-Za-z0-9_-]*)\t([ -~]+)\t(%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%d)\t([0-9a-f]+)\t(%d+)\t([a-z]+)$")
+            if not id or #id ~= 32 or #revision > 18 or (flag ~= "active" and flag ~= "deleted") then return end
         else
             name, area, timestamp = row:match(
                 "^([A-Za-z0-9][A-Za-z0-9_-]*)\t([ -~]+)\t(%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%d)$")
         end
         if not name or #name > 64 or #area > 64 or seen[name:lower()] then return end
         seen[name:lower()] = true
-        campaigns[#campaigns + 1] = {name = name, area = area, timestamp = timestamp}
+        campaigns[#campaigns + 1] = {name = name, area = area, timestamp = timestamp,
+            id = id, revision = revision, deleted = flag == "deleted"}
         start = ending + 1
     end
     if start == #data + 1 then return campaigns end
@@ -154,20 +159,20 @@ end
 local function multiplayer(offer)
     session.browser = nil
     local choices, rows = actions[offer.choices], {}
-    if choices.host then rows[#rows + 1] = {button("host", "Host")} end
+    if choices.host then rows[#rows + 1] = {button("host", "Host Game")} end
     if choices.join then rows[#rows + 1] = {button("join", direct_join and "Join by Direct IP" or "Join")} end
     if choices.join and direct_join and steam_available() then
         rows[#rows + 1] = {button("steam-public", "Public Steam Lobbies")}
     end
     rows[#rows + 1] = {button("modes", "Back")}
-    present({title = "Multiplayer", rows = rows})
+    present({title = "Multiplayer", rows = rows, navigation = resident})
 end
 
 local function modes(owner)
     controls.remove(owner.solo_back)
     owner.solo_back = nil
     show_stock(owner, false)
-    present({title = "Project Silverfish", rows = {
+    present({title = "Project Silverfish", navigation = resident, rows = {
         {button("singleplayer", "Singleplayer")},
         {button("multiplayer", "Multiplayer")},
         {button("quit", "Quit")},
@@ -291,15 +296,17 @@ end
 
 local function host_menu()
     session.form.screen = "menu"
-    present({title = "Host a campaign", rows = {
-        {button("new", "New Game"), button("browse", "Load Game")},
+    present({title = "Host Game", rows = {
+        {button("new", "New Game")},
+        {button("browse", "Load Game")},
+        {button("manage", "Manage Saves")},
         {button("back", "Back")},
     }})
 end
 
 local function host_settings(form, note)
     form.screen = "settings"
-    local rows = form.api.rows(form.values, resident, form.fixture and not form.saved_name)
+    local rows = form.api.rows(form.values, resident, not form.saved_name and (resident or form.fixture))
     if resident and not form.fixture then
         local access = form.values.steam_access
         table.insert(rows, 1, {button("network", access and "Steam · " .. steam_access_labels[access] or "Network · Direct IP")})
@@ -344,8 +351,9 @@ local function show_saved(form)
         local first = form.first or 1
         for index = first, math.min(first + 3, #saved) do
             local row = saved[index]
-            local area = row.timestamp and #row.area > 19 and row.area:sub(1, 18):gsub(" +$", "") .. "…" or row.area
-            rows[#rows + 1] = {button("load:" .. row.name, area, row.timestamp)}
+            local label = row.id and not row.name:match("^campaign%-[0-9a-f]+$") and row.name or row.area
+            if row.timestamp and #label > 24 then label = label:sub(1, 23):gsub(" +$", "") .. "…" end
+            rows[#rows + 1] = {button("load:" .. row.name, label, row.timestamp)}
         end
         local pages = {}
         if first > 1 then pages[#pages + 1] = button("previous", "Previous") end
@@ -370,6 +378,21 @@ local function handle_host_form(action, context)
         report = {state = "ready", choices = offer.choices}
         return true
     end
+    if form.manager then
+        if form.management.press(form.manager, action) == "leave" then
+            form.manager = nil
+            host_menu()
+        end
+        return true
+    end
+    if action == "manage" and resident and form.screen == "menu" then
+        form.management = require("native_title_save_manager")
+        form.manager = form.management.open(bridge_path, offer.generation, request_id, function()
+            local entries = read_campaigns(offer.generation)
+            return entries and (not entries[1] or entries[1].id) and entries or nil
+        end, present)
+        return true
+    end
     if action == "back" then
         if form.screen == "steam-access" then host_network(form)
         elseif form.screen == "network" then host_settings(form)
@@ -382,7 +405,7 @@ local function handle_host_form(action, context)
         return true
     end
     if form.screen == "settings" and action == "network" and resident and not form.fixture then
-        form.api.selection(session.view, form.values, resident, form.saved_name, false)
+        form.api.selection(session.view, form.values, resident, form.saved_name, not form.saved_name)
         host_network(form)
         return true
     end
@@ -401,11 +424,17 @@ local function handle_host_form(action, context)
     end
     if action == "new" and form.screen == "menu" then
         form.saved_name, form.saved_display = nil, nil
+        form.values.campaign = ""
         host_settings(form)
         return true
     end
     if action == "browse" and resident then
         form.saved, form.first, form.index = read_campaigns(offer.generation), 1, 1
+        if form.saved then
+            for index = #form.saved, 1, -1 do
+                if form.saved[index].deleted then table.remove(form.saved, index) end
+            end
+        end
         show_saved(form)
         return true
     end
@@ -432,7 +461,7 @@ local function handle_host_form(action, context)
         return false, "title_host_form_unavailable"
     end
     local values, failure, hint = form.api.selection(session.view, form.values, resident, form.saved_name,
-        form.fixture and not form.saved_name)
+        not form.saved_name and (resident or form.fixture))
     if not values then
         host_settings(form, hint)
         return false, failure
@@ -901,6 +930,7 @@ local function update_title()
     if session.browser then poll_public_lobbies(session.browser) end
     surface.sync(session.view)
     local form = session.form
+    if form and form.manager then form.management.poll(form.manager) end
     if form and form.role == "join" then
         local now = os.time()
         if form.steam_nonce and not form.steam_opened and form.steam_opened_at ~= now then

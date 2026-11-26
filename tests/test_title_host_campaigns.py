@@ -9,9 +9,9 @@ from unittest.mock import patch
 import uuid
 
 from tools.silverfish import embedded_startup, native_host_save
-from tools.silverfish.campaign import CampaignFormatError, CampaignStore
+from tools.silverfish.campaign import CampaignError, CampaignFormatError, CampaignStore, CharacterError, StoreBusyError
 from tools.silverfish.title_handoff import Claim, TitleHandoff
-from tools.silverfish.title_host_campaigns import FILE, CampaignEntry, TitleHostCampaigns, campaign_entries, saved_campaign
+from tools.silverfish.title_host_campaigns import FILE, CampaignEntry, TitleHostCampaigns, campaign_entries, manage_campaign, saved_campaign
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 from test_title_handoff import ready
 
@@ -66,6 +66,49 @@ class SavedCampaignTests(unittest.TestCase):
         ])
         self.assertEqual(saved_campaign(self.campaign, self.saved, "alpha"), (first, CROSSROADS))
         self.assertEqual(before, [(path.stat().st_mtime_ns, path.read_bytes()) for path in objects])
+
+    def test_manage_save_and_character_only_changes_the_selected_coop_checkpoint(self):
+        directory, slot = self.checkpoint("Expedition")
+        other, other_slot = self.checkpoint("Other")
+        solo = self.saved / "SaveGames" / "Singleplayer.sav"
+        solo.write_bytes(b"solo")
+        native_before = {file: file.read_bytes() for file in (slot, other_slot, solo, other / "save" / "campaign.json")}
+        with CampaignStore(directory / "save") as store:
+            guest = store.issue_guest("Scout")
+            character = store.create_character(guest["guest_id"], guest["credential"], "Courier")["character_id"]
+            live = next(row for row in campaign_entries(self.campaign, self.saved) if row.name == "Expedition")
+            with self.assertRaises(StoreBusyError):
+                manage_campaign(self.campaign, self.saved, live, "delete-save", None)
+
+        def entry():
+            return next(row for row in campaign_entries(self.campaign, self.saved) if row.name == "Expedition")
+
+        original = entry()
+        self.assertEqual(manage_campaign(self.campaign, self.saved, original, "characters", None),
+                         ((character, "Courier", False),))
+        manage_campaign(self.campaign, self.saved, original, "delete-character", character)
+        hidden = entry()
+        self.assertGreater(hidden.revision, original.revision)
+        self.assertEqual(manage_campaign(self.campaign, self.saved, hidden, "characters", None),
+                         ((character, "Courier", True),))
+        with CampaignStore(directory / "save") as store:
+            self.assertEqual(store.linked_character_catalog(guest["guest_id"]), [])
+            with self.assertRaises(CharacterError):
+                store.activate(guest["guest_id"], guest["credential"], character)
+        with self.assertRaises(CampaignError):
+            manage_campaign(self.campaign, self.saved, original, "delete-save", None)
+        manage_campaign(self.campaign, self.saved, hidden, "restore-character", character)
+        self.assertEqual(manage_campaign(self.campaign, self.saved, entry(), "characters", None),
+                         ((character, "Courier", False),))
+
+        manage_campaign(self.campaign, self.saved, entry(), "delete-save", None)
+        self.assertTrue(entry().deleted)
+        with self.assertRaisesRegex(ValueError, "Restore this co-op campaign"):
+            saved_campaign(self.campaign, self.saved, "Expedition")
+        manage_campaign(self.campaign, self.saved, entry(), "restore-save", None)
+        self.assertFalse(entry().deleted)
+        self.assertEqual(saved_campaign(self.campaign, self.saved, "Expedition"), (directory, CROSSROADS))
+        self.assertEqual({file: file.read_bytes() for file in native_before}, native_before)
 
     def test_only_matching_profile_for_campaign_owned_game_user(self):
         own_profile = self.campaign / "game-user"

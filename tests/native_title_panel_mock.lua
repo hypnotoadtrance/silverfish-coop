@@ -6,6 +6,8 @@ local steam_opened = "bridge/steam-coop-join-opened.tsv"
 local browse_request = "bridge/steam-coop-browser-request.tsv"
 local browse_response = "bridge/steam-coop-browser-response.tsv"
 local host_catalog = "bridge/title-host-campaigns.tsv"
+local save_request = "bridge/title-save-request.tsv"
+local save_response = "bridge/title-save-response.tsv"
 local files, flags, queued = {}, {}, {}
 local now, id, tick, display, solo_back, writes = 100, 0, nil, nil, nil, 0
 local refuse_rename = false
@@ -137,7 +139,7 @@ local modules = {
 }
 env = setmetatable({
     require = function(name)
-        assert(modules[name] or name == "native_title_host_form" or name == "native_title_join_form")
+        assert(modules[name] or name == "native_title_host_form" or name == "native_title_join_form" or name == "native_title_save_manager")
         if not modules[name] then
             modules[name] = assert(loadfile("mod/SilverfishCoop/Scripts/" .. name .. ".lua", "t", env))()
         end
@@ -151,7 +153,7 @@ env = setmetatable({
         end
         assert(mode == "wb" and (path:sub(1, #request) == request or path:sub(1, #join_request) == join_request
             or path:sub(1, #steam_cancel) == steam_cancel or path:sub(1, #steam_opened) == steam_opened
-            or path:sub(1, #browse_request) == browse_request))
+            or path:sub(1, #browse_request) == browse_request or path:sub(1, #save_request) == save_request))
         return {write = function(_, ...) files[path] = table.concat({...}); writes = writes + 1; return true end,
             close = function() return true end}
     end},
@@ -159,7 +161,7 @@ env = setmetatable({
         remove = function(path) files[path] = nil end,
         rename = function(source, target)
             assert(target == request or target == join_request or target == steam_cancel or target == steam_opened
-                or target == browse_request)
+                or target == browse_request or target == save_request)
             if refuse_rename or files[target] then return false end
             files[target], files[source] = files[source], nil
             return true
@@ -355,17 +357,18 @@ offer("host", 108, fresh_generation, defaults)
 click("multiplayer")
 click("host")
 click("new")
-assert(display.title == "New Game" and display.fields.campaign == nil
+assert(display.title == "New Game" and display.fields.campaign == ""
     and display.fields.bind == defaults[2] and display.fields.port == defaults[3])
 assert(surface.checked(display, "require_password") == false and surface.read(display, "password") == "")
-rejected("title_host_form_fixture_arguments", host("campaign", "title-host-settings-1234abcd"))
+assert(host("campaign", "title-host-settings-1234abcd"))
+assert(surface.read(display, "campaign") == "title-host-settings-1234abcd")
 assert(surface.set_checked(display, "require_password", true))
 click("submit")
 assert(not files[request] and display.note and surface.checked(display, "require_password"))
 assert(host("password") and surface.read(display, "password") == "Fixture co-op pass")
 assert(surface.set_checked(display, "require_password", false) and surface.read(display, "password") == "")
 click("submit")
-assert(files[request] == ("4\t%s\t%s\thost\t\t127.0.0.1\t7777\t\tcreator\n")
+assert(files[request] == ("4\t%s\t%s\thost\ttitle-host-settings-1234abcd\t127.0.0.1\t7777\t\tcreator\n")
     :format(fresh_generation, operation_id()))
 files[request] = nil
 
@@ -406,7 +409,7 @@ now = 101
 files[steam_join] = ("1\t%s\t28951\t159\n"):format(steam_nonce)
 refuse_rename = true
 tick()
-assert(display.title == "Join through Steam" and display.buttons.connect and display.toggles.use_password
+assert(display.title == "Join via Steam" and display.buttons.connect and display.toggles.use_password
     and display.fields.address == nil and display.fields.port == nil and not files[steam_opened])
 local steam_view = display
 refuse_rename = false
@@ -421,14 +424,14 @@ assert(files[join_request] == ("1\t%s\t%s\tdirect\t127.0.0.1\t28951\t\n")
 files[join_request] = nil
 files[join_response] = ("1\t%s\t%s\terror\tdirect_password_required\t0\n"):format(steam_generation, operation_id())
 tick()
-assert(display.title == "Join through Steam" and surface.checked(display, "use_password") and display.focus == "password")
+assert(display.title == "Join via Steam" and surface.checked(display, "use_password") and display.focus == "password")
 click("back")
 assert(display.title == "Multiplayer" and files[steam_cancel] == "1\t" .. steam_nonce .. "\tcancel\n")
 now = 103
 tick()
 assert(display.title == "Multiplayer" and not files[steam_opened], "Do not reopen the consumed Steam invite")
 click("join")
-assert(display.title == "Join co-op" and display.fields.port == defaults[3] and display.focus == nil)
+assert(display.title == "Join by Direct IP" and display.fields.port == defaults[3] and display.focus == nil)
 assert(join("address", "127.0.0.2") and join("port", "28952"))
 local function direct_retry(password, failure)
     next_guid = next_guid + 1
@@ -438,7 +441,7 @@ local function direct_retry(password, failure)
     files[join_request] = nil
     files[join_response] = ("1\t%s\t%s\terror\t%s\t0\n"):format(steam_generation, operation_id(), failure)
     tick()
-    assert(display.title == "Join co-op" and display.focus == "password"
+    assert(display.title == "Join by Direct IP" and display.focus == "password"
         and display.fields.address == "127.0.0.2" and display.fields.port == "28952"
         and surface.checked(display, "use_password") and surface.read(display, "password") == "")
 end
@@ -489,7 +492,7 @@ local abandoned_nonce = generation("b")
 now = 104
 files[steam_join] = ("1\t%s\t28951\t159\n"):format(abandoned_nonce)
 tick()
-assert(display.title == "Join through Steam")
+assert(display.title == "Join via Steam")
 assert(files[steam_opened] == "1\t" .. abandoned_nonce .. "\topened\n")
 files[steam_join], files[steam_opened] = nil, nil
 refuse_rename = true
@@ -507,7 +510,7 @@ local retry_generation, retry_nonce = generation("c"), generation("d")
 offer("host,join", 115, retry_generation, defaults)
 files[steam_join] = ("1\t%s\t28953\t159\n"):format(retry_nonce)
 tick()
-assert(display.title == "Join through Steam")
+assert(display.title == "Join via Steam")
 files[steam_join], files[steam_opened] = nil, nil
 next_guid = next_guid + 1
 click("connect")
@@ -523,3 +526,54 @@ sync()
 assert(not files[steam_cancel], "Retiring a submitted panel must preserve the selected route")
 offer("host,join", 115, generation("e"), defaults)
 assert(files[steam_cancel] == "1\t" .. retry_nonce .. "\tcancel\n", "A fresh title offer releases an unused route")
+
+local manage_generation, campaign_id = generation("d"), generation("c")
+local character = "00000000-1111-2222-3333-444444444444"
+now = 100
+local function manage_list(revision, state)
+    files[host_catalog] = ("3\t%s\t1\nExpedition\tCrossroads\t2026-11-20 18:15:18\t%s\t%s\t%s\n")
+        :format(manage_generation, campaign_id, revision, state)
+end
+local function save_reply(verb, revision, target, rows)
+    local id = operation_id()
+    local prefix = "1\t" .. manage_generation .. "\t" .. id .. "\t"
+    assert(files[save_request] == prefix .. verb .. "\tExpedition\t" .. campaign_id .. "\t" .. revision .. "\t" .. target .. "\n")
+    files[save_request] = nil
+    files[save_response] = prefix .. "ok\t" .. rows
+    tick()
+end
+manage_list(1, "active")
+offer("host,join", 108, manage_generation, defaults)
+click("multiplayer")
+click("host")
+click("manage")
+click("save:" .. campaign_id)
+click("characters")
+save_reply("characters", 1, "-", "1\n" .. character .. "\tCourier\tactive\n")
+click("character:" .. character)
+click("delete-character")
+assert(not files[save_request] and display.title == "Delete Character?")
+click("back")
+assert(not files[save_request])
+click("delete-character")
+click("confirm")
+manage_list(2, "active")
+save_reply("delete-character", 1, character, "0\n")
+click("save:" .. campaign_id)
+click("delete-save")
+assert(not files[save_request] and display.title == "Delete Save?")
+click("confirm")
+manage_list(3, "deleted")
+save_reply("delete-save", 2, "-", "0\n")
+click("back")
+click("browse")
+rejected("title_panel_fixture_button_unavailable", button("load:Expedition"))
+click("back")
+click("manage")
+click("save:" .. campaign_id)
+click("restore-save")
+manage_list(4, "active")
+save_reply("restore-save", 3, "-", "0\n")
+click("back")
+click("browse")
+assert(display.buttons["load:Expedition"])
