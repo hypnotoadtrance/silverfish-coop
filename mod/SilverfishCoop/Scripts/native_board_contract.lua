@@ -1,5 +1,6 @@
 local wire = require("native_wire_quest")
 local quest_catalog = require("native_quest_catalog")
+local content_paths = require("content_paths")
 local board_contract = {}
 
 local keys = {
@@ -75,8 +76,8 @@ local function shape(save, row)
         objective = quantity == 1 and row[keys.objective][1] or nil, empty_consumption = quantity == 0 and consumed}
     if quantity == 1 then
         if not valid(result.objective) then refuse("objective_class_unqualified") end
-        result.path = result.objective:GetFullName():match("^BlueprintGeneratedClass (/Game/[%w_./%-]+)$")
-        local defaults = result.path and result.objective:GetCDO()
+        result.path = result.objective:GetFullName():match("^BlueprintGeneratedClass (/%S+)$")
+        local defaults = content_paths.item_class(result.path) and result.objective:GetCDO()
         if not valid(defaults) or not same(defaults:GetClass(), result.objective) or type(defaults.Stacks) ~= "boolean" then
             refuse("objective_class_unqualified")
         end

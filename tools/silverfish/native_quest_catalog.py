@@ -4,6 +4,8 @@ from collections.abc import Iterable, Sequence
 import re
 from typing import TypedDict
 
+from .content_paths import item_class_name
+
 
 _LIMITS = {"active": 64, "stock": 128, "board": 128}
 _TOTAL_LIMIT = 1024
@@ -11,7 +13,6 @@ _ITEM_LIMIT = 8
 _PAGE_SIZE = 8
 _TAGS = {"native-quest-catalog": 6, "native-quest-entry": 9, "native-quest-reward-item": 5}
 _REASON = re.compile(r"[a-z_]{1,64}\Z")
-_ASSET = re.compile(r"/Game/[A-Za-z0-9_/-]+\.[A-Za-z0-9_-]+\Z")
 _INTEGER = re.compile(r"(?:0|-?[1-9][0-9]{0,9})\Z")
 
 
@@ -110,8 +111,8 @@ def _append_item(entry: QuestEntry, index_text: str, class_path: str) -> None:
     items = entry["items"]
     if index >= entry["item_count"] or any(item["index"] == index for item in items):
         raise ValueError("Quest catalog reward index is out of range or duplicated")
-    if len(class_path) > 256 or not _ASSET.fullmatch(class_path):
-        raise ValueError("Invalid stock quest reward class")
+    if not item_class_name(class_path):
+        raise ValueError("Invalid quest reward item class")
     items.append({"index": index, "class_path": class_path})
 
 

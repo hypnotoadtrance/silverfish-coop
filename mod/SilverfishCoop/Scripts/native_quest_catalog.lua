@@ -1,3 +1,4 @@
+local content_paths = require("content_paths")
 local catalog = {}
 
 local statics_path = "/Script/Engine.Default__GameplayStatics"
@@ -75,8 +76,8 @@ end
 
 local function reward_path(reward)
     if not valid(reward) then return end
-    local path = reward:GetFullName():match("^%S+ (/Game/[%w_/%-]+%.[%w_%-]+)$")
-    if path and #path <= 256 then return path end
+    local path = reward:GetFullName():match("^BlueprintGeneratedClass (/%S+)$")
+    if content_paths.item_class(path) then return path end
 end
 
 local function quest_entry(source, id, quest, save)

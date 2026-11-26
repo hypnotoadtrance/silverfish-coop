@@ -70,6 +70,17 @@ class QuestCatalogTests(unittest.TestCase):
         self.assertEqual(result["stock"], {"state": "unavailable", "total": None, "emitted": 0,
                                            "reason": "quest_table_unavailable", "entries": {}})
 
+    def test_catalog_preserves_a_reward_class_from_a_mounted_content_pack(self):
+        custom_item = "/FrontierPack/Items/Salve.Salve_C"
+        result = parse([
+            summary("active", count="1", emitted="1"),
+            quest("active", "FirstAid", item_count="1"),
+            reward("active", "FirstAid", class_path=custom_item),
+            summary("stock"),
+        ], sequence=11)
+        self.assertEqual(result["active"]["entries"]["FirstAid"]["items"],
+                         [{"index": 0, "class_path": custom_item}])
+
     def test_partial_reward_keeps_total_and_exact_known_item_positions(self):
         result = parse([
             summary("active", state="partial", count="1", emitted="1", reason="reward_summary_limited"),

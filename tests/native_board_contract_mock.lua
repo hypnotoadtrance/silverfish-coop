@@ -42,7 +42,7 @@ local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local eye = "Clt_Eye_02"
 local kill = "Asn_EggHead"
 local multi_reward = "MultiReward"
-local item_path = "/Game/Classes/Items/Item_MonsterEye.Item_MonsterEye_C"
+local item_path = "/FrontierPack/Items/ScrapEye.ScrapEye_C"
 local class = object({GetFullName = function() return "BlueprintGeneratedClass " .. item_path end})
 class.GetCDO = function() return object({Stacks = true, GetClass = function() return class end}) end
 local row_item = {[item_class] = class, [item_units] = 2, [item_guid] = {A = 1, B = 2, C = 3, D = 4}}
@@ -290,6 +290,14 @@ function FName(text)
 end
 assert(stock_keys.stock_quest_key(missing):ToString() == display)
 assert(stock_keys.stock_quest_id("Other_Quest") == "Other_Quest")
+
+local mod_offer = {
+    ForEach = function(_, visit) visit(ref(FName(multi_reward)), ref(complex_recipe)) end,
+}
+setmetatable(mod_offer, {__len = function() return 1 end})
+local rows = require("native_quest_catalog").board_rows(mod_offer, function(...) return {...} end)
+assert(#rows == 3 and rows[1][3] == "ready")
+assert(rows[3][1] == "native-quest-reward-item" and rows[3][3] == multi_reward and rows[3][5] == item_path)
 
 local sync = require("native_wire_board").sync
 local fresh
