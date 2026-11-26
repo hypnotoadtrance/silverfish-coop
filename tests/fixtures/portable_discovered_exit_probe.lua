@@ -209,7 +209,8 @@ LoopInGameThreadWithDelay(50, function()
         local pawn = api:GetPlayerPawn(world, 0)
         local gm = api:GetGameMode(world)
         local function identify(actor) return valid(actor) and actor:GetClass():GetFullName() or "-" end
-        local receipt = table.concat({world:GetFullName(), identify(driver), identify(gm), identify(controller), identify(pawn)}, "\t")
+        local receipt = table.concat({world:GetFullName(), identify(driver), identify(gm), identify(controller), identify(pawn),
+            valid(controller) and tostring(controller.Loading) or "-"}, "\t")
         if receipt ~= last_arrival then
             last_arrival = receipt
             local file = assert(io.open(bridge .. "/portable-discovered-map-observations.tsv", "ab"))

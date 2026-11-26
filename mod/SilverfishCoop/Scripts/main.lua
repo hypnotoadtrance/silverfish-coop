@@ -892,7 +892,7 @@ local function run_command(fields, state, current_phase)
             if not require("world_path").leaf(argument) then
                 return "map-package:invalid-package"
             end
-            zone_maps[argument] = {expanded = true}
+            zone_maps[argument] = {expanded = true, mounted = true}
         end
         return "map-package:" .. verdict
     elseif command == "native-authored-arrival" then

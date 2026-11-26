@@ -1,5 +1,6 @@
 local loading = {}
 local world_path = require("world_path")
+local routes = require("zone_maps")
 local fade_class = "/Game/Classes/GUI/FadeToBlack_Widget.FadeToBlack_Widget_C"
 local transition_sound = "/Game/Assets/Sounds/UI_Sounds/sw_UI_GameStart.sw_UI_GameStart"
 local widgets = "/Script/UMG.Default__WidgetBlueprintLibrary"
@@ -29,8 +30,12 @@ local function asset(path)
     return object
 end
 
-local function finish_guest_loading(state, phase, checking_cover)
-    if phase ~= "connected" or not state.listening or not state.server or not valid(state.world) then return end
+local function finish_loading(state, phase, checking_cover)
+    local route = routes[state.map]
+    local mounted = route and route.mounted
+    local guest = phase == "connected" and state.server == true
+    local host = mounted and phase == "hosting" and state.server == false
+    if not (guest or host) or not state.listening or not valid(state.world) then return end
     local controller = state.controller
     if not valid(controller) then return end
     local pending = controller.Loading
@@ -39,24 +44,31 @@ local function finish_guest_loading(state, phase, checking_cover)
     if not valid(pawn)
         or not same(controller:GetClass(), StaticFindObject(controller_class))
         or not same(pawn:GetClass(), StaticFindObject(pawn_class))
-        or not controller:IsLocalController() or not pawn:IsLocallyControlled() or pawn:HasAuthority()
+        or not controller:IsLocalController() or not pawn:IsLocallyControlled() or pawn:HasAuthority() ~= (not guest)
         or not same(controller.Pawn, pawn) or not same(pawn.Controller, controller)
         or not same(controller:GetWorld(), state.world) or not same(pawn:GetWorld(), state.world) then return end
     local driver, instance = state.world.NetDriver, state.world.OwningGameInstance
-    if not valid(driver) or not valid(driver.ServerConnection) or not same(driver.World, state.world)
-        or not same(driver.ServerConnection.Driver, driver) or not valid(instance) then return end
+    if not valid(driver) or not same(driver.World, state.world) or not valid(instance) then return end
+    local server = driver.ServerConnection
+    if guest and (not valid(server) or not same(server.Driver, driver)) or host and valid(server) then return end
     if pending == false then return true end
     local class = StaticFindObject(level_class)
-    if not valid(class) then return end
-    for _, level in ipairs(FindAllOf("LevelControler_BP_C") or {}) do
+    for _, level in ipairs(valid(class) and FindAllOf("LevelControler_BP_C") or {}) do
         if valid(level) and not level:IsActorBeingDestroyed() and same(level:GetClass(), class)
-            and same(level:GetOuter(), state.world.PersistentLevel) and same(level:GetWorld(), state.world)
-            and same(level["As Game Instance FP"], instance) then
-            -- The stock level controller clears this flag once. A remote
-            -- player controller may arrive after that callback.
-            controller.Loading = false
-            return controller.Loading == false
+            and same(level:GetOuter(), state.world.PersistentLevel) and same(level:GetWorld(), state.world) then
+            if guest and same(level["As Game Instance FP"], instance) then
+                -- The guest controller may arrive after the stock level callback.
+                controller.Loading = false
+                return controller.Loading == false
+            end
+            return
         end
+    end
+    -- A mounted map can use the stock player and save classes without placing
+    -- a level controller. The active listen visit and adopted save qualify it.
+    if mounted and same(pawn.Save, instance.SaveSlot_Ref) then
+        controller.Loading = false
+        return controller.Loading == false
     end
 end
 
@@ -149,7 +161,7 @@ end
 function loading.sync(state, phase)
     local cover = active_cover()
     local checking_cover = cover and cover.seat == "guest" and state.map == cover.destination
-    local ready = finish_guest_loading(state, phase, checking_cover)
+    local ready = finish_loading(state, phase, checking_cover)
     if not cover then return end
     if checking_cover and ready then
         loading.clear(cover.destination)
