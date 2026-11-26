@@ -853,6 +853,17 @@ def _held_input_sequence(value: str) -> int:
     return 0
 
 
+def _guest_reload_intent(fields: list[str]) -> dict | None:
+    if (len(fields) not in (6, 7) or fields[0] != "native-guest-reload-intent"
+            or not (sequence := _held_input_sequence(fields[3])) or not valid_guid(fields[4])
+            or fields[5] not in {"primary", "loki"} or len(fields) == 7 and fields[6] not in AMMO_BY_PATH):
+        return None
+    intent = {"map": fields[1], "pawn": fields[2], "sequence": sequence, "guid": fields[4], "barrel": fields[5]}
+    if len(fields) == 7:
+        intent["ammo_class"] = fields[6]
+    return intent
+
+
 class Bridge:
     """A single controller for one game's local, allowlisted commands."""
 
@@ -897,6 +908,7 @@ class Bridge:
         self._local_cooked_meals = deque(maxlen=16)
         self._local_prop_carry_records = deque(maxlen=64)
         self._local_primary_records = deque(maxlen=64)
+        self._local_reload_records = deque(maxlen=64)
         self._local_host_camera_records = deque(maxlen=64)
         self._local_held_fire_records = deque(maxlen=64)
         self._local_held_aim = None
@@ -969,7 +981,8 @@ class Bridge:
     def _take_local_inputs(self, pending: deque[bytes]) -> list[bytes]:
         # Keep unread interaction, combat, and travel inputs in the native FIFO until their collectors have room.
         room = 64 - max(len(self._local_interaction_records), len(self._local_crate_records), len(self._local_door_confirmations),
-                        len(self._local_primary_records), len(self._local_held_fire_records), len(self._local_host_camera_records),
+                        len(self._local_primary_records), len(self._local_reload_records), len(self._local_held_fire_records),
+                        len(self._local_host_camera_records),
                         len(self._local_death_records), len(self._local_zone_records),
                         len(self._local_authored_zone_records), len(self._local_stardust_records),
                         len(self._local_fruiting_stardust_records), len(self._local_prop_carry_records))
@@ -1001,6 +1014,8 @@ class Bridge:
                     self._local_prop_carry_records.append(record)
                 elif record.startswith(b"native-guest-primary-intent\t"):
                     self._local_primary_records.append(record)
+                elif record.startswith(b"native-guest-reload-intent\t"):
+                    self._local_reload_records.append(record)
                 elif record.startswith(b"native-host-camera-intent\t"):
                     self._local_host_camera_records.append(record)
                 elif record.startswith(b"native-guest-held-fire-intent\t"):
@@ -1139,6 +1154,20 @@ class Bridge:
                 continue
             events.append((sequence, *fields[2:]))
         return events
+
+    def take_guest_reload_input(self, area: str | None, pawn: str | None) -> dict | None:
+        records = self._take_local_inputs(self._local_reload_records)
+        now_ms = int(time.time() * 1000)
+        latest = None
+        for raw in records:
+            *fields, timestamp = raw.decode("utf-8", errors="replace").split("\t")
+            if not 0 <= now_ms - (captured := _held_input_sequence(timestamp)) <= 500:
+                continue
+            intent = _guest_reload_intent(fields)
+            if (intent and (intent["map"], intent["pawn"]) == (area, pawn)
+                    and (latest is None or intent["sequence"] > latest["sequence"])):
+                latest = {**intent, "captured_ms": captured}
+        return latest
 
     def take_guest_held_aim(self):
         sample, self._local_held_aim = self._local_held_aim, None
@@ -2355,14 +2384,9 @@ class Bridge:
                     data["native_campaign_npc_melee_sickness"] = {
                         **dict(zip(identities, fields[1:5])), **dict(zip(counters, map(int, fields[5:]))),
                     }
-                elif (fields[0] == "native-guest-reload-intent" and len(fields) in (6, 7)
-                      and (sequence := _held_input_sequence(fields[3]))
-                      and valid_guid(fields[4]) and fields[5] in {"primary", "loki"}
-                      and (len(fields) == 6 or fields[6] in AMMO_BY_PATH)):
-                    data["native_guest_reload_intent"] = {
-                        "map": fields[1], "pawn": fields[2], "sequence": sequence, "guid": fields[4], "barrel": fields[5],
-                        **({"ammo_class": fields[6]} if len(fields) == 7 else {}),
-                    }
+                elif fields[0] == "native-guest-reload-intent":
+                    if intent := _guest_reload_intent(fields):
+                        data["native_guest_reload_intent"] = intent
                 elif (fields[0] == "native-guest-equipment-selection" and len(fields) == 5 and valid_guid(fields[4])
                       and (selection := _held_input_sequence(fields[3]))):
                     data["native_guest_equipment_selection"] = {"map": fields[1], "pawn": fields[2],

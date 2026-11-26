@@ -198,17 +198,7 @@ namespace
     int enqueue_input(const Lua& lua)
     {
         if (lua.get_stack_size() != 1 || !lua.is_string()) return 0;
-        auto record = lua.get_string();
-        bool queued = false;
-        {
-            std::lock_guard lock(mutex);
-            if (attached && !record.empty() && record.size() <= input_limit && input.size() < input_capacity)
-            {
-                input.emplace_back(std::move(record));
-                queued = true;
-            }
-        }
-        lua.set_bool(queued);
+        lua.set_bool(silverfish::local_bridge::queue_input(std::string{lua.get_string()}));
         return 1;
     }
 
@@ -794,6 +784,14 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCancelV1(std::int64_t tick
 
 namespace silverfish::local_bridge
 {
+    bool queue_input(std::string record)
+    {
+        std::lock_guard lock(mutex);
+        if (!attached || record.empty() || record.size() > input_limit || input.size() >= input_capacity) return false;
+        input.emplace_back(std::move(record));
+        return true;
+    }
+
     void register_lua(RC::LuaMadeSimple::Lua& lua)
     {
         lua.register_function("SilverfishTakeLocalBridgeCommand", take);

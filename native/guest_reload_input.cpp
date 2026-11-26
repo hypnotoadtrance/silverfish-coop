@@ -1,5 +1,6 @@
 #include "guest_reload_input.hpp"
 #include "guest_item.hpp"
+#include "local_bridge.hpp"
 
 #include <algorithm>
 #include <array>
@@ -163,6 +164,25 @@ namespace
     Input pending;
     std::uint64_t sequence{};
 
+    void publish_intent(Unreal::UObject* pawn)
+    {
+        auto* world = static_cast<Unreal::AActor*>(pawn)->GetWorld();
+        if (!live(world)) return;
+        auto area = RC::to_utf8_string(world->GetPathName());
+        const auto separator = area.find('.');
+        if (!area.starts_with("/Game/Classes/Maps/") || separator == std::string::npos) return;
+        area.resize(separator);
+        const auto captured = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        std::string record = "native-guest-reload-intent\t" + area + '\t' + RC::to_utf8_string(pawn->GetFullName()) +
+            '\t' + std::to_string(sequence) + '\t' + pending.weapon.guid +
+            (pending.weapon.underbarrel ? "\tloki" : "\tprimary");
+        if (!pending.ammo.empty()) record += '\t' + pending.ammo;
+        record += '\t' + std::to_string(captured) + '\n';
+        // Keep the pending status row available if the bridge is absent or busy.
+        silverfish::local_bridge::queue_input(std::move(record));
+    }
+
     void bind_schema()
     {
         auto* pawn = find<Unreal::UClass>(pawn_path);
@@ -266,6 +286,7 @@ namespace
         {
             pending = {pawn, Clock::now() + intent_timeout, std::move(weapon), RC::to_utf8_string(ammo->GetPathName())};
             ++sequence;
+            publish_intent(pawn);
         }
         return true;
     }
@@ -329,6 +350,7 @@ namespace
         if (!started.weapon.matches(reload_weapon(pawn))) return;
         pending = {started.pawn, now + intent_timeout, std::move(started.weapon)};
         ++sequence;
+        publish_intent(pawn);
     }
 
     struct StructParameter

@@ -15,6 +15,29 @@ from tools.silverfish.control import Control
 
 
 class LocalBridgeInputTests(unittest.TestCase):
+    def test_guest_reload_fifo_keeps_only_newest_fresh_matching_intent(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        area = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+        pawn = "Player_FP_C guest"
+        guid = "A" * 32
+        ammo = next(iter(runtime.AMMO_BY_PATH))
+
+        def reload(sequence, *, owner=pawn, barrel="primary", selected=ammo, captured=99980):
+            return f"native-guest-reload-intent\t{area}\t{owner}\t{sequence}\t{guid}\t{barrel}\t{selected}\t{captured}".encode()
+
+        bridge.local_bridge = Mock(input_ready=Mock(side_effect=[True, False, False]), read_input=Mock(return_value=[
+            reload(1), reload(2, barrel="loki"), reload(3, captured=98000), reload(4, captured=100100),
+            reload(5, owner="old pawn"), reload(6, selected="unknown-ammo"),
+            f"native-guest-primary-intent\t1\t{area}\t{pawn}\t{guid}\tcamera".encode(),
+        ]))
+        with patch.object(runtime.time, "time", return_value=100):
+            self.assertEqual(bridge.take_guest_reload_input(area, pawn), {
+                "map": area, "pawn": pawn, "sequence": 2, "guid": guid, "barrel": "loki",
+                "ammo_class": ammo, "captured_ms": 99980,
+            })
+            self.assertIsNone(bridge.take_guest_reload_input(area, pawn))
+        self.assertEqual(bridge.native_primary_input_requests(), [(1, area, pawn, guid, "camera")])
+
     def test_host_camera_uses_resident_input_alongside_guest_primary(self):
         bridge = runtime.Bridge(Path("unused"), None)
         area = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"

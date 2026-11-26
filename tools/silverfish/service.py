@@ -5768,9 +5768,13 @@ class Client:
             target += f"@{'loki' if underbarrel else 'primary'}@{ammo}"
         elif underbarrel:
             target += "@loki"
+        captured = intent.get("captured_ms") if fresh else None
+        input_source = "memory_input" if captured is not None else "stock_status" if fresh else "tube_continuation"
+        timing = {"capture_to_send_ms": max(0, round(time.time() * 1000) - captured)} if captured is not None else {}
         try:
             result = await self.gameplay_action("native-guest-weapon-reload", operation, target)
-            self.control.event("native_guest_reload_input", operation_id=operation, sequence=sequence, **result)
+            self.control.event("native_guest_reload_input", operation_id=operation, sequence=sequence,
+                               input_source=input_source, **timing, **result)
         except (ValueError, OSError, RuntimeError) as error:
             self.control.event("native_guest_reload_input_rejected", operation_id=operation, sequence=sequence, reason=str(error))
             return
@@ -7060,6 +7064,12 @@ class Client:
             pawn = game.get("pawns", {}).get("local", {}).get("name")
             active = bool(stock_scope and game.get("state") == "connected" and stock_scope[2:] == (game.get("map"), pawn))
             await self.service_primary_input(active, game)
+            intent = self.bridge.take_guest_reload_input(game.get("map"), pawn)
+            primary = game.get("native_guest_primary_scope", {})
+            if (intent and (intent["map"], intent["pawn"], intent["guid"]) ==
+                    (primary.get("map"), primary.get("pawn"), primary.get("guid"))
+                    and intent["sequence"] >= game.get("native_guest_reload_intent", {}).get("sequence", 0)):
+                game = {**game, "native_guest_reload_intent": intent}
             await self.service_reload_input(active and self.stock_interaction_scope() == stock_scope, game)
             await asyncio.sleep(.02)
 

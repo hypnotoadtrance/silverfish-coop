@@ -973,6 +973,7 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
             "guest_empty_magazine_receipt": guest_input,
             "pistols_still_empty_after_dry_fire": True, "projectiles_spawned": 0, "observers_played_shot_effects": 0,
             "guest_reload_input": reloaded, "guest_reload": reload, "reserve_before": reserve, "reserve_after": reserve_left,
+            "guest_reload_delivery": {key: reload_event[key] for key in ("input_source", "capture_to_send_ms") if key in reload_event},
             "guest_muzzle_attachments": attached_flash,
             "guest_first_person_reload": {"stock_clip": reload_clip, "playhead_seconds": float(position)},
             "both_games_projected_reloaded_magazine": True, "host_magazine_and_reserve_unchanged": True}

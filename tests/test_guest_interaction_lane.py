@@ -142,6 +142,7 @@ class GuestCombatInputLaneTests(unittest.IsolatedAsyncioTestCase):
         waiting, resume, reloaded = asyncio.Event(), asyncio.Event(), asyncio.Event()
         client.bridge.snapshot.return_value = client.last_game
         client.bridge.native_primary_input_requests.side_effect = [[(1, *self.scope), (2, *self.scope)], []]
+        client.bridge.take_guest_reload_input.return_value = None
 
         async def fire(*_):
             waiting.set()
