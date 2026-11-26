@@ -6802,8 +6802,10 @@ class Client:
                     if request.done():
                         del self.stock_door_requests[actor]
                         await request
+                scope = self.stock_interaction_scope()
+                self.prop_carry.poll_local_edges(scope)
                 if self.bridge.stock_interaction_ready(crates=False):
-                    await self.service_stock_interactions(self.stock_interaction_scope())
+                    await self.service_stock_interactions(scope)
                 await asyncio.sleep(.012)
         finally:
             for request in self.stock_door_requests.values():

@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from tools.silverfish import native_prop_carry as carry, party
+from tools.silverfish import native_prop_carry as carry, party, runtime
 
 
 class CarrierPoseTests(unittest.TestCase):
@@ -206,6 +206,40 @@ class ReleaseHandoffTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GuestPoseTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_memory_carry_edges_dispatch_before_snapshots_and_reject_stale_scope(self):
+        area, epoch, pawn = "/Game/Classes/Maps/Test", "a" * 32, "local pawn"
+        scope = ("host", epoch, area, pawn)
+        bridge = runtime.Bridge(Path("unused"), None)
+        bridge.local_bridge = Mock()
+        stock_class = "/Game/Classes/Props/Prop_Test.Prop_Test_C"
+
+        def record(number, edge, *, scene=area, holder=pawn):
+            return f"native-prop-carry-input\t{scene}\t{number}\t{holder}\t{edge}\t{stock_class}\t1\t2\t3\t0\t0\n".encode()
+
+        grab, release = record(1, "grab"), record(2, "throw")
+        bridge.local_bridge.read_input.side_effect = [
+            [record(8, "grab", scene=area + "_old"), record(9, "grab", holder="another pawn"), grab, release],
+            [record(3, "grab")], [], [],
+        ]
+        game = {"state": "connected", "map": area, "pawns": {"local": {"name": pawn}}}
+        service = SimpleNamespace(bridge=bridge, last_game=game, zone_epoch=epoch,
+                                  transport=SimpleNamespace(game_access=True))
+        guest = carry.Guest(service)
+        guest._operate = AsyncMock()
+        guest.poll(True)
+        guest.poll_local_edges(scope)
+        await guest.action
+        self.assertEqual(guest._operate.await_args.args[0]["edge"], "grab")
+
+        guest.poll_local_edges(("host", "b" * 32, area, pawn))
+        game[carry.INPUT] = [carry.parse(line.decode().strip().split("\t"), "connected", area)
+                             for line in (grab, release)]
+        guest.poll(True)
+        await guest.action
+        guest.poll_local_edges(scope)
+        self.assertEqual([call.args[0]["edge"] for call in guest._operate.await_args_list], ["grab", "throw"])
+        self.assertTrue(all(call.args[0]["input_source"] == "local_bridge" for call in guest._operate.await_args_list))
+
     async def test_grab_receipt_arms_before_a_periodic_snapshot_and_accounts_for_delay(self):
         epoch = "a" * 32
         area = "/Game/Test"
@@ -232,7 +266,7 @@ class GuestPoseTransportTests(unittest.IsolatedAsyncioTestCase):
             return receipt
 
         bridge = SimpleNamespace(command=AsyncMock(), input_namespace=uuid.NAMESPACE_URL, local_bridge=object())
-        game = {carry.FILTER_READY: True, carry.TARGET: {"grab": 4, "actor": actor}}
+        game = {carry.FILTER_READY: True}
         service = SimpleNamespace(bridge=bridge, last_game=game, gameplay_action=gameplay_action, gameplay={})
         request = {"edge": "grab", "sequence": 4, "pose": (400, 0, 100, 20, 0), "placement": placement,
                    "class_path": "/Game/Assets/Prop_ScrapWood.Prop_ScrapWood_C"}

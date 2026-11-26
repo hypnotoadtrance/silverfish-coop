@@ -18,6 +18,7 @@ class GuestInteractionLaneTests(unittest.IsolatedAsyncioTestCase):
         client.invite = {"native_loot_input": True, "character_id": "guest"}
         client.control = SimpleNamespace(event=Mock())
         client.stock_door_requests = {}
+        client.prop_carry = SimpleNamespace(poll_local_edges=Mock())
         inputs = iter([b"crate press"])
         client.bridge = SimpleNamespace(
             local_bridge=object(), input_namespace=uuid.UUID(int=1),
@@ -78,6 +79,7 @@ class GuestInteractionLaneTests(unittest.IsolatedAsyncioTestCase):
         client.invite = {"native_loot_input": False}
         client.control = SimpleNamespace(event=Mock())
         client.stock_door_requests = {}
+        client.prop_carry = SimpleNamespace(poll_local_edges=Mock())
         def ready(*, crates):
             if action_started.is_set():
                 drained.set()

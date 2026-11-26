@@ -380,10 +380,16 @@ class Guest:
                     self.filter_placed = bool(placement)
                     if confirmation := returned.get(FILTER):
                         # The request time bounds the age of the host's initial lease.
-                        self._poll_filter(service.last_game.get(TARGET, {}), confirmation, requested)
+                        # For an authored prop the local command can verify the exact
+                        # placed actor immediately, even before it appears in a status frame.
+                        grip = {"grab": number, "actor": actor} if placement else service.last_game.get(TARGET, {})
+                        self._poll_filter(grip, confirmation, requested)
             self.last_pose = None
             self.last_local_sample = None
             self.next_pose = 0
+            if row.get("input_source") == "local_bridge":
+                service.control.event("native_prop_carry_input", edge=edge, sequence=number, lease=lease,
+                                      source="local_bridge")
         except (OSError, ValueError, RuntimeError) as error:
             self.lease = self.grab = None
             self.local_pose_ready.clear()
@@ -490,6 +496,28 @@ class Guest:
                 self._forward_local_pose(mailbox.take_local_prop_pose(), time.monotonic())
             await asyncio.sleep(_LOCAL_POSE_INTERVAL)
 
+    def _dispatch(self, records, pawn):
+        for row in records:
+            if row["sequence"] > self.seen and row["pawn"] == pawn:
+                self.seen = row["sequence"]
+                self.edges.append(row)
+        if self.edges and (self.action is None or self.action.done()):
+            self.action = asyncio.create_task(self._operate(self.edges.popleft()))
+
+    def poll_local_edges(self, scope):
+        records = self.service.bridge.native_prop_carry_inputs()
+        if not scope or self.epoch != scope[1] or not self.service.transport.game_access:
+            return
+        _, _, area, pawn = scope
+        rows = []
+        for record in records:
+            try:
+                row = parse(record.decode("utf-8").rstrip("\n").split("\t"), "connected", area)
+            except ValueError:
+                continue
+            rows.append(dict(row, input_source="local_bridge"))
+        self._dispatch(rows, pawn)
+
     def poll(self, active):
         service = self.service
         game = service.last_game
@@ -501,12 +529,7 @@ class Guest:
         if not self.epoch:
             return
         pawn = game.get("pawns", {}).get("local", {}).get("name")
-        for row in game.get(INPUT, ()):
-            if row["sequence"] > self.seen and row["pawn"] == pawn:
-                self.seen = row["sequence"]
-                self.edges.append(row)
-        if self.edges and (self.action is None or self.action.done()):
-            self.action = asyncio.create_task(self._operate(self.edges.popleft()))
+        self._dispatch(game.get(INPUT, ()), pawn)
         now = time.monotonic()
         grip = game.get(TARGET, {})
         if self.filter_enabled:

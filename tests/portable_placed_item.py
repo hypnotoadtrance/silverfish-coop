@@ -17,6 +17,9 @@ def placed_item_overlay(game, overlay):
         anchor = '    if mode == "sample" and #fields == 4 then'
         assert source.count(gate) == source.count(anchor) == 1
         source = source.replace(gate, gate + '\n    or headless and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"')
+        edge_snapshot = '    for _, edge in ipairs(edges) do rows[#rows + 1] = row("native-prop-carry-input", current.map, table.unpack(edge)) end\n'
+        assert source.count(edge_snapshot) == 1
+        source = source.replace(edge_snapshot, "")
         approach = """                if api:LineTraceSingle(guest, eye, target, 1, true, {guest, fixture_actor}, 0, {}, true, color, color, 0) == false
                     and fixture_actor:K2_SetActorLocation(target, false, {}, true) == true then"""
         assert source.count(approach) == 1
@@ -117,6 +120,16 @@ async def verify_stock_placed_item(host, guest, pawn):
     assert dropped["ok"], dropped
     await wait_resident_status(host_run, lambda frame: moved(frame, "drop", lease)
                                and not frame["game"][carry.FIXTURE].get("held"), timeout=10)
+    async with asyncio.timeout(4):
+        while True:
+            carry_inputs = [event for event in await resident_events(guest_run, guest_frame)
+                            if event.get("event") == "native_prop_carry_input" and event.get("lease") == lease]
+            if len(carry_inputs) == 2:
+                break
+            await asyncio.sleep(.08)
+    assert [(event["edge"], event["source"]) for event in carry_inputs] == [
+        ("grab", "local_bridge"), ("drop", "local_bridge"),
+    ]
     host_pose, guest_pose = await shared_pose()
 
     await host.bridge.command(loose.APPROACH, path, current_pawn, timeout=5)
@@ -163,6 +176,7 @@ async def verify_stock_placed_item(host, guest, pawn):
     assert accepted_preview[0] > 0 and accepted_preview[1:3] == (1, 0) and 0 <= accepted_preview[3] < 100, accepted_preview
     return {"stock_placed_item": {
         "actor": name, "held_movement_cm": math.dist(motion["game"][carry.FIXTURE]["position"], before),
+        "carry_inputs_without_status_rows": carry_inputs,
         "host_pose": host_pose, "guest_pose": guest_pose, "claim": applied, "backpack": inventory,
         "visibility": dict(zip(("host", "guest"), visibility, strict=True)),
         "local_preview": {"refused_meshes": rejected_preview[0], "accepted_meshes": accepted_preview[0],

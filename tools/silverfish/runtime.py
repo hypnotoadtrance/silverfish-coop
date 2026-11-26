@@ -862,6 +862,7 @@ class Bridge:
         self._local_fruiting_stardust_records = deque(maxlen=64)
         self._local_melee_records = deque(maxlen=64)
         self._local_cooked_meals = deque(maxlen=16)
+        self._local_prop_carry_records = deque(maxlen=64)
         self._local_primary_records = deque(maxlen=64)
         self._local_held_fire_records = deque(maxlen=64)
         self._local_held_aim = None
@@ -930,7 +931,7 @@ class Bridge:
                         len(self._local_primary_records), len(self._local_held_fire_records),
                         len(self._local_death_records), len(self._local_zone_records),
                         len(self._local_authored_zone_records), len(self._local_stardust_records),
-                        len(self._local_fruiting_stardust_records))
+                        len(self._local_fruiting_stardust_records), len(self._local_prop_carry_records))
         if room and self.local_bridge is not None and self.local_bridge.input_ready():
             for record in self.local_bridge.read_input(room):
                 if record.startswith(b"wire-board\t"):
@@ -955,6 +956,8 @@ class Bridge:
                     self._local_melee_records.append(record)
                 elif record.startswith(b"native-guest-cooked-meal\t"):
                     self._local_cooked_meals.append(record)
+                elif record.startswith(b"native-prop-carry-input\t"):
+                    self._local_prop_carry_records.append(record)
                 elif record.startswith(b"native-guest-primary-intent\t"):
                     self._local_primary_records.append(record)
                 elif record.startswith(b"native-guest-held-fire-intent\t"):
@@ -986,6 +989,9 @@ class Bridge:
 
     def native_cooked_meals(self) -> list[bytes]:
         return self._take_local_inputs(self._local_cooked_meals)
+
+    def native_prop_carry_inputs(self) -> list[bytes]:
+        return self._take_local_inputs(self._local_prop_carry_records)
 
     def interactions(self) -> list[tuple[str, str | None]]:
         """Consume complete local input records once, even if writing is in progress."""

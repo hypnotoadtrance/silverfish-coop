@@ -21,9 +21,11 @@ local color = {R = 0, G = 0, B = 0, A = 0}
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local world, state, phase, hook, release_hook, mailbox, sequence, next_read, next_local_pose
 local enrolled, holdings, edges, local_hold, latest = {}, {}, {}, nil, nil
+local published_edge = 0
 local host_release
 local fixture_actor, loose_fixtures = nil, {}
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+local embedded = os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") == "1"
 local grip_filter = os.getenv("SILVERFISH_COOP_PROP_GRIP_FILTER") ~= "0"
 local fixtures = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local offering_fixture = headless and observers.enabled and os.getenv("SILVERFISH_COOP_OBSERVER_THROW_FIXTURE") == "1"
@@ -187,6 +189,19 @@ local function stock_target(grip)
     if point(position) and pose(rotation) then return position, rotation end
 end
 
+local function publish_edges()
+    if not embedded or #edges == 0 or edges[#edges][1] <= published_edge
+        or type(SilverfishEnqueueLocalBridgeInput) ~= "function" then return end
+    for _, edge in ipairs(edges) do
+        local serial = edge[1]
+        if serial > published_edge then
+            local record = "native-prop-carry-input\t" .. state.map .. "\t" .. table.concat(edge, "\t") .. "\n"
+            if SilverfishEnqueueLocalBridgeInput(record) ~= true then return end
+            published_edge = serial
+        end
+    end
+end
+
 local function emit(pawn, kind, class, position, pitch, yaw, corpse, placement, loot_id, final)
     if not point(position) or not class or not pitch or not yaw then return end
     sequence = (sequence or 0) + 1
@@ -207,6 +222,7 @@ local function emit(pawn, kind, class, position, pitch, yaw, corpse, placement, 
             final.spin.X, final.spin.Y, final.spin.Z}) do edge[#edge + 1] = value end
     end
     if #edges > 6 then table.remove(edges, 1) end
+    publish_edges()
     return sequence
 end
 
@@ -893,6 +909,7 @@ end
 
 function carry.update()
     if phase == "connected" then
+        publish_edges()
         if not local_hold then return end
         if local_hold.filter_lease
             and (not valid(local_hold.pawn) or players.is_downed(local_hold.pawn)) then release_grip_filter() end
@@ -974,6 +991,11 @@ end
 function carry.sync(current, seat, bridge)
     if not enabled then return end
     if seat ~= "connected" or not same(world, current.world) then release_grip_filter() end
+    if phase == "connected" and (seat ~= "connected" or not same(state.local_pawn and state.local_pawn.pawn,
+        current.local_pawn and current.local_pawn.pawn)) then
+        release_grip_filter()
+        edges, local_hold, next_local_pose = {}, nil, nil
+    end
     if not same(world, current.world) then
         world, enrolled, holdings, edges, local_hold, latest = current.world, {}, {}, {}, nil, nil
         fixture_actor, loose_fixtures, next_read, next_local_pose = nil, {}, nil, nil
