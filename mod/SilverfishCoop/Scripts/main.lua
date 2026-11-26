@@ -1441,8 +1441,11 @@ local function write_status(state, current_phase, failure, fields, pending, crat
             local personal_save
             if details == state.local_pawn then
                 personal_save = viewed_save
-            elseif current_phase == "hosting" and valid(details.save) and guest_save.matches(details.pawn) then
-                personal_save = details.save
+            elseif current_phase == "hosting" and valid(details.save) then
+                local _, checked = guest_save.status_context(state, current_phase, details)
+                if same_object(checked, details.save) or guest_save.matches(details.pawn) then
+                    personal_save = details.save
+                end
             end
             local viewed_health, food, regen, stim, fatigue, intox, sickness, rads
             if personal_save then

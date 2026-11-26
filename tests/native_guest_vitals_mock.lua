@@ -26,6 +26,10 @@ package.loaded.native_avatar_character_view = {}
 package.loaded.native_world = {}
 package.loaded.native_save_scope = {
     selected = function() return token end,
+    personal_flags = function(save)
+        assert(save == guest_view)
+        return 0, 0, 0
+    end,
     bind_guest = function(actual, phase)
         assert(actual == state and phase == "connected")
         return guest_view, pawn, token

@@ -642,8 +642,12 @@ function guest_weapon.rows(state, phase, status_row)
     end
     if not enabled or phase ~= "hosting" then return rows end
     for _, detail in ipairs(state.guests) do
-        local ok, pawn, save = pcall(guest_save.exact_item_context, state, phase, detail.name)
-        if ok then rows[#rows + 1] = equipped_row(state, detail.name, pawn, save, status_row) end
+        local pawn, save = guest_save.status_context(state, phase, detail, true)
+        if not pawn then
+            local ok, current, detached = pcall(guest_save.exact_item_context, state, phase, detail.name)
+            if ok then pawn, save = current, detached end
+        end
+        if pawn then rows[#rows + 1] = equipped_row(state, detail.name, pawn, save, status_row) end
     end
     local row = observation
     if row and row.map == state.map then rows[#rows + 1] = weapon_result_row(row, status_row) end

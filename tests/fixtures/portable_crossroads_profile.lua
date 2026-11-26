@@ -281,6 +281,13 @@ LoopInGameThreadWithDelay(50, function()
     elseif action == "vitals" and not capture then
         local ok, value = pcall(SilverfishProfileCrossroadsVitals)
         if ok then message = value else message = "vitals comparison failed: " .. tostring(value) end
+    elseif action == "guest-binding" and not capture then
+        if type(SilverfishProfileCrossroadsGuestBinding) == "function" then
+            local ok, value = pcall(SilverfishProfileCrossroadsGuestBinding)
+            if ok then message = value else message = "guest binding comparison failed: " .. tostring(value) end
+        else
+            message = "unavailable"
+        end
     elseif action == "rows" and not capture then
         local ok, value = pcall(compare_rows)
         if ok then message = value else message = "status rows comparison failed: " .. tostring(value) end

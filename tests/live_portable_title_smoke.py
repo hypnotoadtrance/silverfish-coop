@@ -7213,11 +7213,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if crossroads_profile:
             from portable_crossroads_profile import (
                 instrument_anomaly_work, instrument_avatar_lean, instrument_death_poll, instrument_flashlight_scope,
-                instrument_host_drop_context, instrument_inline_crate_scan,
+                instrument_guest_status_binding, instrument_host_drop_context, instrument_inline_crate_scan,
                 instrument_input_mappings, instrument_journal_context,
                 instrument_loose_discovery, instrument_npc_class_discovery, instrument_profile,
-                instrument_shop_discovery, instrument_spawn_context, instrument_vital_reads, instrument_weather_status,
-                instrument_stash_binding, instrument_zone_walls,
+                instrument_shop_discovery, instrument_spawn_context, instrument_stash_binding,
+                instrument_vital_reads, instrument_weather_status, instrument_zone_walls,
             )
 
             crate_probe = ((Path(__file__).with_name("fixtures") / "portable_crate_input_probe.lua").read_text(encoding="utf-8")
@@ -7255,6 +7255,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(portable_script_overlay(game, "native_save_scope.lua", instrument_vital_reads))
                 for game in games
             ]
+            guest_save_path = (first_game / runtime.SHIPPING).parent / runtime.MOD_SCRIPTS / "guest_save.lua"
+            if "function guest_save.status_context(" in guest_save_path.read_text(encoding="utf-8"):
+                probes.enter_context(portable_script_overlay(first_game, "guest_save.lua", instrument_guest_status_binding))
             proof["crossroads_anomaly_overlays"] = [
                 probes.enter_context(portable_script_overlay(game, "native_anomaly_fields.lua", instrument_anomaly_work))
                 for game in games

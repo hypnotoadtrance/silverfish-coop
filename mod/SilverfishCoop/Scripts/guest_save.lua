@@ -248,23 +248,42 @@ local function live_binding(binding, state, host, guest, fresh, now)
 end
 
 function guest_save.sync(state, phase)
+    state.status_guest_saves, state.status_guest_lease = nil, nil
     if not guest_save.active() then return false end
     local host, guests = participants(state, phase)
     local fresh = heartbeat_fresh()
-    local changed = false
+    local changed, verified = false, {}
     for _, name in ipairs(sorted_names()) do
         local binding = bindings[name]
         -- A momentarily late coordinator must not attach this player to the host inventory.
         local checked, live = pcall(verified_binding, binding, state, host, guests and guests[name])
-        if checked and live and fresh then binding.lease_seen = true end
-        if not checked or not live then
+        if checked and live then
+            verified[name] = binding
+            if fresh then binding.lease_seen = true end
+        else
             local was_revoked = binding.revoked
             local cleared, removed = pcall(clear_binding, binding)
             if not cleared then binding.revoked = true end
             changed = changed or not was_revoked or (cleared and removed)
         end
     end
+    if not changed then state.status_guest_saves, state.status_guest_lease = verified, fresh end
     return changed
+end
+
+function guest_save.status_context(state, phase, detail, require_lease)
+    if phase ~= "hosting" then return end
+    local binding = state.status_guest_saves and state.status_guest_saves[detail.name]
+    if not binding or binding.revoked or bindings[detail.name] ~= binding
+        or state.map ~= binding.map or not same(state.world, binding.world)
+        or (require_lease and (not binding.character or not state.status_guest_lease)) then return end
+    local pawn = detail.pawn
+    -- Only reuse qualification from this observation and check that the live ownership has not changed.
+    if not same(pawn, binding.pawn) or pawn:IsActorBeingDestroyed()
+        or not same(detail.controller_object, binding.controller) or not same(binding.controller.Pawn, pawn)
+        or not same(pawn.Save, binding.detached) or not valid(binding.host) or not same(binding.host.Save, binding.stock)
+        or not valid(binding.owner) or not same(binding.owner.SaveSlot_Ref, binding.stock) then return end
+    return pawn, binding.detached, binding.character
 end
 
 local function exact_guest(state, phase, name, legacy)

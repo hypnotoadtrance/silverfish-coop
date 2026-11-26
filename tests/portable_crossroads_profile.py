@@ -429,6 +429,41 @@ end
                            'details.name, details.pawn:GetAddress(), save:GetAddress())')
 
 
+def instrument_guest_status_binding(source):
+    if "function guest_save.status_context(" not in source:
+        return source
+    sync = "function guest_save.sync(state, phase)\n"
+    checked = "    if not changed then state.status_guest_saves, state.status_guest_lease = verified, fresh end\n"
+    end = "\nreturn guest_save\n"
+    assert source.count(sync) == source.count(checked) == source.count(end) == 1
+    probe = """
+function SilverfishProfileCrossroadsGuestBinding()
+    local state = assert(guest_status_observation, "missing observed guest status")
+    local detail = assert(state.guests[1], "missing guest pawn")
+    local pawn, save, character = guest_save.status_context(state, "hosting", detail, true)
+    local expected_pawn, expected_save, expected_character = guest_save.exact_item_context(state, "hosting", detail.name)
+    assert(same(pawn, expected_pawn) and same(save, expected_save) and character == expected_character)
+    assert(not guest_save.status_context(state, "connected", detail, true))
+    assert(not guest_save.status_context(state, "hosting", {name=detail.name, pawn=state.local_pawn.pawn}, true))
+    assert(not guest_save.status_context({world=state.world, map="other", status_guest_saves=state.status_guest_saves,
+        status_guest_lease=true}, "hosting", detail, true))
+    local rounds = 128
+    local function measure(fn, ...)
+        local start = os.clock()
+        for _ = 1, rounds do fn(...) end
+        return 1000 * (os.clock() - start)
+    end
+    local reused = measure(guest_save.status_context, state, "hosting", detail, true)
+    local exact = measure(guest_save.exact_item_context, state, "hosting", detail.name)
+    exact = exact + measure(guest_save.exact_item_context, state, "hosting", detail.name)
+    reused = reused + measure(guest_save.status_context, state, "hosting", detail, true)
+    return ("%d,%.3f,%.3f"):format(rounds * 2, exact, reused)
+end
+"""
+    return source.replace(sync, "local guest_status_observation\n\n" + sync).replace(checked, checked +
+        "    if state.status_guest_lease then guest_status_observation = state end\n").replace(end, probe + end)
+
+
 def read_comparison(raw):
     raw, memory, sizes, commands = raw.split("|")
     raw, status = raw.split("^")
@@ -649,6 +684,12 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
             coarse["gc_comparison"] = results
     settled = await wait_resident_status(guest_run, pawns_here)
     comparison = await asyncio.gather(*(compare_vitals(seat) for seat in seats.values()))
+    binding = await command(host, "guest-binding")
+    guest_binding = {}
+    if binding != "unavailable":
+        calls, exact, reused = map(float, binding.split(","))
+        guest_binding = {"guest_binding_comparison": {"reads_per_path": int(calls),
+                         "full_qualification_ms": exact, "observed_binding_ms": reused}}
     rows = await asyncio.gather(*(compare_rows(seat) for seat in seats.values()))
     lean = await asyncio.gather(*(compare_lean_reader(seat, probe) for seat in seats.values()))
     journal = {}
@@ -672,4 +713,4 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
             "zone_walls": {seat: frame["game"]["native_zone_wall"]
                            for seat, frame in zip(seats, wall_status, strict=True)},
             "guest_roster": {slot: row["name"] for slot, row in settled["game"]["pawns"].items()},
-            "vitals_comparison": dict(zip(seats, comparison, strict=True)), **coarse, **journal}
+            "vitals_comparison": dict(zip(seats, comparison, strict=True)), **guest_binding, **coarse, **journal}
