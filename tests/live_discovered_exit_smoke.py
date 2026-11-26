@@ -51,7 +51,7 @@ async def live_exit(host, guest, pawn, probe, **options):
         frame.get("game", {}).get("map") == OBSERVATORY
         and frame["game"].get("native_zone", {}).get("too_far", 0) > denied_before))
     assert refused["zone_epoch"] == start["zone_epoch"]
-    await host.bridge.command("native-exit-position", "local", "near", route.entrance, route.actor)
+    assert (await probe(host.bridge, "portable-discovered-exit", "reset")).strip() == "reset"
     assert (await probe(host.bridge, "portable-discovered-exit", "cross")).strip() == "entered"
 
     reached = await wait_for_party(host_run, guest_run, CROSSROADS)
@@ -62,6 +62,9 @@ async def live_exit(host, guest, pawn, probe, **options):
     arrival, = (row["authored_arrival"] for row in events if row["event"] == "zone_travel_ready"
                 and row["epoch"] == reached["zone_epoch"])
     assert arrival["placement"] == "arrow"
+    fallback = await host.bridge.command("native-authored-arrival", "Missing-Mod-Entrance", "overlap", "-")
+    assert fallback["native_authored_arrival"]["placement"] == "stock-spawn:entrance-unavailable"
+    assert fallback["state"] == "hosting" and fallback["map"] == CROSSROADS
     assert all(not (seat.bridge.directory / "native-authored-exit-events").exists() for seat in (host, guest))
     return {"stock_exit_discovery": departure, "arrival": arrival, "out_of_range_refusal": True}
 
@@ -73,8 +76,8 @@ if __name__ == "__main__":
     parser.add_argument("--second-game", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     args = parser.parse_args()
-    args.work.mkdir(parents=True, exist_ok=True)
+    work, first, second, saves = (path.resolve() for path in (args.work, args.first_game, args.second_game, args.vanilla_saved))
+    work.mkdir(parents=True, exist_ok=True)
     suite.verify_weather_travel = live_exit
-    with suite.installed_probe(args.first_game, mod="SilverfishPortableExitDiscoveryProbe", fixture="portable_discovered_exit_probe.lua"):
-        asyncio.run(suite.verify(args.work, args.first_game, args.second_game, args.vanilla_saved,
-                                 stock_weather_travel=True, stock_placed_item=True))
+    with suite.installed_probe(first, mod="SilverfishPortableExitDiscoveryProbe", fixture="portable_discovered_exit_probe.lua"):
+        asyncio.run(suite.verify(work, first, second, saves, stock_weather_travel=True, stock_placed_item=True))

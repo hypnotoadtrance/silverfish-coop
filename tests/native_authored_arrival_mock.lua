@@ -47,7 +47,7 @@ end}
 local function marker(suffix)
     local actor = object("ModArrival_C " .. destination .. ":PersistentLevel." .. suffix, {
         GetWorld = host.GetWorld, GetOuter = function() return level end, GetParentComponent = function() return nil end,
-        IsA = function(_, type) return type == base end, EntranceTag = "Obsv_Etr",
+        IsA = function(_, type) return type == base end, EntranceTag = "Mod-Entrance",
     })
     actor.Arrow = object("Arrow", {GetOwner = function() return actor end, GetClass = function() return arrow_type end,
         K2_GetComponentLocation = function() return target end, K2_GetComponentRotation = function() return {} end})
@@ -56,13 +56,13 @@ end
 local arrival = require("native_authored_arrival")
 local state = {map = map, listening = true, server = false, world = world, local_pawn = {pawn = host, controller_object = pc}}
 candidates = {marker("NewStockStyleMarker_201")}
-assert(arrival.place(state, "hosting", "Obsv_Etr", "overlap", "-").actor == candidates[1]:GetFullName())
+assert(arrival.place(state, "hosting", "Mod-Entrance", "overlap", "-").actor == candidates[1]:GetFullName())
 assert(location_calls == 1)
 candidates[2] = marker("SecondMarker_8")
-local retained = arrival.place(state, "hosting", "Obsv_Etr", "overlap", "-")
+local retained = arrival.place(state, "hosting", "Mod-Entrance", "overlap", "-")
 assert(retained.placement == "stock-spawn:duplicate-entrance-tag" and retained.actor == host:GetFullName())
 assert(location_calls == 1)
 candidates = {}
-retained = arrival.place(state, "hosting", "Obsv_Etr", "overlap", "-")
+retained = arrival.place(state, "hosting", "Mod-Entrance", "overlap", "-")
 assert(retained.placement == "stock-spawn:entrance-unavailable" and retained.actor == host:GetFullName())
 assert(location_calls == 1)

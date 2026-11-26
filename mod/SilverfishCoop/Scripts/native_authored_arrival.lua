@@ -147,7 +147,7 @@ function arrival.place(state, phase, tag, kind, actor_name)
     local map = state.map
     local basename = type(map) == "string" and map:match("^/Game/Classes/Maps/Maps_[%w_]+/([%w_]+)$")
     local class = kind == "overlap" and spawn_class or kind == "door" and door_class
-    if not basename or type(tag) ~= "string" or #tag > 64 or not tag:match("^[%w_]+$")
+    if not basename or type(tag) ~= "string" or #tag > 64 or not tag:match("^[A-Za-z0-9_%-]+$")
         or not class or type(actor_name) ~= "string"
         or (kind == "door" and not actor_name:match("^" .. door_class .. "_%d+$"))
         or (kind == "overlap" and actor_name ~= "-" and not actor_name:match("^" .. spawn_class .. "_%d+$")) then

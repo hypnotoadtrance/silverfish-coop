@@ -4,7 +4,7 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_TI
 
 local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
 local exit_path = observatory .. ":PersistentLevel.Level_Exit_BP_C_1"
-local last, copy
+local last, copy, approach
 
 local function valid(object) return object and object:IsValid() end
 
@@ -15,6 +15,7 @@ local function run(world, action)
     assert(valid(stock) and valid(pawn) and pawn:HasAuthority() and pawn:IsLocallyControlled())
     if action == "spawn" then
         assert(not valid(copy) and not stock.Box:IsOverlappingActor(pawn))
+        approach = pawn:K2_GetActorLocation()
         local point = stock:K2_GetActorLocation()
         copy = world:SpawnActor(stock:GetClass(), point, stock:K2_GetActorRotation())
         assert(valid(copy) and copy:HasAuthority() and valid(copy.Box))
@@ -25,6 +26,12 @@ local function run(world, action)
         copy.Box:SetGenerateOverlapEvents(true)
         stock.Box:SetGenerateOverlapEvents(false)
         return copy:GetFullName()
+    end
+    if action == "reset" then
+        assert(valid(copy) and approach)
+        assert(pawn:K2_SetActorLocation(approach, false, {}, false) and not copy.Box:IsOverlappingActor(pawn),
+            "The host did not return to the outside approach")
+        return "reset"
     end
     assert((action == "cross" or action == "alone") and valid(copy) and not copy.Box:IsOverlappingActor(pawn))
     local point = copy.Box:K2_GetComponentLocation()
