@@ -441,6 +441,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
     runs = {"host": host.campaign / "run", "guest": guest_run}
     counters = ("quic_datagrams_sent", "quic_payload_bytes_sent", "game_packets_queued", "game_packets_delivered",
                 "relay_queue_evicted_frames", "relay_queue_expired_frames", "snapshot_responses_encoded", "snapshot_delta_responses",
+                "snapshot_row_delta_responses", "snapshot_rows_changed",
                 "snapshot_encoded_bytes", "snapshot_plaintext_bytes", "snapshot_responses_decoded", "snapshot_received_bytes")
 
     async def transport():

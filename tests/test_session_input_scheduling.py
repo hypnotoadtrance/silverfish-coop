@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -109,6 +110,77 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         await refresh()
         self.assertIn("gameplay", replies[-1])
         self.assertTrue(client.needs_travel)
+
+    async def test_snapshot_sends_only_changed_actor_rows_to_a_capable_client(self):
+        area = OBSERVATORY
+        doors = {f"{area}.Observitory_P:PersistentLevel.Door_Wood_C_{index}": {"open": False, "yaw": index * 15}
+                 for index in range(18)}
+        changed, removed, *_ = doors
+        added = f"{area}.Observitory_P:PersistentLevel.Door_Wood_C_40"
+        gameplay = {"host_world": {"clock": 8}, native_stock_door.KEY: {
+            "map": area, "epoch": "epoch", "sequence": 10, "doors": doors,
+        }}
+        host = SimpleNamespace(stopping=False, native_guest=False, transitioning=False, zone_epoch="epoch",
+                               gameplay_snapshots=gameplay_snapshot.HostSnapshots(),
+                               authenticated_guest=Mock(return_value=("guest", "character")))
+        host.snapshot_for_guest = lambda *_: {
+            "ok": True, "gameplay": dict(gameplay), "zone_epoch": host.zone_epoch, "zone": area,
+            "viewer_role": "guest", "travel_in_progress": False,
+        }
+        requests, replies = [], []
+
+        async def request(payload, *, timeout):
+            requests.append(payload)
+            reply = deepcopy(service.Host.guest_request(host, "peer", payload))
+            replies.append(reply)
+            return reply
+
+        client = self.guest(AsyncMock(side_effect=request))
+
+        async def refresh():
+            client.next_snapshot = 0
+            await client.refresh_gameplay(project=False)
+
+        await refresh()
+        self.assertNotIn(gameplay_snapshot.ROW_UPDATES, requests[-1])
+        await refresh()
+        self.assertIs(requests[-1][gameplay_snapshot.ROW_UPDATES], True)
+        legacy = service.Host.guest_request(host, "legacy", {"action": "snapshot", gameplay_snapshot.BASE: ""})
+        client.gameplay[native_stock_door.KEY]["doors"][changed]["yaw"] = 123
+        untouched = next(key for key in doors if key not in {changed, removed})
+        client.gameplay[native_stock_door.KEY]["doors"][untouched]["yaw"] = -999
+        doors[changed]["open"] = True
+        doors.pop(removed)
+        doors[added] = {"open": False, "yaw": 90}
+        gameplay[native_stock_door.KEY]["sequence"] = 12
+        await refresh()
+        patch = replies[-1][gameplay_snapshot.DELTA]
+        self.assertEqual(patch[gameplay_snapshot.ROW_CHANGES], {native_stock_door.KEY: {
+            "changed": {changed: doors[changed], added: doors[added]}, "removed": [removed], "sequence": 12,
+        }})
+        self.assertEqual(client.gameplay, gameplay)
+        self.assertNotIn(native_stock_door.KEY, patch["changed"])
+
+        legacy = service.Host.guest_request(host, "legacy", {
+            "action": "snapshot", gameplay_snapshot.BASE: legacy[gameplay_snapshot.REVISION],
+        })
+        self.assertNotIn(gameplay_snapshot.ROW_CHANGES, legacy[gameplay_snapshot.DELTA])
+        self.assertEqual(legacy[gameplay_snapshot.DELTA]["changed"][native_stock_door.KEY]["doors"], doors)
+        self.assertLess(len(service.link._encode_response(replies[-1], snapshot=True)),
+                        len(service.link._encode_response(legacy, snapshot=True)))
+
+    def test_snapshot_rejects_actor_row_changes_that_overlap_a_section_replacement(self):
+        section = native_loot.STATE_KEY
+        gameplay = {section: {"crate": {"items": []}}}
+        client = gameplay_snapshot.ClientSnapshots()
+        client.read({"gameplay": gameplay, gameplay_snapshot.REVISION: "a" * 32, gameplay_snapshot.ROW_UPDATES: True})
+        with self.assertRaisesRegex(RuntimeError, "no matching baseline"):
+            client.read({gameplay_snapshot.BASE: "a" * 32, gameplay_snapshot.REVISION: "b" * 32,
+                         gameplay_snapshot.DELTA: {"changed": gameplay, "removed": [], gameplay_snapshot.ROW_CHANGES: {
+                             section: {"changed": {}, "removed": ["crate"]},
+                         }}})
+        self.assertIsNone(client.base)
+        self.assertFalse(client.row_updates)
 
     async def test_refused_projected_pickups_release_only_their_local_preview(self):
         client = self.guest(AsyncMock())

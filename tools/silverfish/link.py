@@ -32,6 +32,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 from .native_guest_consumable import RESULT as GUEST_CONSUMABLE_ACTIONS
 from .gameplay_snapshot import DELTA as GAMEPLAY_DELTA
+from .gameplay_snapshot import ROW_CHANGES as GAMEPLAY_ROW_CHANGES
 from .udp_ownership import verify_loopback_socket
 
 __all__ = [
@@ -387,6 +388,8 @@ class _TransportStatistics:
     snapshot_responses_encoded: int = 0
     snapshot_responses_compressed: int = 0
     snapshot_delta_responses: int = 0
+    snapshot_row_delta_responses: int = 0
+    snapshot_rows_changed: int = 0
     snapshot_plaintext_bytes: int = 0
     snapshot_encoded_bytes: int = 0
     snapshot_encode_total_ns: int = 0
@@ -402,7 +405,10 @@ def _encode_response(result: Action, *, snapshot: bool, stats: _TransportStatist
     body = _encode_action(result, limit=_MAX_SNAPSHOT_BODY if snapshot else _MAX_ACTION_BODY)
     frame = b"".join((b'{"result":', body, b"}"))
     plaintext_size = len(frame)
-    if snapshot and plaintext_size >= _COMPRESS_SNAPSHOT_MINIMUM:
+    delta = result.get(GAMEPLAY_DELTA) if snapshot else None
+    rows = delta.get(GAMEPLAY_ROW_CHANGES) if isinstance(delta, dict) else None
+    # Repeated authored paths can keep a small row delta compressible.
+    if snapshot and (rows or plaintext_size >= _COMPRESS_SNAPSHOT_MINIMUM):
         compressed = _COMPRESSED_SNAPSHOT + zlib.compress(frame, level=1)
         if len(compressed) < plaintext_size:
             frame = compressed
@@ -413,6 +419,9 @@ def _encode_response(result: Action, *, snapshot: bool, stats: _TransportStatist
         elapsed = perf_counter_ns() - started
         stats.snapshot_responses_encoded += 1
         stats.snapshot_delta_responses += GAMEPLAY_DELTA in result
+        if rows:
+            stats.snapshot_row_delta_responses += 1
+            stats.snapshot_rows_changed += sum(len(patch["changed"]) + len(patch["removed"]) for patch in rows.values())
         stats.snapshot_responses_compressed += len(frame) < plaintext_size
         stats.snapshot_plaintext_bytes += plaintext_size
         stats.snapshot_encoded_bytes += len(frame)

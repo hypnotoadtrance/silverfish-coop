@@ -147,6 +147,7 @@ async def verify_stock_crossroads_door(host, guest, pawn, *, lockpick=None):
     initial = observed(arrival)
     await wait_resident_status(guest_run, lambda frame:
         frame.get("zone_epoch") == epoch and door.matches(observed(frame), initial))
+    row_counter = arrival.get("transport", {}).get("snapshot_rows_changed")
 
     hx, hy, _ = initial["panel_location"]
     kx, ky, kz = initial["knob_location"]
@@ -191,6 +192,11 @@ async def verify_stock_crossroads_door(host, guest, pawn, *, lockpick=None):
     assert replay.get("ok") and replay[door.RESULT] == closed[door.RESULT]
     assert not await panel(host, query) and not await panel(guest, query)
     assert campaign_save_hashes(host.campaign) == checkpoint
+    snapshot_rows = None
+    if row_counter is not None and len(arrival["game"][door.KEY]) >= 4:
+        report = await wait_resident_status(host_run, lambda frame:
+            frame.get("transport", {}).get("snapshot_rows_changed", 0) > row_counter, timeout=5)
+        snapshot_rows = report["transport"]["snapshot_rows_changed"] - row_counter
     return {**evidence, "stock_crossroads_door": {"actor": WOOD_DOOR, "authoritative_lock_refusal": True,
                                      "close": closed[door.RESULT], "open": reopened[door.RESULT],
                                      "guest_confirm_ms": [closed["elapsed_ms"], reopened["elapsed_ms"]],
@@ -198,6 +204,7 @@ async def verify_stock_crossroads_door(host, guest, pawn, *, lockpick=None):
                                      "guest_movement_start_ms": [close_motion, reopen_motion],
                                      "guest_preview_start_ms": [close_preview, reopen_preview],
                                      "independent_inspection": closed["independent_inspection"],
+                                     "snapshot_rows_changed": snapshot_rows,
                                      "close_replay_preserved_open_door": True,
                                      "collision_verified_both_seats": True, "campaign_unchanged": True}}
 

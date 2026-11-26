@@ -10,8 +10,18 @@ import uuid
 BASE = "gameplay_base"
 REVISION = "gameplay_revision"
 DELTA = "gameplay_delta"
+ROW_UPDATES = "gameplay_row_updates"
+ROW_CHANGES = "rows"
 _TOKEN = re.compile(r"[0-9a-f]{32}")
 _MAX_PEERS = 16
+_TABLES = {
+    "native_loot_rolls": None,
+    "native_stock_enemy_loot": None,
+    "native_stock_doors": "doors",
+    "native_stock_switches": "switches",
+    "native_explosive_canisters": "props",
+}
+_SEQUENCED_TABLES = {"native_stock_doors"}
 
 
 def _revision(value: object) -> bool:
@@ -34,6 +44,73 @@ def _same_value(first, second) -> bool:
     return first == second
 
 
+def _difference(before: dict, after: dict) -> tuple[dict, list[str]]:
+    return ({key: value for key, value in after.items() if key not in before or not _same_value(before[key], value)},
+            sorted(before.keys() - after.keys()))
+
+
+def _table(section, field):
+    if isinstance(section, dict):
+        rows = section if field is None else section.get(field)
+        if isinstance(rows, dict):
+            return rows
+    return None
+
+
+def _row_patch(section, before, after):
+    field = _TABLES[section]
+    old, new = _table(before, field), _table(after, field)
+    if old is None or new is None or len(new) < 4:
+        return None
+    metadata = {}
+    if field is not None:
+        if before.keys() != after.keys():
+            return None
+        for key in after.keys() - {field}:
+            if _same_value(before[key], after[key]):
+                continue
+            if key != "sequence" or section not in _SEQUENCED_TABLES or not _sequence(after[key]):
+                return None
+            metadata[key] = after[key]
+    changed, removed = _difference(old, new)
+    if (changed or removed or metadata) and len(changed) + len(removed) <= len(new) // 2:
+        return {"changed": changed, "removed": removed, **metadata}
+    return None
+
+
+def _sequence(value):
+    return type(value) is int and 0 <= value < 2**53
+
+
+def _valid_patch(previous: dict, changed, removed) -> bool:
+    return (isinstance(changed, dict) and isinstance(removed, list)
+            and all(isinstance(key, str) for key in changed)
+            and all(isinstance(key, str) for key in removed)
+            and len(removed) == len(set(removed))
+            and set(removed) <= previous.keys() - changed.keys())
+
+
+def _apply(previous: dict, changed: dict, removed: list[str]) -> dict:
+    updated = previous.copy()
+    for key in removed:
+        updated.pop(key)
+    updated.update(changed)
+    return updated
+
+
+def _apply_rows(gameplay: dict, sections: dict) -> None:
+    for section, patch in sections.items():
+        field = _TABLES[section]
+        previous = gameplay[section]
+        updated = _apply(_table(previous, field), patch["changed"], patch["removed"])
+        if field is None:
+            gameplay[section] = updated
+        else:
+            gameplay[section] = {**previous, field: updated}
+            if "sequence" in patch:
+                gameplay[section]["sequence"] = patch["sequence"]
+
+
 @dataclass(frozen=True)
 class _Snapshot:
     revision: str
@@ -45,7 +122,8 @@ class HostSnapshots:
     def __init__(self):
         self._peers: OrderedDict[tuple[str, str], _Snapshot] = OrderedDict()
 
-    def encode(self, guest: str, character: str, base: object, reply: dict) -> dict:
+    def encode(self, guest: str, character: str, base: object, reply: dict, *, row_updates=False) -> dict:
+        reply[ROW_UPDATES] = True
         if base != "" and not _revision(base):
             # Advertise support without keeping a baseline for a legacy guest.
             reply[REVISION] = ""
@@ -57,14 +135,20 @@ class HostSnapshots:
         cached = None
         if previous and base == previous.revision and scope == previous.scope:
             old = previous.gameplay
-            changed = {key: value for key, value in current.items()
-                       if key not in old or not _same_value(old[key], value)}
-            removed = sorted(old.keys() - current.keys())
-            if len(changed) + len(removed) < len(current):
-                cached = {key: value for key, value in old.items() if key in current}
-                cached.update(deepcopy(changed))
+            changed, removed = _difference(old, current)
+            rows = {}
+            if row_updates:
+                for section in sorted(changed.keys() & old.keys() & _TABLES.keys()):
+                    if patch := _row_patch(section, old[section], changed[section]):
+                        rows[section] = patch
+                        del changed[section]
+            if rows or len(changed) + len(removed) < len(current):
+                cached = _apply(old, deepcopy(changed), removed)
+                _apply_rows(cached, deepcopy(rows))
                 reply[BASE] = previous.revision
                 reply[DELTA] = {"changed": changed, "removed": removed}
+                if rows:
+                    reply[DELTA][ROW_CHANGES] = rows
                 del reply["gameplay"]
         revision = reply[REVISION] = uuid.uuid4().hex
         self._peers[key] = _Snapshot(revision, scope, deepcopy(current) if cached is None else cached)
@@ -81,25 +165,41 @@ class ClientSnapshots:
     def clear(self) -> None:
         self.base: str | None = None
         self._confirmed: _Snapshot | None = None
+        self.row_updates = False
+
+    def _delta(self, reply, scope, revision):
+        previous = self._confirmed
+        patch = reply[DELTA]
+        if (not previous or previous.revision != reply.get(BASE) or previous.scope != scope
+                or not _revision(revision) or "gameplay" in reply or not isinstance(patch, dict)):
+            return None
+        base = previous.gameplay
+        changed, removed, sections = patch.get("changed"), patch.get("removed"), patch.get(ROW_CHANGES, {})
+        if not _valid_patch(base, changed, removed) or not isinstance(sections, dict):
+            return None
+        if sections and (not self.row_updates or not sections.keys() <= _TABLES.keys() & base.keys()
+                         or sections.keys() & (changed.keys() | set(removed))):
+            return None
+        for section, rows in sections.items():
+            previous_section = base[section]
+            table = _table(previous_section, _TABLES[section])
+            if table is None or not isinstance(rows, dict) or not _valid_patch(table, rows.get("changed"), rows.get("removed")):
+                return None
+            if "sequence" in rows and (section not in _SEQUENCED_TABLES or "sequence" not in previous_section
+                                       or not _sequence(rows["sequence"])):
+                return None
+        gameplay = _apply(base, changed, removed)
+        _apply_rows(gameplay, sections)
+        return gameplay
 
     def read(self, reply: dict) -> dict:
         revision = reply.get(REVISION)
         scope = _scope(reply)
         if DELTA in reply:
-            previous = self._confirmed
-            patch = reply[DELTA]
-            changed = patch.get("changed") if isinstance(patch, dict) else None
-            removed = patch.get("removed") if isinstance(patch, dict) else None
-            if (not previous or previous.revision != reply.get(BASE) or previous.scope != scope
-                    or not _revision(revision) or "gameplay" in reply or not isinstance(changed, dict)
-                    or not isinstance(removed, list) or any(not isinstance(key, str) for key in removed)
-                    or not set(removed) <= previous.gameplay.keys() - changed.keys()):
+            gameplay = self._delta(reply, scope, revision)
+            if gameplay is None:
                 self.clear()
                 raise RuntimeError("The gameplay snapshot delta has no matching baseline")
-            gameplay = previous.gameplay.copy()
-            for key in removed:
-                gameplay.pop(key, None)
-            gameplay.update(changed)
         else:
             gameplay = reply.get("gameplay")
             if not isinstance(gameplay, dict):
@@ -109,9 +209,11 @@ class ClientSnapshots:
         if _revision(revision):
             self._confirmed = _Snapshot(revision, scope, gameplay)
             self.base = revision
+            self.row_updates = reply.get(ROW_UPDATES) is True
             # Local optimistic actions can edit the displayed view before the next snapshot.
             return deepcopy(gameplay)
         self.clear()
         if revision == "":
             self.base = ""
+            self.row_updates = reply.get(ROW_UPDATES) is True
         return gameplay
