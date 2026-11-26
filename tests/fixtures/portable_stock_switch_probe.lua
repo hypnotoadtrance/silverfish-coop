@@ -49,6 +49,7 @@
         elseif mode == "stage" and phase == "hosting" then
             local pawn = assert(guest_save.exact_item_context(state, phase, fields[4]))
             local center, origin = entry.box:K2_GetComponentLocation(), pawn:K2_GetActorLocation()
+            fixture.guest_origin = origin
             for _, axis in ipairs({entry.box:GetForwardVector(), entry.box:GetRightVector()}) do
                 for _, offset in ipairs({90, -90, 130, -130}) do
                     local point = {X = center.X + offset * axis.X, Y = center.Y + offset * axis.Y, Z = center.Z - 42}
@@ -61,6 +62,11 @@
             end
             pawn:K2_SetActorLocation(origin, false, {}, true)
             error("could not focus the streamed switch", 0)
+        elseif mode == "return-guest" and phase == "hosting" then
+            local pawn = assert(guest_save.exact_item_context(state, phase, fields[4]))
+            assert(fixture.guest_origin and pawn:K2_SetActorLocation(fixture.guest_origin, false, {}, true))
+            pawn:ForceNetUpdate()
+            return "guest returned"
         elseif mode == "guest" and phase == "connected" then
             local before = entry.actor.Powered
             stock_focus(state.local_pawn.pawn, entry.box)

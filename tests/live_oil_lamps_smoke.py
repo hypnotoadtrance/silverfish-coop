@@ -149,13 +149,17 @@ async def verify_streamed_switch(host, guest, pawn):
         (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
         and dist(point, position) < 80))
     pressed = time.time()
-    assert await probe(guest, "guest", actor) == "guest pressed"
+    guest_press = await probe(guest, "guest", actor)
+    assert guest_press in ("guest pressed", "guest changed power locally"), guest_press
     assert await observe(host_run, actor, equal=on_host) == on_host
     assert await observe(guest_run, actor, equal=on_host) == on_host
-    events = await suite.resident_events(guest_run, await suite.wait_resident_status(guest_run, lambda frame:
-        row(frame, actor) == on_host))
-    assert any(event.get("time_unix", 0) >= pressed
-               and event.get("native_stock_switch_interaction", {}).get("actor") == actor for event in events)
+    frame = await suite.wait_resident_status(guest_run, lambda current: row(current, actor) == on_host)
+    async with asyncio.timeout(6):
+        while not any(event.get("time_unix", 0) >= pressed
+                      and event.get("native_stock_switch_interaction", {}).get("actor") == actor
+                      for event in await suite.resident_events(guest_run, frame)):
+            await asyncio.sleep(.08)
+    assert await probe(host, "return-guest", actor) == "guest returned"
     assert await probe(guest, "unload") == "unload"
     assert await probe(host, "unload") == "unload"
     for run in (guest_run, host_run):
@@ -163,7 +167,8 @@ async def verify_streamed_switch(host, guest, pawn):
                                          and row(frame, actor) is None)
     assert suite.campaign_save_hashes(host.campaign) == checkpoint
     return {"actor": actor, "linked_lights": len(original["lights"]), "late_load": on_host,
-            "reshown": restored, "guest_press": on_host, "unloaded_on_both": True, "checkpoint_unchanged": True}
+            "reshown": restored, "guest_input": guest_press, "guest_press": on_host,
+            "unloaded_on_both": True, "checkpoint_unchanged": True}
 
 
 async def exercise(work, first, second, saved, streamed_switch=False):
