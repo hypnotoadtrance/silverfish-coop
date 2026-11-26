@@ -348,14 +348,43 @@ async def project_opened(bridge, game: dict, rolls: dict) -> dict:
 
 
 class GuestCrateProjection:
-    """Restore accepted lid poses from fresh host rolls between guest input passes."""
+    """Restore accepted lid poses from fresh host rolls independently of guest input."""
 
     attempts_per_turn = 2
     turn_seconds = .150
     retry_seconds = .750
 
     def __init__(self):
+        self.confirmed = {}
+        self.wake = asyncio.Event()
         self.reset()
+
+    def prioritize(self, crate, scope) -> None:
+        self.confirmed[crate] = scope
+        self.wake.set()
+
+    async def run(self, client) -> None:
+        # One worker owns all lid commands. Recorded interactions can send their
+        # host requests while earlier presentation commands are still in flight.
+        next_restore = 0.0
+        while not client.stopping:
+            if self.confirmed:
+                crate = next(iter(self.confirmed))
+                scope = self.confirmed.pop(crate)
+                if scope == self._scope(client, client.last_game):
+                    await self.sync(client, confirmed_crate=crate)
+                continue
+            delay = next_restore - time.monotonic()
+            if delay <= 0:
+                await self.sync(client)
+                next_restore = time.monotonic() + self.turn_seconds
+                continue
+            self.wake.clear()
+            try:
+                async with asyncio.timeout(delay):
+                    await self.wake.wait()
+            except TimeoutError:
+                pass
 
     def reset(self) -> None:
         self.scope = None
@@ -414,7 +443,7 @@ class GuestCrateProjection:
         for crate in order:
             now = time.monotonic()
             if (attempts >= self.attempts_per_turn or now >= deadline
-                    or (confirmed_crate is None and now - client.gameplay_seen >= 3)):
+                    or (confirmed_crate is None and (self.confirmed or now - client.gameplay_seen >= 3))):
                 break
             lid = random_lid(crate)
             roll = rolls[crate]

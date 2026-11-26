@@ -6080,7 +6080,7 @@ class Client:
                 roll = self.gameplay.get(native_loot.STATE_KEY, {}).get(crate)
                 if (self.bridge.local_bridge is not None and self.stock_interaction_scope() == scope
                         and roll is not None and roll == result.get("native_loot_roll")):
-                    await self.crate_lids.sync(self, confirmed_crate=crate)
+                    self.crate_lids.prioritize(crate, scope)
 
     async def service_lockpick_results(self, scope, inputs) -> None:
         if scope is None or self.stock_interaction_scope() != scope:
@@ -7130,13 +7130,9 @@ class Client:
             await self.project_world_loot()
 
     async def run_stock_crates(self) -> None:
-        next_lids = 0
         while not self.stopping:
             if self.bridge.stock_interaction_ready(crates=True):
                 await self.service_crate_interaction(self.stock_interaction_scope())
-            if not self.stopping and time.monotonic() >= next_lids:
-                await self.crate_lids.sync(self)
-                next_lids = time.monotonic() + self.crate_lids.turn_seconds
             await asyncio.sleep(.012)
 
     async def service_stock_interactions(self, scope) -> None:
@@ -7255,6 +7251,7 @@ class Client:
         interact = asyncio.create_task(self.run_stock_interactions()) if resident else None
         crates = (asyncio.create_task(self.run_stock_crates())
                   if resident and self.invite.get("native_loot_input") else None)
+        crate_lids = asyncio.create_task(self.crate_lids.run(self)) if crates is not None else None
         combat = (asyncio.create_task(self.run_stock_combat_inputs())
                   if resident and self.guest_primary_input else None)
         cues = asyncio.create_task(self.run_weapon_cues()) if resident else None
@@ -7268,7 +7265,7 @@ class Client:
         finally:
             if isinstance(self.transport, link.ClientLink):
                 self.transport.set_gameplay_change_handler(None)
-            input_tasks = (interact, crates, cues, combat, world_loot)
+            input_tasks = (interact, crates, crate_lids, cues, combat, world_loot)
             for task in input_tasks:
                 if task is not None:
                     task.cancel()

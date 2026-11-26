@@ -14,7 +14,7 @@ class GuestInteractionLaneTests(unittest.IsolatedAsyncioTestCase):
         client.stopping = client.needs_travel = client.server_transitioning = False
         client.host_session, client.zone_epoch, client.expected_zone = "session", "visit", "map"
         client.last_game = {"state": "connected", "map": "map", "pawns": {"local": {"name": "pawn"}}}
-        client.transport = SimpleNamespace(connected=True)
+        client.transport = SimpleNamespace(connected=True, game_access=True)
         client.invite = {"native_loot_input": True, "character_id": "guest"}
         client.control = SimpleNamespace(event=Mock())
         client.stock_door_requests = {}
@@ -34,7 +34,8 @@ class GuestInteractionLaneTests(unittest.IsolatedAsyncioTestCase):
                 lid_confirmed.set()
 
         projection = AsyncMock(side_effect=project)
-        client.crate_lids = SimpleNamespace(sync=projection, turn_seconds=.15)
+        client.crate_lids = service.native_loot.GuestCrateProjection()
+        client.crate_lids.sync = projection
         roll = {"id": "roll", "map": "map", "crate": "crate"}
         client.gameplay = {service.native_loot.STATE_KEY: {"crate": roll}}
 
@@ -50,20 +51,90 @@ class GuestInteractionLaneTests(unittest.IsolatedAsyncioTestCase):
         client.gameplay_action = AsyncMock(side_effect=open_crate)
         client.apply_stock_interaction = AsyncMock(side_effect=pickup)
         crate_worker = asyncio.create_task(client.run_stock_crates())
+        projection_worker = asyncio.create_task(client.crate_lids.run(client))
         ordinary_worker = None
         try:
             await asyncio.wait_for(waiting_for_host.wait(), 1)
             ordinary_worker = asyncio.create_task(client.run_stock_interactions())
             await asyncio.wait_for(ordinary_done.wait(), 1)
             client.apply_stock_interaction.assert_awaited_once_with(("session", "visit", "map", "pawn"), "pickup", "object")
-            projection.assert_not_awaited()
+            self.assertTrue(all(not call.kwargs for call in projection.await_args_list))
             release_roll.set()
             await asyncio.wait_for(lid_confirmed.wait(), 1)
         finally:
             client.stopping = True
             release_roll.set()
-            await asyncio.wait_for(asyncio.gather(*(task for task in (crate_worker, ordinary_worker) if task)), 1)
-        self.assertEqual(projection.await_args_list[0].kwargs, {"confirmed_crate": "crate"})
+            workers = [task for task in (crate_worker, projection_worker, ordinary_worker) if task is not None]
+            for task in workers:
+                task.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+        self.assertEqual([call.kwargs["confirmed_crate"] for call in projection.await_args_list if call.kwargs], ["crate"])
+
+    async def test_crate_requests_dispatch_while_lid_readback_is_pending(self):
+        client = service.Client.__new__(service.Client)
+        client.stopping = client.needs_travel = client.server_transitioning = False
+        client.host_session, client.zone_epoch, client.expected_zone = "session", "visit", "map"
+        client.last_game = {"state": "connected", "map": "map", "pawns": {"local": {"name": "pawn"}}}
+        client.transport = SimpleNamespace(connected=True, game_access=True)
+        client.invite = {"native_loot_input": True, "character_id": "guest"}
+        client.control = SimpleNamespace(event=Mock())
+        records = []
+        client.bridge = SimpleNamespace(
+            local_bridge=object(), input_namespace=uuid.UUID(int=1),
+            stock_interaction_ready=lambda *, crates: bool(records),
+            native_crate_inputs=lambda: [],
+        )
+        client.crate_intents = SimpleNamespace(take=lambda _game, _inputs: [records.pop(0)])
+        guest_rolls = {crate: {"id": crate, "map": "map", "crate": crate} for crate in ("first", "second", "stale")}
+        client.gameplay = {service.native_loot.STATE_KEY: guest_rolls}
+        received = {crate: asyncio.Event() for crate in guest_rolls}
+        background_started, release_background = asyncio.Event(), asyncio.Event()
+        confirmed_started, release_confirmed = asyncio.Event(), asyncio.Event()
+        fresh_lid = asyncio.Event()
+        attempts = []
+
+        async def project(_client, *, confirmed_crate=None):
+            attempts.append(confirmed_crate)
+            if confirmed_crate is None and not background_started.is_set():
+                background_started.set()
+                await release_background.wait()
+            elif confirmed_crate == "first":
+                confirmed_started.set()
+                await release_confirmed.wait()
+            elif confirmed_crate == "second":
+                fresh_lid.set()
+
+        async def open_crate(_action, _operation, crate):
+            received[crate].set()
+            return {"native_loot_roll": guest_rolls[crate]}
+
+        client.gameplay_action = AsyncMock(side_effect=open_crate)
+        client.crate_lids = service.native_loot.GuestCrateProjection()
+        client.crate_lids.sync = AsyncMock(side_effect=project)
+        input_worker = asyncio.create_task(client.run_stock_crates())
+        projection_worker = asyncio.create_task(client.crate_lids.run(client))
+        try:
+            await asyncio.wait_for(background_started.wait(), 1)
+            records.append((1, "first", "pawn", "memory_input"))
+            await asyncio.wait_for(received["first"].wait(), .3)
+            self.assertEqual(attempts, [None])
+            release_background.set()
+            await asyncio.wait_for(confirmed_started.wait(), 1)
+
+            records.append((2, "stale", "pawn", "memory_input"))
+            await asyncio.wait_for(received["stale"].wait(), .3)
+            client.zone_epoch = "next-visit"
+            records.append((3, "second", "pawn", "memory_input"))
+            await asyncio.wait_for(received["second"].wait(), .3)
+            self.assertEqual(attempts, [None, "first"])
+            release_confirmed.set()
+            await asyncio.wait_for(fresh_lid.wait(), 1)
+            self.assertNotIn("stale", attempts)
+            self.assertEqual(attempts[:3], [None, "first", "second"])
+        finally:
+            input_worker.cancel()
+            projection_worker.cancel()
+            await asyncio.gather(input_worker, projection_worker, return_exceptions=True)
 
     async def test_dispatches_while_the_view_loop_waits_and_discards_stale_input(self):
         release_view = asyncio.Event()
