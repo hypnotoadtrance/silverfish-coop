@@ -313,6 +313,15 @@ function guest_save.exact_item_context(state, phase, name)
     return guest.pawn, binding.detached, binding.character
 end
 
+function guest_save.observed_item_context(state, phase, detail)
+    -- Routine ticks share the qualification from guest_save.sync. Explicit
+    -- commands and the initial lease grace still use full qualification.
+    local pawn, save, character = guest_save.status_context(state, phase, detail, true)
+    if pawn then return pawn, save, character end
+    pawn, save, character = guest_save.exact_item_context(state, phase, detail.name)
+    if same(pawn, detail.pawn) then return pawn, save, character end
+end
+
 function guest_save.retain(state, phase, name)
     if type(SilverfishReferenceNativeDetachedSave) ~= "function" then return false end
     local pawn, detached, character = guest_save.exact_item_context(state, phase, name)

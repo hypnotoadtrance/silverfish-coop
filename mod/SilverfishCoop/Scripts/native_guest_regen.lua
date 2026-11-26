@@ -37,9 +37,8 @@ end
 local function update(entry, guest, state, phase, standing, stock)
     entry.proof = nil
     if entry.blocked then return false end
-    local qualified, pawn, detached = pcall(guest_save.exact_item_context, state, phase, guest.name)
-    if not qualified or not valid(pawn) or not valid(detached) or pawn:GetFullName() ~= guest.name
-        or detached:GetAddress() == stock:GetAddress() then
+    local qualified, pawn, detached = pcall(guest_save.observed_item_context, state, phase, guest)
+    if not qualified or not valid(pawn) or not valid(detached) or detached:GetAddress() == stock:GetAddress() then
         forget(entry)
         entry.address, entry.status = nil, "paused_binding"
         return false

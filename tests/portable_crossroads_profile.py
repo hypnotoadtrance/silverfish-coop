@@ -443,6 +443,19 @@ function SilverfishProfileCrossroadsGuestBinding()
     local pawn, save, character = guest_save.status_context(state, "hosting", detail, true)
     local expected_pawn, expected_save, expected_character = guest_save.exact_item_context(state, "hosting", detail.name)
     assert(same(pawn, expected_pawn) and same(save, expected_save) and character == expected_character)
+    local observed_context = guest_save.observed_item_context or function(state, phase, detail)
+        return guest_save.status_context(state, phase, detail, true)
+    end
+    if guest_save.observed_item_context then
+        local observed_pawn, observed_save, observed_character = observed_context(state, "hosting", detail)
+        assert(same(pawn, observed_pawn) and same(save, observed_save) and character == observed_character)
+        local cached = state.status_guest_saves
+        state.status_guest_saves = nil
+        local fallback_pawn, fallback_save, fallback_character = observed_context(state, "hosting", detail)
+        assert(same(pawn, fallback_pawn) and same(save, fallback_save) and character == fallback_character)
+        assert(not observed_context(state, "hosting", {name=detail.name, pawn=state.local_pawn.pawn}))
+        state.status_guest_saves = cached
+    end
     assert(not guest_save.status_context(state, "connected", detail, true))
     assert(not guest_save.status_context(state, "hosting", {name=detail.name, pawn=state.local_pawn.pawn}, true))
     assert(not guest_save.status_context({world=state.world, map="other", status_guest_saves=state.status_guest_saves,
@@ -453,10 +466,10 @@ function SilverfishProfileCrossroadsGuestBinding()
         for _ = 1, rounds do fn(...) end
         return 1000 * (os.clock() - start)
     end
-    local reused = measure(guest_save.status_context, state, "hosting", detail, true)
+    local reused = measure(observed_context, state, "hosting", detail)
     local exact = measure(guest_save.exact_item_context, state, "hosting", detail.name)
     exact = exact + measure(guest_save.exact_item_context, state, "hosting", detail.name)
-    reused = reused + measure(guest_save.status_context, state, "hosting", detail, true)
+    reused = reused + measure(observed_context, state, "hosting", detail)
     return ("%d,%.3f,%.3f"):format(rounds * 2, exact, reused)
 end
 """

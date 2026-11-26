@@ -46,15 +46,15 @@ local function observe(entry)
     return {status, infections, infection_writes, ticks, tick_writes, guest, host, previous, current}
 end
 
-function sickness.sync(state, phase)
+function sickness.sync(state, phase, exact)
     local stock = host_stock(state, phase)
     if not stock or type(SilverfishSetNativeGuestSickness) ~= "function"
         or type(SilverfishReadNativeGuestSickness) ~= "function" then sickness.clear() return end
     local active = {}
+    local qualify = exact and guest_save.exact_item_context or guest_save.observed_item_context
     for _, detail in ipairs(state.guests or {}) do
-        local qualified, pawn, detached = pcall(guest_save.exact_item_context, state, phase, detail.name)
-        if qualified and valid(pawn) and valid(detached) and pawn:GetFullName() == detail.name
-            and detached:GetAddress() ~= stock:GetAddress() then
+        local qualified, pawn, detached = pcall(qualify, state, phase, exact and detail.name or detail)
+        if qualified and valid(pawn) and valid(detached) and detached:GetAddress() ~= stock:GetAddress() then
             local address = pawn:GetAddress()
             local old = watching[detail.name]
             if old and (old.address ~= address or old.map ~= state.map) then release(old) end
@@ -99,7 +99,7 @@ function sickness.command(fields, state, phase)
         or not host_stock(state, phase) or type(SilverfishProbeNativeGuestSickness) ~= "function" then
         error("The stock sickness fixture requires an enrolled guest and a bounded nonzero amount", 0)
     end
-    sickness.sync(state, phase)
+    sickness.sync(state, phase, true)
     local entry = watching[name]
     if not entry or not entry.proof then error("The exact detached guest sickness scope is unavailable", 0) end
     local ok, status = SilverfishProbeNativeGuestSickness(entry.address, amount)
