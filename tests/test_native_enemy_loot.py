@@ -7,13 +7,64 @@ import time
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-from tools.silverfish import native_enemy_loot, native_enemy_shells, native_host_save, native_world_loot, party
+from tools.silverfish import native_enemy_loot, native_enemy_shells, native_host_save, native_stock_enemy_drops, native_world_loot, party
 from tools.silverfish.campaign import CampaignFormatError, CampaignStore
 from tools.silverfish.enemy_loot_profiles import BY_MAP as ENCOUNTERS
 from tools.silverfish.generate_enemy_loot_registry import outputs as enemy_registry_outputs
 from tools.silverfish.runtime import Bridge, MAP
 from tools.silverfish.service import Host
-from tools.silverfish.travel import DEAD_BRIDGE, REFINERY
+from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, REFINERY
+
+
+class StockEnemyDropSchedulingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_memory_banking_publishes_completed_drops_before_yielding(self):
+        drops = native_stock_enemy_drops
+        for boundary in ("guest request", "time allowance"):
+            with self.subTest(boundary=boundary):
+                stock = {number: {"sequence": number, "map": CROSSROADS, "actor": f"item-{number}",
+                                  "class_path": "ammo", "source": "Bandit_C NPC", "killer": None,
+                                  "motion": "settled", "live_at_capture": True, "initial_height": 100}
+                         for number in (2, 1, 3)}
+                game = {"state": "hosting", "map": CROSSROADS, drops.KEY: stock,
+                        drops.MEMORY_CAPABILITY: True, "native_world_loot_version": 1}
+                existing = {"marked": "previous drop"}
+                original = party.new_party()
+                original[drops.STATE] = {"A" * 32: existing}
+                host = SimpleNamespace(last_game=game, party=original, native_profile=object(), stopping=False,
+                                       transitioning=False, native_checkpoint_unsafe=False, pending_host_save=None,
+                                       processed_stock_enemy_drops=set(), zone_epoch="b" * 32, roles=dict,
+                                       checkpoint_native=AsyncMock(), control=Mock())
+                ready = asyncio.Event()
+                clock = Mock(return_value=100.)
+                order = []
+
+                async def capture(action, serial, slot, option, *, timeout):
+                    self.assertEqual((action, option), (drops.BANK, "memory-escrow"))
+                    number = int(serial)
+                    order.append(number)
+                    if number == 1 and boundary == "guest request":
+                        ready.set()
+                    if number == 1 and boundary == "time allowance":
+                        clock.return_value = 100.020
+                    return {**game, drops.BANK_KEY: {"map": CROSSROADS, "sequence": number, "actor": f"item-{number}",
+                                                    "class_path": "ammo", "slot": slot, "guid": serial * 32, "ammo": 2,
+                                                    "transform": {}, "memory": True}}
+
+                bridge = SimpleNamespace(command=AsyncMock(side_effect=capture))
+                with patch.object(drops, "time", SimpleNamespace(monotonic=clock)):
+                    await drops.observe(host, bridge, interaction_ready=ready.is_set)
+                    self.assertEqual(order, [1])
+                    self.assertFalse(host.native_checkpoint_unsafe)
+                    self.assertEqual(host.processed_stock_enemy_drops, {1})
+                    self.assertTrue(host.party[drops.STATE]["1" * 32]["escrow"]["pending"])
+                    self.assertEqual(original[drops.STATE], {"A" * 32: existing})
+                    ready.clear()
+                    await drops.observe(host, bridge, interaction_ready=ready.is_set)
+                self.assertEqual(order, [1, 2, 3])
+                self.assertEqual(host.processed_stock_enemy_drops, {1, 2, 3})
+                self.assertIs(host.party[drops.STATE]["A" * 32], existing)
+                self.assertFalse(host.stopping)
+                host.checkpoint_native.assert_not_awaited()
 
 
 class DeadBridgeEnemyLootTests(unittest.TestCase):

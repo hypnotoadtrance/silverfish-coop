@@ -35,6 +35,7 @@ _SERIAL = re.compile(r"[1-9][0-9]{0,15}")
 MOTION_INTERVAL = .08
 MOTION_TTL = .75
 MOTION_LIMIT = 32
+_MEMORY_BANK_TURN_SECONDS = .012
 
 
 def parse(fields, state, area):
@@ -349,7 +350,7 @@ def _available(host):
             and not host.transitioning and not host.native_checkpoint_unsafe and not host.party["wipe"])
 
 
-async def observe(host, bridge):
+async def observe(host, bridge, *, interaction_ready=None):
     from . import native_host_save, native_loot
 
     if not _available(host):
@@ -361,12 +362,17 @@ async def observe(host, bridge):
                       key=lambda row: row["sequence"])
     if not observed:
         return
-    candidate = party.load_party(host.party)
-    records = candidate.setdefault(STATE, {})
-    committed = []
     memory = host.last_game.get(MEMORY_CAPABILITY) is True
+    candidate = None if memory else party.load_party(host.party)
+    records = {} if memory else candidate.setdefault(STATE, {})
+    committed = []
+    deadline = time.monotonic() + _MEMORY_BANK_TURN_SECONDS
     try:
         for drop in observed[:8]:
+            if memory and committed and (time.monotonic() >= deadline or interaction_ready and interaction_ready()):
+                # Finish this batch before yielding to an interaction. The next pass
+                # can still bank the remaining drops in stock spawn order.
+                break
             seq, area, actor = drop["sequence"], drop["map"], drop["actor"]
             if (not drop["live_at_capture"] or drop["motion"] == "gone" or uses_shell_view(host.last_game, drop)
                     or (not memory and drop["source"].startswith(("DigHole_BP_C ", "Bolt_Projectile_BP_C ", "BurriedItem_BP_C ",
@@ -396,7 +402,8 @@ async def observe(host, bridge):
             proof = snapshot.get(BANK_KEY, {})
             guid = proof.get("guid")
             if ((proof.get("map"), proof.get("sequence"), proof.get("actor"), proof.get("class_path"), proof.get("slot"))
-                    != (area, seq, actor, drop["class_path"], slot) or not valid_guid(guid) or guid in records):
+                    != (area, seq, actor, drop["class_path"], slot) or not valid_guid(guid) or guid in records
+                    or memory and guid in host.party.get(STATE, {})):
                 raise RuntimeError("The physical stock enemy item retirement did not verify")
             if bool(proof.get("memory")) != memory:
                 raise RuntimeError("The stock enemy item did not verify its requested escrow mode")
@@ -415,6 +422,8 @@ async def observe(host, bridge):
         if committed:
             revision = None
             if memory:
+                candidate = native_loot.copy_pending_loot(host.party, STATE)
+                candidate.setdefault(STATE, {}).update(records)
                 host.pending_host_save = bool(host.pending_host_save)
             else:
                 revision = await host.checkpoint_native(bridge, candidate)

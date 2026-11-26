@@ -4347,7 +4347,7 @@ class Host:
                     break
             self.sync_native_health_limits()
             await native_enemy_loot.observe(self, bridge)
-            await native_stock_enemy_drops.observe(self, bridge)
+            await native_stock_enemy_drops.observe(self, bridge, interaction_ready=self.native_request_ready.is_set)
             self.world_loot.observe_physics(self.party, self.last_game)
             try:
                 await self.loose_pickups.refresh(self, bridge)
