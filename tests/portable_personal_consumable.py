@@ -13,6 +13,7 @@ from tools.silverfish.native_gold import valid_guid
 
 LIVE_WETA = "/Game/Classes/Items/Item_LiveWeta.Item_LiveWeta_C"
 LIVE_FROG = "/Game/Classes/Items/Item_LiveFrog.Item_LiveFrog_C"
+BLUE_MUSHROOM = "/Game/Classes/Items/Item_BlueMushroom.Item_BlueMushroom_C"
 FALLBACK_RECEIPT = "native_guest_personal_consumable"
 
 
@@ -69,7 +70,8 @@ async def verify_stock_personal_consumable(host, guest, pawn, probe):
     seeded_at = time.time()
     weta, spare, mre = (await command(host, "seed-personal-compatibility")).split(";")
     frogs = (await command(host, "seed-frogs")).split(";")
-    assert len({weta, spare, mre, *frogs}) == 5 and all(map(valid_guid, (weta, spare, mre, *frogs)))
+    blue = await command(host, "seed-blue-mushroom")
+    assert len({weta, spare, mre, blue, *frogs}) == 6 and all(map(valid_guid, (weta, spare, mre, blue, *frogs)))
     baseline, native_guest = (await command(host, "host-medical-vitals")).split(";")
     assert float(native_guest.split(",")[1]) == 110
     items = await inventory(guest_run)
@@ -77,6 +79,7 @@ async def verify_stock_personal_consumable(host, guest, pawn, probe):
                for guid in (weta, spare))
     assert items[mre]["class_path"] == native_guest_consumable.MRE_CLASS and items[mre]["quantity"] == 1
     assert all(items[guid]["class_path"] == LIVE_FROG and items[guid]["quantity"] == 1 for guid in frogs), items
+    assert items[blue]["class_path"] == BLUE_MUSHROOM and items[blue]["quantity"] == 1
 
     frame = await wait_resident_status(guest_run, lambda row: row.get("gameplay_fresh") and row.get("character_id"))
     async with asyncio.timeout(10):
@@ -126,11 +129,27 @@ async def verify_stock_personal_consumable(host, guest, pawn, probe):
     assert weta not in after and mre not in after and after[spare]["quantity"] == 1, after
     assert await inventory(host_run) == starting_host
     assert campaign_save_hashes(host.campaign) == saves, "Fallback item use wrote an early checkpoint"
+    blue_mushroom = await use_stock_item(guest_run, frame, blue, FALLBACK_RECEIPT)
+    assert (blue_mushroom["guid"], blue_mushroom["class_path"], blue_mushroom["quantity_after"]) == (
+        blue, BLUE_MUSHROOM, 0), blue_mushroom
     await stock_inventory_open(guest_run, False)
+    async with asyncio.timeout(12):
+        while True:
+            guest_shift = (await guest.bridge.command("native-time-shift-fixture", "observe"))["ack"]["message"].split(";")
+            if guest_shift[0] == "1":
+                break
+            await asyncio.sleep(.08)
+    host_shift = (await host.bridge.command("native-time-shift-fixture", "observe"))["ack"]["message"].split(";")
+    assert host_shift[:2] == ["0", "1.000"] and guest_shift[:2] == ["1", "1.000"], (host_shift, guest_shift)
+    assert campaign_save_hashes(host.campaign) == saves, "Blue Mushroom use wrote an early checkpoint"
+    food = blue_mushroom["vitals"]["food"]
+    fatigue = blue_mushroom["vitals"]["fatigue"]
+    intox = blue_mushroom["vitals"]["intox"]
     return {"stock_personal_consumable": {
         "pawn": pawn, "character_id": frame["character_id"], "guid": spare, "remaining": 1, "food": food, "regen": regen,
         "fatigue": fatigue, "intox": intox, "frog_guids": frogs,
-        "fallback": fallback, "ordinary_recipe": registered, "original_host_state_unchanged": True,
+        "fallback": fallback, "ordinary_recipe": registered, "blue_mushroom": blue_mushroom,
+        "personal_time_shift": {"guest": guest_shift, "host": host_shift}, "original_host_state_unchanged": True,
         "deferred_save": True,
     }}
 

@@ -48,6 +48,7 @@ namespace
     constexpr auto item_base_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto health_item_path = STR("/Game/Classes/Items/HealthItem_Master_BP.HealthItem_Master_BP_C");
     constexpr auto bandage_path = STR("/Game/Classes/Items/Item_Bandage.Item_Bandage_C");
+    constexpr auto blue_mushroom_path = STR("/Game/Classes/Items/Item_BlueMushroom.Item_BlueMushroom_C");
     constexpr auto starter_bag_path = STR("/Game/Classes/Items/Random_GearBag_Starter.Random_GearBag_Starter_C");
     constexpr auto hyper_bag_path = STR("/Game/Classes/Items/HyperRandom_GearBag_Starter.HyperRandom_GearBag_Starter_C");
     constexpr auto mail_path = STR("/Game/Classes/Items/Package_Mail.Package_Mail_C");
@@ -125,6 +126,14 @@ namespace
         if (path == bandage_path || std::ranges::any_of(silverfish::native_guest_consumable::consumables,
                 [&](const auto& profile) { return profile.path == path; })) return nullptr;
 
+        // The stock Blue Mushroom adds a delayed personal time shift and a
+        // construction script that selects its display mesh.
+        const bool blue_mushroom = path == blue_mushroom_path && type->GetSuperClass() == base;
+        const auto exact_override = [type](Unreal::UFunction* function) {
+            return function && function->GetOuterPrivate() == type && function->GetNumParms() == 0 &&
+                function->GetParmsSize() == 0 && !function->GetReturnProperty() &&
+                !function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net);
+        };
         constexpr std::array inherited{
             STR("Use_Item_Primary"), STR("ApplyItemEffects"), STR("ApplyTempEffects"),
             STR("GetFoodAmmount"),
@@ -133,9 +142,22 @@ namespace
         {
             const Unreal::FName entry{name, Unreal::FNAME_Find};
             auto* stock = base->GetFunctionByNameInChain(entry);
+            if (blue_mushroom && std::wstring_view{name} == STR("ApplyItemEffects"))
+            {
+                if (!stock || !exact_override(type->GetFunctionByNameInChain(entry))) return nullptr;
+                continue;
+            }
             if (!stock || type->GetFunctionByNameInChain(entry) != stock) return nullptr;
         }
-        for (const auto* name : {STR("UserConstructionScript"), STR("ReceiveTick"), STR("ReceiveEndPlay")})
+        const Unreal::FName construction{STR("UserConstructionScript"), Unreal::FNAME_Find};
+        if (blue_mushroom)
+        {
+            if (!exact_override(type->GetFunctionByNameInChain(construction))) return nullptr;
+        }
+        else if (!construction.IsNone() &&
+            type->GetFunctionByNameInChain(construction) != base->GetFunctionByNameInChain(construction))
+            return nullptr;
+        for (const auto* name : {STR("ReceiveTick"), STR("ReceiveEndPlay")})
         {
             const Unreal::FName entry{name, Unreal::FNAME_Find};
             if (!entry.IsNone() && type->GetFunctionByNameInChain(entry) != base->GetFunctionByNameInChain(entry))

@@ -28,6 +28,7 @@ local last_damage
 local friendly_fire
 local allow_friendly_fire = false
 local melee_capsules = {}
+-- Stock player capsules ignore the melee trace channel until enrolled in co-op Friendly Fire.
 local melee_channel, overlap = 18, 1
 local host_revived_health
 local client_visit, client_scope
@@ -189,7 +190,7 @@ local function sync_melee_collision(eligible)
     end
     for address, capsule in pairs(targets) do
         local response = capsule:GetCollisionResponseToChannel(melee_channel)
-        if response ~= overlap then
+        if response == 0 or response == 2 then
             capsule:SetCollisionResponseToChannel(melee_channel, overlap)
             melee_capsules[address] = melee_capsules[address] or {capsule = capsule, response = response}
         end

@@ -2,6 +2,18 @@
 
 Project Silverfish Co-op is a proof of concept under active development. This list summarizes reports from release-candidate playtests. Check the notes for the specific ZIP you installed. Fixes verified in development can still need a live two-PC retest. [Release notes](https://github.com/hypnotoadtrance/silverfish-coop/releases)
 
+## Reports from the rc-b45e9bd playtest
+
+| Area | Observed behavior |
+| --- | --- |
+| Melee Friendly Fire | With Friendly Fire enabled, melee attacks fail to damage teammates in either direction. Other tested damage sources respect the setting. |
+| Guest equipment | Expedition Light snaps back into its worn slot after the guest tries to remove it. The guest also cannot equip a Land Mine. |
+| Oil lanterns | Gold and gray oil lanterns disagree on lit state. A guest who joined after the host broke a lamp saw it intact. Candles and radios synchronized in the same playtest. |
+| Guest character creation | A saved guest character can show a different name from the one entered in the stock editor. |
+| Guest weapon recoil | The guest's first-person weapon lacks the firing recoil animation. |
+| Blue Mushroom | A guest could buy a Blue Mushroom from a trader and see Eat in the context menu. Selecting Eat had no effect. |
+| Three-guest performance | The host and three guests reported better responsiveness, with interaction latency still noticeable. |
+
 ## Current playtest checks
 
 - **Guest travel readiness and clock status.** `rc-a1df9cf` skips the full stock loading check after the guest has settled and uses the native seat read to verify projected clock status. In separate muted Crossroads walking samples, the median guest loading check fell from 0.057 to 0.004 ms, and the clock status row from 0.098 to 0.027 ms. Median frame intervals stayed near 6.9 ms, with occasional longer intervals. Two isolated Direct IP launches verified the guest cover and transition cue, a stock clock draw at the new destination, personal time shift without changing the shared world clock, Crossroads recovery, weather and its siren, live critters, the moving teleport anomaly, mushroom harvesting, and both Simmi jammer quests. The private save baseline was preserved. Rendered travel and Steam timing remain open. [Build source](https://github.com/hypnotoadtrance/silverfish-coop/commit/a1df9cf868a4c10ab9780aa0a32c8f403416103f)

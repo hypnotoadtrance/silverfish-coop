@@ -143,6 +143,9 @@ local function host_read(pawn, save, world, action)
         local dragged = stock_item(remote, frog, 1)
         return clicked .. ";" .. dragged
     end
+    if action == "seed-blue-mushroom" then
+        return stock_item(remote, asset("/Game/Classes/Items/Item_BlueMushroom.Item_BlueMushroom_C"), 1)
+    end
     if action == "seed-mail" then
         return stock_item(remote, asset(mail_paths[1]), 1) .. ";" .. stock_item(remote, asset(mail_paths[2]), 1)
     end

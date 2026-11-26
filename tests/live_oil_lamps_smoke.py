@@ -52,6 +52,10 @@ async def verify_oil_lamps(host, guest, pawn):
             _, host_lit = await verify_state(actor, True)
         finally:
             assert await probe(host, "lower-lighter", actor) == "true;false"
+        assert await probe(guest, "visual-drift", actor) == "visual drift"
+        async with asyncio.timeout(5):
+            while (repaired := await probe(guest, "state", actor)).split(";")[:3] != ["true"] * 3:
+                await asyncio.sleep(.05)
         place = tuple(map(float, (await probe(host, "stage", actor)).split(",")))
         await suite.wait_resident_status(guest_run, lambda frame:
             (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
@@ -77,7 +81,7 @@ async def verify_oil_lamps(host, guest, pawn):
         assert await probe(host, "host-off", actor) == "false"
         _, host_extinguished = await verify_state(actor, False)
         assert suite.campaign_save_hashes(host.campaign) == checkpoint
-        evidence[actor] = dict(host_lit=host_lit, guest_extinguished=guest_extinguished,
+        evidence[actor] = dict(host_lit=host_lit, guest_lit_after_visual_repair=repaired, guest_extinguished=guest_extinguished,
                                guest_lit=guest_lit, guest_lit_after_refresh=guest_lit_after_refresh,
                                host_extinguished=host_extinguished, receipts=receipts)
 

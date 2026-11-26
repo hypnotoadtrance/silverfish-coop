@@ -27,7 +27,7 @@ local bulb_profiles = {
 }
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local world, entries, dirty
-local candle_overlaps = {}
+local candle_overlaps, retired_lamps = {}, {}
 
 local function valid(object) return object and object:IsValid() end
 local function same(left, right) return valid(left) and valid(right) and left:GetAddress() == right:GetAddress() end
@@ -127,7 +127,8 @@ local function census(state, phase)
                     if entry.power then
                         if not entries[name] or not same(entries[name].actor, actor) then
                             entries[name] = {actor = actor, class = class, power = entry.power,
-                                path = name:match("^%S+ (.+)$"), candle = entry.candle, lantern = entry.lantern}
+                                path = name:match("^%S+ (.+)$"), candle = entry.candle, lantern = entry.lantern,
+                                light = entry.light, flame = entry.flame}
                         end
                     elseif not entries[name] or not same(entries[name].actor, actor) then
                         entry.lights = light_links(actor, world)
@@ -149,14 +150,22 @@ local function find_switch(state, phase, name)
 end
 
 function switches.release_candles(state, phase)
-    if not next(candle_overlaps) or phase == "connected" and state.listening and same(world, state.world) then return end
+    if not next(candle_overlaps) and not next(retired_lamps)
+        or phase == "connected" and state.listening and same(world, state.world) then return end
     if same(world, state.world) then
         for _, sphere in pairs(candle_overlaps) do
             local owner = valid(sphere) and sphere:GetOwner()
             if qualified(owner, state.world) then sphere:SetGenerateOverlapEvents(true) end
         end
+        for entry in pairs(retired_lamps) do
+            if entry.retired and qualified(entry.actor, world) then
+                entry.actor:SetActorHiddenInGame(entry.hidden)
+                entry.actor:SetActorEnableCollision(entry.collision)
+                entry.retired = nil
+            end
+        end
     end
-    candle_overlaps = {}
+    candle_overlaps, retired_lamps = {}, {}
 end
 
 local function suppress_candle_overlap(name, sphere)
@@ -187,16 +196,23 @@ function switches.read_row(entry, name, state, phase, row)
                 if valid(sphere) and same(sphere:GetOwner(), actor) then suppress_candle_overlap(name, sphere) end
             end
             local lamp_state
+            local panel = "-"
             if entry.lantern then
                 lamp_state = entry.retired and "removed" or actor.Broken_0 == true and "broken" or "intact"
+                if phase == "connected" and lamp_state == "intact" and valid(entry.light) and valid(entry.flame)
+                    and (entry.light:IsVisible() ~= powered or entry.flame:IsActive() ~= powered) then
+                    panel = "lamp-visual-mismatch"
+                end
             end
-            if entry.row_power ~= powered or entry.row_lamp ~= lamp_state or entry.row_encoder ~= row or entry.row_map ~= state.map then
+            if entry.row_power ~= powered or entry.row_lamp ~= lamp_state or entry.row_panel ~= panel
+                or entry.row_encoder ~= row or entry.row_map ~= state.map then
                 if lamp_state then
-                    entry.status_row = row("native-stock-switch", state.map, name, bit(powered), 0, 0, 0, "-", "-", lamp_state)
+                    entry.status_row = row("native-stock-switch", state.map, name, bit(powered), 0, 0, 0, panel, "-", lamp_state)
                 else
                     entry.status_row = row("native-stock-switch", state.map, name, bit(powered), 0, 0, 0, "-", "-")
                 end
-                entry.row_power, entry.row_lamp, entry.row_encoder, entry.row_map = powered, lamp_state, row, state.map
+                entry.row_power, entry.row_lamp, entry.row_panel = powered, lamp_state, panel
+                entry.row_encoder, entry.row_map = row, state.map
             end
             return entry.status_row
         end
@@ -254,10 +270,12 @@ local function project_lamp(entry, cached, state)
         actor:SetActorHiddenInGame(true)
         actor:SetActorEnableCollision(false)
         cached.retired = true
+        retired_lamps[cached] = true
     elseif state ~= "removed" and cached.retired then
         actor:SetActorHiddenInGame(cached.hidden)
         actor:SetActorEnableCollision(cached.collision)
         cached.retired = nil
+        retired_lamps[cached] = nil
     end
     entry.retired = cached.retired
 end
@@ -265,7 +283,10 @@ end
 local function project(entry, powered, angles, lights)
     local actor, lever = entry.actor, entry.lever
     if entry.candle then
-        if actor.Lit ~= powered then actor:SetLitUnlit(powered, false) end
+        if actor.Lit ~= powered or entry.lantern and
+            (entry.light:IsVisible() ~= powered or entry.flame:IsActive() ~= powered) then
+            actor:SetLitUnlit(powered, false)
+        end
         suppress_candle_overlap(actor:GetFullName(), entry.box)
         if actor.Lit ~= powered or entry.light:IsVisible() ~= powered then error("stock_switch_candle_unverified", 0) end
         return

@@ -173,6 +173,14 @@ local function run(action,id)
         lamp:PropBroken(lamp:K2_GetActorLocation(),pawn)
         return "dispatched"
     end
+    if action == "visual-drift" then
+        assert(not pawn:HasAuthority() and lamp.Lit == true and lamp.PointLight:IsVisible(),
+            "fixture requires a lit guest oil lamp")
+        lamp.PointLight:SetVisibility(false, false)
+        lamp.FX_CandleFlame_01_Converted:Deactivate()
+        assert(lamp.Lit == true and not lamp.PointLight:IsVisible(), "fixture did not isolate the lamp visuals")
+        return "visual drift"
+    end
     if action == "state" then
         return table.concat({tostring(lamp.Lit), tostring(lamp.PointLight:IsVisible()),
             tostring(lamp.FX_CandleFlame_01_Converted:IsActive()), tostring(lamp.Sphere:GetGenerateOverlapEvents())},";")

@@ -5437,6 +5437,20 @@ async def verify_stock_unequip(first, second, evidence):
         utility_slot = utility[native_inventory.STORE_KEY]["slot"]
         evidence["guest_utility_equip"] = {"receipt": utility,
                                           "local_move": await local_move(utility, "equip", ids[2], utility_slot)}
+        mine = await portable_probe_command(host.bridge, probe, f"remote-landmine-seed\t{pawn}")
+        assert re.fullmatch(r"[0-9A-F]{32}", mine), mine
+        await close_stock()
+        async with asyncio.timeout(12):
+            while mine not in (await portable_probe_command(guest.bridge, probe, "guest-worn-backpack")).split(","):
+                await asyncio.sleep(.12)
+        assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+        await leaves_stock_open()
+        assert await portable_probe_command(guest.bridge, probe, f"guest-equip-landmine\t{mine}") == "pressed"
+        equipped_mine = await witness("native_stock_inventory_action", native_inventory.STORE_KEY, mine)
+        mine_slot = equipped_mine[native_inventory.STORE_KEY]["slot"]
+        assert 4 <= mine_slot < 8, equipped_mine
+        evidence["guest_landmine_equip"] = {"receipt": equipped_mine,
+                                            "local_move": await local_move(equipped_mine, "equip", mine, mine_slot)}
         assert await portable_probe_command(guest.bridge, probe, "guest-sort-backpack") == "pressed"
         frame = await wait_resident_status(guest_run, lambda row: row.get("state") == "connected")
         async with asyncio.timeout(6):
@@ -7510,7 +7524,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if (tutorial_dock_combat or tutorial_dock_melee or stock_dock_population
                 or stock_bandage_revisit or stock_shovel or stock_buried_placements
                 or stock_simmi_jammers or stock_weather_travel or stock_lightning
-                or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_friendly_fire
+                or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_friendly_fire or oil_lamps_check
                 or stardust_handoff_check
                 or stock_critters or stock_placed_item
                 or stock_crossroads_door or stock_dock_gate

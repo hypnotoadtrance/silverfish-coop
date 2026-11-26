@@ -284,7 +284,12 @@ local function run(action, argument)
                     and remote:K2_TeleportTo({X = x, Y = y, Z = z}, {Pitch = 0, Yaw = yaw + 180, Roll = 0}) then
                     remote:ForceNetUpdate()
                     pawn.Controller:SetControlRotation({Pitch = -8, Yaw = yaw, Roll = 0})
-                    if not valid(pawn.Save.PlayerEquipment[1][item_class]) then seed_melee(pawn) end
+                    if not valid(pawn.Save.PlayerEquipment[1][item_class]) then
+                        local class, out = asset(melee_class), {}
+                        asset(factory):MakeDefaultItem(class, pawn, out)
+                        pawn.Save.PlayerEquipment[1] = out.Item or out
+                        assert(same(pawn.Save.PlayerEquipment[1][item_class], class), "fixture host Old Pipe unavailable")
+                    end
                     pawn:Equip_NextItem(0, false)
                     return tostring(yaw)
                 end
@@ -312,7 +317,7 @@ local function run(action, argument)
     end
     if action == "remote-seed" or action == "remote-ready" or action == "remote-ammo" or action == "remote-read"
         or action == "remote-worn-seed" or action == "remote-melee-seed" or action == "remote-melee-held"
-        or action == "remote-quick-ammo" or action == "remote-quick-retired" then
+        or action == "remote-quick-ammo" or action == "remote-quick-retired" or action == "remote-landmine-seed" then
         assert(not guest and #driver.ClientConnections == 1, "one enrolled guest required")
         local name = argument and argument:match("^Player_FP_C (.+)$")
         local remote = name and StaticFindObject(name)
@@ -326,7 +331,15 @@ local function run(action, argument)
         end
         assert(remote_seed and same(remote_seed.pawn, remote) and same(remote_seed.save, remote.Save),
             "fixture authoritative detached owner changed")
-        if action == "remote-melee-seed" then
+        if action == "remote-landmine-seed" then
+            local class, output = asset("/Game/Classes/Equipment/Eqp_LandMine.Eqp_LandMine_C"), {}
+            asset(factory):MakeDefaultItem(class, remote, output)
+            local row = output.Item or output
+            assert(same(row[item_class], class) and row[ammo] == 1, "fixture stock Land Mine creation failed")
+            local bag = remote.Save.PlayerBackpack
+            bag[bag:GetArrayNum() + 1] = row
+            return identity(row)
+        elseif action == "remote-melee-seed" then
             assert(not remote_seed.melee, "fixture melee item already seeded")
             remote_seed.melee = seed_melee(remote)
             return remote_seed.melee
@@ -479,6 +492,10 @@ local function run(action, argument)
         local pack, result = pawn.Save.PlayerBackpack, {}
         for index = 1, pack:GetArrayNum() do result[index] = identity(pack[index]) end
         return table.concat(result, ",")
+    elseif action == "guest-equip-landmine" then
+        assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")
+        equip_worn(pawn, argument, false)
+        return "pressed"
     elseif action == "guest-sort-backpack" or action == "guest-reequip-utility" then
         assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")
         if action == "guest-sort-backpack" then
