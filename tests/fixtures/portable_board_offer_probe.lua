@@ -74,9 +74,18 @@ local function run(action, quest)
                 -- This disposable campaign measures the sabotage prop, while the
                 -- separate combat trial exercises stock attacks and retaliation.
                 actor:K2_DestroyActor()
-                assert(not valid(actor) or actor:IsActorBeingDestroyed(), "Could not clear a stock NPC from the firing test")
                 count = count + 1
             end
+        end
+        -- Destroyed actors can remain valid Lua handles until garbage collection.
+        -- Read back the level roster to verify that no living stock actor remains.
+        local remaining = {}
+        statics:GetAllActorsOfClass(world, class, remaining)
+        for _, parameter in ipairs(remaining.OutActors or remaining) do
+            local actor = type(parameter.type) == "function" and parameter:type() == "RemoteUnrealParam"
+                and parameter:get() or parameter
+            assert(not valid(actor) or not actor.Alive or not same(actor:GetWorld(), world),
+                "A stock NPC remained in the firing test level")
         end
         return tostring(count)
     end
