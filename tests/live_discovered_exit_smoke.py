@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import math
+from contextlib import ExitStack
 from functools import partial
 from pathlib import Path
 
@@ -89,11 +90,14 @@ async def live_exit(host, guest, pawn, probe, *, unlisted_only=False, save_in_sh
     for participant in (reached["game"]["native_guest_save"]["pawn"], "local"):
         await host.bridge.command("native-exit-position", participant, "near", route.entrance, route.actor)
     outbound = await cross_unlisted(host, guest, probe, "demo" if shop == UNLISTED_DEMO else "shop", CROSSROADS, shop)
-    if mounted_items:
-        evidence["mounted_items"] = await live_mounted_items(host, guest, shop)
+    try:
+        if mounted_items:
+            evidence["mounted_items"] = await live_mounted_items(host, guest, shop)
+    finally:
+        if not save_in_shop:
+            returned = await cross_unlisted(host, guest, probe, "return", shop, CROSSROADS)
     if save_in_shop:
         return dict(evidence, entered_unlisted_map=outbound)
-    returned = await cross_unlisted(host, guest, probe, "return", shop, CROSSROADS)
     return dict(evidence, unlisted_map_round_trip=[outbound, returned])
 
 
@@ -118,8 +122,11 @@ async def live_mounted_items(host, guest, area):
             frame = await viewer.bridge.wait_for(lambda frame: identity in frame.get(loot.KEY, {}), timeout=12)
             assert frame[loot.KEY][identity]["map"] == area
             visible.append(frame[loot.KEY][identity]["actor"])
-        local = await seat.bridge.wait_for(lambda frame: frame.get("map") == area)
-        await host.bridge.command(loot.APPROACH, identity, local["pawns"]["local"]["name"])
+        authority = await host.bridge.wait_for(lambda frame: frame.get("map") == area
+                                               and frame.get("native_guest_save", {}).get("state") == "bound")
+        pawn = (authority["native_guest_save"]["pawn"] if seat is guest
+                else authority["pawns"]["local"]["name"])
+        await host.bridge.command(loot.APPROACH, identity, pawn)
         pressed = await seat.bridge.command(loot.FIXTURE, identity)
         assert pressed["ack"]["message"] == "stock world loot interaction intercepted", pressed["ack"]
         for viewer in (host, guest):
@@ -326,6 +333,11 @@ if __name__ == "__main__":
             return await previous(*arguments, **options)
 
         suite.start_pair = with_stock_kit
-    with suite.installed_probe(first, mod="SilverfishPortableExitDiscoveryProbe", fixture="portable_discovered_exit_probe.lua"):
+    with ExitStack() as probes:
+        probes.enter_context(suite.installed_probe(
+            first, mod="SilverfishPortableExitDiscoveryProbe", fixture="portable_discovered_exit_probe.lua"))
+        if args.mounted_items:
+            for game in (first, second):
+                probes.enter_context(suite.installed_probe(game))
         asyncio.run(suite.verify(work, first, second, saves, stock_weather_travel=True,
                                  stock_placed_item=not args.resume_unlisted))
