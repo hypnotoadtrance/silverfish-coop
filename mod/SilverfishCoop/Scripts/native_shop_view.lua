@@ -6,6 +6,7 @@ local stock = require("native_shop_stock")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_SHOP_VIEW") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+local embedded = os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") == "1"
 local profiles = {}
 local function register_merchant(map, level, actor, data, title, barter)
     local world = map .. "." .. level
@@ -159,13 +160,21 @@ end
 local function emit(kind, first, second)
     if event_sequence >= max_sequence then return end
     local profile = session.context.profile
-    local file = io.open(events_path, "ab")
-    if not file then return end
-    event_sequence = event_sequence + 1
-    local wrote = file:write(table.concat({"shop-view", event_sequence, session.sequence, kind, profile.map,
-        session.context.name, profile.actor_name, first or "-", second or "-"}, "\t"), "\n")
-    local closed = file:close()
-    return wrote and closed and event_sequence or nil
+    local next_event = event_sequence + 1
+    local line = table.concat({"shop-view", next_event, session.sequence, kind, profile.map,
+        session.context.name, profile.actor_name, first or "-", second or "-"}, "\t") .. "\n"
+    if embedded then
+        if type(SilverfishEnqueueLocalBridgeInput) ~= "function" or not SilverfishEnqueueLocalBridgeInput(line) then return end
+    else
+        local file = io.open(events_path, "ab")
+        if not file then return end
+        event_sequence = next_event
+        local wrote = file:write(line)
+        local closed = file:close()
+        if not wrote or not closed then return end
+    end
+    event_sequence = next_event
+    return next_event
 end
 
 local function request(kind, waiting, offset, first, second)

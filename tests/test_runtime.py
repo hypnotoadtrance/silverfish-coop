@@ -233,6 +233,44 @@ class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
                 for sequence, target in ((8, None), (10, "stock-critter:1"))
             ])
 
+    async def test_resident_menu_inputs_wake_guest_after_another_lane_reads_the_fifo(self):
+        area = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+        pawn = "Player_FP_C ClientView"
+        actor = "Shop_BP_C ObservatoryMerchant"
+        item = "a" * 32
+        records = [
+            b"interact\t1",
+            f"inventory-view\t2\topen\t{area}\t{pawn}".encode(),
+            f"shop-view\t3\t1\tbuy\t{area}\t{pawn}\t{actor}\t{item}\t17".encode(),
+            f"inventory-view\t2\tpage\t{area}\t{pawn}\t16".encode(),
+            f"inventory-view\t2\tclosed\t{area}\t{pawn}".encode(),
+        ]
+        with TemporaryDirectory() as temporary:
+            bridge = runtime.Bridge(Path(temporary), None)
+            native = bridge.local_bridge = Mock()
+            bridge.status_source = "memory"
+            native.status_ready.return_value = False
+            native.input_ready.return_value = False
+            waiting = asyncio.create_task(bridge.wait_for_interaction(5, guest=True))
+            await asyncio.sleep(0)
+            self.assertFalse(waiting.done())
+
+            def read_input(_limit):
+                native.input_ready.return_value = False
+                return records
+
+            native.read_input.side_effect = read_input
+            native.input_ready.return_value = True
+            self.assertEqual(len(bridge.interactions()), 1)
+            await asyncio.wait_for(waiting, .25)
+            self.assertEqual(bridge.native_inventory_view_requests(), [
+                (2, "open", area, pawn, 0), (2, "page", area, pawn, 16), (2, "closed", area, pawn, 0),
+            ])
+            self.assertEqual(bridge.native_shop_view_requests(), [(3, 1, "buy", area, pawn, actor, item, "17")])
+            self.assertEqual(bridge.native_inventory_view_requests(), [])
+            self.assertEqual(bridge.native_shop_view_requests(), [])
+            self.assertEqual(list(bridge.directory.iterdir()), [])
+
     async def test_full_interaction_lane_keeps_new_press_in_the_native_queue(self):
         with TemporaryDirectory() as temporary:
             bridge = runtime.Bridge(Path(temporary), None)

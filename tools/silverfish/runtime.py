@@ -883,8 +883,9 @@ class Bridge:
         self._status_snapshot: dict | None = None
         self.local_bridge = None
         self._local_interaction_records = deque(maxlen=64)
-        self._local_board_records = deque(maxlen=64)
-        self._local_dialogue_records = deque(maxlen=64)
+        self._local_menu_inputs = {tag: deque(maxlen=64) for tag in
+                                   (b"wire-board", b"dialogue-input", b"inventory-view", b"shop-view")}
+        self._local_menu_wakeup = asyncio.Event()
         self._local_crate_records = deque(maxlen=64)
         self._local_door_confirmations: deque[bytes] = deque()
         self._local_death_records = deque(maxlen=64)
@@ -909,25 +910,28 @@ class Bridge:
     async def wait_for_interaction(self, timeout: float, *, wake_if=None, wake_event: asyncio.Event | None = None,
                                    guest=False) -> None:
         """Wake for local input, a new game frame, or pending network work."""
+        menu_wake = guest and self.local_bridge is not None and wake_event is None
+        if menu_wake:
+            wake_event = self._local_menu_wakeup
         deadline = time.monotonic() + timeout
         streams = [("input.tsv", self.input_offset)] if self.local_bridge is None else []
         if guest:
             if self.local_bridge is None:
                 streams.extend((("native-guest-primary-events", self.primary_input_offset),
                                 ("native-guest-held-fire-events", self.held_fire_offset),
-                                ("native-dialogue-events", self.dialogue_offset)))
+                                ("native-dialogue-events", self.dialogue_offset),
+                                ("native-inventory-view-events", self.inventory_view_offset),
+                                ("native-shop-view-events", self.shop_view_offset),
+                                ("native-wire-board-events", self.wire_board_offset)))
             streams.extend((
-                ("native-inventory-view-events", self.inventory_view_offset),
                 ("native-guest-inventory-equip-events", self.inventory_equip_offset),
-                ("native-shop-view-events", self.shop_view_offset),
-                ("native-wire-board-events", self.wire_board_offset),
                 ("native-mosby-station-events", self.mosby_station_offset),
             ))
         while (remaining := deadline - time.monotonic()) > 0:
             if ((wake_event is not None and wake_event.is_set()) or (wake_if is not None and wake_if())
                     or (self.local_bridge is not None
                         and (self.local_bridge.input_ready() or self.local_bridge.status_ready()))):
-                return
+                break
             if self.status_source == "file":
                 try:
                     published = (self.directory / "status.tsv").stat()
@@ -935,7 +939,7 @@ class Bridge:
                     pass
                 else:
                     if (published.st_mtime_ns, published.st_size) != self._status_revision:
-                        return
+                        break
             ready = False
             for filename, offset in streams:
                 try:
@@ -948,7 +952,7 @@ class Bridge:
                     self._input_wake_sizes[filename] = size
                     ready = True
             if ready:
-                return
+                break
             delay = min(.025, remaining)
             if wake_event is None:
                 await asyncio.sleep(delay)
@@ -956,9 +960,11 @@ class Bridge:
                 try:
                     async with asyncio.timeout(delay):
                         await wake_event.wait()
-                    return
+                    break
                 except TimeoutError:
                     pass
+        if menu_wake:
+            self._local_menu_wakeup.clear()
 
     def _take_local_inputs(self, pending: deque[bytes]) -> list[bytes]:
         # Keep unread interaction, combat, and travel inputs in the native FIFO until their collectors have room.
@@ -969,10 +975,10 @@ class Bridge:
                         len(self._local_fruiting_stardust_records), len(self._local_prop_carry_records))
         if room and self.local_bridge is not None and self.local_bridge.input_ready():
             for record in self.local_bridge.read_input(room):
-                if record.startswith(b"wire-board\t"):
-                    self._local_board_records.append(record)
-                elif record.startswith(b"dialogue-input\t"):
-                    self._local_dialogue_records.append(record)
+                menu_inputs = self._local_menu_inputs.get(record.partition(b"\t")[0])
+                if menu_inputs is not None:
+                    menu_inputs.append(record)
+                    self._local_menu_wakeup.set()
                 elif record.startswith((b"loot-crate-open\t", b"loot-lockpick\t")):
                     self._local_crate_records.append(record)
                 elif record.startswith(b"stock-door-settled\t"):
@@ -1007,6 +1013,8 @@ class Bridge:
                     self._local_interaction_records.append(record)
         records = list(pending)
         pending.clear()
+        if self._local_menu_wakeup.is_set() and not any(self._local_menu_inputs.values()):
+            self._local_menu_wakeup.clear()
         return records
 
     def stock_door_confirmations(self):
@@ -1070,16 +1078,10 @@ class Bridge:
         return [(identity, target) for _, identity, target in results]
 
     def native_inventory_view_requests(self) -> list[tuple[int, str, str, str, int]]:
-        try:
-            with (self.directory / "native-inventory-view-events").open("rb") as stream:
-                stream.seek(self.inventory_view_offset)
-                batch = stream.read(4096)
-        except OSError:
-            return []
-        end = batch.rfind(b"\n") + 1
-        self.inventory_view_offset += end if end else len(batch) if len(batch) == 4096 else 0
+        records = self._native_guest_input_records(self._local_menu_inputs[b"inventory-view"],
+                                                  "native-inventory-view-events", "inventory_view_offset")
         events = []
-        for line in batch[:end].splitlines():
+        for line in records:
             fields = line.decode("utf-8", errors="replace").split("\t")
             if (len(fields) not in (5, 6) or fields[0] != "inventory-view"
                     or not fields[1].isascii() or not fields[1].isdigit() or len(fields[1]) > 16
@@ -1100,18 +1102,19 @@ class Bridge:
             events.append((sequence, event, area, pawn, offset))
         return events
 
-    def _native_guest_input_records(self, pending: deque[bytes], filename: str, offset_name: str) -> list[bytes]:
+    def _native_guest_input_records(self, pending: deque[bytes], filename: str, offset_name: str,
+                                    *, file_limit: int = 4096) -> list[bytes]:
         if self.local_bridge is not None:
             return self._take_local_inputs(pending)
         offset = getattr(self, offset_name)
         try:
             with (self.directory / filename).open("rb") as stream:
                 stream.seek(offset)
-                batch = stream.read(4096)
+                batch = stream.read(file_limit)
         except OSError:
             return []
         end = batch.rfind(b"\n") + 1
-        setattr(self, offset_name, offset + (end or (len(batch) if len(batch) == 4096 else 0)))
+        setattr(self, offset_name, offset + (end or (len(batch) if len(batch) == file_limit else 0)))
         return batch[:end].splitlines()
 
     def native_primary_input_requests(self) -> list[tuple[int, str, str, str, str] | tuple[int, str, str, str, str, str]]:
@@ -1196,16 +1199,10 @@ class Bridge:
         return events
 
     def native_shop_view_requests(self) -> list[tuple[int, int, str, str, str, str, str, str]]:
-        try:
-            with (self.directory / "native-shop-view-events").open("rb") as stream:
-                stream.seek(self.shop_view_offset)
-                batch = stream.read(8192)
-        except OSError:
-            return []
-        end = batch.rfind(b"\n") + 1
-        self.shop_view_offset += end if end else len(batch) if len(batch) == 8192 else 0
+        records = self._native_guest_input_records(self._local_menu_inputs[b"shop-view"],
+                                                  "native-shop-view-events", "shop_view_offset", file_limit=8192)
         events = []
-        for line in batch[:end].splitlines():
+        for line in records:
             fields = line.decode("utf-8", errors="replace").split("\t")
             if (len(fields) == 9 and fields[0] == "shop-view" and fields[3] in ("open", "close", "buy", "sell", "page")
                     and all(value.isascii() and value.isdigit() and len(value) <= 16 and 0 < int(value) < 2**53
@@ -1244,7 +1241,7 @@ class Bridge:
             self.wire_board_offset += end if end else len(batch) if len(batch) == 8192 else 0
             records = batch[:end].splitlines()
         else:
-            records = self._take_local_inputs(self._local_board_records)
+            records = self._take_local_inputs(self._local_menu_inputs[b"wire-board"])
         events = []
         for line in records:
             fields = line.decode("utf-8", errors="replace").split("\t")
@@ -1268,7 +1265,7 @@ class Bridge:
             self.dialogue_offset += end if end else len(batch) if len(batch) == 4096 else 0
             records = batch[:end].splitlines()
         else:
-            records = self._take_local_inputs(self._local_dialogue_records)
+            records = self._take_local_inputs(self._local_menu_inputs[b"dialogue-input"])
         events = []
         for line in records:
             fields = line.decode("utf-8", errors="replace").split("\t")

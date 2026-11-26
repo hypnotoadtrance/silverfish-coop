@@ -81,7 +81,7 @@ WAREHOUSE_DOCK = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
 # Checks that reacquire their target on an already loaded map can still run
 # when an unrelated fixture on the same map has failed.
 INDEPENDENT_RESIDENT_MAPS = {
-    "stock_food": {OBSERVATORY}, "stock_cooked_meal": {OBSERVATORY}, "stock_melee_edges": {OBSERVATORY},
+    "stock_shop_lease": {OBSERVATORY}, "stock_food": {OBSERVATORY}, "stock_cooked_meal": {OBSERVATORY}, "stock_melee_edges": {OBSERVATORY},
     "stock_castaway_dialogue": {OBSERVATORY},
     "stock_avatar_tail": {OBSERVATORY}, "stock_avatar_lean": {OBSERVATORY},
     "stock_footsteps": {OBSERVATORY}, "stock_impact_cues": {OBSERVATORY},
@@ -4281,7 +4281,8 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
     assert campaign_save_hashes(host.campaign) == checkpoint_hashes, "Stock medicine caused an early campaign checkpoint"
     assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
     await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
-    return {"resident_guest_food": {"receipt": used, "before": before, "after": after,
+    assert not (guest.bridge.directory / "native-inventory-view-events").exists(), "Stock inventory used the file mailbox"
+    return {"resident_guest_food": {"view_event_file_absent": True, "receipt": used, "before": before, "after": after,
                                     "host_food_before": host_before[0], "host_food_after": host_after[0],
                                     "host_regen_unchanged": True, "campaign_checkpoint_unchanged": True,
                                     "stock_widget_tick_invoked_in_muted_fixture": True, "additional_stock_uses": verified,
@@ -5822,8 +5823,10 @@ async def verify_guest_shop_lease(host: Seat, guest: Seat, pawn: str) -> dict:
         "native-dialogue-heartbeat", "native-mosby-station-heartbeat",
     ))
 
+    events_path = guest.bridge.directory / "native-shop-view-events"
+
     def require_memory_only():
-        files = [path.name for path in paths if os.path.lexists(path)]
+        files = [path.name for path in (*paths, events_path) if os.path.lexists(path)]
         assert not files, files
 
     save_roots = ((host.campaign / "save", "campaign*.json"),
@@ -5880,6 +5883,7 @@ async def verify_guest_shop_lease(host: Seat, guest: Seat, pawn: str) -> dict:
         "native_game_sequence_before": ready["game"]["sequence"],
         "native_game_sequence_after": current["game"]["sequence"],
         "absent_heartbeat_files": [path.name for path in paths],
+        "stock_shop_event_file_absent": not events_path.exists(),
         "heartbeat_check_seconds": checked_seconds,
         "saves_unchanged_before_checkpoint": True,
     }
@@ -7065,6 +7069,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     for enabled, campaign, name, check in (
         (stock_avatar_lean, "observatory", "stock_avatar_lean", check_lean),
         (stock_footsteps, "observatory", "stock_footsteps", check_footsteps),
+        (guest_shop_lease, "shop_lease", "stock_shop_lease", verify_guest_shop_lease),
         (stock_campfire, "observatory", "stock_campfire", verify_resident_campfire),
         (stock_npc_override and not resident_weapon_cues, "observatory", "stock_npc_override", verify_resident_npc_override),
         (stock_dead_drops, "crossroads_dead_drop", "crossroads_dead_drop",
@@ -7863,8 +7868,6 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                       after_reconnect=refresh_host_pause))
         elif stock_crate_ring:
             proof["sessions"].append(await start_pair(first, second, "Crate scout", on_join=verify_stock_crate_ring))
-        elif guest_shop_lease:
-            proof["sessions"].append(await start_pair(first, second, "Merchant scout", on_join=verify_guest_shop_lease))
         elif guest_ui_memory:
             proof["sessions"].append(await start_pair(first, second, "Inventory scout", on_join=check_gameplay))
         elif resident_cabinet_checkpoint:
@@ -8208,7 +8211,7 @@ if __name__ == "__main__":
             args.guest_world_start, args.guest_world_start_travel, args.guest_ui_memory, args.compact_crate_status,
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
-    resident_check_options = {"stock_unequip", "stock_food", "stock_personal_consumable", "stock_wipe_chooser",
+    resident_check_options = {"guest_shop_lease", "stock_unequip", "stock_food", "stock_personal_consumable", "stock_wipe_chooser",
                               "stock_campfire", "stock_npc_override", "stock_dock_population",
                               "stock_dead_drops",
                               "stock_board_offers", "stock_quarry_photo", "resident_weapon_cues", "resident_held_queue", "resident_stale_quick_slot",

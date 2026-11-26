@@ -9,6 +9,7 @@ local save_scope = require("native_save_scope")
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_INVENTORY_VIEW") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+local embedded = os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") == "1"
 local pawn_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 local inventory_action_path = "/Game/Classes/Player/Player_Inputs/IA_Inventory.IA_Inventory"
@@ -131,7 +132,12 @@ local function emit_line(path, fields)
 end
 
 local function emit(current, sequence, event, offset)
-    return emit_line(event_path, {"inventory-view", sequence, event, current.map, current.name, offset})
+    local fields = {"inventory-view", sequence, event, current.map, current.name, offset}
+    if embedded then
+        return type(SilverfishEnqueueLocalBridgeInput) == "function"
+            and SilverfishEnqueueLocalBridgeInput(table.concat(fields, "\t") .. "\n") == true
+    end
+    return emit_line(event_path, fields)
 end
 
 local function take(current)
