@@ -5756,6 +5756,19 @@ async def verify_stock_unequip(first, second, evidence):
         assert retained_result == "detached save retained through collection and released", retained_result
         evidence["host_detached_save_collection"] = retained_result
         assert saves() == before, "Retaining a detached save through collection wrote a campaign file"
+        exported = await portable_probe_command(guest.bridge, probe, "guest-typed-grant")
+        grant_guid, grant_text = exported.split("@", 1)
+        assert re.fullmatch(r"[0-9A-F]{32}", grant_guid) and "WeaponData_Struct" in grant_text, exported
+        request = f"{pawn}\t{grant_guid}\t{grant_text}"
+        wrong_guid = ("A" if grant_guid[0] != "A" else "B") + grant_guid[1:]
+        refused = await portable_probe_command(host.bridge, probe, f"remote-typed-grant\t{pawn}\t{wrong_guid}\t{grant_text}")
+        assert refused == "refused@native_inventory_grant_refused_serialization", refused
+        assert await portable_probe_command(host.bridge, probe, "remote-typed-grant\t" + request) == "ok@added"
+        assert await portable_probe_command(host.bridge, probe, "remote-typed-grant\t" + request) == "ok@present"
+        assert await portable_probe_command(host.bridge, probe, f"remote-typed-read\t{pawn}\t{grant_guid}\t") == grant_text
+        assert saves() == before, "Mirroring the typed grant wrote a campaign file"
+        evidence["guest_typed_grant"] = {"guid": grant_guid, "ammo": 7, "typed_payload_preserved": True,
+                                         "replay_added_no_row": True, "mismatched_guid_refused": True}
         return {"selected_and_inactive_slots_checked": True, "guest_duplicate_clicks_rejected": True,
                 "guest_worn_slots_checked": True, "guest_equipped_host_drop": True,
                 "saves_unchanged_before_checkpoint": True}

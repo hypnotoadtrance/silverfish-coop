@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <format>
 #include <map>
 #include <memory>
@@ -3264,7 +3265,7 @@ namespace
             object(context.instance, STR("SaveSlot_Ref")) == context.save;
     }
 
-    bool bind_local_inventory(Context& context, std::int64_t pawn, std::int64_t save)
+    bool bind_local_inventory(Context& context, std::int64_t pawn, std::int64_t save, bool require_ready = true)
     {
         if (!Unreal::IsInGameThreadRaw() || pawn <= 0 || save <= 0) return false;
         context.pawn = silverfish::native_interaction_input::current_guest_pawn(static_cast<std::uintptr_t>(pawn));
@@ -3274,7 +3275,7 @@ namespace
             reinterpret_cast<std::uintptr_t>(context.save) != static_cast<std::uintptr_t>(save)) return false;
         context.world = static_cast<Unreal::AActor*>(context.pawn)->GetWorld();
         context.instance = object(context.world, STR("OwningGameInstance"));
-        return local_inventory_current(context) && ready_pawn(context);
+        return local_inventory_current(context) && (!require_ready || ready_pawn(context));
     }
 
     template <bool local>
@@ -3282,6 +3283,120 @@ namespace
     {
         if constexpr (local) return local_inventory_current(context);
         return ownership_current(context);
+    }
+
+    constexpr std::size_t max_inventory_item_text = 8192;
+
+    std::string inventory_item_text(const Context& context, const Inventory& inventory, const void* row)
+    {
+        Unreal::FString text;
+        inventory.type->ExportTextItem_Direct(text, row, nullptr, context.save, Unreal::PPF_Delimited);
+        if (text.Len() <= 0 || static_cast<std::size_t>(text.Len()) > max_inventory_item_text) return {};
+        auto encoded = RC::to_utf8_string(*text);
+        if (encoded.size() > max_inventory_item_text || encoded.find_first_of("\t\r\n") != std::string::npos) return {};
+        return encoded;
+    }
+
+    template <bool local>
+    int export_inventory_item(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 3 ||
+            !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3))
+            return result(lua, false, "native_inventory_export_refused_arguments");
+        Context context;
+        const auto pawn = lua.get_integer(), save = lua.get_integer();
+        if (pawn <= 0 || save <= 0 || !parse_guid(lua.get_string(), context.guid))
+            return result(lua, false, "native_inventory_export_refused_arguments");
+        if constexpr (local)
+        {
+            if (!bind_local_inventory(context, pawn, save, false))
+                return result(lua, false, "native_inventory_export_refused_owner");
+        }
+        else if (!resolve_owner(context, pawn, save).empty())
+            return result(lua, false, "native_inventory_export_refused_owner");
+
+        Inventory inventory;
+        if (!locate(context, inventory).empty() || !inventory.item || !live(inventory.row_class(inventory.item)))
+            return result(lua, false, "native_inventory_export_refused_row");
+        const auto text = inventory_item_text(context, inventory, inventory.item);
+        if (text.empty()) return result(lua, false, "native_inventory_export_refused_serialization");
+        return result(lua, true, text);
+    }
+
+    int import_inventory_addition(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 5 || !lua.is_integer(1) || !lua.is_integer(2) ||
+            !lua.is_string(3) || !lua.is_string(4) || !lua.is_string(5))
+            return result(lua, false, "native_inventory_grant_refused_arguments");
+        Context context;
+        const auto pawn = lua.get_integer(), save = lua.get_integer();
+        if (pawn <= 0 || save <= 0 || !parse_guid(lua.get_string(), context.guid))
+            return result(lua, false, "native_inventory_grant_refused_arguments");
+        const auto class_path = lua.get_string();
+        const auto reported = lua.get_string();
+        if (class_path.size() > 512 || !class_path.starts_with("/Game/") || !class_path.ends_with("_C") ||
+            class_path.find("..") != std::string::npos ||
+            class_path.find_first_not_of("/._-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789") != std::string::npos ||
+            reported.empty() || reported.size() > max_inventory_item_text || reported.front() != '(' ||
+            reported.back() != ')' || reported.find_first_of("\t\r\n") != std::string::npos ||
+            reported.find('\0') != std::string::npos)
+            return result(lua, false, "native_inventory_grant_refused_encoding");
+        if (!resolve_owner(context, pawn, save).empty())
+            return result(lua, false, "native_inventory_grant_refused_owner");
+
+        Inventory inventory;
+        auto* expected = find<Unreal::UClass>(RC::to_wstring(class_path).c_str());
+        if (!locate(context, inventory, expected).empty())
+            return result(lua, false, "native_inventory_grant_refused_guid");
+        auto* base = inventory.item_class->GetMetaClass().Get();
+        if (!live(expected) || !base || expected == base || !expected->IsChildOf(base))
+            return result(lua, false, "native_inventory_grant_refused_class");
+
+        using Value = std::unique_ptr<void, PropertyDeleter>;
+        Value row(inventory.type->AllocateAndInitializeValue(), {inventory.type});
+        if (!row) return result(lua, false, "native_inventory_grant_refused_storage");
+        std::wstring text;
+        try
+        {
+            text = RC::to_wstring(reported);
+        }
+        catch (const std::exception&)
+        {
+            return result(lua, false, "native_inventory_grant_refused_encoding");
+        }
+        const auto* tail = inventory.type->ImportText_Direct(text.c_str(), row.get(), context.save,
+                                                             Unreal::PPF_Delimited, nullptr);
+        auto* payload = field<Unreal::FStructProperty>(inventory.type->GetStruct().Get(), payload_name);
+        auto* weight = field<Unreal::FDoubleProperty>(inventory.type->GetStruct().Get(), weight_name);
+        if (tail != text.data() + text.size() || inventory.row_class(row.get()) != expected ||
+            inventory.identity(row.get()) != context.guid || !payload || !weight ||
+            !std::isfinite(weight->GetPropertyValueInContainer(row.get())) ||
+            inventory.ammo->GetPropertyValueInContainer(row.get()) < -1 ||
+            payload->GetStruct().Get() != find<Unreal::UScriptStruct>(STR("/Script/StructUtils.InstancedStruct")) ||
+            inventory_item_text(context, inventory, row.get()) != reported)
+            return result(lua, false, "native_inventory_grant_refused_serialization");
+
+        const auto identical = [&](const void* target) {
+            return inventory.type->Identical(row.get(), target) &&
+                payload->Identical(payload->ContainerPtrToValuePtr<void>(row.get()), payload->ContainerPtrToValuePtr<void>(target));
+        };
+        if (inventory.item)
+        {
+            if (!identical(inventory.item)) return result(lua, false, "native_inventory_grant_refused_guid");
+            return result(lua, true, "present");
+        }
+        auto* bag = inventory.backpack->ContainerPtrToValuePtr<void>(context.save);
+        Unreal::FScriptArrayHelper current(inventory.backpack, bag);
+        if (current.Num() >= max_inventory || !ownership_current(context))
+            return result(lua, false, "native_inventory_grant_refused_backpack");
+        const auto position = current.AddValue();
+        inventory.type->CopyCompleteValue(current.GetRawPtr(position), row.get());
+        if (!ownership_current(context) || !identical(current.GetRawPtr(position)))
+        {
+            current.RemoveValues(position, 1);
+            return result(lua, false, "native_inventory_grant_refused_readback");
+        }
+        return result(lua, true, "added");
     }
 
     template <bool local>
@@ -4489,6 +4604,9 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishStoreNativeGuestEquipment", store_stock_equipment<false>);
     lua.register_function("SilverfishSortLocalGuestBackpack", sort_backpack<true>);
     lua.register_function("SilverfishStoreLocalGuestEquipment", store_stock_equipment<true>);
+    lua.register_function("SilverfishExportLocalInventoryItem", export_inventory_item<true>);
+    lua.register_function("SilverfishExportDetachedInventoryItem", export_inventory_item<false>);
+    lua.register_function("SilverfishImportGuestInventoryAddition", import_inventory_addition);
     lua.register_function("SilverfishPreviewLocalGuestGear", preview_worn_or_unequip);
     lua.register_function("SilverfishUnequipNativeGuestEquipment", unequip_stock_equipment<false>);
     lua.register_function("SilverfishDebitNativeGuestQuickDrop", unequip_stock_equipment<true>);

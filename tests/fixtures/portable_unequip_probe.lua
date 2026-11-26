@@ -7,6 +7,7 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or (lane ~= "first" and lane ~= 
 local path = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
 local inventory = "/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C"
 local factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
+local grant_class = "/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
@@ -263,7 +264,44 @@ local function run(action, argument)
         and valid(pawn) and pawn:IsLocallyControlled() and pawn:HasAuthority() ~= guest and pawn.Dead == false
         and valid(control) and control:IsLocalController() and same(control.Pawn, pawn)
         and same(pawn.Save, world.OwningGameInstance.SaveSlot_Ref), "fixture exact private player scope unavailable")
-    if action == "melee-lane" then
+    if action == "guest-typed-grant" then
+        assert(guest, "only the guest can originate the fixture grant")
+        local class, out = asset(grant_class), {}
+        asset(factory):ItemActorToStruct(class:GetCDO(), pawn, out)
+        local row = out.Item or out
+        assert(same(row[item_class], class) and identity(row) ~= "-", "typed source item was unavailable")
+        row[ammo] = 7
+        local backpack = pawn.Save.PlayerBackpack
+        backpack[backpack:GetArrayNum() + 1] = row
+        local guid = identity(row)
+        local ok, text = SilverfishExportLocalInventoryItem(pawn:GetAddress(), pawn.Save:GetAddress(), guid)
+        assert(ok, text)
+        return guid .. "@" .. text
+    elseif action == "remote-typed-grant" or action == "remote-typed-read" then
+        assert(not guest and #driver.ClientConnections == 1, "one enrolled guest required")
+        local name, guid, text = argument:match("^Player_FP_C (.-)\t([0-9A-F]+)\t(.*)$")
+        local remote = name and StaticFindObject(name)
+        assert(valid(remote) and not remote:IsLocallyControlled() and remote:HasAuthority()
+            and same(remote:GetWorld(), world) and valid(remote.Save) and not same(remote.Save, pawn.Save))
+        asset(grant_class)
+        local address, save = remote:GetAddress(), remote.Save:GetAddress()
+        if action == "remote-typed-grant" then
+            local ok, message = SilverfishImportGuestInventoryAddition(address, save, guid, grant_class, text)
+            return (ok and "ok@" or "refused@") .. message
+        end
+        local ok, encoded = SilverfishExportDetachedInventoryItem(address, save, guid)
+        assert(ok, encoded)
+        local matches = 0
+        for index = 1, remote.Save.PlayerBackpack:GetArrayNum() do
+            local row = remote.Save.PlayerBackpack[index]
+            if identity(row) == guid then
+                assert(row[ammo] == 7 and same(row[item_class], asset(grant_class)))
+                matches = matches + 1
+            end
+        end
+        assert(matches == 1, "typed grant missing or duplicated")
+        return encoded
+    elseif action == "melee-lane" then
         assert(not guest and #driver.ClientConnections == 1, "one enrolled guest required")
         local remote = StaticFindObject(assert(argument:match("^Player_FP_C (.+)$")))
         assert(valid(remote) and remote:HasAuthority() and same(remote:GetWorld(), world)
@@ -631,7 +669,7 @@ end
 LoopInGameThreadWithDelay(40, function()
     local file = io.open(mailbox .. "/portable-unequip-command.tsv", "rb")
     if not file then return end
-    local data = file:read(512)
+    local data = file:read(8704)
     file:close()
     if not data then return end
     local ticket, action, argument = data:match("^(%x+)\t([a-z%-]+)\t?(.*)$")
