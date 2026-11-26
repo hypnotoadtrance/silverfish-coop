@@ -13,7 +13,9 @@ An unofficial UE4SS mod that adds co-op via Steam invites or Direct IP to the Wi
 
 [Download a release candidate](docs/RELEASES.md) · [Known Issues](docs/KNOWN-ISSUES.md) · [Player guide](docs/PLAYING-COOP.md) · [18-rule design](docs/DESIGN.md) · [Contribute with a coding agent](CONTRIBUTING.md) · [Build and publish a release](docs/RELEASING.md)
 
-![Project Silverfish title screen showing the Singleplayer and Multiplayer choices](docs/screenshots/title-menu.png)
+![Earlier co-op title screen showing the Singleplayer and Multiplayer choices](docs/screenshots/title-menu.png)
+
+*Earlier development screenshot. Current candidates use the stock title's amber styling.*
 
 ## Install or update
 

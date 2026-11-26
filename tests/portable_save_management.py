@@ -127,6 +127,9 @@ async def verify_save_management(host, guest):
     await click("back")
     await click("manage")
     await focused("back")
+    await click("back")
+    await click("back")
+    await click("modes")
     return {"created": created, "reopened": reopened, "campaign_files_erased": True,
             "guest_slot_erased": True, "confirmation_cancelled": True, "title_focus_verified": True,
             "revisions": [original["revision"], deleted_character["revision"], reopened["revision"]]}
