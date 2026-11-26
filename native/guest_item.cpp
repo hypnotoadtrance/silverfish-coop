@@ -3323,6 +3323,29 @@ namespace
         return result(lua, true, text);
     }
 
+    int fixture_copy_stock_weapon_payload(const Lua& lua)
+    {
+        constexpr std::string_view refused = "fixture_typed_weapon_payload_unavailable";
+        if (!env("SILVERFISH_COOP_HEADLESS") || !env("SILVERFISH_COOP_TITLE_FIXTURES") ||
+            lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3))
+            return result(lua, false, refused);
+        Context context;
+        const auto pawn = lua.get_integer(), save = lua.get_integer();
+        if (!parse_guid(lua.get_string(), context.guid) || !bind_local_inventory(context, pawn, save, false))
+            return result(lua, false, refused);
+        context.weapon = find<Unreal::UClass>(STR("/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C"));
+        Inventory inventory;
+        if (!context.weapon || !locate(context, inventory).empty() || inventory.backpack_index < 0)
+            return result(lua, false, refused);
+        auto* defaults = context.weapon->GetClassDefaultObject().Get();
+        auto* source = field<Unreal::FStructProperty>(defaults, STR("DataStruct"));
+        auto* target = field<Unreal::FStructProperty>(inventory.type->GetStruct().Get(), payload_name);
+        if (!weapon_data(source, defaults).data || !target || target->GetStruct().Get() != source->GetStruct().Get())
+            return result(lua, false, refused);
+        target->CopyCompleteValue(target->ContainerPtrToValuePtr<void>(inventory.item), source->ContainerPtrToValuePtr<void>(defaults));
+        return result(lua, !!weapon_data(target, inventory.item).data, "stock weapon payload copied");
+    }
+
     int import_inventory_addition(const Lua& lua)
     {
         if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 5 || !lua.is_integer(1) || !lua.is_integer(2) ||
@@ -4607,6 +4630,8 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishExportLocalInventoryItem", export_inventory_item<true>);
     lua.register_function("SilverfishExportDetachedInventoryItem", export_inventory_item<false>);
     lua.register_function("SilverfishImportGuestInventoryAddition", import_inventory_addition);
+    if (env("SILVERFISH_COOP_TITLE_FIXTURES") && env("SILVERFISH_COOP_HEADLESS"))
+        lua.register_function("SilverfishFixtureLocalTypedInventory", fixture_copy_stock_weapon_payload);
     lua.register_function("SilverfishPreviewLocalGuestGear", preview_worn_or_unequip);
     lua.register_function("SilverfishUnequipNativeGuestEquipment", unequip_stock_equipment<false>);
     lua.register_function("SilverfishDebitNativeGuestQuickDrop", unequip_stock_equipment<true>);

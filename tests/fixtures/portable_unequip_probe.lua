@@ -274,7 +274,10 @@ local function run(action, argument)
         local backpack = pawn.Save.PlayerBackpack
         backpack[backpack:GetArrayNum() + 1] = row
         local guid = identity(row)
-        local ok, text = SilverfishExportLocalInventoryItem(pawn:GetAddress(), pawn.Save:GetAddress(), guid)
+        local address, save = pawn:GetAddress(), pawn.Save:GetAddress()
+        local copied, detail = SilverfishFixtureLocalTypedInventory(address, save, guid)
+        assert(copied, detail)
+        local ok, text = SilverfishExportLocalInventoryItem(address, save, guid)
         assert(ok, text)
         return guid .. "@" .. text
     elseif action == "remote-typed-grant" or action == "remote-typed-read" then
