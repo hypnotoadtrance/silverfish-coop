@@ -6,15 +6,17 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 
 | Area | Observed behavior |
 | --- | --- |
-| Crossroads excavation | On `rc-e78fc64`, the host returned to the title while digging at the two rocks by the scarecrow. The campaign reported an unsafe-checkpoint stop. The exact stock dig error was absent from the retained diagnostics. |
-| Flood Plains jammer | On `rc-e78fc64`, guests could accept Signal Jammer: Flood Plains at the physical Quest Board but could not accept it from Simmi. An isolated Direct IP trial of the development fix confirmed that accepting it through Simmi updated both journals. |
-| Manual stack merge | On `rc-e78fc64`, guests reported that dragging stacks together in the backpack had no effect. Dropping and picking up the items combined them. |
+| Crossroads excavation | On `rc-e78fc64`, the host returned to the title while digging between the two rocks by the scarecrow. Logs recorded an unsafe-checkpoint stop. `rc-a2b1ea2` leaves a rejected contact retryable and logs uncertain custody. In muted Direct IP, the host dug up, collected, and dropped the package. The guest recovered that same item, canceled its stock quest warning once, then opened it after confirming. |
+| Flood Plains jammer | On `rc-e78fc64`, guests could accept Signal Jammer: Flood Plains at the physical Quest Board but could not accept it from Simmi. On `rc-a2b1ea2`, the guest accepted it through Simmi and both stock journals showed step 1. The physical board also stopped offering it after acceptance. |
+| Manual stack merge | On `rc-e78fc64`, guests reported that dragging stacks together in the backpack had no effect. On `rc-a2b1ea2`, dragging three Bandages onto five showed eight immediately, and the host confirmed the same surviving stack. Splitting, stale-operation reconciliation, and stock Take Ammo were also verified. |
 | Steam character catalogs | One of two guests finished character creation but could not reopen the catalog, including after the host reopened the campaign. Manage Saves also timed out. The host had both character rows. One Steam avatar exceeded the title's image limit, which made the menu reject the response. `rc-e78fc64` bounds the PNG without changing its pixels and keeps characters visible when a photo is oversized. Both menu paths passed simulated checks. |
 | Public Steam lobbies | Joining a passwordless Public lobby showed a password form. `rc-e78fc64` starts the join immediately and asks for a password only after the host requests one. Both flows passed simulated menu checks. |
 | Contractor Vest | A guest could equip other armor but could not equip Contractor Vest. `rc-e78fc64` recognizes the stock Heavy Holster passive on eligible chest gear. A guest equipped, swapped, and dropped the vest over muted Direct IP. |
 | Clyde's Honey Egg | The egg appeared larger than the character during eating. The host observed the guest's stock eating action with a 10 cm prop over muted Direct IP on `rc-e78fc64`. |
 
 Retest these reports in a rendered Steam session.
+
+The `rc-a2b1ea2` checks used four muted Direct IP launches. One guest shovel setup missed the acknowledgement for an aiming command before the swing. The focused host retest used the same ZIP and completed the dig, pickup, drop, guest reclaim, and opening. Both runs preserved the copied source saves. [Build source](https://github.com/hypnotoadtrance/silverfish-coop/commit/a2b1ea21ad569802d16d984bde659adba32ef4b1)
 
 ## Reports from the rc-b45e9bd playtest
 

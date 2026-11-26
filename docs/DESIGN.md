@@ -50,6 +50,13 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 - Give gameplay traffic and action receipts priority over bulky snapshots and diagnostics. Use short-lived messages for replaceable visual and audio effects. Keep each character's latest accepted state and the shared ledger consistent through a delay or disconnect.
 - Keep routine campaign changes in memory until the next checkpoint. Save on rest, travel, Save and Quit, or an explicit save request.
 
+## Compatibility with game updates and other mods
+
+- Discover quest offers, objective items, progress, and reward data from the host’s active stock boards and journal. Use stock acceptance and completion paths for quests with the same recipe. Publish the resulting journal and campaign changes to the party.
+- Discover world items and interactables through their game classes and stock events. Match placed actors by map and actor path. Give spawned actors a host identity tied to the current visit so late join and pickup refer to the same object.
+- Discover exits and arrivals through the game’s transition actors and their configured destinations. Qualify the active source and the matching arrival before moving the party. Use the same arrival and checkpoint rules for maps provided by other mods.
+- Use shared integration for stock behavior inherited by new content. A scripted quest, object, or transition that introduces a new behavior can extend the relevant integration. Report unsupported actions where they occur and keep the rest of the session running.
+
 ## Implementation milestones
 
 ### Physical world loot

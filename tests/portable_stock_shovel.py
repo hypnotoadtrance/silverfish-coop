@@ -389,10 +389,15 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
             assert not sealed_packages(await stock_inventory(host_run))
             preview = await verified_drop_preview(guest, shared)
             assert campaign_save_hashes(host.campaign) == checkpoint, "Dropping or reclaiming the package wrote a save"
-            return {"stock_missing_contact_host_dig": {**result, "package": package, "custody": custody,
-                        "world_actors_before_pickup": raw_packages, "host_package": host_item,
-                        "guest_package": guest_item, "shared_drop": drop, "pickup_preview": preview,
-                        "redrop_checkpoint_unchanged": True}}
+            evidence = {"stock_missing_contact_host_dig": {**result, "package": package, "custody": custody,
+                            "world_actors_before_pickup": raw_packages, "host_package": host_item,
+                            "guest_package": guest_item, "shared_drop": drop, "pickup_preview": preview,
+                            "redrop_checkpoint_unchanged": True}}
+            if open_package:
+                if open_package_quest:
+                    assert await observe(host, "quest-activate") == "staged the stock Missing Contact quest"
+                evidence["stock_missing_contact_package_open"] = await open_package(host, guest, guest_item["guid"], checkpoint)
+            return evidence
         press = await submit(guest_run, native_world_loot.FIXTURE, target=identity)
         if not press["ok"]:
             sight = await observe(guest, "sight", replica["actor"].split(" ", 1)[1])
