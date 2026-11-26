@@ -2714,6 +2714,8 @@ class Bridge:
                     )
                 elif fields == [native_inventory.TAKE_AMMO + "-capability", "1"]:
                     data[native_inventory.TAKE_AMMO_CAPABILITY] = 1
+                elif fields == [native_inventory.TAKE_AMMO + "-preview-capability", "1"]:
+                    data[native_inventory.TAKE_AMMO_PREVIEW_CAPABILITY] = 1
                 elif (fields[0] == native_inventory.TAKE_AMMO and len(fields) == 10 and data.get("map") == fields[1]
                       and valid_guid(fields[3]) and valid_guid(fields[4]) and fields[3] != fields[4]
                       and native_inventory.valid_take_ammo_result(fields[9], fields[5], int(fields[6]))):

@@ -149,7 +149,7 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
             key = native_inventory.TAKE_AMMO_KEY if unloading else native_inventory.SPLIT_KEY
             action = native_inventory.TAKE_AMMO if unloading else native_inventory.SPLIT
             target = f"{guid}|{quantity}" if unloading else f"{guid}|{quantity}|{expected}"
-            if splitting and layout_preview is not None:
+            if layout_preview is not None:
                 target = f"{target}|{layout_preview}"
             receipt = (await client.gameplay_action(action, operation, target)).get(key)
             remaining = split[2] - quantity
@@ -171,7 +171,8 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                 equipment = client.gameplay.get("native_equipped_weapon", {})
                 if (client.zone_epoch, equipment.get("map"), equipment.get("guid")) == (epoch, area, guid):
                     client.gameplay["native_equipped_weapon"] = {**equipment, "rounds": 0}
-                client.last_game = await client.bridge.command("native-inventory-stock-project-unloaded", epoch, sequence, timeout=3)
+                if layout_preview is None:
+                    client.last_game = await client.bridge.command("native-inventory-stock-project-unloaded", epoch, sequence, timeout=3)
         elif mode == "equip":
             if entry != "equip" or quantity != 1:
                 raise ValueError("The native action did not select one equipment item")
@@ -266,8 +267,8 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                 raise RuntimeError("The host did not settle the stock guest inventory drop")
             committed = (str(remaining),)
         # A matching slot receipt already describes the local inventory.
-        # Sorting still needs the complete host order, which can include
-        # other items that arrived while this report was in flight.
+        # Sorting and unloading still need the complete host rows. In particular,
+        # a loaded weapon on the host can carry a different alternate ammo payload.
         if layout_preview is None or local_result != layout_preview:
             if layout_preview is None:
                 await client.guest_ui.refresh(client)
@@ -279,6 +280,9 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
     finally:
         if not accepted:
             if layout_preview is not None and client.zone_epoch == epoch and client.last_game.get("map") == area:
+                if unloading:
+                    client.primary_magazine = None
+                    client.primary_magazine_attempt = None
                 with suppress(OSError, RuntimeError, ValueError):
                     await client.guest_ui.refresh(client, layout_sequence=sequence)
             with suppress(OSError, RuntimeError, ValueError):

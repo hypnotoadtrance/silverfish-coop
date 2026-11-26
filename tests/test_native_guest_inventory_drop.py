@@ -110,6 +110,10 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
             intent = record.parse_stock_action([*envelope, rounds, rounds], game)
             self.assertEqual((intent["mode"], intent["count"], intent["expected"]), ("unload", int(rounds), int(rounds)))
             self.assertEqual(native_inventory.take_ammo_target(f"{GUID}|{rounds}"), (GUID, int(rounds), int(rounds)))
+            preview = record.parse_stock_action([*envelope, rounds, rounds, "B" * 32], game)
+            self.assertEqual(preview["layout_preview"], "B" * 32)
+        with self.assertRaises(ValueError):
+            record.parse_stock_action([*envelope, "1", "1", GUID], game)
         for amount, expected in (("0", "0"), ("1", "7"), (too_many, too_many), ("2", "0")):
             with self.assertRaises(ValueError):
                 record.parse_stock_action([*envelope, amount, expected], game)

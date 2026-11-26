@@ -673,8 +673,10 @@ local function open_stock_inventory(fields, current, state, phase)
     local stack, action = current.controller.MenuStack, load_class(inventory_action_path)
     local save = save_scope.bind_guest(state, phase)
     local pawn = current.pawn:GetAddress()
-    local split_preview = #fields == 5 and fields[5] == "1"
-    if (#fields ~= 4 and not split_preview) or not observation or observation.state ~= "pending" or observation.sequence ~= sequence
+    local features = fields[5]
+    local split_preview = features == "1" or features == "2"
+    local unload_preview = features == "2"
+    if (#fields ~= 4 and (#fields ~= 5 or not split_preview)) or not observation or observation.state ~= "pending" or observation.sequence ~= sequence
         or not same_context(current, observation.context) or not epoch or #epoch ~= 32 or not epoch:match("^[0-9a-f]+$")
         or stock_session or stock_drop or #stock_layout > 0 or not valid(save) or not action or not stack or stack:GetArrayNum() ~= 0
         or type(SilverfishSetNativeGuestDropScope) ~= "function"
@@ -689,7 +691,8 @@ local function open_stock_inventory(fields, current, state, phase)
         SilverfishClearNativeHostDropScope()
         error(ok and "The stock inventory input could not be restored" or screen, 0)
     end
-    stock_session = {context = current, screen = screen, save = save, epoch = epoch, split_preview = split_preview}
+    stock_session = {context = current, screen = screen, save = save, epoch = epoch,
+        split_preview = split_preview, unload_preview = unload_preview}
     install_stock_context_hook()
     observation.state, observation.pending_offset = "stock", nil
     return ("opened stock guest inventory with %d backpack cards"):format(displayed)
@@ -710,13 +713,18 @@ end
 local function preview_stock_layout(action)
     local pawn, save = action.context.pawn:GetAddress(), action.save:GetAddress()
     local target = (action.expected or 0) - 1
-    local slot, receipt
+    local slot, receipt, unload_slot
     if action.sort and type(SilverfishSortLocalGuestBackpack) == "function" then
         local ok = SilverfishSortLocalGuestBackpack(pawn, save)
         if ok then receipt = "sorted" end
     elseif action.entry == "split" and stock_session.split_preview and type(SilverfishSplitLocalGuestStack) == "function" then
         local ok, _, _, _, _, _, created = SilverfishSplitLocalGuestStack(pawn, save, action.guid, action.quantity, action.expected)
         if ok then receipt = created end
+    elseif action.unload and #stock_layout == 0 and stock_session.unload_preview
+        and type(SilverfishTakeLocalGuestWeaponAmmo) == "function" then
+        local ok, _, _, _, _, _, _, created, index = SilverfishTakeLocalGuestWeaponAmmo(
+            pawn, save, action.guid, action.quantity, action.expected)
+        if ok then receipt, unload_slot = created, index >= 0 and index or nil end
     elseif action.equip and target < 8 and type(SilverfishStoreLocalGuestEquipment) == "function" then
         local ok, _, stored, _, displaced = SilverfishStoreLocalGuestEquipment(pawn, save, action.guid, target)
         if ok then slot, receipt = stored, displaced end
@@ -734,8 +742,9 @@ local function preview_stock_layout(action)
     if action.entry == "split" then screen.ItemManager:CancelSplitStack() end
     if not action.sort then screen.ItemManager:CloseContextMenu() end
     screen.BackpackPanel:FullRefresh()
-    if slot then
-        local widget = widget_at(screen.ItemManager.EquipSlots, slot + 1)
+    local refresh_slot = slot or unload_slot
+    if refresh_slot then
+        local widget = widget_at(screen.ItemManager.EquipSlots, refresh_slot + 1)
         if valid(widget) then widget:FullRefresh() end
     end
     if slot and slot >= 8 then update_local_worn_slot(action.context, slot) end
@@ -775,7 +784,7 @@ sync_stock = function(current, state, phase, allowed)
     -- Release the native input latch after applying a personal move. The oldest report
     -- still goes first. A world action captured behind the moves keeps the latch.
     pcall(preview_stock_layout, stock_drop)
-    if stock_drop.layout_preview and type(SilverfishReleaseNativeGuestLayoutRequest) == "function"
+    if stock_drop.layout_preview and not stock_drop.unload and type(SilverfishReleaseNativeGuestLayoutRequest) == "function"
         and SilverfishReleaseNativeGuestLayoutRequest(pawn, session.epoch, sequence) then
         stock_layout[#stock_layout + 1], stock_drop = stock_drop, nil
     end
@@ -1196,7 +1205,16 @@ function inventory_view.command(fields, state, phase)
                 return "verified native quest-item warning"
             end
             sync_stock(current, state, phase, true)
-            if stock_drop and stock_drop.guid == fields[3] then return "verified stock use click" end
+            if stock_drop and stock_drop.guid == fields[3] then
+                if stock_drop.unload and stock_drop.layout_preview then
+                    local equipped = stock_equipped_card(screen, stock_drop.guid)
+                    local empty = equipped and equipped.Item[item_ammo] == 0
+                        or stock_cards(screen, stock_drop.save, stock_drop.guid, 0, false, true)
+                    assert(empty and stock_cards(screen, stock_drop.save, stock_drop.layout_preview, stock_drop.quantity),
+                        "Take Ammo did not display the empty weapon and recovered rounds before yielding")
+                end
+                return "verified stock use click"
+            end
         end
         error("The stock use click did not queue the chosen inventory item", 0)
     end

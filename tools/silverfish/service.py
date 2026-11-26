@@ -1988,6 +1988,8 @@ class Host:
         if self.last_game.get(native_inventory.SPLIT_CAPABILITY) == 1:
             gameplay[native_inventory.SPLIT_CAPABILITY] = 1
             gameplay[native_inventory.SPLIT_PREVIEW_CAPABILITY] = 1
+        if self.last_game.get(native_inventory.TAKE_AMMO_PREVIEW_CAPABILITY) == 1:
+            gameplay[native_inventory.TAKE_AMMO_PREVIEW_CAPABILITY] = 1
         if self.last_game.get(native_inventory.SORT_CAPABILITY) == 1:
             gameplay[native_inventory.SORT_CAPABILITY] = 1
         if self.last_game.get(native_inventory.STORE_CAPABILITY) == 1:
@@ -6081,9 +6083,13 @@ class Client:
                     # A local grant may arrive while the fresh stock view is being read.
                     # Show the guest's current stock backpack while that projection waits.
                     await self.guest_ui.refresh(self, allow_local_pending=True)
-                split_preview = ("1",) if self.gameplay.get(native_inventory.SPLIT_PREVIEW_CAPABILITY) == 1 else ()
+                preview_mode = ()
+                if self.gameplay.get(native_inventory.TAKE_AMMO_PREVIEW_CAPABILITY) == 1:
+                    preview_mode = ("2",)
+                elif self.gameplay.get(native_inventory.SPLIT_PREVIEW_CAPABILITY) == 1:
+                    preview_mode = ("1",)
                 snapshot = await self.bridge.command("native-inventory-stock-open", str(sequence), self.zone_epoch,
-                                                     *split_preview, timeout=5)
+                                                     *preview_mode, timeout=5)
                 proof = snapshot.get("native_inventory_view", {})
                 if (proof.get("state"), proof.get("sequence"), proof.get("map"), proof.get("pawn")) != (
                     "stock", sequence, area, pawn,

@@ -4009,6 +4009,8 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
         await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
         pressed = await submit(guest_run, "native-inventory-stock-use-click-fixture", target=f"{guid}|take-ammo")
         assert pressed["ok"] and pressed["stock_action"]["guid"] == guid, pressed
+        preview_guid = pressed["stock_action"].get("layout_preview")
+        assert isinstance(preview_guid, str) and re.fullmatch(r"[0-9A-F]{32}", preview_guid), pressed
         async with asyncio.timeout(12):
             while True:
                 matches = [entry[native_inventory.TAKE_AMMO_KEY] for entry in await resident_events(guest_run, guest_frame)
@@ -4017,7 +4019,7 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
                     break
                 await asyncio.sleep(.1)
         unloaded, = matches
-        assert unloaded["remaining"] == 0 and unloaded["split"] == before["stored_ammo"], unloaded
+        assert unloaded["remaining"] == 0 and unloaded["split"] == before["stored_ammo"] and unloaded["new_guid"] == preview_guid, unloaded
         expected = alternate or (THIRTY_06_FMJ if kind == "obrez" else profiles[kind].ammo)
         assert unloaded["class_path"] == expected.item_path, unloaded
         inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]

@@ -4324,6 +4324,21 @@ namespace
         return 3;
     }
 
+    bool read_local_stack_selection(const Lua& lua, Context& context, StackSplit& split, bool full_split)
+    {
+        if (lua.get_stack_size() != 5 || !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3) ||
+            !lua.is_integer(4) || !lua.is_integer(5)) return false;
+        const auto pawn = lua.get_integer();
+        const auto save = lua.get_integer();
+        if (!parse_guid(lua.get_string(), context.guid) || !bind_local_inventory(context, pawn, save)) return false;
+        const auto take = lua.get_integer();
+        const auto expected = lua.get_integer();
+        if (take < 1 || (full_split ? expected != take : expected <= take) || expected > INT32_MAX) return false;
+        split.take = static_cast<std::int32_t>(take);
+        split.expected = static_cast<std::int32_t>(expected);
+        return true;
+    }
+
     template <bool local>
     int split_backpack_stack(const Lua& lua)
     {
@@ -4331,18 +4346,8 @@ namespace
         StackSplit split;
         if constexpr (local)
         {
-            if (lua.get_stack_size() != 5 || !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3) ||
-                !lua.is_integer(4) || !lua.is_integer(5)) return result(lua, false, "native_inventory_split_refused_owner");
-            const auto pawn = lua.get_integer();
-            const auto save = lua.get_integer();
-            if (!parse_guid(lua.get_string(), context.guid) || !bind_local_inventory(context, pawn, save))
-                return result(lua, false, "native_inventory_split_refused_owner");
-            const auto take = lua.get_integer();
-            const auto expected = lua.get_integer();
-            if (take < 1 || expected <= take || expected > INT32_MAX)
-                return result(lua, false, "native_inventory_split_refused_quantity");
-            split.take = static_cast<std::int32_t>(take);
-            split.expected = static_cast<std::int32_t>(expected);
+            if (!read_local_stack_selection(lua, context, split, false))
+                return result(lua, false, "native_inventory_split_refused_owner_or_selection");
         }
         else if (const auto error = resolve(lua, context, nullptr, nullptr, &split); !error.empty())
         {
@@ -4518,12 +4523,15 @@ namespace
         void* left() { return remainder->ContainerPtrToValuePtr<void>(buffer.data()); }
     };
 
+    template <bool local>
     int take_ammo(const Lua& lua)
     {
         const auto refuse = [&](std::string_view reason) { return result(lua, false, reason); };
         Context context;
         StackSplit selection;
-        if (!resolve(lua, context, nullptr, nullptr, &selection, true).empty())
+        const bool qualified = local ? read_local_stack_selection(lua, context, selection, true)
+            : resolve(lua, context, nullptr, nullptr, &selection, true).empty();
+        if (!qualified)
             return refuse("native_inventory_take_ammo_refused_owner_or_selection");
         if (!ready_pawn(context) || std::ranges::any_of(smg_holds, [&](const SmgHold& hold) {
                 return hold.fenced && hold.pawn.Get() == context.pawn;
@@ -4560,16 +4568,11 @@ namespace
                       : !ordinary_magazine_payload(profile, context, inventory, held))))
             return refuse("native_inventory_take_ammo_refused_held_weapon");
 
-        auto distinct = context;
-        distinct.guid = selection.created;
-        Inventory collision;
-        if (!locate(distinct, collision).empty() || collision.item)
-            return refuse("native_inventory_take_ammo_refused_guid_collision");
         auto* property = inventory.backpack;
         auto* live_array = property->ContainerPtrToValuePtr<void>(context.save);
-        auto* host_array = property->ContainerPtrToValuePtr<void>(context.stock);
-        auto* flags = field<Unreal::FMapProperty>(context.stock, STR("Flags"));
-        if (!flags || Unreal::FScriptArrayHelper(property, live_array).Num() >= max_inventory)
+        auto* host_array = local ? nullptr : property->ContainerPtrToValuePtr<void>(context.stock);
+        auto* flags = local ? nullptr : field<Unreal::FMapProperty>(context.stock, STR("Flags"));
+        if ((!local && !flags) || Unreal::FScriptArrayHelper(property, live_array).Num() >= max_inventory)
             return refuse("native_inventory_take_ammo_refused_backpack");
 
         StockSplit split;
@@ -4579,34 +4582,37 @@ namespace
         using Value = std::unique_ptr<void, PropertyDeleter>;
         Value original(property->AllocateAndInitializeValue(), {property});
         Value proposed(property->AllocateAndInitializeValue(), {property});
-        Value host_before(property->AllocateAndInitializeValue(), {property});
-        Value flags_before(flags->AllocateAndInitializeValue(), {flags});
+        Value host_before(host_array ? property->AllocateAndInitializeValue() : nullptr, {property});
+        Value flags_before(flags ? flags->AllocateAndInitializeValue() : nullptr, {flags});
         Value expected_weapon(inventory.type->AllocateAndInitializeValue(), {inventory.type});
         Value stored_before(stored ? inventory.type->AllocateAndInitializeValue() : nullptr, {inventory.type});
-        if (!original || !proposed || !host_before || !flags_before || !expected_weapon || (stored && !stored_before))
+        if (!original || !proposed || (!local && (!host_before || !flags_before)) ||
+            !expected_weapon || (stored && !stored_before))
             return refuse("native_inventory_take_ammo_refused_storage");
-        auto* host_flags = flags->ContainerPtrToValuePtr<void>(context.stock);
+        auto* host_flags = flags ? flags->ContainerPtrToValuePtr<void>(context.stock) : nullptr;
         property->CopyCompleteValue(original.get(), live_array);
         property->CopyCompleteValue(proposed.get(), live_array);
-        property->CopyCompleteValue(host_before.get(), host_array);
-        flags->CopyCompleteValue(flags_before.get(), host_flags);
+        if (host_array) property->CopyCompleteValue(host_before.get(), host_array);
+        if (host_flags) flags->CopyCompleteValue(flags_before.get(), host_flags);
         if (stored) inventory.type->CopyCompleteValue(stored_before.get(), inventory.item);
         const auto stored_row = [&] {
             Unreal::FScriptArrayHelper loadout(inventory.equipment, inventory.equipment->ContainerPtrToValuePtr<void>(context.save));
             if (!stored || inventory.equipment_index >= loadout.Num()) return static_cast<void*>(nullptr);
             return static_cast<void*>(loadout.GetRawPtr(inventory.equipment_index));
         };
-        const auto host_unchanged = [&] {
-            return ownership_current(context) && property->Identical(host_before.get(), host_array)
-                && flags->Identical(flags_before.get(), host_flags);
+        const auto scope_unchanged = [&] {
+            if (!inventory_current<local>(context)) return false;
+            if constexpr (local) return true;
+            return property->Identical(host_before.get(), host_array) && flags->Identical(flags_before.get(), host_flags);
         };
 
         const auto did_split = split.run(context.pawn, inventory.item, 1);
-        if (!host_unchanged() || !property->Identical(original.get(), live_array) ||
+        if (!scope_unchanged() || !property->Identical(original.get(), live_array) ||
             (stored && (stored_row() != inventory.item || !inventory.type->Identical(stored_before.get(), inventory.item))))
             return refuse("mutation_unverified_native_inventory_take_ammo_stock_call");
         auto* extracted = split.moved();
         auto* unloaded = split.left();
+        const auto stock_guid = inventory.identity(extracted);
         const auto empty_weight = weight->GetPropertyValueInContainer(unloaded);
         auto* ammo_class = Unreal::Cast<Unreal::UClass>(inventory.row_class(extracted));
         const auto* ammo = unloaded_ammo(profile, bolt, ammo_class);
@@ -4615,7 +4621,7 @@ namespace
         if (!did_split || !ammo_class || !ammo || !ammo_item_row_matches(ammo_class, *ammo) ||
             !stock_ammo.read(ammo_class, inventory) || !stock_ammo.qualifies(selection.expected) ||
             (held && (mounted_ammo(held) != ammo_class || (bolt && !bolt_round(held, ammo_class, stock_projectile(held)))))
-            || inventory.identity(extracted) == Guid{} || inventory.identity(extracted) == context.guid
+            || stock_guid == Guid{} || stock_guid == context.guid
             || inventory.row_class(unloaded) != weapon
             || inventory.ammo->GetPropertyValueInContainer(extracted) != selection.expected
             || inventory.ammo->GetPropertyValueInContainer(unloaded) != 0 || !std::isfinite(empty_weight) || empty_weight < 0
@@ -4626,6 +4632,12 @@ namespace
         weight->SetPropertyValueInContainer(expected_weapon.get(), empty_weight);
         if (!inventory.type->Identical(expected_weapon.get(), unloaded))
             return refuse("native_inventory_take_ammo_refused_weapon_identity");
+        if constexpr (local) selection.created = stock_guid;
+        auto distinct = context;
+        distinct.guid = selection.created;
+        Inventory collision;
+        if (!locate(distinct, collision).empty() || collision.item)
+            return refuse("native_inventory_take_ammo_refused_guid_collision");
 
         Unreal::FScriptArrayHelper staged(property, proposed.get());
         const auto inserted = staged.AddValue();
@@ -4637,10 +4649,10 @@ namespace
             return refuse("native_inventory_take_ammo_refused_staging");
         property->CopyCompleteValue(live_array, proposed.get());
         if (stored) inventory.type->CopyCompleteValue(inventory.item, unloaded);
-        if (!host_unchanged() || !property->Identical(proposed.get(), live_array) ||
+        if (!scope_unchanged() || !property->Identical(proposed.get(), live_array) ||
             (stored && (stored_row() != inventory.item || !inventory.type->Identical(expected_weapon.get(), inventory.item))))
         {
-            if (host_unchanged() && (!stored || stored_row() == inventory.item))
+            if (scope_unchanged() && (!stored || stored_row() == inventory.item))
             {
                 property->CopyCompleteValue(live_array, original.get());
                 if (stored) inventory.type->CopyCompleteValue(inventory.item, stored_before.get());
@@ -4657,7 +4669,7 @@ namespace
             held_weight->SetPropertyValueInContainer(held, empty_weight);
             held->ProcessEvent(update, nullptr);
         }
-        if (!host_unchanged() || !property->Identical(proposed.get(), live_array) ||
+        if (!scope_unchanged() || !property->Identical(proposed.get(), live_array) ||
             (stored && (!stored_row() || !inventory.type->Identical(expected_weapon.get(), stored_row()))) ||
             (held && (held_actor.Get() != held || object(context.pawn, STR("EquipedItem")) != held ||
                        rounds->GetPropertyValueInContainer(held) != 0 || held_weight->GetPropertyValueInContainer(held) != empty_weight)))
@@ -4666,6 +4678,13 @@ namespace
         lua.set_integer(selection.expected);
         lua.set_string(RC::to_utf8_string(ammo_class->GetPathName()));
         lua.set_string(RC::to_utf8_string(weapon->GetPathName()));
+        if constexpr (local)
+        {
+            const auto& guid = selection.created;
+            lua.set_string(std::format("{:08X}{:08X}{:08X}{:08X}", guid[0], guid[1], guid[2], guid[3]));
+            lua.set_integer(inventory.equipment_index);
+            return 9;
+        }
         return 7;
     }
 
@@ -4942,7 +4961,8 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishReloadNativeGuestUnderbarrel", run<Operation::Reload, true>);
     lua.register_function("SilverfishSplitNativeGuestAmmoStack", split_backpack_stack<false>);
     lua.register_function("SilverfishSplitLocalGuestStack", split_backpack_stack<true>);
-    lua.register_function("SilverfishTakeNativeGuestWeaponAmmo", take_ammo);
+    lua.register_function("SilverfishTakeNativeGuestWeaponAmmo", take_ammo<false>);
+    lua.register_function("SilverfishTakeLocalGuestWeaponAmmo", take_ammo<true>);
     lua.register_function("SilverfishSortNativeGuestBackpack", sort_backpack<false>);
     lua.register_function("SilverfishStoreNativeGuestEquipment", store_stock_equipment<false>);
     lua.register_function("SilverfishSortLocalGuestBackpack", sort_backpack<true>);

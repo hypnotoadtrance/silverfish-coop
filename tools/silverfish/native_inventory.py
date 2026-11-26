@@ -25,6 +25,7 @@ SPLIT_PREVIEW_CAPABILITY = "native_inventory_split_preview_capability"
 TAKE_AMMO = "native-inventory-take-ammo"
 TAKE_AMMO_KEY = "native_inventory_take_ammo"
 TAKE_AMMO_CAPABILITY = "native_inventory_take_ammo_capability"
+TAKE_AMMO_PREVIEW_CAPABILITY = "native_inventory_take_ammo_preview_capability"
 _TAKE_AMMO_TARGET = re.compile(r"([0-9A-F]{32})\|([1-9][0-9]{0,9})")
 _SPLIT_TARGET = re.compile(r"([0-9A-F]{32})\|([1-9][0-9]{0,9})\|([1-9][0-9]{0,9})")
 SPLIT_VIEW = "native_guest_inventory_split_view"
@@ -156,10 +157,11 @@ async def split_stack(host, bridge, character: str, target, operation: str, *, u
                                else (SPLIT, SPLIT_KEY, SPLIT_CAPABILITY))
     prefix = key
     preview_guid = None
-    selection = take_ammo_target(target) if unload else split_target(target)
-    if not unload and not selection and isinstance(target, str):
+    parse_target = take_ammo_target if unload else split_target
+    selection = parse_target(target)
+    if not selection and isinstance(target, str):
         base, _, created = target.rpartition("|")
-        if valid_guid(created) and (parsed := split_target(base)) and created != parsed[0]:
+        if valid_guid(created) and (parsed := parse_target(base)) and created != parsed[0]:
             selection, preview_guid = parsed, created
     if not selection or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
         raise party.RuleError(f"{prefix}_requires_guid_amount_and_expected_quantity")

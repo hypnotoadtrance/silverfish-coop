@@ -211,6 +211,9 @@ function inventory.rows(state, phase, status_row)
     end
     if type(SilverfishTakeNativeGuestWeaponAmmo) == "function" then
         rows[#rows + 1] = status_row("native-inventory-take-ammo-capability", 1)
+        if type(SilverfishTakeLocalGuestWeaponAmmo) == "function" then
+            rows[#rows + 1] = status_row("native-inventory-take-ammo-preview-capability", 1)
+        end
     end
     if unloaded and unloaded.map == state.map then
         rows[#rows + 1] = status_row("native-inventory-take-ammo", unloaded.map, unloaded.pawn, unloaded.source,
