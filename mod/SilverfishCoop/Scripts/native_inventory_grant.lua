@@ -33,7 +33,7 @@ function grant.command(fields, state, phase)
         return detail
     end
     if action ~= "native-inventory-grant-apply" then return end
-    if #fields ~= 6 or phase ~= "hosting" or not state.listening or state.server ~= false
+    if (#fields ~= 6 and #fields ~= 7) or phase ~= "hosting" or not state.listening or state.server ~= false
         or type(SilverfishImportGuestInventoryAddition) ~= "function" then
         error("native_inventory_grant_scope_changed", 0)
     end
@@ -45,7 +45,18 @@ function grant.command(fields, state, phase)
     end
     local asset = StaticFindObject(item_class)
     if not asset or not asset:IsValid() then LoadAsset(item_class) end
-    local ok, detail = SilverfishImportGuestInventoryAddition(pawn:GetAddress(), save:GetAddress(), fields[4], item_class, fields[6])
+    local ok, detail
+    if #fields == 7 then
+        local units = math.tointeger(tonumber(fields[6]:match("^stack:([1-9]%d*)$")))
+        if not units or units > 2147483647 or #fields[7] ~= 32 or not fields[7]:match("^%x+$")
+            or type(SilverfishIncreaseGuestInventoryStack) ~= "function" then
+            error("native_inventory_grant_refused_encoding", 0)
+        end
+        ok, detail = SilverfishIncreaseGuestInventoryStack(pawn:GetAddress(), save:GetAddress(), fields[4],
+            item_class, units, fields[7]:upper())
+    else
+        ok, detail = SilverfishImportGuestInventoryAddition(pawn:GetAddress(), save:GetAddress(), fields[4], item_class, fields[6])
+    end
     if not ok then error(detail, 0) end
     return detail
 end

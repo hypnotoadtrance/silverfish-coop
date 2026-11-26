@@ -1045,8 +1045,9 @@ namespace
 
 namespace silverfish::loot_escrow
 {
-    bool stock_stack_matches(Unreal::UObject* pawn, Unreal::FStructProperty* row,
-                             const void* previous, const void* expected, int difference)
+    template <typename Receive>
+    static bool with_stock_stack(Unreal::UObject* pawn, Unreal::FStructProperty* row,
+                                 const void* previous, int difference, Receive receive)
     {
         auto* fn = find<Unreal::UFunction>(stack_path);
         auto* library = find<Unreal::UObject>(stack_library);
@@ -1054,11 +1055,10 @@ namespace silverfish::loot_escrow
         auto* delta = parameter<Unreal::FIntProperty>(fn, STR("Difference"), 0x50, false);
         auto* context = parameter<Unreal::FObjectProperty>(fn, STR("__WorldContext"), 0x58, false);
         auto* output = parameter<Unreal::FStructProperty>(fn, STR("StackedStruct"), 0x60, true);
-        auto* payload = field<Unreal::FStructProperty>(row->GetStruct().Get(), STR("DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"));
         if (!fn || !library || !library->HasAnyFlags(Unreal::RF_ClassDefaultObject) ||
             fn->GetOuterPrivate() != library->GetClassPrivate() || fn->GetNumParms() != 4 ||
             fn->GetReturnProperty() || fn->GetParmsSize() > parameter_capacity ||
-            fn->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) || !input || !delta || !context || !output || !payload ||
+            fn->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) || !input || !delta || !context || !output ||
             !input->HasAllPropertyFlags(Unreal::CPF_Parm | Unreal::CPF_OutParm | Unreal::CPF_ReferenceParm | Unreal::CPF_ConstParm) ||
             input->HasAnyPropertyFlags(Unreal::CPF_ReturnParm) || input->GetOffset_Internal() != 0 ||
             output->HasAnyPropertyFlags(Unreal::CPF_ReferenceParm) || input->GetSize() != 0x50 || output->GetSize() != 0x50 ||
@@ -1078,9 +1078,27 @@ namespace silverfish::loot_escrow
         delta->SetPropertyValueInContainer(storage, difference);
         context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(storage), pawn);
         library->ProcessEvent(fn, storage);
-        const auto* calculated = output->ContainerPtrToValuePtr<void>(storage);
-        return row->Identical(calculated, expected) &&
-            payload->Identical(payload->ContainerPtrToValuePtr<void>(calculated), payload->ContainerPtrToValuePtr<void>(expected));
+        return receive(output->ContainerPtrToValuePtr<void>(storage));
+    }
+
+    bool stock_stack_matches(Unreal::UObject* pawn, Unreal::FStructProperty* row,
+                             const void* previous, const void* expected, int difference)
+    {
+        auto* payload = field<Unreal::FStructProperty>(row->GetStruct().Get(), STR("DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"));
+        return payload && with_stock_stack(pawn, row, previous, difference, [&](const void* calculated) {
+            return row->Identical(calculated, expected) &&
+                payload->Identical(payload->ContainerPtrToValuePtr<void>(calculated),
+                                   payload->ContainerPtrToValuePtr<void>(expected));
+        });
+    }
+
+    bool calculate_stock_stack(Unreal::UObject* pawn, Unreal::FStructProperty* row,
+                               const void* previous, void* calculated, int difference)
+    {
+        return with_stock_stack(pawn, row, previous, difference, [&](const void* value) {
+            row->CopyCompleteValue(calculated, value);
+            return true;
+        });
     }
 
     bool convert_stock_item(Unreal::UObject* pawn, Unreal::UObject* actor, void* initialized_row)

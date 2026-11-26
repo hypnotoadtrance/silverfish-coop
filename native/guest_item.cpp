@@ -4,6 +4,7 @@
 #include "guest_melee.hpp"
 #include "guest_weapon_registry.hpp"
 #include "interaction_input.hpp"
+#include "loot_escrow.hpp"
 
 #include <algorithm>
 #include <array>
@@ -3337,13 +3338,21 @@ namespace
     {
         Unreal::FWeakObjectPtr pawn, save;
         std::array<Unreal::UFunction*, 2> functions{};
-        std::set<Guid> before;
+        std::map<Guid, std::pair<Unreal::UObject*, int>> before;
         std::deque<InventoryGrant> pending;
         std::set<Guid> granted;
         unsigned depth{};
     };
 
     LocalGrantScope grant_scope;
+    struct StackGrantReceipt
+    {
+        Unreal::FWeakObjectPtr save;
+        Guid guid;
+        std::string item_class;
+        int units;
+    };
+    std::map<Guid, StackGrantReceipt> stack_grant_receipts;
     std::uint64_t grant_sequence{};
     std::array grant_hooks{
         Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
@@ -3368,6 +3377,10 @@ namespace
         Context context;
         Inventory inventory;
         if (!bind_grant_inventory(context, inventory)) return;
+        const auto remember = [&](const void* row) {
+            if (auto* type = inventory.row_class(row))
+                grant_scope.before.try_emplace(inventory.identity(row), type, inventory.ammo->GetPropertyValueInContainer(row));
+        };
         for (auto* property : {inventory.backpack, inventory.equipment})
         {
             Unreal::FScriptArrayHelper rows(property, property->ContainerPtrToValuePtr<void>(context.save));
@@ -3376,21 +3389,12 @@ namespace
                 grant_scope.before.clear();
                 return;
             }
-            for (int index = 0; index < rows.Num(); ++index)
-            {
-                const auto* row = rows.GetRawPtr(index);
-                if (inventory.row_class(row))
-                    grant_scope.before.emplace(inventory.identity(row));
-            }
+            for (int index = 0; index < rows.Num(); ++index) remember(rows.GetRawPtr(index));
         }
         for (auto* property : {inventory.helmet, inventory.armor})
-        {
-            const auto* row = property->ContainerPtrToValuePtr<void>(context.save);
-            if (inventory.row_class(row))
-                grant_scope.before.emplace(inventory.identity(row));
-        }
+            remember(property->ContainerPtrToValuePtr<void>(context.save));
         // Count zero is a valid initial backpack. An empty GUID marks a qualified capture.
-        grant_scope.before.emplace(Guid{});
+        grant_scope.before.try_emplace(Guid{});
     }
 
     void finish_grant(Unreal::UFunction* function)
@@ -3408,9 +3412,21 @@ namespace
             const auto* row = rows.GetRawPtr(index);
             const auto guid = inventory.identity(row);
             auto* type = inventory.row_class(row);
-            if (!live(type) || before.contains(guid) ||
-                std::ranges::any_of(grant_scope.pending, [&](const InventoryGrant& grant) { return grant.guid == guid; })) continue;
-            auto encoded = inventory_item_text(context, inventory, row);
+            if (!live(type) || guid == Guid{}) continue;
+            std::string encoded;
+            if (const auto old = before.find(guid); old != before.end())
+            {
+                const auto [old_type, old_count] = old->second;
+                const int count = inventory.ammo->GetPropertyValueInContainer(row);
+                auto* item = Unreal::Cast<Unreal::UClass>(type);
+                if (old_type != type || old_count < 1 || count <= old_count ||
+                    !item || !boolean(item->GetClassDefaultObject().Get(), STR("Stacks"), true)) continue;
+                encoded = std::format("stack:{}", count - old_count);
+            }
+            else
+            {
+                encoded = inventory_item_text(context, inventory, row);
+            }
             if (!encoded.empty())
                 grant_scope.pending.push_back({++grant_sequence, guid, RC::to_utf8_string(type->GetPathName()), std::move(encoded)});
         }
@@ -3543,7 +3559,11 @@ namespace
 
     int clear_inventory_grants(const Lua&)
     {
-        if (Unreal::IsInGameThreadRaw()) remove_grant_hooks();
+        if (Unreal::IsInGameThreadRaw())
+        {
+            remove_grant_hooks();
+            stack_grant_receipts.clear();
+        }
         return 0;
     }
 
@@ -3644,6 +3664,82 @@ namespace
             return result(lua, false, "native_inventory_grant_refused_readback");
         }
         return result(lua, true, "added");
+    }
+
+    int increase_inventory_stack(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 6 ||
+            !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3) ||
+            !lua.is_string(4) || !lua.is_integer(5) || !lua.is_string(6))
+            return result(lua, false, "native_inventory_grant_refused_arguments");
+        Context context;
+        Guid operation;
+        const auto pawn = lua.get_integer(), save = lua.get_integer();
+        if (pawn <= 0 || save <= 0 || !parse_guid(lua.get_string(), context.guid))
+            return result(lua, false, "native_inventory_grant_refused_arguments");
+        const std::string class_path(lua.get_string());
+        const auto units = lua.get_integer();
+        if (units < 1 || units > INT32_MAX || !parse_guid(lua.get_string(), operation))
+            return result(lua, false, "native_inventory_grant_refused_arguments");
+        if (class_path.size() > 512 || !class_path.starts_with("/Game/") || !class_path.ends_with("_C") ||
+            class_path.find("..") != std::string::npos ||
+            class_path.find_first_not_of("/._-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789") != std::string::npos)
+            return result(lua, false, "native_inventory_grant_refused_class");
+        if (!resolve_owner(context, pawn, save).empty())
+            return result(lua, false, "native_inventory_grant_refused_owner");
+        if (const auto earlier = stack_grant_receipts.find(operation); earlier != stack_grant_receipts.end())
+        {
+            const auto& receipt = earlier->second;
+            if (receipt.save.Get() != context.save || receipt.guid != context.guid ||
+                receipt.item_class != class_path || receipt.units != units)
+                return result(lua, false, "native_inventory_grant_refused_guid");
+            return result(lua, true, "increased");
+        }
+
+        auto* item = find<Unreal::UClass>(RC::to_wstring(class_path).c_str());
+        if (!live(item) || !boolean(item->GetClassDefaultObject().Get(), STR("Stacks"), true))
+            return result(lua, false, "native_inventory_grant_refused_class");
+        Inventory inventory;
+        if (!locate(context, inventory, item).empty() || inventory.backpack_index < 0)
+            return result(lua, false, "native_inventory_grant_refused_stack");
+        const auto count = inventory.ammo->GetPropertyValueInContainer(inventory.item);
+        if (count < 1 || count > INT32_MAX - units)
+            return result(lua, false, "native_inventory_grant_refused_stack");
+        using Value = std::unique_ptr<void, PropertyDeleter>;
+        Value previous(inventory.type->AllocateAndInitializeValue(), {inventory.type});
+        Value changed(inventory.type->AllocateAndInitializeValue(), {inventory.type});
+        if (!previous || !changed) return result(lua, false, "native_inventory_grant_refused_storage");
+        inventory.type->CopyCompleteValue(previous.get(), inventory.item);
+        auto* payload = field<Unreal::FStructProperty>(inventory.type->GetStruct().Get(), payload_name);
+        auto* weight = field<Unreal::FDoubleProperty>(inventory.type->GetStruct().Get(), weight_name);
+        auto* price = field<Unreal::FIntProperty>(inventory.type->GetStruct().Get(), value_name);
+        const auto same_payload = [&](const void* first, const void* second) {
+            return payload->Identical(payload->ContainerPtrToValuePtr<void>(first), payload->ContainerPtrToValuePtr<void>(second));
+        };
+        if (!payload || !weight || !price || !silverfish::loot_escrow::calculate_stock_stack(
+                context.pawn, inventory.type, previous.get(), changed.get(), static_cast<int>(units)))
+            return result(lua, false, "native_inventory_grant_stack_calculation_unavailable");
+        const auto mass = weight->GetPropertyValueInContainer(changed.get());
+        if (inventory.row_class(changed.get()) != item || inventory.identity(changed.get()) != context.guid ||
+            inventory.ammo->GetPropertyValueInContainer(changed.get()) != count + units ||
+            !std::isfinite(mass) || mass < 0 || price->GetPropertyValueInContainer(changed.get()) < 0 ||
+            !same_payload(previous.get(), changed.get()))
+            return result(lua, false, "native_inventory_grant_refused_stack");
+        Inventory current;
+        if (!ownership_current(context) || !locate(context, current, item).empty() || current.backpack_index < 0 ||
+            !inventory.type->Identical(previous.get(), current.item) || !same_payload(previous.get(), current.item))
+            return result(lua, false, "native_inventory_grant_refused_owner");
+        // Keep the receipt in the active campaign even if bridge readback must be retried.
+        const auto receipt = stack_grant_receipts.emplace(operation,
+            StackGrantReceipt{context.save, context.guid, class_path, static_cast<int>(units)}).first;
+        inventory.type->CopyCompleteValue(current.item, changed.get());
+        if (!inventory.type->Identical(changed.get(), current.item) || !same_payload(changed.get(), current.item))
+        {
+            inventory.type->CopyCompleteValue(current.item, previous.get());
+            stack_grant_receipts.erase(receipt);
+            return result(lua, false, "native_inventory_grant_refused_readback");
+        }
+        return result(lua, true, "increased");
     }
 
     template <bool local>
@@ -4859,6 +4955,7 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishAcknowledgeInventoryGrant", acknowledge_inventory_grant);
     lua.register_function("SilverfishPreserveInventoryGrantPayloads", preserve_inventory_grant_payloads);
     lua.register_function("SilverfishClearInventoryGrants", clear_inventory_grants);
+    lua.register_function("SilverfishIncreaseGuestInventoryStack", increase_inventory_stack);
     if (env("SILVERFISH_COOP_TITLE_FIXTURES") && env("SILVERFISH_COOP_HEADLESS"))
         lua.register_function("SilverfishFixtureLocalTypedInventory", fixture_copy_stock_weapon_payload);
     lua.register_function("SilverfishPreviewLocalGuestGear", preview_worn_or_unequip);
@@ -4896,6 +4993,7 @@ void silverfish::native_guest_item::shutdown()
     }
     remove_hold_hooks();
     remove_grant_hooks();
+    stack_grant_receipts.clear();
     if (tap_birth_hook != Hook::ERROR_ID) Hook::UnregisterCallback(tap_birth_hook);
     tap_birth_hook = Hook::ERROR_ID;
     local_selection = {};

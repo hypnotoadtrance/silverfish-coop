@@ -8,6 +8,7 @@ local path = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
 local inventory = "/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C"
 local factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local grant_class = "/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C"
+local grant_stack_class = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
@@ -269,23 +270,29 @@ local function run(action, argument)
         asset("/Game/Classes/GUI/Menu_Cheats_Widget.Menu_Cheats_Widget_C")
         asset(grant_class)
         return "loaded"
-    elseif action == "guest-stock-grant" then
+    elseif action == "guest-stock-grant" or action == "guest-stock-stack-grant" then
         assert(guest, "only the guest can originate the fixture grant")
         local cheats = asset("/Game/Classes/GUI/Menu_Cheats_Widget.Menu_Cheats_Widget_C")
         local widgets = asset("/Script/UMG.Default__WidgetBlueprintLibrary")
         local widget = widgets:Create(pawn, cheats, control)
         assert(valid(widget) and same(widget:GetOwningPlayer(), control), "stock cheat widget unavailable")
+        local stack = action == "guest-stock-stack-grant"
+        local class = asset(stack and grant_stack_class or grant_class)
         local bag, prior = pawn.Save.PlayerBackpack, {}
-        for index = 1, bag:GetArrayNum() do prior[identity(bag[index])] = true end
-        widget:GiveGear({asset(grant_class)})
+        for index = 1, bag:GetArrayNum() do prior[identity(bag[index])] = bag[index][ammo] end
+        widget:GiveGear({class})
         for index = 1, bag:GetArrayNum() do
             local row = bag[index]
             local guid = identity(row)
-            if same(row[item_class], asset(grant_class)) and not prior[guid] then
-                return guid
+            if same(row[item_class], class) then
+                if not stack and prior[guid] == nil then return guid end
+                local preceding = prior[guid] or 0
+                if stack and row[ammo] > preceding then
+                    return string.format("%s@%d@%d", guid, preceding, row[ammo])
+                end
             end
         end
-        error("stock GiveGear did not add a guest row")
+        error("stock GiveGear did not grant a guest item")
     elseif action == "guest-read-stock-grant" then
         assert(guest)
         local ok, exported = SilverfishExportLocalInventoryItem(pawn:GetAddress(), pawn.Save:GetAddress(), argument)
@@ -307,7 +314,7 @@ local function run(action, argument)
         local ok, text = SilverfishExportLocalInventoryItem(address, save, guid)
         assert(ok, text)
         return guid .. "@" .. text
-    elseif action == "remote-typed-grant" or action == "remote-typed-read" then
+    elseif action == "remote-typed-grant" or action == "remote-typed-read" or action == "remote-stock-stack-replay" then
         assert(not guest and #driver.ClientConnections == 1, "one enrolled guest required")
         local name, guid, text = argument:match("^Player_FP_C (.-)\t([0-9A-F]+)\t(.*)$")
         local remote = name and StaticFindObject(name)
@@ -318,6 +325,13 @@ local function run(action, argument)
         if action == "remote-typed-grant" then
             local ok, message = SilverfishImportGuestInventoryAddition(address, save, guid, grant_class, text)
             return (ok and "ok@" or "refused@") .. message
+        end
+        if action == "remote-stock-stack-replay" then
+            local units, operation = text:match("^(%d+)@(%x+)$")
+            assert(units and #operation == 32)
+            local ok, message = SilverfishIncreaseGuestInventoryStack(address, save, guid, grant_stack_class,
+                tonumber(units), operation:upper())
+            assert(ok, message)
         end
         local ok, encoded = SilverfishExportDetachedInventoryItem(address, save, guid)
         assert(ok, encoded)

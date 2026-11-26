@@ -19,11 +19,14 @@ READY = "native_inventory_grant_ready"
 RESULT = "native_inventory_grant"
 MAX_ITEM_BYTES = 8192
 _CLASS = re.compile(r"/Game/[A-Za-z0-9_./-]{1,500}_C")
+_STACK = re.compile(r"stack:([1-9][0-9]{0,9})")
 _TERMINAL = {
     "native_inventory_grant_refused_class",
     "native_inventory_grant_refused_guid",
     "native_inventory_grant_refused_serialization",
     "native_inventory_grant_refused_encoding",
+    "native_inventory_grant_refused_stack",
+    "native_inventory_grant_stack_calculation_unavailable",
 }
 
 
@@ -36,17 +39,22 @@ def parse_ready(fields):
 
 def parse_item(value):
     guid, item_class, text = value.split("@", 2)
-    if (not valid_guid(guid) or not _CLASS.fullmatch(item_class) or ".." in item_class
-            or not text.startswith("(") or not text.endswith(")") or any(ord(c) < 32 for c in text)
-            or len(text.encode("utf-8")) > MAX_ITEM_BYTES):
+    if not valid_guid(guid) or not _CLASS.fullmatch(item_class) or ".." in item_class:
         raise ValueError("Invalid typed inventory grant")
-    return guid, item_class, text
+    if stack := _STACK.fullmatch(text):
+        units = int(stack[1])
+        if units <= 2**31 - 1:
+            return guid, item_class, text, units
+    elif (text.startswith("(") and text.endswith(")") and len(text.encode("utf-8")) <= MAX_ITEM_BYTES
+          and all(ord(c) >= 32 for c in text)):
+        return guid, item_class, text, 0
+    raise ValueError("Invalid typed inventory grant")
 
 
 async def accept(host, bridge, character, target, operation):
     try:
         epoch, value = target.split("@", 1)
-        guid, item_class, text = parse_item(value)
+        guid, item_class, text, units = parse_item(value)
         if not party.REQUEST_ID.fullmatch(operation):
             raise ValueError("Invalid inventory grant operation")
     except (AttributeError, TypeError, ValueError) as error:
@@ -58,7 +66,7 @@ async def accept(host, bridge, character, target, operation):
             or not host.native_guest or not host.native_profile or game.get("state") != "hosting"
             or host.stopping or host.transitioning or host.native_checkpoint_unsafe or host.party.get("wipe")):
         raise party.RuleError("native_inventory_grant_scope_changed")
-    identity = character, guid
+    identity = (character, "stack", operation) if units else (character, "row", guid)
     fingerprint = sha256(value.encode("utf-8")).digest()
     if prior := host.guest_inventory_grants.get(identity):
         if prior[0] != fingerprint:
@@ -70,12 +78,18 @@ async def accept(host, bridge, character, target, operation):
     if epoch != host.zone_epoch or host.transitioning or current.get("pawn") != pawn or not current.get("connected"):
         raise party.RuleError("native_inventory_grant_scope_changed")
 
-    frame = await bridge.command(APPLY, pawn, guid, item_class, text, timeout=3)
+    args = (pawn, guid, item_class, text)
+    if units:
+        args += (operation,)
+    frame = await bridge.command(APPLY, *args, timeout=3)
     state = frame.get("ack", {}).get("message")
-    if (frame.get("state"), frame.get("map")) != ("hosting", game.get("map")) or state not in ("added", "present"):
+    outcomes = ("increased",) if units else ("added", "present")
+    if (frame.get("state"), frame.get("map")) != ("hosting", game.get("map")) or state not in outcomes:
         raise RuntimeError("The detached stock inventory grant did not verify")
     host.last_game, host.last_seen = frame, time.monotonic()
     proof = {"owner": character, "guid": guid, "class_path": item_class, "status": state}
+    if units:
+        proof["units"] = units
     host.guest_inventory_grants[identity] = fingerprint, proof
     host.control.event("native_guest_inventory_grant_settled", operation_id=operation, **proof)
     return {RESULT: proof}
@@ -97,7 +111,7 @@ class GuestGrants:
         try:
             read = await client.bridge.command(READ, str(sequence), timeout=2, update_status=False)
             value = read["ack"]["message"]
-            guid, item_class, _ = parse_item(value)
+            guid, item_class, _, units = parse_item(value)
             if client.stock_interaction_scope() != scope:
                 return
             session, epoch, _, _ = scope
@@ -114,6 +128,8 @@ class GuestGrants:
                 if (proof.get("owner"), proof.get("guid"), proof.get("class_path")) != (
                         client.invite["character_id"], guid, item_class):
                     raise RuntimeError("The native stock grant reply did not match")
+                if proof.get("units", 0) != units:
+                    raise RuntimeError("The native stock grant count did not match")
                 client.control.event("native_guest_inventory_grant", operation_id=operation, **proof)
                 accepted = True
             if client.stock_interaction_scope() == scope:

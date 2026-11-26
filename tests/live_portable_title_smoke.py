@@ -5789,6 +5789,35 @@ async def verify_stock_unequip(first, second, evidence):
         assert read == await portable_probe_command(guest.bridge, probe, f"guest-read-stock-grant\t{stock_guid}")
         assert saves() == before, "The stock gear grant wrote a save before a checkpoint"
         evidence["guest_stock_gear_grant"] = stock_reports[0]
+        stack_reports, previous_guid, previous_quantity = [], None, None
+        for index in range(3):
+            changed = await portable_probe_command(guest.bridge, probe, "guest-stock-stack-grant")
+            guid, old, new = changed.split("@")
+            old, new = int(old), int(new)
+            assert new > old >= 0 and (not index or (guid, old) == (previous_guid, previous_quantity)), changed
+            previous_guid, previous_quantity = guid, new
+            async with asyncio.timeout(10):
+                while True:
+                    outcomes = await resident_events(guest_run, start)
+                    grants = [row for row in outcomes if row["event"] == "native_guest_inventory_grant"
+                              and row["guid"] == guid and row["operation_id"] not in
+                              {saved["operation_id"] for saved in stack_reports}]
+                    if grants:
+                        break
+                    await asyncio.sleep(.07)
+            report, = grants
+            assert report["status"] == ("increased" if old else "added"), report
+            assert report.get("units", new) == new - old
+            await wait_resident_status(guest_run, lambda frame: not frame.get("game", {}).get("native_inventory_grant_ready"))
+            read = await portable_probe_command(host.bridge, probe, f"remote-typed-read\t{pawn}\t{guid}\t")
+            assert read == await portable_probe_command(guest.bridge, probe, f"guest-read-stock-grant\t{guid}")
+            if old:
+                replay = f"{new - old}@{report['operation_id']}"
+                assert read == await portable_probe_command(host.bridge, probe,
+                    f"remote-stock-stack-replay\t{pawn}\t{guid}\t{replay}")
+            stack_reports.append(report)
+        assert saves() == before, "Stock stack grants wrote a save before a checkpoint"
+        evidence["guest_stock_stack_grants"] = stack_reports
         return {"selected_and_inactive_slots_checked": True, "guest_duplicate_clicks_rejected": True,
                 "guest_worn_slots_checked": True, "guest_equipped_host_drop": True,
                 "saves_unchanged_before_checkpoint": True}
