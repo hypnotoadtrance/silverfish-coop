@@ -95,7 +95,7 @@ INDEPENDENT_RESIDENT_MAPS = {
     "stock_canister": {CROSSROADS},
     "stock_warehouse_switch": {OBSERVATORY, WAREHOUSE_DOCK}, "stock_warehouse_radio": {OBSERVATORY, WAREHOUSE_DOCK},
     "stock_warehouse_candle": {WAREHOUSE_DOCK}, "stock_dock_gate": {WAREHOUSE_DOCK},
-    "tutorial_dock_npc_population": {WAREHOUSE_DOCK},
+    "tutorial_dock_npc_population": {WAREHOUSE_DOCK}, "tutorial_dock_swing": {WAREHOUSE_DOCK},
     "stock_bottle": {OBSERVATORY, WAREHOUSE_DOCK},
     "stock_prop_breaks": {WAREHOUSE_DOCK}, "stock_acid_bottle": {WAREHOUSE_DOCK}, "stock_wood_debris": {WAREHOUSE_DOCK},
 }
@@ -2853,11 +2853,29 @@ async def verify_dock_enemy_drop(host: Seat, guest: Seat, arrival: dict) -> dict
     identity = native_world_loot.stock_enemy_identity(guid, item.get("visual_id"))
     pawn = authority["game"]["native_guest_save"]["pawn"]
     await wait_resident_status(host_run, lambda frame: identity in frame["game"].get(native_world_loot.KEY, {}))
-    approached = await host.bridge.command(native_world_loot.APPROACH, identity, pawn, timeout=5)
-    assert approached["ack"]["message"] == "stock loot height and line of sight verified", approached["ack"]
-    await wait_resident_status(guest_run, lambda frame: identity in frame["game"].get(native_world_loot.KEY, {})
-                               and math.dist(frame["game"]["pawns"]["local"]["location"], item["transform"]["position"]) < 225)
-    picked = await guest.bridge.command(native_world_loot.FIXTURE, identity, timeout=5)
+    focus_failures = []
+    for stance in ((), ("left",), ("right",), ("back",)):
+        try:
+            approached = await host.bridge.command(native_world_loot.APPROACH, identity, pawn, *stance)
+        except RuntimeError as error:
+            if not str(error).startswith("world_loot_fixture_no_clear_sight:"):
+                raise
+            focus_failures.append(str(error))
+            continue
+        assert approached["ack"]["message"] == "stock loot height and line of sight verified", approached["ack"]
+        position, = (row["location"] for row in approached["pawns"].values() if row["name"] == pawn)
+        await wait_resident_status(guest_run, lambda frame: identity in frame["game"].get(native_world_loot.KEY, {})
+                                   and math.dist(frame["game"]["pawns"]["local"]["location"], position) < 35)
+        try:
+            picked = await guest.bridge.command(native_world_loot.FIXTURE, identity, timeout=5)
+        except RuntimeError as error:
+            if not str(error).startswith("world_loot_fixture_focus_unavailable:"):
+                raise
+            focus_failures.append(str(error))
+        else:
+            break
+    else:
+        raise AssertionError(f"Stock Interact could not focus the Dock drop: {focus_failures}")
     assert picked["ack"]["message"] == "stock world loot interaction intercepted", picked["ack"]
     for run in (host_run, guest_run):
         await wait_resident_status(run, lambda frame: guid not in frame.get("gameplay", {}).get(scope.STATE, {})
@@ -2878,9 +2896,16 @@ async def verify_dock_enemy_drop(host: Seat, guest: Seat, arrival: dict) -> dict
     assert math.isclose(resting_heights[0], item["transform"]["position"][2], abs_tol=2), heights
     assert len({actor for _, _, actor in heights}) == 1, heights
     return {"item": item["class_path"], "stock_source": item["source"], "inventory_guid": guid,
+            "focus_failures_before_pickup": focus_failures,
             "moving_heights_cm": moving_heights, "resting_height_cm": resting_heights[0],
             "pickup_preview": await verified_drop_preview(guest, identity),
             "duplicate": refused["error"], "checkpoint_unchanged": True}
+
+
+async def check_dock_enemy_drop(host: Seat, guest: Seat, _pawn: str) -> dict:
+    frame = await wait_resident_status(guest.client / "run", lambda row: row.get("gameplay_fresh")
+                                       and row.get("game", {}).get("map") == WAREHOUSE_DOCK)
+    return {"stock_enemy_pickup": await verify_dock_enemy_drop(host, guest, frame)}
 
 
 async def tap_dock_primary(host: Seat, guest: Seat, command) -> dict:
@@ -2980,7 +3005,6 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
             if all(row.startswith("false;true;1;") for row in result):
                 break
             await asyncio.sleep(.05)
-    stock_pickup = await verify_dock_enemy_drop(host, guest, frame)
     assert await command(guest, "dock-strike") == "0", "the simulated worker executed its own strike"
     started = time.time()
     host_hp, before, after, attacker = (await command(host, "dock-strike")).split(";")
@@ -2993,6 +3017,22 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
             await asyncio.sleep(.05)
     hurt, = injuries
     assert hurt["damage"] > 0 and math.isclose(float(before) - float(after), hurt["damage"], abs_tol=1e-5), hurt
+    return {"tutorial_dock_combat": {"before": seen, "native_shot": shot, "both_peers_dead_and_ragdolled": result,
+                                     "stock_melee": {"attacker": attacker, "host_health": float(host_hp),
+                                                     "guest_before": float(before), "guest_after": float(after),
+                                                     "guest_hurt_cue": hurt, "replica_strike_denied": True,
+                                                     "retargeted_when_guest_downed": True,
+                                                     "downed_aggro_and_queued_strike_denied": True}}}
+
+
+async def verify_dock_swing(host: Seat, guest: Seat, _pawn: str) -> dict:
+    guest_run = guest.client / "run"
+    frame = await wait_resident_status(guest_run, lambda row: row.get("gameplay_fresh")
+                                       and row.get("game", {}).get("map") == WAREHOUSE_DOCK)
+
+    async def command(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-npc-override", action)
+
     for seat in (host, guest):
         assert await command(seat, "dock-arm-swing") == "ready"
     try:
@@ -3016,14 +3056,7 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
     finally:
         for seat in (host, guest):
             assert await command(seat, "dock-disarm-swing") == "disarmed"
-    return {"stock_enemy_pickup": stock_pickup,
-            "tutorial_dock_combat": {"before": seen, "native_shot": shot, "both_peers_dead_and_ragdolled": result,
-                                     "stock_melee": {"attacker": attacker, "host_health": float(host_hp),
-                                                     "guest_before": float(before), "guest_after": float(after),
-                                                     "guest_hurt_cue": hurt, "replica_strike_denied": True,
-                                                     "retargeted_when_guest_downed": True,
-                                                     "downed_aggro_and_queued_strike_denied": True},
-                                     "stock_swing": {"host": source, "guest": observer, "received": received}}}
+    return {"stock_swing": {"host": source, "guest": observer, "received": received}}
 
 async def verify_dock_npc_population(host: Seat, guest: Seat, _pawn: str, *, burst=False) -> dict:
     async def command(seat, action):
@@ -7260,6 +7293,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                                pursuit=tutorial_dock_pursuit,
                                                                held_mask=tutorial_dock_held_mask,
                                                                grounded_gait=tutorial_dock_gait)),
+        (tutorial_dock_combat and dock_combat_check == "tutorial_dock_combat" and not tutorial_dock_shot_view,
+         "tutorial_dock_combat", "tutorial_dock_enemy_pickup", check_dock_enemy_drop),
+        (tutorial_dock_combat and dock_combat_check == "tutorial_dock_combat" and not tutorial_dock_shot_view,
+         "tutorial_dock_combat", "tutorial_dock_swing", verify_dock_swing),
         (tutorial_dock_shot_view and tutorial_dock_pursuit, shot_view_campaign, "shot_view_weapon_setup",
          lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, rusty=True, npc_rivalry=False)),
         (tutorial_dock_shot_view, shot_view_campaign, "tutorial_dock_shot_view",

@@ -430,12 +430,15 @@ function input.approach_exact_container(state, phase, profile, pawn, actor, box)
     approach_clear_sight(state, pawn, actor, box, label, distances, office_desk and bearing + 90 or bearing, true, false)
 end
 
-function input.approach_world_loot(state, phase, pawn, actor, box, title_fixture)
+function input.approach_world_loot(state, phase, pawn, actor, box, title_fixture, alternate)
     if not approach_scope(state, phase, pawn, actor, state.map, title_fixture)
         or not same(actor.Box, box) or not owned(box, actor, "BoxComponent") then
         error("world_loot_fixture_scope_unavailable", 0)
     end
-    approach_clear_sight(state, pawn, actor, box, "world_loot_fixture", {65, 95, 125, 155}, nil, true, false)
+    local facing = ({left = -90, right = 90, back = 180})[alternate]
+    if alternate and not facing then error("world_loot_fixture_unknown_approach", 0) end
+    local distances = facing and {125, 155, 95, 65} or {65, 95, 125, 155}
+    approach_clear_sight(state, pawn, actor, box, "world_loot_fixture", distances, facing, true, false)
 end
 
 local function restored(camera, original)
@@ -473,6 +476,15 @@ local function press_stock(state, pawn, box, precise_aim, label, dispatch)
         if precise_aim then
             failure = failure .. string.format(":eye=(%.1f,%.1f,%.1f):box=(%.1f,%.1f,%.1f)",
                 eye.X, eye.Y, eye.Z, center.X, center.Y, center.Z)
+        end
+        if label == "world_loot_fixture" and finite(pawn.InteractionRange) and pawn.InteractionRange > 0 then
+            local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+            if valid(trace) then
+                local ignoring = {pawn}
+                if valid(pawn.EquipedItem) then ignoring[2] = pawn.EquipedItem end
+                local clear, blocker = stock_sight(trace, pawn, box, eye, center, pawn.InteractionRange, ignoring)
+                failure = failure .. ":guest_center_trace=" .. (clear and "clear" or blocker)
+            end
         end
         error(failure, 0)
     end)

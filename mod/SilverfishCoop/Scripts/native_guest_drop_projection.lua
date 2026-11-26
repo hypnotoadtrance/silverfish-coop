@@ -463,7 +463,7 @@ function projection.command(fields, state, phase)
         local id, pawn_name = fields[3], fields[4]
         local item, pawn = world_items[id]
         local scope = item or (current and current.id == id and current)
-        if not scope or #fields ~= 4 or not same(state.world, scope.world) then
+        if not scope or (#fields ~= 4 and #fields ~= 5) or not same(state.world, scope.world) then
             error("world_loot_fixture_scope_unavailable", 0)
         end
         for _, member in ipairs(state.pawns) do
@@ -482,7 +482,7 @@ function projection.command(fields, state, phase)
         if not valid(pawn) or not valid(actor) or actor:GetFullName() ~= name then
             error("world_loot_fixture_scope_unavailable", 0)
         end
-        pickup_fixture.approach_world_loot(state, phase, pawn, actor, actor.Box, title_fixtures)
+        pickup_fixture.approach_world_loot(state, phase, pawn, actor, actor.Box, title_fixtures, fields[5])
         return "stock loot height and line of sight verified"
     elseif command == "native-world-loot-fixture" then
         local pawn, id = local_pawn(state, phase), fields[3]

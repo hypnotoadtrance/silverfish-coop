@@ -1633,7 +1633,7 @@ local function dock_swing(world, host, action)
     local animator = actor.Mesh:GetAnimInstance()
     assert(valid(animator), "the stock worker animator is unavailable")
     if action == "dock-arm-swing" then
-        montage_probe = {animator=animator, count=0, clip="-", rate=0}
+        montage_probe = {animator=animator, count=0, clip="-", rate=0, playing=false}
         if not montage_probe_hooked then
             RegisterHook("/Script/Engine.AnimInstance:PlaySlotAnimationAsDynamicMontage",
                 function(context, asset, slot, _fade_in, _fade_out, rate)
@@ -1643,6 +1643,13 @@ local function dock_swing(world, host, action)
                     montage_probe.count = montage_probe.count + 1
                     montage_probe.clip = clip:GetFullName()
                     montage_probe.rate = rate:get()
+                end,
+                function(context, result, _, slot)
+                    if not montage_probe or not same(context:get(), montage_probe.animator)
+                        or slot:get():ToString() ~= "DefaultSlot" then return end
+                    -- Sample playback before a later game frame can end the montage.
+                    local montage = result:get()
+                    montage_probe.playing = valid(montage) and montage_probe.animator:Montage_IsPlaying(montage) == true
                 end)
             montage_probe_hooked = true
         end
@@ -1657,9 +1664,8 @@ local function dock_swing(world, host, action)
         return clip:GetFullName()
     end
     assert(montage_probe and same(montage_probe.animator, animator), "the swing probe is unarmed")
-    local montage = animator:GetCurrentActiveMontage()
-    local playing = valid(montage) and animator:Montage_IsPlaying(montage) == true
-    return ("%d;%.3f;%s;%s"):format(montage_probe.count, montage_probe.rate, tostring(playing), montage_probe.clip)
+    return ("%d;%.3f;%s;%s"):format(montage_probe.count, montage_probe.rate,
+        tostring(montage_probe.playing), montage_probe.clip)
 end
 
 local function observe_strike(actor)
