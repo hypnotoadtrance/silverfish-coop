@@ -6983,7 +6983,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_stock_take_ammo(host, guest, pawn, impact_cues=True)),
         (stock_loki_control, "observatory", "stock_loki_control", verify_stock_loki_control),
         (stock_loki_guest, "observatory", "stock_loki_guest", verify_guest_loki),
-        (stock_alternate_ammo, "observatory", "stock_alternate_ammo",
+        (stock_alternate_ammo, "alternate_ammo", "stock_alternate_ammo",
          lambda host, guest, pawn: verify_alternate_ammo(host, guest, pawn, portable_probe_command)),
         (stock_roaming_barter, "observatory", "stock_roaming_barter", verify_roaming_barter),
         (stock_castaway_dialogue, "observatory", "stock_castaway_dialogue", verify_stock_castaway_dialogue),

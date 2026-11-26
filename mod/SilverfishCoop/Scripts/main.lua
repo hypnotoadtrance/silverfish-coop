@@ -1702,7 +1702,7 @@ local function write_status(state, current_phase, failure, fields, pending, crat
     -- explicit filesystem commands can still observe their game-thread receipts.
     status_publication.memory_live = type(SilverfishPublishLocalBridgeStatus) == "function"
         and SilverfishPublishLocalBridgeStatus(frame)
-    if resident_title and status_publication.installed and status_publication.memory_live and not status_publication.mirror then
+    if resident_title and status_publication.installed and status_publication.memory_live then
         status_publication.context = {phase = current_phase, map = state.map, clients = state.clients, world = state.world, pawn = pawn}
     else
         status_publication.context = nil

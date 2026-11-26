@@ -44,8 +44,6 @@ end
     dispatch = '    if fields and pending and fields[2] == "native-world-view-apply-local" and not periodic'
     replacements = {
         "function status_publication.steady(state, current_phase)": support + "function status_publication.steady(state, current_phase)",
-        published_scope: published_scope.replace("and not status_publication.mirror",
-                                                f"and (not status_publication.mirror or {tag}())"),
         capability: capability.replace("and compact_crates", f"and (compact_crates or {tag}())"),
         scope: scope.replace("status_publication.compact()", f"(status_publication.compact() or {tag}())"),
         short_reply: short_reply.replace("\n        return true", '\n        status_publication.trace_world_view("compact", state, fields, reply, "steady")\n        return true'),
@@ -60,6 +58,9 @@ end
     end
 ''' + dispatch,
     }
+    if published_scope in text:
+        replacements[published_scope] = published_scope.replace("and not status_publication.mirror",
+                                                               f"and (not status_publication.mirror or {tag}())")
     for original, patched in replacements.items():
         if text.count(original) != 1:
             raise ValueError(f"The portable replica lacks the exact world view receipt fixture anchor {original!r}")

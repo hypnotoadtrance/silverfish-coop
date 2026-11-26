@@ -55,7 +55,7 @@ def instrument_profile(source, *, stock_receipts=False):
         admission = gate.replace("status_publication.compact()", "resident_title and status_publication.installed "
                                                                   "and status_publication.memory_live")
         publish = "        SilverfishPublishLocalBridgeReply(pending.ticket, readback and reply .. readback or reply)"
-        assert all(rest.count(marker) == 1 for marker in (scope, gate, publish))
+        assert all(rest.count(marker) == 1 for marker in (gate, publish))
         rest = rest.replace(scope, scope.replace(" and not status_publication.mirror", ""))
         rest = rest.replace(gate, admission)
         rest = rest.replace(publish, "        if accepted then status_publication.profile.stock_receipt("
