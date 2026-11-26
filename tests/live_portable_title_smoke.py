@@ -8265,9 +8265,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableBoardOfferProbe",
                                                      fixture="portable_board_offer_probe.lua"))
         if ((stock_npc_override and resident_weapon_cues) or stock_melee_family or tutorial_dock_melee
-                or tutorial_dock_combat or stock_host_corpse_carry):
+                or tutorial_dock_combat or stock_host_corpse_carry or stock_streamed_npc):
             proof["npc_combat_overlays"] = [probes.enter_context(host_npc_combat_overlay(game)) for game in games]
-        elif stock_npc_rivalry or stock_npc_override or stock_streamed_npc or stock_melee_edges or stock_dock_population:
+        elif stock_npc_rivalry or stock_npc_override or stock_melee_edges or stock_dock_population:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
                                                      fixture="portable_npc_override_probe.lua"))
