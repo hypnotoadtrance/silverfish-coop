@@ -17,6 +17,8 @@ local crouched_idle = "Crouching_Idle"
 local crouched_walk = "Crouched_Walking"
 local firearm_class = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
 local health_item_class = "/Game/Classes/Items/HealthItem_Master_BP.HealthItem_Master_BP_C"
+local honey_egg_class = "/Game/Classes/Items/Item_HoneyEgg.Item_HoneyEgg_C"
+local honey_egg_size_cm = 10
 local gameplay_statics = "/Script/Engine.Default__GameplayStatics"
 local math_library = "/Script/Engine.Default__KismetMathLibrary"
 local max_lean = 40
@@ -510,6 +512,10 @@ function avatar.animate_melee(get_world)
     end
 end
 
+local function use_prop_size(extent, scale)
+    return 2 * math.max(math.abs(extent.X * scale.X), math.abs(extent.Y * scale.Y), math.abs(extent.Z * scale.Z))
+end
+
 function avatar.play_consumable(world, id, item_path, defaults, serial)
     if id == nil then return false end
     for _, entry in pairs(avatars) do
@@ -525,17 +531,36 @@ function avatar.play_consumable(world, id, item_path, defaults, serial)
             local rotation = math_api:Quat_Rotator(transform.Rotation)
             local position = {X = transform.Translation.X, Y = transform.Translation.Y, Z = transform.Translation.Z}
             local scale = {X = transform.Scale3D.X, Y = transform.Scale3D.Y, Z = transform.Scale3D.Z}
+            local egg_extent
+            if item_path == honey_egg_class then
+                local bounds = mesh:GetBounds()
+                egg_extent = bounds and bounds.BoxExtent
+                if not egg_extent then return false end
+            end
             stop_use(entry)
             local prop = visual_component(entry, "use_prop", entry.body, "Weapon_Socket01")
             prop:SetStaticMesh(mesh)
-            prop:SetHiddenInGame(false, false)
             prop:SetRelativeScale3D(scale)
             if not valid(prop.StaticMesh) or mesh:GetAddress() ~= prop.StaticMesh:GetAddress() then
                 stop_use(entry)
                 return false
             end
+            local prop_size
+            if egg_extent then
+                -- The remote avatar uses the item's display mesh, so size the
+                -- Honey Egg from its bounds after accounting for the hand socket.
+                local current_size = use_prop_size(egg_extent, prop:K2_GetComponentScale())
+                if not (current_size > 0 and current_size < math.huge) then
+                    stop_use(entry)
+                    return false
+                end
+                local multiplier = honey_egg_size_cm / current_size
+                prop:SetRelativeScale3D({X = scale.X * multiplier, Y = scale.Y * multiplier, Z = scale.Z * multiplier})
+                prop_size = use_prop_size(egg_extent, prop:K2_GetComponentScale())
+            end
+            prop:SetHiddenInGame(false, false)
             local use = {serial = serial, item = item_path, mesh = mesh:GetFullName(), duration = duration,
-                world = world:GetAddress(), start = statics:GetRealTimeSeconds(world), peak = 0,
+                world = world:GetAddress(), start = statics:GetRealTimeSeconds(world), peak = 0, prop_size = prop_size,
                 position = position, rotation = {Pitch = rotation.Pitch, Yaw = rotation.Yaw, Roll = rotation.Roll}}
             local food_class = StaticFindObject(health_item_class)
             local head = FName("Head", EFindName.FNAME_Find)
@@ -1038,7 +1063,8 @@ function avatar.rows(row)
         if entry.last_use then
             local use = entry.last_use
             rows[#rows + 1] = row("native-avatar-use", entry.name, use.serial, use.item, use.mesh,
-                use.peak, uses[entry] and 1 or 0, use.mouth_reach or "-", use.mouth_height or "-", use.mouth_pitch or "-")
+                use.peak, uses[entry] and 1 or 0, use.mouth_reach or "-", use.mouth_height or "-", use.mouth_pitch or "-",
+                use.prop_size or "-")
         end
         local recoil = weapon_view.recoil_row(entry, row)
         if recoil then rows[#rows + 1] = recoil end

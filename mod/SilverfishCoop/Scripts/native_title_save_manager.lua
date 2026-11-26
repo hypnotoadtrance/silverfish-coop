@@ -205,8 +205,9 @@ local function response(state)
         local ending = data:find("\n", first, true)
         if not ending then return end
         local account, hex = data:sub(first, ending - 1):match("^([0-9]+)\t([0-9a-f]+)$")
-        if not account or not accounts[account] or photos[account] or #hex > 8500 then return end
-        photos[account] = hex
+        if account and accounts[account] and not photos[account] and #hex <= 8500 then
+            photos[account] = hex
+        end
         first = ending + 1
     end
     for _, entry in ipairs(entries) do entry.photo = photos[entry.account] end

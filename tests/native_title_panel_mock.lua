@@ -74,7 +74,7 @@ function surface.mount(owner, spec, dispatch)
         else
             for _, button in ipairs(row) do
                 assert(not view.buttons[button.key])
-                view.buttons[button.key] = {label = button.label, detail = button.detail, widget = object(view),
+                view.buttons[button.key] = {label = button.label, detail = button.detail, photo = button.photo, widget = object(view),
                     callback = function() dispatch(button.key) end}
             end
         end
@@ -152,7 +152,12 @@ env = setmetatable({
     io = {open = function(path, mode)
         if mode == "rb" then
             if not files[path] then return end
-            return {read = function(_, size) return files[path]:sub(1, size) end, close = function() return true end}
+            local offset = 1
+            return {read = function(_, size)
+                local value = files[path]:sub(offset, offset + size - 1)
+                offset = offset + #value
+                return #value > 0 and value or nil
+            end, close = function() return true end}
         end
         assert(mode == "wb" and (path:sub(1, #request) == request or path:sub(1, #join_request) == join_request
             or path:sub(1, #steam_cancel) == steam_cancel or path:sub(1, #steam_opened) == steam_opened
@@ -412,7 +417,8 @@ now = 101
 files[steam_join] = ("1\t%s\t28951\t159\n"):format(steam_nonce)
 refuse_rename = true
 tick()
-assert(display.title == "Join via Steam" and display.buttons.connect and display.toggles.use_password
+assert(display.title == "Join via Steam" and display.buttons.connect and not display.toggles.use_password
+    and not display.fields.password
     and display.fields.address == nil and display.fields.port == nil and not files[steam_opened])
 local steam_view = display
 refuse_rename = false
@@ -427,7 +433,8 @@ assert(files[join_request] == ("1\t%s\t%s\tdirect\t127.0.0.1\t28951\t\n")
 files[join_request] = nil
 files[join_response] = ("1\t%s\t%s\terror\tdirect_password_required\t0\n"):format(steam_generation, operation_id())
 tick()
-assert(display.title == "Join via Steam" and surface.checked(display, "use_password") and display.focus == "password")
+assert(display.title == "Join via Steam" and not display.toggles.use_password
+    and display.fields.password and display.focus == "password")
 click("back")
 assert(display.title == "Multiplayer" and files[steam_cancel] == "1\t" .. steam_nonce .. "\tcancel\n")
 now = 103
@@ -484,7 +491,7 @@ click("steam-public")
 local prefix = ("1\t%s\t%s\t"):format(browse_generation, operation_id())
 assert(files[browse_request] == prefix .. "search\n")
 files[browse_request] = nil
-files[browse_response] = prefix .. "ready\t1\nFixture Host\n"
+files[browse_response] = ("2\t%s\t%s\tready\t1\nFixture Host\trc-abcdef0\t1\n"):format(browse_generation, operation_id())
 tick()
 assert(display.buttons["steam-pick:1"].label == "Fixture Host")
 click("steam-pick:1")
@@ -497,7 +504,7 @@ files[steam_join] = ("1\t%s\t28951\t159\n"):format(abandoned_nonce)
 tick()
 assert(display.title == "Join via Steam")
 assert(files[steam_opened] == "1\t" .. abandoned_nonce .. "\topened\n")
-files[steam_join], files[steam_opened] = nil, nil
+files[steam_join], files[steam_opened], files[join_request] = nil, nil, nil
 refuse_rename = true
 state.qualified = false
 sync()
@@ -515,12 +522,13 @@ files[steam_join] = ("1\t%s\t28953\t159\n"):format(retry_nonce)
 tick()
 assert(display.title == "Join via Steam")
 files[steam_join], files[steam_opened] = nil, nil
-next_guid = next_guid + 1
-click("connect")
+assert(files[join_request] == ("1\t%s\t%s\tdirect\t127.0.0.1\t28953\t\n"):format(retry_generation, operation_id()))
+assert(not display.fields.password and not display.buttons.connect)
 files[join_request] = nil
-files[join_response] = ("1\t%s\t%s\tok\t%s\t1\n%s\tOriginal character\n")
-    :format(retry_generation, operation_id(), import_id, original_character)
+files[join_response] = ("2\t%s\t%s\tok\t%s\t1\nFixture Guest\t%s\n%s\tOriginal character\n")
+    :format(retry_generation, operation_id(), import_id, string.rep("ab", 4408), original_character)
 tick()
+assert(display.buttons["character:1"] and not display.buttons["character:1"].photo)
 click("character:1")
 click("confirm")
 assert(files[request] and not files[steam_cancel], "Keep the route through the submitted join")
@@ -542,7 +550,7 @@ local function save_reply(verb, revision, target, rows)
     local prefix = "1\t" .. manage_generation .. "\t" .. id .. "\t"
     assert(files[save_request] == prefix .. verb .. "\tExpedition\t" .. campaign_id .. "\t" .. revision .. "\t" .. target .. "\n")
     files[save_request] = nil
-    files[save_response] = prefix .. "ok\t" .. rows
+    files[save_response] = ("2\t%s\t%s\tok\t%s"):format(manage_generation, id, rows)
     tick()
 end
 manage_list(1, "active")
@@ -552,7 +560,14 @@ click("host")
 click("manage")
 click("save:" .. campaign_id)
 click("characters")
-save_reply("characters", 1, "-", "1\n" .. character .. "\tCourier\tactive\n")
+local steam_account = "76561198000000002"
+local other_character, other_account = "00000000-1111-2222-3333-444444444445", "76561198000000003"
+save_reply("characters", 1, "-", "2\n" .. character .. "\tCourier\tFixture Guest\t" .. steam_account
+    .. "\n" .. other_character .. "\tScout\tOther Guest\t" .. other_account
+    .. "\n" .. steam_account .. "\t" .. string.rep("ab", 4408)
+    .. "\n" .. other_account .. "\t89504e470d0a1a0a\n")
+assert(display.buttons["character:" .. character] and not display.buttons["character:" .. character].photo)
+assert(display.buttons["character:" .. other_character].photo == "89504e470d0a1a0a")
 click("character:" .. character)
 click("delete-character")
 assert(not files[save_request] and display.title == "Delete Character?")

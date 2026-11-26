@@ -2,6 +2,17 @@
 
 Project Silverfish Co-op is a proof of concept under active development. This list summarizes reports from release-candidate playtests. Check the notes for the specific ZIP you installed. Fixes verified in development can still need a live two-PC retest. [Release notes](https://github.com/hypnotoadtrance/silverfish-coop/releases)
 
+## Latest playtest reports
+
+| Area | Observed behavior |
+| --- | --- |
+| Steam character catalogs | One of two guests finished character creation but could not reopen the catalog, including after the host reopened the campaign. Manage Saves also timed out. The host had both character rows. One Steam avatar exceeded the title's image limit, which made the menu reject the response. The development build bounds the PNG without changing its pixels and keeps characters visible when a photo is oversized. |
+| Public Steam lobbies | Joining a passwordless Public lobby showed a password form. The development build connects immediately and asks for a password only after the host requests one. |
+| Contractor Vest | A guest could equip other armor but could not equip Contractor Vest. The development build recognizes the stock Heavy Holster passive on this vest and other eligible chest gear that uses it. |
+| Clyde's Honey Egg | The egg appeared larger than the character during eating. The development build sizes the remote eating prop to 10 cm along its longest axis. |
+
+Retest these reports in a rendered Steam session.
+
 ## Reports from the rc-b45e9bd playtest
 
 | Area | Observed behavior |

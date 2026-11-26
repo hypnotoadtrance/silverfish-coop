@@ -352,6 +352,20 @@ namespace
             type->GetNameByValue(state_faction).ToString() == STR("Factions_Enum::NewEnumerator4");
     }
 
+    bool matches_passive(U::UObject* defaults, std::basic_string_view<U::TCHAR> expected)
+    {
+        auto* effects = field<U::FArrayProperty>(defaults, STR("PassiveEffects"));
+        if (!effects) return false;
+        U::FScriptArrayHelper passives(effects, effects->ContainerPtrToValuePtr<void>(defaults));
+        if (expected.empty()) return passives.Num() == 0;
+        auto* text = U::CastField<U::FStrProperty>(effects->GetInner());
+        if (passives.Num() != 1 || !text || text->GetArrayDim() != 1 || text->GetOffset_Internal() != 0)
+            return false;
+        const auto& passive = text->GetPropertyValue(passives.GetRawPtr(0));
+        return passive.Len() == static_cast<int>(expected.size()) &&
+            std::basic_string_view<U::TCHAR>{*passive, expected.size()} == expected;
+    }
+
     U::UObject* armor_defaults(const ArmorProfile& profile)
     {
         auto* klass = find<U::UClass>(profile.path);
@@ -360,11 +374,10 @@ namespace
         auto* type = field<U::FByteProperty>(cdo, STR("ItemType"));
         auto* value = field<U::FIntProperty>(cdo, STR("Value"));
         auto* disguise = field<U::FByteProperty>(cdo, STR("DisguiseFaction"));
-        auto* effects = field<U::FArrayProperty>(cdo, STR("PassiveEffects"));
         if (!base || !cdo || cdo->GetClassPrivate() != klass || !klass->IsChildOf(base) ||
             !cdo->HasAnyFlags(U::RF_ClassDefaultObject) || !type ||
             type->GetPropertyValueInContainer(cdo) != (profile.helmet ? 6 : 7) ||
-            !value || value->GetPropertyValueInContainer(cdo) != profile.value || !effects ||
+            !value || value->GetPropertyValueInContainer(cdo) != profile.value ||
             !boolean(cdo, STR("Stacks"), false)) return nullptr;
         if (!profile.helmet && (!disguise || disguise->GetPropertyValueInContainer(cdo) != profile.disguise_faction ||
             (profile.disguise_faction && !faction_property(disguise)) ||
@@ -392,14 +405,7 @@ namespace
                     faction->GetPropertyValueInContainer(list.GetRawPtr()) != profile.disguise_faction)) return nullptr;
             }
         }
-        U::FScriptArrayHelper passives(effects, effects->ContainerPtrToValuePtr<void>(cdo));
-        if (profile.passive.empty()) return passives.Num() == 0 ? cdo : nullptr;
-        auto* text = U::CastField<U::FStrProperty>(effects->GetInner());
-        if (passives.Num() != 1 || !text || text->GetArrayDim() != 1 || text->GetOffset_Internal() != 0)
-            return nullptr;
-        const auto& passive = text->GetPropertyValue(passives.GetRawPtr(0));
-        return passive.Len() == static_cast<int>(profile.passive.size()) &&
-            std::basic_string_view<U::TCHAR>{*passive, profile.passive.size()} == profile.passive ? cdo : nullptr;
+        return matches_passive(cdo, profile.passive) ? cdo : nullptr;
     }
 
 
@@ -422,7 +428,7 @@ namespace
         profile.helmet = head;
         storage.path = klass->GetPathName();
         profile.path = storage.path.c_str();
-        if (!head && storage.path == STR("/Game/Classes/Armor_Items/Armor_ExpiditionLight.Armor_ExpiditionLight_C"))
+        if (!head && matches_passive(defaults, STR("HeavyHolster")))
             profile.passive = STR("HeavyHolster");
         auto* value = field<U::FIntProperty>(defaults, STR("Value"));
         if (!value) return nullptr;

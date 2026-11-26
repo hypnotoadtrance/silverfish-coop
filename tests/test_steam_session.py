@@ -7,6 +7,7 @@ import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
+import zlib
 
 from tools.silverfish import direct_ip, embedded_startup, link, native_title_entry, runtime, service, steam_browser, steam_session
 from tools.silverfish.campaign import CampaignStore
@@ -24,6 +25,25 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
         self.platform = Platform()
+
+    def test_oversized_fast_avatar_encoding_fits_both_title_menus(self):
+        pixels = bytes(range(256)) * 16
+        compress = zlib.compress
+
+        def compressed(data, *, level):
+            if level == 1:
+                return b"x" * 4351
+            return compress(data, level=level)
+
+        with patch.object(steam_session.zlib, "compress", side_effect=compressed):
+            encoded = steam_session._avatar_hex(pixels)
+        self.assertLessEqual(len(encoded), 8500)
+        png = bytes.fromhex(encoded)
+        self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(png[37:41], b"IDAT")
+        size, = struct.unpack_from("!I", png, 33)
+        scanlines = zlib.decompress(png[41:41 + size])
+        self.assertEqual(scanlines, b"".join(b"\0" + pixels[i:i + 128] for i in range(0, len(pixels), 128)))
 
     async def start(self, peer):
         api = self.platform.client(peer)

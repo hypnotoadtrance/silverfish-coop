@@ -59,8 +59,13 @@ def _avatar_hex(pixels: bytes) -> str:
         return struct.pack("!I", len(data)) + kind + data + struct.pack("!I", zlib.crc32(kind + data))
 
     scanlines = b"".join(b"\0" + pixels[i:i + 128] for i in range(0, 4096, 128))
+    compressed = zlib.compress(scanlines, level=1)
+    # Incompressible profile art still has to fit the title's 8,500-character
+    # hex field. The stored DEFLATE block bounds the 32 px PNG below that limit.
+    if len(compressed) > len(scanlines) + 11:
+        compressed = zlib.compress(scanlines, level=0)
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack("!IIBBBBB", 32, 32, 8, 6, 0, 0, 0))
-            + chunk(b"IDAT", zlib.compress(scanlines, level=1)) + chunk(b"IEND", b"")).hex()
+            + chunk(b"IDAT", compressed) + chunk(b"IEND", b"")).hex()
 
 
 class SteamSession:

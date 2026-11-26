@@ -21,7 +21,7 @@ local specs = {
 local worn_fields = {[9] = "PlayerHelmet", [10] = "PlayerArmor"}
 local worn_classes = {
     "/Game/Classes/Armor_Items/Helm_FaceMask.Helm_FaceMask_C",
-    "/Game/Classes/Armor_Items/Armor_LabCoat.Armor_LabCoat_C",
+    "/Game/Classes/Armor_Items/Armor_Contractor.Armor_Contractor_C",
 }
 local melee_class = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
 local stored_rounds, live_rounds = 5, 3

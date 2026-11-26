@@ -646,7 +646,7 @@ def launch_portable(game: Path, profile: Path) -> GameProcess:
     env = {key: value for key, value in os.environ.items() if not key.upper().startswith("SILVERFISH_COOP_")}
     arguments = subprocess.list2cmdline([str(image)])
     arguments += (f' -SilverfishCoopIsolated -userdir="{profile}" -unattended -NoSplash -windowed'
-                  " -nullrhi -RenderOffScreen -nosound -ResX=640 -ResY=480"
+                  " -nullrhi -RenderOffScreen -nosteam -nosound -ResX=640 -ResY=480"
                   " -ini:Input:[/Script/Engine.InputSettings]:DefaultViewportMouseCaptureMode=NoCapture,"
                   "[/Script/Engine.InputSettings]:DefaultViewportMouseLockMode=DoNotLock")
     info = subprocess.STARTUPINFO()
@@ -4286,6 +4286,13 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
             assert -21 <= use["food_height_from_head_cm"] <= 15, use
             observed_food[label] = use
             assert math.isclose(float(await command(guest, "guest-look-level")), 0, abs_tol=.1)
+        elif label == "honey-egg":
+            def observed_egg(frame):
+                return observed_use(frame, profile.class_path)
+
+            use = observed_egg(await wait_resident_status(host_run, observed_egg, timeout=8))
+            assert 9 <= use.get("prop_longest_axis_cm", 0) <= 11, use
+            observed_food[label] = use
         verified[label] = receipt
     remaining = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
     assert [(row["guid"], row["quantity"]) for row in remaining if row["guid"] in seeded] == [(seeded[3], 1)], remaining
@@ -5537,7 +5544,7 @@ async def verify_stock_unequip(first, second, evidence):
             if slot == 8:
                 assert proof["class_path"].endswith("/Helm_FaceMask.Helm_FaceMask_C"), proof
             else:
-                assert proof["class_path"].endswith("/Armor_LabCoat.Armor_LabCoat_C") and proof["minimum"] == 22, proof
+                assert proof["class_path"].endswith("/Armor_Contractor.Armor_Contractor_C") and proof["minimum"] == 28, proof
             current_worn[index] = guid
             assert (await portable_probe_command(guest.bridge, probe, "guest-worn-state")).split(",") == current_worn
             authoritative = await submit(guest_run, "native-inventory-list")

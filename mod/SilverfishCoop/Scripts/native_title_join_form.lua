@@ -81,8 +81,8 @@ local function read_response(draft)
     if version == "2" then
         creator, photo, offset = body:match("^([^\t\n]+)\t([^\t\n]+)\n()")
         local length = single_line(creator, 256)
-        if not length or length < 1 or length > 64 or #photo > 8500
-            or (photo ~= "-" and not photo:match("^[0-9a-f]+$")) then return end
+        if not length or length < 1 or length > 64 then return end
+        if #photo > 8500 or not photo:match("^[0-9a-f]+$") then photo = nil end
     end
     local characters, seen = {}, {}
     for _ = 1, count do
@@ -146,11 +146,13 @@ local function render_surface(draft, screen, hint, initial)
         if not draft.steam_port then
             rows[#rows + 1] = field("address", "Host IP", "IPv4 or IPv6 address", 45, draft.address)
             rows[#rows + 1] = field("port", "UDP port", "", 5, draft.port)
+            rows[#rows + 1] = {toggle = {key = "use_password", label = "Use password", target = "password",
+                checked = draft.use_password}}
         end
-        rows[#rows + 1] = {toggle = {key = "use_password", label = "Use password", target = "password",
-            checked = draft.use_password}}
         rows[#rows + 1] = field("password", "Password", "", 512, nil, true)
         rows[#rows + 1] = {button("connect", "Connect"), back}
+    elseif screen == "steam_retry" then
+        rows = {{button("connect", "Retry connection"), back}}
     elseif screen == "trust_host" then
         title = draft.host_trust.changed and "Host identity changed" or "Trust this host?"
         local endpoint = draft.steam_port and "Steam invitation" or draft.address .. " · UDP " .. draft.port
@@ -224,6 +226,8 @@ local function render(draft, state, phase, next_screen, hint, initial)
     end
 end
 
+local queue
+
 function form.open(state, phase, context, bridge, generation, new_id, direct, on_action, defaults, steam_port)
     local surface = on_action and require("native_title_surface")
     local draft = {context = context, generation = generation, new_id = new_id, direct = direct,
@@ -231,7 +235,15 @@ function form.open(state, phase, context, bridge, generation, new_id, direct, on
         port = steam_port or (surface and direct and (defaults and defaults.port or "7777") or nil),
         request = bridge .. "/title-join-request.tsv", response = bridge .. "/title-join-response.tsv",
         fixture = bridge .. "/title-join-fixture.invite.json"}
-    local ok, failure = pcall(render, draft, state, phase, direct and "address" or "invite")
+    local ok, failure = pcall(function()
+        if steam_port and surface then
+            draft.screen = "steam_retry"
+            local sent = queue(draft, state, phase, "direct", "")
+            if not sent and not draft.view then render(draft, state, phase, "steam_retry") end
+        else
+            render(draft, state, phase, direct and "address" or "invite")
+        end
+    end)
     if not ok then
         form.remove(draft)
         error(failure, 0)
@@ -252,7 +264,7 @@ local function publish(draft, id, kind, payload)
     return false
 end
 
-local function queue(draft, state, phase, kind, value, detail)
+queue = function(draft, state, phase, kind, value, detail)
     local retried = kind == "create" and draft.retry and draft.retry.name == value and draft.retry.import == draft.import
         and draft.retry.appearance == detail
     local id = retried and draft.retry.id or draft.new_id()
@@ -309,7 +321,10 @@ function form.poll(draft, state, phase)
     else
         draft.import, draft.characters, draft.retry = nil, nil, nil
         draft.creator, draft.photo = nil, nil
-        if draft.direct then
+        if draft.steam_port then
+            draft.use_password = password_errors[draft.failure] == true
+            render(draft, state, phase, draft.use_password and "password" or "steam_retry", messages[draft.failure])
+        elseif draft.direct then
             if password_errors[draft.failure] then
                 draft.use_password = true
             end
@@ -340,7 +355,7 @@ local function connect(draft, state, phase)
     local address = draft.steam_port and "127.0.0.1" or draft.surface.read(draft.view, "address")
     local port = draft.steam_port or draft.surface.read(draft.view, "port")
     local password = draft.surface.read(draft.view, "password")
-    draft.use_password = draft.surface.checked(draft.view, "use_password") == true
+    draft.use_password = draft.steam_port ~= nil or draft.surface.checked(draft.view, "use_password") == true
     draft.address, draft.port = address or draft.address, port or draft.port
     if not address_valid(address) or not port_valid(port) or not password or utf8.len(password) > 128 then
         local hint = not address_valid(address) and "Enter a numeric IPv4 or IPv6 address."
@@ -350,7 +365,8 @@ local function connect(draft, state, phase)
         return false, "title_join_form_invalid_endpoint"
     end
     if draft.use_password and password == "" then
-        render(draft, state, phase, draft.screen, "Enter the host’s password or clear Use password.")
+        render(draft, state, phase, draft.screen, draft.steam_port and "Enter the host’s password."
+            or "Enter the host’s password or clear Use password.")
         return false, "title_join_form_password_required"
     end
     return queue(draft, state, phase, "direct", draft.use_password and password or "")
@@ -359,6 +375,9 @@ end
 function form.press(draft, action, state, phase)
     local screen = draft.screen
     if action == "back" then
+        if draft.steam_port and (screen == "catalog" or screen == "trust_host") then
+            return false, "title_join_form_back_to_title"
+        end
         if screen == "catalog" then
             draft.import, draft.characters, draft.retry, draft.character, draft.character_name = nil, nil, nil, nil, nil
             render(draft, state, phase, draft.direct and "address" or "invite")
@@ -380,6 +399,7 @@ function form.press(draft, action, state, phase)
         return accepted, failure
     end
     if action == "connect" then
+        if screen == "steam_retry" and draft.steam_port then return queue(draft, state, phase, "direct", "") end
         if draft.view and draft.direct and endpoint_screens[screen] then return connect(draft, state, phase) end
         if screen ~= "invite" then return false, "title_join_form_selection_unavailable" end
         action = "host"
