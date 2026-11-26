@@ -2,6 +2,7 @@
 #include "mosby_station_input.hpp"
 #include "mindcore_input.hpp"
 #include "npc_barter.hpp"
+#include "zone_exit.hpp"
 
 #include <algorithm>
 #include <array>
@@ -319,13 +320,24 @@ namespace
     Unreal::FWeakObjectPtr event_focus;
     bool sewer_answering{};
 
-    bool live_actor(Unreal::UObject* actor, Unreal::UObject* world, std::uint8_t role)
+    bool live_actor_role(Unreal::UObject* actor, std::uint8_t role)
     {
         auto* role_field = field<Unreal::FByteProperty>(actor, STR("Role"));
         auto* destroyed = field<Unreal::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
         return live(actor) && role_field && role_field->GetPropertyValueInContainer(actor) == role &&
-            destroyed && !destroyed->GetPropertyValueInContainer(actor) &&
-            static_cast<Unreal::AActor*>(actor)->GetWorld() == world;
+            destroyed && !destroyed->GetPropertyValueInContainer(actor);
+    }
+
+    bool live_actor(Unreal::UObject* actor, Unreal::UObject* world, std::uint8_t role)
+    {
+        return live_actor_role(actor, role) && static_cast<Unreal::AActor*>(actor)->GetWorld() == world;
+    }
+
+    bool visible_switch_actor(Unreal::UObject* actor, Unreal::UObject* world)
+    {
+        return (live_actor_role(actor, 1) || live_actor_role(actor, 3)) &&
+            silverfish::native_zone::visible_actor_level(static_cast<Unreal::AActor*>(actor),
+                                                         static_cast<Unreal::UWorld*>(world));
     }
 
     bool live_scope(const Scope& current)
@@ -1064,11 +1076,10 @@ namespace
     bool stock_lantern(Unreal::UObject* actor)
     {
         auto* world = scope.world.Get();
-        if (!live(world) || !live(actor) || !actor->HasAnyFlags(Unreal::RF_WasLoaded) ||
-            actor->GetOuterPrivate() != object_field(world, STR("PersistentLevel"))) return false;
+        if (!live(world) || !live(actor) || !actor->HasAnyFlags(Unreal::RF_WasLoaded)) return false;
         auto* base = find<Unreal::UClass>(lantern_class);
         return base && actor->GetClassPrivate()->IsChildOf(base) &&
-            (live_actor(actor, world, 1) || live_actor(actor, world, 3));
+            visible_switch_actor(actor, world);
     }
 
     void remember_lantern_press(ScopedInteraction& input, Unreal::UObject* pawn,
@@ -1174,13 +1185,12 @@ namespace
         if (call.OriginalFunctionCallPrevented() || !live(actor) || !actor->HasAnyFlags(Unreal::RF_WasLoaded)) return;
         auto* pawn = scope.pawn.Get();
         auto* world = scope.world.Get();
-        if (!pawn || Clock::now() >= scope.expires || !live_scope(scope) ||
-            actor->GetOuterPrivate() != object_field(world, STR("PersistentLevel"))) return;
+        if (!pawn || Clock::now() >= scope.expires || !live_scope(scope)) return;
         auto* klass = actor->GetClassPrivate();
         const auto kind = stock_switch_kind(klass);
         if (kind == SwitchKind::Unsupported || kind == SwitchKind::Lantern) return;
         const bool candle = kind == SwitchKind::Candle;
-        if (!live_actor(actor, world, 3) && !live_actor(actor, world, 1)) return;
+        if (!visible_switch_actor(actor, world)) return;
         if (name != interaction)
         {
             if (candle && function == find<Unreal::UFunction>(name == ignite ? lantern_ignite : lantern_extinguish))

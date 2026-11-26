@@ -98,13 +98,82 @@ async def verify_oil_lamps(host, guest, pawn):
     return {"lamps": evidence, "other_lamp_stayed_unlit": adjacent}
 
 
-async def exercise(work, first, second, saved):
+async def verify_streamed_switch(host, guest, pawn):
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    checkpoint = suite.campaign_save_hashes(host.campaign)
+
+    async def probe(seat, mode, actor=""):
+        result = await seat.bridge.command("fixture-streamed-switch", mode, pawn, actor)
+        return result["ack"]["message"]
+
+    async def load(seat):
+        assert await probe(seat, "load") == "loading"
+        async with asyncio.timeout(18):
+            while (actor := await probe(seat, "discover")) == "waiting":
+                await asyncio.sleep(.12)
+        return actor
+
+    def row(frame, name):
+        game = frame.get("game", {})
+        if game.get("map") == OBSERVATORY:
+            return game.get(native_stock_switch.KEY, {}).get(name)
+
+    async def observe(run, name, *, equal=None):
+        frame = await suite.wait_resident_status(run, lambda result: (
+            (state := row(result, name)) and (equal is None or state == equal)), timeout=12)
+        return row(frame, name)
+
+    actor = await load(host)
+    assert "/CoopSwitchSublevel." in actor and actor.endswith(":PersistentLevel.CircutBox_BP_C_1"), actor
+    try:
+        original = await observe(host_run, actor)
+    except RuntimeError as error:
+        raise AssertionError(await probe(host, "diagnose", actor)) from error
+    assert original["lights"], original
+    assert await probe(host, "host", actor) == "host pressed"
+    on_host = row(await suite.wait_resident_status(host_run, lambda frame:
+        (found := row(frame, actor)) and found["powered"] != original["powered"]), actor)
+    assert await load(guest) == actor
+    assert await observe(guest_run, actor, equal=on_host) == on_host
+
+    assert await probe(guest, "hide") == "hide"
+    await suite.wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("map") == OBSERVATORY
+                                     and row(frame, actor) is None)
+    assert await probe(host, "host", actor) == "host pressed"
+    restored = await observe(host_run, actor, equal=original)
+    assert await probe(guest, "show") == "show"
+    assert await observe(guest_run, actor, equal=restored) == restored
+
+    position = tuple(map(float, (await probe(host, "stage", actor)).split(",")))
+    await suite.wait_resident_status(guest_run, lambda frame: (
+        (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
+        and dist(point, position) < 80))
+    pressed = time.time()
+    assert await probe(guest, "guest", actor) == "guest pressed"
+    assert await observe(host_run, actor, equal=on_host) == on_host
+    assert await observe(guest_run, actor, equal=on_host) == on_host
+    events = await suite.resident_events(guest_run, await suite.wait_resident_status(guest_run, lambda frame:
+        row(frame, actor) == on_host))
+    assert any(event.get("time_unix", 0) >= pressed
+               and event.get("native_stock_switch_interaction", {}).get("actor") == actor for event in events)
+    assert await probe(guest, "unload") == "unload"
+    assert await probe(host, "unload") == "unload"
+    for run in (guest_run, host_run):
+        await suite.wait_resident_status(run, lambda frame: frame.get("game", {}).get("map") == OBSERVATORY
+                                         and row(frame, actor) is None)
+    assert suite.campaign_save_hashes(host.campaign) == checkpoint
+    return {"actor": actor, "linked_lights": len(original["lights"]), "late_load": on_host,
+            "reshown": restored, "guest_press": on_host, "unloaded_on_both": True, "checkpoint_unchanged": True}
+
+
+async def exercise(work, first, second, saved, streamed_switch=False):
     with ExitStack() as fixtures:
         for game in (first, second):
             fixtures.enter_context(suite.installed_probe(game, mod="SilverfishPortableOilLampProbe",
                                                          fixture="portable_oil_lamp_probe.lua"))
         await suite.verify(work, first, second, saved, stock_warehouse_switch=True,
-                           oil_lamps_check=verify_oil_lamps)
+                           oil_lamps_check=verify_oil_lamps,
+                           streamed_switch_check=verify_streamed_switch if streamed_switch else None)
 
 
 if __name__ == "__main__":
@@ -113,6 +182,7 @@ if __name__ == "__main__":
     parser.add_argument("--first-game", type=Path, required=True)
     parser.add_argument("--second-game", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
+    parser.add_argument("--streamed-switch", action="store_true")
     args = parser.parse_args()
     asyncio.run(exercise(args.work.resolve(), args.first_game.resolve(), args.second_game.resolve(),
-                         args.vanilla_saved.resolve()))
+                         args.vanilla_saved.resolve(), args.streamed_switch))

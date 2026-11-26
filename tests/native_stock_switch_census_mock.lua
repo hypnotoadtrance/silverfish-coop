@@ -8,6 +8,8 @@ local function object(fields)
 end
 
 local callbacks, paths, scans = {}, {}, {}
+local began
+function RegisterBeginPlayPostHook(callback) began = callback end
 local actor_lookups = 0
 function NotifyOnNewObject(path, callback)
     callbacks[path] = callback
@@ -130,3 +132,42 @@ state.server = true
 assert(switches.command({"nonce", "native-stock-switch-project", child_name, state.map, "0", "0", "0", "0"},
     state, "connected") == "stock switch state projected" and not custom.Powered)
 print("Inherited radio on a mounted map passed stock focus, host dispatch, and guest projection")
+
+local now = os.clock() + 1
+os.clock = function() return now end
+function FName(value) return value end
+local stream_package = "/CommunityMaps/CoopHarbor_1"
+local stream_path = stream_package .. ".Harbor:PersistentLevel.SolarRadio_C_1"
+local stream_name = "SolarRadio_C " .. stream_path
+local package = object({GetFullName = function() return "Package " .. stream_package end})
+local subworld = object({GetOuter = function() return package end})
+local level = object({bIsVisible = true, GetOuter = function() return subworld end})
+local stream = object({GetLoadedLevel = function() return level end, IsLevelVisible = function() return level.bIsVisible end})
+local statics = paths["/Script/Engine.Default__GameplayStatics"]
+statics.GetStreamingLevel = function(_, scope, name)
+    assert(scope == state.world and name == stream_package)
+    return stream
+end
+local radio_in_stream = device(state.world, radio_child, stream_name)
+radio_in_stream.GetOuter = function() return level end
+radio_in_stream.GetWorld = function() return subworld end
+radio_in_stream.Toggle_Power = custom.Toggle_Power
+paths[stream_path] = radio_in_stream
+paths[stream_path .. ".Box"] = radio_in_stream.Box
+state.world.actors[radio_class][#state.world.actors[radio_class] + 1] = radio_in_stream
+began({get = function() return radio_in_stream end})
+local function has_stream_row()
+    for _, device_row in ipairs(switches.rows(state, "connected", row)) do
+        if device_row[3] == stream_name then return true end
+    end
+end
+assert(has_stream_row() and switches.focused_target(pawn, stream_path .. ".Box") == "stock-switch:" .. stream_name)
+level.bIsVisible = false
+assert(not has_stream_row() and not switches.focused_target(pawn, stream_path .. ".Box"))
+assert(not pcall(switches.command,
+    {"nonce", "native-stock-switch-project", stream_name, state.map, "1", "0", "0", "0"}, state, "connected"))
+now, level.bIsVisible = now + 1, true
+assert(has_stream_row())
+assert(switches.command({"nonce", "native-stock-switch-project", stream_name, state.map, "1", "0", "0", "0"},
+    state, "connected") == "stock switch state projected" and radio_in_stream.Powered)
+print("Streamed device census follows visibility and rejects projection against a hidden level")

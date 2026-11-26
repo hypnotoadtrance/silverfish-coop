@@ -63,6 +63,26 @@ class StockSwitchResponseTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.assert_awaited_once_with(switches.IGNITE, actor, "qualified guest", timeout=3)
         self.assertTrue(result["native_stock_switch_interaction"]["powered"])
 
+    async def test_projection_routes_live_streamed_actors_and_skips_a_hidden_level(self):
+        area = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+        epoch = "e" * 32
+        prefix = "/CommunityMaps/LoadedHarbor.Harbor:PersistentLevel."
+        actor = "LightSwitch_BP_C " + prefix + "LightSwitch_BP_C_1"
+        hidden = actor[:-1] + "2"
+        inactive = actor[:-1] + "3"
+        bulb = "WallLamp_01_C " + prefix + "WallLamp_01_C_1"
+        fields = [switches.TAG, area, actor, "1", "0", "0", "0", "-", bulb + "|1|1"]
+        on = switches.parse(fields, "hosting", area)
+        off = dict(on, powered=False, lights={bulb: [False, False]})
+        game = {"state": "connected", "map": area, switches.KEY: {hidden: off, actor: off}}
+        updated = {**game, switches.KEY: {hidden: off, actor: on}}
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[RuntimeError("stock_switch_unavailable"), updated]))
+        frame = {"map": area, "epoch": epoch, "switches": {hidden: on, inactive: on, actor: on}}
+        self.assertIs(await switches.project(bridge, game, frame, "f" * 32), game)
+        self.assertIs(await switches.project(bridge, game, frame, epoch), updated)
+        self.assertEqual([call.args[1] for call in bridge.command.await_args_list], [hidden, actor])
+        self.assertEqual(bridge.command.await_args.args[-1], bulb + "|1|1")
+
     async def test_reply_applies_exact_switch_before_another_world_snapshot(self):
         area = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
         epoch = "e" * 32

@@ -1690,6 +1690,11 @@ namespace
 
 namespace silverfish::native_zone
 {
+    bool visible_actor_level(Unreal::AActor* actor, Unreal::UWorld* world)
+    {
+        return active_exit_level(actor, world);
+    }
+
     void install_hooks()
     {
         if (!enabled()) return;

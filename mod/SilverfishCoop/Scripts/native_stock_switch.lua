@@ -29,22 +29,28 @@ local bulb_profiles = {
     ["/Game/Classes/DynamicLights/Dynamic_SpotLight_Master_BP.Dynamic_SpotLight_Master_BP_C"] = "SpotLight",
 }
 local statics_path = "/Script/Engine.Default__GameplayStatics"
-local world, entries, dirty
+local world, entries, dirty, known_streams, visible_streams, next_stream_check
 local candle_overlaps, retired_lamps = {}, {}
 
 local function valid(object) return object and object:IsValid() end
 local function same(left, right) return valid(left) and valid(right) and left:GetAddress() == right:GetAddress() end
 local function bit(value) return value and "1" or "0" end
 
-local function qualified(actor, scope)
-    return valid(actor) and same(actor:GetWorld(), scope) and same(actor:GetOuter(), scope.PersistentLevel)
-        and not actor:IsActorBeingDestroyed()
+local function level_visible(level, scope)
+    return valid(level) and (same(level, scope.PersistentLevel) or level.bIsVisible == true)
+end
+
+local function qualified(actor, scope, level)
+    if not level then return world_path.visible_actor_level(actor, scope) end
+    if not valid(actor) or not same(actor:GetOuter(), level) or actor:IsActorBeingDestroyed() then return false end
+    if same(level, scope.PersistentLevel) then return same(actor:GetWorld(), scope) end
+    return level.bIsVisible == true
 end
 
 local function placed_actor(name)
     if type(name) ~= "string" or #name > 384 then return end
     local path = name:match("^[A-Za-z0-9_%-]+_C (.+)$")
-    return world_path.actor_package(path), path
+    return world_path.level_actor_package(path), path
 end
 
 local function inherited_profile(class)
@@ -55,8 +61,9 @@ local function inherited_profile(class)
     end
 end
 
-local function parts(actor, scope)
-    if not qualified(actor, scope) then return end
+local function parts(actor, scope, level)
+    level = level or qualified(actor, scope)
+    if not level then return end
     local class = actor:GetClass()
     local profile = inherited_profile(class)
     if not profile or type(actor[profile.power or "Powered"]) ~= "boolean" then return end
@@ -67,16 +74,16 @@ local function parts(actor, scope)
         if not same(mesh, actor.RootComponent) or not same(mesh:GetOwner(), actor)
             or not valid(light) or not same(light:GetOwner(), actor)
             or not valid(flame) or not same(flame:GetOwner(), actor) then return end
-        return {actor = actor, box = box, mesh = mesh, light = light, flame = flame, power = profile.power,
+        return {actor = actor, level = level, box = box, mesh = mesh, light = light, flame = flame, power = profile.power,
             candle = true, lantern = profile.lantern}
     end
-    if profile.power then return {actor = actor, box = box, power = profile.power, television = profile.television} end
+    if profile.power then return {actor = actor, level = level, box = box, power = profile.power, television = profile.television} end
     local lever, panel = actor[profile[1]], actor[profile[2]]
     if not valid(lever) or not valid(panel) then return end
     for _, component in ipairs({lever, panel}) do
         if not same(component:GetOwner(), actor) then return end
     end
-    return {actor = actor, lever = lever, panel = panel, box = box}
+    return {actor = actor, level = level, lever = lever, panel = panel, box = box}
 end
 
 local function light_links(actor, scope)
@@ -90,12 +97,14 @@ local function light_links(actor, scope)
     end
     for index = 1, linked:GetArrayNum() do
         local target = linked[index]
-        if valid(target) and type(target.Powered) == "boolean" and qualified(target, scope) then
+        local level = valid(target) and type(target.Powered) == "boolean" and qualified(target, scope)
+        if level then
             for _, base in ipairs(bases) do
                 if target:IsA(base[1]) then
                     local bulb = target[base[2]]
                     if valid(bulb) and same(bulb:GetOwner(), target) then
-                        lights[target:GetFullName()] = {target = target, bulb = bulb}
+                        local name = target:GetFullName()
+                        if placed_actor(name) then lights[name] = {target = target, bulb = bulb, level = level} end
                     end
                     break
                 end
@@ -106,13 +115,52 @@ local function light_links(actor, scope)
 end
 
 function switches.start()
-    if type(NotifyOnNewObject) ~= "function" then return end
-    for kind, profile in pairs(profiles) do
-        NotifyOnNewObject(profile.path, function()
-            -- Construction can precede BeginPlay. Read stock properties during the regular census.
-            if dirty then dirty[kind] = true end
+    if type(NotifyOnNewObject) == "function" then
+        for kind, profile in pairs(profiles) do
+            NotifyOnNewObject(profile.path, function()
+                -- Construction can precede BeginPlay. Read stock properties during the regular census.
+                if dirty then dirty[kind] = true end
+            end)
+        end
+    end
+    if type(RegisterBeginPlayPostHook) == "function" then
+        RegisterBeginPlayPostHook(function(context)
+            if not dirty then return end
+            local actor = context:get()
+            local level = valid(actor) and actor:GetOuter()
+            local address = valid(level) and level:GetAddress()
+            if address and not known_streams[address] and not same(level, world.PersistentLevel) then
+                -- A streamed actor can report its asset world. The census verifies the
+                -- owning level against the campaign's actual streaming instance.
+                known_streams[address] = level
+            end
         end)
     end
+end
+
+local function refresh_streamed_levels()
+    local now = os.clock()
+    if now < next_stream_check then return end
+    next_stream_check = now + .25
+    local current, changed = {}, false
+    for address, level in pairs(known_streams) do
+        if not valid(level) then
+            known_streams[address] = nil
+        elseif world_path.visible_streaming_level(level, world) then
+            current[address] = true
+            if not visible_streams[address] then changed = true end
+        end
+    end
+    for address in pairs(visible_streams) do
+        if not current[address] then changed = true end
+    end
+    visible_streams = current
+    if not changed then return end
+    for name, entry in pairs(entries) do
+        if not valid(entry.level) then entries[name] = nil end
+    end
+    for kind in pairs(profiles) do dirty[kind] = true end
+    return true
 end
 
 local function census(state, phase)
@@ -122,9 +170,10 @@ local function census(state, phase)
         return {}
     end
     if not same(world, state.world) then
-        world, entries, dirty = state.world, {}, {}
+        world, entries, dirty, known_streams, visible_streams, next_stream_check = state.world, {}, {}, {}, {}, 0
         for kind in pairs(profiles) do dirty[kind] = true end
     end
+    local changed_levels = refresh_streamed_levels()
     if not next(dirty) then return entries end
     local statics = StaticFindObject(statics_path)
     if not valid(statics) then return entries end
@@ -136,21 +185,25 @@ local function census(state, phase)
             statics:GetAllActorsOfClass(world, class, output)
             for _, actor in ipairs(output.OutActors or output) do
                 if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
-                if qualified(actor, world) and (phase ~= "hosting" or actor:HasAuthority()) then
+                local level = qualified(actor, world)
+                if level and (phase ~= "hosting" or actor:HasAuthority()) then
+                    if not same(level, world.PersistentLevel) then known_streams[level:GetAddress()] = level end
                     local name = actor:GetFullName()
                     local package, path = placed_actor(name)
-                    if package and package == state.map
-                        and (not entries[name] or not same(entries[name].actor, actor)) then
-                        local entry = parts(actor, world)
+                    local previous = entries[name]
+                    if package and (not previous or not same(previous.actor, actor)) then
+                        local entry = parts(actor, world, level)
                         if entry then
                             if entry.power then
-                                entries[name] = {actor = actor, class = actor:GetClass(), power = entry.power,
+                                entries[name] = {actor = actor, level = level, class = actor:GetClass(), power = entry.power,
                                     path = path, candle = entry.candle, lantern = entry.lantern, light = entry.light}
                             else
                                 entry.lights = light_links(actor, world)
                                 entries[name] = entry
                             end
                         end
+                    elseif changed_levels and previous and previous.lights then
+                        previous.lights = light_links(actor, world)
                     end
                 end
             end
@@ -161,7 +214,11 @@ end
 
 local function find_switch(state, phase, name)
     local entry = census(state, phase)[name]
-    if not entry or not entry.power then return entry end
+    if not entry then return end
+    if not entry.power then
+        if qualified(entry.actor, state.world) then return entry end
+        return
+    end
     local actor = StaticFindObject(entry.path)
     if not valid(actor) or not same(actor:GetClass(), entry.class) then return end
     local resolved = parts(actor, state.world)
@@ -195,12 +252,13 @@ local function suppress_candle_overlap(name, sphere)
 end
 
 function switches.read_row(entry, name, state, phase, row)
+    if not level_visible(entry.level, state.world) then return end
     if entry.power then
         local actor = entry.actor
-        if not qualified(actor, state.world) then
+        if not qualified(actor, state.world, entry.level) then
             if not entry.path then return end
             actor = StaticFindObject(entry.path)
-            if not qualified(actor, state.world) or not same(actor:GetClass(), entry.class)
+            if not qualified(actor, state.world, entry.level) or not same(actor:GetClass(), entry.class)
                 or phase == "hosting" and not actor:HasAuthority() then
                 if entry.lantern and phase == "hosting" then
                     return row("native-stock-switch", state.map, name, 0, 0, 0, 0, "-", "-", "removed")
@@ -244,7 +302,7 @@ function switches.read_row(entry, name, state, phase, row)
         local panel = entry.panel:GetMaterial(0)
         local lights = {}
         for id, link in pairs(entry.lights) do
-            if valid(link.target) and valid(link.bulb) then
+            if qualified(link.target, state.world, link.level) and valid(link.bulb) then
                 local powered, visible = bit(link.target.Powered), bit(link.bulb:IsVisible())
                 if link.row_power ~= powered or link.row_visible ~= visible then
                     link.status_row = id .. "|" .. powered .. "|" .. visible
@@ -325,7 +383,7 @@ local function project(entry, powered, angles, lights)
     lever:K2_SetRelativeRotation(angles, false, {}, true)
     for _, state in ipairs(lights) do
         local link = entry.lights[state.id]
-        if link and valid(link.target) and valid(link.bulb) then
+        if link and qualified(link.target, world, link.level) and valid(link.bulb) then
             if link.target.Powered ~= state.powered then
                 link.target.Powered = state.powered
                 link.target:TogglePower()

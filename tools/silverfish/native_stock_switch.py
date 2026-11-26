@@ -19,15 +19,15 @@ _ACTOR = re.compile(r"[A-Za-z0-9_-]+_C (/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):Persis
 _LAMP_STATES = {"intact", "broken", "removed"}
 
 
-def actor_map(actor):
+def actor_package(actor):
     match = _ACTOR.fullmatch(actor) if isinstance(actor, str) and len(actor) <= 384 else None
-    if match and valid_campaign_package(match[1]) and match[1].rsplit("/", 1)[-1] == match[2]:
+    if match and valid_campaign_package(match[1]):
         return match[1]
     return None
 
 
 def target_actor(value):
-    if isinstance(value, str) and value.startswith(TARGET) and actor_map(actor := value[len(TARGET):]):
+    if isinstance(value, str) and value.startswith(TARGET) and actor_package(actor := value[len(TARGET):]):
         return actor
     return None
 
@@ -35,7 +35,7 @@ def target_actor(value):
 def input_target(value):
     if isinstance(value, str) and value.startswith(IGNITION_TARGET):
         actor = value[len(IGNITION_TARGET):]
-        if actor_map(actor):
+        if actor_package(actor):
             return IGNITE, actor
     if actor := target_actor(value):
         return ACTION, actor
@@ -43,7 +43,7 @@ def input_target(value):
 
 
 def parse(fields, phase, area):
-    if (len(fields) not in (9, 10) or fields[1] != area or actor_map(fields[2]) != area
+    if (len(fields) not in (9, 10) or fields[1] != area or not actor_package(fields[2])
             or phase not in ("hosting", "connected") or fields[3] not in ("0", "1")):
         raise ValueError("Invalid stock switch frame")
     angles = [round(float(value), 2) for value in fields[4:7]]
@@ -52,7 +52,7 @@ def parse(fields, phase, area):
     lights = {}
     for link in fields[8].split(";") if fields[8] != "-" else ():
         name, power, visible = link.split("|")
-        if (actor_map(name) != area or name in lights
+        if (not actor_package(name) or name in lights
                 or power not in ("0", "1") or visible not in ("0", "1")):
             raise ValueError("Invalid linked light state")
         lights[name] = [power == "1", visible == "1"]
@@ -71,7 +71,7 @@ async def interact(host, bridge, character, requested, operation, action=ACTION)
     player = host.party["players"].get(character)
     row = game.get(KEY, {}).get(actor)
     if (action not in ACTIONS or action == IGNITE and (not row or row.get("lamp") != "intact")
-            or not epoch or epoch != host.zone_epoch or actor_map(actor) != game.get("map")
+            or not epoch or epoch != host.zone_epoch or not actor_package(actor)
             or row is None or game.get("state") != "hosting" or host.transitioning
             or host.stopping or host.native_checkpoint_unsafe or not member.get("connected")
             or not player or player["downed"] or host.party["wipe"]
@@ -112,7 +112,7 @@ async def interact(host, bridge, character, requested, operation, action=ACTION)
 async def apply_interaction(client, frame, actor):
     area, epoch = client.last_game.get("map"), client.zone_epoch
     if (not isinstance(frame, dict) or (frame.get("map"), frame.get("epoch")) != (area, epoch)
-            or actor_map(actor) != area or not epoch or client.needs_travel or client.server_transitioning
+            or not actor_package(actor) or not epoch or client.needs_travel or client.server_transitioning
             or not isinstance(rows := frame.get("switches"), dict) or rows.keys() != {actor}):
         return
     await client.cancel_gameplay_snapshot()
@@ -133,7 +133,7 @@ async def project(bridge, game, frame, epoch):
     if game.get("state") != "connected" or not local or not isinstance(rows, dict):
         return game
     for actor, target in rows.items():
-        if (actor_map(actor) != area or actor not in local or not isinstance(target, dict)
+        if (not actor_package(actor) or actor not in local or not isinstance(target, dict)
                 or target == local[actor] or type(target.get("powered")) is not bool):
             continue
         angles, lights = target.get("angles"), target.get("lights")
@@ -149,8 +149,14 @@ async def project(bridge, game, frame, epoch):
             if not isinstance(lamp, str) or lamp not in _LAMP_STATES or "lamp" not in local[actor]:
                 continue
             bulbs = [lamp]
-        updated = await bridge.command(PROJECT, actor, area, str(int(target["powered"])),
-                                       *map(str, angles), *bulbs, timeout=2)
+        try:
+            updated = await bridge.command(PROJECT, actor, area, str(int(target["powered"])),
+                                           *map(str, angles), *bulbs, timeout=2)
+        except RuntimeError as error:
+            if str(error) != "stock_switch_unavailable":
+                raise
+            # A streamed level can hide after the guest census and before this command runs.
+            continue
         if (updated.get("state"), updated.get("map")) != ("connected", area):
             return game
         if native_stock_door.LOCAL_SCOPE in updated:
