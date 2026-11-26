@@ -4468,9 +4468,8 @@ async def verify_stock_castaway_dialogue(host: Seat, guest: Seat, pawn: str) -> 
     await wait_resident_status(guest_run, lambda frame: ready(frame, shop) and shop_view(frame).get("wallet") == wallet - int(price))
     assert (await submit(guest_run, "native-shop-view-fixture", target="back"))["ok"]
     await wait_resident_status(guest_run, lambda frame: shop_view(frame).get("state") in (None, "closed"))
-    position = tuple(map(float, (await castaway(host, "regular")).split(",")))
-    await wait_resident_status(guest_run, lambda frame: math.dist(
-        frame.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), position) < 40)
+    await castaway(host, "regular")
+    assert await stock_menu(guest, "near") == ["near"]
     regular = f"Shop_BP_C {native_dialogue.LEVEL}Shop_BP_C_2"
     opened = await submit(guest_run, "native-shop-view-fixture", target="open")
     assert opened["ok"], opened

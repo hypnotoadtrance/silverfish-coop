@@ -17,12 +17,12 @@ local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
 local function exact(value, path) return valid(value) and same(value:GetClass(), StaticFindObject(path)) end
 
-local function stage(pawn, component)
+local function stage(pawn, component, offsets)
     local origin = component:K2_GetComponentLocation()
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local height = pawn.CapsuleComponent:GetScaledCapsuleHalfHeight()
     local color = {R=0, G=0, B=0, A=0}
-    for _, offset in ipairs({{0, 120}, {120, 0}, {0, -120}, {-120, 0}}) do
+    for _, offset in ipairs(offsets) do
         local x, y = origin.X + offset[1], origin.Y + offset[2]
         local out = {}
         if trace:LineTraceSingle(pawn, {X=x, Y=y, Z=origin.Z+160}, {X=x, Y=y, Z=origin.Z-210},
@@ -53,7 +53,7 @@ local function inspect(action)
         local npc = StaticFindObject(level .. "NPC_Castaway_C_1")
         assert(pawn:HasAuthority() and #stack == 0 and valid(npc) and npc.Alive and npc:HasAuthority()
             and same(npc:GetWorld(), world) and same(npc.Sphere_Interact:GetOwner(), npc))
-        stage(pawn, npc.Sphere_Interact)
+        stage(pawn, npc.Sphere_Interact, {{0, 120}, {120, 0}, {0, -120}, {-120, 0}})
         npc:SendInteractionToActor(pawn, npc.Sphere_Interact)
         return "started"
     elseif action == "choices" then
@@ -115,7 +115,12 @@ local function inspect(action)
         assert(pawn:HasAuthority() and valid(merchant) and links:GetArrayNum() == 1)
         local guest = links[1].PlayerController.Pawn
         assert(valid(guest) and not guest:IsLocallyControlled() and same(guest:GetWorld(), world))
-        return stage(guest, merchant.Box)
+        return stage(guest, merchant.Box, {{0, -110}, {110, 0}, {-110, 0}})
+    elseif action == "near" then
+        local merchant = StaticFindObject(level .. "Shop_BP_C_2")
+        local from, to = pawn:K2_GetActorLocation(), merchant.Box:K2_GetComponentLocation()
+        local distance = (from.X - to.X)^2 + (from.Y - to.Y)^2 + (from.Z - to.Z)^2
+        return distance < (pawn.InteractionRange - 10)^2 and "near" or "waiting"
     elseif action == "close" then
         assert(pawn:HasAuthority())
         if exact(menu, shop_screen) or exact(menu, dialogue) then controller:CloseMenu({}) end
