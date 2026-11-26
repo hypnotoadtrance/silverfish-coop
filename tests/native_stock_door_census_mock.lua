@@ -21,9 +21,11 @@ local function vector() return {X = 0, Y = 0, Z = 0} end
 local door_class = object()
 local arrow_type, mesh_type, box_type = object(), object(), object()
 local statics = object()
-function statics:GetAllActorsOfClass(world, class, result)
-    assert(class == door_class)
-    result.OutActors = world.doors
+local catalog, travel_pending = {}, false
+function SilverfishNativeListenTravelPending() return travel_pending end
+function SilverfishSnapshotNativeWorldActorPaths(address, name, kind)
+    assert(address:GetFullName() == "World " .. name and kind == "hinged-door")
+    return table.concat(catalog[address], "\n")
 end
 
 local paths = {
@@ -41,6 +43,8 @@ end
 local function make_state(name, count)
     local map = "/Game/Classes/Maps/Maps_OverWorld/" .. name
     local world = object({PersistentLevel = object(), doors = {}})
+    function world:GetFullName() return "World " .. map .. "." .. name end
+    catalog[world] = {}
     for index = 1, count do
         local path = map .. "." .. name .. ":PersistentLevel.BasicDoor_" .. index
         local door = object({Locked = false, LockBroken = false, Open = false, name = "BasicDoor_C " .. path})
@@ -67,7 +71,7 @@ local function make_state(name, count)
         end
         door.DoorMesh = part(mesh_type, door.Arrow)
         door.Box_Knob = part(box_type, door.DoorMesh)
-        world.doors[index], paths[path] = door, door
+        world.doors[index], paths[path], catalog[world][index] = door, door, path
     end
     return {map = map, world = world, server = true, listening = true}
 end
@@ -95,7 +99,8 @@ assert(qualifiers > 0 and qualifiers < 10, "qualification should stop when the g
 
 local target = state.world.doors[30]
 local command = {"request", "native-stock-door-project", state.map, target.name .. "|0|0|1|0|90|0|0|5|0"}
-assert(doors.command(command, state, "connected") and target.Open and actor_lookups == 1)
+local before_exact = actor_lookups
+assert(doors.command(command, state, "connected") and target.Open and actor_lookups == before_exact + 1)
 local exact = current_rows(doors, state, command)
 assert(#exact == 1 and exact[1][1] == "native-stock-door-state"
     and exact[1][3] == "BasicDoor_30" and exact[1][6] == 1, "the exact action must read back before ack")
@@ -114,7 +119,18 @@ frames = frames + 1
 local before = qualifiers
 assert(#current_rows(doors, state) == 30 and qualifiers == before,
     "a refresh must keep the last completed readback and start without a full scan")
+paths[catalog[state.world][1]] = nil
+travel_pending = true
+local before_travel = actor_lookups
 tick()
+assert(actor_lookups == before_travel, "a pending handoff suspends the background door scan")
+travel_pending = false
+for _ = 1, 40 do
+    tick()
+    current_rows(doors, state)
+end
+assert(#current_rows(doors, state) == 29, "a door removed after discovery must be skipped safely")
+
 local new = make_state("DeadBridge_P", 2)
 local fresh = current_rows(doors, new)
 local stable_encodes = encodes

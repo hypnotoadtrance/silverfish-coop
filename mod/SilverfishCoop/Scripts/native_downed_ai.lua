@@ -1,11 +1,11 @@
 local ai = {}
 local guest_save = require("guest_save")
+local world_path = require("world_path")
 
 local npc_path = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local aggro_path = npc_path .. ":Agro_Buffer"
 local remember_path = npc_path .. ":AddTargetToList"
 local remembered_target = "CombatTarget_7_5EB8D2544EEE9E5E6FB88485135FB2B4"
-local statics_path = "/Script/Engine.Default__GameplayStatics"
 local world, candidates, sampled_at
 local threat_session, threat_downed, threat_viewport, threat_hook
 local inactive_mask = ""
@@ -80,11 +80,9 @@ end
 local function npc_candidates(current)
     local now = os.clock()
     if not same(world, current) or now - sampled_at >= 1 then
-        local statics, class = StaticFindObject(statics_path), StaticFindObject(npc_path)
-        if not valid(statics) or not valid(class) then return {} end
-        local found = {}
-        statics:GetAllActorsOfClass(current, class, found)
-        candidates, world, sampled_at = found.OutActors or found, current, now
+        local paths = world_path.actor_paths(current, "npc")
+        if not paths then return {} end
+        candidates, world, sampled_at = paths, current, now
     end
     return candidates
 end
@@ -133,9 +131,8 @@ function ai.sync(state, phase, desired)
     sync_inactive_targets(state.world, downed)
     if standing == 0 or next(downed) == nil then return end
 
-    for _, value in ipairs(npc_candidates(state.world)) do
-        local npc = value
-        if npc and type(npc.type) == "function" and npc:type() == "RemoteUnrealParam" then npc = npc:get() end
+    for _, path in ipairs(npc_candidates(state.world)) do
+        local npc = StaticFindObject(path)
         if valid(npc) and npc:HasAuthority() and npc.Alive == true and not npc:IsActorBeingDestroyed()
             and same(npc:GetWorld(), state.world) and is_downed(npc.CombatTarget, downed) then
             -- Each stock selection discards the previous target from the

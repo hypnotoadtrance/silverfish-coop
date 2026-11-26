@@ -1,6 +1,7 @@
 local identity = {}
 
 local reference = require("replicated_actor_reference")
+local world_path = require("world_path")
 local npc_paths = {
     "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C",
     "/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C",
@@ -123,15 +124,9 @@ end
 local installed = false
 
 local function collect_existing_npcs()
-    local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
-    if not valid(statics) then return end
-    for _, path in ipairs(npc_paths) do
-        local class = StaticFindObject(path)
-        if valid(class) then
-            local output = {}
-            statics:GetAllActorsOfClass(world, class, output)
-            census[#census + 1] = {actors = output.OutActors or output, cursor = 1}
-        end
+    for _, kind in ipairs({"npc", "npc-drone", "npc-turret"}) do
+        local paths = world_path.actor_paths(world, kind)
+        if paths and #paths > 0 then census[#census + 1] = {paths = paths, cursor = 1} end
     end
 end
 
@@ -161,14 +156,13 @@ function identity.sync(state, current)
     local now = os.time()
     local batch = census[1]
     if batch then
-        local limit = math.min(batch.cursor + 7, #batch.actors)
+        local limit = math.min(batch.cursor + 7, #batch.paths)
         for index = batch.cursor, limit do
-            local npc = batch.actors[index]
-            if npc and type(npc.type) == "function" and npc:type() == "RemoteUnrealParam" then npc = npc:get() end
+            local npc = StaticFindObject(batch.paths[index])
             if exact_npc(npc) and not publish(npc) then enqueue(npc) end
         end
         batch.cursor = limit + 1
-        if batch.cursor > #batch.actors then table.remove(census, 1) end
+        if batch.cursor > #batch.paths then table.remove(census, 1) end
     end
     for address, entry in pairs(pending) do
         if now >= entry.expires or not actor_in_world(entry.actor) then

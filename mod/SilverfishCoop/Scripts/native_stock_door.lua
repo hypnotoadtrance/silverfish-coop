@@ -2,6 +2,7 @@ local doors = {}
 local guest_save = require("guest_save")
 local preview_component = require("native_preview_component")
 local stock_alert = require("native_cash_popup")
+local world_path = require("world_path")
 
 local base_path = "/Game/Assets/StaticMeshes/Doors/BasicDoor_Master.BasicDoor_Master_C"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
@@ -62,8 +63,7 @@ local function census_slice(scan, deadline)
         local candidate = scan.candidates[scan.next]
         if not candidate then break end
         scan.next = scan.next + 1
-        local actor = candidate
-        if type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
+        local actor = StaticFindObject(candidate)
         local name = identity(actor, scan.world)
         if name and (scan.phase ~= "hosting" or actor:HasAuthority()) then
             local arrow, panel, knob = components(actor)
@@ -92,11 +92,8 @@ local function census(state, phase)
     local now = os.time()
     if not pending_census and scanned_at ~= now then
         scanned_at = now
-        local base, statics = stock_class(base_path), stock_class(statics_path)
-        if not valid(base) or not valid(statics) then return actors end
-        local found = {}
-        statics:GetAllActorsOfClass(state.world, base, found)
-        local candidates = found.OutActors or found
+        local candidates = world_path.actor_paths(state.world, "hinged-door")
+        if not candidates then return actors end
         local scan = {candidates = candidates, next = 1, world = state.world, phase = phase, actors = {}, parts = {}}
         pending_census = scan
         if not periodic_sampling or #candidates <= 12 then
@@ -447,6 +444,7 @@ function doors.start(report_motion, next_sequence, status_row)
         end)
     end
     LoopInGameThreadWithDelay(16, function()
+        if type(SilverfishNativeListenTravelPending) == "function" and SilverfishNativeListenTravelPending() then return end
         if preview then
             local ok, alive = pcall(function()
                 if active_phase ~= "connected" or not valid(active_world) or not valid(preview.pivot)

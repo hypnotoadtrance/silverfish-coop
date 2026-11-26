@@ -678,12 +678,18 @@ namespace
         const auto address_expected = static_cast<Address>(lua.get_integer());
         const auto world_path = RC::to_wstring(lua.get_string());
         const auto kind = lua.get_string();
-        const auto* class_path = kind == "destructible"
-            ? STR("/Game/Assets/StaticMeshes/Destructable/Static_DestructableObject_Master_BP.Static_DestructableObject_Master_BP_C")
-            : kind == "physics-prop" ? STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C") : nullptr;
-        if (!class_path || !silverfish::world_path::object(RC::StringViewType{world_path})) return 0;
+        static constexpr std::pair<std::string_view, const RC::CharType*> bases[] = {
+            {"destructible", STR("/Game/Assets/StaticMeshes/Destructable/Static_DestructableObject_Master_BP.Static_DestructableObject_Master_BP_C")},
+            {"physics-prop", STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C")},
+            {"hinged-door", STR("/Game/Assets/StaticMeshes/Doors/BasicDoor_Master.BasicDoor_Master_C")},
+            {"npc", STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C")},
+            {"npc-drone", STR("/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C")},
+            {"npc-turret", STR("/Game/Classes/NPCs/NPC_Assets/Turret_Master_BP.Turret_Master_BP_C")},
+        };
+        const auto entry = std::ranges::find(bases, kind, [](const auto& entry) { return entry.first; });
+        if (entry == std::ranges::end(bases) || !silverfish::world_path::object(RC::StringViewType{world_path})) return 0;
         auto* world = find<Unreal::UWorld>(world_path.c_str());
-        auto* base = find<Unreal::UClass>(class_path);
+        auto* base = find<Unreal::UClass>(entry->second);
         if (!live_object(world) || address(world) != address_expected || world->GetPathName() != world_path || !base) return 0;
 
         std::vector<Unreal::AActor*> actors;
