@@ -11,11 +11,20 @@ from tools.silverfish.control import current_status
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
 
-async def enter_crossroads(host, pawn):
+async def enter_crossroads(host, pawn, *, verify_wall=False):
     route, = (route for route in AUTHORED_ROUTES if
               (route.source, route.destination, route.entrance) == (OBSERVATORY, CROSSROADS, "Obsv_Etr"))
+    blocked = {}
+    if verify_wall:
+        for participant, position in ((pawn, "near"), (pawn, "far"), ("local", "near")):
+            await host.bridge.command("native-exit-position", participant, position, route.entrance, route.actor)
+            if position == "near":
+                reply = await host.bridge.command("native-exit-wall-probe", participant, route.entrance)
+                blocked[participant] = reply["native_zone_wall"]
+                assert blocked[participant]["outcome"] == "wall", reply
     for participant, position in ((pawn, "near"), ("local", "near"), ("local", "inside")):
         await host.bridge.command("native-exit-position", participant, position, route.entrance, route.actor)
+    return blocked
 
 
 async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_trial=False):
@@ -35,7 +44,7 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
 
         performance["observatory"] = await profile_world(host, guest, OBSERVATORY, probe)
     before_travel = campaign_save_hashes(host.campaign)
-    await enter_crossroads(host, pawn)
+    blocked_departures = await enter_crossroads(host, pawn, verify_wall=profile)
 
     async def applied(intensity):
         def matches(frame):
@@ -123,5 +132,6 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
                                       "guest_stock_siren_callbacks": 1, "siren_receipt": warning,
                                       "guest_wet_particle_count": int(wet_particles)}}
     if performance:
+        result["stock_weather_travel"]["blocked_departures"] = blocked_departures
         result["crossroads_profile"] = performance
     return result
