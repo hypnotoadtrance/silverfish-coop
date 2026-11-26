@@ -2358,6 +2358,12 @@ namespace silverfish::native_interaction_input
             pawn == scope.pawn.Get() && Clock::now() < scope.expires && live_scope(scope) && standing(pawn);
     }
 
+    Unreal::UWorld* current_listen_world()
+    {
+        if (!available() || Clock::now() >= scope.expires || !live_scope(scope)) return nullptr;
+        return static_cast<Unreal::UWorld*>(scope.world.Get());
+    }
+
     Unreal::UObject* current_local_pawn(std::uintptr_t requested)
     {
         if (!available() || Clock::now() >= scope.expires || !live_scope(scope)) return nullptr;

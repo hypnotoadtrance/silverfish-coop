@@ -10,11 +10,13 @@ namespace RC::LuaMadeSimple
 namespace RC::Unreal
 {
     class UObject;
+    class UWorld;
 }
 
 namespace silverfish::native_interaction_input
 {
     bool has_current_host_press(RC::Unreal::UObject* pawn);
+    RC::Unreal::UWorld* current_listen_world();
     bool consume_current_press(RC::Unreal::UObject* pawn);
     RC::Unreal::UObject* current_local_pawn(std::uintptr_t address);
     RC::Unreal::UObject* current_guest_pawn(std::uintptr_t address);

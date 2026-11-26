@@ -1,4 +1,5 @@
 #include "datasilo_door.hpp"
+#include "interaction_input.hpp"
 #include "loot_crate_input.hpp"
 #include "shared_loot.hpp"
 #include "zone_exit.hpp"
@@ -125,12 +126,14 @@ namespace
     U::UWorld* door_world(U::AActor* actor)
     {
         auto* world = actor->GetWorld();
-        if (live(world) && actor->GetLevel() == object(world, STR("PersistentLevel"))) return world;
-        auto* level = actor->GetLevel();
-        auto* assigned = live(level) ? object(level, STR("OwningWorld")) : nullptr;
-        if (live(assigned) && assigned->GetClassPrivate() == find<U::UClass>(STR("/Script/Engine.World")))
-            world = static_cast<U::UWorld*>(assigned);
-        return silverfish::native_zone::visible_actor_level(actor, world) ? world : nullptr;
+        auto* driver = live(world) ? object(world, STR("NetDriver")) : nullptr;
+        if (live(driver) && object(driver, STR("World")) == world &&
+            (actor->GetLevel() == object(world, STR("PersistentLevel")) ||
+                silverfish::native_zone::visible_actor_level(actor, world))) return world;
+        // A streamed actor can report its asset world. The armed input lease
+        // supplies the actual listen world even for an independently loaded level.
+        auto* listen_world = silverfish::native_interaction_input::current_listen_world();
+        return silverfish::native_zone::visible_actor_level(actor, listen_world) ? listen_world : nullptr;
     }
 
     Seat seat(U::UObject* door, bool allow_ordinary = false)

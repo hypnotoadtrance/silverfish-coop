@@ -125,7 +125,7 @@ async def toggle_door(host, guest, actor, pawn, expected_open, *, inspect_during
     assert motion["time_unix"] < receipt["time_unix"], (motion, receipt)
     measured = await guest.bridge.command(door.FIXTURE, "motion", actor, update_status=False)
     first, preview, collision_kept = map(float, measured["ack"]["message"].split("|"))
-    assert 0 <= preview < first and collision_kept == 1, measured
+    assert 0 <= preview < first and collision_kept == 1, (actor, first, preview, collision_kept)
     return receipt, first, preview
 
 
