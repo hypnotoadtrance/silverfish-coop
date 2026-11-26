@@ -5816,7 +5816,7 @@ async def verify_stock_unequip(first, second, evidence):
             assert report["status"] == ("increased" if old else "added"), report
             assert report.get("units", new) == new - old
             await wait_resident_status(guest_run, lambda frame: not frame.get("game", {}).get("native_inventory_grant_ready"))
-            read = await portable_probe_command(host.bridge, probe, f"remote-typed-read\t{pawn}\t{guid}\t")
+            read = await portable_probe_command(host.bridge, probe, f"remote-stock-stack-read\t{pawn}\t{guid}\t")
             assert read == await portable_probe_command(guest.bridge, probe, f"guest-read-stock-grant\t{guid}")
             if old:
                 replay = f"{new - old}@{report['operation_id']}"

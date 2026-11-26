@@ -314,7 +314,8 @@ local function run(action, argument)
         local ok, text = SilverfishExportLocalInventoryItem(address, save, guid)
         assert(ok, text)
         return guid .. "@" .. text
-    elseif action == "remote-typed-grant" or action == "remote-typed-read" or action == "remote-stock-stack-replay" then
+    elseif action == "remote-typed-grant" or action == "remote-typed-read"
+        or action == "remote-stock-stack-read" or action == "remote-stock-stack-replay" then
         assert(not guest and #driver.ClientConnections == 1, "one enrolled guest required")
         local name, guid, text = argument:match("^Player_FP_C (.-)\t([0-9A-F]+)\t(.*)$")
         local remote = name and StaticFindObject(name)
@@ -335,11 +336,13 @@ local function run(action, argument)
         end
         local ok, encoded = SilverfishExportDetachedInventoryItem(address, save, guid)
         assert(ok, encoded)
+        local is_stack = action == "remote-stock-stack-read" or action == "remote-stock-stack-replay"
+        local expected_class = asset(is_stack and grant_stack_class or grant_class)
         local matches = 0
         for index = 1, remote.Save.PlayerBackpack:GetArrayNum() do
             local row = remote.Save.PlayerBackpack[index]
             if identity(row) == guid then
-                assert(same(row[item_class], asset(grant_class)))
+                assert(same(row[item_class], expected_class))
                 matches = matches + 1
             end
         end
