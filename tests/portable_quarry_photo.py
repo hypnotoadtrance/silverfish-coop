@@ -26,7 +26,7 @@ async def verify_quarry_photo(host, guest, pawn, probe):
         return await probe(seat.bridge, "portable-quarry-photo", action)
 
     async def shutter_count(seat):
-        return int(await probe(seat.bridge, "avatar-probe", "shuttercount"))
+        return int(await probe(seat.bridge, "avatar-probe", "shuttercount\n"))
 
     guid = await command(host, "seed")
     assert valid_guid(guid), guid

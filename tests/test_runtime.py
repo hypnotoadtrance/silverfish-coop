@@ -15,6 +15,18 @@ from tools.silverfish.control import Control
 
 
 class LocalBridgeInputTests(unittest.TestCase):
+    def test_host_camera_uses_resident_input_alongside_guest_primary(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        area = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
+        guid = "A" * 32
+        host = f"native-host-camera-intent\t1\t{area}\tHost pawn\t{guid}".encode()
+        guest = f"native-guest-primary-intent\t2\t{area}\tGuest pawn\t{guid}\tcamera".encode()
+        bridge.local_bridge = Mock(input_ready=Mock(side_effect=[True, False, False]),
+                                   read_input=Mock(return_value=[host, guest]))
+        self.assertEqual(bridge.native_host_camera_requests(), [(1, area, "Host pawn", guid)])
+        self.assertEqual(bridge._take_local_inputs(bridge._local_primary_records), [guest])
+        self.assertEqual(bridge.native_host_camera_requests(), [])
+
     def test_reads_only_the_requested_batch_and_preserves_record_boundaries(self):
         library = Mock()
         bridge = LocalBridge(library)

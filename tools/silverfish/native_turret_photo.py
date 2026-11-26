@@ -177,7 +177,7 @@ async def stock_shutter(host, bridge, character, target, operation):
         raise party.RuleError("native_stock_photo_shutter_cooling_down")
     host.camera_ready_at[character] = now + 3
 
-    host.transitioning = True
+    host.transitioning = host.stock_photo_in_progress = True
     try:
         host.native_checkpoint_unsafe = True
         try:
@@ -212,7 +212,7 @@ async def stock_shutter(host, bridge, character, target, operation):
             host.stopping = True
         raise
     finally:
-        host.transitioning = False
+        host.transitioning = host.stock_photo_in_progress = False
 
 
 async def aim_host_fixture(host, bridge, target):

@@ -384,6 +384,7 @@ class Host:
         self.zone_epoch = uuid.uuid4().hex
         self.gameplay_snapshots = gameplay_snapshot.HostSnapshots()
         self.transitioning = False
+        self.stock_photo_in_progress = False
         self.loading_zone: str | None = None
         self.zone_fade_from: str | None = None
         self.awaiting_zone_guest = None

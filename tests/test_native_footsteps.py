@@ -13,7 +13,7 @@ AREA = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 class HostFootstepsTests(unittest.TestCase):
     def setUp(self):
         self.host = SimpleNamespace(
-            zone_epoch=VISIT, transitioning=False, stopping=False, last_seen=10,
+            zone_epoch=VISIT, transitioning=False, stock_photo_in_progress=False, stopping=False, last_seen=10,
             last_game={"state": "hosting", "map": AREA, "pawns": {"local": {"name": "host pawn"}},
                        feet.OUTFITS: {"3": {"pawn": "host pawn"}, "8": {"pawn": "guest pawn"}}},
             authenticated_guest=lambda guest: (guest, guest) if guest in {"sender", "listener"} else None,
@@ -70,6 +70,7 @@ class HostFootstepsTests(unittest.TestCase):
     def test_shutter_and_footstep_relay_in_same_tick_without_echo_or_replay(self):
         self.steps.receive("sender", self.upload())
         shutter = self.upload(serial=2, cue=b"CameraShutter")
+        self.host.transitioning = self.host.stock_photo_in_progress = True
         self.steps.receive("sender", shutter)
         self.steps.receive("sender", shutter)
         self.assertEqual(self.transport.send_footstep.call_count, 2)

@@ -85,7 +85,8 @@ class HostFootsteps:
 
     def _current(self):
         game, now = self.host.last_game, time.monotonic()
-        scope = _scope(self.host, game) if (game.get("state") == "hosting" and not self.host.transitioning
+        same_visit = not self.host.transitioning or self.host.stock_photo_in_progress
+        scope = _scope(self.host, game) if (game.get("state") == "hosting" and same_visit
                                             and not self.host.stopping and now - self.host.last_seen < 1.5) else None
         if scope != self.scope:
             self.scope = scope
@@ -158,8 +159,7 @@ async def follow(client):
     while not client.stopping:
         game = client.last_game
         scope = _scope(client, game) if (transport.game_access and game.get("state") == "connected"
-                                         and game.get("map") == client.expected_zone and not client.needs_travel
-                                         and not client.server_transitioning) else None
+                                         and game.get("map") == client.expected_zone and not client.needs_travel) else None
         frame, packets = mailbox.take_local_weapon_cues(), transport.take_footsteps()
         if scope != previous:
             previous = scope
@@ -173,6 +173,8 @@ async def follow(client):
                 except UnicodeError:
                     local = ""
                 for serial, cue, volume, pitch in _local(local, area, pawn):
+                    if client.server_transitioning and cue != "CameraShutter":
+                        continue
                     transport.send_footstep(_UPLOAD.pack(visit, serial, volume, pitch) + cue.encode("ascii"))
             steps, now = [], time.monotonic()
             local_player = _player_id(game, pawn)
@@ -182,6 +184,7 @@ async def follow(client):
                     continue
                 (epoch, player, serial, volume, pitch), cue = decoded
                 if (epoch != visit or player > 2147483647 or player == local_player
+                        or (client.server_transitioning and cue != "CameraShutter")
                         or not _valid(serial, cue, volume, pitch)):
                     continue
                 key = player, cue == "CameraShutter"
