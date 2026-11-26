@@ -111,17 +111,20 @@ class OrderlySessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_host_end_announces_only_after_exact_paired_commit(self):
         with CampaignStore(Path(self.enterContext(tempfile.TemporaryDirectory())) / "save") as store:
             invite = store.issue_invitation("Alice", "Scout")
+            second = store.issue_invitation("Kellan", "Runner")
+            third = store.issue_invitation("Nora", "Cook")
+            guests = [entry["character_id"] for entry in (invite, second, third)]
             host = self.host(store, invite)
-            host.roles = lambda: {"host": "host", "guest": invite["character_id"]}
-            relay = SimpleNamespace(announce_session_end=AsyncMock(return_value=1))
+            host.roles = lambda: {"host": "host", **dict(zip(("guest", "guest2", "guest3"), guests, strict=True))}
+            relay = SimpleNamespace(announce_session_end=AsyncMock(return_value=3))
             host.checkpoint_native.side_effect = RuntimeError("Missing exact guest frame")
             with self.assertRaisesRegex(RuntimeError, "Missing exact guest frame"):
                 await host.end_session("bridge", relay)
             relay.announce_session_end.assert_not_awaited()
             self.assertFalse(host.stopping or host.transitioning)
             host.checkpoint_native.side_effect = None
-            self.assertEqual(await host.end_session("bridge", relay), {"revision": 17, "peers_acknowledged": 1})
-            host.checkpoint_native.assert_awaited_with("bridge", require_guest_frames=frozenset({invite["character_id"]}))
+            self.assertEqual(await host.end_session("bridge", relay), {"revision": 17, "peers_acknowledged": 3})
+            host.checkpoint_native.assert_awaited_with("bridge", require_guest_frames=frozenset(guests))
             relay.announce_session_end.assert_awaited_once_with(SESSION, 17)
             self.assertTrue(host.stopping)
             self.assertEqual(host.session_stop_reason, "host_session_ended")
