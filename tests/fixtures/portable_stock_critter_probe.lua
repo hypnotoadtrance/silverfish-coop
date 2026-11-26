@@ -53,19 +53,22 @@
             if valid(controller) then controller:StopMovement() controller:SetActorTickEnabled(false) end
             local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
             local color = {R=0,G=0,B=0,A=0}
+            local function ground_at(player, x, y)
+                local hit = {}
+                if trace:LineTraceSingle(player, {X=x,Y=y,Z=point.Z+120}, {X=x,Y=y,Z=point.Z-300}, 0, true,
+                    {actor, pawn, remote}, 0, hit, true, color, color, 0) then
+                    local floor = (hit.OutHit or hit).ImpactPoint
+                    if floor then return {X=x,Y=y,Z=floor.Z+player.CapsuleComponent:GetScaledCapsuleHalfHeight()+3} end
+                end
+            end
             for step = 0, 11 do
                 local angle = step * math.pi / 6
                 local x, y = point.X + 125 * math.cos(angle), point.Y + 125 * math.sin(angle)
-                local hit = {}
-                if trace:LineTraceSingle(remote, {X=x,Y=y,Z=point.Z+90}, {X=x,Y=y,Z=point.Z-200}, 0, true,
-                    {actor, pawn, remote}, 0, hit, true, color, color, 0) then
-                    local floor = (hit.OutHit or hit).ImpactPoint
-                    local target = floor and {X=x,Y=y,Z=floor.Z+remote.CapsuleComponent:GetScaledCapsuleHalfHeight()+3}
-                    if target and remote:K2_TeleportTo(target, remote:K2_GetActorRotation()) and focus(remote) then
-                        local host_x, host_y = 2 * x - point.X, 2 * y - point.Y
-                        assert(pawn:K2_TeleportTo({X=host_x,Y=host_y,Z=target.Z+30}, pawn:K2_GetActorRotation()))
-                        return ("%f,%f,%f"):format(target.X,target.Y,target.Z)
-                    end
+                local target = ground_at(remote, x, y)
+                local host_target = ground_at(pawn, 2 * x - point.X, 2 * y - point.Y)
+                if target and host_target and remote:K2_TeleportTo(target, remote:K2_GetActorRotation())
+                    and pawn:K2_TeleportTo(host_target, pawn:K2_GetActorRotation()) and focus(remote) then
+                    return ("%f,%f,%f"):format(target.X,target.Y,target.Z)
                 end
             end
             error("no clear stock interaction focus on the frog", 0)
