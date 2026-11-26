@@ -131,6 +131,11 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
                         and "native_zone_loading_cover" not in game and game.get("pawns", {}).get("local", {}).get("name"))
 
             settled = await wait_resident_status(guest_run, ready_after_travel)
+            loading, = [event for event in await resident_events(guest_run, settled)
+                        if event.get("event") == "native_zone_loading_transition"
+                        and event.get("destination") == CROSSROADS]
+            assert loading["covered"] and loading["cue"], loading
+            performance["crossroads_loading"] = loading
             pawn_name = settled["game"]["pawns"]["local"]["name"]
             performance["crossroads_clock"] = await verify_stock_clock(guest_run, CROSSROADS, settled["zone_epoch"], pawn_name)
             performance["crossroads"] = await profile_world(host, guest, CROSSROADS, probe, gc_trial=gc_trial)
