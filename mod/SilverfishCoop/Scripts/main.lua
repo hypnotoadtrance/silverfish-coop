@@ -574,6 +574,7 @@ local function run_command(fields, state, current_phase)
         end
         if native_stock_creator.guest_busy() then error("Finish returning from the co-op guest creator first", 0) end
         native_save_scope.release(argument)
+        wallet.release()
         native_title_entry.refresh_singleplayer(context)
         native_fresh_campaign.clear()
         native_stock_creator.clear_host()

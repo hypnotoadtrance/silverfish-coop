@@ -172,6 +172,10 @@ function wallet.command(fields, state, phase)
     return ("%d %d"):format(sequence, total)
 end
 
+function wallet.release()
+    guest, ledger_session, reports = nil, nil, nil
+end
+
 function wallet.rows(state, phase, status_row)
     if phase == "connected" and save_scope.selected() then
         local ok, amount, address = pcall(function()

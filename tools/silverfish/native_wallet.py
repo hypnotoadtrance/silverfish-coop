@@ -48,7 +48,11 @@ async def settle(host, bridge, character, target, operation):
         raise party.RuleError("guest_wallet_unavailable")
 
     snapshot = await bridge.command(REPORT, session, owner, stream, str(sequence), str(total), timeout=3)
-    accepted, applied = parse_sequence(*snapshot.get("ack", {}).get("message", "").split(" "))
+    message = snapshot.get("ack", {}).get("message")
+    counters = message.split(" ") if isinstance(message, str) else ()
+    if len(counters) != 2:
+        raise RuntimeError("The stock wallet receipt did not include its counters")
+    accepted, applied = parse_sequence(*counters)
     balance = snapshot.get("native_wallet")
     if ((snapshot.get("state"), snapshot.get("map")) != ("hosting", host.last_game.get("map"))
             or type(balance) is not int or not MIN_CASH <= balance <= MAX_CASH
