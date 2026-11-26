@@ -7,6 +7,7 @@ local mama = require("native_dialogue_mama")
 local sewer = require("native_dialogue_sewer")
 local sewer_stock = require("native_sewer_stock_screen")
 local castaway_stock = require("native_castaway_stock_screen")
+local castaway = require("native_dialogue_castaway")
 local shop_view = require("native_shop_view")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
@@ -14,24 +15,9 @@ local embedded = os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local title_fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
-local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
-local world_path = observatory .. ".Observitory_P"
-local level = world_path .. ":PersistentLevel."
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local widget_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
-local root, story = "Cast_Root", "Cast_Origin"
-local castaway = {
-    id = "castaway", title = "Castaway", map = observatory, world = world_path, root = root,
-    npc = level .. "NPC_Castaway_C_1", npc_kind = "NPC_Castaway_C",
-    npc_class = "/Game/Classes/NPCs/NPC_Characters/NPC_Castaway.NPC_Castaway_C",
-    component = "Sphere_Interact", component_class = "/Script/Engine.SphereComponent",
-    controller = level .. "Dialogue_Controler_BP_C_3", receiver = level .. "GlobalPing_ScriptingReciver_BP_C_3",
-    source = "/Game/Classes/Libraries/Tables_Dialogue/Dialogue_Observatory.Dialogue_Observatory",
-    row_order = {root, story},
-    rows = {[root] = {lines = 1, choices = {1, 3}, next = {[1] = false, [3] = story}, count = 3},
-        [story] = {lines = 3, choices = {1}, next = {[1] = root}, count = 1, continuation = true}},
-}
-local profiles = {[observatory] = castaway, [mosby.map] = mosby, [shopkeep.map] = shopkeep, [mama.map] = mama, [sewer.map] = sewer}
+local profiles = {[castaway.map] = castaway, [mosby.map] = mosby, [shopkeep.map] = shopkeep, [mama.map] = mama, [sewer.map] = sewer}
 
 local npc_lines = "NPC_Dialogue_3_CE4B2EF741973F79EF3C89BB03B96687"
 local responses = "PlayerResponces_6_DA452ED342AF8EEEC7BD299C134AF0F3"
@@ -420,9 +406,10 @@ local function host_command(fields, state, phase)
     local shop_cash = action == "native-dialogue-shopkeep-cash"
     local mama_trade = action == "native-dialogue-mama-trade"
     local sewer_trade = action == "native-dialogue-sewer-trade"
+    local castaway_trade = action == "native-dialogue-castaway-trade"
     if (commit and #fields ~= 12 and #fields ~= 16)
         or (not commit and #fields ~= (readings_open and 14 or mama_open and 8 or shop_open and 7
-            or (shop_cash or mama_trade or sewer_trade) and 6 or approach_exit and 4 or 3)) then
+            or (shop_cash or mama_trade or sewer_trade or castaway_trade) and 6 or approach_exit and 4 or 3)) then
         reject("arguments_unqualified")
     end
     local pawn, profile, npc, target, component, connection = guest_context(state, phase, name)
@@ -430,6 +417,7 @@ local function host_command(fields, state, phase)
     if (action == "native-dialogue-mama-open" or mama_trade) and profile ~= mama then reject("mama_scope_unavailable") end
     if (sewer_open or sewer_trade) and profile ~= sewer then reject("sewer_scope_unavailable") end
     if readings_open and profile ~= mosby then reject("readings_scope_unavailable") end
+    if castaway_trade and profile ~= castaway then reject("castaway_scope_unavailable") end
     if action == "native-dialogue-approach" then
         if not (headless and (fixtures or profile == castaway and title_fixtures)) then reject("approach_unavailable") end
         local location, floor = target:K2_GetActorLocation(), npc:K2_GetActorLocation().Z
@@ -482,13 +470,15 @@ local function host_command(fields, state, phase)
             reject(profile.id .. "_open_scope_changed")
         end
         progress, effect_name = profile.open(context, progress)
-    elseif shop_cash or mama_trade or sewer_trade then
+    elseif shop_cash or mama_trade or sewer_trade or castaway_trade then
         local row, ordinal = fields[4], math.tointeger(tonumber(fields[5]))
         local effect = profile.effects[row] and profile.effects[row][ordinal]
         if not effect or not effect.ping or not rows[row].choices[ordinal] or identity ~= fields[6] then
             reject(profile.id .. "_trade_scope_changed")
         end
-        if shop_cash then
+        if castaway_trade then
+            castaway.grant(state, pawn, connection)
+        elseif shop_cash then
             profile.grant_cash(state, phase, pawn, connection, context)
             effect_name = "cash-granted"
         else
@@ -551,10 +541,12 @@ function dialogue.command(fields, state, phase)
         or action == "native-dialogue-mosby-readings-open"
         or action == "native-dialogue-shopkeep-open" or action == "native-dialogue-shopkeep-cash"
         or action == "native-dialogue-mama-open" or action == "native-dialogue-mama-trade"
-        or action == "native-dialogue-sewer-open" or action == "native-dialogue-sewer-trade" then
+        or action == "native-dialogue-sewer-open" or action == "native-dialogue-sewer-trade"
+        or action == "native-dialogue-castaway-trade" then
         return host_command(fields, state, phase)
     end
-    local handoff = action == "native-dialogue-shopkeep-view"
+    local castaway_handoff = action == "native-dialogue-castaway-shop"
+    local handoff = action == "native-dialogue-shopkeep-view" or castaway_handoff
     local trade_view = action == "native-dialogue-sewer-offers"
     if action ~= "native-dialogue-render" and action ~= "native-dialogue-stock-fixture" and not handoff and not trade_view then return end
     local current = local_context(state, phase)
@@ -608,16 +600,19 @@ function dialogue.command(fields, state, phase)
     end
     if handoff then
         local sequence = math.tointeger(tonumber(fields[3]))
-        local effect = session and session.content and shopkeep.effects[session.row]
+        local profile = castaway_handoff and castaway or shopkeep
+        local effect = session and session.content and profile.effects[session.row]
         effect = effect and effect[session.content.ordinals[selected]]
-        if current.profile ~= shopkeep or #fields ~= 4 or not session or not session.pending
+        if current.profile ~= profile or #fields ~= 4 or not session or not session.pending
             or not effect or not effect.ping or session.sequence ~= sequence or session.token ~= fields[4]
-            or session.expires <= os.time() or not shop_view.reception_pending(state, phase, sequence) then
-            reject("shopkeep_client_handoff_unavailable")
+            or session.expires <= os.time() then reject(profile.id .. "_client_handoff_unavailable") end
+        if castaway_handoff then castaway_stock.close() end
+        if not shop_view.reception_pending(state, phase, sequence, castaway_handoff) then
+            reject(profile.id .. "_client_handoff_unavailable")
         end
         session = nil
         hide()
-        return "exact ShopKeep dialogue opened the local merchant view"
+        return "exact " .. profile.title .. " dialogue opened the local merchant view"
     end
     if action == "native-dialogue-stock-fixture" then
         local target = fields[3]

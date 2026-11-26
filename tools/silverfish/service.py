@@ -2203,7 +2203,9 @@ class Host:
                 return {"ok": False, "error": "invalid_operation_id"}
             handler = self.smg_holds.aim if action == native_smg_hold.AIM_ACTION else self.smg_holds.authenticated
             return handler(guest_id, request["target"])
-        if action in GUEST_NATIVE_ACTIONS and set(request) == {"action", "operation_id", "target"}:
+        if action in GUEST_NATIVE_ACTIONS and (set(request) == {"action", "operation_id", "target"}
+                or action in native_finite_shop.ACTIONS and set(request) == {"action", "operation_id", "target", "merchant"}
+                and request["merchant"] == native_finite_shop.CASTAWAY_ACTOR):
             return self.enqueue_native_request(guest_id, request)
         if action not in ("interact", "buy", "keep") or set(request) - {"action", "operation_id", "target", "retained"}:
             return {"ok": False, "error": "action_unavailable"}
@@ -2435,7 +2437,8 @@ class Host:
             elif action == "native-wipe-recover":
                 result = await native_inventory_death.recover(self, bridge, character, target, request["operation_id"])
             elif action in native_finite_shop.ACTIONS:
-                result = await native_finite_shop.perform(self, bridge, character, action, target, request["operation_id"])
+                result = await native_finite_shop.perform(self, bridge, character, action, target, request["operation_id"],
+                                                          merchant=request.get("merchant"))
             elif action in (native_npc_barter.OPEN, native_npc_barter.EXCHANGE):
                 result = await native_npc_barter.perform(self, bridge, character, action, target, request["operation_id"])
             elif action == native_loose_pickup.CLAIM:
@@ -5601,7 +5604,7 @@ class Client:
         return {"revision": receipt["revision"], "retirement_confirmed": confirmed}
 
     async def gameplay_action(self, action: str, operation_id: str, target: str | None,
-                              retained: dict | None = None) -> dict:
+                              retained: dict | None = None, *, merchant: str | None = None) -> dict:
         if not self.transport.connected or (action != "keep" and self.last_game.get("state") != "connected"):
             raise RuntimeError("game_connection_unavailable")
         area, epoch, session = self.last_game.get("map"), self.zone_epoch, self.host_session
@@ -5618,6 +5621,8 @@ class Client:
               or action in native_stock_door.PRY_ACTIONS.values()):
             target = f"{self.zone_epoch}@{target}"
         request = {"action": action, "operation_id": operation_id, "target": target}
+        if merchant is not None:
+            request["merchant"] = merchant
         if action == "keep":
             request["retained"] = retained
         timeout = link.checkpoint_action_timeout(request) or (7 if action in GUEST_NATIVE_ACTIONS else 4)

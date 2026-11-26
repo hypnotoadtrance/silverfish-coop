@@ -12,6 +12,7 @@ from .travel import OBSERVATORY, SCIENTIST_SHOP, SHOPKEEP
 
 
 ACTOR = f"Shop_BP_C {OBSERVATORY}.Observitory_P:PersistentLevel.Shop_BP_C_2"
+CASTAWAY_ACTOR = f"Shop_BP_C {OBSERVATORY}.Observitory_P:PersistentLevel.Shop_BP_C_3"
 SCAV_BAR = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"
 BLACK_MARKET = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
 GUNSMITH = "/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P"
@@ -34,6 +35,10 @@ STOCK_REVISION = "native_finite_shop_stock_revision"
 
 def valid_stock_revision(value) -> bool:
     return type(value) is int and 0 < value < 2**53
+
+
+def merchant_in_map(area, actor) -> bool:
+    return isinstance(actor, str) and (actor == MERCHANTS.get(area) or (area, actor) == (OBSERVATORY, CASTAWAY_ACTOR))
 
 
 def parse_stock_revision(fields, phase, area) -> dict:
@@ -70,11 +75,12 @@ def parse_item(fields: list[str]) -> dict:
     return item
 
 
-def matching_report(snapshot: dict, area: str, pawn: str, expected_state: str, *, guest: bool) -> dict:
+def matching_report(snapshot: dict, area: str, pawn: str, expected_state: str, *, guest: bool, merchant=None) -> dict:
     report = snapshot.get("native_finite_shop", {})
     offers = report.get("offers")
     if (snapshot.get("state") != "hosting" or snapshot.get("map") != area
-            or tuple(report.get(key) for key in ("state", "map", "pawn", "actor")) != (expected_state, area, pawn, MERCHANTS[area])
+            or tuple(report.get(key) for key in ("state", "map", "pawn", "actor")) != (
+                expected_state, area, pawn, merchant or MERCHANTS[area])
             or type(offers) is not list or report.get("count") != len(offers) or len(offers) > 128
             or any(type(report.get(key)) is not int or not 0 <= report[key] <= MAX_PRICE for key in (
                 "wallet_before", "wallet_after", "merchant_cash_before", "merchant_cash_after"))):
@@ -101,7 +107,7 @@ def matching_report(snapshot: dict, area: str, pawn: str, expected_state: str, *
     return report
 
 
-async def perform(host, bridge, character: str, action: str, target: str | None, operation_id: str) -> dict:
+async def perform(host, bridge, character: str, action: str, target: str | None, operation_id: str, *, merchant=None) -> dict:
     area = host.last_game.get("map")
     if (not host.native_zones or not host.native_guest or host.native_profile is None or host.stopping
             or host.transitioning or host.native_checkpoint_unsafe or host.last_game.get("state") != "hosting"
@@ -110,6 +116,9 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
     if not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
         raise party.RuleError("invalid_operation_id")
     guest = character != "host"
+    if merchant is not None and (not guest or (area, merchant) != (OBSERVATORY, CASTAWAY_ACTOR)):
+        raise party.RuleError("native_finite_shop_merchant_unavailable")
+    merchant_args = (merchant,) if merchant is not None else ()
     if not guest:
         if area != SCIENTIST_SHOP or action not in ACTIONS[:2]:
             raise party.RuleError("native_scientist_host_camera_purchase_only")
@@ -144,6 +153,8 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
                 or len(raw_price) > 10 or (price := int(raw_price)) > MAX_PRICE):
             raise party.RuleError("native_finite_shop_requires_guid_and_price")
         fingerprint = [action, guid, price]
+        if merchant is not None:
+            fingerprint.append(merchant)
         if chosen_amount:
             if (sale or not guest or not raw_quantity.isascii() or not raw_quantity.isdigit()
                     or len(raw_quantity) > 10 or not 1 <= (selected_quantity := int(raw_quantity)) <= MAX_PRICE):
@@ -161,12 +172,12 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         preflight = "native-finite-shop-list"
         arguments = (pawn,)
     try:
-        snapshot = await bridge.command(preflight, *arguments, timeout=6)
+        snapshot = await bridge.command(preflight, *arguments, *merchant_args, timeout=6)
     except RuntimeError as error:
         if str(error).startswith("finite_shop_refused_"):
             raise party.RuleError(str(error)) from error
         raise
-    listing = matching_report(snapshot, area, pawn, "sale-quote" if sale else "listed", guest=guest)
+    listing = matching_report(snapshot, area, pawn, "sale-quote" if sale else "listed", guest=guest, merchant=merchant)
     if (listing["wallet_before"] != listing["wallet_after"] or listing["merchant_cash_before"] != listing["merchant_cash_after"]
             or sale and (len(listing["offers"]) != 1 or listing["offers"][0]["guid"] != guid
                          or listing["offers"][0]["price"] != listing["offers"][0]["value"])):
@@ -212,13 +223,14 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
     try:
         try:
             invocation = "native-finite-shop-buy-quantity" if selected_quantity is not None else action
-            snapshot = await bridge.command(invocation, pawn, guid, str(quantity), str(price), str(wallet), timeout=7)
+            snapshot = await bridge.command(invocation, pawn, guid, str(quantity), str(price), str(wallet),
+                                            *merchant_args, timeout=7)
         except RuntimeError as error:
             if str(error).startswith("finite_shop_refused_"):
                 host.native_checkpoint_unsafe = False
                 raise party.RuleError(str(error)) from error
             raise
-        proof = matching_report(snapshot, area, pawn, "sold" if sale else "purchased", guest=guest)
+        proof = matching_report(snapshot, area, pawn, "sold" if sale else "purchased", guest=guest, merchant=merchant)
         reported = proof["offers"]
         shelf_classes = {SCIENTIST_SHOP: (CAMERA, BLANK_CLASS), GUNSMITH: (BALL_AMMO,), SMUGGLER: (MRE_CLASS,)}
         reusable = offer.get("source") == "shelf"

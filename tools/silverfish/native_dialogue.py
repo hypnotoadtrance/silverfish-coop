@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import time
 import uuid
 
-from . import native_sewer_barter, party
+from . import native_finite_shop, native_sewer_barter, party
 from .travel import BOROUGH, CISTERN, OBSERVATORY, SCIENTIST_SHOP, SHOPKEEP
 
 
@@ -18,7 +18,8 @@ READ, RENDER, COMMIT = "native-dialogue-read", "native-dialogue-render", "native
 APPROACH, FIXTURE = "native-dialogue-approach", "native-dialogue-stock-fixture"
 HEARTBEAT = "native-dialogue-heartbeat"
 ROOT, STORY = "Cast_Root", "Cast_Origin"
-ROWS = {ROOT: (1, {1: None, 3: STORY}), STORY: (3, {1: ROOT})}
+ROWS = {ROOT: (1, {1: None, 2: None, 3: STORY}), STORY: (3, {1: ROOT})}
+CASTAWAY_TRADE, CASTAWAY_SHOP = "native-dialogue-castaway-trade", "native-dialogue-castaway-shop"
 MOSBY = "mosby"
 MOSBY_LEVEL = SCIENTIST_SHOP + ".Shop_Scientist_01:PersistentLevel."
 MOSBY_NPC = "NPC_DrMosby_C " + MOSBY_LEVEL + "NPC_DrMosby_C_1"
@@ -462,6 +463,14 @@ class DialogueSessions:
             if profile.id == MOSBY and (session.row, ordinal) in EFFECTS:
                 stock, effect, revision = await self._commit(host, bridge, character, scope, stock, session.row, ordinal)
                 now = time.monotonic()
+            elif profile.id == PROFILE and (session.row, ordinal) == (ROOT, 2):
+                if not host.native_shop_view:
+                    raise party.RuleError("native_castaway_shop_unavailable")
+                observed = await self._read(host, bridge, profile, scope[-2], command=CASTAWAY_TRADE,
+                                            arguments=(session.row, str(ordinal), scope[-1]))
+                if observed["connection"] != scope[-1] or self._scope(host, character, time.monotonic()) != scope[:4]:
+                    raise RuntimeError("The stock Castaway cash reception did not verify")
+                stock, effect = observed, "cash-granted"
             elif profile.id == SHOPKEEP_PROFILE:
                 observed = await self._read(host, bridge, profile, scope[-2], command=SHOPKEEP_CASH,
                                             arguments=(session.row, str(ordinal), scope[-1]))
@@ -520,6 +529,7 @@ class DialogueView:
         self.pending = None
         self.maps = supported_maps(mosby, shopkeep, mama, sewer)
         self.shopkeep_view = shopkeep and shopkeep_view
+        self.castaway_view = shopkeep_view
 
     async def sync(self, snapshot, epoch, active, action):
         events = self.bridge.native_dialogue_requests()
@@ -557,12 +567,16 @@ class DialogueView:
             text = () if row == SEWER_OFFERS else render_text(reply, profile, row)
             cash_handoff = (self.shopkeep_view and profile.id == SHOPKEEP_PROFILE and verb == CHOOSE
                             and reply.get("effect") == "cash-granted" and row == SHOPKEEP_ROOT)
-            if cash_handoff:
-                rendered = await self.bridge.command(SHOPKEEP_VIEW, str(sequence), token, timeout=3)
+            castaway_handoff = (self.castaway_view and profile.id == PROFILE and verb == CHOOSE
+                                and reply.get("effect") == "cash-granted" and choice == "2" and row is None)
+            if cash_handoff or castaway_handoff:
+                command, actor = (CASTAWAY_SHOP, native_finite_shop.CASTAWAY_ACTOR) if castaway_handoff else (
+                    SHOPKEEP_VIEW, SHOPKEEP_COUNTER)
+                rendered = await self.bridge.command(command, str(sequence), token, timeout=3)
                 proof = rendered.get("native_shop_view", {})
                 if tuple(proof.get(field) for field in ("pawn", "sequence", "map", "actor", "state")) != (
-                        pawn, sequence, SHOPKEEP, SHOPKEEP_COUNTER, "pending"):
-                    raise RuntimeError("The ShopKeep dialogue did not open its exact local merchant")
+                        pawn, sequence, profile.map, actor, "pending"):
+                    raise RuntimeError("The dialogue did not open its exact local merchant")
             else:
                 if row == SEWER_OFFERS:
                     offers = reply.get("offers")

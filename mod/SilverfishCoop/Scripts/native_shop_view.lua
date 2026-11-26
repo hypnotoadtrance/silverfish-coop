@@ -1,6 +1,7 @@
 local view = {}
 local interaction_lease = require("guest_interaction_lease")
 local shopkeep = require("native_dialogue_shopkeep")
+local castaway = require("native_dialogue_castaway")
 local focus_fixture = require("native_shop_focus_fixture")
 local stock = require("native_shop_stock")
 
@@ -8,6 +9,8 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1" and os.getenv("S
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local embedded = os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") == "1"
 local profiles = {}
+local castaway_shop = {map = castaway.map, world = "World " .. castaway.world,
+    actor_name = "Shop_BP_C " .. castaway.shop, title = "Data Hoard", reception = true}
 local function register_merchant(map, level, actor, data, title, barter)
     local world = map .. "." .. level
     local path = world .. ":PersistentLevel." .. actor
@@ -71,9 +74,11 @@ local function renew_lease(current)
     lease_through = sent and sent + 2 or 0
 end
 
-local function context(state, phase)
+local function context(state, phase, castaway_handoff)
     local host = phase == "hosting"
-    local profile = profiles[state.map]
+    local trading_castaway = castaway_handoff or session and session.state ~= "closed"
+        and session.context.profile == castaway_shop
+    local profile = trading_castaway and castaway_shop or profiles[state.map]
     if not enabled or not events_path or (not host and phase ~= "connected") or not profile
         or not state.listening or state.server ~= (not host) or not valid(state.world)
         or state.world:GetFullName() ~= profile.world then return nil end
@@ -96,6 +101,10 @@ end
 
 local function qualified_actor(current)
     local profile = current.profile
+    if profile == castaway_shop then
+        local _, shop = castaway.counter(current.world)
+        return shop
+    end
     local actor = StaticFindObject(profile.actor_object_path)
     if not exact(actor, actor_path) or actor:GetFullName() ~= profile.actor_name or not same(actor:GetWorld(), current.world)
         or actor:IsActorBeingDestroyed() or not same(actor.MerchantData, StaticFindObject(profile.data_path))
@@ -129,15 +138,21 @@ end
 local function in_reach(current)
     local actor = qualified_actor(current)
     if not actor then return false end
-    if current.profile.reception then
+    local component = actor.Box
+    if current.profile == castaway_shop then
+        local npc = castaway.counter(current.world)
+        if not npc then return false end
+        component = npc.Sphere_Interact
+    elseif current.profile.reception then
         actor = StaticFindObject(current.profile.reception)
         if not exact(actor, shopkeep.target_class) or not same(actor:GetWorld(), current.world)
             or actor:IsActorBeingDestroyed() or not exact(actor.Box, shopkeep.component_class)
             or not same(actor.Box:GetOwner(), actor) then return false end
         local collision = actor.Box:GetCollisionEnabled()
         if collision ~= 1 and collision ~= 3 then return false end
+        component = actor.Box
     end
-    local here, target = current.pawn:K2_GetActorLocation(), actor.Box:K2_GetComponentLocation()
+    local here, target = current.pawn:K2_GetActorLocation(), component:K2_GetComponentLocation()
     local radius = current.pawn.InteractionRange
     if not here or not target or type(radius) ~= "number" or radius <= 0 or radius > 1000 then return false end
     return (here.X - target.X) ^ 2 + (here.Y - target.Y) ^ 2 + (here.Z - target.Z) ^ 2 < radius ^ 2
@@ -210,11 +225,12 @@ local function read_press(current)
     return true
 end
 
-function view.reception_pending(state, phase, sequence)
-    local current = context(state, phase)
-    if not current or not current.profile.reception or not same_context(current, binding) or not can_open(current)
+function view.reception_pending(state, phase, sequence, castaway_handoff)
+    local current = context(state, phase, castaway_handoff)
+    if not current or not current.profile.reception or not same_context(context(state, phase), binding) or not can_open(current)
         or not in_reach(current) or not math.tointeger(sequence) or sequence < 1 or sequence > max_sequence then return false end
     if active() then close() end
+    binding = current
     session = {context = current, sequence = sequence, offset = 0, total = 0, offers = {}, selection = 0,
         stock = stock.available(), expires = os.time() + 29}
     held = {}

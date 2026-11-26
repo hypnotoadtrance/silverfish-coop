@@ -14,7 +14,8 @@ from tools.silverfish.runtime import Bridge
 ROOT_LINES = [["native-dialogue-line", dialogue.ROOT, "1", "Looking for something?"]]
 STORY_LINES = [["native-dialogue-line", dialogue.STORY, str(index), f"Story {index}"] for index in (1, 2, 3)]
 CHOICES = [["native-dialogue-choice", row, str(index), label] for row, index, label in (
-    (dialogue.ROOT, 1, "Not right now.."), (dialogue.ROOT, 3, "What's your story?"), (dialogue.STORY, 1, "I see..."))]
+    (dialogue.ROOT, 1, "Not right now.."), (dialogue.ROOT, 2, "What do you got?"),
+    (dialogue.ROOT, 3, "What's your story?"), (dialogue.STORY, 1, "I see..."))]
 
 
 def stock_frame(pawn, connection):
@@ -29,10 +30,14 @@ class CastawayDialogueTests(unittest.IsolatedAsyncioTestCase):
         party = {"players": {guest: {"downed": False} for guest in members}, "pending_spawns": {}, "wipe": None}
         host = SimpleNamespace(native_recipients=lambda: members, party=party, control=SimpleNamespace(generation="host-generation"),
                                zone_epoch="first-epoch", last_game=game, last_seen=time.monotonic(), native_profile=True,
-                               native_zones=True, native_guest=True, transitioning=False, stopping=False, native_checkpoint_unsafe=False)
+                               native_zones=True, native_guest=True, transitioning=False, stopping=False,
+                               native_checkpoint_unsafe=False, native_shop_view=True)
 
-        async def read(command, pawn, *, timeout):
-            self.assertEqual(command, dialogue.READ)
+        async def read(command, pawn, *args, timeout):
+            if command == dialogue.CASTAWAY_TRADE:
+                self.assertEqual((pawn, args), (members["second"]["pawn"], (dialogue.ROOT, "2", connections[pawn])))
+            else:
+                self.assertEqual((command, args), (dialogue.READ, ()))
             return {**game, "native_dialogue_stock": dialogue.parse_stock(stock_frame(pawn, connections[pawn]),
                                                                           ROOT_LINES + STORY_LINES, CHOICES)}
 
@@ -46,11 +51,13 @@ class CastawayDialogueTests(unittest.IsolatedAsyncioTestCase):
         second = await request("second", dialogue.OPEN, dialogue.PROFILE)
         self.assertNotEqual(first["token"], second["token"])
         self.assertEqual(first["lines"], ["Looking for something?"])
-        self.assertEqual([choice["ordinal"] for choice in first["choices"]], [1, 3])
+        self.assertEqual([choice["ordinal"] for choice in first["choices"]], [1, 2, 3])
         with self.assertRaisesRegex(ValueError, "native_dialogue_choice_expired"):
             await request("second", dialogue.CHOOSE, first["token"] + "@3")
         with self.assertRaisesRegex(ValueError, "native_dialogue_choice_unavailable"):
-            await request("first", dialogue.CHOOSE, first["token"] + "@2")
+            await request("first", dialogue.CHOOSE, first["token"] + "@4")
+        trade = await request("second", dialogue.CHOOSE, second["token"] + "@2")
+        self.assertEqual((trade["state"], trade["effect"]), ("closed", "cash-granted"))
 
         operation = uuid.uuid4().hex
         story = await request("first", dialogue.CHOOSE, first["token"] + "@3", operation)
@@ -59,7 +66,8 @@ class CastawayDialogueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await request("first", dialogue.CHOOSE, first["token"] + "@3", operation), story)
         with self.assertRaisesRegex(ValueError, "operation_id_conflict"):
             await request("first", dialogue.CHOOSE, first["token"] + "@1", operation)
-        self.assertEqual((await request("second", dialogue.CHOOSE, second["token"] + "@1"))["state"], "closed")
+        with self.assertRaisesRegex(ValueError, "native_dialogue_choice_expired"):
+            await request("second", dialogue.CHOOSE, second["token"] + "@1")
         self.assertEqual(sessions.sessions["first"].row, dialogue.STORY)
 
         connections[members["first"]["pawn"]] = "NetConnection staged-first@2"
@@ -77,7 +85,7 @@ class CastawayDialogueTests(unittest.IsolatedAsyncioTestCase):
                     "native_dialogue_view": dict(state="pending", pawn=pawn, sequence=serial, row="-", token="-")}
         first = {"row": dialogue.ROOT, "token": "a" * 32, "state": "open", "profile": dialogue.PROFILE,
                  "npc": dialogue.NPC, "map": dialogue.OBSERVATORY, "lines": ["Verified live text"],
-                 "choices": [{"ordinal": 1, "text": "Close"}, {"ordinal": 3, "text": "Story"}]}
+                 "choices": [{"ordinal": 1, "text": "Close"}, {"ordinal": 2, "text": "Trade"}, {"ordinal": 3, "text": "Story"}]}
         opened = {**snapshot, "native_dialogue_view": dict(state="open", pawn=pawn, sequence=serial,
                                                           row=dialogue.ROOT, token=first["token"])}
         bridge = SimpleNamespace(native_dialogue_requests=Mock(return_value=[(serial, pawn + "_sibling", "-", "-")]),
@@ -90,7 +98,7 @@ class CastawayDialogueTests(unittest.IsolatedAsyncioTestCase):
         result = await view.sync(snapshot, epoch, True, action)
         self.assertEqual(result, opened)
         bridge.command.assert_awaited_once_with(dialogue.RENDER, str(serial), dialogue.ROOT, first["token"],
-                                               "Verified live text", "Close", "Story", timeout=2)
+                                               "Verified live text", "Close", "Trade", "Story", timeout=2)
         self.assertEqual(action.await_args.args[0::2], (dialogue.OPEN, dialogue.PROFILE))
         await view.sync(snapshot, "next-epoch", True, action)
         self.assertEqual(action.await_count, 1)

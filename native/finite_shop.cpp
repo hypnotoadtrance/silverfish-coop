@@ -45,6 +45,7 @@ namespace
         bool camera_only{};
         const Unreal::TCHAR* reception{};
         bool smuggler{};
+        bool castaway{};
     };
 
     constexpr std::array merchants{
@@ -52,6 +53,14 @@ namespace
             STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"),
             STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.Shop_BP_C_2"),
             STR("/Game/Classes/Libraries/DataAssets/Merchants/Observitory_ShopData.Observitory_ShopData"),
+        },
+        MerchantProfile{
+            STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.Shop_BP_C_3"),
+            STR("/Game/Classes/Libraries/DataAssets/Merchants/Castaway_TradeData.Castaway_TradeData"),
+            nullptr, false,
+            STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.NPC_Castaway_C_1"),
+            false, true,
         },
         MerchantProfile{
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P.Shop_ScavBar_P"),
@@ -184,7 +193,7 @@ namespace
         Unreal::UObject* stock{};
         Unreal::UObject* instance{};
         Unreal::UObject* reception{};
-        bool camera_only{}, guards_neutral_purchase{}, smuggler{};
+        bool camera_only{}, guards_neutral_purchase{}, smuggler{}, castaway{};
         bool host{};
     };
 
@@ -304,15 +313,16 @@ namespace
     bool qualified_reach(const Context& context)
     {
         auto* counter = context.reception ? context.reception : context.shop;
-        auto* box = read_object(counter, STR("Box"));
+        auto* component = read_object(counter, context.castaway ? STR("Sphere_Interact") : STR("Box"));
+        auto* component_type = find<Unreal::UClass>(context.castaway ? STR("/Script/Engine.SphereComponent") :
+            STR("/Script/Engine.BoxComponent"));
         auto* range = field<Unreal::FDoubleProperty>(context.pawn, STR("InteractionRange"));
-        if (!exact(box, find<Unreal::UClass>(STR("/Script/Engine.BoxComponent"))) ||
-            box->GetOuterPrivate() != counter || !range) return false;
+        if (!exact(component, component_type) || component->GetOuterPrivate() != counter || !range) return false;
         const auto distance = range->GetPropertyValueInContainer(context.pawn);
         Location guest{}, merchant{};
         if (!std::isfinite(distance) || distance <= 0 || distance > 1000 ||
             !location(context.pawn, STR("/Script/Engine.Actor:K2_GetActorLocation"), guest) ||
-            !location(box, STR("/Script/Engine.SceneComponent:K2_GetComponentLocation"), merchant))
+            !location(component, STR("/Script/Engine.SceneComponent:K2_GetComponentLocation"), merchant))
             return false;
         const auto x = guest[0] - merchant[0], y = guest[1] - merchant[1], z = guest[2] - merchant[2];
         return (x * x + y * y + z * z) < distance * distance;
@@ -413,6 +423,7 @@ namespace
         if (!profile || !exact_merchant(context, *profile)) return "shop_exact_merchant_unavailable";
         context.camera_only = profile->camera_only;
         context.smuggler = profile->smuggler;
+        context.castaway = profile->castaway;
         context.guards_neutral_purchase = profile->cash_barter_replacement && !profile->camera_only;
         auto* data = read_object(context.shop, STR("MerchantData"));
         auto* pawn_type = find<Unreal::UClass>(pawn_class);
@@ -442,12 +453,13 @@ namespace
         if (profile->reception)
         {
             context.reception = find<Unreal::UObject>(profile->reception);
-            auto* reception_type = find<Unreal::UClass>(
+            auto* reception_type = find<Unreal::UClass>(context.castaway ?
+                STR("/Game/Classes/NPCs/NPC_Characters/NPC_Castaway.NPC_Castaway_C") :
                 STR("/Game/Classes/ScriptingActors/Generic_Interact_BP.Generic_Interact_BP_C"));
             if (!exact(context.reception, reception_type) || !authority(context.reception, context.world) ||
                 static_cast<Unreal::AActor*>(context.reception)->GetLevel() != read_object(context.world, STR("PersistentLevel")) ||
-                !cash_counter_open(context.reception))
-                return "shop_shopkeep_cash_reception_unavailable";
+                (context.castaway ? !read_bool(context.reception, STR("Alive"), true) : !cash_counter_open(context.reception)))
+                return context.castaway ? "shop_castaway_cash_reception_unavailable" : "shop_shopkeep_cash_reception_unavailable";
         }
         if (profile->cash_barter_replacement)
         {

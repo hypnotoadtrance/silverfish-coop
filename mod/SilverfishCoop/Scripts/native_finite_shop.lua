@@ -2,6 +2,7 @@ local shop = {}
 local pickup = require("native_pickup")
 local players = require("players")
 local shopkeep = require("native_dialogue_shopkeep")
+local castaway = require("native_dialogue_castaway")
 local focus_fixture = require("native_shop_focus_fixture")
 local stock_view = require("native_shop_stock")
 
@@ -33,6 +34,7 @@ local merchants = {
         neutral = true, smuggler = true,
     },
 }
+local castaway_shop = {level = "Observitory_P", actor = "Shop_BP_C_3", data = castaway.data, castaway = true}
 local merchant_data_root = "/Game/Classes/Libraries/DataAssets/Merchants/"
 local shop_class = "/Game/Classes/Actors/Shop_BP.Shop_BP_C"
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
@@ -113,13 +115,14 @@ local function canonical_host(state, detail, pawn_name)
     return pawn, instance.SaveSlot_Ref
 end
 
-local function merchant(state, phase, pawn_name, allow_host)
-    local profile = merchants[state.map]
+local function merchant(state, phase, pawn_name, allow_host, requested)
+    local profile = requested and state.map == castaway.map and castaway_shop or merchants[state.map]
     if not enabled or not profile or phase ~= "hosting" or not state.listening or state.server ~= false
         or not valid(state.world) then refused("exact_listen_world_unavailable") end
     local world = state.map .. "." .. profile.level
     if state.world:GetFullName() ~= "World " .. world then refused("exact_listen_world_unavailable") end
     local target_name = "Shop_BP_C " .. world .. ":PersistentLevel." .. profile.actor
+    if requested and target_name ~= requested then refused("exact_merchant_identity_unavailable") end
     local merchant_data = merchant_data_root .. profile.data .. "." .. profile.data
     local pawn, stock
     local detail = state.local_pawn
@@ -159,7 +162,10 @@ local function merchant(state, phase, pawn_name, allow_host)
         end
     end
     local reception
-    if profile.reception then
+    if profile.castaway then
+        reception = castaway.authorized_counter(state, pawn, actor)
+        if not reception then refused("castaway_stock_dialogue_required") end
+    elseif profile.reception then
         reception = shopkeep.authorized_counter(state, phase, pawn, stock)
         if not reception then refused("shopkeep_stock_dialogue_required") end
     end
@@ -308,7 +314,7 @@ function shop.sync(state, phase)
             watch.ready = read(actor:GetAddress()) ~= nil
         end
     end
-    if refresh_host and os.clock() >= refresh_after and same(watch.actor, refresh_host) then
+    if valid(refresh_host) and os.clock() >= refresh_after and same(refresh_host:GetWorld(), state.world) then
         refresh_after = os.clock() + .2
         local okay, refreshed = pcall(stock_view.refresh_host, state.controller, refresh_host)
         if okay and refreshed then refresh_host = nil end
@@ -325,12 +331,12 @@ function shop.command(fields, state, phase)
     if not action then return end
     last = nil
     local mutates = action.fields == 7
-    if #fields ~= action.fields then refused("exact_offer_arguments_required") end
+    if #fields ~= action.fields and #fields ~= action.fields + 1 then refused("exact_offer_arguments_required") end
     local native = _G[action.native]
     if type(native) ~= "function" then refused("native_merchant_unavailable") end
     local prepared, context, panel = pcall(function()
         local allow_host = operation == "native-finite-shop-list" or operation == "native-finite-shop-buy"
-        local exact_merchant = merchant(state, phase, fields[3], allow_host)
+        local exact_merchant = merchant(state, phase, fields[3], allow_host, fields[action.fields + 1])
         return exact_merchant, quote_panel(exact_merchant)
     end)
     if not prepared then

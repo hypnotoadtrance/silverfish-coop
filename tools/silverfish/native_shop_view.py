@@ -8,7 +8,7 @@ import time
 import uuid
 
 from . import runtime
-from .native_finite_shop import MAX_PRICE, MERCHANTS, STOCK_REVISION, valid_stock_revision
+from .native_finite_shop import CASTAWAY_ACTOR, MAX_PRICE, STOCK_REVISION, merchant_in_map, valid_stock_revision
 from .native_gold import valid_guid
 
 
@@ -137,7 +137,7 @@ class ShopView:
             return
         game = client.last_game
         view = game.get("native_shop_view", {})
-        if (area != game.get("map") or actor != MERCHANTS.get(area)
+        if (area != game.get("map") or not merchant_in_map(area, actor)
                 or pawn != game.get("pawns", {}).get("local", {}).get("name")
                 or tuple(view.get(key) for key in ("sequence", "map", "pawn", "actor", "state"))
                 != (sequence, area, pawn, actor, WAITING[kind])):
@@ -153,7 +153,8 @@ class ShopView:
             wanted = self._requested_offset(kind, page, scope, guid, price, view)
             if kind in {"buy", "sell"}:
                 try:
-                    result = await client.gameplay_action(f"native-finite-shop-{kind}", operation, f"{guid}@{price}")
+                    options = {"merchant": actor} if actor == CASTAWAY_ACTOR else {}
+                    result = await client.gameplay_action(f"native-finite-shop-{kind}", operation, f"{guid}@{price}", **options)
                 except ValueError as error:
                     if not view.get("stock") or str(error) not in _REFRESH_AFTER_REFUSAL:
                         raise
@@ -195,7 +196,8 @@ class ShopView:
 
     async def _listing(self, client, scope, operation):
         _, _, _, area, _, actor = scope
-        response = await client.gameplay_action("native-finite-shop-list", operation, None)
+        options = {"merchant": actor} if actor == CASTAWAY_ACTOR else {}
+        response = await client.gameplay_action("native-finite-shop-list", operation, None, **options)
         listing = response["native_finite_shop"]
         total, wallet, offers = listing["count"], listing["wallet_after"], listing["offers"]
         if (type(total) is not int or not 0 <= total <= MAX_OFFERS or type(wallet) is not int
