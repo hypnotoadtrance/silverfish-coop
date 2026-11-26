@@ -4371,6 +4371,9 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str, *, wo
         for source, destination in zip(areas, areas[1:]):
             await cross(source, destination)
         area = areas[-1]
+        # Earlier Dry Dock runs lost the firing lane to three unrelated melee attackers.
+        # Keep the authored target and stock damage path active during this objective check.
+        paused_npcs = int(await command(host, "quiet-dry-dock")) if area == dry_dock else 0
         prefix = f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel."
         for actor in actors:
             target = prefix + actor
@@ -4393,6 +4396,15 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str, *, wo
             entry = prop(frame)
             return entry.get("destroyed") and entry.get("damaged_mesh") and not entry.get("burning")
 
+        async def sample_prop(destroyed):
+            samples = {}
+            for name, seat in (("host", host), ("guest", guest)):
+                native, lua, reads, broken, health = (await command(seat, "fixed-sample", actor)).split(",")
+                assert broken == str(destroyed).lower(), (name, target, broken)
+                samples[name] = {"native_ms": float(native) * 1000, "lua_ms": float(lua) * 1000,
+                                 "reads": int(reads), "health": float(health)}
+            return samples
+
         async def flag():
             response = await host.bridge.command("native-fixed-explosive-flag-fixture", target)
             return response["ack"]["message"]
@@ -4402,6 +4414,7 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str, *, wo
         connected = await wait_resident_status(guest_run, lambda frame:
             prop(frame) and not prop(frame)["destroyed"]
             and frame.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
+        intact_samples = await sample_prop(False)
         local_pawn = connected["game"]["native_guest_primary_scope"]["pawn"]
         guard = "native_canister_blocked" if cue == "fixedtank" else "native_fixed_explosive_blocked"
         blocked = connected["game"].get(guard, 0)
@@ -4452,6 +4465,7 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str, *, wo
         witness = await wait_resident_status(guest_run, wreck)
         assert prop(witness)["mesh"] == prop(destroyed)["mesh"]
         assert destroyed["game"]["pawns"]["guest"]["health"] > 0
+        destroyed_samples = await sample_prop(True)
         cues = [r for r in await resident_events(guest_run, witness)
                 if r["event"] == "native_fixed_explosive_effect_played" and r.get("cue") == cue and r["map"] == area]
         assert len(cues) == 1, cues
@@ -4462,6 +4476,7 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str, *, wo
         await approach_board()
         return {"actor": target, "guest_magazine": fired, "stock_counter": [count, count + 1],
                 "host_mesh": prop(destroyed)["mesh"], "guest_mesh": prop(witness)["mesh"],
+                "paused_dry_dock_npcs": paused_npcs, "intact_samples": intact_samples, "destroyed_samples": destroyed_samples,
                 "denied_guest_local_callbacks": True, "no_save_on_destruction": True, "guest_blast_relay": cues[0]}
 
     checkpoint = campaign_save_hashes(host.campaign)

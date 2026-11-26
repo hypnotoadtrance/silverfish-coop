@@ -3125,6 +3125,8 @@ class Bridge:
                     path, destroyed, damaged, mesh, health = fields[1:6]
                     burning = fields[6] if len(fields) == 7 else "-"
                     prefix = f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel."
+                    if path.startswith("@"):
+                        path = prefix + path[1:]
                     if (area.startswith("/Game/Classes/Maps/") and path.startswith(prefix) and len(path) <= 512
                             and len(props) < native_anomaly_effects.MAX_SENSORS
                             and all(bit in {"0", "1"} for bit in (destroyed, damaged))

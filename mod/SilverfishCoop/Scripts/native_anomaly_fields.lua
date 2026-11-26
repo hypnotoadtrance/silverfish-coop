@@ -867,7 +867,7 @@ function fields.rows(state, phase, row, compact)
     end
     for _, canister in ipairs(canisters.rows(state, phase, row, compact)) do rows[#rows + 1] = canister end
     for _, view in ipairs(drum_fire.rows(state, phase, row)) do rows[#rows + 1] = view end
-    for _, item in ipairs(fixed.rows(state, phase, row)) do rows[#rows + 1] = item end
+    for _, item in ipairs(fixed.rows(state, phase, row, compact)) do rows[#rows + 1] = item end
     rows[#rows + 1] = destructibles.rows(state, phase, row)
     rows[#rows + 1] = acid_pools.rows(state, phase, row)
     return rows

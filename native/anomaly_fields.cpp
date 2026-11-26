@@ -367,7 +367,7 @@ namespace
         bool floating_health{};
     };
 
-    struct PlacedCanister
+    struct PlacedProp
     {
         U::FWeakObjectPtr actor;
         std::size_t schema{};
@@ -375,7 +375,7 @@ namespace
 
     constexpr std::array flame_fields{STR("OnFire"), STR("Fireing"), STR("Burning_0")};
     thread_local std::array<CanisterSchema, flame_fields.size()> canister_schemas;
-    thread_local std::unordered_map<std::uintptr_t, PlacedCanister> placed_canisters;
+    thread_local std::unordered_map<std::uintptr_t, PlacedProp> placed_canisters;
 
     void remember_canister(U::UObject* actor)
     {
@@ -397,7 +397,7 @@ namespace
         if (placed_canisters.size() >= max_tracked)
             std::erase_if(placed_canisters, [](const auto& entry) { return !entry.second.actor.Get(); });
         if (placed_canisters.size() < max_tracked)
-            placed_canisters.insert_or_assign(reinterpret_cast<std::uintptr_t>(actor), PlacedCanister{actor, index});
+            placed_canisters.insert_or_assign(reinterpret_cast<std::uintptr_t>(actor), PlacedProp{actor, index});
     }
 
     int read_placed_canister(const Lua& lua)
@@ -549,6 +549,70 @@ namespace
         if (type && type->GetFName() == standing_tank_name) return type->GetPathName() == standing_tank_class;
         auto* base = U::UObjectGlobals::StaticFindObject<U::UClass*>(nullptr, nullptr, fixed_prop);
         return type && base && static_cast<U::UClass*>(type)->IsChildOf(base);
+    }
+
+    struct FixedPropSchema
+    {
+        U::FWeakObjectPtr type;
+        U::FNumericProperty* health{};
+        U::FBoolProperty* destroyed{};
+        U::FBoolProperty* destroying{};
+    };
+
+    thread_local std::array<FixedPropSchema, 16> fixed_prop_schemas;
+    thread_local std::unordered_map<std::uintptr_t, PlacedProp> placed_fixed_props;
+
+    void remember_fixed_prop(U::UObject* actor)
+    {
+        auto* type = actor->GetClassPrivate();
+        auto schema = std::ranges::find_if(fixed_prop_schemas, [type](const auto& entry) { return entry.type.Get() == type; });
+        if (schema == fixed_prop_schemas.end())
+        {
+            schema = std::ranges::find_if(fixed_prop_schemas, [](const auto& entry) { return !entry.type.Get(); });
+            if (schema == fixed_prop_schemas.end()) return;
+            auto* health = property<U::FNumericProperty>(actor, STR("Health"));
+            auto* destroyed = property<U::FBoolProperty>(actor, STR("Destroyed"));
+            auto* destroying = property<U::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
+            if (!health || health->GetArrayDim() != 1 || (!health->IsFloatingPoint() && !health->IsInteger()) ||
+                !destroyed || destroyed->GetArrayDim() != 1 || !destroying || destroying->GetArrayDim() != 1) return;
+            *schema = {type, health, destroyed, destroying};
+        }
+        constexpr std::size_t max_tracked = 1024;
+        if (placed_fixed_props.size() >= max_tracked)
+            std::erase_if(placed_fixed_props, [](const auto& entry) { return !entry.second.actor.Get(); });
+        if (placed_fixed_props.size() < max_tracked)
+            placed_fixed_props.insert_or_assign(reinterpret_cast<std::uintptr_t>(actor),
+                PlacedProp{actor, static_cast<std::size_t>(schema - fixed_prop_schemas.begin())});
+    }
+
+    int read_placed_fixed_prop(const Lua& lua)
+    {
+        if (!U::IsInGameThreadRaw() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_integer(2)) return 0;
+        const auto address = static_cast<std::uintptr_t>(lua.get_integer());
+        const auto world = static_cast<std::uintptr_t>(lua.get_integer());
+        const auto tracked = placed_fixed_props.find(address);
+        if (!world || tracked == placed_fixed_props.end()) return 0;
+        auto* actor = tracked->second.actor.Get();
+        if (!actor)
+        {
+            placed_fixed_props.erase(tracked);
+            return 0;
+        }
+        const auto& schema = fixed_prop_schemas[tracked->second.schema];
+        if (schema.type.Get() != actor->GetClassPrivate() ||
+            reinterpret_cast<std::uintptr_t>(static_cast<U::AActor*>(actor)->GetWorld()) != world) return 0;
+        if (schema.destroying->GetPropertyValueInContainer(actor))
+        {
+            lua.set_bool(false);
+            return 1;
+        }
+        auto* stored = schema.health->ContainerPtrToValuePtr<void>(actor);
+        const auto health = schema.health->IsFloatingPoint() ? schema.health->GetFloatingPointPropertyValue(stored)
+            : static_cast<double>(schema.health->GetSignedIntPropertyValue(stored));
+        lua.set_bool(true);
+        lua.set_bool(schema.destroyed->GetPropertyValueInContainer(actor));
+        lua.set_number(health);
+        return 3;
     }
 
     bool destructible_class(U::UObject* type)
@@ -1207,7 +1271,7 @@ namespace
         call.PreventOriginalFunctionCall();
     }
 
-    int qualify_placed(const Lua& lua, bool (*matches)(U::UObject*), bool track_canister = false)
+    int qualify_placed(const Lua& lua, bool (*matches)(U::UObject*), void (*remember)(U::UObject*) = nullptr)
     {
         U::UObject* placed{};
         if (U::IsInGameThreadRaw() && lua.get_stack_size() == 1 && lua.is_string(1))
@@ -1219,7 +1283,7 @@ namespace
         const bool qualified = placed && placed->HasAnyFlags(U::RF_WasLoaded) && !placed->IsUnreachable() &&
             matches(placed->GetClassPrivate());
         auto* world = qualified ? static_cast<U::AActor*>(placed)->GetWorld() : nullptr;
-        if (world && track_canister) remember_canister(placed);
+        if (world && remember) remember(placed);
         lua.set_bool(world != nullptr);
         lua.set_bool(guest_world(world));
         return 2;
@@ -1561,10 +1625,11 @@ namespace silverfish::native_anomaly_fields
             [](const Lua& current) { return qualify_placed(current, trap_class); });
         lua.register_function("SilverfishNativeAcidPool", acid_pool_view);
         lua.register_function("SilverfishQualifyNativePlacedCanister",
-            [](const Lua& current) { return qualify_placed(current, canister_class, true); });
+            [](const Lua& current) { return qualify_placed(current, canister_class, remember_canister); });
         lua.register_function("SilverfishReadNativePlacedCanister", read_placed_canister);
         lua.register_function("SilverfishQualifyNativePlacedFixedExplosive",
-            [](const Lua& current) { return qualify_placed(current, fixed_prop_class); });
+            [](const Lua& current) { return qualify_placed(current, fixed_prop_class, remember_fixed_prop); });
+        lua.register_function("SilverfishReadNativePlacedFixedExplosive", read_placed_fixed_prop);
         lua.register_function("SilverfishQualifyNativePlacedDestructible",
             [](const Lua& current) { return qualify_placed(current, destructible_class); });
     }

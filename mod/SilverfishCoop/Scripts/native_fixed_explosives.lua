@@ -34,6 +34,17 @@ local function resolve(path, state)
         and same(root_mesh(actor, entry.standing), entry.mesh) and same(entry.mesh:GetOwner(), actor) then return entry end
 end
 
+local function observe(entry, address, world_address)
+    local alive, destroyed, health
+    if world_address then alive, destroyed, health = SilverfishReadNativePlacedFixedExplosive(address, world_address) end
+    if alive == nil then
+        local actor = entry.actor
+        if not valid(actor) or actor:IsActorBeingDestroyed() then return end
+        return true, actor.Destroyed == true, actor.Health
+    end
+    return alive, destroyed, health
+end
+
 function fixed.created(actor, class, seat)
     local cue = profiles[class]
     if not cue or type(SilverfishQualifyNativePlacedFixedExplosive) ~= "function" then return end
@@ -98,16 +109,21 @@ local function observe_blast(location, pfx, scale, sfx, volume, ignored, attenua
     end
 end
 
-function fixed.rows(state, phase, row)
+function fixed.rows(state, phase, row, compact)
     hosting = phase == "hosting"
     if not same(world, state.world) or area ~= state.map then
         world, area, active = state.world, state.map, {}
     end
-    for address, entry in pairs(pending) do
-        if valid(entry.actor) and same(world, entry.actor:GetWorld()) and not entry.actor:IsActorBeingDestroyed() then
-            active[address] = entry
+    if next(pending) then
+        local level = area:match("^/Game/Classes/Maps/.+/([^/]+)$")
+        local prefix = level and area .. "." .. level .. ":PersistentLevel."
+        for address, entry in pairs(pending) do
+            if valid(entry.actor) and same(world, entry.actor:GetWorld()) and not entry.actor:IsActorBeingDestroyed() then
+                if prefix and entry.path:sub(1, #prefix) == prefix then entry.local_path = "@" .. entry.path:sub(#prefix + 1) end
+                active[address] = entry
+            end
+            pending[address] = nil
         end
-        pending[address] = nil
     end
     if hosting and not hooked and next(active) and type(RegisterHook) == "function" and valid(StaticFindObject(blast_path)) then
         -- The stock fixed prop calls this library directly rather than spawning an ExplosionActor.
@@ -117,20 +133,27 @@ function fixed.rows(state, phase, row)
         hooked = true
     end
     local rows = {}
+    local world_address = type(SilverfishReadNativePlacedFixedExplosive) == "function" and valid(world) and world:GetAddress()
     for address, entry in pairs(active) do
+        local alive, destroyed, health = observe(entry, address, world_address)
         local actor = entry.actor
-        if valid(actor) and not actor:IsActorBeingDestroyed() and valid(entry.mesh) then
+        if alive and valid(entry.mesh) then
             local mesh = entry.mesh.StaticMesh
             local damaged_mesh = same(mesh, destroyed_mesh(entry))
-            local name = valid(mesh) and mesh:GetFullName():match("^StaticMesh (.+)$")
+            local mesh_address = valid(mesh) and mesh:GetAddress() or false
+            if entry.observed_mesh ~= mesh_address then
+                entry.observed_mesh = mesh_address
+                entry.observed_name = mesh_address and mesh:GetFullName():match("^StaticMesh (.+)$") or "-"
+            end
             local burning
             if entry.standing then
                 local particles = actor.NI_FireSmall
-                burning = not actor.Destroyed and
+                burning = not destroyed and
                     (hosting and actor.Burning_0 == true or not hosting and valid(particles) and particles:IsActive())
             end
-            rows[#rows + 1] = row("native-fixed-explosive", entry.path, actor.Destroyed and 1 or 0,
-                damaged_mesh and 1 or 0, name or "-", actor.Health, burning == nil and "-" or (burning and 1 or 0))
+            local path = compact and entry.local_path or entry.path
+            rows[#rows + 1] = row("native-fixed-explosive", path, destroyed and 1 or 0,
+                damaged_mesh and 1 or 0, entry.observed_name, health, burning == nil and "-" or (burning and 1 or 0))
         else
             active[address] = nil
         end

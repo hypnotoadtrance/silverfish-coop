@@ -461,6 +461,18 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.assert_awaited_once_with(
             "native-fixed-explosives-apply", "Dry Dock", epoch, "Broken|1", "Reset|0", "WrongMesh|1", timeout=1.5)
 
+    def test_fixed_prop_status_expands_a_placed_id_in_its_current_map(self):
+        area = "/Game/Classes/Maps/Maps_Dungeons/DryDock_P"
+        actor = "Prop_Explosive_PowerBox_C_5"
+        path = f"{area}.DryDock_P:PersistentLevel.{actor}"
+        header = f"schema\t1\nsession\tclient\tconnected\t{area}\t1\t0\n"
+        bridge = Bridge(None, None)
+        def status(identity):
+            return bridge._parse_status(header + f"native-fixed-explosive\t{identity}\t1\t1\t/Game/Wreck.Wreck\t0\t-\n")
+        self.assertEqual(status("@" + actor)[FIXED_EXPLOSIVES], status(path)[FIXED_EXPLOSIVES])
+        self.assertEqual(status("@" + actor)[FIXED_EXPLOSIVES][path]["destroyed"], True)
+        self.assertEqual(status("@../" + actor)[FIXED_EXPLOSIVES], {})
+
     async def test_fixed_tank_projects_flames_and_wreck_without_changing_other_props(self):
         epoch = "a" * 32
         game = {"state": "connected", "map": "Forest", FIXED_EXPLOSIVES: {
