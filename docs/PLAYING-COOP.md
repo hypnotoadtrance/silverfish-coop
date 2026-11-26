@@ -30,9 +30,17 @@ Set `$sfPython` and `$sfCli` again when opening a new terminal. The workspace pa
 
 ## Host from the co-op title
 
-Choose **Multiplayer** on the first screen, then **Host**. **New Game** opens the stock character creator and creates a co-op save automatically. **Load Game** lists saves by location and last-saved time. The selected save restores its character and world. Use **Network** to select the connection method. The Direct IP form starts with the configured UDP port and listening address. Select **Require password** to enable the password field for either method. **Friendly fire** is off by default. Check it when starting or loading a campaign to allow damage attributed to another player for that hosting session. Self-inflicted damage follows the normal game rules. Up to four guests can join.
+Choose **Multiplayer** on the first screen, then **Host Game**. **New Game** opens the stock character creator. Enter an optional save name to make the campaign easier to find later, or leave it blank to identify it by location and date. **Load Game** lists your campaigns and their last-saved times. The selected save restores its character and world. Use **Network** to select the connection method. The Direct IP form starts with the configured UDP port and listening address. Select **Require password** to enable the password field for either method. **Friendly fire** is off by default. Check it when starting or loading a campaign to allow damage attributed to another player for that hosting session. Self-inflicted damage follows the normal game rules. Up to four guests can join.
 
 Host container pickups take effect immediately. The live campaign writes a checkpoint at normal save boundaries such as resting, Save and Quit, or a level transition. A brief connection loss reserves the guest’s character in memory. If the host game closes unexpectedly before a save, the campaign resumes at the last saved checkpoint.
+
+### Manage multiplayer saves
+
+Open **Multiplayer → Host Game → Manage Saves** on the host PC. Select a campaign to open its details.
+
+- **Manage Characters** lists the guest characters for that campaign. Select a character and confirm **Delete Character** to remove it from that guest's Join list.
+- **Delete Save** removes the entire campaign from Load Game, including access to its host character and guest roster.
+- Deleted campaigns and characters stay visible in Manage Saves. Select one and choose **Restore Save** or **Restore Character** to make it playable again. The mod retains save data for recovery and records the change as a new campaign revision. Singleplayer slots are stored separately.
 
 ## Join from the co-op title
 
@@ -55,7 +63,7 @@ The host sent an in-game Steam invite and the guest accepted it and joined the c
 
 The installed mod mirrors each hosted campaign as a complete backup under `%LOCALAPPDATA%\SilverFish\Saved\SaveGames\SilverfishCoopCloud`. The backup includes the world, host and guest characters, and the campaign’s private host identity so returning guests can use their existing characters. Keep the backup files within the host’s Steam account. Steam Auto-Cloud uploads these files on exit and downloads them on launch when Steam Cloud is enabled for Project Silverfish. The mod reads downloaded backups when you open the Host campaign picker. The same Steam account and a compatible mod build are required on the other PC.
 
-Use **Multiplayer → Host → Load Game** on the other PC. The mod restores missing campaigns and newer revisions. An equal or older revision leaves the local campaign in place. Live multiplayer saves keep their own storage and Singleplayer continues to use the original save slots. Guests keep their progress with the host’s campaign.
+Use **Multiplayer → Host Game → Load Game** on the other PC. The mod restores missing campaigns and newer revisions. An equal or older revision leaves the local campaign in place. Live multiplayer saves keep their own storage and Singleplayer continues to use the original save slots. Guests keep their progress with the host’s campaign.
 
 ### Reset co-op campaigns
 
