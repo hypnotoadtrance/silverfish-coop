@@ -8,6 +8,7 @@ import time
 
 from .native_guest_drop_record import valid_id, valid_position
 from .native_stock_door import matches_area as door_matches_area
+from .content_paths import item_class_name
 
 
 LIMIT = 36
@@ -16,7 +17,6 @@ _MAX_MAILBOX = 16384
 _MAX_AGE = .25
 _STOCK_CLASS = re.compile(r"/Game/Classes/Weapons/(?:[\w-]+/)*([\w-]+)\.\1_C", re.ASCII)
 _STOCK_TURRET = re.compile(r"/Game/Classes/NPCs/(?:[\w-]+/)*(Turret_[\w-]+)\.\1_C", re.ASCII)
-_STOCK_CONSUMABLE = re.compile(r"/Game/Classes/Items/(?:[\w-]+/)*([\w-]+)\.\1_C", re.ASCII)
 _STOCK_CYCLE = re.compile(r"/Game/Classes/Weapons/Wep_Assets/Wep_Anim/([\w-]+)\.\1", re.ASCII)
 _STOCK_ANIMATION = re.compile(r"/Game/(?:[\w-]+/)+([\w-]+)\.\1", re.ASCII)
 _STOCK_IMPACT = re.compile(r"/Game/Assets/Sounds/(?:[\w-]+/)*([\w-]+)\.\1", re.ASCII)
@@ -112,8 +112,7 @@ def valid_door_motion(cue, area):
 
 def valid_use(cue):
     return (type(cue) is list and len(cue) in (6, 7) and type(cue[0]) is int and 0 < cue[0] < 10**15
-            and cue[1] == "consume" and type(cue[2]) is str and len(cue[2]) <= 160
-            and _STOCK_CONSUMABLE.fullmatch(cue[2]) and valid_position(cue[3:6])
+            and cue[1] == "consume" and item_class_name(cue[2]) is not None and valid_position(cue[3:6])
             and (len(cue) == 6 or type(cue[6]) is int and 0 <= cue[6] <= 2147483647))
 
 

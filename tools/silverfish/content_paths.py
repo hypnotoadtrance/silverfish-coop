@@ -6,6 +6,7 @@ from .native_map_preflight import valid_campaign_package
 
 
 _ITEM = re.compile(r"/(?:[A-Za-z0-9_-]+/)+([A-Za-z0-9_-]+)\.\1_C")
+_ASSET = re.compile(r"/(?:[A-Za-z0-9_-]+/)+([A-Za-z0-9_-]+)\.\1")
 _QUEST = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,95}")
 
 
@@ -16,6 +17,12 @@ def quest_id(value: object) -> bool:
 def item_class_name(path: object, limit: int = 256) -> str | None:
     if isinstance(path, str) and len(path) <= limit and (match := _ITEM.fullmatch(path)):
         return match[1] + "_C"
+    return None
+
+
+def asset_name(path: object) -> str | None:
+    if isinstance(path, str) and len(path) <= 256 and (match := _ASSET.fullmatch(path)):
+        return match[1]
     return None
 
 

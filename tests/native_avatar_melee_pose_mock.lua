@@ -68,4 +68,18 @@ assert(swing())
 body.ragdoll = true
 update()
 assert(#positions == 4 and #modes == 4 and not swing(), "A ragdoll must not receive swing pose writes")
+local display_mesh = upvalue(avatar.play_consumable, "consumable_display_mesh")
+local child_path, parent_path = "/Frontier-Pack/Food/Salve.Salve_C", "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
+local parent_mesh, child_mesh = object({}), object({})
+local parent_class = object({GetFullName = function() return "BlueprintGeneratedClass " .. parent_path end})
+local child_class = object({GetSuperStruct = function() return parent_class end})
+local defaults = object({GetClass = function() return child_class end})
+local resolve = StaticFindObject
+function StaticFindObject(path)
+    if path == parent_path .. ":DisplayMesh_GEN_VARIABLE" then return object({StaticMesh = parent_mesh}) end
+    return resolve(path)
+end
+assert(display_mesh(child_path, defaults) == parent_mesh, "A child must resolve the inherited display mesh")
+defaults.DisplayMesh = object({StaticMesh = child_mesh})
+assert(display_mesh(child_path, defaults) == child_mesh, "A class default mesh must take precedence over the parent template")
 print("Melee pose follows the current held model and skips retired bodies and firearms")

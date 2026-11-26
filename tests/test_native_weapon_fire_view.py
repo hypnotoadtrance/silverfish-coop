@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 
 from tools.silverfish.local_bridge import LocalBridge, WEAPON_CUES_LIMIT
 from tools.silverfish.native_weapon_fire_view import Playback, _captured, relay
+from tools.silverfish.runtime import Bridge
 
 
 class ItemUseCueTests(unittest.IsolatedAsyncioTestCase):
@@ -22,6 +23,19 @@ class ItemUseCueTests(unittest.IsolatedAsyncioTestCase):
                    "3|consume|/Script/Engine.PlayerController|0|0|0\n"
                    f"4|consume|{self.item}|0|0|0|-1\n")
         self.assertEqual(_captured(mailbox), (self.area, [[1, "consume", self.item, 121.0, -59.0, 2.05, 257]]))
+
+    def test_mounted_item_use_preserves_exact_class_identity(self):
+        path = "/Frontier-Pack/Food/Salve.Salve_C"
+        mailbox = (f"{self.area}\n1|consume|{path}|121|-59|2.05|257\n"
+                   "2|consume|/Frontier-Pack/Food/Salve.Other_C|0|0|0|257\n"
+                   "3|consume|/Frontier-Pack//Food/Salve.Salve_C|0|0|0|257\n")
+        self.assertEqual(_captured(mailbox), (self.area, [[1, "consume", path, 121.0, -59.0, 2.05, 257]]))
+        mesh = "StaticMesh /Frontier-Pack/Meshes/SalveMesh.SalveMesh"
+        pawn = "Player_FP_C TestPawn"
+        packet = f"schema\t1\nsession\thost\thosting\t{self.area}\t1\t0\n"
+        packet += f"native-avatar-use\t{pawn}\t1\t{path}\t{mesh}\t42\t0\n"
+        avatar_use = Bridge(Path("unused"), None)._parse_status(packet)["native_avatar_use"][pawn]
+        self.assertEqual((avatar_use["item"], avatar_use["mesh"]), (path, mesh))
 
     def test_shot_can_identify_the_shooter_without_a_recoil_clip(self):
         weapon = "/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C"

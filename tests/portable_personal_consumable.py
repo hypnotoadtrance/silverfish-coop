@@ -133,6 +133,9 @@ async def verify_stock_personal_consumable(host, guest, pawn, probe):
     assert fixture == "restored:1", fixture
     assert (fallback["guid"], fallback["class_path"], fallback["quantity_before"], fallback["quantity_after"]) == (
         weta, LIVE_WETA, 1, 0), fallback
+    observed = await wait_resident_status(host_run, lambda row:
+        row.get("game", {}).get("native_avatar_use", {}).get(pawn, {}).get("item") == LIVE_WETA)
+    weta_prop = observed["game"]["native_avatar_use"][pawn]["mesh"]
     food, regen = fallback["vitals"]["food"], fallback["vitals"]["regen"]
     fatigue, intox = fallback["vitals"]["fatigue"], fallback["vitals"]["intox"]
     assert math.isclose(food - food_before, 7, abs_tol=1) and math.isclose(regen, expected_regen, abs_tol=.02), fallback
@@ -155,6 +158,7 @@ async def verify_stock_personal_consumable(host, guest, pawn, probe):
         "pawn": pawn, "character_id": frame["character_id"], "guid": spare, "remaining": 1, "food": food, "regen": regen,
         "fatigue": fatigue, "intox": intox, "frog_guids": frogs,
         "fallback": fallback, "ordinary_recipe": registered, "blue_mushroom": blue_mushroom,
+        "fallback_observer_mesh": weta_prop,
         "personal_time_shift": time_shift, "original_host_state_unchanged": True,
         "deferred_save": True,
     }}

@@ -1,4 +1,5 @@
 local view = {}
+local content_paths = require("content_paths")
 local npc_melee = require("native_npc_melee_view")
 local weapon_view = require("native_avatar_weapon_view")
 local bolt_view = require("native_short_bolt_view")
@@ -101,15 +102,10 @@ local function valid_decal_pose(point, rotation, size)
         and bounded(size.Y, .02, 128) and bounded(size.Z, .02, 128)
 end
 
-local function stock_consumable(path)
-    if type(path) ~= "string" or #path > 160 then return false end
-    local package, class = path:match("^(/Game/Classes/Items/[%w_/%-]+)%.([%w_%-]+)_C$")
-    return package and package:match("([%w_%-]+)$") == class
-end
-
 local function consumable_defaults(path)
+    if not content_paths.item_class(path) then return end
     local class, base = asset(path), asset(consumable_base)
-    local defaults = valid(class) and class:GetCDO()
+    local defaults = valid(class) and class:GetFullName() == "BlueprintGeneratedClass " .. path and class:GetCDO()
     if valid(defaults) and valid(base) and defaults:IsA(base) then return defaults end
 end
 
@@ -266,8 +262,10 @@ function view.dry_fired(pawn)
 end
 
 function view.consumed(pawn, path, stock_played, point)
-    if not current or not valid(pawn) or not pawn:HasAuthority() or not stock_consumable(path)
+    if not current or not valid(pawn) or not pawn:HasAuthority()
         or not same(pawn:GetWorld(), current.world) then return end
+    local resolved, defaults = pcall(consumable_defaults, path)
+    if not resolved or not defaults then return end
     if not point then
         local prop = pawn.Prop_Arrow
         point = valid(prop) and prop:K2_GetComponentLocation() or pawn:K2_GetActorLocation()
@@ -277,8 +275,6 @@ function view.consumed(pawn, path, stock_played, point)
     record({serial, "consume", path, point.X, point.Y, point.Z, player,
         expires = current.statics:GetRealTimeSeconds(pawn) + .25})
     if not stock_played and valid(current.listener) then
-        local defaults = consumable_defaults(path)
-        if not defaults then return end
         pcall(play_sound_at_location, defaults.UseSound, current.listener, point)
         pcall(current.avatar.play_consumable, current.world, player, path, defaults, serial)
     end
@@ -694,7 +690,7 @@ function view.command(args, state, phase, avatar)
             goto next_cue
         end
         if (#values == 6 or #values == 7) and id and id > last_played and path == "consume"
-            and stock_consumable(values[3]) then
+            and content_paths.item_class(values[3]) then
             local x, y, z = tonumber(values[4]), tonumber(values[5]), tonumber(values[6])
             if bounded(x, -1e7, 1e7) and bounded(y, -1e7, 1e7) and bounded(z, -1e7, 1e7) then
                 last_played = id

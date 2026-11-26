@@ -516,13 +516,28 @@ local function use_prop_size(extent, scale)
     return 2 * math.max(math.abs(extent.X * scale.X), math.abs(extent.Y * scale.Y), math.abs(extent.Z * scale.Z))
 end
 
+local function consumable_display_mesh(item_path, defaults)
+    local template = StaticFindObject(item_path .. ":DisplayMesh_GEN_VARIABLE")
+    if valid(template) then return template.StaticMesh end
+    local inherited = defaults.DisplayMesh
+    if valid(inherited) then return inherited.StaticMesh end
+    local class = defaults:GetClass()
+    for _ = 1, 32 do
+        if not valid(class) then return end
+        class = class:GetSuperStruct()
+        local path = valid(class) and class:GetFullName():match("^BlueprintGeneratedClass (.+)$")
+        if not path then return end
+        template = StaticFindObject(path .. ":DisplayMesh_GEN_VARIABLE")
+        if valid(template) then return template.StaticMesh end
+    end
+end
+
 function avatar.play_consumable(world, id, item_path, defaults, serial)
     if id == nil then return false end
     for _, entry in pairs(avatars) do
         if entry.id == id and valid(entry.body) and valid(entry.pawn)
             and entry.pawn:GetWorld():GetAddress() == world:GetAddress() then
-            local template = StaticFindObject(item_path .. ":DisplayMesh_GEN_VARIABLE")
-            local mesh = valid(template) and template.StaticMesh
+            local mesh = consumable_display_mesh(item_path, defaults)
             local duration, transform = defaults.UseTime, defaults.Anim_Trans
             local statics = StaticFindObject(gameplay_statics)
             local math_api = StaticFindObject(math_library)

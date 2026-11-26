@@ -3,6 +3,9 @@ package.path = "./mod/SilverfishCoop/Scripts/?.lua;" .. package.path
 local now = 10
 local area = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local bandage = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
+local mounted = "/Frontier-Pack/Food/Salve.Salve_C"
+local other = "/Frontier-Pack/Food/Crate.Crate_C"
+local consumable_base = "/Game/Classes/Items/Consumable_Master_BP.Consumable_Master_BP_C"
 local frames, clears = {}, 0
 local attached, accept_until = true, math.huge
 SilverfishPublishLocalWeaponCue = function(map, record, remaining)
@@ -26,8 +29,21 @@ local pawn = object({
     K2_GetActorLocation = function() return {X = 100, Y = 200, Z = 300} end,
 })
 local statics = object({GetRealTimeSeconds = function() return now end})
+local stock_consumable = object({})
+local use_sound = object({})
+local use_defaults = object({UseSound = use_sound, IsA = function(_, base) return base == stock_consumable end})
+local function item(path, defaults)
+    return object({GetFullName = function() return "BlueprintGeneratedClass " .. path end,
+        GetCDO = function() return defaults end})
+end
+local item_classes = {
+    [bandage] = item(bandage, use_defaults), [mounted] = item(mounted, use_defaults),
+    [other] = item(other, object({IsA = function() return false end})),
+}
 StaticFindObject = function(path)
     if path == "/Script/Engine.Default__GameplayStatics" then return statics end
+    if path == consumable_base then return stock_consumable end
+    return item_classes[path]
 end
 LoadAsset = function() end
 
@@ -110,6 +126,10 @@ now = now + .3
 attached = true
 flush()
 assert(#frames == 42, "an expired cue must not play after the bridge comes back")
+view.consumed(pawn, mounted, true)
+view.consumed(pawn, other, true)
+flush()
+assert(#frames == 43 and frames[43][1]:match("^[0-9]+|consume|") and frames[43][1]:find(mounted, 1, true))
 
 view.sync(state, "ready", avatar)
 SilverfishPublishLocalWeaponCue = nil
@@ -117,7 +137,7 @@ SilverfishClearLocalWeaponCues = nil
 view.sync(state, "hosting", avatar)
 report()
 flush()
-assert(#frames == 42)
+assert(#frames == 43)
 -- The shooter uses their live first-person muzzle, while observers keep the host pose.
 local weapon_path = "/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C"
 local muzzle_location = {X = 152, Y = 225, Z = 325}
@@ -199,4 +219,18 @@ pawn.EquipedItem = nil
 view.command({"-", "native-weapon-play-shots", area, ("1"):rep(32), shot(6, 17) .. values .. camera},
     state, "connected", avatar)
 assert(#projected == 5 and #local_kicks == 2, "a delayed shot must not flash or kick after holstering")
+local audio, props = 0, 0
+statics.PlaySoundAtLocation = function(_, listener, sound)
+    assert(listener == pawn and sound == use_sound)
+    audio = audio + 1
+end
+avatar.play_consumable = function(world, id, path, defaults)
+    assert(world == state.world and id == 18 and path == mounted and defaults == use_defaults)
+    props = props + 1
+    return true
+end
+local cues = view.command({"-", "native-weapon-play-shots", area, ("1"):rep(32),
+    "7|consume|" .. mounted .. "|100|200|300|18", "8|consume|" .. other .. "|100|200|300|18"},
+    state, "connected", avatar)
+assert(audio == 1 and props == 1 and cues == "7:consume,7:consume_visual")
 print("Weapon cues preserve in-memory delivery and use the firing guest's live muzzle")

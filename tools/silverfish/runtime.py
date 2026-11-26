@@ -20,6 +20,7 @@ import tempfile
 import time
 import uuid
 
+from .content_paths import asset_name, item_class_name
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from . import native_finite_shop
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
@@ -3647,7 +3648,8 @@ class Bridge:
                     pawn, serial, item, mesh, movement, active = fields[1:7]
                     movement = _finite(movement)
                     if (pawn.startswith("Player_FP_C ") and re.fullmatch(r"[1-9][0-9]{0,14}", serial)
-                            and item.startswith("/Game/Classes/Items/") and mesh.startswith("StaticMesh /Game/")
+                            and item_class_name(item) and mesh.startswith("StaticMesh ")
+                            and asset_name(mesh.removeprefix("StaticMesh "))
                             and active in ("0", "1") and movement is not None and 0 <= movement <= 300):
                         use = {"serial": int(serial), "item": item, "mesh": mesh, "prop_displacement_cm": movement,
                                "active": active == "1"}
