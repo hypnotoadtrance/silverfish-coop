@@ -91,7 +91,7 @@ end
 function surface.sync(view)
     if not view or view ~= display then return false end
     for _, toggle in pairs(view.toggles) do
-        if not toggle.checked then view.fields[toggle.target] = "" end
+        if toggle.target and not toggle.checked then view.fields[toggle.target] = "" end
     end
     return true
 end
@@ -483,3 +483,43 @@ tick()
 assert(display.buttons["steam-pick:1"].label == "Fixture Host")
 click("steam-pick:1")
 assert(files[browse_request] == prefix .. "1\n")
+
+files[steam_cancel], files[steam_join], files[steam_opened] = nil, nil, nil
+local abandoned_nonce = generation("b")
+now = 104
+files[steam_join] = ("1\t%s\t28951\t159\n"):format(abandoned_nonce)
+tick()
+assert(display.title == "Join through Steam")
+assert(files[steam_opened] == "1\t" .. abandoned_nonce .. "\topened\n")
+files[steam_join], files[steam_opened] = nil, nil
+refuse_rename = true
+state.qualified = false
+sync()
+assert(not display and not files[steam_cancel])
+refuse_rename = false
+now = 105
+sync()
+assert(files[steam_cancel] == "1\t" .. abandoned_nonce .. "\tcancel\n")
+files[steam_cancel] = nil
+
+state.qualified = true
+local retry_generation, retry_nonce = generation("c"), generation("d")
+offer("host,join", 115, retry_generation, defaults)
+files[steam_join] = ("1\t%s\t28953\t159\n"):format(retry_nonce)
+tick()
+assert(display.title == "Join through Steam")
+files[steam_join], files[steam_opened] = nil, nil
+next_guid = next_guid + 1
+click("connect")
+files[join_request] = nil
+files[join_response] = ("1\t%s\t%s\tok\t%s\t1\n%s\tOriginal character\n")
+    :format(retry_generation, operation_id(), import_id, original_character)
+tick()
+click("character:1")
+click("confirm")
+assert(files[request] and not files[steam_cancel], "Keep the route through the submitted join")
+files[request], files[descriptor] = nil, nil
+sync()
+assert(not files[steam_cancel], "Retiring a submitted panel must preserve the selected route")
+offer("host,join", 115, generation("e"), defaults)
+assert(files[steam_cancel] == "1\t" .. retry_nonce .. "\tcancel\n", "A fresh title offer releases an unused route")

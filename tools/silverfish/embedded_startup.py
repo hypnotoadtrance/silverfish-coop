@@ -606,12 +606,12 @@ def _resident_direct_join_plan(work, directory, mailbox, saved, headless, *, ava
 
         async def start():
             nonlocal engine
-            engine = EmbeddedEngine(os.getpid(), mailbox, saved, None, session_directory=directory)
-            await engine.observe_title()
             async with AsyncExitStack() as scope:
                 if steam is not None:
                     endpoint = connection.session()
                     await scope.enter_async_context(steam.playing(endpoint["host"], endpoint["port"], role="guest"))
+                engine = EmbeddedEngine(os.getpid(), mailbox, saved, None, session_directory=directory)
+                await engine.observe_title()
                 await service.join_game(work, directory, connection, headless, character, resident_engine=engine)
 
         return SessionPlan(start, status, lambda frame: frame.get("character_id") == character

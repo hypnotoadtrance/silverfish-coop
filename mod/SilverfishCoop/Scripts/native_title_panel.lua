@@ -10,6 +10,7 @@ local actions = {
 }
 local bridge_path, session_path, request_path, loop, current, session, report
 local steam_join_path, steam_cancel_path, steam_opened_path, last_steam_invite, steam_polled_at
+local steam_handoff, steam_cancel_retry
 local dismissed, submitted
 local singleplayer_title
 local guest_creation
@@ -87,21 +88,40 @@ local function read_campaigns(generation)
     if start == #data + 1 then return campaigns end
 end
 
-local function close_form(owner)
+local function publish_steam_join_state(path, nonce, action)
+    local temporary = path .. "." .. nonce .. ".tmp"
+    local file = io.open(temporary, "wb")
+    if not file then return end
+    local written = file:write("1\t", nonce, "\t", action, "\n")
+    local closed = file:close()
+    if written and closed and os.rename(temporary, path) then return true end
+    os.remove(temporary)
+end
+
+local function cancel_steam_form(nonce)
+    if nonce and not publish_steam_join_state(steam_cancel_path, nonce, "cancel") then
+        steam_cancel_retry = {nonce = nonce, at = os.time() + 1, attempts = 3}
+    end
+end
+
+local function close_form(owner, preserve_route)
     local form = owner.form
     owner.form = nil
-    if form and form.role == "join" then form.api.remove(form.draft) end
+    if form and form.role == "join" then
+        if not preserve_route then cancel_steam_form(form.steam_nonce) end
+        form.api.remove(form.draft)
+    end
 end
 
 local function show_stock(owner, shown)
     if valid(owner.root) then owner.root:SetVisibility(shown and owner.stock_visibility or 2) end
 end
 
-local function remove_display()
+local function remove_display(preserve_route)
     local old = session
     session = nil
     if old then
-        close_form(old)
+        close_form(old, preserve_route)
         surface.remove(old.view)
         controls.remove(old.solo_back)
         show_stock(old, true)
@@ -253,7 +273,10 @@ local function choose(action, context, form_values, friendly_fire)
     if not latest then return false, reason end
     if write_request(latest.generation, action, form_values, friendly_fire) then
         submitted = latest.generation
-        close_form(session)
+        if action == "join" and session.form and session.form.steam_nonce then
+            steam_handoff = {nonce = session.form.steam_nonce, generation = latest.generation}
+        end
+        close_form(session, action == "join")
         report = {state = "pending", choices = latest.choices}
         present({title = "Multiplayer", note = action == "host" and "Starting the campaign…" or "Joining the host…",
             rows = {}})
@@ -420,17 +443,6 @@ local function handle_host_form(action, context)
     return choose("host", context, values, form.values.friendly_fire)
 end
 
-local function publish_steam_join_state(path, nonce, action)
-    if not nonce then return end
-    local temporary = path .. "." .. nonce .. ".tmp"
-    local file = io.open(temporary, "wb")
-    if not file then return end
-    local written = file:write("1\t", nonce, "\t", action, "\n")
-    local closed = file:close()
-    if written and closed and os.rename(temporary, path) then return true end
-    os.remove(temporary)
-end
-
 local function handle_join_form(action, state, phase, context, steam_invite)
     local offer, reason = active_offer("join", context)
     if not offer then return false, reason end
@@ -469,12 +481,11 @@ local function handle_join_form(action, state, phase, context, steam_invite)
             return form.api.resume_creation(form.draft, state, phase, name, nil, "Could not open character creation.")
         end
         guest_creation = {form = form, name = name, scope = scope_id, attempt = attempt}
-        remove_display()
+        remove_display(true)
         report = nil
         return true
     end
     if failure == "title_join_form_back_to_title" then
-        publish_steam_join_state(steam_cancel_path, form.steam_nonce, "cancel")
         close_form(session)
         multiplayer(offer)
         return true
@@ -942,9 +953,21 @@ end
 function panel.sync(state, phase)
     current = nil
     if not session_path then return end
+    local retry = steam_cancel_retry
+    if retry and os.time() >= retry.at then
+        if publish_steam_join_state(steam_cancel_path, retry.nonce, "cancel") or retry.attempts == 1 then
+            steam_cancel_retry = nil
+        else
+            retry.at, retry.attempts = os.time() + 1, retry.attempts - 1
+        end
+    end
     local context = title.probe(state, phase)
     if settings_fixture and not same_title(settings_fixture.context, context) then remove_settings_fixture() end
     local offer = context and read_offer()
+    if steam_handoff and offer and offer.generation ~= steam_handoff.generation then
+        cancel_steam_form(steam_handoff.nonce)
+        steam_handoff = nil
+    end
     if guest_creation then
         if context then
             current = {state = state, phase = phase}

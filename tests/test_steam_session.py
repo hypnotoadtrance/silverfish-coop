@@ -273,7 +273,7 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         browser.cancel()
         await asyncio.gather(browser, return_exceptions=True)
 
-    async def test_cancel_releases_only_the_current_join_offer(self):
+    async def test_cancel_releases_only_the_current_join_offer_and_allows_a_fresh_invite(self):
         _, host, _ = await self.start(HOST)
         guest_api, guest, bridge = await self.start(GUEST)
         await host.transport.host(32124, fingerprint="d" * 64)
@@ -281,6 +281,8 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         offer = bridge / steam_session.JOIN_OFFER
         await self.ready(offer.exists)
         nonce = offer.read_text().split("\t")[1]
+        runtime.write_text(bridge / steam_session.JOIN_OPENED, f"1\t{nonce}\topened\n", newline="\n")
+        await self.ready(lambda: not offer.exists())
         cancel = bridge / steam_session.JOIN_CANCEL
         runtime.write_text(cancel, f"1\t{'c' * 32}\tcancel\n", newline="\n")
         await self.ready(lambda: not cancel.exists())
@@ -288,3 +290,13 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         runtime.write_text(cancel, f"1\t{nonce}\tcancel\n", newline="\n")
         await self.ready(lambda: guest.transport.lobby is None)
         self.assertFalse(offer.exists())
+        self.assertEqual(host.transport.lobby, LOBBY)
+        guest_api.callbacks.append((_CALLBACK_INVITE, struct.pack("<QQ", LOBBY, HOST), 0))
+        await self.ready(offer.exists)
+        _, replacement, port, _ = offer.read_text().split()
+        self.assertNotEqual(replacement, nonce)
+        self.assertEqual(guest.fingerprint_for("127.0.0.1", int(port)), "d" * 64)
+        runtime.write_text(cancel, f"1\t{nonce}\tcancel\n", newline="\n")
+        await self.ready(lambda: not cancel.exists())
+        self.assertTrue(offer.exists())
+        self.assertEqual(guest.transport.lobby, LOBBY)
