@@ -152,18 +152,21 @@ end
 
 local mod = require("native_board_contract")
 local state = {world = world, map = "ShopKeep"}
-local inspection
+local inspection, reward_inspection
 local function proof()
     return mod.rows(state, "hosting", table.pack)[1]
 end
 
 local function action(verb, mode, id, guid, units)
     local arguments = {"1", "native-board-contract", verb, mode, "Guest", "Board", id}
-    if mode == "apply" then arguments[8], arguments[9], arguments[10] = guid, units or "-", inspection end
+    if mode == "apply" then
+        arguments[8], arguments[9], arguments[10], arguments[11] = guid, units or "-", inspection, reward_inspection
+    end
     local response = mod.command(arguments, state, "hosting")
     local row = proof()
     if mode == "inspect" and row[8] == "qualified" then
         inspection = table.concat({row[9], row[11], row[16], row[17], row[20]}, "|")
+        reward_inspection = row[23] ~= "-" and row[23] or nil
     end
     return response
 end
@@ -238,6 +241,7 @@ host_flags.TrackedKills = 1
 denied("objective_not_complete", "turnin", "inspect", kill)
 host_flags.TrackedKills = 3
 kill_recipe[items] = array({class})
+kill_recipe[ping] = "Coup_HuntPlayer"
 assert(catalog()[8] == "-" and catalog(kill)[8] == kill)
 denied("specialized_recipe", "turnin", "inspect", kill)
 kill_recipe[items] = array({})
@@ -271,6 +275,32 @@ assert(proof()[10] == -10 and photo_recipe[consumed] and host_flags.Player_Cash 
 action("turnin", "inspect", photo)
 assert(proof()[8] == "already" and host_flags.Player_Cash == 3918)
 assert(store.PlayerBackpack[1] == host_stack and bag.PlayerBackpack[1] == row_item and #stock_pings == 1)
+
+local reward_quest = "WorkshopReward"
+local reward_recipe = quest(2, nil, 500)
+reward_recipe[step] = 2
+reward_recipe[items] = array({class})
+store.ActiveQuests[reward_quest] = reward_recipe
+local original_redeem = SilverfishRedeemBoardObjectives
+function SilverfishRedeemBoardObjectives(pawn, source, dest, key, limit, payout, experience, selected, rewards)
+    assert(pawn == guest:GetAddress() and source == bag:GetAddress() and dest == store:GetAddress())
+    assert(key == reward_quest and limit == 2 and payout == 500 and experience == 1)
+    assert(selected == "-" and rewards == item_path)
+    stock_finalize(nil, key, game_instance, true, player, {})
+    bag.PlayerBackpack[3] = portion
+    return true, "redeemed", ""
+end
+assert(catalog()[8] == reward_quest)
+action("turnin", "inspect", reward_quest)
+assert(proof()[18] == "-" and proof()[23] == item_path and not bag.PlayerBackpack[3])
+reward_inspection = "/FrontierPack/Items/Other.Other_C"
+denied("inspection_changed", "turnin", "apply", reward_quest, "-")
+assert(reward_recipe[step] == 2 and not bag.PlayerBackpack[3])
+action("turnin", "inspect", reward_quest)
+action("turnin", "apply", reward_quest, "-")
+assert(proof()[10] == -10 and proof()[23] == item_path and bag.PlayerBackpack[3] == portion)
+assert(#store.PlayerBackpack == 1 and store.PlayerBackpack[1] == host_stack)
+SilverfishRedeemBoardObjectives = original_redeem
 
 local missing, display = "Note_Farmhouse", "Note_FarmHouse"
 local configure = board.Configure_Stock

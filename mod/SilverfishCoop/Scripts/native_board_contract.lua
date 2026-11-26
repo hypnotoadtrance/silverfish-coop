@@ -60,13 +60,15 @@ local function shape(save, row)
     local step = quest_catalog.tracked_step(save, row)
     local final, cash, xp = row[keys.final], row[keys.cash], row[keys.xp]
     local quantity, consumed = len(row[keys.objective]), row[keys.consumed]
+    local reward_count = len(row[keys.items])
     local ping = name(row[keys.ping])
     -- The normal stock turn-in sends follow-up pings in the host world.
     -- Item deposits use the native inventory transaction and have separate constraints.
     local ping_supported = ping == "" or ping == "None"
-        or quantity == 0 and type(ping) == "string" and #ping <= 96 and ping:match("^[A-Za-z0-9_-]+$")
+        or quantity == 0 and reward_count == 0 and type(ping) == "string" and #ping <= 96 and ping:match("^[A-Za-z0-9_-]+$")
     if row[keys.kind] ~= 2 or not int(step) or not int(final) or final < 1 or not int(cash) or cash < 0
-        or not int(xp) or xp < 0 or not int(row[keys.redeem]) or len(row[keys.items]) ~= 0
+        or not int(xp) or xp < 0 or not int(row[keys.redeem])
+        or not int(reward_count) or reward_count < 0 or reward_count > 8
         or len(row[keys.chained]) ~= 0 or not ping_supported
         or not int(quantity) or quantity < 0 or quantity > 16
         or not (quantity == 0 and type(consumed) == "boolean" or quantity > 0 and consumed == true)
@@ -74,7 +76,7 @@ local function shape(save, row)
         refuse("specialized_recipe")
     end
     local result = {step = step, final = final, cash = cash, xp = xp, objectives = {}, by_class = {},
-        empty_consumption = quantity == 0 and consumed}
+        empty_consumption = quantity == 0 and consumed, rewards = {}, reward_paths = {}}
     for index = 1, quantity do
         local class = row[keys.objective][index]
         if not valid(class) then refuse("objective_class_unqualified") end
@@ -90,7 +92,40 @@ local function shape(save, row)
             result.objectives[#result.objectives + 1] = objective
         end
     end
+    for index = 1, reward_count do
+        local class = row[keys.items][index]
+        if not valid(class) then refuse("reward_class_unqualified") end
+        local path = class:GetFullName():match("^BlueprintGeneratedClass (/%S+)$")
+        local defaults = content_paths.item_class(path) and class:GetCDO()
+        local address = class:GetAddress()
+        if not valid(defaults) or not same(defaults:GetClass(), class) or type(defaults.Stacks) ~= "boolean"
+            or result.rewards[address] ~= nil or result.by_class[address] then
+            refuse("reward_class_unqualified")
+        end
+        result.rewards[address] = defaults.Stacks
+        result.reward_paths[index] = path
+    end
     return result
+end
+
+local function reward_quantities(save, contract)
+    local totals = {}
+    for address in pairs(contract.rewards) do totals[address] = 0 end
+    local rows = save.PlayerBackpack
+    local size = len(rows)
+    if not int(size) or size < 0 or size > 4096 then refuse("inventory_unqualified") end
+    for index = 1, size do
+        local row = rows[index]
+        local class = row and row[class_key]
+        local address = valid(class) and class:GetAddress()
+        local stacks = contract.rewards[address]
+        if stacks ~= nil then
+            local units = stacks and row[units_key] or 1
+            if not int(units) or units < 1 or not int(totals[address] + units) then refuse("reward_quantity_unqualified") end
+            totals[address] = totals[address] + units
+        end
+    end
+    return totals
 end
 
 local function backpack_objectives(save, contract)
@@ -147,21 +182,23 @@ local function balances(context)
     return wire.stock_flag(context.instance, "Player_Cash"), wire.stock_flag(context.instance, "Player_Xp")
 end
 
-local function turn_in(context, library, active, empty_consumption)
+local function stock_payout(context, active, empty_consumption, apply)
     if empty_consumption then
         -- An empty list has nothing to consume. Stock's item check returns false for it.
         -- Use the normal stock payout and restore the original field on the active row.
         active[keys.consumed] = false
     end
-    local out = {}
-    local ok = pcall(library.TurnIn_Quest, library, context.key, context.instance, true, context.host, out, out)
+    local ok, applied, reason, consumed = pcall(apply)
     if empty_consumption then
         local after = wire.stock_row(context.save.ActiveQuests, context.key)
-        if not after then return false end
+        if not after then error("mutation_unverified_stock_board_consumption_restore", 0) end
         after[keys.consumed] = true
-        if wire.stock_row(context.save.ActiveQuests, context.key)[keys.consumed] ~= true then return false end
+        if wire.stock_row(context.save.ActiveQuests, context.key)[keys.consumed] ~= true then
+            error("mutation_unverified_stock_board_consumption_restore", 0)
+        end
     end
-    return ok and out.Success == true and not valid(out.ConfirmationPopup)
+    if not ok then error(applied, 0) end
+    return applied, reason, consumed
 end
 
 local function expected_effects(context, row)
@@ -279,6 +316,7 @@ local function catalog(fields, state, phase)
         elseif contract.step < contract.final then
             return
         end
+        if #contract.reward_paths > 0 and not pcall(reward_quantities, context.receiving_save, contract) then return end
         if pcall(expected_effects, context, row) then target[#target + 1] = id end
     end
     contracts:ForEach(function(key, row) descriptor(key, row, offers, true) end)
@@ -311,7 +349,8 @@ function board_contract.command(fields, state, phase)
     local verb, mode, pawn, board, quest = fields[3], fields[4], fields[5], fields[6], fields[7]
     if (verb ~= "start" and verb ~= "turnin") or (mode ~= "inspect" and mode ~= "apply")
         or type(quest) ~= "string" or #quest > 96 or not quest:match("^[A-Za-z0-9_]+$")
-        or type(board) ~= "string" or #board > 512 or #fields ~= (mode == "apply" and 10 or 7) then
+        or type(board) ~= "string" or #board > 512 or
+        (mode == "apply" and #fields ~= 10 and #fields ~= 11) or (mode == "inspect" and #fields ~= 7) then
         refuse("arguments")
     end
 
@@ -323,14 +362,15 @@ function board_contract.command(fields, state, phase)
     local outcome = {
         verb = verb, mode = mode, pawn = pawn, board = board, quest = quest, context = context,
         before = step or "-", after = step or "-", cash_before = cash_before, cash_after = cash_before,
-        xp_before = xp_before, xp_after = xp_before, cash = 0, xp = 0, guid = "-", consumed = "-", state = "already", deposits = {},
+        xp_before = xp_before, xp_after = xp_before, cash = 0, xp = 0, guid = "-", consumed = "-", state = "already",
+        deposits = {}, rewards = "-",
     }
     if (verb == "start" and active) or (verb == "turnin" and step == completed_step) then
         last = outcome
         return "Stock board contract already recorded"
     end
 
-    local contract, effects, library, objective_before
+    local contract, effects, library, objective_before, rewards_before
     local starting_step
     if verb == "start" then
         context.board:Configure_Stock()
@@ -343,6 +383,13 @@ function board_contract.command(fields, state, phase)
         contract = shape(context.save, active)
         if contract.step <= 0 then refuse("objective_not_complete") end
         outcome.cash, outcome.xp = contract.cash, contract.xp
+        if #contract.reward_paths > 0 then
+            if not same(context.save, context.receiving_save) and type(SilverfishRedeemBoardObjectives) ~= "function" then
+                refuse("native_reward_redemption_unavailable")
+            end
+            outcome.rewards = table.concat(contract.reward_paths, ",")
+            rewards_before = reward_quantities(context.receiving_save, contract)
+        end
         if #contract.objectives > 0 then
             objective_before = backpack_objectives(context.receiving_save, contract)
             outcome.deposits = required_items(contract, objective_before)
@@ -369,28 +416,32 @@ function board_contract.command(fields, state, phase)
     local inspected = table.concat({outcome.before, outcome.expected_step, outcome.cash, outcome.xp,
         outcome.remaining or "-"}, "|")
     if #outcome.deposits > 1 then inspected = inspected .. "|" .. additional_deposits(outcome, false) end
-    if fields[10] ~= inspected then refuse("inspection_changed") end
+    if fields[10] ~= inspected or (fields[11] or "-") ~= outcome.rewards then refuse("inspection_changed") end
 
     local has_deposit = outcome.guid ~= "-"
-    local guest_deposit = has_deposit and not same(context.save, context.receiving_save)
-    if guest_deposit then
+    local native_redemption = (has_deposit or rewards_before) and not same(context.save, context.receiving_save)
+    if native_redemption then
         if type(SilverfishRedeemBoardObjectives) ~= "function" then refuse("native_objective_redemption_unavailable") end
         local requested = {}
         for _, item in ipairs(outcome.deposits) do
             requested[#requested + 1] = table.concat({item.guid, item.units, item.path}, "|")
         end
-        local redeemed, reason, moved = SilverfishRedeemBoardObjectives(context.interactor:GetAddress(),
-            context.receiving_save:GetAddress(), context.save:GetAddress(), quest, contract.final, contract.cash, contract.xp,
-            table.concat(requested, ","))
+        local redeemed, reason, moved = stock_payout(context, active, contract.empty_consumption, function()
+            local arguments = {context.interactor:GetAddress(), context.receiving_save:GetAddress(),
+                context.save:GetAddress(), quest, contract.final, contract.cash, contract.xp,
+                #requested > 0 and table.concat(requested, ",") or "-"}
+            if outcome.rewards ~= "-" then arguments[9] = outcome.rewards end
+            return SilverfishRedeemBoardObjectives(table.unpack(arguments))
+        end)
         if redeemed ~= true then
             if type(reason) == "string" and reason:match("^mutation_unverified_") then error(reason, 0) end
             refuse("objective_redemption_rejected")
         end
         local index, seen = 0, {}
-        if type(moved) ~= "string" or #moved ~= #outcome.deposits * 33 - 1 then
+        if type(moved) ~= "string" or #moved ~= math.max(0, #outcome.deposits * 33 - 1) then
             error("mutation_unverified_stock_board_objective_guids", 0)
         end
-        for guid in (moved .. ","):gmatch("([^,]*),") do
+        for guid in moved:gmatch("([^,]+)") do
             index = index + 1
             local item = outcome.deposits[index]
             if not item or #guid ~= 32 or guid:find("[^0-9A-F]") or not guid:find("[^0]") or seen[guid]
@@ -412,7 +463,17 @@ function board_contract.command(fields, state, phase)
             context.instance:AddQuest_ByName(context.key)
             context.board:Configure_Stock()
         else
-            if not guest_deposit and not turn_in(context, library, active, contract.empty_consumption) then return end
+            if not native_redemption and not stock_payout(context, active, contract.empty_consumption, function()
+                local out = {}
+                library:TurnIn_Quest(context.key, context.instance, true, context.host, out, out)
+                return out.Success == true and not valid(out.ConfirmationPopup)
+            end) then return end
+            if rewards_before then
+                local awarded = reward_quantities(context.receiving_save, contract)
+                for address, count in pairs(rewards_before) do
+                    if awarded[address] <= count then return end
+                end
+            end
             if has_deposit then
                 local observed = backpack_objectives(context.receiving_save, contract)
                 local remaining = {}
@@ -460,7 +521,7 @@ function board_contract.rows(state, phase, status_row)
     return {status_row(operation, last.verb, last.mode, state.map, last.pawn, last.board, last.quest,
         last.state, last.before, last.after, last.expected_step or "-", last.cash_before, last.cash_after,
         last.xp_before, last.xp_after, last.cash, last.xp, last.guid,
-        last.units or "-", last.remaining or "-", last.consumed, additional_deposits(last, true))}
+        last.units or "-", last.remaining or "-", last.consumed, additional_deposits(last, true), last.rewards)}
 end
 
 return board_contract

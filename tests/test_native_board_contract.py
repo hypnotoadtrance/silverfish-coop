@@ -18,7 +18,7 @@ VISIT = "12" * 16
 
 
 def result(quest, verb, mode, before, expected, *, cash=0, xp=0, guid="-", board_name=BOARD,
-           raw_units=1, remaining=0, consumed=None, additional="-"):
+           raw_units=1, remaining=0, consumed=None, additional="-", rewards="-"):
     applied = mode == "apply"
     if consumed is None:
         consumed = guid if applied else "-"
@@ -27,7 +27,7 @@ def result(quest, verb, mode, before, expected, *, cash=0, xp=0, guid="-", board
               str(expected) if applied else "-" if before is None else str(before),
               str(expected), "17", str(17 + cash if applied else 17), "3", str(3 + xp if applied else 3),
               str(cash), str(xp), guid, str(raw_units) if guid != "-" else "-",
-              str(remaining) if guid != "-" else "-", consumed, additional)
+              str(remaining) if guid != "-" else "-", consumed, additional, rewards)
     return {"state": "hosting", "map": SHOPKEEP, board.KEY: board.parse(fields)}
 
 
@@ -75,6 +75,27 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.command.await_count, 4)
         host.checkpoint_native.assert_not_awaited()
         host.checkpoint.assert_not_called()
+
+    async def test_reward_only_contract_retains_the_guest_and_checks_live_receipt(self):
+        quest = "WorkshopReward"
+        reward = "/FrontierPack/Items/Waterskin.Waterskin_C"
+        host = self.host()
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+            result(quest, "turnin", "inspect", 2, -10, cash=500, xp=1, rewards=reward),
+            result(quest, "turnin", "apply", 2, -10, cash=500, xp=1, rewards=reward),
+        ]))
+        with patch.object(board.native_inventory, "retain_guest_save", new_callable=AsyncMock, return_value=True) as retain:
+            paid = await board.perform(host, bridge, "guest", "turnin", quest)
+        retain.assert_awaited_once_with(host, bridge, "guest", PAWN)
+        self.assertEqual(bridge.command.await_args.args[-1], reward)
+        self.assertEqual((paid["item_rewards"], paid["item_reward_owner"]), ([reward], "guest"))
+        self.assertEqual(paid["recipients"], ["guest", "host"])
+        self.assertFalse(host.pending_host_save or host.native_checkpoint_unsafe)
+        host.checkpoint_native.assert_not_awaited()
+        invalid = result(quest, "turnin", "apply", 2, -10, rewards=reward)[board.KEY]
+        before = result(quest, "turnin", "inspect", 2, -10)[board.KEY]
+        with self.assertRaisesRegex(RuntimeError, "inspected item rewards"):
+            board._receipt("guest", before, invalid)
 
     async def test_multiple_objectives_bind_every_debit_and_pay_once(self):
         armor = "Clct_Armor_Simmi"

@@ -3,6 +3,7 @@
 import re
 import time
 
+from .content_paths import item_class_name
 from . import native_computer_board, native_inventory, native_loot, native_rewards, party
 from .native_gold import valid_guid
 from .native_map_preflight import valid_campaign_package
@@ -82,7 +83,7 @@ def require_visit(host, visit):
 
 
 def parse(fields):
-    if len(fields) not in (21, 22):
+    if len(fields) not in (21, 22, 23):
         raise ValueError("Invalid native board result")
     proof = dict(zip(("verb", "mode", "map", "pawn", "board", "quest", "state"), fields[1:8], strict=True))
     proof.update(zip(("step_before", "step_after", "expected_step"),
@@ -102,7 +103,7 @@ def parse(fields):
     elif not _valid_deposit(proof, proof):
         raise ValueError("Unqualified board deposit result")
     proof["additional_deposits"] = []
-    extra = fields[21] if len(fields) == 22 else "-"
+    extra = fields[21] if len(fields) >= 22 else "-"
     if extra != "-":
         # Two GUIDs, two int32 counts and four separators per additional deposit.
         if len(extra) > (MAX_OBJECTIVES - 1) * 88 or proof["guid"] == "-":
@@ -117,6 +118,12 @@ def parse(fields):
             pending.add(guid)
             spent.add(consumed)
             proof["additional_deposits"].append(part)
+    raw_rewards = fields[22] if len(fields) == 23 else "-"
+    rewards = [] if raw_rewards == "-" else raw_rewards.split(",")
+    if (len(rewards) > 8 or len(set(rewards)) != len(rewards) or not all(map(item_class_name, rewards))
+            or rewards and (proof["verb"] != "turnin" or proof["state"] == "already")):
+        raise ValueError("Invalid stock board reward classes")
+    proof["item_rewards"] = rewards
     return proof
 
 
@@ -186,6 +193,8 @@ def _receipt(actor, before, result):
             raise RuntimeError("The stock board action differs from its inspected recipe")
     if _additional_inspection(result) != _additional_inspection(before):
         raise RuntimeError("The stock board action differs from its inspected deposits")
+    if result["item_rewards"] != before["item_rewards"]:
+        raise RuntimeError("The stock board action differs from its inspected item rewards")
     cash, xp = result["cash"], result["xp"]
     # A separate stock action can change the balance between inspection and apply.
     # Use the game-thread balance at apply time and verify the exact reward delta.
@@ -194,6 +203,8 @@ def _receipt(actor, before, result):
     record = {"quest_id": result["quest"], "step": step, "actor": actor}
     if step == COMPLETE:
         record.update(cash=cash, xp=xp, wallet=result["cash_after"])
+        if result["item_rewards"]:
+            record.update(item_rewards=result["item_rewards"], item_reward_owner=actor)
         if result["guid"] != "-":
             deposits = [_deposit_receipt(actor, part) for part in (result, *result["additional_deposits"])]
             record.update(deposits[0])
@@ -227,7 +238,8 @@ def apply_arguments(proof):
     additional = _additional_inspection(proof)
     if additional:
         inspected = f"{inspected}|{additional}"
-    return proof["guid"], encode(proof["units"]), inspected
+    fields = (proof["guid"], encode(proof["units"]), inspected)
+    return (*fields, ",".join(proof["item_rewards"])) if proof["item_rewards"] else fields
 
 
 def _present(proof):
@@ -283,7 +295,7 @@ async def perform(host, bridge, actor, verb, quest, *, board=None, visit=None):
         recipients = sorted(set(host.roles().values()) & candidate["players"].keys()) if turning_in else []
         if turning_in and actor not in recipients:
             raise party.RuleError("native_board_interactor_unavailable")
-        if turning_in and before["guid"] != "-" and actor != "host":
+        if turning_in and (before["guid"] != "-" or before["item_rewards"]) and actor != "host":
             if not await native_inventory.retain_guest_save(host, bridge, actor, pawn):
                 raise party.RuleError("native_board_objective_retention_unavailable")
 
@@ -307,7 +319,8 @@ async def perform(host, bridge, actor, verb, quest, *, board=None, visit=None):
             candidate["economy"].update(wallet=record["wallet"], native_wallet_active=True)
         candidate.setdefault("native_quests", {})[quest] = record
         host.party = candidate
-        host.pending_host_save = bool(host.pending_host_save or (actor == "host" and "objective_guid" in record))
+        host.pending_host_save = bool(host.pending_host_save or
+                                      (actor == "host" and ("objective_guid" in record or "item_rewards" in record)))
         host.native_checkpoint_unsafe = False
         host.control.event("native_board_contract_applied", board=board, **record)
         return {"effect": "native_quest_changed", **record}

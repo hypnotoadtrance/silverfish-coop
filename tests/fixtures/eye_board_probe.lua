@@ -14,6 +14,9 @@ local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local step_field = "Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A"
 local objectives_field = "Objective_Items_56_9FD46BE9431873A188AED4B08F0AF083"
 local armor_contract = "Clct_Armor_Simmi"
+local reward_quests = {rewarddeposit = "Clt_Wrench", rewardonly = "Asn_Sniper_Coup_01"}
+local reward_items = "Reward_Items_32_2B334D5F4DBA7AA760BF33A8E93A4C0A"
+local final_step = "Objective_FinalStep_57_F5A16DBF4E231A030BBD9F864F62A14B"
 local previous, prepared_save, leveled, seeded
 local streamed
 local discovered_path = shopkeep .. ".Shop_ShopKeep_P:PersistentLevel.BountyBoard_BP_C_2"
@@ -121,6 +124,45 @@ local function prepare(state, host, operation)
         return table.concat({append(remote, save.PlayerBackpack), append(host, host.Save.PlayerBackpack),
             class:GetFullName():match("^%S+ (.+)$")}, ";")
     end
+    if reward_quests[operation] then
+        assert(state.map == shopkeep)
+        local quest = FName(reward_quests[operation], EFindName.FNAME_Find)
+        local stock = require("native_wire_quest")
+        assert(not stock.stock_row(host.Save.ActiveQuests, quest))
+        instance:AddQuest_ByName(quest)
+        local board = StaticFindObject(turnin_path)
+        local redeemable = board.RedeemableQuests
+        redeemable[redeemable:GetArrayNum() + 1] = quest
+        local row = assert(stock.stock_row(host.Save.ActiveQuests, quest))
+        local objectives, rewards = row[objectives_field], row[reward_items]
+        assert(objectives:GetArrayNum() == (operation == "rewarddeposit" and 1 or 0))
+        local factory = StaticFindObject(factory_path)
+        local function append(owner, backpack, class)
+            local out = {}
+            factory:MakeDefaultItem(class, owner, out)
+            local item = out.Item or out
+            local guid = identity(item)
+            assert(same(item[class_field], class) and guid:find("[^0]"))
+            local index = backpack:GetArrayNum() + 1
+            backpack[index] = item
+            assert(identity(backpack[index]) == guid)
+            return guid
+        end
+        local material = "-"
+        if operation == "rewardonly" then
+            row[step_field] = row[final_step]
+        else
+            material = append(remote, save.PlayerBackpack, objectives[1])
+        end
+        local fields = {material}
+        for index = 1, rewards:GetArrayNum() do
+            local class = rewards[index]
+            append(host, host.Save.PlayerBackpack, class)
+            fields[#fields + 1] = assert(class:GetFullName():match("^%S+ (.+)$"))
+        end
+        assert(#fields > 1)
+        return table.concat(fields, ";")
+    end
     assert(operation == "eye" and not seeded)
     local item = StaticFindObject(class_path)
     if not valid(item) then LoadAsset(class_path); item = StaticFindObject(class_path) end
@@ -193,9 +235,11 @@ local function sync(state, phase)
     local operation, nonce = request:gsub("\r$", ""):match("^(%a+)|(%x+)$")
     if not nonce then return end
     local ok, result
-    if operation == "journal" or operation == "multijournal" then
+    local journal = ({journal = "Clt_Eye_02", multijournal = armor_contract,
+        depositjournal = reward_quests.rewarddeposit, rewardjournal = reward_quests.rewardonly})[operation]
+    if journal then
         ok, result = pcall(function()
-            local key = operation == "journal" and "Clt_Eye_02" or armor_contract
+            local key = journal
             local row = require("native_wire_quest").stock_row(pawn.Save.ActiveQuests, FName(key, EFindName.FNAME_Find))
             return row and row[step_field] or "-"
         end)

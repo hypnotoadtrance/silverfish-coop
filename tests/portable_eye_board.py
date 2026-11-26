@@ -52,8 +52,9 @@ async def verify_stock_eye_stacks(host, guest, pawn):
     proof = await verify_eye_board(host_run, guest_run, host.bridge.directory, character,
                                   wait_status=wait_resident_status)
     multiple = await verify_multi_deposit(host, guest, character, visits[-1])
+    rewards = await verify_stock_item_rewards(host, guest, character, visits[-1])
     return {"stock_eye_stacks": dict(proof, zone_visits=visits, stock_shop_observation=observed),
-            "stock_multi_deposit": multiple}
+            "stock_multi_deposit": multiple, "stock_item_rewards": rewards}
 
 
 async def verify_multi_deposit(host, guest, character, visit):
@@ -122,3 +123,66 @@ async def verify_multi_deposit(host, guest, character, visit):
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"missing_second_objective_refused": True, "classes": [first_class, second_class],
             "receipt": payout, "journals": journals, "saved_early": False}
+
+
+
+async def verify_stock_item_rewards(host, guest, character, visit):
+    """Turn in unregistered stock item rewards through the regular board UI."""
+    from live_multi_smoke import campaign_save_hashes
+
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    checkpoint = campaign_save_hashes(host.campaign)
+
+    async def action(directory, verb, target=None):
+        reply = await submit(directory, verb, target=target)
+        assert reply["ok"], (verb, reply)
+        return reply
+
+    async def inventory(directory):
+        reply = await action(directory, "native-inventory-list")
+        return {row["guid"]: row for row in reply["native_inventory"]["items"]}
+
+    evidence = {}
+    for quest, fixture, journal in (
+        ("Clt_Wrench", "rewarddeposit", "depositjournal"),
+        ("Asn_Sniper_Coup_01", "rewardonly", "rewardjournal"),
+    ):
+        material, *classes = (await probe(host.bridge.directory, fixture)).split(";")
+        host_items, guest_items = await inventory(host_run), await inventory(guest_run)
+        assert len(classes) == (2 if material != "-" else 1), (quest, classes)
+        if material != "-":
+            assert material in guest_items and material not in host_items
+        assert set(classes) <= {item["class_path"] for item in host_items.values()}
+        catalog = await action(guest_run, native_board_contract.CATALOG, BOARD)
+        assert quest in catalog[native_board_contract.CATALOG_KEY]["turnins"], (quest, catalog)
+        await action(guest_run, native_wire_board.STOCK_F_FIXTURE, BOARD)
+        await wait_resident_status(guest_run, lambda frame: (menu := frame["game"].get(native_board_contract.MENU_KEY))
+                                   and menu["board"] == BOARD and menu["state"] == "visible")
+        await action(guest_run, native_wire_board.STOCK_FIXTURE, f"{quest}|turnin")
+        complete = await wait_resident_status(host_run, lambda frame:
+            frame.get("gameplay", {}).get("native_quests", {}).get(quest, {}).get("step") == -10)
+        paid = complete["gameplay"]["native_quests"][quest]
+        assert paid["item_rewards"] == classes and paid["item_reward_owner"] == character, paid
+        if material != "-":
+            assert paid["consumed_guid"] == material, paid
+        async with asyncio.timeout(10):
+            while True:
+                after = await inventory(guest_run)
+                new = {guid: item for guid, item in after.items() if guid not in guest_items}
+                if sorted(item["class_path"] for item in new.values()) == sorted(classes):
+                    break
+                await asyncio.sleep(.1)
+        assert material not in after and await inventory(host_run) == host_items
+        assert all(after.get(guid) == item for guid, item in guest_items.items() if guid != material)
+        async with asyncio.timeout(10):
+            while True:
+                journals = await asyncio.gather(*(probe(seat.bridge.directory, journal) for seat in (host, guest)))
+                if journals == ["-10", "-10"]:
+                    break
+                await asyncio.sleep(.1)
+        selection = native_board_contract.menu_target(visit, BOARD, quest)
+        replay = await action(guest_run, "native-quest-turnin", selection)
+        assert replay["effect"] == "native_quest_already_settled" and replay["wallet"] == paid["wallet"]
+        assert after == await inventory(guest_run) and campaign_save_hashes(host.campaign) == checkpoint
+        evidence[quest] = {"awarded": new, "receipt": paid, "journals": journals, "host_inventory_preserved": True}
+    return evidence

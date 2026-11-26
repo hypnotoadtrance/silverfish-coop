@@ -321,7 +321,8 @@ namespace
     bool objective_recipe(U::UObject* stock, const U::TCHAR* quest, U::UClass* wanted, int expected_cash,
                           U::UClass* first_reward, U::UClass* second_reward, WirePhase phase,
                           int expected_final_step = 2, int expected_xp = 1, int exact_active_step = 0,
-                          const U::TCHAR* display_alias = nullptr, std::span<U::UClass* const> board_objectives = {})
+                          const U::TCHAR* display_alias = nullptr, std::span<U::UClass* const> board_objectives = {},
+                          std::span<U::UClass* const> board_rewards = {})
     {
         auto* type = find<U::UScriptStruct>(quest_path);
         auto* map = field<U::FMapProperty>(stock, STR("ActiveQuests"));
@@ -384,6 +385,13 @@ namespace
             if (distinct != board_objectives.size()) return false;
         }
         U::FScriptArrayHelper rewards(items, items->ContainerPtrToValuePtr<void>(found));
+        if (!board_rewards.empty())
+        {
+            if (rewards.Num() != static_cast<int>(board_rewards.size())) return false;
+            for (int index = 0; index < rewards.Num(); ++index)
+                if (item->GetObjectPropertyValue(rewards.GetRawPtr(index)) != board_rewards[index]) return false;
+            return true;
+        }
         if (!first_reward) return !second_reward && rewards.Num() == 0;
         return rewards.Num() == (second_reward ? 2 : 1) && item->GetObjectPropertyValue(rewards.GetRawPtr(0)) == first_reward &&
             (!second_reward || item->GetObjectPropertyValue(rewards.GetRawPtr(1)) == second_reward);
@@ -993,16 +1001,38 @@ namespace
         return objectives;
     }
 
+    std::vector<U::UClass*> read_board_rewards(std::string_view input, const Inventory& inventory)
+    {
+        std::vector<U::UClass*> rewards;
+        if (input.empty() || input.size() > 8 * 257 || input.back() == ',') return {};
+        while (!input.empty())
+        {
+            const auto end = input.find(',');
+            const auto path = input.substr(0, end);
+            if (rewards.size() >= 8 || !silverfish::content_paths::item_class(path)) return {};
+            const std::wstring name(path.begin(), path.end());
+            auto* type = find<U::UClass>(name.c_str());
+            if (!live(type) || !type->IsChildOf(inventory.base_class) || type->GetPathName() != name ||
+                std::ranges::find(rewards, type) != rewards.end()) return {};
+            rewards.push_back(type);
+            if (end == input.npos) break;
+            input.remove_prefix(end + 1);
+        }
+        return rewards;
+    }
+
     int redeem_board_objectives(const Lua& lua)
     {
         const auto fail = [&](std::string_view reason) { return reply(lua, false, reason); };
         std::array<Address, 3> args{};
-        if (!available(lua, 8) || !lua.is_string(4) || !lua.is_integer(5) || !lua.is_integer(6) ||
-            !lua.is_integer(7) || !lua.is_string(8) || !read_addresses(lua, args))
+        const bool has_rewards = lua.get_stack_size() == 9;
+        if (!available(lua, has_rewards ? 9 : 8) || !lua.is_string(4) || !lua.is_integer(5) || !lua.is_integer(6) ||
+            !lua.is_integer(7) || !lua.is_string(8) || (has_rewards && !lua.is_string(9)) || !read_addresses(lua, args))
             return fail("board_objective_arguments_unqualified");
         const std::string quest{lua.get_string()};
         const auto final_step = lua.get_integer(), cash = lua.get_integer(), xp = lua.get_integer();
         const std::string selection{lua.get_string()};
+        const std::string reward_paths = has_rewards ? std::string{lua.get_string()} : std::string{};
         constexpr auto max_value = 2147483647;
         const auto word = [](char value) {
             return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z') ||
@@ -1018,13 +1048,16 @@ namespace
         if (!party.read(args[0], args[1], args[2], true, location) || !inventory.bind(false))
             return fail("board_objective_exact_detached_guest_required");
         auto objectives = read_board_objectives(selection, inventory);
-        if (objectives.empty()) return fail("board_objective_arguments_unqualified");
+        const auto rewards = read_board_rewards(reward_paths, inventory);
+        if ((objectives.empty() && (selection != "-" || rewards.empty())) || (has_rewards && rewards.empty()))
+            return fail("board_objective_arguments_unqualified");
         std::vector<U::UClass*> classes;
         for (const auto& item : objectives) classes.push_back(item.type);
         const std::wstring quest_name(quest.begin(), quest.end());
         const auto matches_recipe = [&] {
-            return objective_recipe(party.stock, quest_name.c_str(), classes.front(), static_cast<int>(cash),
-                nullptr, nullptr, WirePhase::active, static_cast<int>(final_step), static_cast<int>(xp), 0, nullptr, classes);
+            return objective_recipe(party.stock, quest_name.c_str(), classes.empty() ? nullptr : classes.front(),
+                static_cast<int>(cash), nullptr, nullptr, WirePhase::active, static_cast<int>(final_step),
+                static_cast<int>(xp), 0, nullptr, classes, rewards);
         };
         if (!matches_recipe()) return fail("board_objective_active_recipe_required");
         BoardDeposit deposit{U::FName{quest_name.c_str(), U::FNAME_Find}};
@@ -1091,10 +1124,16 @@ namespace
         U::FScriptArrayHelper planned_to(inventory.backpack, prepared_to.get());
         U::FScriptArrayHelper original(inventory.backpack, inventories[0].before[0].get());
         for (int index = planned_to.Num() - 1; index >= 0; --index)
-            if (std::ranges::find(classes, inventory.klass(planned_to.GetRawPtr(index))) != classes.end())
+        {
+            const auto* type = inventory.klass(planned_to.GetRawPtr(index));
+            // Isolate these classes so the stock pickup can't merge a reward into the host's own stack.
+            if (std::ranges::find(classes, type) != classes.end() || std::ranges::find(rewards, type) != rewards.end())
                 planned_to.RemoveValues(index, 1);
+        }
         const int host_rows = planned_to.Num();
-        if (host_rows + objectives.size() > max_inventory) return fail("board_objective_canonical_inventory_full");
+        if (host_rows + std::max(objectives.size(), rewards.size()) > max_inventory ||
+            planned_from.Num() + rewards.size() > max_inventory)
+            return fail("board_objective_inventory_full");
 
         std::vector<Guid> consumed;
         std::vector<int> removed;
@@ -1154,8 +1193,49 @@ namespace
             try
             {
                 redeemed = deposit.redeem(party);
-                planned_to.RemoveValues(host_rows, static_cast<int>(objectives.size()));
-                redeemed = redeemed && verified(to, prepared_to) && inventories[0].unchanged();
+                if (!objectives.empty()) planned_to.RemoveValues(host_rows, static_cast<int>(objectives.size()));
+                redeemed = redeemed && inventories[0].unchanged();
+                if (redeemed && !rewards.empty())
+                {
+                    // The stock callback creates these complete inventory rows, including any item-specific metadata.
+                    U::FScriptArrayHelper awarded(inventory.backpack, to);
+                    U::FScriptArrayHelper prior_host(inventory.backpack, inventories[1].before[0].get());
+                    std::vector<Guid> original_ids;
+                    original_ids.reserve(prior_host.Num());
+                    for (int index = 0; index < prior_host.Num(); ++index)
+                        original_ids.push_back(inventory.identity(prior_host.GetRawPtr(index)));
+                    std::ranges::sort(original_ids);
+                    const bool expected_size = awarded.Num() == host_rows + static_cast<int>(rewards.size());
+                    std::vector<U::UClass*> outstanding{rewards};
+                    std::vector<Guid> granted;
+                    redeemed = expected_size && inventories[1].unchanged(1);
+                    for (int index = 0; redeemed && index < awarded.Num(); ++index)
+                    {
+                        const auto* row = awarded.GetRawPtr(index);
+                        if (index < host_rows)
+                        {
+                            redeemed = inventory.identical(planned_to.GetRawPtr(index), row);
+                            continue;
+                        }
+                        const auto found = std::ranges::find(outstanding, inventory.klass(row));
+                        const auto id = inventory.identity(row);
+                        if (found == outstanding.end() || id == Guid{} || guid_count(id, 0) != 1 ||
+                            std::ranges::binary_search(original_ids, id) ||
+                            std::ranges::find(granted, id) != granted.end() ||
+                            std::ranges::find(consumed, id) != consumed.end())
+                        {
+                            redeemed = false;
+                            break;
+                        }
+                        outstanding.erase(found);
+                        granted.push_back(id);
+                        auto* target = planned_from.GetRawPtr(planned_from.AddValue());
+                        inventory.row->CopyCompleteValue(target, row);
+                        redeemed = inventory.identical(target, row);
+                    }
+                    redeemed = redeemed && outstanding.empty();
+                }
+                else redeemed = redeemed && verified(to, prepared_to);
             }
             catch (const std::exception&)
             {

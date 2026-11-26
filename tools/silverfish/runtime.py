@@ -4023,7 +4023,8 @@ class Bridge:
                       stash_payload: bytes | None = None) -> dict:
         fields = (uuid.uuid4().hex, action, *arguments)
         long_fields = ((5, 6) if action == native_board_contract.MENU_OPEN else
-                       (5,) if action == native_inventory_grant.APPLY and self.local_bridge is not None else ())
+                       (5,) if action == native_inventory_grant.APPLY and self.local_bridge is not None else
+                       (10,) if action == native_board_contract.COMMAND else ())
         if any(len(value) > (8192 if index in long_fields else 1024)
                or "\t" in value or "\r" in value or "\n" in value for index, value in enumerate(fields)):
             raise ValueError("Invalid game bridge command value")
