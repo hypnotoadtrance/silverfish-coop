@@ -4,10 +4,11 @@ from pathlib import Path
 import struct
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
-from tools.silverfish import direct_ip, link, native_title_entry, runtime, service, steam_browser, steam_session
+from tools.silverfish import direct_ip, embedded_startup, link, native_title_entry, runtime, service, steam_browser, steam_session
 from tools.silverfish.campaign import CampaignStore
 from tools.silverfish.control import Control, status as control_status
 from tools.silverfish.steam_transport import SteamTransport, _CALLBACK_FRIEND_JOIN, _CALLBACK_INVITE
@@ -300,3 +301,25 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         await self.ready(lambda: not cancel.exists())
         self.assertTrue(offer.exists())
         self.assertEqual(guest.transport.lobby, LOBBY)
+
+    async def test_failed_resident_title_observation_releases_the_claimed_steam_route(self):
+        _, host, _ = await self.start(HOST)
+        _, guest, bridge = await self.start(GUEST)
+        await host.transport.host(32124, fingerprint="d" * 64)
+        self.assertTrue(await guest.open_lobby(LOBBY))
+        offer = bridge / steam_session.JOIN_OFFER
+        _, _, port, _ = offer.read_text().split()
+        connection = direct_ip.Connection({"host": "127.0.0.1", "port": int(port)})
+        settings = Mock()
+        settings.resolve.return_value = connection
+        engine = Mock(observe_title=AsyncMock(side_effect=RuntimeError("Title changed before startup")))
+        claim = SimpleNamespace(join_settings=("b" * 32, bridge.name, "character"), generation="c" * 32)
+        with (patch("tools.silverfish.title_join_settings.TitleJoinSettings", return_value=settings),
+              patch.object(embedded_startup, "EmbeddedEngine", return_value=engine)):
+            plan, _ = embedded_startup._resident_direct_join_plan(self.directory, bridge, bridge, bridge, True, steam=guest)
+            with self.assertRaisesRegex(RuntimeError, "Title changed"):
+                await plan.resolve_claim(claim).start()
+        self.assertFalse(offer.exists())
+        self.assertIsNone(guest.transport.lobby)
+        self.assertIsNone(guest.fingerprint_for("127.0.0.1", int(port)))
+        self.assertEqual(host.transport.lobby, LOBBY)
