@@ -1057,6 +1057,37 @@ local function point_string(point)
     return ("%.3f,%.3f,%.3f"):format(point.X, point.Y, point.Z)
 end
 
+local melee_motion, melee_motion_hooks
+
+local function watch_melee_motion(world, pawn)
+    melee_motion = {world=world, pawn=pawn, started=trace:GetGameTimeInSeconds(world), events={}}
+    if melee_motion_hooks then return end
+    local function record(receiver, movement, event, detail)
+        local watch = melee_motion
+        if not watch or #watch.events >= 16 or not valid(watch.pawn) or watch.pawn:IsActorBeingDestroyed()
+            or not same(watch.pawn:GetWorld(), watch.world)
+            or not same(receiver, movement and watch.pawn.CharacterMovement or watch.pawn) then return end
+        watch.events[#watch.events + 1] = ("%.3f %s %s"):format(
+            trace:GetGameTimeInSeconds(watch.world) - watch.started, event, detail and detail() or "")
+    end
+    RegisterHook("/Script/Engine.Character:LaunchCharacter", function(context, velocity)
+        record(context:get(), false, "launch", function() return point_string(velocity:get()) end)
+    end)
+    RegisterHook("/Script/Engine.CharacterMovementComponent:AddImpulse", function(context, impulse)
+        record(context:get(), true, "impulse", function() return point_string(impulse:get()) end)
+    end)
+    RegisterHook("/Game/Classes/Player/Player_FP.Player_FP_C:OnJumped", function(context)
+        record(context:get(), false, "jump", function() return point_string(context:get():GetVelocity()) end)
+    end)
+    RegisterHook("/Game/Classes/Player/Player_FP.Player_FP_C:DealDamage", function(context, _, _, instigator, force)
+        record(context:get(), false, "damage", function()
+            local source = instigator:get()
+            return (valid(source) and source:GetFullName() or "-") .. " " .. point_string(force:get())
+        end)
+    end)
+    melee_motion_hooks = true
+end
+
 -- Arm this only for the staged long shot. The same stock projectile and
 -- rounded muzzle packet are still used by the production contact check.
 RegisterBeginPlayPreHook(function(context)
@@ -1921,6 +1952,13 @@ local function run(action, actor_path)
         local body, velocity = owner:K2_GetActorLocation(), owner:GetVelocity()
         return table.concat({point_string(eye) .. "," .. point_string(forward), point_string(body),
             point_string(velocity), tostring(owner.CharacterMovement.MovementMode)}, ";")
+    elseif action == "watch-melee-motion" then
+        watch_melee_motion(world, host and authoritative_guest(world) or pawn)
+        return "watching"
+    elseif action == "read-melee-motion" then
+        local watch = melee_motion
+        melee_motion = nil
+        return watch and table.concat(watch.events, "|") or ""
     elseif action == "melee-contact-view" or action == "dock-melee-contact-view" then
         assert(host, "the authoritative contact runs on the host")
         if type(SilverfishReadNativeGuestMeleeContactGeometry) ~= "function" then return "unavailable" end
@@ -2143,7 +2181,12 @@ local function run(action, actor_path)
     elseif action == "seed-pipe" then
         assert(host, "only the host can grant the fixture item")
         assert(actor_path == "" or actor_path == "heavy", "unknown melee fixture item")
-        spawn_stock_npc(pawn, world, "state")
+        local target = spawn_stock_npc(pawn, world, "state")
+        -- This target measures incoming hits. Stock ResolveMelee can still run from an animation
+        -- notify with the actor tick disabled. Keep its normal collision and damage receiver.
+        assert(target.Melee_SweepRange > 0, "the staged NPC needs the stock melee range field")
+        target.Melee_SweepRange = 0
+        assert(target.Melee_SweepRange == 0, "the staged NPC still has an offensive melee range")
         return seed_pipe(world, actor_path == "heavy" and heavy_pipe_path or pipe_path)
     elseif action == "clear-melee-target" then
         local actor = melee_target(world, true)

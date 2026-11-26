@@ -1182,6 +1182,8 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
             while not (await command(guest, f"melee-state\t{center}")).startswith("true;false;"):
                 await asyncio.sleep(.05)
         try:
+            watching = await asyncio.gather(*(command(seat, "watch-melee-motion") for seat in (host, guest)))
+            assert watching == ["watching", "watching"], watching
             assert await command(guest, f"face-melee\t{center}") == "ready"
             await asyncio.sleep(.25)
             assert await command(host, f"align-melee\t{center}") == "true"
@@ -1202,13 +1204,17 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
         finally:
             cleared = await asyncio.gather(*(command(seat, "clear-melee-aim") for seat in (host, guest)),
                                            return_exceptions=True)
+            motion = await asyncio.gather(*(command(seat, "read-melee-motion") for seat in (host, guest)),
+                                          return_exceptions=True)
         assert cleared == ["cleared", "cleared"], cleared
+        assert all(isinstance(value, str) for value in motion), motion
         assert event["event"] == "native_guest_melee_input", event
         proof = event[native_guest_melee.SWING_KEY]
         contact = await command(host, "melee-contact")
         after = await command(host, f"melee-state\t{center}")
         host_after, guest_after = await asyncio.gather(*(command(seat, "melee-view") for seat in (host, guest)))
         geometry = {"host_before": host_view, "guest_before": guest_view, "host_after": host_after, "guest_after": guest_after,
+                    "host_motion_calls": motion[0], "guest_motion_calls": motion[1],
                     "host_contact": await command(host, "melee-contact-view")}
         result = {"stock_input": tap, "host_damage": proof, "contact_geometry": geometry}
         if verify_observer:
@@ -1339,6 +1345,9 @@ async def verify_stock_melee_family(host: Seat, guest: Seat, _pawn: str) -> dict
     assert await portable_probe_command(host.bridge, "portable-npc-override", "clear-melee-target") == "cleared"
     old_pipe = await verify_resident_guest_melee(host, guest, verify_observer=True)
     assert heavy_pipe["host_damage"]["stock_damage"] > old_pipe["host_damage"]["stock_damage"]
+    for weapon in (heavy_pipe, old_pipe):
+        motion = weapon["contact_geometry"]["host_motion_calls"]
+        assert " damage " not in motion and " impulse " not in motion, motion
     assert await portable_probe_command(host.bridge, "portable-npc-override", "clear-melee-target") == "cleared"
     edges = await verify_stock_melee_edges(host, guest)
     assert campaign_save_hashes(host.campaign) == before, "A regular melee attack wrote campaign saves"
