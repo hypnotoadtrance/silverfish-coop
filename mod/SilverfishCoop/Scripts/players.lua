@@ -351,12 +351,38 @@ local function prepare_mapping_gate(controller)
         controller = controller, player_input = player_input, allowed = allowed, blocked = blocked }
 end
 
-local function apply_mapping_gate(gate)
+local function switch_mapping_gate(gate, source, target)
     local contexts = gate.player_input.AppliedInputContexts
-    if not contexts:Contains(gate.clone) then
-        gate.subsystem:AddMappingContext(gate.clone, gate.priority, mapping_options)
+    local add, remove = not contexts:Contains(target), contexts:Contains(source)
+    if not add and not remove then return end
+
+    -- The stock rebuild protects held combat keys from firing on revive.
+    -- Preserve only the movement and look bindings that were already usable.
+    local unblocked = {}
+    local mappings = gate.player_input.EnhancedActionMappings
+    for index = 1, #mappings do
+        local row = mappings[index]
+        local action = row.Action
+        local address = valid(action) and action:GetAddress()
+        if address and gate.allowed[address] and not row.bShouldBeIgnored then
+            local keys = unblocked[address] or {}
+            keys[row.Key.KeyName:ToString()] = true
+            unblocked[address] = keys
+        end
     end
-    if contexts:Contains(gate.original) then gate.subsystem:RemoveMappingContext(gate.original, mapping_options) end
+
+    if add then gate.subsystem:AddMappingContext(target, gate.priority, mapping_options) end
+    if remove then gate.subsystem:RemoveMappingContext(source, mapping_options) end
+
+    mappings = gate.player_input.EnhancedActionMappings
+    for index = 1, #mappings do
+        local row = mappings[index]
+        local action = row.Action
+        local keys = valid(action) and unblocked[action:GetAddress()]
+        if keys and row.bShouldBeIgnored and keys[row.Key.KeyName:ToString()] then
+            row.bShouldBeIgnored = false
+        end
+    end
 end
 
 local function remove_mapping_gate(gate)
@@ -366,8 +392,7 @@ local function remove_mapping_gate(gate)
         return true
     end
     local contexts = gate.player_input.AppliedInputContexts
-    if not contexts:Contains(gate.original) then gate.subsystem:AddMappingContext(gate.original, gate.priority, mapping_options) end
-    if contexts:Contains(gate.clone) then gate.subsystem:RemoveMappingContext(gate.clone, mapping_options) end
+    switch_mapping_gate(gate, gate.clone, gate.original)
     return contexts:Contains(gate.original) and not contexts:Contains(gate.clone)
 end
 
@@ -515,7 +540,7 @@ local function sync_local_input(state, phase)
         if not restoring_gate then
             pcall(function()
                 if not record.gate then record.gate = prepare_mapping_gate(controller) end
-                if record.gate then apply_mapping_gate(record.gate) end
+                if record.gate then switch_mapping_gate(record.gate, record.gate.original, record.gate.clone) end
             end)
         end
     end

@@ -122,7 +122,20 @@ def instrument_kill_volume(source, *, measure=False, recovery_fixture=False):
 
 
 async def verify_crossroads_recovery(host, guest, _pawn):
+    from live_downed_input_smoke import input_proof
+
     host_run, guest_run = host.campaign / "run", guest.client / "run"
+
+    async def local_input(run, *, downed):
+        def observed(frame):
+            game = frame["game"]
+            pawn = game.get("pawns", {}).get("local", {}).get("name")
+            inventory = "clear" if run == host_run else "not_applicable"
+            return pawn and input_proof(game, pawn, downed=downed, inventory=inventory)
+
+        frame = await wait_resident_status(run, observed)
+        return frame["game"]["player_local_input"]
+
     receipts = {}
     for role, slot, helper_slot, helper_run in (
         ("guest", "guest", "local", host_run), ("host", "local", "guest", guest_run),
@@ -158,6 +171,8 @@ async def verify_crossroads_recovery(host, guest, _pawn):
             return host_down and effects.get("guest", {}).get("crouched") is True
 
         await wait_resident_status(guest_run, guest_observed)
+        victim_run = guest_run if role == "guest" else host_run
+        downed_input = await local_input(victim_run, downed=True)
         if role == "host":
             await wait_resident_status(guest_run, lambda frame:
                 "host" in frame["game"].get(native_downed_markers.KEY, {}).get("markers", {}))
@@ -168,7 +183,8 @@ async def verify_crossroads_recovery(host, guest, _pawn):
             and frame["game"]["pawns"][slot]["name"] == victim_name
             and frame["game"]["pawns"][slot]["health"] > 0)
         assert after["game"]["pawns"][helper_slot]["health"] >= helper["health"], after["game"]["pawns"]
-        receipts[role] = {"recovered": receipt, "revived_health": after["game"]["pawns"][slot]["health"]}
+        receipts[role] = {"recovered": receipt, "revived_health": after["game"]["pawns"][slot]["health"],
+                          "downed_input": downed_input, "revived_input": await local_input(victim_run, downed=False)}
         if role == "host":
             await wait_resident_status(guest_run, lambda frame:
                 frame.get("gameplay", {}).get("players", {}).get("host", {}).get("downed") is False
