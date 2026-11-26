@@ -3673,8 +3673,9 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str, hinged=None
         crate, = [name for name, area in native_loot.CRATES.items() if area == OBSERVATORY
                   and name.endswith(":PersistentLevel.LootLocker_Small_BP_C_0")]
     proofs = []
-    cases = (("heavy-lockpick", 1),) if hinged else (("lockpick", 2), ("heavy-lockpick", 1))
-    for kind, units in cases:
+    cases = (("heavy-lockpick", 1, False), ("heavy-lockpick", 1, True)) if hinged else (
+        ("lockpick", 2, False), ("heavy-lockpick", 1, False))
+    for kind, units, stale_stack in cases:
         seeded = await host.bridge.command("fixture-stock-take-ammo-seed", pawn, kind, str(units))
         guid = seeded["ack"]["message"]
         frame = await wait_resident_status(guest_run, lambda f: f.get("state") == "connected")
@@ -3715,6 +3716,9 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str, hinged=None
         assert held["actor_ammo"] == held["stored_ammo"] == units, held
         started = time.monotonic()
         started_at = time.time()
+        if stale_stack:
+            skew = await host.bridge.command("fixture-stock-lockpick-stale-stack", guid)
+            assert skew["ack"]["message"] == "armed", skew
         if hinged:
             for seat in (host, guest):
                 await seat.bridge.command(native_stock_door.FIXTURE, "pickable", hinged)
@@ -3773,9 +3777,15 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str, hinged=None
                 lock = await seat.bridge.command("fixture-stock-lockpick-locker", "read")
                 assert lock["ack"]["message"] == "unlocked", lock["ack"]
         rows = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
-        expected = [result["remaining"]] if result["remaining"] else []
-        assert [row["quantity"] for row in rows if row["guid"] == guid] == expected, rows
-        proofs.append({"class_path": item["class_path"], "slot": slot, "units": units,
+        if stale_stack:
+            assert result["inventory_reconciled"] is False, result
+            event = next((row for row in await resident_events(host_run, await current_status(host_run))
+                          if row.get("event") == "native_guest_lockpick_stack_stale" and row.get("actor") == crate), None)
+            assert event is not None, result
+        else:
+            expected = [result["remaining"]] if result["remaining"] else []
+            assert [row["quantity"] for row in rows if row["guid"] == guid] == expected, rows
+        proofs.append({"class_path": item["class_path"], "slot": slot, "units": units, "stale_stack": stale_stack,
                        "remaining": result["remaining"], "result_roundtrip_ms": receipt["milliseconds"],
                        "press_to_ack_ms": round((time.monotonic() - started) * 1000)})
     if not hinged:

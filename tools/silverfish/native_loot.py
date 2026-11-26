@@ -615,16 +615,20 @@ async def settle_lockpick(host, bridge, character, target, operation):
         if str(error).startswith("stock_lockpick_refused_"):
             raise party.RuleError(str(error)) from error
         raise
-    locked = frame.get("ack", {}).get("message")
+    message = frame.get("ack", {}).get("message")
+    locked, _, accounting = message.partition(":") if isinstance(message, str) else ("", "", "")
     if ((frame.get("state"), frame.get("map")) != ("hosting", area) or locked not in ("locked", "unlocked")
-            or unlocked == "1" and locked != "unlocked"):
+            or accounting not in ("", "pick-stack-stale") or unlocked == "1" and locked != "unlocked"):
         raise RuntimeError("The stock lockpick result could not be verified")
     host.last_game, host.last_seen = frame, time.monotonic()
     remaining = int(quantity) - int(spent)
-    if remaining == 0:
+    if remaining == 0 and not accounting:
         host.party["players"][character].get("native_inventory", {}).pop(guid, None)
         host.native_pickup.forget_committed_row(character, guid)
     proof = {"map": area, "crate": crate, "guid": guid, "locked": locked == "locked", "remaining": remaining}
+    if accounting:
+        proof["inventory_reconciled"] = False
+        host.control.event("native_guest_lockpick_stack_stale", actor=crate, character=character, operation_id=operation)
     result = {LOCKPICK_RESULT: proof}
     if lockpick_door(crate, area):
         delta = native_stock_door.frame(frame, epoch, crate)

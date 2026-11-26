@@ -1,3 +1,15 @@
+    if fields[2] == "fixture-stock-lockpick-stale-stack" and headless
+        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
+        assert(phase == "hosting" and #fields == 3)
+        local settle = SilverfishSettleNativeGuestLockpick
+        assert(type(settle) == "function")
+        SilverfishSettleNativeGuestLockpick = function(pawn, save, guid, before, spent)
+            if guid ~= fields[3] then return settle(pawn, save, guid, before, spent) end
+            SilverfishSettleNativeGuestLockpick = settle
+            return false, "stock_lockpick_refused_stack"
+        end
+        return "armed"
+    end
     if fields[2] == "fixture-stock-lockpick-locker" and headless
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
         local locker = StaticFindObject("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.LootLocker_Small_BP_C_0")

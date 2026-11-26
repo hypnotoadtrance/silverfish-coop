@@ -643,12 +643,14 @@ function input.command(fields, state, phase)
         end
         local ok, result = SilverfishSettleNativeGuestLockpick(pawn:GetAddress(), save:GetAddress(), fields[5], before,
             spent == "1")
-        if not ok then error(result, 0) end
+        local stale_stack = not ok and result == "stock_lockpick_refused_stack"
+        if not ok and not stale_stack then error(result, 0) end
         if outcome == "1" and crate.Locked then
             crate:PickLock(false)
             if crate.Locked ~= false then error("mutation_unverified_stock_lockpick_result", 0) end
         end
-        return crate.Locked and "locked" or "unlocked"
+        local lock_state = crate.Locked and "locked" or "unlocked"
+        return stale_stack and lock_state .. ":pick-stack-stale" or lock_state
     end
     if command == "native-loot-lockpick-input-fixture" then
         local profile = loot.profile(state.map, fields[3])
