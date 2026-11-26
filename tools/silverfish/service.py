@@ -4752,9 +4752,12 @@ def _host_dig_available(work: Path, authored: bool, persist_guest: bool, native_
 def _require_resident_host_checkpoint(profile: Path, checkpoint: dict) -> None:
     world = checkpoint["world"]
     storage = native_host_save.checkpoint_profile(profile, checkpoint)
+    area = world.get("map")
+    # Catalogue and cloud operations read scoped save metadata. Hosting checks
+    # the mounted World on the game thread before opening an unlisted map.
     if (not isinstance(storage, native_host_save.SaveScope) or type(world.get("native_host_save")) is not dict
-            or not isinstance(world.get("map"), str)
-            or world["map"] not in (AUTHORED_MAPS | EXPANDED_MAPS | PLAYTEST_MAPS)):
+            or not isinstance(area, str) or (area not in AUTHORED_MAPS | EXPANDED_MAPS | PLAYTEST_MAPS
+                                             and not native_map_preflight.valid_campaign_package(area))):
         raise CampaignFormatError("The selected campaign lacks a qualified scoped host save")
     try:
         sizes = [frame.get("size") for frame in native_host_save.references(checkpoint)]

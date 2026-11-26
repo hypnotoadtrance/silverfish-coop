@@ -98,7 +98,7 @@ def host_plan(work: Path, campaign: Path, bind: str, port: int, mode: str, expec
             private = runtime.spare_udp_port()
         if private == port:
             raise RuntimeError("A distinct private Unreal port was not available")
-        authored = area in service.AUTHORED_MAPS or area in service.EXPANDED_MAPS
+        authored = area not in service.PLAYTEST_MAPS and service.native_map_preflight.valid_campaign_package(area)
         persistent, profile = service._host_save_options(work, campaign / "game-user", True, authored)
         options = service.MENU_HOST_OPTIONS | service._host_stage_options(work, True, True)
         options["host_dig_live"] = service._host_dig_available(work, authored, persistent, profile)

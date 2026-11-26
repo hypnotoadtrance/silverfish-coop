@@ -52,7 +52,7 @@ class SavedCampaignTests(unittest.TestCase):
         self.checkpoint("OtherProfile", profile=self.root / "other-profile")
         self.checkpoint("Unscoped", scoped=False)
         self.checkpoint("NoSlot", native=False)
-        self.checkpoint("UnqualifiedMap", area="/Game/Classes/Maps/Unknown")
+        self.checkpoint("UnqualifiedMap", area="/Game/Classes/Maps/MainMenu_P")
         _, bad_slot = self.checkpoint("BadSlot")
         bad_slot.write_bytes(b"GVAS" + bytes([1]) * 40)
         bad_name, _ = self.checkpoint("_bad")
@@ -66,6 +66,14 @@ class SavedCampaignTests(unittest.TestCase):
         ])
         self.assertEqual(saved_campaign(self.campaign, self.saved, "alpha"), (first, CROSSROADS))
         self.assertEqual(before, [(path.stat().st_mtime_ns, path.read_bytes()) for path in objects])
+
+    def test_unlisted_map_is_visible_and_selectable_from_a_verified_scoped_save(self):
+        area = "/Game/Classes/Maps/Custom/ModOutpost"
+        directory, slot = self.checkpoint("Outpost", area=area)
+        before = slot.read_bytes()
+        self.assertEqual([row.name for row in campaign_entries(self.campaign, self.saved)], ["Outpost"])
+        self.assertEqual(saved_campaign(self.campaign, self.saved, "Outpost"), (directory, area))
+        self.assertEqual(slot.read_bytes(), before)
 
     def test_manage_save_and_character_only_changes_the_selected_coop_checkpoint(self):
         directory, slot = self.checkpoint("Expedition")
