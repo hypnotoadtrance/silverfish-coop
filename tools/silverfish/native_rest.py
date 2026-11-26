@@ -3,7 +3,7 @@
 import math
 import time
 
-from . import party
+from . import native_host_dig_live, party
 from .native_blue import BED_IDS
 from .travel import OBSERVATORY
 
@@ -65,6 +65,8 @@ async def perform(host, bridge, operation_id: str, hours: int, *, insomnia: bool
         raise party.RuleError("native_rest_insomnia_selection_unavailable")
     if not insomnia and not inspected["eligible"]:
         raise party.RuleError(inspected["reason"] or "native_rest_denied")
+    if native_host_dig_live.checkpoint_pending(host):
+        raise party.RuleError(native_host_dig_live.WAITING)
 
     host.native_checkpoint_unsafe = True
     try:

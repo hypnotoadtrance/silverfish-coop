@@ -78,6 +78,16 @@ class DigReportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             dig.parse(fields, "hosting", CROSSROADS)
 
+    def test_refused_contact_is_a_report_without_package_custody(self):
+        reason = "stock_live_dig_contact_landmark_unverified"
+        fields = [dig.TAG, CROSSROADS, PAWN, "refused", "0", "-", "-", "-",
+                  "-", "-", "-", "-", "0", "-", "-", reason]
+        row = dig.parse(fields, "hosting", CROSSROADS)
+        self.assertEqual((row["state"], row["serial"], row["fault"]), ("refused", 0, reason))
+        fields[4] = "1"
+        with self.assertRaises(ValueError):
+            dig.parse(fields, "hosting", CROSSROADS)
+
     def test_only_loose_custody_retains_escrow(self):
         loose = custody("escrowed")
         self.assertEqual(dig.escrow_frames({dig.CUSTODY: loose}), [loose["escrow"]])
@@ -128,6 +138,31 @@ class DigCustodyTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.assert_awaited_once_with(dig.TAG + "-restore", PAWN, SLOT, ESCROW, SPADE,
                                                *map(str, stock.SITE), MATERIAL, timeout=6)
         host.checkpoint_native.assert_not_awaited()
+
+    async def test_failed_dig_preserves_the_session_and_blocks_only_checkpoint_paths(self):
+        snapshot = game("failed")
+        snapshot[dig.KEY]["fault"] = "stock_live_dig_exact_package_unverified"
+        host = self.make_host(snapshot)
+        host.party.pop(dig.CUSTODY)
+        host.zone_epoch = "e" * 32
+        host.stopping = host.native_checkpoint_unsafe = False
+        settlement = dig.DigSettlement()
+        bridge = SimpleNamespace(command=AsyncMock())
+
+        self.assertTrue(await settlement.update(host, bridge))
+        self.assertTrue(await settlement.update(host, bridge))
+        host.control.event.assert_called_once_with(
+            "native_host_dig_settlement_deferred", map=CROSSROADS, state="failed", serial=1,
+            reason="stock_live_dig_exact_package_unverified",
+        )
+        self.assertFalse(host.stopping or host.native_checkpoint_unsafe)
+        host.checkpoint_native.assert_not_awaited()
+
+        host.last_game = game("ready", serial=0)
+        host.last_game[dig.KEY].update(state="refused", fault="stock_live_dig_contact_landmark_unverified")
+        self.assertFalse(await settlement.update(host, bridge))
+        self.assertFalse(dig.checkpoint_pending(host))
+        bridge.command.assert_not_awaited()
 
 
 class GuestPackageCollectionTests(unittest.IsolatedAsyncioTestCase):

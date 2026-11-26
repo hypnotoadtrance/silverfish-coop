@@ -550,8 +550,7 @@ namespace
     {
         return exact(package, package_class) && authority(package) && !package->HasAnyFlags(U::RF_WasLoaded) &&
             static_cast<U::AActor*>(package)->GetWorld() == ctx.world &&
-            static_cast<U::AActor*>(package)->GetLevel() == ctx.level && !object(package, STR("Owner")) &&
-            squared_distance(location(package), {live_dig.impact[0], live_dig.impact[1], live_dig.impact[2] + 10.0}) <= 16.0;
+            static_cast<U::AActor*>(package)->GetLevel() == ctx.level && !object(package, STR("Owner"));
     }
 
     bool remember_package(U::UObject* package)
@@ -642,7 +641,7 @@ namespace
             function->GetReturnProperty() || !input || !vector || input->GetStruct().Get() != vector ||
             input->GetSize() != 24 || input->GetOffset_Internal() != 0 || !frame.Locals())
         {
-            fail_live("stock_live_dig_contact_abi_unqualified");
+            live_dig.issue = "stock_live_dig_contact_abi_unqualified";
             call.PreventOriginalFunctionCall();
             return;
         }
@@ -650,7 +649,7 @@ namespace
         const Point hit{axes[0], axes[1], axes[2]};
         if (!(squared_distance(hit, source_position) <= 45.1 * 45.1))
         {
-            fail_live("stock_live_dig_contact_landmark_unverified");
+            live_dig.issue = "stock_live_dig_contact_landmark_unverified";
             call.PreventOriginalFunctionCall();
             return;
         }
@@ -661,7 +660,7 @@ namespace
             (!host_contact && now_spade != expected_spade) ||
             !loot_escrow::sealed_package_guid(ctx.save, owned) || !owned.empty())
         {
-            fail_live("stock_live_dig_contact_ownership_unverified");
+            live_dig.issue = "stock_live_dig_contact_ownership_unverified";
             call.PreventOriginalFunctionCall();
             return;
         }
@@ -669,7 +668,7 @@ namespace
         live_dig.impact = hit;
         if (live_dig.material.empty())
         {
-            fail_live("stock_contact_proof_unavailable");
+            live_dig.issue = "stock_contact_proof_unavailable";
             call.PreventOriginalFunctionCall();
             return;
         }
@@ -1238,7 +1237,7 @@ namespace
     {
         switch (live_dig.state)
         {
-        case LiveState::Arming: return "ready";
+        case LiveState::Arming: return live_dig.issue.empty() ? "ready" : "refused";
         case LiveState::Contact: return "contact";
         case LiveState::Unclaimed: return "unclaimed";
         case LiveState::Escrowed: return "escrowed";
@@ -1493,6 +1492,8 @@ namespace silverfish::native_host_dig
     {
         if (!ordinary || live_dig.state != LiveState::Contact || live_dig.package.Get()) return;
         const auto ctx = bound_live();
+        // The exact stock buried-source graph supplies the spawned actor. Its
+        // collision may adjust its pose before escrow or while someone approaches.
         if (ctx.world && valid_package(ctx, package)) remember_package(package);
     }
 

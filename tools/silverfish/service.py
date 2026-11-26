@@ -729,6 +729,8 @@ class Host:
         pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
         if self.last_game.get("state") != "hosting" or not pawn or source not in self.allowed_maps:
             raise RuntimeError("The canonical native host is unavailable for checkpointing")
+        if not dig_token and native_host_dig_live.checkpoint_pending(self):
+            raise party.RuleError(native_host_dig_live.WAITING)
         checkpoint_party = self.party if proposed_party is None else proposed_party
         saved_party, escrow_records = await native_loot.flush_pending_escrows(self, bridge, checkpoint_party)
         slot = native_host_save.new_slot()
@@ -1143,6 +1145,8 @@ class Host:
                        staying: bool = False, exit_crossing: int | None = None) -> dict | None:
         if native_kill_volume.pending(self.last_game):
             return {"ok": False, "error": native_kill_volume.PENDING}
+        if native_host_dig_live.checkpoint_pending(self):
+            return {"ok": False, "error": native_host_dig_live.WAITING}
         if self.party["wipe"] and not respawning:
             return {"ok": False, "error": "wipe_in_progress"}
         if not respawning and any(actor in self.party["pending_spawns"] for actor in roles.values()):
@@ -4293,6 +4297,7 @@ class Host:
         loot_view = native_loot.LootView(bridge, self.control) if self.native_loot_input else None
         wire_board = native_wire_board.WireBoardView(bridge, self.control) if self.wire_board_enabled else None
         package_journal = native_package_handoff_journal.Journal() if self.native_host_dig_live else None
+        dig_settlement = native_host_dig_live.DigSettlement() if self.native_host_dig_live else None
 
         async def claim_crate(operation, guid):
             return await native_loot.perform(self, bridge, "host", "claim", guid, operation, defer_save=True)
@@ -4333,16 +4338,8 @@ class Host:
             self.stock_doors.settle(self, bridge.stock_door_confirmations())
             if self.mindcore_carry:
                 self.mindcore_carry.maintain()
-            try:
-                dig_pending = await native_host_dig_live.settle(self, bridge)
-            except (OSError, ValueError, RuntimeError):
-                self.native_checkpoint_unsafe = True
-                raise
-            if dig_pending:
-                self.refresh_native_zone_heartbeat(bridge, time.monotonic())
-                self.publish_host_status(transport, bridge)
-                await asyncio.sleep(.25)
-                continue
+            if dig_settlement is not None:
+                await dig_settlement.update(self, bridge)
             native_kill_volume.fence(self)
             if native_kill_volume.pending(self.last_game):
                 self.refresh_native_zone_heartbeat(bridge, time.monotonic())

@@ -19,9 +19,9 @@ local commands = {
     ["native-host-dig-live-restore"] = "restore",
     ["native-host-dig-live-ack"] = "ack",
 }
-local phases = {ready = true, contact = true, unclaimed = true, escrowed = true, collecting = true,
+local phases = {ready = true, refused = true, contact = true, unclaimed = true, escrowed = true, collecting = true,
     collected = true, owned = true, failed = true}
-local durable = {ready = true, escrowed = true, owned = true}
+local durable = {ready = true, refused = true, escrowed = true, owned = true}
 local geometry = {X = 1665.2142939210705, Y = 5811.305953931523, Z = 339.15110679941967}
 local allowed_material = {}
 for _, name in ipairs({"Dirt", "Debris", "Grass", "MossyDirt", "Mud", "Sand"}) do

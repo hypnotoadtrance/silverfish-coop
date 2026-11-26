@@ -6,6 +6,9 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 
 | Area | Observed behavior |
 | --- | --- |
+| Crossroads excavation | On `rc-e78fc64`, the host returned to the title while digging at the two rocks by the scarecrow. The campaign reported an unsafe-checkpoint stop. The exact stock dig error was absent from the retained diagnostics. |
+| Flood Plains jammer | On `rc-e78fc64`, guests could accept Signal Jammer: Flood Plains at the physical Quest Board but could not accept it from Simmi. An isolated Direct IP trial of the development fix confirmed that accepting it through Simmi updated both journals. |
+| Manual stack merge | On `rc-e78fc64`, guests reported that dragging stacks together in the backpack had no effect. Dropping and picking up the items combined them. |
 | Steam character catalogs | One of two guests finished character creation but could not reopen the catalog, including after the host reopened the campaign. Manage Saves also timed out. The host had both character rows. One Steam avatar exceeded the title's image limit, which made the menu reject the response. `rc-e78fc64` bounds the PNG without changing its pixels and keeps characters visible when a photo is oversized. Both menu paths passed simulated checks. |
 | Public Steam lobbies | Joining a passwordless Public lobby showed a password form. `rc-e78fc64` starts the join immediately and asks for a password only after the host requests one. Both flows passed simulated menu checks. |
 | Contractor Vest | A guest could equip other armor but could not equip Contractor Vest. `rc-e78fc64` recognizes the stock Heavy Holster passive on eligible chest gear. A guest equipped, swapped, and dropped the vest over muted Direct IP. |
@@ -165,6 +168,8 @@ Build `rc-e78fc64` verified three successive guest Bandage grants over Direct IP
 1. Improve the main-menu, hosting, and joining flow using stock controls. Verify the new Manage Saves flow and rendered navigation with players.
 2. Improve host and guest frame pacing, local interaction response, and network latency during play. Compare Observatory and Crossroads under load, track packet volume and queue delays, and work toward a 100 ms round trip where the connection allows it. Ordinary map loading time is a lower priority. Keep transition bugs that interrupt the session or leave the party behind in the functional backlog.
 3. Return to visual and animation polish after the performance and UI/UX passes. Gameplay regressions stay in the functional backlog.
+4. Expand compatibility through the stock game’s runtime discovery. Read live quest offers, progress, rewards, and map transitions from the game’s existing data and events. Discover items and interactables by their stock classes and supported interfaces. Keep standard behavior shared across maps and mod content, and document which custom scripts need explicit integration.
+5. Add an optional update check for the latest published GitHub release candidate.
 
 <details>
 <summary>Development measurements and earlier candidate checks</summary>

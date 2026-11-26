@@ -30,7 +30,7 @@ _HANDOFF_MAPS = {BLACK_MARKET, CROSSROADS}
 _HANDOFF_RANGE = 300
 _HANDOFF_REFUSAL = "stock_missing_contact_handoff_"
 _COLLECT_REFUSAL = "stock_missing_contact_collect_"
-_STATES = {"ready", "contact", "unclaimed", "escrowed", "collecting", "collected", "owned", "failed"}
+_STATES = {"ready", "refused", "contact", "unclaimed", "escrowed", "collecting", "collected", "owned", "failed"}
 _FRAME_SLOT = re.compile(r"SFCoop_[0-9a-f]{32}\Z")
 _FAULT = re.compile(r"stock_[a-z0-9_]{1,80}\Z")
 _STATUS = re.compile(r"[a-z][a-z0-9_]{0,80}|-")
@@ -91,21 +91,22 @@ def parse(fields: list[str], phase: str, area: str) -> dict:
     tag, reported, pawn, state, serial, spade, actor, package, x, y, z, material, incidental, escrow, slot, fault = fields[:16]
     collector = fields[16] if len(fields) == 17 else "-"
     contact = None if x == y == z == "-" else list(map(float, (x, y, z)))
+    pre_contact = state in ("ready", "refused")
     if (tag != TAG or (phase, area, reported) != ("hosting", CROSSROADS, CROSSROADS)
             or len(pawn) > 360 or not stock._PAWN.fullmatch(pawn) or state not in _STATES
             or not re.fullmatch(r"0|[1-9][0-9]{0,15}", serial) or int(serial) >= 2**53
-            or (state == "ready") != (serial == "0")
-            or spade != "-" and not valid_guid(spade) or state not in ("ready", "failed") and spade == "-"
+            or pre_contact != (serial == "0")
+            or spade != "-" and not valid_guid(spade) or not pre_contact and state != "failed" and spade == "-"
             or actor != "-" and (len(actor) > 360 or not stock._PACKAGE.fullmatch(actor))
             or package != "-" and not valid_guid(package) or escrow != "-" and not valid_guid(escrow)
             or contact is None and material != "-" or contact is not None and not _valid_contact(contact, material)
-            or incidental not in ("0", "1") or (state == "failed") != bool(_FAULT.fullmatch(fault))
-            or state != "failed" and fault != "-"
+            or incidental not in ("0", "1") or (state in ("refused", "failed")) != bool(_FAULT.fullmatch(fault))
+            or state not in ("refused", "failed") and fault != "-"
             or slot != "-" and (escrow == "-" or not _FRAME_SLOT.fullmatch(slot))
             or collector != "-" and (len(collector) > 360 or collector == pawn or not stock._PAWN.fullmatch(collector)
                                        or state not in ("collecting", "collected", "owned", "failed"))):
         raise ValueError("Invalid live stock dig report")
-    if (state == "ready" and (spade, actor, package, material, incidental, escrow, slot) != ("-", "-", "-", "-", "0", "-", "-")
+    if (pre_contact and (spade, actor, package, material, incidental, escrow, slot) != ("-", "-", "-", "-", "0", "-", "-")
             or state in ("unclaimed", "escrowed", "collecting", "collected", "owned") and (actor == "-" or contact is None)
             or state in ("collected", "owned") and package == "-"
             or state == "escrowed" and escrow == "-"):
@@ -258,6 +259,49 @@ def _report(host, expected_pawn=None) -> dict:
 def _matches(prior, report, guid_field):
     return all(prior[key] == report.get(key) for key in ("spade_guid", "contact", "material")) and (
         prior["package_guid"] == report.get(guid_field))
+
+
+def checkpoint_pending(host) -> bool:
+    if not getattr(host, "native_host_dig_live", False) or host.last_game.get("map") != CROSSROADS:
+        return False
+    report, prior = _report(host), host.party.get(CUSTODY, {})
+    state, saved = report.get("state"), prior.get("state")
+    if saved == "opened":
+        return False
+    if state in ("escrowed", "owned"):
+        return saved != state or not _matches(prior, report, "escrow_guid" if state == "escrowed" else "package_guid")
+    return (state in ("contact", "unclaimed", "collecting", "collected", "failed")
+            or state in (None, "ready", "refused") and saved == "escrowed")
+
+
+class DigSettlement:
+    def __init__(self):
+        self.issue = None
+        self.retry_at = 0.0
+
+    async def update(self, host, bridge) -> bool:
+        report = _report(host)
+        key = (host.zone_epoch, report.get("serial"), report.get("state"), report.get("fault"))
+        now = time.monotonic()
+        prior = self.issue
+        if prior and prior[0] == key and now < self.retry_at:
+            return checkpoint_pending(host)
+        self.issue = None
+        try:
+            waiting = await settle(host, bridge)
+        except (OSError, ValueError, RuntimeError) as error:
+            self.issue = (key, str(error))
+            self.retry_at = now + 1
+            if self.issue != prior:
+                host.control.event("native_host_dig_settlement_deferred", map=CROSSROADS,
+                                   state=report.get("state"), serial=report.get("serial"), reason=str(error))
+            return checkpoint_pending(host)
+        if report.get("state") == "refused":
+            self.issue = (key, report["fault"])
+            self.retry_at = now + 1
+            if self.issue != prior:
+                host.control.event("native_host_dig_contact_refused", map=CROSSROADS, reason=report["fault"])
+        return waiting
 
 
 def advance_dropped_package_owner(data: dict, drop: dict, recipient: str) -> None:
@@ -432,7 +476,7 @@ async def settle(host, bridge) -> bool:
         raise RuntimeError(report["fault"])
     if state in ("contact", "collecting"):
         return True
-    if state == "ready":
+    if state in ("ready", "refused"):
         if not prior or prior["state"] == "owned":
             return False
         pawn = report["pawn"]

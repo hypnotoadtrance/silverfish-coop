@@ -722,9 +722,10 @@ local function preview_stock_layout(action)
         if ok then receipt = created end
     elseif action.unload and #stock_layout == 0 and stock_session.unload_preview
         and type(SilverfishTakeLocalGuestWeaponAmmo) == "function" then
-        local ok, _, _, _, _, _, _, created, index = SilverfishTakeLocalGuestWeaponAmmo(
+        local ok, status, _, _, _, _, _, created, index = SilverfishTakeLocalGuestWeaponAmmo(
             pawn, save, action.guid, action.quantity, action.expected)
         if ok then receipt, unload_slot = created, index >= 0 and index or nil end
+        if not ok and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then action.unload_fixture_status = status end
     elseif action.equip and target < 8 and type(SilverfishStoreLocalGuestEquipment) == "function" then
         local ok, _, stored, _, displaced = SilverfishStoreLocalGuestEquipment(pawn, save, action.guid, target)
         if ok then slot, receipt = stored, displaced end
@@ -1206,6 +1207,9 @@ function inventory_view.command(fields, state, phase)
             end
             sync_stock(current, state, phase, true)
             if stock_drop and stock_drop.guid == fields[3] then
+                if stock_drop.unload and screen and stock_session.unload_preview and not stock_drop.layout_preview then
+                    error("Take Ammo did not apply locally: " .. tostring(stock_drop.unload_fixture_status), 0)
+                end
                 if stock_drop.unload and stock_drop.layout_preview then
                     local equipped = stock_equipped_card(screen, stock_drop.guid)
                     local empty = equipped and equipped.Item[item_ammo] == 0

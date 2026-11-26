@@ -434,7 +434,7 @@ class EmbeddedServiceTests(unittest.IsolatedAsyncioTestCase):
             self.events.append(("quic", port))
             return transport
 
-        async def run(controller, bridge, connection):
+        async def run(controller, bridge, connection, *, pause_exit=None):
             self.assertIs(bridge, self.bridge)
             self.assertIs(connection, transport)
             self.assertEqual(bridge.directory, mailbox)
@@ -475,7 +475,7 @@ class EmbeddedServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((pid, port), (os.getpid(), self.raw_port))
             self.assertIsNone(engine.initial_host_world)
 
-        async def run(controller, bridge, connection):
+        async def run(controller, bridge, connection, *, pause_exit=None):
             initial = engine.initial_host_world
             self.assertEqual((initial.map, initial.save_scope), (OBSERVATORY, controller.native_profile.id))
             self.assertGreaterEqual(controller.last_game["sequence"], initial.sequence)
