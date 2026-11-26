@@ -403,6 +403,42 @@ function melee.command(fields, state, phase, standing)
     return "stock guest Old Pipe animation observed"
 end
 
+local function input_row(scope, status_row)
+    local proof = scope.proof
+    return status_row(input_state, scope.map, scope.pawn, scope.guid, proof.serial, proof.status,
+        proof.presses, proof.releases, proof.contacts, proof.hits, proof.charged, proof.combo)
+end
+
+local function swing_row(swing, status_row)
+    local proof = swing.proof
+    local fields = {swing.ordinary and "native-guest-melee-swing" or "native-guest-melee-canary", swing.map,
+        swing.pawn, swing.guid, proof.serial, proof.status,
+        proof.presses, proof.releases, proof.contacts, proof.qualified, proof.settled and 1 or 0, proof.passives and 1 or 0}
+    if swing.damage then
+        fields[13], fields[14], fields[15] = proof.target, proof.sweeps, proof.calls
+        fields[16], fields[17], fields[18] = proof.before, proof.after, proof.total
+    end
+    return status_row(table.unpack(fields))
+end
+
+function melee.local_reply(fields, state, phase, sequence, status_row, standing)
+    local accepted, message = pcall(melee.command, fields, state, phase, standing)
+    local report
+    if accepted then
+        if fields[2] == swing_start then
+            if latest and latest.map == state.map then report = swing_row(latest, status_row) end
+        elseif input_scope and input_scope.map == state.map then
+            report = input_row(input_scope, status_row)
+        end
+        if not report then accepted, message = false, "mutation_unverified_guest_melee_readback" end
+    end
+    local rows = {"native-guest-melee-reply\t1", status_row("schema", 1), status_row("seq", sequence),
+        status_row("ack", fields[1], accepted and "accepted" or "error", message),
+        status_row("session", "host", phase, state.map, state.clients, state.server and 1 or 0)}
+    if report then rows[#rows + 1] = report end
+    return table.concat(rows, "\n") .. "\n"
+end
+
 function melee.rows(state, phase, status_row, standing)
     local rows = {}
     if staged_aim then
@@ -424,22 +460,14 @@ function melee.rows(state, phase, status_row, standing)
             if proof.serial ~= scope.proof.serial then error("mutation_unverified_guest_melee_input_owner", 0) end
             scope.proof = proof
         end
-        rows[#rows + 1] = status_row(input_state, state.map, scope.pawn, scope.guid, proof.serial, proof.status,
-            proof.presses, proof.releases, proof.contacts, proof.hits, proof.charged, proof.combo)
+        rows[#rows + 1] = input_row(scope, status_row)
     end
     if not latest or latest.map ~= state.map then return rows end
     local pawn = exact_guest(state, phase, latest.pawn, standing)
     local invalid = not pawn or pawn:GetAddress() ~= latest.address
     read(latest, invalid and latest.proof.status == "pending")
     local proof = latest.proof
-    local fields = {latest.ordinary and "native-guest-melee-swing" or "native-guest-melee-canary", state.map,
-        latest.pawn, latest.guid, proof.serial, proof.status,
-        proof.presses, proof.releases, proof.contacts, proof.qualified, proof.settled and 1 or 0, proof.passives and 1 or 0}
-    if latest.damage then
-        fields[13], fields[14], fields[15] = proof.target, proof.sweeps, proof.calls
-        fields[16], fields[17], fields[18] = proof.before, proof.after, proof.total
-    end
-    rows[#rows + 1] = status_row(table.unpack(fields))
+    rows[#rows + 1] = swing_row(latest, status_row)
     if latest.fixture_target and type(SilverfishReadNativeGuestMeleeContactFixture) == "function" then
         local ok, detail = pcall(function() return table.pack(SilverfishReadNativeGuestMeleeContactFixture(proof.serial)) end)
         if ok and (detail.n == 9 or detail.n == 10) and detail[1] == latest.fixture_target then

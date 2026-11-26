@@ -19,6 +19,9 @@ SWING = "native-guest-melee-swing"
 INPUT = "native-guest-melee-input"
 INPUT_RECORD = "native-guest-melee-edge"
 INPUT_STATE = "native-guest-melee-input-state"
+COMPACT_ACTIONS = frozenset((INPUT + "-start", INPUT + "-edge", SWING + "-start"))
+REPLY_HEADER = "native-guest-melee-reply\t1\n"
+REPLY_BYTES = "native_guest_melee_reply_bytes"
 INPUT_KEY = "native_guest_melee_input_state"
 INPUT_FIXTURE = "native-guest-melee-input-fixture"
 INPUT_FIXTURE_KEY = "native_guest_melee_input_fixture"
@@ -208,6 +211,7 @@ class InputScope:
     guid: str
     frame: dict
     held: str | None = None
+    reply_sequence: int | None = None
 
     def observes(self, frame: dict) -> bool:
         return (frame.get("map"), frame.get("pawn"), frame.get("guid"), frame.get("serial")) == (
@@ -240,11 +244,18 @@ class AuthorityInput:
         host = self.host
         if not self.scope:
             return
-        frame = self._proof(host.last_game, self.scope)
-        if self.scope.observes(frame) and frame["status"] in TERMINAL:
-            host.control.event("native_guest_melee_input_settled", character_id=self.scope.character, **frame)
+        scope = self.scope
+        if scope.epoch != host.zone_epoch or (host.last_game.get("map") or scope.area) != scope.area:
             self.scope = None
-        elif self.scope.epoch != host.zone_epoch or (host.last_game.get("map") or self.scope.area) != self.scope.area:
+            return
+        if scope.frame["status"] in TERMINAL:
+            frame = scope.frame
+        elif scope.reply_sequence is not None and host.last_game.get("sequence", -1) <= scope.reply_sequence:
+            return
+        else:
+            frame = self._proof(host.last_game, scope)
+        if scope.observes(frame) and frame["status"] in TERMINAL:
+            host.control.event("native_guest_melee_input_settled", character_id=scope.character, **frame)
             self.scope = None
 
     async def request(self, bridge, character, target, operation):
@@ -259,7 +270,7 @@ class AuthorityInput:
             raise party.RuleError("native_guest_melee_exact_edge_required")
         receipt = character, epoch, guid, stroke, edge
         if receipt in self.receipts:
-            return {INPUT_KEY: self.receipts[receipt]}
+            return self.receipts[receipt]
 
         self.observe()
         scope = self.scope
@@ -307,11 +318,18 @@ class AuthorityInput:
         if scope is None:
             scope = self.scope = InputScope(character, epoch, area, pawn, guid, frame)
         scope.held = stroke if edge == "press" else None
-        host.last_game, host.last_seen = snapshot, time.monotonic()
-        self.receipts[receipt] = frame
+        result = {INPUT_KEY: frame}
+        if REPLY_BYTES in snapshot:
+            # A frame published before this mutation can still be awaiting the host loop.
+            scope.reply_sequence = snapshot["sequence"]
+            result[REPLY_BYTES] = snapshot[REPLY_BYTES]
+        else:
+            scope.reply_sequence = None
+            host.last_game, host.last_seen = snapshot, time.monotonic()
+        self.receipts[receipt] = result
         if len(self.receipts) > 256:
             self.receipts.pop(next(iter(self.receipts)))
-        return {INPUT_KEY: frame}
+        return result
 
 
 class GuestInput:
@@ -418,6 +436,7 @@ async def perform(host, bridge, action: str, character: str, guid: str, operatio
                 host.native_checkpoint_unsafe = False
                 raise party.RuleError(str(error)) from error
             raise
+        reply_bytes = snapshot.get(REPLY_BYTES)
         proof = exact(snapshot, key)
         if not proof:
             raise RuntimeError("The stock melee receipt does not match the exact guest and GUID")
@@ -455,9 +474,17 @@ async def perform(host, bridge, action: str, character: str, guid: str, operatio
                     (ordinary or action == DAMAGE) and not miss and not verified_damage(proof, fixture=not ordinary)) or (
                     action == DAMAGE and proof.get("target") != TARGET):
                 raise RuntimeError(proof.get("status") or "The fenced stock animation did not settle")
-        host.last_game, host.last_seen = snapshot, time.monotonic()
+        if REPLY_BYTES not in snapshot:
+            host.last_game, host.last_seen = snapshot, time.monotonic()
         result = {key: proof}
-        candidate = party.load_party(host.party)
+        if reply_bytes is not None:
+            result[REPLY_BYTES] = reply_bytes
+        if deferred:
+            candidate = host.party.copy()
+            candidate["receipts"] = host.party["receipts"].copy()
+            candidate["receipts"][character] = list(candidate["receipts"].get(character, ()))
+        else:
+            candidate = party.load_party(host.party)
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation_id, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]

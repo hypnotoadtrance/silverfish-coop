@@ -3958,15 +3958,17 @@ class Bridge:
                     raise RuntimeError(ack["message"] or f"The game declined the {action} command")
                 receipt[native_loot.CLAIM_REPLY_BYTES] = len(raw.encode("utf-8"))
                 return receipt
-            if action in native_guest_weapon.COMPACT_ACTIONS and raw.startswith(native_guest_weapon.REPLY_HEADER):
-                receipt = self._parse_status(raw.removeprefix(native_guest_weapon.REPLY_HEADER), cache=False)
+            combat = (native_guest_weapon if action in native_guest_weapon.COMPACT_ACTIONS else
+                      native_guest_melee if action in native_guest_melee.COMPACT_ACTIONS else None)
+            if combat is not None and raw.startswith(combat.REPLY_HEADER):
+                receipt = self._parse_status(raw.removeprefix(combat.REPLY_HEADER), cache=False)
                 if (not receipt or receipt.get("mode") != "host" or receipt.get("state") != "hosting"
                         or type(receipt.get("sequence")) is not int or receipt.get("ack", {}).get("id") != fields[0]):
-                    raise RuntimeError("The local weapon receipt did not match the request")
+                    raise RuntimeError(f"The local {action} receipt did not match the request")
                 ack = receipt["ack"]
                 if ack["result"] != "accepted":
                     raise RuntimeError(ack["message"] or f"The game declined the {action} command")
-                receipt[native_guest_weapon.REPLY_BYTES] = len(raw.encode("utf-8"))
+                receipt[combat.REPLY_BYTES] = len(raw.encode("utf-8"))
                 return receipt
             if action == native_world_loot.FRAME and raw.startswith(native_world_loot.FRAME_REPLY + "\t"):
                 return native_world_loot.parse_frame_reply(raw, fields)

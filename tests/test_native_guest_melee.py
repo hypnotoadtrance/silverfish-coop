@@ -359,6 +359,46 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
         host.control.event.assert_called_once_with("native_guest_melee_input_settled", character_id="guest", **settled)
         host.checkpoint_native.assert_not_awaited()
 
+    async def test_compact_release_survives_an_older_publication(self):
+        host = self.host()
+        area = CROSSROADS
+        pawn = f"Player_FP_C {area}.CrossRoads_P:PersistentLevel.Player_FP_C_42"
+        host.native_recipients = lambda: {"guest": {"connected": True, "pawn": pawn}}
+        host.zone_epoch, host.control = "epoch", Mock()
+        host.last_game.update(sequence=39, native_guest_equipped_weapons={pawn: {"kind": "old-pipe", "guid": GUID}})
+        handler = melee.AuthorityInput(host)
+        previous = host.last_game
+        sampled = f"session\thost\thosting\t{area}\t1\t0\n"
+
+        async def reply(payload, timeout):
+            nonce, action, *_ = payload.decode().strip().split("\t")
+            release = int(action == melee.INPUT + "-edge")
+            return (melee.REPLY_HEADER + f"schema\t1\nseq\t{40 + release}\n" + sampled
+                    + f"ack\t{nonce}\taccepted\tmelee edge\n"
+                    + f"{melee.INPUT_STATE}\t{area}\t{pawn}\t{GUID}\t3\tpending\t1\t{release}\t0\t0\t0\t0\n")
+
+        bridge = Bridge(".", None)
+        bridge.local_bridge = SimpleNamespace(command=AsyncMock(side_effect=reply))
+        target = f"epoch@{GUID}@{'b' * 32}"
+        with patch.object(melee.native_inventory, "retain_guest_save", new=AsyncMock(return_value=True)):
+            press = await handler.request(bridge, "guest", target + "@press", OPERATION)
+            release = await handler.request(bridge, "guest", target + "@release", OPERATION)
+        self.assertIs(host.last_game, previous)
+        self.assertIsNone(bridge._local_status)
+        self.assertLess(release[melee.REPLY_BYTES], 600)
+        self.assertEqual(await handler.request(bridge, "guest", target + "@release", OPERATION), release)
+        host.last_game.update(sequence=40, **{melee.INPUT_KEY: press[melee.INPUT_KEY]})
+        handler.observe()
+        self.assertEqual(handler.scope.frame["releases"], 1)
+        self.assertFalse(host.stopping)
+        settled = dict(release[melee.INPUT_KEY], status="settled", contacts=1, hits=1)
+        host.last_game.update(sequence=42, **{melee.INPUT_KEY: settled})
+        handler.observe()
+        self.assertIsNone(handler.scope)
+        host.control.event.assert_called_once_with("native_guest_melee_input_settled", character_id="guest", **settled)
+        self.assertEqual(bridge.local_bridge.command.await_count, 2)
+        host.checkpoint_native.assert_not_awaited()
+
     def test_stock_edge_state_rejects_impossible_combo_or_charge_evidence(self):
         pawn = f"Player_FP_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Player_FP_C_42"
         fields = [melee.INPUT_STATE, CROSSROADS, pawn, GUID, "3", "settled", "2", "2", "2", "1", "1", "1"]
