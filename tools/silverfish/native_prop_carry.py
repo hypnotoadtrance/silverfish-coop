@@ -15,6 +15,11 @@ from .link import STATE_INTERVAL
 from .native_map_preflight import valid_campaign_package
 
 ACTION = "native-prop-carry"
+ARM_FILTER = "native-prop-carry-arm-filter"
+REFUSE = "native-prop-carry-refuse"
+COMPACT_ACTIONS = {ACTION, ARM_FILTER, REFUSE}
+REPLY = "native-prop-carry-reply"
+REPLY_BYTES = "native_prop_carry_reply_bytes"
 AIM = "native-prop-carry-aim"
 POSE_DATAGRAM = "native_prop_pose_datagram"
 RELEASE_POSE = "native_prop_release_pose"
@@ -207,6 +212,43 @@ def parse(fields, phase, area):
     return grip
 
 
+def parse_local_reply(raw, request):
+    rows = [line.split("\t") for line in raw.splitlines()] if 0 < len(raw) <= 4096 and raw.endswith("\n") else []
+    action = request[1]
+    phase = "hosting" if action == ACTION else "connected"
+    if not rows or len(rows[0]) != 9 or rows[0][:5] != [REPLY, "1", request[0], action, phase]:
+        raise RuntimeError("The local physics carry receipt did not match the command")
+    _, _, nonce, _, _, area, sequence, result, message = rows[0]
+    if result == "error" and len(rows) == 1:
+        raise RuntimeError(message or "The stock physics carry was refused")
+    if result != "accepted" or not valid_campaign_package(area):
+        raise RuntimeError("The local physics carry receipt did not match the world")
+    try:
+        proof = {"state": phase, "map": area, "sequence": _serial(sequence), REPLY_BYTES: len(raw.encode("utf-8")),
+                 "ack": {"id": nonce, "result": result, "message": message}}
+        if action != ACTION:
+            if len(rows) != 1:
+                raise ValueError("Unexpected physics carry rows")
+            return proof
+        if len(rows) not in (2, 3) or rows[1][0] != ACTION:
+            raise ValueError("Missing physics carry action")
+        command = parse(rows[1], phase, area)
+        lease, pawn, edge, serial = request[2:6]
+        if tuple(command[key] for key in ("lease", "pawn", "edge", "sequence")) != (lease, pawn, edge, _serial(serial)):
+            raise ValueError("Different physics carry action")
+        proof[PROOF] = command
+        if len(rows) == 3:
+            if edge != "grab" or rows[2][0] != HELD_ROW:
+                raise ValueError("Unexpected physics carry hold")
+            grip = parse(rows[2], phase, area)
+            if tuple(grip[key] for key in ("lease", "pawn", "serial", "actor")) != (lease, pawn, command["sequence"], command["actor"]):
+                raise ValueError("Different physics carry hold")
+            proof[HELD] = {lease: grip}
+        return proof
+    except (IndexError, ValueError) as error:
+        raise RuntimeError("The local physics carry receipt did not verify the action") from error
+
+
 class Host:
     def __init__(self, service):
         self.service = service
@@ -229,20 +271,21 @@ class Host:
             self.poses.clear()
             self.epoch = self.service.zone_epoch
 
-    def grip_confirmation(self, character):
+    def grip_confirmation(self, character, receipt=None):
         self._reset()
-        game = self.service.last_game
+        game = self.service.last_game if receipt is None else receipt
         now = time.monotonic()
+        age = now - self.service.last_seen if receipt is None else 0
         holder = self.holders.get(character)
         if (not holder or holder.get("closing") or holder["pawn"] != self._pawn(character)
-                or not 0 <= now - self.service.last_seen < .5):
+                or not 0 <= age < .5):
             return None
         lease = holder["lease"]
         live = game.get(HELD, {}).get(lease)
         if (not live or live["serial"] != holder["sequence"] or live["pawn"] != holder["pawn"]
                 or live["actor"] != holder["actor"]):
             return None
-        remaining = int(min(live["remaining"] - 1000 * (now - self.service.last_seen),
+        remaining = int(min(live["remaining"] - 1000 * age,
                             1000 * (holder["deadline"] - now), 900))
         if remaining <= 0:
             return None
@@ -279,26 +322,31 @@ class Host:
             holder["closing"] = True
         else:
             raise party.RuleError("native_prop_carry_wrong_holder")
+        area = self.service.last_game["map"]
         snapshot = await bridge.command(ACTION, lease, pawn, edge, str(number), str(pitch), str(yaw), *args, timeout=4)
         proof = snapshot.get(PROOF, {})
         actor = proof.get("actor")
         if (tuple(proof.get(key) for key in ("lease", "sequence", "edge", "pawn")) != (lease, number, edge, pawn)
                 or not isinstance(actor, str) or not actor
                 or any(proof.get(key) != identity.get(key) for key in ("corpse", "bone", "loot_id"))
+                or (REPLY_BYTES in snapshot and snapshot["map"] != area)
                 or (proof.get("release_pose_applied") and (edge == "grab" or not args))
                 or ("placement" in identity and actor.partition(" ")[2] != identity["placement"])):
             raise RuntimeError("The stock physics carry did not return the exact action")
-        self.service.last_game, self.service.last_seen = snapshot, time.monotonic()
+        compact = REPLY_BYTES in snapshot
+        if not compact:
+            self.service.last_game, self.service.last_seen = snapshot, time.monotonic()
         result = {PROOF: proof}
         if edge == "grab":
             self.holders[character] = dict(lease=lease, pawn=pawn, sequence=number, sample=0,
                                            deadline=time.monotonic() + 1.4, identity=identity, actor=actor)
-            if confirmation := self.grip_confirmation(character):
+            if confirmation := self.grip_confirmation(character, snapshot if compact else None):
                 result[FILTER] = confirmation
         else:
             self.holders.pop(character, None)
             self.poses.pop(lease, None)
-        self.service.control.event("native_prop_carry_action", **proof, filter_confirmed=FILTER in result)
+        self.service.control.event("native_prop_carry_action", **proof, filter_confirmed=FILTER in result,
+                                   bridge_reply_bytes=snapshot.get(REPLY_BYTES))
         return result
 
     def aim(self, bridge, character, target):
@@ -418,7 +466,7 @@ class Guest:
             service.control.event("native_prop_carry_refused", edge=edge, reason=str(error))
             if edge == "grab":
                 try:
-                    await service.bridge.command("native-prop-carry-refuse", str(number), timeout=2)
+                    await service.bridge.command(REFUSE, str(number), timeout=2)
                 except (OSError, ValueError, RuntimeError) as failure:
                     service.control.event("native_prop_carry_local_release_failed", reason=str(failure))
 
@@ -439,7 +487,7 @@ class Guest:
         if self.lease != confirmation["lease"] or remaining < 150:
             return
         try:
-            await self.service.bridge.command("native-prop-carry-arm-filter", self.lease, str(self.grab),
+            await self.service.bridge.command(ARM_FILTER, self.lease, str(self.grab),
                                               local_actor, str(remaining), timeout=.5)
         except (OSError, ValueError, RuntimeError):
             # Stock movement stays enabled when the local grip or fresh lease cannot be proved.

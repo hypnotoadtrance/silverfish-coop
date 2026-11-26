@@ -16,6 +16,7 @@ local release_component_path = "/Script/Engine.PhysicsHandleComponent:ReleaseCom
 local final_capture_age = .10
 local max_handoff_offset = 175
 local max_release_reach = 375
+local placed_grab_margin = 100
 local max_linear_velocity = 6000
 local max_angular_velocity = 7200
 local pawn_channel, ignore_collision, block_collision = 2, 0, 2
@@ -425,30 +426,30 @@ local function trace(pawn, pitch, yaw, number, expected_bone, claimed, expected_
         if placement then
             local level = carry.placed_level(selected, world, visible_streams)
             if not level or streamed == same(level, world.PersistentLevel) then return nil, "placement scope" end
-        end
-        if valid(selected) and same(selected, enrolled[selected:GetAddress()]) and selected:HasAuthority()
-            and actor_class(selected) == expected_class and mesh(selected) and point(claimed) then
+            if not selected:HasAuthority() or selected.bReplicates ~= true or actor_class(selected) ~= expected_class
+                or not mesh(selected) or not point(claimed) then return nil, "placement body" end
             local center = selected:K2_GetActorLocation()
-            if point(center) and dist2(center, claimed) <= 35^2 and dist2(origin, center) < range^2 then
-                -- The stock guest grip already selected this placed actor. Use its
-                -- enrolled identity when the authority camera is on a different frame.
-                return selected, math.sqrt(dist2(origin, center))
-            end
+            if not point(center) or dist2(origin, center) > (range + placed_grab_margin)^2
+                or dist2(origin, claimed) > (range + placed_grab_margin)^2 then return nil, "placement reach" end
+            -- The stock guest grab already found this exact replica. Use its distance
+            -- for the stock grip even if the host sees the body a few physics steps behind.
+            return selected, math.min(range, math.sqrt(dist2(origin, claimed))), nil,
+                not same(selected, enrolled[selected:GetAddress()])
         end
         local part, collision = impact(along(range))
         local actor = valid(part) and part:GetOwner()
-        if valid(actor) and (not placement or same(actor, selected)) and point(collision)
+        if valid(actor) and point(collision)
             and actor_class(actor) == expected_class and point(claimed)
             and dist2(actor:K2_GetActorLocation(), claimed) <= 35^2 then
             local tracked = same(actor, enrolled[actor:GetAddress()]) and same(part, mesh(actor))
-            local lit_flare = not tracked and not placement and same(part, flares.carry_root(actor, world))
+            local lit_flare = not tracked and same(part, flares.carry_root(actor, world))
                 and actor:HasAuthority() and actor.Lit == true and part:IsAnySimulatingPhysics()
             -- Script-spawned network props can be absent from the placed or crate census.
             -- The live host trace and the actor's stock root can still prove this grip.
-            local networked = not tracked and not placement and same(part, replicated_prop_root(actor))
+            local networked = not tracked and same(part, replicated_prop_root(actor))
             if tracked or lit_flare or networked then return actor, math.sqrt(dist2(origin, collision)), nil, networked end
         end
-        if not placement and expected_class and point(claimed) then
+        if expected_class and point(claimed) then
             -- The guest already acquired a real network replica. Accept the uniquely
             -- matching host prop even if the authority camera's trace hit different geometry.
             local replica, distance = find_spawned_prop(origin, range, claimed, expected_class)
@@ -458,7 +459,7 @@ local function trace(pawn, pitch, yaw, number, expected_bone, claimed, expected_
         if expected_class and point(claimed) then
             local matched, center
             for _, candidate in pairs(enrolled) do
-                if (not placement or same(candidate, selected)) and item_body(candidate) and actor_class(candidate) == expected_class then
+                if item_body(candidate) and actor_class(candidate) == expected_class then
                     local at = candidate:K2_GetActorLocation()
                     if point(at) and dist2(at, claimed) <= 35^2 then
                         if matched then return nil, "ambiguous loose item" end
@@ -884,7 +885,7 @@ function carry.command(fields, current, seat)
                 if same(holder.actor, actor) then error("native_prop_carry_wrong_holder", 0) end
             end
         end
-        if not corpse and (dist2(position, actor:K2_GetActorLocation()) > 35^2
+        if not corpse and ((not placement or loot_id) and dist2(position, actor:K2_GetActorLocation()) > 35^2
             or not unflagged and actor.BeingHeld ~= false) then
             if fixtures then
                 error(("native_prop_carry_stock_target_unavailable: center moved %.1f cm, held=%s"):format(
@@ -1016,6 +1017,31 @@ function carry.update()
     end
 end
 
+local function held_row(map, entry, now, row)
+    local remaining = math.min(1500, math.floor((entry.deadline - now) * 1000))
+    if remaining > 0 and filter_root(entry, entry.grip)
+        and players.is_standing_guest(entry.pawn, entry.pawn:GetFullName()) then
+        return row("native-prop-carry-held", map, entry.lease, entry.serial,
+            entry.pawn:GetFullName(), entry.actor_name, remaining)
+    end
+end
+
+function carry.local_reply(fields, current, seat, version, row)
+    local accepted, message = pcall(carry.command, fields, current, seat)
+    if not message then accepted, message = false, "native_prop_carry_scope_unavailable" end
+    local lines = {row("native-prop-carry-reply", 1, fields[1], fields[2], seat, current.map, version,
+        accepted and "accepted" or "error", message)}
+    if accepted and fields[2] == "native-prop-carry" then
+        lines[2] = row("native-prop-carry", current.map, table.unpack(latest))
+        local entry = holdings[fields[3]]
+        if entry and filter_available() then
+            local checked, line = pcall(held_row, current.map, entry, os.clock(), row)
+            if checked then lines[3] = line end
+        end
+    end
+    return table.concat(lines, "\n") .. "\n"
+end
+
 function carry.rows(current, seat, row)
     local rows = {}
     if not enabled or not same(world, current.world) then return rows end
@@ -1046,13 +1072,9 @@ function carry.rows(current, seat, row)
     if seat == "hosting" and latest then rows[#rows + 1] = row("native-prop-carry", current.map, table.unpack(latest)) end
     if seat == "hosting" and filter_available() then
         local now = os.clock()
-        for id, entry in pairs(holdings) do
-            local remaining = math.min(1500, math.floor((entry.deadline - now) * 1000))
-            if remaining > 0 and filter_root(entry, entry.grip)
-                and players.is_standing_guest(entry.pawn, entry.pawn:GetFullName()) then
-                rows[#rows + 1] = row("native-prop-carry-held", current.map, id, entry.serial,
-                    entry.pawn:GetFullName(), entry.actor_name, remaining)
-            end
+        for _, entry in pairs(holdings) do
+            local line = held_row(current.map, entry, now, row)
+            if line then rows[#rows + 1] = line end
         end
     end
     if seat ~= "connected" then return rows end

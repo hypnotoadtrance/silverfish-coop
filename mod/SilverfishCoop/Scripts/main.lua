@@ -1858,6 +1858,12 @@ status_publication.dead_drop_actions = {
     ["native-dead-drop-clear"] = true,
 }
 
+status_publication.prop_carry_actions = {
+    ["native-prop-carry"] = "hosting",
+    ["native-prop-carry-arm-filter"] = "connected",
+    ["native-prop-carry-refuse"] = "connected",
+}
+
 status_publication.spatial_cues = {
     ["native-anomaly-play-cues"] = 4,
     ["native-sound-voice"] = 4,
@@ -1878,6 +1884,14 @@ local function tick(fields, pending, periodic)
     end
     local state, current_phase = observe_session()
     if not state then return end
+    if fields and pending and status_publication.prop_carry_actions[fields[2]] == current_phase then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        SilverfishPublishLocalBridgeReply(pending.ticket,
+            native_prop_carry.local_reply(fields, state, current_phase, sequence, status_row))
+        if not periodic then return true end
+        fields, pending = nil, nil
+    end
     if fields and pending and fields[2] == "native-world-loot-frame" and status_publication.steady(state, current_phase) then
         if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
         pending.dispatched = true
@@ -2276,7 +2290,7 @@ if resident_title and status_publication.installed then
         if action == "native-world-loot-frame" or action == "native-loot-open" or action == "native-loot-inspect"
             or status_publication.stock_interactions[action] or status_publication.pickup_presentation[action]
             or status_publication.pickup_claims[action] or status_publication.guest_combat_actions[action]
-            or status_publication.dead_drop_actions[action] then
+            or status_publication.dead_drop_actions[action] or status_publication.prop_carry_actions[action] then
             status_publication.dispatch(os.clock(), fields, pending, false)
         end
     end)

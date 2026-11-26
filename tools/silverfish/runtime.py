@@ -4116,6 +4116,8 @@ class Bridge:
             if (action in (native_dead_drop.PROJECT, native_dead_drop.CLEAR)
                     and raw.startswith(native_dead_drop.REPLY + "\t")):
                 return native_dead_drop.parse_projection_reply(raw, fields)
+            if action in native_prop_carry.COMPACT_ACTIONS and raw.startswith(native_prop_carry.REPLY + "\t"):
+                return native_prop_carry.parse_local_reply(raw, fields)
             if action == native_guest_clock.APPLY and raw.startswith(native_guest_clock.REPLY + "\t"):
                 return self._local_guest_clock_reply(raw, fields)
             status = self._parse_status(raw)

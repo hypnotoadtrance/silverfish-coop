@@ -167,6 +167,33 @@ class CorpseCarryPayloadTests(unittest.TestCase):
 
 
 class ReleaseHandoffTests(unittest.IsolatedAsyncioTestCase):
+    async def test_compact_receipt_confirms_grip_without_replacing_the_world_snapshot(self):
+        epoch, lease, nonce, character = "a" * 32, "b" * 32, "c" * 32, "d" * 32
+        area = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+        path = f"{area}.CrossRoads_P:PersistentLevel.Prop_TypeWriter_C_3"
+        actor = f"Prop_TypeWriter_C {path}"
+        class_path = "/Game/Assets/Prop_TypeWriter.Prop_TypeWriter_C"
+        request = (nonce, carry.ACTION, lease, "guest pawn", "grab", "4", "0", "0", class_path, "10", "20", "30", path)
+        lines = [f"{carry.REPLY}\t1\t{nonce}\t{carry.ACTION}\thosting\t{area}\t18\taccepted\tgrabbed",
+                 f"{carry.ACTION}\t{area}\t{lease}\t4\tgrab\tguest pawn\t{actor}",
+                 f"{carry.HELD_ROW}\t{area}\t{lease}\t4\tguest pawn\t{actor}\t1250"]
+        text = "\n".join(lines) + "\n"
+        reply = carry.parse_local_reply(text, request)
+        service = SimpleNamespace(zone_epoch=epoch, last_game={"map": area, "sequence": 17},
+                                  last_seen=0, control=Mock())
+        host = carry.Host(service)
+        bridge = SimpleNamespace(command=AsyncMock(return_value=reply))
+        with patch.object(host, "_pawn", return_value="guest pawn"):
+            result = await host.operate(bridge, character, f"{epoch}@{lease}@grab@4@0@0@{class_path}@10@20@30@{path}")
+        self.assertEqual(result[carry.FILTER]["version"], 18)
+        self.assertEqual(result[carry.FILTER]["actor"], actor)
+        self.assertEqual(service.last_game, {"map": area, "sequence": 17})
+        self.assertEqual(service.last_seen, 0)
+        for wrong in (text.replace(nonce, "e" * 32), text.replace("\t4\tgrab", "\t3\tgrab"),
+                      text.replace("\t1250", "\t0")):
+            with self.assertRaises(RuntimeError):
+                carry.parse_local_reply(wrong, request)
+
     async def test_a_refused_dynamic_prop_grab_clears_the_predicted_local_grip(self):
         bridge = SimpleNamespace(command=AsyncMock(), input_namespace=uuid.NAMESPACE_URL)
         gameplay_action = AsyncMock(side_effect=RuntimeError("native_prop_carry_stock_target_unavailable"))
