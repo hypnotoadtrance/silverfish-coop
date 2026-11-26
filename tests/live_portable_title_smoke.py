@@ -7102,6 +7102,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_weather_travel, "crossroads", "stock_weather_travel",
          lambda host, guest, pawn: verify_weather_travel(host, guest, pawn, portable_probe_command,
                                                         profile=crossroads_profile, gc_trial=crossroads_gc_trial)),
+        # Exercise recovery near the arrival point before world-object checks move the party.
+        (stock_crossroads_recovery, "crossroads", "stock_crossroads_recovery", verify_crossroads_recovery),
         (stock_lightning, "crossroads", "stock_lightning",
          lambda host, guest, pawn: verify_stock_lightning(host, guest, pawn, portable_probe_command)),
         (storm_trial, "storm", "stock_storm_ambience",
@@ -7122,7 +7124,6 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_lingering_teleport, "crossroads" if crossroads_profile else "crossroads_anomaly", "stock_lingering_teleport",
          lambda host, guest, pawn: verify_stock_lingering_teleport(host, guest, pawn, portable_probe_command)),
         (stock_mushrooms, "crossroads", "stock_mushrooms", verify_stock_mushrooms),
-        (stock_crossroads_recovery, "crossroads", "stock_crossroads_recovery", verify_crossroads_recovery),
         (stock_canister, "crossroads", "stock_canister", lambda host, guest, pawn:
          verify_crossroads_canister(host, guest, pawn, resident_events, campaign_save_hashes)),
         (stock_buried_placements, "buried_placements" if stock_shovel_quest else "crossroads",
