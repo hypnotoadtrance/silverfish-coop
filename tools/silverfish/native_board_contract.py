@@ -26,6 +26,7 @@ BOARD_PATH = re.compile(
 STREAM_PREFIX = "stream:"
 COMPLETE = -10
 MAX_OBJECTIVES = 16
+MAX_FOLLOWUPS = 16
 _INSPECTED_FIELDS = ("step_before", "expected_step", "cash", "xp", "remaining")
 
 
@@ -83,7 +84,7 @@ def require_visit(host, visit):
 
 
 def parse(fields):
-    if len(fields) not in (21, 22, 23):
+    if len(fields) not in (21, 22, 23, 24):
         raise ValueError("Invalid native board result")
     proof = dict(zip(("verb", "mode", "map", "pawn", "board", "quest", "state"), fields[1:8], strict=True))
     proof.update(zip(("step_before", "step_after", "expected_step"),
@@ -118,13 +119,33 @@ def parse(fields):
             pending.add(guid)
             spent.add(consumed)
             proof["additional_deposits"].append(part)
-    raw_rewards = fields[22] if len(fields) == 23 else "-"
+    raw_rewards = fields[22] if len(fields) >= 23 else "-"
     rewards = [] if raw_rewards == "-" else raw_rewards.split(",")
     if (len(rewards) > 8 or len(set(rewards)) != len(rewards) or not all(map(item_class_name, rewards))
             or rewards and (proof["verb"] != "turnin" or proof["state"] == "already")):
         raise ValueError("Invalid stock board reward classes")
     proof["item_rewards"] = rewards
+    proof["followups"] = _parse_followups(fields[23] if len(fields) == 24 else "-", proof)
     return proof
+
+
+def _parse_followups(raw, proof):
+    if raw == "-":
+        return []
+    if len(raw) > MAX_FOLLOWUPS * 111 or proof["verb"] != "turnin" or proof["state"] == "already":
+        raise ValueError("Unexpected stock board follow-ups")
+    records = []
+    seen = {proof["quest"], "None"}
+    for entry in raw.split(","):
+        quest, step, present = entry.split(":")
+        number = int(step)
+        if (len(records) >= MAX_FOLLOWUPS or not quest_id(quest) or quest in seen or present not in {"0", "1"}
+                or step != str(number) or not -2_147_483_648 <= number <= 2_147_483_647
+                or present == "0" and number < 1):
+            raise ValueError("Invalid stock board follow-up")
+        records.append({"quest_id": quest, "step": number, "present": present == "1"})
+        seen.add(quest)
+    return records
 
 
 def _valid_deposit(proof, part):
@@ -195,6 +216,8 @@ def _receipt(actor, before, result):
         raise RuntimeError("The stock board action differs from its inspected deposits")
     if result["item_rewards"] != before["item_rewards"]:
         raise RuntimeError("The stock board action differs from its inspected item rewards")
+    if result.get("followups", []) != before.get("followups", []):
+        raise RuntimeError("The stock board action differs from its inspected follow-ups")
     cash, xp = result["cash"], result["xp"]
     # A separate stock action can change the balance between inspection and apply.
     # Use the game-thread balance at apply time and verify the exact reward delta.
@@ -205,6 +228,8 @@ def _receipt(actor, before, result):
         record.update(cash=cash, xp=xp, wallet=result["cash_after"])
         if result["item_rewards"]:
             record.update(item_rewards=result["item_rewards"], item_reward_owner=actor)
+        if followups := result.get("followups"):
+            record["followups"] = followups
         if result["guid"] != "-":
             deposits = [_deposit_receipt(actor, part) for part in (result, *result["additional_deposits"])]
             record.update(deposits[0])
@@ -238,6 +263,9 @@ def apply_arguments(proof):
     additional = _additional_inspection(proof)
     if additional:
         inspected = f"{inspected}|{additional}"
+    if followups := proof.get("followups"):
+        entries = ",".join(f"{row['quest_id']}:{row['step']}:{int(row['present'])}" for row in followups)
+        inspected = f"{inspected}|followups={entries}"
     fields = (proof["guid"], encode(proof["units"]), inspected)
     return (*fields, ",".join(proof["item_rewards"])) if proof["item_rewards"] else fields
 

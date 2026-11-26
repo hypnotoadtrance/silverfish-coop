@@ -56,8 +56,46 @@ local function offer_step(row)
     if int(step) and int(final) and step >= 1 and step <= final then return step end
 end
 
-local function shape(save, row)
-    local step = quest_catalog.tracked_step(save, row)
+local function followups(context, row, parent)
+    local list = row[keys.chained]
+    local count = len(list)
+    if not int(count) or count < 0 or count > 16 then refuse("followup_list_unqualified") end
+    local result = {}
+    if count == 0 then return result end
+    local available, templates = pcall(wire.stock_quest_table)
+    if not available then refuse("followup_table_unavailable") end
+    local active = context.save.ActiveQuests
+    local seen = {[parent] = true}
+    for index = 1, count do
+        local id = wire.stock_quest_id(name(list[index]))
+        if type(id) ~= "string" or #id > 96 or not id:match("^[A-Za-z0-9_]+$") or id == "None" or seen[id] then
+            refuse("followup_identity_unqualified")
+        end
+        local key = wire.stock_quest_key(id)
+        local found, starting = pcall(function()
+            local template = key and templates:FindRow(id)
+            return template and offer_step(template)
+        end)
+        if not found or not starting then refuse("followup_template_unavailable") end
+        local current = wire.stock_row(active, key)
+        local expected = current and current[keys.step] or starting
+        if not int(expected) then refuse("followup_step_unqualified") end
+        result[index] = {key = key, id = id, step = expected, present = current ~= nil}
+        seen[id] = true
+    end
+    return result
+end
+
+local function followup_proof(result)
+    local entries = {}
+    for index, entry in ipairs(result) do
+        entries[index] = table.concat({entry.id, entry.step, entry.present and 1 or 0}, ":")
+    end
+    return #entries == 0 and "-" or table.concat(entries, ",")
+end
+
+local function shape(context, row, quest)
+    local step = quest_catalog.tracked_step(context.save, row)
     local final, cash, xp = row[keys.final], row[keys.cash], row[keys.xp]
     local quantity, consumed = len(row[keys.objective]), row[keys.consumed]
     local reward_count = len(row[keys.items])
@@ -69,14 +107,15 @@ local function shape(save, row)
     if row[keys.kind] ~= 2 or not int(step) or not int(final) or final < 1 or not int(cash) or cash < 0
         or not int(xp) or xp < 0 or not int(row[keys.redeem])
         or not int(reward_count) or reward_count < 0 or reward_count > 8
-        or len(row[keys.chained]) ~= 0 or not ping_supported
+        or not ping_supported
         or not int(quantity) or quantity < 0 or quantity > 16
         or not (quantity == 0 and type(consumed) == "boolean" or quantity > 0 and consumed == true)
         or not row[keys.flags] or #row[keys.flags] > 16 or not row[keys.rep] or #row[keys.rep] > 16 then
         refuse("specialized_recipe")
     end
     local result = {step = step, final = final, cash = cash, xp = xp, objectives = {}, by_class = {},
-        empty_consumption = quantity == 0 and consumed, rewards = {}, reward_paths = {}}
+        empty_consumption = quantity == 0 and consumed, rewards = {}, reward_paths = {},
+        followups = followups(context, row, quest)}
     for index = 1, quantity do
         local class = row[keys.objective][index]
         if not valid(class) then refuse("objective_class_unqualified") end
@@ -308,7 +347,7 @@ local function catalog(fields, state, phase)
             if specialist_ready(context, row) then target[#target + 1] = id end
             return
         end
-        local supported, contract = pcall(shape, context.save, row)
+        local supported, contract = pcall(shape, context, row, id)
         if not supported or contract.step <= 0 then return end
         if #contract.objectives > 0 then
             local permitted, owned = pcall(backpack_objectives, context.receiving_save, contract)
@@ -363,7 +402,7 @@ function board_contract.command(fields, state, phase)
         verb = verb, mode = mode, pawn = pawn, board = board, quest = quest, context = context,
         before = step or "-", after = step or "-", cash_before = cash_before, cash_after = cash_before,
         xp_before = xp_before, xp_after = xp_before, cash = 0, xp = 0, guid = "-", consumed = "-", state = "already",
-        deposits = {}, rewards = "-",
+        deposits = {}, rewards = "-", followups = "-",
     }
     if (verb == "start" and active) or (verb == "turnin" and step == completed_step) then
         last = outcome
@@ -380,9 +419,10 @@ function board_contract.command(fields, state, phase)
         if not starting_step then refuse("offer_step_unqualified") end
     else
         if not active or step <= 0 or not board_accepts(context.board, context.key, active) then refuse("wrong_turnin") end
-        contract = shape(context.save, active)
+        contract = shape(context, active, quest)
         if contract.step <= 0 then refuse("objective_not_complete") end
         outcome.cash, outcome.xp = contract.cash, contract.xp
+        outcome.followups = followup_proof(contract.followups)
         if #contract.reward_paths > 0 then
             if not same(context.save, context.receiving_save) and type(SilverfishRedeemBoardObjectives) ~= "function" then
                 refuse("native_reward_redemption_unavailable")
@@ -416,6 +456,7 @@ function board_contract.command(fields, state, phase)
     local inspected = table.concat({outcome.before, outcome.expected_step, outcome.cash, outcome.xp,
         outcome.remaining or "-"}, "|")
     if #outcome.deposits > 1 then inspected = inspected .. "|" .. additional_deposits(outcome, false) end
+    if outcome.followups ~= "-" then inspected = inspected .. "|followups=" .. outcome.followups end
     if fields[10] ~= inspected or (fields[11] or "-") ~= outcome.rewards then refuse("inspection_changed") end
 
     local has_deposit = outcome.guid ~= "-"
@@ -497,6 +538,12 @@ function board_contract.command(fields, state, phase)
             end
         end
         if not unchanged(context, state, phase, pawn, board, quest) then return end
+        if contract then
+            for _, followup in ipairs(contract.followups) do
+                local observed = wire.stock_row(context.save.ActiveQuests, followup.key)
+                if not observed or observed[keys.step] ~= followup.step then return end
+            end
+        end
         local after = wire.stock_row(context.save.ActiveQuests, context.key)
         local cash_after, xp_after = balances(context)
         if not after or after[keys.step] ~= outcome.expected_step or cash_after ~= cash_before + outcome.cash
@@ -522,7 +569,8 @@ function board_contract.rows(state, phase, status_row)
     return {status_row(operation, last.verb, last.mode, state.map, last.pawn, last.board, last.quest,
         last.state, last.before, last.after, last.expected_step or "-", last.cash_before, last.cash_after,
         last.xp_before, last.xp_after, last.cash, last.xp, last.guid,
-        last.units or "-", last.remaining or "-", last.consumed, additional_deposits(last, true), last.rewards)}
+        last.units or "-", last.remaining or "-", last.consumed, additional_deposits(last, true), last.rewards,
+        last.followups)}
 end
 
 return board_contract

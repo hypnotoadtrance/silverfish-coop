@@ -41,6 +41,7 @@ local item_units = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local eye = "Clt_Eye_02"
 local kill = "Asn_EggHead"
+local followup = "Workshop_SecondDelivery"
 local multi_reward = "MultiReward"
 local item_path = "/FrontierPack/Items/ScrapEye.ScrapEye_C"
 local class = object({GetFullName = function() return "BlueprintGeneratedClass " .. item_path end})
@@ -62,9 +63,10 @@ local function quest(at, class_value, payout, flag_values, rep_values)
 end
 
 local eye_recipe, kill_recipe = quest(2, class, 801), quest(0, nil, 3000, {BountyDone = 1}, {[8] = 20})
+local followup_recipe = quest(0, nil, 0)
 local complex_recipe = quest(2, class, 100)
 complex_recipe[items] = array({class})
-complex_recipe[chained] = array({eye})
+complex_recipe[chained] = array({followup})
 local store = object({ActiveQuests = map({}), PlayerBackpack = array({}), PlayerEquipment = array({})})
 local player = object({Save = store})
 local bag = object({PlayerBackpack = array({}), PlayerEquipment = array({})})
@@ -93,6 +95,10 @@ end
 
 package.loaded.native_wire_quest = {
     stock_quest_id = stock_keys.stock_quest_id,
+    stock_quest_key = function(key) return key end,
+    stock_quest_table = function()
+        return {FindRow = function(_, key) if key == followup then return followup_recipe end end}
+    end,
     live_stock_board_context = function(state, phase, pawn, board_name, key)
         assert(state.world == world and phase == "hosting" and pawn == "Guest" and board_name == "Board")
         return {key = key, world = world, board = board, save = store, receiving_save = bag, host = player,
@@ -119,6 +125,11 @@ local function stock_finalize(_, key, instance, no_confirmation, host, out)
     for flag, number in pairs(contract[flags]) do host_flags[flag] = number end
     for _, number in pairs(contract[rep]) do host_flags.Rep_Freelancer = host_flags.Rep_Freelancer + number * 2 end
     if contract[ping] ~= "None" then stock_pings[#stock_pings + 1] = contract[ping] end
+    for _, next_quest in ipairs(contract[chained]) do
+        if not store.ActiveQuests[next_quest] and next_quest == followup then
+            store.ActiveQuests[next_quest] = followup_recipe
+        end
+    end
     out.Success = true
 end
 
@@ -166,6 +177,7 @@ local function action(verb, mode, id, guid, units)
     local row = proof()
     if mode == "inspect" and row[8] == "qualified" then
         inspection = table.concat({row[9], row[11], row[16], row[17], row[20]}, "|")
+        if row[24] ~= "-" then inspection = inspection .. "|followups=" .. row[24] end
         reward_inspection = row[23] ~= "-" and row[23] or nil
     end
     return response
@@ -189,7 +201,7 @@ assert(proof()[8] == "qualified" and proof()[11] == 1)
 action("start", "apply", multi_reward, "-")
 assert(proof()[8] == "applied" and proof()[10] == 1 and proof()[13] == 17 and proof()[15] == 3)
 assert(store.ActiveQuests[multi_reward] == complex_recipe)
-denied("specialized_recipe", "turnin", "inspect", multi_reward)
+denied("reward_class_unqualified", "turnin", "inspect", multi_reward)
 assert(catalog()[7] == "Asn_EggHead,Clt_Eye_02" and catalog()[8] == "-")
 action("start", "inspect", eye)
 assert(proof()[8] == "qualified" and proof()[9] == "-" and proof()[11] == 1)
@@ -240,6 +252,12 @@ denied("objective_not_complete", "turnin", "inspect", kill)
 host_flags.TrackedKills = 1
 denied("objective_not_complete", "turnin", "inspect", kill)
 host_flags.TrackedKills = 3
+kill_recipe[chained] = array({"Unloaded_Quest"})
+assert(catalog()[8] == "-")
+denied("followup_template_unavailable", "turnin", "inspect", kill)
+kill_recipe[chained] = array({kill})
+denied("followup_identity_unqualified", "turnin", "inspect", kill)
+kill_recipe[chained] = array({followup})
 kill_recipe[items] = array({class})
 kill_recipe[ping] = "Coup_HuntPlayer"
 assert(catalog()[8] == "-" and catalog(kill)[8] == kill)
@@ -248,12 +266,19 @@ kill_recipe[items] = array({})
 kill_recipe[ping] = "Coup_HuntPlayer"
 action("turnin", "inspect", kill)
 assert(proof()[18] == "-" and proof()[16] == 3000 and proof()[9] == 1)
+assert(proof()[24] == followup .. ":1:0")
+store.ActiveQuests[followup] = followup_recipe
+denied("inspection_changed", "turnin", "apply", kill, "-")
+assert(kill_recipe[step] == 1 and #stock_pings == 0 and host_flags.Player_Cash == 818)
+store.ActiveQuests[followup] = nil
 action("turnin", "apply", kill, "-")
 assert(proof()[13] == 3818 and host_flags.BountyDone == 1 and host_flags.Rep_Freelancer == 42)
+assert(proof()[24] == followup .. ":1:0" and store.ActiveQuests[followup] == followup_recipe)
 assert(require("native_quest_catalog").tracked_step(store, kill_recipe) == -10)
 action("turnin", "apply", kill, "-")
 assert(proof()[8] == "already" and #stock_pings == 1 and stock_pings[1] == "Coup_HuntPlayer")
 assert(host_flags.Player_Cash == 3818)
+store.ActiveQuests[followup] = nil
 
 local photo = "Photo_BrnzQuarry"
 local photo_recipe = quest(0, nil, 100)

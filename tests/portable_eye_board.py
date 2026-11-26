@@ -165,6 +165,7 @@ async def verify_stock_item_rewards(host, guest, character, visit):
         assert paid["item_rewards"] == classes and paid["item_reward_owner"] == character, paid
         if material != "-":
             assert paid["consumed_guid"] == material, paid
+            assert paid["followups"] == [{"quest_id": "Photo_BrnzQuarry", "step": 1, "present": False}], paid
         async with asyncio.timeout(10):
             while True:
                 after = await inventory(guest_run)
@@ -174,10 +175,14 @@ async def verify_stock_item_rewards(host, guest, character, visit):
                 await asyncio.sleep(.1)
         assert material not in after and await inventory(host_run) == host_items
         assert all(after.get(guid) == item for guid, item in guest_items.items() if guid != material)
+        followups = None
         async with asyncio.timeout(10):
             while True:
                 journals = await asyncio.gather(*(probe(seat.bridge.directory, journal) for seat in (host, guest)))
-                if journals == ["-10", "-10"]:
+                if material != "-":
+                    followups = await asyncio.gather(*(probe(seat.bridge.directory, "followupjournal")
+                                                       for seat in (host, guest)))
+                if journals == ["-10", "-10"] and (followups is None or followups == ["1", "1"]):
                     break
                 await asyncio.sleep(.1)
         selection = native_board_contract.menu_target(visit, BOARD, quest)
@@ -185,4 +190,6 @@ async def verify_stock_item_rewards(host, guest, character, visit):
         assert replay["effect"] == "native_quest_already_settled" and replay["wallet"] == paid["wallet"]
         assert after == await inventory(guest_run) and campaign_save_hashes(host.campaign) == checkpoint
         evidence[quest] = {"awarded": new, "receipt": paid, "journals": journals, "host_inventory_preserved": True}
+        if followups is not None:
+            evidence[quest]["followup_journals"] = followups
     return evidence

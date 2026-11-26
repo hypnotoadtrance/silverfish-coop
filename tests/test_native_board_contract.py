@@ -18,7 +18,7 @@ VISIT = "12" * 16
 
 
 def result(quest, verb, mode, before, expected, *, cash=0, xp=0, guid="-", board_name=BOARD,
-           raw_units=1, remaining=0, consumed=None, additional="-", rewards="-"):
+           raw_units=1, remaining=0, consumed=None, additional="-", rewards="-", followups=None):
     applied = mode == "apply"
     if consumed is None:
         consumed = guid if applied else "-"
@@ -28,6 +28,8 @@ def result(quest, verb, mode, before, expected, *, cash=0, xp=0, guid="-", board
               str(expected), "17", str(17 + cash if applied else 17), "3", str(3 + xp if applied else 3),
               str(cash), str(xp), guid, str(raw_units) if guid != "-" else "-",
               str(remaining) if guid != "-" else "-", consumed, additional, rewards)
+    if followups is not None:
+        fields = (*fields, followups)
     return {"state": "hosting", "map": SHOPKEEP, board.KEY: board.parse(fields)}
 
 
@@ -125,6 +127,30 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
             result(EYE, "turnin", "inspect", 1, -10, guid=GUID, additional=f"{GUID}:1:0:-")
         with self.assertRaisesRegex(ValueError, "Unexpected additional"):
             result(EYE, "start", "inspect", None, 1, additional=f"{GUID}:1:0:-")
+
+    async def test_stock_quest_followups_are_bound_to_the_turnin_and_replay(self):
+        next_quests = "NewQuest:1:0,ExistingQuest:-10:1"
+        before = result(EYE, "turnin", "inspect", 2, -10, cash=801, followups=next_quests)
+        applied = result(EYE, "turnin", "apply", 2, -10, cash=801, followups=next_quests)
+        host = self.host()
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[before, applied]))
+        paid = await board.perform(host, bridge, "guest", "turnin", EYE)
+        self.assertTrue(bridge.command.await_args.args[-1].endswith(f"|followups={next_quests}"))
+        self.assertEqual(paid["followups"], [
+            {"quest_id": "NewQuest", "step": 1, "present": False},
+            {"quest_id": "ExistingQuest", "step": -10, "present": True},
+        ])
+        replay = await board.perform(host, bridge, "guest", "turnin", EYE)
+        self.assertEqual(replay, {**paid, "effect": "native_quest_already_settled"})
+        self.assertEqual(bridge.command.await_count, 2)
+        host.checkpoint_native.assert_not_awaited()
+        wrong = result(EYE, "turnin", "apply", 2, -10, cash=801, followups="OtherQuest:1:0")[board.KEY]
+        with self.assertRaisesRegex(RuntimeError, "inspected follow-ups"):
+            board._receipt("guest", before[board.KEY], wrong)
+        for invalid in (f"{EYE}:1:0", "NewQuest:01:0", "NewQuest:0:0", "None:1:0",
+                        "NewQuest:1:0,NewQuest:2:1", "NewQuest:1:2"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                result(EYE, "turnin", "inspect", 2, -10, followups=invalid)
 
     def test_largest_supported_objective_receipt_survives_parsing(self):
         deposited = ",".join(f"{index:032X}:2147483647:2147483646:{index + 100:032X}"

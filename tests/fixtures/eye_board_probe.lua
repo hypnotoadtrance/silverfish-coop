@@ -15,6 +15,8 @@ local step_field = "Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A"
 local objectives_field = "Objective_Items_56_9FD46BE9431873A188AED4B08F0AF083"
 local armor_contract = "Clct_Armor_Simmi"
 local reward_quests = {rewarddeposit = "Clt_Wrench", rewardonly = "Asn_Sniper_Coup_01"}
+local followup_quest = "Photo_BrnzQuarry"
+local followups_field = "Add_Quests_OnComplete_66_06ACA8C44193595C2DFAD8A85B7FC8B9"
 local reward_items = "Reward_Items_32_2B334D5F4DBA7AA760BF33A8E93A4C0A"
 local final_step = "Objective_FinalStep_57_F5A16DBF4E231A030BBD9F864F62A14B"
 local previous, prepared_save, leveled, seeded
@@ -153,6 +155,11 @@ local function prepare(state, host, operation)
             row[step_field] = row[final_step]
         else
             material = append(remote, save.PlayerBackpack, objectives[1])
+            local followup = FName(followup_quest, EFindName.FNAME_Find)
+            local followups = row[followups_field]
+            assert(followups:GetArrayNum() == 0 and not stock.stock_row(host.Save.ActiveQuests, followup))
+            followups[1] = followup
+            assert(followups:GetArrayNum() == 1 and followups[1]:ToString() == followup_quest)
         end
         local fields = {material}
         for index = 1, rewards:GetArrayNum() do
@@ -243,7 +250,8 @@ local function sync(state, phase)
     if not nonce then return end
     local ok, result
     local journal = ({journal = "Clt_Eye_02", multijournal = armor_contract,
-        depositjournal = reward_quests.rewarddeposit, rewardjournal = reward_quests.rewardonly})[operation]
+        depositjournal = reward_quests.rewarddeposit, rewardjournal = reward_quests.rewardonly,
+        followupjournal = followup_quest})[operation]
     if journal then
         ok, result = pcall(function()
             local key = journal
