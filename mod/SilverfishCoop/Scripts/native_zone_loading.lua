@@ -53,20 +53,21 @@ local function finish_loading(state, phase, checking_cover)
     if guest and (not valid(server) or not same(server.Driver, driver)) or host and valid(server) then return end
     if pending == false then return true end
     local class = StaticFindObject(level_class)
+    local has_level_controller = false
     for _, level in ipairs(valid(class) and FindAllOf("LevelControler_BP_C") or {}) do
         if valid(level) and not level:IsActorBeingDestroyed() and same(level:GetClass(), class)
             and same(level:GetOuter(), state.world.PersistentLevel) and same(level:GetWorld(), state.world) then
+            has_level_controller = true
             if guest and same(level["As Game Instance FP"], instance) then
                 -- The guest controller may arrive after the stock level callback.
                 controller.Loading = false
                 return controller.Loading == false
             end
-            return
         end
     end
     -- A mounted map can use the stock player and save classes without placing
     -- a level controller. The active listen visit and adopted save qualify it.
-    if mounted and same(pawn.Save, instance.SaveSlot_Ref) then
+    if mounted and not has_level_controller and same(pawn.Save, instance.SaveSlot_Ref) then
         controller.Loading = false
         return controller.Loading == false
     end

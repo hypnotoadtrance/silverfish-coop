@@ -166,6 +166,9 @@ async def check_unlisted_resume(host, guest, character_name, *, unlisted_map=UNL
     async def verify_reloaded(host, guest, pawn):
         host_run, guest_run = host.campaign / "run", guest.client / "run"
         active = await wait_for_party(host_run, guest_run, unlisted_map)
+        for seat in (host, guest):
+            await seat.bridge.wait_for(lambda game: game.get("map") == unlisted_map
+                                       and game.get("stock_pause_exit", {}).get("state") == "armed", timeout=8)
         events = await suite.resident_events(host_run, active)
         restored_host, = (event for event in events if event["event"] == "native_host_save_restored")
         restored_guest, = (event for event in events if event["event"] == "native_guest_save_restored"
