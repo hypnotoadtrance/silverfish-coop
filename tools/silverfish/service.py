@@ -1269,6 +1269,7 @@ class Host:
         stock_loading = (departure_proof is not None and (authored_plan is not None or entrance is not None)
                          and source_frame.get("native_zone_loading_support") is True
                          and not (gold_guid or blue_plan or dream_plan or random_plan or matrix_plan or respawn_plan))
+        stage = "loading_cue"
         try:
             if stock_loading:
                 self.loading_zone = destination
@@ -1292,43 +1293,51 @@ class Host:
                 authorization = ("authored", str(authored_plan.travel_time_step or 0))
             cqc_profile = native_enemy_loot.BY_MAP.get(current) if getattr(self, "native_dead_bridge_enemy_loot", False) else None
             pending_capacity = len(cqc_profile.actors) if cqc_profile else 0
-            if departure_proof is None and not pending_capacity:
-                self.begin_zone_guests(transport)
-                await bridge.command("travel", destination, *authorization)
-            else:
-                command, arguments = ("travel-party", departure_proof) if departure_proof else ("travel", authorization)
-                for attempt in range(pending_capacity + 1):
-                    hold = transport.hold_game_routes() if transport else contextlib.nullcontext()
-                    with hold:
-                        try:
-                            departure = await bridge.command(command, destination, *arguments)
-                        except (OSError, RuntimeError, ValueError):
-                            self.begin_zone_guests(transport)
-                            raise
-                        message = departure.get("ack", {}).get("message")
-                        if message in ("travel_source_changed", "native_roster_unavailable", "game_snapshot_unavailable",
-                                       "exit_crossing_unavailable", native_kill_volume.PENDING):
-                            return {"ok": False, "error": message}
-                        if departure_proof:
-                            moving = {f"travel_blocked:{index}": character for index, character in enumerate(characters, 1)}
-                            if message in moving:
-                                return {"ok": False, "error": "travel_blocked",
-                                        "blockers": [{"id": moving[message], "reason": "too_far"}]}
-                        if message != native_enemy_loot.PENDING:
-                            self.begin_zone_guests(transport)
-                            if message != "zone travel requested":
-                                raise RuntimeError("The game did not verify the checked party departure")
-                            break
-                    self.last_game, self.last_seen = departure, time.monotonic()
-                    if attempt == pending_capacity or not native_enemy_loot.pending(self):
-                        raise RuntimeError("The stock CQC departure hold did not identify its reserved roll")
-                    if await native_enemy_loot.observe(self, bridge):
+            stage = "departure"
+            command, arguments = ("travel-party", departure_proof) if departure_proof else ("travel", authorization)
+            for attempt in range(pending_capacity + 1):
+                hold = transport.hold_game_routes() if transport else contextlib.nullcontext()
+                with hold:
+                    try:
+                        departure = await bridge.command(command, destination, *arguments)
+                    except (OSError, RuntimeError, ValueError):
+                        self.begin_zone_guests(transport)
+                        raise
+                    message = departure.get("ack", {}).get("message")
+                    if message in ("travel_source_changed", "native_roster_unavailable", "game_snapshot_unavailable",
+                                   "exit_crossing_unavailable", native_kill_volume.PENDING,
+                                   "stock_live_dig_checkpoint_pending"):
+                        return {"ok": False, "error": message}
+                    if departure_proof:
+                        moving = {f"travel_blocked:{index}": character for index, character in enumerate(characters, 1)}
+                        if message in moving:
+                            return {"ok": False, "error": "travel_blocked",
+                                    "blockers": [{"id": moving[message], "reason": "too_far"}]}
+                    if message != native_enemy_loot.PENDING:
+                        self.begin_zone_guests(transport)
+                        if message != "zone travel requested":
+                            raise RuntimeError("The game did not verify the checked party departure")
+                        break
+                if attempt == pending_capacity:
+                    return {"ok": False, "error": native_enemy_loot.PENDING}
+                pending_frame = departure
+                if departure.get("map") != current:
+                    try:
+                        pending_frame = await bridge.wait_for(
+                            lambda game: game["sequence"] > departure["sequence"] and game.get("map") == current
+                            and game.get("state") == "hosting", timeout=POSITION_MAX_AGE)
+                    except TimeoutError:
                         return {"ok": False, "error": native_enemy_loot.PENDING}
+                self.last_game, self.last_seen = pending_frame, time.monotonic()
+                if not native_enemy_loot.pending(self) or await native_enemy_loot.observe(self, bridge):
+                    return {"ok": False, "error": native_enemy_loot.PENDING}
+            stage = "destination_listener"
             observed = await bridge.wait_for(
                 lambda game: game.get("state") == "hosting" and game.get("map") == destination,
                 timeout=22,
             )
             await asyncio.to_thread(verify_loopback_socket, bridge.process.pid, self.internal_port)
+            stage = "arrival"
             if authored_plan:
                 observed = await self.authored_arrival(bridge, authored_plan)
             elif matrix_plan:
@@ -1357,6 +1366,7 @@ class Host:
                     raise RuntimeError("The authored arrival was acknowledged in the wrong world")
             self.last_game = observed
             self.last_seen = time.monotonic()
+            stage = "guest_rejoin"
             returning_guests = self.enrollment is not None and any(role != "host" for role in roles)
             hold = transport.hold_game_routes() if transport and returning_guests else contextlib.nullcontext()
             with hold:
@@ -1398,13 +1408,15 @@ class Host:
             if self.party.get(native_loot.KEY_UNLOCKS):
                 candidate = candidate if candidate is not None else party.load_party(self.party)
                 candidate.pop(native_loot.KEY_UNLOCKS, None)
+            stage = "destination_checkpoint"
             revision = await self.checkpoint_native(bridge, candidate)
             if candidate is not None:
                 self.party = candidate
         except (OSError, RuntimeError, ValueError) as error:
             with contextlib.suppress(OSError, RuntimeError, ValueError):
                 last_frame = bridge.snapshot() or {}
-                self.control.event("zone_travel_failed", source=current, destination=destination, reason=str(error)[:256],
+                self.control.event("zone_travel_failed", source=current, destination=destination, stage=stage,
+                                   reason=str(error)[:256],
                                    observed_map=last_frame.get("map"), observed_state=last_frame.get("state"),
                                    host_pawn=bool(last_frame.get("pawns", {}).get("local")),
                                    status_error=bridge.status_error)

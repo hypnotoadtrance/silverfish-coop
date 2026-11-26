@@ -111,6 +111,27 @@ class BridgeWalkTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_travel_receipt_is_bound_to_departure_without_replacing_the_world_snapshot(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        source, destination = "/Game/Maps/Camp", "/Game/Maps/Depot"
+        published = {"sequence": 41, "state": "hosting", "map": source}
+        bridge._local_status = published
+        wrong_destination = False
+
+        async def reply(payload, _timeout):
+            request, action, target, *_ = payload.decode().rstrip("\n").split("\t")
+            if wrong_destination:
+                target = source
+            return f"native-travel-reply\t1\t{request}\t{action}\t{target}\t42\taccepted\tzone travel requested\n"
+
+        bridge.local_bridge = Mock(command=AsyncMock(side_effect=reply))
+        self.assertEqual((await bridge.command("travel", destination))["ack"]["message"], "zone travel requested")
+        self.assertEqual((await bridge.command("travel-party", destination, source))["sequence"], 42)
+        wrong_destination = True
+        with self.assertRaisesRegex(RuntimeError, "did not match the departure request"):
+            await bridge.command("travel-party", destination, source)
+        self.assertIs(bridge._local_status, published)
+
     async def test_stock_loot_inspection_receipt_preserves_the_resident_world_frame(self):
         bridge = runtime.Bridge(Path("unused"), None)
         area = runtime.AUTHORED_CRATES[runtime.native_loot.CRATE]

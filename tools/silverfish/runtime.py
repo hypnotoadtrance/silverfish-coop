@@ -3975,6 +3975,19 @@ class Bridge:
         reply[native_stock_switch.KEY] = {fields[2]: proof}
         return reply
 
+    @staticmethod
+    def _local_travel_reply(raw: str, fields: tuple[str, ...]) -> dict:
+        line = raw[:-1] if len(raw) <= 2048 and raw.endswith("\n") else ""
+        row = line.split("\t")
+        if (len(row) != 8 or row[:5] != ["native-travel-reply", "1", *fields[:3]]
+                or "\n" in line or "\r" in line
+                or not (sequence := _held_input_sequence(row[5]))
+                or row[6] not in {"accepted", "error"}):
+            raise RuntimeError("The local travel receipt did not match the departure request")
+        if row[6] == "error":
+            raise RuntimeError(row[7] or "The game declined the departure request")
+        return {"sequence": sequence, "ack": {"id": row[2], "result": row[6], "message": row[7]}}
+
     async def command(self, action: str, *arguments: str, timeout: float = 8, update_status: bool = True,
                       stash_payload: bytes | None = None) -> dict:
         fields = (uuid.uuid4().hex, action, *arguments)
@@ -3999,6 +4012,8 @@ class Bridge:
                                              interval=.025, file_reply=True)
         else:
             raw = await self.local_bridge.command(request.encode("utf-8") + (stash_payload or b""), timeout)
+            if action in {"travel", "travel-party"} and raw.startswith("native-travel-reply\t"):
+                return self._local_travel_reply(raw, fields)
             if action == native_stash.RENDER_MEMORY and _GUEST_UI_REPLY in raw:
                 raise RuntimeError("The resident stash renderer returned an unexpected body")
             receipt_tag = None

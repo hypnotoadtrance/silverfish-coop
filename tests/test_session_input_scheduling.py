@@ -63,7 +63,7 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
     async def test_snapshot_delta_preserves_host_state_and_recovers_from_a_missed_reply(self):
         gameplay = {"host_world": {"clock": 8}, "actors": {"door": False}, "players": {}, "cue": "old"}
         host = SimpleNamespace(stopping=False, native_guest=False, transitioning=False, zone_epoch="epoch",
-                               gameplay_snapshots=gameplay_snapshot.HostSnapshots(),
+                               map_preflight=None, gameplay_snapshots=gameplay_snapshot.HostSnapshots(),
                                authenticated_guest=Mock(return_value=("guest", "character")))
         host.snapshot_for_guest = lambda *_: {
             "ok": True, "gameplay": dict(gameplay), "zone_epoch": host.zone_epoch, "zone": OBSERVATORY,
@@ -121,7 +121,7 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
             "map": area, "epoch": "epoch", "sequence": 10, "doors": doors,
         }}
         host = SimpleNamespace(stopping=False, native_guest=False, transitioning=False, zone_epoch="epoch",
-                               gameplay_snapshots=gameplay_snapshot.HostSnapshots(),
+                               map_preflight=None, gameplay_snapshots=gameplay_snapshot.HostSnapshots(),
                                authenticated_guest=Mock(return_value=("guest", "character")))
         host.snapshot_for_guest = lambda *_: {
             "ok": True, "gameplay": dict(gameplay), "zone_epoch": host.zone_epoch, "zone": area,

@@ -169,7 +169,7 @@ class ZoneRejoinIntegrationTests(IsolatedAsyncioTestCase):
         game = {"state": "hosting", "map": CITY, "server_connection": False,
                 "native_scene": {"active_map": CITY, "instance_seed": -123.0, "game_seconds": 113312.523}}
         host = SimpleNamespace(stopping=False, transitioning=False, native_checkpoint_unsafe=False, native_guest=False,
-                               native_zones=True, zone_epoch=visit, allowed_maps={CITY}, last_game=game,
+                               native_zones=True, zone_epoch=visit, allowed_maps={CITY}, last_game=game, map_preflight=None,
                                last_seen=time.monotonic() - 10, control=SimpleNamespace(generation=session),
                                authenticated_guest=Mock(return_value=("guest", "guest-character")),
                                snapshot_for_guest=lambda *_args: {"ok": True, "travel_in_progress": False,
@@ -219,7 +219,7 @@ class ZoneRejoinIntegrationTests(IsolatedAsyncioTestCase):
 
         control = SimpleNamespace(event=Mock())
         bridge = SimpleNamespace(snapshot=lambda: dict(game), command=command, wait_for=wait_for,
-                                 process=SimpleNamespace(poll=lambda: None), local_bridge=None)
+                                 process=SimpleNamespace(poll=lambda: None), local_bridge=None, wake_guest_update=Mock())
         client = Client(control, transport, {"character_id": "exact-guest"}, bridge, allowed_maps=frozenset({CITY, BOROUGH}))
         client.host_session, client.zone_epoch, client.expected_zone = "same-session", "borough-epoch", BOROUGH
         client.next_projection = float("inf")

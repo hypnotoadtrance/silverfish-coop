@@ -638,15 +638,19 @@ local function run_command(fields, state, current_phase)
         error("Clear the managed native guest save before running a stock-save probe", 0)
     end
 
-    if command == "travel" and native_enemy_loot.departure_pending(state, current_phase) then
-        return "native_enemy_loot_roll_pending"
+    if command == "travel" then
+        if native_enemy_loot.departure_pending(state, current_phase) then return "native_enemy_loot_roll_pending" end
+        if native_kill_volume.capture_blocked(state, current_phase) then return "stock_kill_volume_recovery_in_progress" end
+        if role == "host" and not native_host_dig_live.capture_allowed(state, current_phase) then
+            return "stock_live_dig_checkpoint_pending"
+        end
     end
-    if (command == "travel" or command == "native-world-flush" or command == "native-host-save-capture"
+    if (command == "native-world-flush" or command == "native-host-save-capture"
         or command == "native-host-save-capture-typed" or command == "native-guest-save-capture")
         and native_kill_volume.capture_blocked(state, current_phase) then
         error("stock_kill_volume_recovery_in_progress", 0)
     end
-    if role == "host" and (command == "travel" or command == "native-world-flush" or command == "native-rest")
+    if role == "host" and (command == "native-world-flush" or command == "native-rest")
         and not native_host_dig_live.capture_allowed(state, current_phase) then
         error("stock_live_dig_checkpoint_pending", 0)
     end
@@ -2126,6 +2130,13 @@ local function tick(fields, pending, periodic)
         acknowledged_id = fields[1]
         acknowledged_result = accepted and "accepted" or "error"
         acknowledged_message = message
+        if pending and (fields[2] == "travel" or fields[2] == "travel-party") then
+            -- Once OpenLevel is queued, the source-world snapshot can no longer
+            -- serve as the departure acknowledgement.
+            SilverfishPublishLocalBridgeReply(pending.ticket, status_row("native-travel-reply", 1, fields[1],
+                fields[2], fields[3], sequence, acknowledged_result, tostring(message):sub(1, 512)) .. "\n")
+            return true
+        end
         if was_guest_bound or guest_save.active() or fields[2] == "native-exit-arrival"
             or fields[2] == "native-blue-arrival" or fields[2] == "native-wipe-fallback"
             or fields[2] == "native-red-arrival" or fields[2] == "native-green-arrival"

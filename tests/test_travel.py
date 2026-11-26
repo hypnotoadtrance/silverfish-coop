@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, call, patch
 
+from tools.silverfish import native_enemy_loot
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.link import HostLink
 from tools.silverfish.native_roster import RosterEnrollment
@@ -290,6 +291,59 @@ class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
                 bridge.command.assert_not_awaited()
                 self.assertFalse(host.transitioning)
                 self.assertFalse(host.stopping)
+
+    async def test_a_stock_departure_hold_leaves_the_live_party_on_the_source_map(self):
+        route = next(route for route in AUTHORED_ROUTES if route.kind == "overlap")
+        for refusal in ("stock_kill_volume_recovery_in_progress", "stock_live_dig_checkpoint_pending"):
+            with self.subTest(refusal=refusal):
+                host = self.host(route.source, route.destination)
+                host.last_game = self.frame(route.source, 1, 1500, guarded=True)
+                source = self.frame(route.source, 3, 1500, guarded=True)
+                bridge = self.bridge(self.frame(route.source, 2, 1500), source)
+                bridge.command.side_effect = None
+                bridge.command.return_value = {"sequence": 3, "ack": {"message": refusal}}
+
+                result = await host.travel_authored(bridge, None, route)
+
+                self.assertEqual(result, {"ok": False, "error": refusal})
+                self.assertIs(host.last_game, source)
+                host.begin_zone_guests.assert_not_called()
+                self.assertFalse(host.stopping)
+                self.assertFalse(host.transitioning)
+
+    async def test_a_compact_enemy_loot_hold_reads_a_fresh_source_snapshot(self):
+        route = next(route for route in AUTHORED_ROUTES if route.kind == "overlap")
+        host = self.host(route.source, route.destination)
+        host.native_dead_bridge_enemy_loot = True
+        host.last_game = self.frame(route.source, 1, 1500, guarded=True)
+        checked = self.frame(route.source, 3, 1500, guarded=True)
+        fresh = self.frame(route.source, 4, 1500, guarded=True)
+        bridge = self.bridge(self.frame(route.source, 2, 1500), checked)
+        bridge.command.side_effect = (
+            {"sequence": 3, "ack": {"message": native_enemy_loot.PENDING}},
+            {"sequence": 4, "ack": {"message": native_enemy_loot.PENDING}},
+        )
+
+        async def wait_for(predicate, *, timeout):
+            if bridge.wait_for.await_count == 1:
+                self.assertTrue(predicate(checked))
+                return checked
+            self.assertFalse(predicate(checked))
+            self.assertFalse(predicate(dict(fresh, map=route.destination)))
+            self.assertTrue(predicate(fresh))
+            return fresh
+
+        bridge.wait_for.side_effect = wait_for
+        with (patch.dict(native_enemy_loot.BY_MAP, {route.source: Mock(actors=["fixture"])}),
+              patch.object(native_enemy_loot, "pending", return_value=True),
+              patch.object(native_enemy_loot, "observe", new_callable=AsyncMock, return_value=False) as settle):
+            result = await host.travel_authored(bridge, None, route)
+
+        self.assertEqual(result, {"ok": False, "error": native_enemy_loot.PENDING})
+        settle.assert_awaited_once_with(host, bridge)
+        self.assertIs(host.last_game, fresh)
+        host.begin_zone_guests.assert_not_called()
+        self.assertFalse(host.stopping)
 
     async def test_crossing_reaches_live_native_guard_when_host_outruns_regroup_radius(self):
         route = next(route for route in AUTHORED_ROUTES if route.kind == "overlap")
