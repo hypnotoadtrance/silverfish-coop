@@ -400,9 +400,21 @@ local function streamed_probe(action, world, pawn, source_prop)
         placed_stream:SetShouldBeLoaded(false)
         return "unloading"
     end
+    if action == "streamhide" or action == "streamshow" then
+        placed_stream:SetShouldBeVisible(action == "streamshow")
+        return "visibility changed"
+    end
     if not placed_stream:IsLevelVisible() then return "absent" end
     local level = placed_stream:GetLoadedLevel()
     local level_path = level:GetFullName():match("^%S+ (.+)$")
+    if action == "streamloot" then
+        local path = level_path .. ".Eqp_Bolt_C_1"
+        local item = StaticFindObject(path)
+        local visible = valid(item) and same(item:GetOuter(), level) and item.bHidden == false and item:GetActorEnableCollision()
+        local original = StaticFindObject(map .. ":PersistentLevel.Eqp_Bolt_C_1")
+        local untouched = valid(original) and original.bHidden == false and original:GetActorEnableCollision()
+        return table.concat({path, tostring(visible), tostring(untouched)}, ";")
+    end
     local actor = StaticFindObject(level_path .. ".Prop_ToolBox01_C_7")
     assert(valid(actor) and same(actor:GetOuter(), level), "the sublevel did not contain the stock toolbox")
     local root = actor.PropMesh

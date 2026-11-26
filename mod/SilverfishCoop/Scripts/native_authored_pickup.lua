@@ -349,7 +349,7 @@ local function bind_pickup_seat(state, phase)
     if not binding or binding.placements ~= placements or binding.host ~= host
         or not same(binding.pawn, pawn) or not same(binding.world, state.world) then
         clear_previews()
-        binding = {pawn = pawn, world = state.world, host = host, placements = placements, next_loose = 0,
+        binding = {pawn = pawn, world = state.world, map = state.map, host = host, placements = placements, next_loose = 0,
             active = {}, unavailable = {}}
         report, loose_check = nil, nil
     end
@@ -394,18 +394,30 @@ local function select_profile(requested)
     return profile
 end
 
-local function loose_profile(path, state)
-    if not binding or not binding.loose_count or type(path) ~= "string" or #path > 384
+local function loose_actor_path(source, map)
+    if type(source) ~= "string" or #source > 568 then return end
+    local parent, path = source:match("^([^|]+)|([^|]+)$")
+    if not parent then
+        if world_path.actor_package(source) == map then return source end
+        return
+    end
+    local package = world_path.level_actor_package(path)
+    if parent == map and package and package ~= map then return path end
+end
+
+local function loose_profile(source, state)
+    if not binding or not binding.loose_count
         or type(SilverfishDescribeLoosePickup) ~= "function" then return end
-    local class, mode, claimed, cash = SilverfishDescribeLoosePickup(path)
+    local path = loose_actor_path(source, state.map)
+    if not path then return end
+    local class, mode, claimed, cash = SilverfishDescribeLoosePickup(source)
     local actor = class and StaticFindObject(path)
     local name = valid(actor) and actor:GetFullName():match("^(%S+) ")
     local leaf = path:match(":PersistentLevel%.([%w_%-]+)$")
     local area_name = state.map:match("([^/]+)$")
     local limits = class and cash_limits[class]
-    if not name or not leaf or not area_name or (cash and not limits)
-        or not same(actor:GetWorld(), state.world) then return end
-    return {loose = true, source = path, path = path, name = name, class = class, map = state.map,
+    if not name or not leaf or not area_name or (cash and not limits) then return end
+    return {loose = true, source = source, path = path, name = name, class = class, map = state.map,
         mode = mode, claimed = claimed, stock_cash = cash, cash_min = limits and limits[1], cash_max = limits and limits[2],
         cash_flag = leaf .. "-" .. area_name .. "-"}
 end
@@ -709,7 +721,9 @@ function pickup.command(fields, state, phase)
         if phase ~= "hosting" or not (fixtures and host_fixtures) or #fields ~= 3 then
             error("loose_pickup_fixture_scope_unavailable", 0)
         end
-        local days = require("native_loot").expire_loose_fixture(state, phase, fields[3])
+        local path = loose_actor_path(fields[3], state.map)
+        if not path then error("loose_pickup_fixture_scope_unavailable", 0) end
+        local days = require("native_loot").expire_loose_fixture(state, phase, path)
         return "stock temporary loot expired after " .. tostring(days) .. " daily updates"
     end
     if action == "native-loose-pickup-claim" then
@@ -864,12 +878,12 @@ function pickup.preview_input(pawn, target, projected_actor)
     if binding.host and (not projected_actor or not target:match("^world%-loot:%x+:%x+:")) then return end
     local profile = binding.active and binding.active[target]
     local loose = target:match("^loose:(.+)$")
-    local path = profile and profile.path or world_path.actor_package(loose) and loose
+    local path = profile and profile.path or loose_actor_path(loose, binding.map)
         or projected_actor and projected_actor:match("^%S+ (/[A-Za-z0-9_./:%-]+)$")
     local actor = path and StaticFindObject(path)
     if not valid(actor) or (projected_actor and actor:GetFullName() ~= projected_actor)
         or (binding.host and actor.bReplicates ~= false) or actor.bHidden or actor:IsActorBeingDestroyed()
-        or not same(actor:GetWorld(), binding.world) or not same(actor:GetOuter(), binding.world.PersistentLevel) then return end
+        or not world_path.visible_actor_level(actor, binding.world) then return end
     if not valid(mesh_class) then mesh_class = StaticFindObject("/Script/Engine.MeshComponent") end
     if not valid(mesh_class) then return end
     local components = actor:K2_GetComponentsByClass(mesh_class)
@@ -905,7 +919,7 @@ function pickup.take_press(pawn)
     if not binding or not same(pawn, binding.pawn) or type(SilverfishTakeNativeAuthoredPickupPress) ~= "function" then return end
     local source = SilverfishTakeNativeAuthoredPickupPress(pawn:GetAddress())
     if binding.active[source] then return source end
-    if world_path.actor_package(source) then
+    if loose_actor_path(source, binding.map) then
         return "loose:" .. source
     end
 end

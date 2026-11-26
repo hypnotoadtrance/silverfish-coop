@@ -34,10 +34,16 @@ _SLOT = re.compile(r"SFCoop_[0-9a-f]{32}")
 
 
 def actor_map(path):
-    match = _PATH.fullmatch(path) if isinstance(path, str) and len(path) <= 384 else None
-    if match and valid_campaign_package(match[1]) and match[1].rsplit("/", 1)[-1] == match[2]:
-        return match[1]
-    return None
+    if not isinstance(path, str) or len(path) > 568:
+        return None
+    parent, separator, actor = path.partition("|")
+    raw = actor if separator else parent
+    match = _PATH.fullmatch(raw) if len(raw) <= 384 else None
+    if not match or not valid_campaign_package(match[1]):
+        return None
+    if separator:
+        return parent if valid_campaign_package(parent) and parent != match[1] else None
+    return match[1] if match[1].rsplit("/", 1)[-1] == match[2] else None
 
 
 def target_path(value):

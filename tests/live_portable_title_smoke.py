@@ -6109,6 +6109,8 @@ async def verify_spawned_prop_carry(host: Seat, guest: Seat, pawn: str, evidence
 
 
 async def verify_streamed_prop_carry(host: Seat, guest: Seat, pawn: str, evidence: dict) -> dict:
+    from tools.silverfish import native_loose_pickup as loose
+
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     checkpoint = campaign_save_hashes(host.campaign)
     snapshots = await asyncio.gather(*(wait_resident_status(run, lambda frame:
@@ -6188,6 +6190,47 @@ async def verify_streamed_prop_carry(host: Seat, guest: Seat, pawn: str, evidenc
                     observation["released"] = (left, right)
                     break
                 await asyncio.sleep(.08)
+
+    async def read_loot(seat):
+        message = await call(seat, "streamloot")
+        return None if message == "absent" else message.split(";")
+
+    host_item = await read_loot(host)
+    guest_item = await read_loot(guest)
+    assert host_item == guest_item and host_item[1:] == ["true", "true"], (host_item, guest_item)
+    source = f"{OBSERVATORY}|{host_item[0]}"
+    target = f"loose:{source}"
+    assert loose.target_path(target) == source
+    await host.bridge.command(loose.APPROACH, source, pawn, timeout=6)
+    await wait_resident_status(guest_run, lambda frame:
+        frame.get("game", {}).get(loose.KEY, {}).get(source, {}).get("state") == "available")
+    taken = await submit(guest_run, loose.FIXTURE, target=target)
+    assert taken["ok"], taken
+    async with asyncio.timeout(8):
+        while True:
+            claims = [event for event in await resident_events(host_run, snapshots[0])
+                      if event.get("event") == "native_loose_pickup_claimed" and event.get("actor") == source]
+            if claims:
+                claim, = claims
+                break
+            await asyncio.sleep(.08)
+    assert claim["owner"] != "host" and claim["actor"] == source, claim
+    item = await submit(guest_run, "native-inventory-list")
+    assert item["ok"] and any(row["guid"] == claim.get("inventory_guid", claim["guid"])
+                             for row in item["native_inventory"]["items"]), item
+    assert await read_loot(host) == [host_item[0], "false", "true"]
+    async with asyncio.timeout(8):
+        while await read_loot(guest) != [host_item[0], "false", "true"]:
+            await asyncio.sleep(.08)
+    assert await call(guest, "streamhide") == "visibility changed"
+    async with asyncio.timeout(8):
+        while await read_loot(guest) is not None:
+            await asyncio.sleep(.08)
+    assert await call(guest, "streamshow") == "visibility changed"
+    async with asyncio.timeout(8):
+        while await read_loot(guest) != [host_item[0], "false", "true"]:
+            await asyncio.sleep(.08)
+    evidence["placed_pickup"] = {"claim": claim, "persistent_copy_visible": True, "claimed_after_reshow": True}
 
     for seat in (guest, host):
         assert await call(seat, "streamunload") == "unloading"

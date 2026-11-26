@@ -10,6 +10,7 @@
 #include "stock_cash.hpp"
 #include "quest_rewards.hpp"
 #include "stock_wallet.hpp"
+#include "zone_exit.hpp"
 
 #include <algorithm>
 #include <array>
@@ -696,6 +697,47 @@ namespace
         return cash && loose_cash_value(actor) <= 0 ? "unqualified_stock_cash" : nullptr;
     }
 
+    bool in_loose_level(U::AActor* actor, U::UObject* world)
+    {
+        if (!live(actor) || !live(world)) return false;
+        if (actor->GetLevel() == object(world, STR("PersistentLevel"))) return actor->GetWorld() == world;
+        return silverfish::native_zone::visible_actor_level(actor, static_cast<U::UWorld*>(world));
+    }
+
+    // Stream instances may use a different package leaf and World export name.
+    // Keep the owning campaign in the claim key so the same sublevel can be reused in another map.
+    std::string_view loose_actor_path(std::string_view source, std::string_view world)
+    {
+        constexpr std::string_view level_marker{":PersistentLevel."};
+        if (source.size() > 568) return {};
+        const auto separator = source.find('|');
+        const auto path = separator == source.npos ? source : source.substr(separator + 1);
+        const auto level = path.find(level_marker);
+        const auto owner = path.substr(0, level);
+        const auto dot = owner.find('.');
+        if (level == path.npos || dot == owner.npos || path.size() > 384) return {};
+        const auto token = [](std::string_view value, bool actor = false) {
+            return !value.empty() && std::ranges::all_of(value, [actor](char c) {
+                return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+                    c == '_' || (actor && c == '-');
+            });
+        };
+        if (!token(path.substr(level + level_marker.size()), true)) return {};
+        if (separator == source.npos) return owner == world ? path : std::string_view{};
+        const auto map = world.substr(0, world.find('.'));
+        const auto package = owner.substr(0, dot);
+        return source.substr(0, separator) == map && package != map && silverfish::world_path::package(package) &&
+            token(owner.substr(dot + 1)) ? path : std::string_view{};
+    }
+
+    std::string loose_source_key(RC::StringViewType path, RC::StringViewType world, bool streamed)
+    {
+        std::string source;
+        if (streamed) source = RC::to_utf8_string(world.substr(0, world.find(STR('.')))) + '|';
+        source += RC::to_utf8_string(path);
+        return source;
+    }
+
     const char* source_fault(U::UObject* actor, U::UObject* world, const Profile& profile, bool require_placement = true)
     {
         if (!exact(actor, profile.item_class) || actor->GetPathName() != profile.actor ||
@@ -703,7 +745,7 @@ namespace
         if (profile.discovered)
         {
             auto* item = static_cast<U::AActor*>(actor);
-            return item->GetWorld() == world && item->GetLevel() == object(world, STR("PersistentLevel"))
+            return in_loose_level(item, world)
                 && !generic_payload_fault(actor, profile.stock_cash) ? nullptr : "loose_pickup_stock_actor_changed";
         }
         if (!boolean(actor, STR("Physics"), profile.physics)) return "authored_pickup_stock_physics_unqualified";
@@ -2111,7 +2153,7 @@ namespace
     } respawn_load;
 
     U::FWeakObjectPtr respawn_world;
-    std::set<std::wstring> pending_host_respawns;
+    std::map<std::string, RC::StringType, std::less<>> pending_host_respawns;
     std::set<std::string> host_respawn_hidden;
 
     bool established_server(U::UObject* driver, U::UObject* connection)
@@ -2171,16 +2213,18 @@ namespace
         auto* mode = loose_respawn_mode(actor);
         if (!mode || (mode->GetPropertyValueInContainer(actor) == 0 &&
             !boolean(actor, STR("DespawnIfPlayerOwns"), true))) return;
-        auto* world = actor->GetWorld();
-        if (!live(world) || !exact(object(world, STR("OwningGameInstance")), instance_path) ||
-            actor->GetOuterPrivate() != object(world, STR("PersistentLevel"))) return;
+        U::UObject* world = actor->GetWorld();
+        if (auto* active = loose_world.Get(); active != world && in_loose_level(actor, active)) world = active;
+        if (!in_loose_level(actor, world) || !exact(object(world, STR("OwningGameInstance")), instance_path)) return;
         const auto world_path = world->GetPathName();
         if (!silverfish::world_path::object(RC::StringViewType{world_path})) return;
         const auto seat = respawn_seat(world, world_path);
         if (seat == RespawnSeat::Inactive) return;
         const auto path = actor->GetPathName();
+        const auto source = loose_source_key(path, world_path, actor->GetLevel() != object(world, STR("PersistentLevel")));
+        const auto scope_path = RC::to_utf8_string(world_path);
         const auto item = actor->GetClassPrivate()->GetPathName();
-        if (authored_path(path) || !source_box(actor) ||
+        if (authored_path(path) || loose_actor_path(source, scope_path).empty() || !source_box(actor) ||
             !silverfish::content_paths::item_class(std::basic_string_view{item.data(), item.size()}) ||
             generic_payload_fault(actor, silverfish::stock_cash::is_family(actor->GetClassPrivate()))) return;
 
@@ -2197,7 +2241,7 @@ namespace
             pending_host_respawns.clear();
             host_respawn_hidden.clear();
         }
-        pending_host_respawns.insert(path);
+        pending_host_respawns.emplace(source, path);
     }
 
     int read_host_respawn_hidden(const Lua& lua)
@@ -2207,12 +2251,11 @@ namespace
         if (!live(world) || respawn_world.Get() != world) return 0;
         // Read after the engine has finished placing actors and retiring any that
         // stock removed during BeginPlay. This also catches pending-kill actors.
-        for (const auto& path : pending_host_respawns)
+        for (const auto& [key, path] : pending_host_respawns)
         {
             auto* actor = find<U::UObject>(path.c_str());
-            auto key = RC::to_utf8_string(path);
             if (!live(actor) || !boolean(actor, STR("bActorIsBeingDestroyed"), false))
-                host_respawn_hidden.insert(std::move(key));
+                host_respawn_hidden.insert(key);
             else host_respawn_hidden.erase(key);
         }
         pending_host_respawns.clear();
@@ -2249,9 +2292,10 @@ namespace
         return byte && byte->GetPropertyValue(mobility->ContainerPtrToValuePtr<void>(box)) == 0;
     }
 
-    LooseSource* enroll_loose_actor(U::AActor* actor, U::UObject* level, U::UClass* base, const Scope& seat)
+    LooseSource* enroll_loose_actor(U::AActor* actor, U::UClass* base, const Scope& seat)
     {
-        if (!live(actor) || actor->GetOuterPrivate() != level || !actor->IsA(base) ||
+        auto* world = seat.world.Get();
+        if (!live(actor) || !actor->IsA(base) || !in_loose_level(actor, world) ||
             !actor->HasAnyFlags(U::RF_WasLoaded) || !boolean(actor, STR("bActorIsBeingDestroyed"), false)) return nullptr;
         if (auto* existing = enrolled_loose_actor(actor))
         {
@@ -2262,7 +2306,8 @@ namespace
         auto* box = source_box(actor);
         if (!box) return nullptr;
         const auto path = actor->GetPathName();
-        const auto source = RC::to_utf8_string(path);
+        const auto source = loose_source_key(path, seat.profile->world, actor->GetLevel() != object(world, STR("PersistentLevel")));
+        if (loose_actor_path(source, RC::to_utf8_string(seat.profile->world)).empty()) return nullptr;
         if ((!actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false)) &&
             (seat.host || (!guest_loose_hidden.contains(source) && !remotely_hidden_loose(actor)))) return nullptr;
         const auto class_path = actor->GetClassPrivate()->GetPathName();
@@ -2303,15 +2348,14 @@ namespace
             // A player can reach an authored item before its part of the
             // discovery sweep runs. Qualify that exact stock actor on demand.
             auto* base = find<U::UClass>(base_class);
-            auto* level = object(world, STR("PersistentLevel"));
             auto* pawn = loose_pawn.Get();
-            if (!base || !level || !pawn || actor->GetOuterPrivate() != level || !actor->IsA(base)) return nullptr;
+            if (!base || !pawn || !actor->IsA(base)) return nullptr;
             const auto world_path = world->GetPathName();
             const Profile seat_profile{.world = world_path.c_str()};
             const Scope seat{world, pawn, nullptr, nullptr, object(pawn, STR("Controller")),
                 object(world, STR("NetDriver")), &seat_profile, loose_host};
             if (!local_scope(seat)) return nullptr;
-            loose = enroll_loose_actor(static_cast<U::AActor*>(actor), level, base, seat);
+            loose = enroll_loose_actor(static_cast<U::AActor*>(actor), base, seat);
         }
         if (!loose) return nullptr;
         auto& scope = loose->scope;
@@ -2338,17 +2382,13 @@ namespace
         if (!local_scope(seat)) return result(lua, false, "loose_pickup_projection_scope_changed");
 
         const auto area = RC::to_utf8_string(world_path);
-        const auto prefix = area + ":PersistentLevel.";
         std::vector<std::string> paths;
         paths.reserve(count - 2);
         for (int index = 3; index <= count; ++index)
         {
             if (!lua.is_string()) return result(lua, false, "loose_pickup_projection_arguments");
             std::string path{lua.get_string()};
-            if (path.size() > 384 || path.size() <= prefix.size() || !path.starts_with(prefix) ||
-                !std::ranges::all_of(std::string_view(path).substr(prefix.size()), [](char ch) {
-                    return ch == '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
-                }))
+            if (loose_actor_path(path, area).empty())
                 return result(lua, false, "loose_pickup_projection_source");
             paths.push_back(std::move(path));
         }
@@ -2387,8 +2427,7 @@ namespace
         }
         const auto now = Clock::now();
         auto* base = find<U::UClass>(base_class);
-        auto* level = object(world, STR("PersistentLevel"));
-        if (!base || !level) return 0;
+        if (!base) return 0;
         if (next_loose_candidate == loose_candidates.size() && now >= loose_rescan)
         {
             loose_rescan = now + loose_scan_interval;
@@ -2398,7 +2437,7 @@ namespace
             U::UGameplayStatics::GetAllActorsOfClass(world, base, actors);
             loose_candidates.reserve(actors.size());
             for (auto* actor : actors)
-                if (live(actor) && actor->GetOuterPrivate() == level && actor->HasAnyFlags(U::RF_WasLoaded))
+                if (live(actor) && actor->HasAnyFlags(U::RF_WasLoaded))
                     loose_candidates.emplace_back(actor);
         }
         const auto cutoff = Clock::now() + loose_scan_budget;
@@ -2406,7 +2445,7 @@ namespace
         while (next_loose_candidate < limit)
         {
             auto* actor = static_cast<U::AActor*>(loose_candidates[next_loose_candidate++].Get());
-            enroll_loose_actor(actor, level, base, seat);
+            enroll_loose_actor(actor, base, seat);
             if (Clock::now() >= cutoff) break;
         }
 
@@ -2414,7 +2453,8 @@ namespace
         for (int count = 0; count < 8 && !loose_carry_pending.empty(); ++count)
         {
             auto next = loose_carry_pending.begin();
-            carry_paths += *next;
+            if (const auto found = loose_sources.find(*next); found != loose_sources.end())
+                carry_paths += RC::to_utf8_string(found->second.actor);
             carry_paths += '\n';
             loose_carry_pending.erase(next);
         }
@@ -2429,14 +2469,14 @@ namespace
     {
         if (!ready() || !loose_host || lua.get_stack_size() != 2 || !lua.is_string() || !lua.is_integer(2)) return 0;
         const auto pointer = static_cast<Address>(lua.get_integer(2));
-        const auto found = loose_sources.find(lua.get_string());
-        if (found != loose_sources.end())
+        const auto path = RC::to_wstring(lua.get_string());
+        auto* actor = find<U::UObject>(path.c_str());
+        if (address(actor) == pointer && live(actor))
         {
-            auto& loose = found->second;
-            auto* actor = loose.scope.actor.Get();
-            if (loose.carry_candidate && address(actor) == pointer && live(actor) && local_scope(loose.scope) &&
+            auto* loose = enrolled_loose_actor(actor);
+            if (loose && loose->carry_candidate && local_scope(loose->scope) &&
                 boolean(actor, STR("bReplicates"), true) && boolean(actor, STR("bReplicateMovement"), true))
-                loose.carry_enrolled = true;
+                loose->carry_enrolled = true;
         }
         return 0;
     }
@@ -2445,18 +2485,23 @@ namespace
     {
         if (!ready() || lua.get_stack_size() != 1 || !lua.is_string()) return 0;
         const auto requested = lua.get_string();
-        if (requested.size() > 384 || !silverfish::world_path::object(requested.substr(0, requested.find(':')))) return 0;
+        auto* world = loose_world.Get();
+        if (!live(world)) return 0;
+        const auto raw = loose_actor_path(requested, RC::to_utf8_string(world->GetPathName()));
+        if (raw.empty()) return 0;
         const auto found = loose_sources.find(requested);
         auto* scope = found != loose_sources.end() ? &found->second.scope : nullptr;
         if (!scope || !live(scope->actor.Get()))
         {
-            const auto path = RC::to_wstring(requested);
+            const auto path = RC::to_wstring(raw);
             scope = loose_actor_scope(find<U::UObject>(path.c_str()));
         }
-        if (!scope || !scope->profile || !scope->profile->discovered || !local_scope(*scope)) return 0;
+        if (!scope || !scope->profile || scope->profile->source != requested || !scope->profile->discovered) return 0;
         auto* actor = scope->actor.Get();
+        if (scope->claimed ? !local_scope(*scope) || !in_loose_level(static_cast<U::AActor*>(actor), world) : !available(*scope))
+            return 0;
         auto* mode = loose_respawn_mode(actor);
-        if (!mode || (!scope->claimed && !available(*scope))) return 0;
+        if (!mode) return 0;
         lua.set_string(RC::to_utf8_string(scope->profile->item_class));
         lua.set_integer(mode->GetPropertyValueInContainer(actor));
         lua.set_bool(scope->claimed);
@@ -2467,17 +2512,18 @@ namespace
     int diagnose_loose(const Lua& lua)
     {
         if (!ready() || !headless() || lua.get_stack_size() != 1 || !lua.is_string()) return 0;
-        const auto path = RC::to_wstring(lua.get_string());
-        if (path.size() > 384 ||
-            !silverfish::world_path::object(RC::StringViewType{path}.substr(0, path.find(':')))) return 0;
+        auto* world = loose_world.Get();
+        if (!live(world)) return 0;
+        const auto raw = loose_actor_path(lua.get_string(), RC::to_utf8_string(world->GetPathName()));
+        if (raw.empty()) return 0;
+        const auto path = RC::to_wstring(raw);
         auto* source = find<U::UObject>(path.c_str());
         auto* actor_type = find<U::UClass>(STR("/Script/Engine.Actor"));
         const auto report = [&](const char* fault) { lua.set_string(fault); return 1; };
         if (!live(source) || !actor_type || !source->IsA(actor_type) || !boolean(source, STR("bActorIsBeingDestroyed"), false))
             return report("actor_absent");
         auto* actor = static_cast<U::AActor*>(source);
-        auto* world = loose_world.Get();
-        if (!live(world) || actor->GetWorld() != world || actor->GetLevel() != object(world, STR("PersistentLevel")))
+        if (!in_loose_level(actor, world))
             return report("different_level");
         if (authored_path(path)) return report("dedicated_pickup_route");
         if (!source_box(actor)) return report("unqualified_root");
@@ -2504,7 +2550,7 @@ namespace
         {
             auto& scope = loose.scope;
             auto* actor = static_cast<U::AActor*>(scope.actor.Get());
-            if (!live(actor)) continue;
+            if (!live(actor) || (path.contains('|') && !boolean(actor->GetLevel(), STR("bIsVisible"), true))) continue;
             // The ledger stays active even when the source is outside the reported nearby list.
             apply_guest_loose_view(path, scope);
             auto at = scope.hidden_at ? *scope.hidden_at :

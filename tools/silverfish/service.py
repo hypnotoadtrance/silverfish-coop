@@ -6867,7 +6867,8 @@ class Client:
                             or native_loose_pickup.actor_map(actor) != self.last_game.get("map")
                             or self.last_game.get("native_inventory_view", {}).get("state") != "stock"):
                         raise ValueError("Select an actor on the mounted stock Nearby Items panel")
-                    self.last_game = await self.bridge.command(action, actor, *((guid,) if separator else ()), timeout=5)
+                    raw_actor = actor.rsplit("|", 1)[-1]
+                    self.last_game = await self.bridge.command(action, raw_actor, *((guid,) if separator else ()), timeout=5)
                     result = {"actor": actor, "proof": self.last_game.get("ack", {}).get("message")}
                 elif action in native_guest_drop.STOCK_FIXTURES:
                     result = await native_guest_drop.stock_menu_fixture(

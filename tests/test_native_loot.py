@@ -133,6 +133,27 @@ class AuthoredCrateRegistryTests(unittest.TestCase):
 
 
 class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_streamed_claim_uses_the_owning_campaign_and_survives_missing_local_actor(self):
+        loose = native_loose_pickup
+        raw = "/FrontierPack/Maps/StockroomInstance.Stockroom:PersistentLevel.Item_Bandage_C_1"
+        source = f"{OBSERVATORY}|{raw}"
+        self.assertEqual(loose.target_path(f"loose:{source}"), source)
+        self.assertIsNone(loose.target_path(f"loose:{raw}"))
+        row = [loose.ROW, OBSERVATORY, source, ITEM["class_path"], "1", "available", "10", "20", "30"]
+        self.assertEqual(loose.parse(row, "connected", OBSERVATORY)["target"], f"loose:{source}")
+        row[1] = "/Game/OtherPack/Elsewhere"
+        with self.assertRaises(ValueError):
+            loose.parse(row, "connected", row[1])
+        local_scene = {"state": "connected", "map": OBSERVATORY, loose.VIEW_SCOPE: 1, loose.CAPABILITY: 1}
+        client = SimpleNamespace(last_game=local_scene)
+        bridge = SimpleNamespace(command=AsyncMock(return_value=local_scene))
+        view = loose.GuestView()
+        await view.project(client, bridge, [source])
+        await view.project(client, bridge, [source])
+        bridge.command.assert_awaited_once_with(loose.PROJECT, "1", "hide", source, timeout=4)
+        await view.project(client, bridge, [])
+        self.assertEqual(bridge.command.await_args.args, (loose.PROJECT, "1", "show", source))
+
     async def test_transient_award_queues_a_typed_save_without_escrow_io(self):
         loose = native_loose_pickup
         path = f"{OBSERVATORY}.Observitory_P:PersistentLevel.Item_Bandage_C_1"

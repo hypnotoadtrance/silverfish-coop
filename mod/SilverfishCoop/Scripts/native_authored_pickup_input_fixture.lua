@@ -1,6 +1,7 @@
 local input = {}
 local supply_profiles = require("authored_supply_catalog")
 local cash_profiles = require("authored_cash_catalog")
+local world_path = require("world_path")
 local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
@@ -195,7 +196,7 @@ end
 
 function input.stock_item_sight(pawn, actor)
     if not valid(pawn) or pawn.Dead ~= false or not pawn:HasAuthority() or not valid(actor) or not actor:HasAuthority()
-        or not same(pawn:GetWorld(), actor:GetWorld()) then return false end
+        or not world_path.visible_actor_level(actor, pawn:GetWorld()) then return false end
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local camera, box = pawn.Camera, actor.Box
     if not valid(trace) or not owned(camera, pawn, "CameraComponent") or not owned(box, actor, "BoxComponent") then return false end
@@ -384,7 +385,7 @@ end
 
 local function approach_scope(state, phase, pawn, actor, map, title_fixture)
     return headless and (host_fixtures or title_fixture) and phase == "hosting" and state.listening and state.server == false
-        and map == state.map and same(pawn:GetWorld(), state.world) and same(actor:GetWorld(), state.world)
+        and map == state.map and same(pawn:GetWorld(), state.world) and world_path.visible_actor_level(actor, state.world)
         and pawn.Dead == false and pawn:HasAuthority()
 end
 
@@ -502,7 +503,7 @@ end
 
 function input.press_world_loot(state, pawn, actor, box, dispatch)
     if not headless or not same(pawn, state.local_pawn and state.local_pawn.pawn)
-        or not same(pawn:GetWorld(), state.world) or not same(actor:GetWorld(), state.world)
+        or not same(pawn:GetWorld(), state.world) or not world_path.visible_actor_level(actor, state.world)
         or not owned(pawn.Camera, pawn, "CameraComponent") or not same(actor.Box, box)
         or not owned(box, actor, "BoxComponent") then
         error("world_loot_fixture_scope_unavailable", 0)
