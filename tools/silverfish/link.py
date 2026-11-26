@@ -405,6 +405,7 @@ class _TransportStatistics:
     relay_queue_departed_frames: int = 0
     relay_queue_wait_total_ns: int = 0
     relay_queue_wait_max_ns: int = 0
+    interaction_priority_passes: int = 0
     weapon_cues_rejected_full_queue: int = 0
     prop_pose_datagrams_queued: int = 0
     prop_pose_datagrams_replaced: int = 0
@@ -603,6 +604,7 @@ class _LinkProtocol(QuicConnectionProtocol):
         self._next_packet_id = 0
         self._game_enqueued: deque[float] = deque()
         self._next_game_expiry: float | None = None
+        self._interaction_streams: dict[int, int] = {}
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         super().connection_made(_MeasuredDatagramTransport(transport, self._stats))
@@ -623,6 +625,28 @@ class _LinkProtocol(QuicConnectionProtocol):
     def send_admission(self, payload: bytes) -> None:
         self._quic.send_stream_data(_ADMISSION_STREAM, payload, end_stream=True)
         self.transmit()
+
+    def _send_action_stream(self, stream_id: int, payload: bytes, *, priority: bool = True) -> None:
+        self._quic.send_stream_data(stream_id, payload, end_stream=True)
+        if priority and self.game_access and len(payload) <= _FRAGMENT_SIZE:
+            self._interaction_streams[stream_id] = len(payload)
+        self.transmit()
+
+    def _ready_interactions(self) -> set[int]:
+        ready = set()
+        remaining = self._quic._remote_max_data - self._quic._remote_max_data_used
+        for stream_id, size in tuple(self._interaction_streams.items()):
+            stream = self._quic._streams.get(stream_id)
+            if stream is None or stream.sender.is_finished:
+                del self._interaction_streams[stream_id]
+                continue
+            sender = stream.sender
+            if stream.is_blocked or sender.buffer_is_empty or sender.reset_pending:
+                continue
+            limit = min(stream.max_stream_data_remote, sender.highest_offset + remaining, size)
+            if sender.next_offset < limit or sender.next_offset == size and sender._pending_eof:
+                ready.add(stream_id)
+        return ready
 
     def forward_game_packet(self, data: bytes) -> None:
         if not self.authorized or not self.game_access or self.terminated or not 0 < len(data) <= _MAX_GAME_PACKET:
@@ -722,6 +746,23 @@ class _LinkProtocol(QuicConnectionProtocol):
     def transmit(self) -> None:
         now = self._loop.time()
         self._expire_game_queue(now)
+        pending = self._quic._datagrams_pending
+        if self._interaction_streams and (ready := self._ready_interactions()):
+            # aioquic 1.3 writes DATAGRAM frames before STREAM frames. Give a
+            # small interaction a pass ahead of datagrams and bulk streams.
+            self._quic._streams_queue.sort(key=lambda stream: stream.stream_id not in ready)
+            if pending:
+                self._stats.interaction_priority_passes += 1
+                self._quic._datagrams_pending = deque()
+                try:
+                    super().transmit()
+                finally:
+                    self._quic._datagrams_pending = pending
+                # If congestion held back the stream, the next ACK or QUIC
+                # timer retries it. When it was sent, resume the datagram queue.
+                if not self._ready_interactions():
+                    self._transmit_soon()
+                return
         try:
             super().transmit()
         finally:
@@ -780,8 +821,7 @@ class _HostProtocol(_LinkProtocol):
 
     def send_session_end(self, body: bytes) -> asyncio.Event:
         self._end_ack = asyncio.Event()
-        self._quic.send_stream_data(_END_SESSION_STREAM, body, end_stream=True)
-        self.transmit()
+        self._send_action_stream(_END_SESSION_STREAM, body)
         return self._end_ack
 
     def quic_event_received(self, event: events.QuicEvent) -> None:
@@ -874,8 +914,7 @@ class _HostProtocol(_LinkProtocol):
                 return
             response = await self.host._run_action(self, bytes(action.body))
             if self.authorized and not self.terminated and not action.abandoned:
-                self._quic.send_stream_data(stream_id, response, end_stream=True)
-                self.transmit()
+                self._send_action_stream(stream_id, response)
         finally:
             self._actions.pop(stream_id, None)
 
@@ -1465,8 +1504,7 @@ class _ClientProtocol(_LinkProtocol):
             self.close(error_code=_APP_ERROR, reason_phrase="invalid session end notice")
             return
         self.session_end = (session, revision)
-        self._quic.send_stream_data(_END_SESSION_STREAM, _END_SESSION_ACK, end_stream=True)
-        self.transmit()
+        self._send_action_stream(_END_SESSION_STREAM, _END_SESSION_ACK)
 
     async def request(self, body: bytes, timeout: float, *, snapshot: bool = False) -> Action:
         if len(self._actions) >= _MAX_ACTIONS:
@@ -1474,8 +1512,7 @@ class _ClientProtocol(_LinkProtocol):
         stream_id = self._quic.get_next_available_stream_id()
         action = self._actions[stream_id] = _OutgoingAction(self._loop.create_future(), snapshot=snapshot)
         try:
-            self._quic.send_stream_data(stream_id, body, end_stream=True)
-            self.transmit()
+            self._send_action_stream(stream_id, body, priority=not snapshot)
             async with asyncio.timeout(timeout):
                 return await action.response
         except TimeoutError:

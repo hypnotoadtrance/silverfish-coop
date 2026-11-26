@@ -717,6 +717,55 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
             "ok": True, "body": "rejoined",
         })
 
+    async def test_small_interaction_prioritizes_both_directions_and_drains_queued_game_packets(self):
+        self.assertTrue((await self.connect_guest())["accepted"])
+        await self.exchange(64)
+        guest_protocol = self.client._protocol
+        host_protocol = self.host._protocols[self.request["guest_id"]]
+        guest_packets = [secrets.token_bytes(link._FRAGMENT_SIZE) for _ in range(4)]
+        host_packets = [secrets.token_bytes(link._FRAGMENT_SIZE) for _ in range(4)]
+
+        def queue_without_sending(protocol, packets):
+            with patch.object(protocol, "transmit"):
+                for packet in packets:
+                    protocol.forward_game_packet(packet)
+
+        async def open_door(_, payload):
+            self.assertEqual(payload, {"action": "open-door"})
+            queue_without_sending(host_protocol, host_packets)
+            return {"ok": True, "opened": True}
+
+        self.application_handler = open_door
+        queue_without_sending(guest_protocol, guest_packets)
+        self.assertEqual(await self.client.request({"action": "open-door"}), {"ok": True, "opened": True})
+        self.assertGreater(self.client.statistics()["interaction_priority_passes"], 0)
+        self.assertGreater(self.host.statistics()["interaction_priority_passes"], 0)
+        self.assertCountEqual([(await self.host_inbox.next())[0] for _ in guest_packets], guest_packets)
+        self.assertCountEqual([(await self.client_inbox.next())[0] for _ in host_packets], host_packets)
+        for protocol in (guest_protocol, host_protocol):
+            self.assertFalse(protocol._quic._datagrams_pending)
+            self.assertFalse(protocol._game_enqueued)
+            self.assertEqual(protocol._stats.relay_queue_expired_frames, 0)
+            self.assertEqual(protocol._stats.relay_queue_evicted_frames, 0)
+
+    async def test_flow_blocked_interaction_leaves_relay_datagrams_eligible(self):
+        self.assertTrue((await self.connect_guest())["accepted"])
+        protocol = self.client._protocol
+        quic = protocol._quic
+        stream_id = quic.get_next_available_stream_id()
+        with patch.object(protocol, "transmit"):
+            protocol.forward_game_packet(b"pending game packet")
+            protocol._send_action_stream(stream_id, b"pending interaction")
+
+        pending = quic._datagrams_pending
+        self.assertEqual(protocol._ready_interactions(), {stream_id})
+        with patch.object(quic, "_remote_max_data", quic._remote_max_data_used), \
+                patch.object(link.QuicConnectionProtocol, "transmit", side_effect=pending.popleft):
+            protocol.transmit()
+        self.assertFalse(pending)
+        self.assertFalse(protocol._game_enqueued)
+        self.assertEqual(protocol._stats.interaction_priority_passes, 0)
+
     async def test_large_world_snapshot_is_compressed_and_game_datagrams_stay_independent(self):
         world = {"ok": True, "gameplay": {"loot_sources": [
             f"/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P:PersistentLevel.LootCrate_Small_BP_C_{index}"
