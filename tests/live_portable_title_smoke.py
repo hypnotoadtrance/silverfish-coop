@@ -6163,8 +6163,8 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
     async with asyncio.timeout(2):
         while (motion := await portable_probe_command(guest.bridge, "portable-crate", "motion")) == "pending":
             await asyncio.sleep(.05)
-    motion_ms, collision_safe = motion.split(",")
-    assert 0 < float(motion_ms) < 200 and collision_safe == "true", motion
+    motion_ms, collision_safe, stage = motion.split(",")
+    assert 0 < float(motion_ms) < 200 and collision_safe == "true" and stage in {"preview", "confirmed"}, motion
     await asyncio.sleep(.65)  # Let the compatible status copies arrive after the ring receipt.
 
     async def events(run, state, name):
@@ -6232,7 +6232,8 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
         "probe_request_to_press_reply_ms": round(1000 * (pressed_at - request_at), 2),
         "probe_request_to_visible_roll_ms": round(1000 * (visible_at - request_at), 2),
         "probe_request_to_guest_lid_ms": round(1000 * (lid_at - request_at), 2),
-        "guest_press_to_preview_motion_ms": float(motion_ms), "guest_preview_collision_preserved": True,
+        "guest_press_to_lid_motion_ms": float(motion_ms), "guest_lid_motion_stage": stage,
+        "guest_preview_collision_preserved": True,
         **timings,
     }
 

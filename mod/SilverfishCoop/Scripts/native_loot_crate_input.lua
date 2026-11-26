@@ -399,6 +399,10 @@ local function project(current, angle)
         error(restored and matches and "native_loot_crate_projection_refused"
             or "mutation_unverified_native_loot_crate_projection", 0)
     end
+    -- The stock pose and collision are already authoritative. Finish the local visual
+    -- movement before revealing the real panel at its verified final pose.
+    local confirmed = pcall(lid_preview.confirm, profile.name, opened, locations)
+    if not confirmed then lid_preview.resolve(profile.name) end
     return "stock crate exhausted projection verified"
 end
 
@@ -734,10 +738,7 @@ function input.command(fields, state, phase)
         local result
         if current.profile.random_lid and #fields == 5 then result = project(current, tonumber(fields[5])) end
         if not current.profile.random_lid and (#fields == 3 or #fields == 4) then result = project(current) end
-        if result then
-            lid_preview.resolve(current.profile.name)
-            return result
-        end
+        if result then return result end
     end
     error("native_loot_crate_input_arguments", 0)
 end
@@ -904,6 +905,16 @@ local function visit_lockpicks(state, status_row, accept)
     end
 end
 
+local function publish_stock_press(state, status_row, index, profile, pawn, sequence, pried, guest)
+    if pried or guest ~= 0 or sequence == fixture_sequences[index] or sequence == published[index] then return end
+    published[index] = sequence
+    pcall(preview_open, state, profile, sequence)
+    if type(SilverfishEnqueueLocalBridgeInput) == "function" then
+        -- Status remains the fallback if the in-process input ring is detached or full.
+        SilverfishEnqueueLocalBridgeInput(status_row("loot-crate-open", state.map, profile.name, pawn, sequence) .. "\n")
+    end
+end
+
 local function append_receipts(rows, state, status_row)
     visit_receipts(state, function(index, profile, pawn, sequence, pried, guest)
         if pried and guest ~= 0 then
@@ -914,6 +925,7 @@ local function append_receipts(rows, state, status_row)
                 end
             end
         else
+            publish_stock_press(state, status_row, index, profile, pawn, sequence, pried, guest)
             rows[#rows + 1] = status_row("native-loot-crate-interaction", state.map, profile.name, pawn, sequence,
                 pried and "pried" or sequence == fixture_sequences[index] and "fixture" or "stock")
         end
@@ -930,12 +942,7 @@ local function publish_receipts(frame)
     local pawn = state.local_pawn.pawn
     if not same(active_world, state.world) or not valid(pawn) or not same(pawn:GetWorld(), state.world) then return end
     visit_receipts(state, function(index, profile, pawn, sequence, pried, guest)
-        if not pried and guest == 0 and sequence ~= fixture_sequences[index] and sequence ~= published[index] then
-            published[index] = sequence
-            -- Status remains the fallback if the in-process input ring is detached or full.
-            SilverfishEnqueueLocalBridgeInput(status_row("loot-crate-open", state.map, profile.name, pawn, sequence) .. "\n")
-            pcall(preview_open, state, profile, sequence)
-        end
+        publish_stock_press(state, status_row, index, profile, pawn, sequence, pried, guest)
     end)
 end
 

@@ -68,7 +68,8 @@ local function start(current, sequence, panels, opened, locations)
     if not valid(math_api) then math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary") end
     if not valid(clock) or not valid(math_api) then return end
     local world = actor:GetWorld()
-    local start_at = clock:GetRealTimeSeconds(world)
+    -- Start one short step into the easing curve before the request can settle.
+    local start_at = clock:GetRealTimeSeconds(world) - .008
     local entry = {actor = actor, world = world, name = profile.name, sequence = sequence, start_at = start_at, parts = {}}
     preview = entry
     for index, panel in ipairs(panels) do
@@ -80,19 +81,35 @@ end
 
 function view.start(current, sequence, panels, opened, locations)
     local ok, shown = pcall(start, current, sequence, panels, opened, locations)
-    if not ok or not shown then clear() end
+    if ok and shown then view.tick(current.crate:GetWorld()) else clear() end
+end
+
+function view.confirm(name, opened, locations)
+    local entry = preview
+    if not entry or entry.name ~= name or entry.confirmed then return end
+    for index, part in ipairs(entry.parts) do
+        if not valid(part.moving) or not opened[index] then return clear() end
+        local rotation, point = part.moving.RelativeRotation, part.moving.RelativeLocation
+        if not rotation or (locations[index] and not point) then return clear() end
+        part.rotation = {Pitch = rotation.Pitch, Yaw = rotation.Yaw, Roll = rotation.Roll}
+        part.goal = opened[index]
+        part.end_location = locations[index]
+        if part.end_location then part.location = {X = point.X, Y = point.Y, Z = point.Z} end
+    end
+    entry.start_at = clock:GetRealTimeSeconds(entry.world)
+    entry.confirmed, entry.paused = true, false
 end
 
 local function animate(world)
     local entry = preview
     if not valid(world) or not valid(entry.world) or world:GetAddress() ~= entry.world:GetAddress()
-        or not valid(entry.actor) or entry.actor:IsActorBeingDestroyed() or entry.actor.Looted ~= false then return false end
+        or not valid(entry.actor) or entry.actor:IsActorBeingDestroyed()
+        or entry.actor.Looted ~= (entry.confirmed == true) then return false end
     local elapsed = clock:GetRealTimeSeconds(world) - entry.start_at
     if elapsed >= .75 then return false end
     if entry.paused then return true end
-    -- Begin the lid movement locally and leave the final pose to the confirmed stock open.
     local alpha = math.min(1, math.max(0, elapsed / .12))
-    local fraction = .32 * alpha * (2 - alpha)
+    local fraction = (entry.confirmed and 1 or .32) * alpha * (2 - alpha)
     for _, part in ipairs(entry.parts) do
         if not valid(part.moving) then return false end
         local start, stop = part.rotation, part.goal
@@ -111,7 +128,7 @@ local function animate(world)
         end
     end
     entry.paused = alpha == 1
-    return true
+    return not (entry.confirmed and entry.paused)
 end
 
 function view.tick(world)

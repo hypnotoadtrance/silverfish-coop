@@ -30,8 +30,9 @@ local function sample_motion()
             break
         end
     end
-    if crate.Looted == true then
-        track.done = not duplicate and panel:IsVisible()
+    local confirmed = crate.Looted == true
+    if confirmed and not duplicate then
+        track.done = panel:IsVisible() and valid(box) and box:GetCollisionEnabled() == 0
         return
     end
     if not duplicate or track.elapsed then return end
@@ -41,10 +42,13 @@ local function sample_motion()
     if math.max(difference(point.Pitch, before.Pitch), difference(point.Yaw, before.Yaw),
         difference(point.Roll, before.Roll)) <= 1 then return end
     local original = panel.RelativeRotation
-    track.safe = difference(original.Pitch, before.Pitch) < .05 and difference(original.Yaw, before.Yaw) < .05
-        and difference(original.Roll, before.Roll) < .05 and panel:GetCollisionEnabled() == track.panel_collision
-        and valid(box) and box:GetCollisionEnabled() == track.box_collision and not panel:IsVisible()
+    local stock_pose = difference(original.Pitch, before.Pitch) < .05
+        and difference(original.Yaw, before.Yaw) < .05 and difference(original.Roll, before.Roll) < .05
+    local stock_box = valid(box) and box:GetCollisionEnabled()
+    track.safe = panel:GetCollisionEnabled() == track.panel_collision and not panel:IsVisible()
         and duplicate:IsVisible() and duplicate:GetCollisionEnabled() == 0
+        and (confirmed and not stock_pose and stock_box == 0 or not confirmed and stock_pose and stock_box == track.box_collision)
+    track.stage = confirmed and "confirmed" or "preview"
     track.elapsed = (track.statics:GetRealTimeSeconds(track.world) - track.pressed) * 1000
 end
 
@@ -113,7 +117,7 @@ LoopInGameThreadWithDelay(25, function()
     last = ticket
     local ok, result
     if mode == "motion" then
-        ok, result = true, motion and motion.done and ("%.2f,%s"):format(motion.elapsed or -1, tostring(motion.safe)) or "pending"
+        ok, result = true, motion and motion.done and ("%.2f,%s,%s"):format(motion.elapsed or -1, tostring(motion.safe), motion.stage or "unseen") or "pending"
     else
         ok, result = pcall(press, mode)
     end
