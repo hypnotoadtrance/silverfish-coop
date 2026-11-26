@@ -988,7 +988,7 @@ namespace
             int units{};
             const auto parsed = std::from_chars(count.data(), count.data() + count.size(), units);
             if (guid == Guid{} || parsed.ec != std::errc{} || parsed.ptr != count.data() + count.size() ||
-                units < 0 || !silverfish::content_paths::item_class(path)) return {};
+                units < -1 || !silverfish::content_paths::item_class(path)) return {};
             const std::wstring name(path.begin(), path.end());
             auto* type = find<U::UClass>(name.c_str());
             if (!live(type) || !type->IsChildOf(inventory.base_class) || type->GetPathName() != name ||
@@ -1144,7 +1144,7 @@ namespace
             if (!stacks || !defaults->HasAnyFlags(U::RF_ClassDefaultObject))
                 return fail("board_objective_stack_layout_unqualified");
             const bool stackable = stacks->GetPropertyValueInContainer(defaults);
-            if (stackable && !item.units) return fail("board_objective_quantity_changed");
+            if (stackable && item.units < 1) return fail("board_objective_quantity_changed");
             const void* moving = original.GetRawPtr(item.slot);
             Value portion(nullptr, {inventory.row}), remainder(nullptr, {inventory.row});
             Guid spent = item.guid;

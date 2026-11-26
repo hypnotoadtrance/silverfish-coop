@@ -139,7 +139,7 @@ local function backpack_objectives(save, contract)
             local objective = valid(class) and contract.by_class[class:GetAddress()]
             if objective then
                 local units, id = row[units_key], row[guid_key]
-                if slot ~= 1 or not int(units) or units < (objective.stacks and 1 or 0)
+                if slot ~= 1 or not int(units) or units < (objective.stacks and 1 or -1)
                     or not id or not int(id.A) or not int(id.B) or not int(id.C) or not int(id.D) then
                     refuse("objective_requires_unambiguous_backpack_stack")
                 end
@@ -435,7 +435,8 @@ function board_contract.command(fields, state, phase)
         end)
         if redeemed ~= true then
             if type(reason) == "string" and reason:match("^mutation_unverified_") then error(reason, 0) end
-            refuse("objective_redemption_rejected")
+            -- Keep the native preflight reason so a refused board action can be diagnosed.
+            refuse(type(reason) == "string" and reason or "objective_redemption_rejected")
         end
         local index, seen = 0, {}
         if type(moved) ~= "string" or #moved ~= math.max(0, #outcome.deposits * 33 - 1) then

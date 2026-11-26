@@ -130,7 +130,7 @@ def parse(fields):
 def _valid_deposit(proof, part):
     units, remaining, consumed = part["units"], part["remaining"], part["consumed"]
     return (proof["verb"] == "turnin" and valid_guid(part["guid"]) and units is not None
-            and 0 <= units <= 2_147_483_647 and remaining in {0, max(0, units - 1)}
+            and -1 <= units <= 2_147_483_647 and remaining in {0, max(0, units - 1)}
             and (consumed == "-" or proof["state"] == "applied" and valid_guid(consumed)))
 
 

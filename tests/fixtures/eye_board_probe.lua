@@ -161,6 +161,13 @@ local function prepare(state, host, operation)
             fields[#fields + 1] = assert(class:GetFullName():match("^%S+ (.+)$"))
         end
         assert(#fields > 1)
+        local inspected, detail = pcall(require("native_board_contract").command,
+            {"fixture", "native-board-contract", "turnin", "inspect", remote:GetFullName(), board:GetFullName(),
+                reward_quests[operation]}, state, "hosting")
+        if not inspected then
+            error(("Stock reward inspect failed for %s at step %s: %s"):format(
+                reward_quests[operation], tostring(row[step_field]), tostring(detail)), 0)
+        end
         return table.concat(fields, ";")
     end
     assert(operation == "eye" and not seeded)

@@ -105,14 +105,14 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
         host = self.host()
         bridge = SimpleNamespace(command=AsyncMock(side_effect=[
             result(armor, "turnin", "inspect", 1, -10, cash=8000, xp=1, guid=GUID,
-                   raw_units=2, remaining=1, additional=inspected),
+                   raw_units=2, remaining=1, additional=inspected.replace(":0:0:", ":-1:0:")),
             result(armor, "turnin", "apply", 1, -10, cash=8000, xp=1, guid=GUID,
-                   raw_units=2, remaining=1, consumed=split, additional=applied),
+                   raw_units=2, remaining=1, consumed=split, additional=applied.replace(":0:0:", ":-1:0:")),
         ]))
         with patch.object(board.native_inventory, "retain_guest_save", return_value=True) as retain:
             paid = await board.perform(host, bridge, "guest", "turnin", armor)
             retain.assert_awaited_once()
-        self.assertTrue(bridge.command.await_args.args[-1].endswith(f"|{helmet}:0:0"))
+        self.assertTrue(bridge.command.await_args.args[-1].endswith(f"|{helmet}:-1:0"))
         self.assertEqual([(row["objective_guid"], row["objective_units_remaining"], row["consumed_guid"])
                           for row in paid["objective_deposits"]], [(GUID, 1, split), (helmet, 0, helmet)])
         self.assertEqual((paid["cash"], paid["wallet"]), (8000, 8017))
