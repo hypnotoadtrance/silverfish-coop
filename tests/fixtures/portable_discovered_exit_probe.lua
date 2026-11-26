@@ -26,8 +26,15 @@ local function run(world, action)
         stock.Box:SetGenerateOverlapEvents(false)
         return copy:GetFullName()
     end
-    assert(action == "cross" and valid(copy) and not copy.Box:IsOverlappingActor(pawn))
+    assert((action == "cross" or action == "alone") and valid(copy) and not copy.Box:IsOverlappingActor(pawn))
     local point = copy.Box:K2_GetComponentLocation()
+    local connection = world.NetDriver.ClientConnections[1]
+    local guest = connection.PlayerController.Pawn
+    assert(valid(guest) and guest:HasAuthority() and not guest:IsLocallyControlled())
+    local normal = copy:GetActorForwardVector()
+    local separation = action == "cross" and 500 or 2300
+    assert(guest:K2_SetActorLocation({X = point.X + separation * normal.X, Y = point.Y + separation * normal.Y, Z = point.Z},
+        false, {}, false), "The remote pawn could not be positioned for the party-radius check")
     local moved = pawn:K2_SetActorLocation({X = point.X, Y = point.Y, Z = point.Z}, false, {}, false)
     assert(moved and copy.Box:IsOverlappingActor(pawn), "The local pawn did not enter the test exit")
     return "entered"

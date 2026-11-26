@@ -559,9 +559,10 @@ namespace
     {
         if (scope.authored_world.empty() || !scope.exit_class || !live_object(exit) || !live_object(box) ||
             !exit->GetClassPrivate()->IsChildOf(scope.exit_class) || !in_persistent_level(exit, world) ||
-            !exit_token(exit->GetName()) || exit->GetName().size() > 96 ||
             box->GetOuterPrivate() != exit || box != read_object(field<Unreal::FObjectProperty>(exit, STR("Box")), exit) ||
             box->GetClassPrivate() != find<Unreal::UClass>(STR("/Script/Engine.BoxComponent"))) return {};
+        const auto actor_name = exit->GetName();
+        if (actor_name.size() > 96 || !exit_token(actor_name)) return {};
         for (auto* stock : {scope.overlap, scope.activate, scope.exit_power})
         {
             if (!stock || exit->GetClassPrivate()->GetFunctionByNameInChain(stock->GetFName()) != stock) return {};
@@ -1088,7 +1089,7 @@ namespace
 
     void finish_exit_probe(Iteration&, Unreal::UObject* actor, Unreal::UFunction* function, void*)
     {
-        if (Unreal::IsInGameThreadRaw() && actor == scope.probing_exit.Get() && function == scope.overlap)
+        if (actor && function == scope.overlap && Unreal::IsInGameThreadRaw() && actor == scope.probing_exit.Get())
         {
             scope.probing_exit.Reset();
             scope.probing_box.Reset();

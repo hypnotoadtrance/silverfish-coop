@@ -1,3 +1,4 @@
+from dataclasses import replace
 import time
 import tempfile
 import unittest
@@ -269,6 +270,20 @@ class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
         host.begin_zone_guests.assert_not_called()
         self.assertFalse(host.transitioning)
         self.assertFalse(host.stopping)
+
+    async def test_discovered_route_requires_a_native_ticket_and_supported_destination(self):
+        route = replace(next(route for route in AUTHORED_ROUTES if route.kind == "overlap"), discovered=True)
+        host = self.host(route.source, route.destination)
+        host.last_game = self.frame(route.source, 1, 500, guarded=True)
+        bridge = Mock(command=AsyncMock())
+        self.assertEqual(await host.travel_authored(bridge, None, route),
+                         {"ok": False, "error": "exit_crossing_unavailable"})
+        invalid = replace(route, destination="/Game/Classes/Maps/Custom/Arena")
+        self.assertEqual(await host.travel_authored(bridge, None, invalid, exit_crossing=17),
+                         {"ok": False, "error": "travel_blocked",
+                          "blockers": [{"id": "host", "reason": "unknown_destination"}]})
+        bridge.command.assert_not_awaited()
+        host.checkpoint_native.assert_not_awaited()
 
     async def test_crossing_cannot_survive_an_application_roster_change(self):
         route = next(route for route in AUTHORED_ROUTES if route.kind == "overlap")

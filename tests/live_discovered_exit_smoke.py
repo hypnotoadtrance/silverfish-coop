@@ -1,0 +1,80 @@
+"""Verify one registered and one runtime-discovered exit on an isolated pair."""
+
+import argparse
+import asyncio
+from pathlib import Path
+
+import live_portable_title_smoke as suite
+from tools.silverfish.authored_routes import AUTHORED_ROUTES
+from tools.silverfish.travel import CROSSROADS, OBSERVATORY
+
+
+def route_between(source, destination):
+    route, = (row for row in AUTHORED_ROUTES if (row.source, row.destination) == (source, destination))
+    return route
+
+
+async def wait_for_party(host_run, guest_run, destination):
+    reached = await suite.wait_resident_status(host_run, lambda frame: (
+        frame.get("game", {}).get("map") == destination
+        and frame["game"].get("native_guest_save", {}).get("state") == "bound"
+        and not frame.get("awaiting_zone_guest")), timeout=20)
+    await suite.wait_resident_status(guest_run, lambda frame: (
+        frame.get("game", {}).get("map") == destination and frame.get("zone_epoch") == reached["zone_epoch"]), timeout=10)
+    return reached
+
+
+async def live_exit(host, guest, pawn, probe, **options):
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    for source, destination in ((OBSERVATORY, CROSSROADS), (CROSSROADS, OBSERVATORY)):
+        route = route_between(source, destination)
+        for participant, position in ((pawn, "near"), ("local", "near"), ("local", "inside")):
+            await host.bridge.command("native-exit-position", participant, position, route.entrance, route.actor)
+        reached = await wait_for_party(host_run, guest_run, destination)
+        events = await suite.resident_events(host_run, reached)
+        settled, = (row for row in events if row["event"] == "native_authored_zone_request" and row["actor"] == route.actor
+                    and row["source"] == source)
+        assert settled["result"]["ok"] and not settled["discovered"], settled
+        pawn = reached["game"]["native_guest_save"]["pawn"]
+
+    route = route_between(OBSERVATORY, CROSSROADS)
+    for participant in (pawn, "local"):
+        await host.bridge.command("native-exit-position", participant, "near", route.entrance, route.actor)
+    actor = (await probe(host.bridge, "portable-discovered-exit", "spawn")).strip()
+    actual_name = actor.rsplit(".", 1)[-1]
+    assert actual_name != route.actor and not any(row.source == OBSERVATORY and row.actor == actual_name
+                                                  for row in AUTHORED_ROUTES)
+    start = await suite.wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == OBSERVATORY)
+    denied_before = start["game"]["native_zone"]["too_far"]
+    assert (await probe(host.bridge, "portable-discovered-exit", "alone")).strip() == "entered"
+    refused = await suite.wait_resident_status(host_run, lambda frame: (
+        frame.get("game", {}).get("map") == OBSERVATORY
+        and frame["game"].get("native_zone", {}).get("too_far", 0) > denied_before))
+    assert refused["zone_epoch"] == start["zone_epoch"]
+    await host.bridge.command("native-exit-position", "local", "near", route.entrance, route.actor)
+    assert (await probe(host.bridge, "portable-discovered-exit", "cross")).strip() == "entered"
+
+    reached = await wait_for_party(host_run, guest_run, CROSSROADS)
+    events = await suite.resident_events(host_run, reached)
+    departure, = (row for row in events if row["event"] == "native_authored_zone_request" and row["actor"] == actual_name)
+    assert departure["discovered"] is True and departure["exit_crossing"] > 0 and departure["travel_time_step"] == 17
+    assert departure["destination"] == CROSSROADS and departure["entrance"] == route.entrance and departure["result"]["ok"]
+    arrival, = (row["authored_arrival"] for row in events if row["event"] == "zone_travel_ready"
+                and row["epoch"] == reached["zone_epoch"])
+    assert arrival["placement"] == "arrow"
+    assert all(not (seat.bridge.directory / "native-authored-exit-events").exists() for seat in (host, guest))
+    return {"stock_exit_discovery": departure, "arrival": arrival, "out_of_range_refusal": True}
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--work", type=Path, required=True)
+    parser.add_argument("--first-game", type=Path, required=True)
+    parser.add_argument("--second-game", type=Path, required=True)
+    parser.add_argument("--vanilla-saved", type=Path, required=True)
+    args = parser.parse_args()
+    args.work.mkdir(parents=True, exist_ok=True)
+    suite.verify_weather_travel = live_exit
+    with suite.installed_probe(args.first_game, mod="SilverfishPortableExitDiscoveryProbe", fixture="portable_discovered_exit_probe.lua"):
+        asyncio.run(suite.verify(args.work, args.first_game, args.second_game, args.vanilla_saved,
+                                 stock_weather_travel=True, stock_placed_item=True))
