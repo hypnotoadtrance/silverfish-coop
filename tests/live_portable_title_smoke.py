@@ -4586,7 +4586,7 @@ async def verify_streamed_stock_board(host: Seat, guest: Seat, pawn: str) -> dic
                     return int(values[0])
                 await asyncio.sleep(.1)
 
-    dynamic = "CoopProbe.Supply-Run"
+    dynamic, followup = "CoopProbe.Supply-Run", "CoopProbe.Second-Run"
     assert await command(host, "stream-modded-offers") == "off-table offers armed"
     assert await command(guest, "stream-modded-offers") == "off-table offers armed"
     result = await catalog()
@@ -4607,6 +4607,8 @@ async def verify_streamed_stock_board(host: Seat, guest: Seat, pawn: str) -> dic
     for omitted in ("CoopProbe.Large-Journal-Entry", "CoopProbe.Reserved:Name"):
         assert await command(host, "journal", omitted) == "1"
         assert await command(guest, "journal", omitted) == "-"
+    await journals(followup, 2)
+    assert await command(host, "modded-completion-flag") == "-"
     assert await command(host, "complete-modded-objective") == "2"
     ready = await catalog()
     assert ready["ok"] and dynamic in ready[native_board_contract.CATALOG_KEY]["turnins"], ready
@@ -4616,6 +4618,8 @@ async def verify_streamed_stock_board(host: Seat, guest: Seat, pawn: str) -> dic
     await open_board()
     await choose(dynamic, "turnin")
     await journals(dynamic, -10)
+    await journals(followup, 2)
+    assert await command(host, "modded-completion-flag") == "1"
     await wait_resident_status(guest_run, lambda view: view["game"].get("native_wallet") == before + 137)
     assert int(await command(guest, "reward-units")) == guest_bandages + 1
 
@@ -4652,6 +4656,7 @@ async def verify_streamed_stock_board(host: Seat, guest: Seat, pawn: str) -> dic
     assert len(receipts) == 4 and all(0 < size < 1024 for size in receipts), receipts
     return {"board": board, "offers": sorted(offers), "accepted": accepted, "journal_step": started,
             "turnin": payout, "off_table_quest": dynamic, "off_table_cash": 137, "off_table_bandages": 1,
+            "off_table_followup": {"id": followup, "step": 2}, "off_table_completion_flag": 1,
             "omitted_oversized_and_unsupported_journal_rows": True,
             "compact_apply_receipt_bytes": receipts,
             "hidden_board_refused": True, "hidden_guest_menu_closed": True, "saved_early": False}

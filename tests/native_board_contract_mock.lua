@@ -371,6 +371,34 @@ action("start", "inspect", mounted_quest)
 assert(proof()[8] == "already" and not board.Contracts[mounted_quest])
 board.Configure_Stock = previous_configure
 
+-- A content pack can have both live journal rows without supplying a base DataTable row.
+local mounted_followup = "Frontier.Second-Run"
+local mounted_flag = "Frontier.Supply-Delivered"
+mounted_active[step] = 2
+mounted_active[chained] = array({mounted_followup})
+mounted_active[flags] = map({[mounted_flag] = 1})
+local second_delivery = quest(2, nil, 25)
+second_delivery[step] = 2
+denied("followup_template_unavailable", "turnin", "inspect", mounted_quest)
+store.ActiveQuests[mounted_followup] = second_delivery
+assert(catalog()[8]:find(mounted_quest, 1, true))
+action("turnin", "inspect", mounted_quest)
+assert(proof()[24] == mounted_followup .. ":2:1")
+second_delivery[step] = 1
+denied("inspection_changed", "turnin", "apply", mounted_quest, "-")
+second_delivery[step] = 2
+local cash_before_chain = host_flags.Player_Cash
+action("turnin", "apply", mounted_quest, "-")
+assert(proof()[10] == -10 and store.ActiveQuests[mounted_followup] == second_delivery and second_delivery[step] == 2)
+assert(host_flags[mounted_flag] == 1 and host_flags.Player_Cash == cash_before_chain + 70)
+action("turnin", "apply", mounted_quest, "-")
+assert(proof()[8] == "already" and host_flags.Player_Cash == cash_before_chain + 70)
+
+local reserved = quest(2, nil, 5, {player_cash = 100})
+reserved[step] = 2
+store.ActiveQuests["Frontier.Reserved-Flag"] = reserved
+denied("effect_unqualified", "turnin", "inspect", "Frontier.Reserved-Flag")
+
 local mod_offer = {
     ForEach = function(_, visit) visit(ref(FName(multi_reward)), ref(complex_recipe)) end,
 }

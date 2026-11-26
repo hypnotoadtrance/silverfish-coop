@@ -62,8 +62,7 @@ local function followups(context, row, parent)
     if not int(count) or count < 0 or count > 16 then refuse("followup_list_unqualified") end
     local result = {}
     if count == 0 then return result end
-    local available, templates = pcall(wire.stock_quest_table)
-    if not available then refuse("followup_table_unavailable") end
+    local templates
     local active = context.save.ActiveQuests
     local seen = {[parent:lower()] = true}
     for index = 1, count do
@@ -72,13 +71,24 @@ local function followups(context, row, parent)
             refuse("followup_identity_unqualified")
         end
         local key = wire.stock_quest_key(id)
-        local found, starting = pcall(function()
-            local template = key and templates:FindRow(id)
-            return template and offer_step(template)
-        end)
-        if not found or not starting then refuse("followup_template_unavailable") end
+        if not key then refuse("followup_template_unavailable") end
         local current = wire.stock_row(active, key)
-        local expected = current and current[keys.step] or starting
+        local expected
+        if current then
+            expected = current[keys.step]
+        else
+            if not templates then
+                local available
+                available, templates = pcall(wire.stock_quest_table)
+                if not available then refuse("followup_table_unavailable") end
+            end
+            local found, starting = pcall(function()
+                local template = templates:FindRow(name(key))
+                return template and offer_step(template)
+            end)
+            if not found or not starting then refuse("followup_template_unavailable") end
+            expected = starting
+        end
         if not int(expected) then refuse("followup_step_unqualified") end
         result[index] = {key = key, id = id, step = expected, present = current ~= nil}
         seen[id:lower()] = true
@@ -244,14 +254,15 @@ local function expected_effects(context, row)
     local effects, keys_seen = {}, {}
     local function add(key, value, increment, multiplier)
         local text = name(key)
-        if type(text) ~= "string" or #text > 96 or not text:match("^[A-Za-z0-9_]+$")
-            or keys_seen[text] or text == "Player_Cash" or text == "Player_Xp" or not int(value) then
+        if not content_paths.quest_id(text) or not int(value) then refuse("effect_unqualified") end
+        local identity = text:lower()
+        if keys_seen[identity] or identity == "player_cash" or identity == "player_xp" then
             refuse("effect_unqualified")
         end
         local prior, found = wire.stock_flag(context.instance, key)
         local expected = increment and prior + value * (found and multiplier or 1) or value
         if not int(expected) then refuse("effect_range") end
-        keys_seen[text] = true
+        keys_seen[identity] = true
         effects[#effects + 1] = {key = key, value = expected}
     end
 

@@ -19,6 +19,8 @@ local track = "TrackFlag_ForStep_111_31112EA54B887C1D869E1291BC819774"
 local ping = "GlobalPing_OnTurnIn_108_68CA1968452BFC635A107EBB1EE3AA7F"
 local photo_key = "Photo_BrnzQuarry"
 local dynamic_key, local_only_key = "CoopProbe.Supply-Run", "CoopProbe.Local-Only"
+local custom_followup, custom_flag = "CoopProbe.Second-Run", "CoopProbe.Supply-Delivered"
+local completion_flags = "Set_FlagsOnComplete_73_4E24EFBB44C3458694C7DCB8CEF1D03F"
 local oversized_key, unsupported_key = "CoopProbe.Large-Journal-Entry", "CoopProbe.Reserved:Name"
 local reward_path = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
@@ -132,13 +134,16 @@ local function run(action, quest)
         assert(streamed and same(streamed.world, world) and valid(streamed.board))
         local quest_table = StaticFindObject("/Game/Classes/Libraries/DataTables/Quests_DT.Quests_DT")
         local seed = assert(quest_table:FindRow(photo_key))
-        local dynamic, local_only = FName(dynamic_key), FName(local_only_key)
+        local dynamic, local_only, followup = FName(dynamic_key), FName(local_only_key), FName(custom_followup)
         local reward = StaticFindObject(reward_path)
         if not valid(reward) then LoadAsset(reward_path); reward = StaticFindObject(reward_path) end
         assert(valid(reward))
-        assert(not quest_table:FindRow(dynamic_key) and not quest_table:FindRow(local_only_key))
+        assert(not quest_table:FindRow(dynamic_key) and not quest_table:FindRow(local_only_key)
+            and not quest_table:FindRow(custom_followup))
         if pawn:HasAuthority() then
             local active = pawn.Save.ActiveQuests
+            active:Add(followup, seed)
+            active:Find(followup):get()[step] = 2
             local oversized = FName(oversized_key)
             active:Add(oversized, seed)
             local lines = active:Find(oversized):get()[descriptions]
@@ -156,6 +161,8 @@ local function run(action, quest)
                 local row = contracts:Find(dynamic):get()
                 row[cash] = 137
                 row[items][1] = reward
+                row[chained][1] = followup
+                row[completion_flags]:Add(FName(custom_flag), 1)
             end
             if not pawn:HasAuthority() and not contracts:Contains(local_only) then
                 contracts:Add(local_only, seed)
@@ -169,6 +176,10 @@ local function run(action, quest)
         assert(row[step] == 1 and row[cash] == 137)
         row[step] = row[final]
         return tostring(row[step])
+    elseif action == "modded-completion-flag" then
+        local key = FName(custom_flag, EFindName.FNAME_Find)
+        local flags = world.OwningGameInstance.SaveSlot_Ref.Flags
+        return flags:Contains(key) and tostring(flags:Find(key):get()) or "-"
     elseif action == "reward-units" then
         assert(valid(pawn.Save) and same(pawn.Save, world.OwningGameInstance.SaveSlot_Ref))
         local pack, total = pawn.Save.PlayerBackpack, 0
