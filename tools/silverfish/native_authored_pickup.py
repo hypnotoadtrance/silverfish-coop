@@ -288,11 +288,11 @@ def parse_effect(fields, snapshot):
     return effect
 
 
-def remember_claim_snapshot(host, snapshot):
+def remember_claim_snapshot(host, bridge, snapshot):
     if CLAIM_REPLY_BYTES not in snapshot:
         host.last_game, host.last_seen = snapshot, time.monotonic()
     elif "native_wallet" in snapshot:
-        host.last_game = {**host.last_game, "native_wallet": snapshot["native_wallet"]}
+        host.last_game = bridge.remember_local_wallet(host.last_game, snapshot)
 
 
 async def claim(host, bridge, character: str, target: str | None, operation_id: str, *, local_input=False) -> dict:
@@ -397,7 +397,7 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
             raise RuntimeError("The authored pickup append reported an unexpected stack merge")
         if not is_cash and not defer_save:
             await asyncio.to_thread(native_host_save.record, host.native_profile, slot, area, flush=True)
-        remember_claim_snapshot(host, snapshot)
+        remember_claim_snapshot(host, bridge, snapshot)
         row = {"source": target, "map": area, "actor": actor, "class_path": item_class, "owner": character}
         if is_cash:
             row["wallet_credit"] = {key: credit[key] for key in ("amount", "before", "after", "stock_flag")}

@@ -159,7 +159,8 @@ class AuthoredPickupTransactionTests(unittest.IsolatedAsyncioTestCase):
     async def test_compact_cash_reply_has_exact_ticket_and_preserves_world_snapshot(self):
         path = Path(self.enterContext(tempfile.TemporaryDirectory()))
         bridge = runtime.Bridge(path, Mock())
-        stock = f"schema\t1\nseq\t4\nsession\thost\thosting\t{CITY}\t1\t0\nwallet\t50\n"
+        stock = (f"schema\t1\nseq\t4\nsession\thost\thosting\t{CITY}\t1\t0\nwallet\t50\n"
+                 f"pawn\tlocal\t{PAWN}\t100\t0\t0\t0\tplr\n")
         original = bridge._parse_status(stock)
         bridge._local_status = original
         slot = "SFCoop_" + "a" * 32
@@ -171,16 +172,20 @@ class AuthoredPickupTransactionTests(unittest.IsolatedAsyncioTestCase):
                     + f"{pickup.ACTION}\t{CASH}\t{CITY}\t{PAWN}\t1\t1\tcash_credited\t-\t{slot}\tmemory\n"
                     + f"{pickup.CASH_TAG}\t{CASH}\t{CITY}\t{PAWN}\t{slot}\t7\t50\t57\tItem_Money_CoupleBills_C_7-City_01_P-\n")
 
-        bridge.local_bridge = SimpleNamespace(command=command)
+        bridge.local_bridge = SimpleNamespace(command=command, read_status=Mock(return_value=stock))
         receipt = await bridge.command(pickup.ACTION, PAWN, slot, CASH)
         self.assertEqual(receipt[pickup.CASH_KEY]["amount"], 7)
         self.assertGreater(receipt[pickup.CLAIM_REPLY_BYTES], 0)
         self.assertIs(bridge._local_status, original)
         self.assertIs(bridge._parse_status(stock), original)
         host = SimpleNamespace(last_game=original, last_seen=1.0)
-        pickup.remember_claim_snapshot(host, receipt)
+        pickup.remember_claim_snapshot(host, bridge, receipt)
         self.assertEqual(host.last_game, dict(original, native_wallet=57))
         self.assertEqual(host.last_seen, 1.0)
+        self.assertEqual(bridge.snapshot()["native_wallet"], 57)
+        bridge.local_bridge.read_status.return_value = stock.replace("seq\t4", "seq\t5").replace("wallet\t50", "wallet\t49")
+        self.assertEqual(bridge.snapshot()["native_wallet"], 49)
+        self.assertIsNone(bridge._local_wallet)
 
         valid = bridge.local_bridge.command
 

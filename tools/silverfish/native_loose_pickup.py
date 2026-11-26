@@ -278,7 +278,7 @@ async def claim(host, bridge, character, requested, operation, *, local_input=Fa
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        native_authored_pickup.remember_claim_snapshot(host, snapshot)
+        native_authored_pickup.remember_claim_snapshot(host, bridge, snapshot)
         deferred = retained and (proof.get("memory") or row["class_path"] in native_loot.CASH_RANGES)
         revision = None
         if not deferred:

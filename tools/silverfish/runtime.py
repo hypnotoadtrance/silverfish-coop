@@ -903,6 +903,7 @@ class Bridge:
         self._local_status = None
         self._file_command_lock = asyncio.Lock()
         self._local_world_view = None
+        self._local_wallet = None
 
     async def wait_for_interaction(self, timeout: float, *, wake_if=None, wake_event: asyncio.Event | None = None,
                                    guest=False) -> None:
@@ -1461,6 +1462,14 @@ class Bridge:
                 frame = self._local_status
             else:
                 self._local_status = None
+        if self._local_wallet is not None and frame is not None:
+            sequence, area, pawn, balance = self._local_wallet
+            if (frame.get("sequence", -1) <= sequence
+                    and (frame.get("state"), frame.get("map"), frame.get("pawns", {}).get("local", {}).get("name"))
+                    == ("hosting", area, pawn)):
+                frame = {**frame, "native_wallet": balance}
+            else:
+                self._local_wallet = None
         if self._local_world_view is not None and frame is not None:
             at_sequence, pawn, proof = self._local_world_view
             if (self.local_bridge is not None and frame.get("sequence", 0) <= at_sequence
@@ -1469,6 +1478,13 @@ class Bridge:
                 return {**frame, "native_world_view": proof}
             self._local_world_view = None
         return frame
+
+    def remember_local_wallet(self, game: dict, receipt: dict) -> dict:
+        balance, sequence = receipt["native_wallet"], receipt.get("sequence")
+        pawn = game.get("pawns", {}).get("local", {}).get("name")
+        if type(sequence) is int and pawn:
+            self._local_wallet = sequence, receipt["map"], pawn, balance
+        return {**game, "native_wallet": balance}
 
     def _parse_status(self, text: str, *, cache: bool = True) -> dict | None:
         try:
