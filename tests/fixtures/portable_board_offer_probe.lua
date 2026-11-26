@@ -142,6 +142,11 @@ local function run(action, quest)
             and not quest_table:FindRow(custom_followup))
         if pawn:HasAuthority() then
             local active = pawn.Save.ActiveQuests
+            for index = 1, 132 do
+                local completed = FName(("CoopProbe.Archived-%03d"):format(index))
+                active:Add(completed, seed)
+                active:Find(completed):get()[step] = -10
+            end
             active:Add(followup, seed)
             active:Find(followup):get()[step] = 2
             local oversized = FName(oversized_key)
@@ -169,6 +174,9 @@ local function run(action, quest)
             end
         end)
         return "off-table offers armed"
+    elseif action == "active-quest-count" then
+        assert(pawn:HasAuthority())
+        return tostring(#pawn.Save.ActiveQuests)
     elseif action == "complete-modded-objective" then
         local save = world.OwningGameInstance.SaveSlot_Ref
         assert(pawn:HasAuthority() and same(pawn.Save, save))

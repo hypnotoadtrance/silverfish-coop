@@ -22,14 +22,19 @@ local function is_downed(actor, downed)
     return valid(actor) and downed[actor:GetAddress()] == true
 end
 
+local function active_npc(npc, current)
+    if not valid(npc) or not npc:HasAuthority() or npc.Alive ~= true or npc:IsActorBeingDestroyed() then return false end
+    local level = world_path.owned_actor_level(npc, current)
+    return valid(level) and (same(level, current.PersistentLevel) or level.bIsVisible == true)
+end
+
 local function remember_stock_attacker(npc, source, from_damage)
     local state = threat_session
-    if not state or from_damage ~= true or not valid(npc) or not valid(source)
+    if not state or from_damage ~= true or not valid(source)
         or not valid(threat_viewport) or not same(threat_viewport.World, state.world)
-        or not npc:HasAuthority() or npc.Alive ~= true or npc:IsActorBeingDestroyed()
-        or not source:HasAuthority() or source.Dead ~= false or source:IsActorBeingDestroyed()
-        or not same(npc:GetWorld(), state.world) or not same(source:GetWorld(), state.world)
-        or not same(npc.CombatTarget, source) then return end
+        or not active_npc(npc, state.world) or not source:HasAuthority()
+        or source.Dead ~= false or source:IsActorBeingDestroyed()
+        or not same(source:GetWorld(), state.world) or not same(npc.CombatTarget, source) then return end
     local driver = state.world.NetDriver
     if not valid(driver) or valid(driver.ServerConnection) or #driver.ClientConnections == 0 then return end
     local controller = source.Controller
@@ -133,8 +138,7 @@ function ai.sync(state, phase, desired)
 
     for _, path in ipairs(npc_candidates(state.world)) do
         local npc = StaticFindObject(path)
-        if valid(npc) and npc:HasAuthority() and npc.Alive == true and not npc:IsActorBeingDestroyed()
-            and same(npc:GetWorld(), state.world) and is_downed(npc.CombatTarget, downed) then
+        if valid(npc) and is_downed(npc.CombatTarget, downed) and active_npc(npc, state.world) then
             -- Each stock selection discards the previous target from the
             -- threat list. Re-run if the next threat is another downed player.
             for _ = 1, #state.pawns do

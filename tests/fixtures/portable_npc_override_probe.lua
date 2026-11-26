@@ -1685,6 +1685,21 @@ local function observe_strike(actor)
     return sample.calls
 end
 
+local function check_downing_retarget(actor, pawn, guest)
+    local health = guest.Save.PlayerHealth
+    actor:AddTargetToList(pawn, {})
+    project_downed(guest, "downed")
+    local retargeted = same(actor.CombatTarget, pawn)
+    actor:Agro_Buffer(guest, true, true, true, true)
+    local stayed_on_host = same(actor.CombatTarget, pawn)
+    actor.CombatTarget = guest
+    local queued = observe_strike(actor)
+    actor.CombatTarget = pawn
+    project_downed(guest, "standing")
+    assert(retargeted and stayed_on_host and queued == 0 and guest.Save.PlayerHealth == health,
+        ("downed checks failed: retarget=%s ignore=%s strike=%s"):format(tostring(retargeted), tostring(stayed_on_host), queued))
+end
+
 local function place_striker(actor, guest)
     local center = guest:K2_GetActorLocation()
     local radius = math.min(actor.Melee_SweepRange - 12, 135)
@@ -1737,17 +1752,7 @@ local function dock_strike(pawn, world, host)
     assert(after > 0 and after < before and pawn.Save.PlayerHealth == host_before,
         ("the stock strike did not damage the guest alone: %s to %s"):format(before, after))
 
-    actor:AddTargetToList(pawn, {})
-    project_downed(guest, "downed")
-    local retargeted = same(actor.CombatTarget, pawn)
-    actor:Agro_Buffer(guest, true, true, true, true)
-    local stayed_on_host = same(actor.CombatTarget, pawn)
-    actor.CombatTarget = guest
-    local queued = observe_strike(actor)
-    actor.CombatTarget = pawn
-    project_downed(guest, "standing")
-    assert(retargeted and stayed_on_host and queued == 0 and guest.Save.PlayerHealth == after,
-        ("downed checks failed: retarget=%s ignore=%s strike=%s"):format(tostring(retargeted), tostring(stayed_on_host), queued))
+    check_downing_retarget(actor, pawn, guest)
     return ("%.6f;%.6f;%.6f;%s"):format(host_before, before, after, actor:GetFullName())
 end
 
@@ -1866,6 +1871,21 @@ local function streamed_npc(world, pawn, host, action)
         actor.Health = 1
         actor:ForceNetUpdate()
         return actor:GetFullName()
+    end
+    if action == "stream-npc-retarget" then
+        assert(host and actor.Alive and actor:HasAuthority())
+        local guest = authoritative_guest(world)
+        actor.TargetList = {}
+        actor.CombatTarget = nil
+        actor:AddTargetToList(guest, {})
+        local selection = {}
+        actor:GetNewCombatTarget(selection)
+        assert(selection.NewTargetFound == true and same(actor.CombatTarget, guest),
+            "the streamed worker must first target the standing guest")
+        check_downing_retarget(actor, pawn, guest)
+        actor.TargetList = {}
+        actor.CombatTarget = nil
+        return "switched to host"
     end
     if action == "stream-npc-status" then
         return ("%d,%s,%.6f,%s"):format(actor:GetLocalRole(), tostring(actor.Alive),

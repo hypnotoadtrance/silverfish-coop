@@ -4589,6 +4589,8 @@ async def verify_streamed_stock_board(host: Seat, guest: Seat, pawn: str) -> dic
     dynamic, followup = "CoopProbe.Supply-Run", "CoopProbe.Second-Run"
     assert await command(host, "stream-modded-offers") == "off-table offers armed"
     assert await command(guest, "stream-modded-offers") == "off-table offers armed"
+    journal_size = int(await command(host, "active-quest-count"))
+    assert journal_size > 128, journal_size
     result = await catalog()
     assert result["ok"], result
     offers = set(result[native_board_contract.CATALOG_KEY]["offers"])
@@ -4655,6 +4657,7 @@ async def verify_streamed_stock_board(host: Seat, guest: Seat, pawn: str) -> dic
                 if entry["board"] == board]
     assert len(receipts) == 4 and all(0 < size < 1024 for size in receipts), receipts
     return {"board": board, "offers": sorted(offers), "accepted": accepted, "journal_step": started,
+            "host_quest_journal_entries": journal_size,
             "turnin": payout, "off_table_quest": dynamic, "off_table_cash": 137, "off_table_bandages": 1,
             "off_table_followup": {"id": followup, "step": 2}, "off_table_completion_flag": 1,
             "omitted_oversized_and_unsupported_journal_rows": True,
@@ -5067,6 +5070,9 @@ async def verify_stock_streamed_npc(host: Seat, guest: Seat, _pawn: str) -> dict
     host_before = await command(host, "status")
     assert await command(guest, "damage") == "damage denied", ownership
     assert await command(host, "status") == host_before, ownership
+    assert await command(host, "retarget") == "switched to host"
+    await wait_resident_status(guest_run, lambda status:
+        status["game"].get("native_guest_primary_scope", {}).get("guid") == guid, timeout=10)
 
     assert await command(guest, "aim") == "aimed"
     press = await submit(guest_run, "native-guest-primary-input-fixture")
@@ -5096,7 +5102,8 @@ async def verify_stock_streamed_npc(host: Seat, guest: Seat, _pawn: str) -> dict
     assert all(row.split(",")[1] == "false" and row.endswith(",true") for row in after), after
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"actor": actor, "world_lookup": ownership, "guest_before": observed, "final_states": after,
-            "guest_local_damage_denied": True, "guest_contact": contact, "stock_shot": receipt,
+            "guest_local_damage_denied": True, "retargeted_when_guest_downed": True,
+            "guest_contact": contact, "stock_shot": receipt,
             "campaign_checkpoint_unchanged": True}
 
 

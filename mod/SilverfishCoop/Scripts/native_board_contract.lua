@@ -24,6 +24,7 @@ local class_key = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local units_key = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local guid_key = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local completed_step = -10
+local menu_limit, journal_limit = 128, 4096
 local operation = "native-board-contract"
 local catalog_operation = "native-board-contract-catalog"
 local last
@@ -342,7 +343,7 @@ local function catalog(fields, state, phase)
     context.board:Configure_Stock()
     local offers, ready = {}, {}
     local active, contracts = context.save.ActiveQuests, context.board.Contracts
-    if not active or not contracts or #active > 128 or #contracts > 128 then refuse("catalog_extent") end
+    if not active or not contracts or #active > journal_limit or #contracts > menu_limit then refuse("catalog_extent") end
     local function descriptor(raw_key, raw_row, target, accepting)
         local key, row = raw_key:get(), raw_row:get()
         local id = wire.stock_quest_id(name(key))
@@ -353,7 +354,8 @@ local function catalog(fields, state, phase)
             if offer_step(row) and not wire.stock_row(active, key) then target[#target + 1] = id end
             return
         end
-        if excluded[id] or not board_accepts(context.board, key, row) then return end
+        local step = row[keys.step]
+        if not int(step) or step <= 0 or excluded[id] or not board_accepts(context.board, key, row) then return end
         if special[id] then
             if specialist_ready(context, row) then target[#target + 1] = id end
             return
@@ -374,6 +376,11 @@ local function catalog(fields, state, phase)
     if not unchanged(context, state, phase, pawn, board_name) then refuse("catalog_scope_changed") end
     table.sort(offers)
     table.sort(ready)
+    if #ready > menu_limit then
+        print(("[SilverfishCoop] Board has %d eligible turn-ins. Showing the first %d; more will appear as quests are turned in.\n")
+            :format(#ready, menu_limit))
+        for index = #ready, menu_limit + 1, -1 do ready[index] = nil end
+    end
     return {mode = "catalog", pawn = pawn, board = board_name, context = context, offers = offers, ready = ready}
 end
 
@@ -430,7 +437,8 @@ function board_contract.command(fields, state, phase)
         if not starting_step then refuse("offer_step_unqualified") end
         -- Stock AddQuest_ByName looks up only the base table. A board supplied by
         -- another content pack can expose a complete quest row in Contracts.
-        if not wire.stock_quest_table():FindRow(name(context.key)) then live_offer = offer end
+        local available, templates = pcall(wire.stock_quest_table)
+        if not available or not templates:FindRow(name(context.key)) then live_offer = offer end
     else
         if not active or step <= 0 or not board_accepts(context.board, context.key, active) then refuse("wrong_turnin") end
         contract = shape(context, active, quest)

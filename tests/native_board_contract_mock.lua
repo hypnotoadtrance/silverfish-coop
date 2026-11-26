@@ -71,6 +71,7 @@ complex_recipe[chained] = array({followup})
 local store = object({ActiveQuests = map({}), PlayerBackpack = array({}), PlayerEquipment = array({})})
 local mounted_recipe = quest(2, nil, 70)
 local stock_templates = {[eye] = eye_recipe, [kill] = kill_recipe, [multi_reward] = complex_recipe, [followup] = followup_recipe}
+local stock_table_available = true
 local player = object({Save = store})
 local bag = object({PlayerBackpack = array({}), PlayerEquipment = array({})})
 local guest = object({Save = bag})
@@ -100,6 +101,7 @@ package.loaded.native_wire_quest = {
     stock_quest_id = stock_keys.stock_quest_id,
     stock_quest_key = function(key) return key end,
     stock_quest_table = function()
+        assert(stock_table_available, "Base quest table is unavailable")
         return {FindRow = function(_, key) return stock_templates[key] end}
     end,
     live_stock_board_context = function(state, phase, pawn, board_name, key)
@@ -361,6 +363,11 @@ getmetatable(store.ActiveQuests).__index.Add = function(self, key, row)
     self[key] = copy
 end
 assert(catalog()[7]:find(mounted_quest, 1, true))
+local completed = quest(2, nil, 5)
+completed[step] = -10
+for index = 1, 140 do store.ActiveQuests["Completed" .. index] = completed end
+assert(catalog()[7]:find(mounted_quest, 1, true) and catalog()[8] == "-")
+stock_table_available = false
 action("start", "inspect", mounted_quest)
 assert(proof()[8] == "qualified" and not store.ActiveQuests[mounted_quest])
 action("start", "apply", mounted_quest, "-")
@@ -369,6 +376,8 @@ assert(proof()[8] == "applied" and mounted_active and mounted_active ~= mounted_
 assert(mounted_active[step] == 1 and mounted_active[cash] == 70)
 action("start", "inspect", mounted_quest)
 assert(proof()[8] == "already" and not board.Contracts[mounted_quest])
+stock_table_available = true
+for index = 1, 140 do store.ActiveQuests["Completed" .. index] = nil end
 board.Configure_Stock = previous_configure
 
 -- A content pack can have both live journal rows without supplying a base DataTable row.

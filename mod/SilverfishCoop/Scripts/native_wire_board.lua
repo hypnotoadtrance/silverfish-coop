@@ -482,7 +482,6 @@ end
 local function show_stock_menu(current, sequence, offers_arg, ready_arg, existing_menu)
     local offered, redeemable = stock_ids(offers_arg), stock_ids(ready_arg)
     local offers, ready_names, ready = {}, {}, {}
-    local table_data = stock.stock_quest_table()
     local missing = {}
     for _, id in ipairs(redeemable) do
         local key = stock.stock_quest_key(id)
@@ -502,7 +501,7 @@ local function show_stock_menu(current, sequence, offers_arg, ready_arg, existin
         drawn, reason = pcall(function()
             local contracts, additions, removals = current.board.Contracts, {}, {}
             if #contracts > 128 then error("wire_board_stock_offers_extent", 0) end
-            local offer_count = 0
+            local offer_count, table_checked, table_data = 0, false, nil
             for _, id in ipairs(offered) do
                 if ready[id] then error("wire_board_catalog_invalid", 0) end
                 local key = stock.stock_quest_key(id)
@@ -511,7 +510,12 @@ local function show_stock_menu(current, sequence, offers_arg, ready_arg, existin
                 if key and contracts:Contains(key) then
                     offers[id], offer_count = true, offer_count + 1
                 else
-                    local row = key and table_data:FindRow(key:ToString())
+                    if key and not table_checked then
+                        table_checked = true
+                        local available, source = pcall(stock.stock_quest_table)
+                        if available then table_data = source end
+                    end
+                    local row = key and table_data and table_data:FindRow(key:ToString())
                     if row then
                         additions[#additions + 1] = {key = key, row = row}
                         offers[id], offer_count = true, offer_count + 1
