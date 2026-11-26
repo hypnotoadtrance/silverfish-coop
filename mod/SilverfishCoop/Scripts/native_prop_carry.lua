@@ -1,5 +1,6 @@
 local carry = {}
 local world_path = require("world_path")
+local content_paths = require("content_paths")
 local corpses = require("native_corpse_view")
 local guest_save = require("guest_save")
 local observers = require("native_observer_target")
@@ -49,7 +50,8 @@ local function angle_delta(angle, goal) return (goal - angle + 180) % 360 - 180 
 local function guid(value) return type(value) == "string" and #value == 32 and value:match("^[0-9a-f]+$") end
 
 local function actor_class(actor)
-    return actor:GetClass():GetFullName():match("^%S+ (/Game/[%w_./%-]+)$")
+    local path = actor:GetClass():GetFullName():match("^BlueprintGeneratedClass ([^%s]+)$")
+    if content_paths.item_class(path, 200) then return path end
 end
 
 local function item_box(actor)
@@ -77,14 +79,31 @@ end
 
 local function prop_mesh(actor)
     local base = StaticFindObject(prop_path)
-    if not valid(base) or not valid(actor) or not actor:IsA(base) or actor_class(actor) == core_path
+    if not valid(base) or not valid(actor) or not actor:IsA(base)
         or not same(actor:GetWorld(), world) or actor:IsActorBeingDestroyed() then return end
+    local core = StaticFindObject(core_path)
+    if valid(core) and actor:IsA(core) then return end
     local root = actor.PropMesh
     if same(root, actor.RootComponent) and same(root:GetOwner(), actor) then return root end
 end
 
 local function mesh(actor)
     return prop_mesh(actor) or unflagged_body(actor)
+end
+
+function carry.publish_motion(actor)
+    if actor.bReplicates == true and actor.bReplicateMovement == true then return true end
+    actor.NetUpdateFrequency = math.min(actor.NetUpdateFrequency, 15)
+    if actor.bReplicates ~= true then actor:SetReplicates(true) end
+    if actor.bReplicateMovement ~= true then actor:SetReplicateMovement(true) end
+    actor:ForceNetUpdate()
+    return actor.bReplicates == true and actor.bReplicateMovement == true
+end
+
+local function replicated_prop_root(actor)
+    local root = prop_mesh(actor)
+    if root and actor.bReplicates == true and actor:HasAuthority()
+        and root:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find)) then return root end
 end
 
 local function handle(pawn)
@@ -257,7 +276,12 @@ local function observe(pawn, throwing, dropping)
                 return
             end
         end
-        if valid(pawn.HeldObject) then loot.start_carry(pawn, pawn.HeldObject) end
+        local actor = pawn.HeldObject
+        if valid(actor) then
+            local root = replicated_prop_root(actor)
+            if root and held(pawn, actor, handle(pawn)) and carry.publish_motion(actor) then carry.enroll(actor) end
+            loot.start_carry(pawn, actor)
+        end
     end
     if phase ~= "connected" or not state.listening or state.server ~= true or not same(pawn, local_pawn)
         or not pawn:IsLocallyControlled() or pawn:HasAuthority() or pawn.Dead ~= false then return end
@@ -288,7 +312,8 @@ local function observe(pawn, throwing, dropping)
         if not name or part:GetBoneIndex(bone) < 0 or not part:IsSimulatingPhysics(bone) then return end
         corpse = {number = number, part = part, name = name, bone = bone}
     end
-    if not held(pawn, actor, grip, corpse) or not loot_id and not corpse and actor.bReplicateMovement ~= true then return end
+    if not held(pawn, actor, grip, corpse) then return end
+    if not loot_id and not corpse and actor.bReplicateMovement ~= true and not prop_mesh(actor) then return end
     -- The stock call has bound the grip and the physics step has yet to move its root.
     local class, pitch, yaw = actor_class(actor), camera_aim(pawn)
     local position = corpse and part:GetSocketLocation(corpse.bone) or actor:K2_GetActorLocation()
@@ -336,6 +361,31 @@ function carry.item_is_held(actor)
     return false
 end
 
+local function find_spawned_prop(origin, range, claimed, expected_class)
+    local class = StaticFindObject(expected_class)
+    local base = StaticFindObject(prop_path)
+    local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+    if not valid(class) or not valid(base) or not class:IsChildOf(base) or not valid(api) then return end
+    local output = {}
+    api:GetAllActorsOfClass(world, class, output)
+    local candidates = output.OutActors or output
+    if #candidates > 128 then return end
+    local found, distance
+    for _, candidate in ipairs(candidates) do
+        if candidate and type(candidate.type) == "function" and candidate:type() == "RemoteUnrealParam" then
+            candidate = candidate:get()
+        end
+        if valid(candidate) and same(candidate:GetClass(), class) and replicated_prop_root(candidate) then
+            local center = candidate:K2_GetActorLocation()
+            if point(center) and dist2(center, claimed) <= 35^2 and dist2(origin, center) < range^2 then
+                if found then return nil, "ambiguous network prop" end
+                found, distance = candidate, math.sqrt(dist2(origin, center))
+            end
+        end
+    end
+    return found, distance
+end
+
 local function trace(pawn, pitch, yaw, number, expected_bone, claimed, expected_class, placement)
     local trace_api = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local camera = pawn.Camera
@@ -368,13 +418,25 @@ local function trace(pawn, pitch, yaw, number, expected_bone, claimed, expected_
         end
         local part, collision = impact(along(range))
         local actor = valid(part) and part:GetOwner()
-        if valid(actor) and (not placement or same(actor, selected)) and point(collision) then
+        if valid(actor) and (not placement or same(actor, selected)) and point(collision)
+            and actor_class(actor) == expected_class and point(claimed)
+            and dist2(actor:K2_GetActorLocation(), claimed) <= 35^2 then
             local tracked = same(actor, enrolled[actor:GetAddress()]) and same(part, mesh(actor))
             local lit_flare = not tracked and not placement and same(part, flares.carry_root(actor, world))
                 and actor:HasAuthority() and actor.Lit == true and part:IsAnySimulatingPhysics()
-            if tracked or lit_flare then return actor, math.sqrt(dist2(origin, collision)) end
+            -- Script-spawned network props can be absent from the placed or crate census.
+            -- The live host trace and the actor's stock root can still prove this grip.
+            local networked = not tracked and not placement and same(part, replicated_prop_root(actor))
+            if tracked or lit_flare or networked then return actor, math.sqrt(dist2(origin, collision)), nil, networked end
         end
-        if expected_class and expected_class:match("^/Game/Classes/") and point(claimed) then
+        if not placement and expected_class and point(claimed) then
+            -- The guest already acquired a real network replica. Accept the uniquely
+            -- matching host prop even if the authority camera's trace hit different geometry.
+            local replica, distance = find_spawned_prop(origin, range, claimed, expected_class)
+            if replica then return replica, distance, nil, true end
+            if distance then return nil, distance end
+        end
+        if expected_class and point(claimed) then
             local matched, center
             for _, candidate in pairs(enrolled) do
                 if (not placement or same(candidate, selected)) and item_body(candidate) and actor_class(candidate) == expected_class then
@@ -769,7 +831,7 @@ function carry.command(fields, current, seat)
         if #fields == 14 and (not number or number < 1 or number > 65535) then
             error("native_prop_carry_stock_target_unavailable", 0)
         end
-        local actor, distance, corpse
+        local actor, distance, corpse, new_prop
         if loot_id then
             actor = guid(loot_id) and loot.carry_actor(loot_id)
             local center = valid(actor) and actor:K2_GetActorLocation()
@@ -781,12 +843,12 @@ function carry.command(fields, current, seat)
                 actor = nil
             end
         else
-            actor, distance, corpse = trace(pawn, pitch, yaw, number, fields[14], position, fields[9], placement)
+            actor, distance, corpse, new_prop = trace(pawn, pitch, yaw, number, fields[14], position, fields[9], placement)
         end
         local grip = handle(pawn)
         if entry or not actor or not point(position) or actor_class(actor) ~= fields[9]
             or not valid(grip) or valid(pawn.HeldObject) or valid(grip:GetGrabbedComponent()) then
-            if fixtures and (number or offering_fixture) then
+            if fixtures then
                 error("native_prop_carry_stock_target_unavailable:" .. (not actor and tostring(distance) or "grip or class"), 0)
             end
             error("native_prop_carry_stock_target_unavailable", 0)
@@ -805,9 +867,9 @@ function carry.command(fields, current, seat)
         end
         if not corpse and (dist2(position, actor:K2_GetActorLocation()) > 35^2
             or not unflagged and actor.BeingHeld ~= false) then
-            if fixtures and item then
-                error(("native_prop_carry_stock_target_unavailable: item moved %.1f cm"):format(
-                    math.sqrt(dist2(position, actor:K2_GetActorLocation()))), 0)
+            if fixtures then
+                error(("native_prop_carry_stock_target_unavailable: center moved %.1f cm, held=%s"):format(
+                    math.sqrt(dist2(position, actor:K2_GetActorLocation())), tostring(actor.BeingHeld)), 0)
             end
             error("native_prop_carry_stock_target_unavailable", 0)
         end
@@ -816,6 +878,10 @@ function carry.command(fields, current, seat)
             if same(pawn.HeldObject, actor) then stock(pawn, "drop", actor, 0, pitch, yaw) end
             if loot_id then loot.stop_carry(pawn, actor) end
             error("native_prop_carry_stock_grab_unverified", 0)
+        end
+        if new_prop and not (carry.publish_motion(actor) and carry.enroll(actor)) then
+            stock(pawn, "drop", actor, 0, pitch, yaw)
+            error("native_prop_carry_stock_movement_unavailable", 0)
         end
         entry = {lease = lease, pawn = pawn, actor = actor, actor_name = actor:GetFullName(), grip = grip,
             serial = serial, deadline = os.clock() + 1.5, corpse = corpse, loot_id = loot_id}

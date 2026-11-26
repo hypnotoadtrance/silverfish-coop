@@ -6085,6 +6085,54 @@ async def verify_stock_host_prop_observer(host: Seat, guest: Seat, pawn: str, ev
     target = evidence["guest_toolbox_npc_impact"] = impact_frame(await call(host, "heavyimpactreadnpc"))
     assert target["attributed_calls"] == target["damage_calls"] == 1, target
     assert target["hp"][1] < target["hp"][0], target
+
+    async def dynamic_state(seat):
+        row = await call(seat, "dynamicstate")
+        if row == "absent":
+            return None
+        actor, replicates, held, point = row.split(";")
+        return {"actor": actor, "motion": replicates == "1", "held": held == "1",
+                "position": list(map(float, point.split()))}
+
+    evidence["unregistered_spawned_props"] = {}
+    for name, carrier in (("guest", guest), ("host", host)):
+        staging = tuple(map(float, (await call(host, "impactlane")).split()))
+        await wait(guest_run, lambda frame: (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
+                   and math.dist(point, staging) < 45)
+        await call(host, f"dynamicspawn{name}")
+        before = await dynamic_state(host)
+        async with asyncio.timeout(5):
+            while (replica := await dynamic_state(guest)) is None:
+                await asyncio.sleep(.05)
+        assert before and not before["motion"] and not before["held"] and not replica["held"], (before, replica)
+        observation = evidence["unregistered_spawned_props"][name] = dict(before=before, replica_before=replica)
+        assert await call(carrier, "dynamicgrab") == "grabbed"
+        if carrier is guest:
+            await wait(host_run, lambda frame: (edge := frame.get("game", {}).get(native_prop_carry.PROOF, {}))
+                       and (edge["edge"], edge["actor"]) == ("grab", before["actor"]), timeout=8)
+        held = await dynamic_state(host)
+        assert held and held["motion"], held
+        assert await call(carrier, "dynamicsweep") == "sweeping"
+        await asyncio.sleep(1.35)
+        during, seen = await asyncio.gather(dynamic_state(host), dynamic_state(guest))
+        for state in (during, seen):
+            assert state and math.dist(state["position"], before["position"]) > 25, state
+        assert await call(carrier, "dynamicdrop") == "dropped"
+        if carrier is guest:
+            await wait(host_run, lambda frame: (edge := frame.get("game", {}).get(native_prop_carry.PROOF, {}))
+                       and (edge["edge"], edge["actor"]) == ("drop", before["actor"]))
+        async with asyncio.timeout(8):
+            while True:
+                authority, observer = await asyncio.gather(dynamic_state(host), dynamic_state(guest))
+                if (authority and observer and not authority["held"] and not observer["held"]
+                        and math.dist(authority["position"], observer["position"]) < 20):
+                    break
+                await asyncio.sleep(.08)
+        observation.update(motion_authority=during, motion_guest=seen, released=(authority, observer))
+        assert await call(host, "dynamicremove") == "removed"
+        async with asyncio.timeout(5):
+            while await dynamic_state(guest) is not None:
+                await asyncio.sleep(.05)
     assert campaign_save_hashes(host.campaign) == checkpoint, "A stock prop impact wrote a campaign checkpoint"
     return {"stock_host_prop_observer": True,
             "stock_prop_contact_both_seats": len(evidence["stock_contact_recipients"]) == 2,

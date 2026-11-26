@@ -10,7 +10,7 @@ local toolbox_path = map .. ":PersistentLevel.Prop_ToolBox01_C_7"
 local stalker_path = map .. ":PersistentLevel.NPC_LoneStalker_C_0"
 local command, reply = mailbox .. "/portable-lantern-command.tsv", mailbox .. "/portable-lantern-reply.tsv"
 local color = {R = 0, G = 0, B = 0, A = 0}
-local last, watch
+local last, watch, dynamic
 
 local function valid(object) return object and object:IsValid() end
 local function same(first, second)
@@ -321,6 +321,69 @@ local function observer_probe(action, world, driver, pawn, lantern, root)
     error("unknown stock lantern trace action")
 end
 
+local function dynamic_probe(action, world, pawn, source_prop)
+    assert(pawn:IsLocallyControlled() and pawn:HasAuthority() == (lane == "first"), "wrong dynamic prop seat")
+    local class = assert(StaticFindObject(toolbox_path)):GetClass()
+    if action == "dynamicspawnhost" or action == "dynamicspawnguest" then
+        assert(lane == "first" and not valid(dynamic), "dynamic prop already spawned")
+        local other = other_player(world, pawn)
+        local first = action == "dynamicspawnhost" and pawn or other
+        local last = same(first, pawn) and other or pawn
+        local a, b = first:K2_GetActorLocation(), last:K2_GetActorLocation()
+        local distance = math.sqrt((b.X-a.X)^2+(b.Y-a.Y)^2)
+        assert(distance > 250, "dynamic prop lane is too short")
+        local x, y = a.X + (b.X-a.X)*120/distance, a.Y + (b.Y-a.Y)*120/distance
+        local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+        local hit = {}
+        assert(trace:LineTraceSingle(first, {X=x,Y=y,Z=a.Z+20}, {X=x,Y=y,Z=a.Z-170}, 0,
+            true, {pawn, other, source_prop}, 0, hit, true, color, color, 0), "no floor for the dynamic prop")
+        hit = hit.OutHit or hit
+        local point = {X=x,Y=y,Z=hit.ImpactPoint.Z+12}
+        dynamic = world:SpawnActor(class, point, {Pitch=0,Yaw=0,Roll=0})
+        assert(valid(dynamic) and not dynamic:HasAnyFlags(EObjectFlags.RF_WasLoaded)
+            and dynamic.PropMesh:IsSimulatingPhysics(FName("None")), "dynamic toolbox was not simulated")
+        dynamic:SetReplicateMovement(false)
+        dynamic:SetReplicates(true)
+        dynamic:ForceNetUpdate()
+        assert(dynamic.bReplicates and not dynamic.bReplicateMovement, "the new prop already publishes motion")
+        return position_text(point)
+    end
+    local actor = dynamic
+    if lane == "second" then
+        local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+        local found = {}
+        api:GetAllActorsOfClass(world, class, found)
+        for _, candidate in ipairs(found.OutActors or found) do
+            if type(candidate.type) == "function" and candidate:type() == "RemoteUnrealParam" then candidate = candidate:get() end
+            if valid(candidate) and not candidate:HasAuthority() and not candidate:IsActorBeingDestroyed()
+                and not candidate:HasAnyFlags(EObjectFlags.RF_WasLoaded) then
+                assert(not actor, "ambiguous dynamic toolbox")
+                actor = candidate
+            end
+        end
+    end
+    if action == "dynamicstate" and (not valid(actor) or actor:IsActorBeingDestroyed()) then return "absent" end
+    assert(valid(actor) and same(actor:GetWorld(), world))
+    local root = actor.PropMesh
+    if action == "dynamicstate" then
+        return string.format("%s;%d;%d;%s", actor:GetFullName(), actor.bReplicateMovement and 1 or 0,
+            holds(pawn, actor, root) and 1 or 0, position_text(actor:K2_GetActorLocation()))
+    end
+    if action == "dynamicgrab" then return host_grab(pawn, actor, root) end
+    if action == "dynamicsweep" then
+        return sweep_lantern(world, world.NetDriver, pawn, actor, root, lane == "first" and {} or nil)
+    end
+    if action == "dynamicdrop" then
+        assert(holds(pawn, actor, root))
+        pawn:Grab_Release_Object(false, true, false)
+        return "dropped"
+    end
+    assert(action == "dynamicremove" and lane == "first" and actor:HasAuthority() and not valid(pawn.HeldObject))
+    actor:K2_DestroyActor()
+    dynamic = nil
+    return "removed"
+end
+
 local function verify(action, pawn_name)
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
@@ -340,6 +403,7 @@ local function verify(action, pawn_name)
     local pawn = pawn_path and StaticFindObject(pawn_path)
     assert(valid(pawn) and pawn:GetFullName() == pawn_name and same(pawn:GetWorld(), world) and pawn.Dead == false,
         "unqualified Observatory pawn")
+    if action:match("^dynamic") then return dynamic_probe(action, world, pawn, lantern) end
     if action:match("^impact") then
         assert(pawn:IsLocallyControlled() and pawn:HasAuthority() == (lane == "first"), "wrong impact seat")
         return impact_probe(action, world, pawn, lantern, root)

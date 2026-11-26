@@ -50,15 +50,6 @@ local function authored_index(name, labels)
     end
 end
 
-local function publish_motion(actor)
-    if actor.bReplicates == true and actor.bReplicateMovement == true then return true end
-    actor.NetUpdateFrequency = math.min(actor.NetUpdateFrequency, 15)
-    if actor.bReplicates ~= true then actor:SetReplicates(true) end
-    if actor.bReplicateMovement ~= true then actor:SetReplicateMovement(true) end
-    actor:ForceNetUpdate()
-    return actor.bReplicates == true and actor.bReplicateMovement == true
-end
-
 function props.debris_created(actor, class, seat)
     if seat ~= "host" or not wood_debris[class] or not valid(world) or not same(actor:GetWorld(), world)
         or not actor:HasAuthority() or actor:HasAnyFlags(EObjectFlags.RF_WasLoaded) then return end
@@ -78,7 +69,7 @@ local function enroll_debris(wrapper)
             if mesh and mesh:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find)) then
                 if valid(mesh:GetAttachParent()) then actor:K2_DetachFromActor(1, 1, 1) end
                 mesh:SetIsReplicated(true)
-                if publish_motion(actor) then carry.enroll(actor) end
+                if carry.publish_motion(actor) then carry.enroll(actor) end
             end
         end
     end
@@ -91,7 +82,7 @@ local function publish(spawner, actor)
     local owner = spawner:GetOwner()
     if not valid(owner) or not owner:IsA(container_class) or not same(spawner.Container, owner)
         or not owner:HasAuthority() or not same(owner:GetWorld(), world) then return end
-    if root_mesh(actor) and publish_motion(actor) then carry.enroll(actor) end
+    if root_mesh(actor) and carry.publish_motion(actor) then carry.enroll(actor) end
 end
 
 local function enroll_stock_spawned_props(state)
@@ -113,7 +104,7 @@ local function enroll_stock_spawned_props(state)
         if valid(actor) and actor:GetFullName() == name and actor:IsA(base)
             and same(actor:GetClass(), StaticFindObject(class)) and same(actor:GetWorld(), world)
             and actor:HasAuthority() and not actor:IsActorBeingDestroyed() and root_mesh(actor)
-            and publish_motion(actor) then
+            and carry.publish_motion(actor) then
             carry.enroll(actor)
         end
     end
@@ -144,7 +135,7 @@ local function placed_tanks(state, phase)
             if valid(actor) and same(actor:GetClass(), class) and actor:IsA(base) and root_mesh(actor)
                 and actor.bNetLoadOnClient == true and not actor:IsActorBeingDestroyed()
                 and same(actor:GetWorld(), state.world) and same(actor:GetOuter(), state.world.PersistentLevel)
-                and (not hosting or actor:HasAuthority() and publish_motion(actor)) then
+                and (not hosting or actor:HasAuthority() and carry.publish_motion(actor)) then
                 found[actor:GetFullName()] = actor
             end
         end
@@ -177,7 +168,7 @@ local function enroll_placed_props(state, phase)
         if mesh and (not valid(core) or not actor:IsA(core)) and actor:HasAnyFlags(EObjectFlags.RF_WasLoaded)
             and actor.bNetLoadOnClient == true and actor:HasAuthority() and not actor:IsActorBeingDestroyed()
             and same(actor:GetWorld(), state.world) and same(actor:GetOuter(), state.world.PersistentLevel)
-            and mesh:IsSimulatingPhysics(bone) == true and publish_motion(actor) and carry.enroll(actor) then
+            and mesh:IsSimulatingPhysics(bone) == true and carry.publish_motion(actor) and carry.enroll(actor) then
             if fixtures then
                 local name = actor:GetFullName()
                 local class = actor:GetClass():GetFullName():match("^%S+ (.+)$")

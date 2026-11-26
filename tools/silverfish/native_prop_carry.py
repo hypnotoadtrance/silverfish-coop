@@ -10,6 +10,7 @@ import time
 import uuid
 
 from . import native_loot, party
+from .content_paths import item_class_name
 from .link import STATE_INTERVAL
 
 ACTION = "native-prop-carry"
@@ -30,7 +31,6 @@ FILTER_ROW = "native-prop-carry-filter"
 FILTER = "native_prop_carry_filter"
 FILTER_READY_ROW = "native-prop-carry-filter-ready"
 FILTER_READY = "native_prop_carry_filter_ready"
-_CLASS = re.compile(r"/Game/[A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+_C\Z")
 _PLACED_NAME = re.compile(r"[A-Za-z0-9_-]{1,100}\Z")
 _LOCAL_INSTANCE = re.compile(r"[A-Za-z0-9_-]{1,200}\Z")
 _BONE = re.compile(r"[A-Za-z0-9_ .-]{1,64}\Z")
@@ -58,7 +58,7 @@ def _numbers(fields, limits):
 
 
 def _class(value):
-    return isinstance(value, str) and len(value) <= 200 and _CLASS.fullmatch(value)
+    return item_class_name(value, 200) is not None
 
 
 def _token(value):

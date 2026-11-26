@@ -123,6 +123,20 @@ class CorpseCarryPayloadTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             carry.parse([*fields[:-1], path.replace("CrossRoads_P", "Observitory_P")], "connected", self.area)
 
+    def test_mounted_class_preserves_exact_level_placement(self):
+        area = "/CommunityMaps/Workshop"
+        path = f"{area}.Workshop:PersistentLevel.SteelRoller_C_2"
+        item_class = "/CommunityProps/Workshop/SteelRoller.SteelRoller_C"
+        request = [self.edge[0], area, *self.edge[2:5], item_class, *self.edge[6:], path]
+        result = carry.parse(request, "connected", area)
+        self.assertEqual((result["placement"], result["class_path"]), (path, item_class))
+        for wrong in (path.replace("/CommunityMaps/", "/AnotherMount/"), path.replace("Workshop.", "Other.")):
+            with self.subTest(wrong=wrong), self.assertRaisesRegex(ValueError, "placed physics"):
+                carry.parse([*request[:-1], wrong], "connected", area)
+        request[5] = item_class.replace(".SteelRoller_C", ".Other_C")
+        with self.assertRaisesRegex(ValueError, "carry input"):
+            carry.parse(request, "connected", area)
+
     def test_cooked_ammo_kits_keep_their_hyphenated_class_and_placement(self):
         area = "/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P"
         path = f"{area}.FortLeto_01_P:PersistentLevel.AmmoKit_5-56Inter_C_3"
