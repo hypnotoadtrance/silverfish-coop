@@ -6,10 +6,10 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 
 | Area | Observed behavior |
 | --- | --- |
-| Steam character catalogs | One of two guests finished character creation but could not reopen the catalog, including after the host reopened the campaign. Manage Saves also timed out. The host had both character rows. One Steam avatar exceeded the title's image limit, which made the menu reject the response. The development build bounds the PNG without changing its pixels and keeps characters visible when a photo is oversized. |
-| Public Steam lobbies | Joining a passwordless Public lobby showed a password form. The development build connects immediately and asks for a password only after the host requests one. |
-| Contractor Vest | A guest could equip other armor but could not equip Contractor Vest. The development build recognizes the stock Heavy Holster passive on this vest and other eligible chest gear that uses it. |
-| Clyde's Honey Egg | The egg appeared larger than the character during eating. The development build sizes the remote eating prop to 10 cm along its longest axis. |
+| Steam character catalogs | One of two guests finished character creation but could not reopen the catalog, including after the host reopened the campaign. Manage Saves also timed out. The host had both character rows. One Steam avatar exceeded the title's image limit, which made the menu reject the response. `rc-e78fc64` bounds the PNG without changing its pixels and keeps characters visible when a photo is oversized. Both menu paths passed simulated checks. |
+| Public Steam lobbies | Joining a passwordless Public lobby showed a password form. `rc-e78fc64` starts the join immediately and asks for a password only after the host requests one. Both flows passed simulated menu checks. |
+| Contractor Vest | A guest could equip other armor but could not equip Contractor Vest. `rc-e78fc64` recognizes the stock Heavy Holster passive on eligible chest gear. A guest equipped, swapped, and dropped the vest over muted Direct IP. |
+| Clyde's Honey Egg | The egg appeared larger than the character during eating. The host observed the guest's stock eating action with a 10 cm prop over muted Direct IP on `rc-e78fc64`. |
 
 Retest these reports in a rendered Steam session.
 
@@ -29,7 +29,7 @@ Retest these reports in a rendered Steam session.
 
 ## Trusted player state
 
-Every admitted player is intended to have the same gameplay privileges. Completed worn and quick-slot moves now have a guest reporting path, and the host accepts guest lockpick outcomes for the exact lock and pick. Local cash edits now contribute to the shared wallet. New inventory rows from the stock Give Gear action now have a guest reporting path. Grants that increase the quantity of an existing stack remain open. The host orders shared updates and maintains the campaign checkpoint. [Design](DESIGN.md)
+Every admitted player is intended to have the same gameplay privileges. Completed worn and quick-slot moves now have a guest reporting path, and the host accepts guest lockpick outcomes for the exact lock and pick. Local cash edits now contribute to the shared wallet. The stock Give Gear action can report new inventory rows and increases to existing stacks. The host orders shared updates and maintains the campaign checkpoint. [Design](DESIGN.md)
 
 Development build `rc-070f888` accepted a successful guest lockpick on an exact Crossroads door while the host reported a stale pick stack. Both seats saw the door unlock, and the host logged the inventory discrepancy. The muted Direct IP runs preserved the original saves. One pair also passed ordinary locker tests, Expedition Light and helmet changes, and Land Mine equip. The repeat pair could not start one Observatory locker fixture. That build logged the count mismatch and left the pick stack as it was. [Build source](https://github.com/hypnotoadtrance/silverfish-coop/commit/070f88889c61ccaa46a2ac12aa5b419f7bf78662)
 
@@ -42,6 +42,8 @@ Build `rc-336d31c` applied local guest cash changes to the current shared balanc
 Development build `rc-6cea6c7` transferred one typed stock inventory row from the guest's save into that guest's detached host save. The private fixture used Unreal's stock weapon data and seven rounds. The host exported the same row, refused a mismatched item ID, and kept a single copy on replay. The final muted Direct IP pair used two launches and preserved the source saves. The fixture transferred the row directly. Capturing a stock gear grant and sending it through the live co-op connection remain open.
 
 Build `rc-9ce343b` ran the stock Give Gear action on the guest and transferred the new SMG row to the correct host-side backpack over Direct IP. The guest's inventory refresh kept the item and the exported rows agreed on both seats. The final two isolated launches also passed worn gear, quick-slot transfers, and melee Friendly Fire. The grant left the campaign checkpoint unchanged and the source saves were preserved. The rendered Steam cheat-menu flow and grants that merge into existing stacks still need testing. [Build source](https://github.com/hypnotoadtrance/silverfish-coop/commit/9ce343bad85a3dbd599cecb603aa851047e06518)
+
+Build `rc-e78fc64` verified three successive guest Bandage grants over Direct IP. The first added a stack, and the following two updated that same stack on both seats. Replaying an earlier operation left its quantity unchanged. The two muted launches also verified the vest and food changes, and source saves were preserved. The rendered Steam cheat-menu flow still needs a playtest. [Build source](https://github.com/hypnotoadtrance/silverfish-coop/commit/e78fc64ed21e0539e6a26fd435f43db7c1b8c101)
 
 ## Current playtest checks
 
