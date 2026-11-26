@@ -126,6 +126,7 @@ class Visibility:
         self.epoch = None
         self.replenished = set()
         self.next_check = 0.0
+        self.streamed = PickupView("hosting")
 
     async def refresh(self, host, bridge):
         game, epoch = host.last_game, host.zone_epoch
@@ -149,6 +150,7 @@ class Visibility:
                 raise RuntimeError("The placed stock replenishment reply did not match the requested map and sources")
             self.replenished.update(path for path, available in observed.items() if available)
             host.last_game, host.last_seen = snapshot, time.monotonic()
+        await self.streamed.project(host, bridge, [path for path in self.hidden(host) if "|" in path])
 
     def hidden(self, host):
         area, epoch = host.last_game.get("map"), host.zone_epoch
@@ -159,15 +161,16 @@ class Visibility:
         return sorted(claimed)
 
 
-class GuestView:
-    def __init__(self):
+class PickupView:
+    def __init__(self, phase="connected"):
+        self.phase = phase
         self.scope = None
         self.hidden = set()
 
     async def project(self, service, bridge, hidden):
         game = service.last_game
         area, generation = game.get("map"), game.get(VIEW_SCOPE)
-        if (game.get(CAPABILITY) != 1 or game.get("state") != "connected"
+        if (game.get(CAPABILITY) != 1 or game.get("state") != self.phase
                 or type(generation) is not int or generation <= 0 or not isinstance(hidden, list)
                 or any(actor_map(path) != area for path in hidden)):
             return
@@ -182,7 +185,7 @@ class GuestView:
             for index in range(0, len(paths), 64):
                 batch = paths[index:index + 64]
                 reply = await bridge.command(PROJECT, str(generation), mode, *batch, timeout=4)
-                if (reply.get("map"), reply.get("state"), reply.get(VIEW_SCOPE)) != (area, "connected", generation):
+                if (reply.get("map"), reply.get("state"), reply.get(VIEW_SCOPE)) != (area, self.phase, generation):
                     raise RuntimeError("The loose pickup projection changed worlds")
                 if mode == "hide":
                     self.hidden.update(batch)

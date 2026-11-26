@@ -147,7 +147,7 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
         local_scene = {"state": "connected", "map": OBSERVATORY, loose.VIEW_SCOPE: 1, loose.CAPABILITY: 1}
         client = SimpleNamespace(last_game=local_scene)
         bridge = SimpleNamespace(command=AsyncMock(return_value=local_scene))
-        view = loose.GuestView()
+        view = loose.PickupView()
         await view.project(client, bridge, [source])
         await view.project(client, bridge, [source])
         bridge.command.assert_awaited_once_with(loose.PROJECT, "1", "hide", source, timeout=4)
@@ -252,7 +252,7 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
         game = {"state": "connected", "map": CROSSROADS, loose.CAPABILITY: 1, loose.VIEW_SCOPE: 4}
         client = SimpleNamespace(last_game=game)
         bridge = SimpleNamespace(command=AsyncMock(return_value=game))
-        view = loose.GuestView()
+        view = loose.PickupView()
         await view.project(client, bridge, [path])
         await view.project(client, bridge, [path])
         await view.project(client, bridge, None)
@@ -268,7 +268,7 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
         reloaded = {**prior, loose.VIEW_SCOPE: 5}
         client = SimpleNamespace(last_game=prior)
         bridge = SimpleNamespace(command=AsyncMock(side_effect=[prior, reloaded]))
-        view = loose.GuestView()
+        view = loose.PickupView()
         await view.project(client, bridge, [path])
         client.last_game = reloaded
         await view.project(client, bridge, [path])

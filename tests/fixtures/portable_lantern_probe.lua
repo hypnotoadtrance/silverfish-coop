@@ -400,6 +400,18 @@ local function streamed_probe(action, world, pawn, source_prop)
         placed_stream:SetShouldBeLoaded(false)
         return "unloading"
     end
+    if action == "streamreload" then
+        assert(not valid(placed_stream:GetLoadedLevel()), "the prior sublevel has not unloaded")
+        placed_stream:SetShouldBeLoaded(true)
+        placed_stream:SetShouldBeVisible(true)
+        return "loading"
+    end
+    if action == "streamloaded" then return tostring(not not valid(placed_stream:GetLoadedLevel())) end
+    if action == "streamstockflag" then
+        local flag = {}
+        world.OwningGameInstance:Check_SaveFlag(FName("Eqp_Bolt_C_1-Observitory_P-"), flag, flag)
+        return tostring(flag.Found)
+    end
     if action == "streamhide" or action == "streamshow" then
         placed_stream:SetShouldBeVisible(action == "streamshow")
         return "visibility changed"

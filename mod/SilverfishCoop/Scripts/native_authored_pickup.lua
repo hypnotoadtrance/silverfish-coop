@@ -417,9 +417,9 @@ local function loose_profile(source, state)
     local area_name = state.map:match("([^/]+)$")
     local limits = class and cash_limits[class]
     if not name or not leaf or not area_name or (cash and not limits) then return end
-    return {loose = true, source = source, path = path, name = name, class = class, map = state.map,
+    return {loose = true, streamed = source ~= path, source = source, path = path, name = name, class = class, map = state.map,
         mode = mode, claimed = claimed, stock_cash = cash, cash_min = limits and limits[1], cash_max = limits and limits[2],
-        cash_flag = leaf .. "-" .. area_name .. "-"}
+        cash_flag = source ~= path and "-" or leaf .. "-" .. area_name .. "-"}
 end
 
 local function temporary_mark(actor)
@@ -428,6 +428,24 @@ local function temporary_mark(actor)
     local result = {}
     library:Find_ActorOnTempActivations(actor, actor, result)
     if type(result.Found) == "boolean" then return result.Found end
+end
+
+local function stream_activation(save, profile, add)
+    local entries = save.TempActivations
+    local count = entries and math.tointeger(entries:GetArrayNum())
+    if not count or count < 0 or count > 16384 then return end
+    local marker = "SFCoopPlacement:" .. profile.source
+    local function read(index)
+        local value = entries[index]
+        return type(value) == "userdata" and value:ToString() or value
+    end
+    for index = 1, count do
+        if read(index) == marker then return true end
+    end
+    if not add then return false end
+    if count == 16384 then return end
+    entries[count + 1] = marker
+    return entries:GetArrayNum() == count + 1 and read(count + 1) == marker
 end
 
 local function verify_stock_mark(profile, actor)
@@ -471,6 +489,10 @@ local function claim(fields, state, phase, profile)
         local active, claimed, sequence, fixture = SilverfishReadNativeAuthoredPickup(profile.source)
         stock_input = active == true and claimed == false and math.type(sequence) == "integer" and sequence > 0
             and fixture == false
+    end
+    if profile.streamed and profile.mode == 1 and stream_activation(stock, profile, false) ~= false then
+        report.status = "loose_pickup_stream_activation_unavailable"
+        return "authored loose pickup refused"
     end
     if profile.stock_cash then
         local cash = SilverfishClaimNativeAuthoredCash
@@ -584,8 +606,14 @@ local function claim(fields, state, phase, profile)
     if report.ok and profile.loose then
         local actor = StaticFindObject(profile.path)
         if not valid(actor) then error("mutation_unverified_loose_pickup_source_lost", 0) end
-        actor:ResolveSaveMode()
-        if not verify_stock_mark(profile, actor) then error("mutation_unverified_loose_pickup_stock_persistence", 0) end
+        if profile.streamed then
+            if profile.mode == 1 and stream_activation(stock, profile, true) ~= true then
+                error("mutation_unverified_loose_pickup_stream_activation", 0)
+            end
+        else
+            actor:ResolveSaveMode()
+            if not verify_stock_mark(profile, actor) then error("mutation_unverified_loose_pickup_stock_persistence", 0) end
+        end
         if not SilverfishProjectNativeAuthoredPickup(true, profile.source) then
             error("mutation_unverified_loose_pickup_retirement", 0)
         end
@@ -741,10 +769,18 @@ function pickup.command(fields, state, phase)
             error("loose_pickup_check_arguments", 0)
         end
         loose_check = {}
+        local _, _, _, stock = owner(state, phase, state.local_pawn and state.local_pawn.name)
         for index = 3, #fields do
             local profile = loose_profile(fields[index], state)
-            local available = profile and not profile.claimed and (profile.mode == 0
-                or profile.mode == 1 and temporary_mark(StaticFindObject(profile.path)) == false)
+            local available = false
+            if profile then
+                if profile.streamed then
+                    available = profile.mode == 0 or profile.mode == 1 and valid(stock)
+                        and stream_activation(stock, profile, false) == false
+                elseif not profile.claimed then
+                    available = profile.mode == 0 or profile.mode == 1 and temporary_mark(StaticFindObject(profile.path)) == false
+                end
+            end
             loose_check[#loose_check + 1] = {fields[index], available and 1 or 0}
         end
         return "stock loose pickup availability verified"
@@ -752,14 +788,14 @@ function pickup.command(fields, state, phase)
     if action == "native-loose-pickup-project" then
         bind_pickup_seat(state, phase)
         local generation, mode = math.tointeger(tonumber(fields[3])), fields[4]
-        if phase ~= "connected" or not binding or not generation or generation ~= binding.loose_generation or
+        if (phase ~= "connected" and phase ~= "hosting") or not binding or not generation or generation ~= binding.loose_generation or
             #fields < 5 or #fields > 68 or (mode ~= "hide" and mode ~= "show") or
             type(SilverfishSetGuestLoosePickupView) ~= "function" then
             error("loose_pickup_projection_arguments", 0)
         end
         local accepted, issue = SilverfishSetGuestLoosePickupView(generation, mode == "hide", table.unpack(fields, 5))
         if not accepted then error(issue, 0) end
-        pcall(loot_projection.refresh_stock_inventory, state, false)
+        if phase == "connected" then pcall(loot_projection.refresh_stock_inventory, state, false) end
         return "shared level item visibility synchronized"
     end
     if action == "native-loose-pickup-nearby-fixture" then
@@ -1077,7 +1113,7 @@ function pickup.rows(state, phase, status_row)
                 end
             end
         end
-        if phase == "connected" and binding.loose_generation then
+        if binding.loose_generation then
             rows[#rows + 1] = status_row("native-loose-pickup-view-scope", binding.loose_generation)
         end
         local publish = SilverfishNearbyLoosePickupStatusRows

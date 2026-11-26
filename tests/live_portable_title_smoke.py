@@ -6109,8 +6109,6 @@ async def verify_spawned_prop_carry(host: Seat, guest: Seat, pawn: str, evidence
 
 
 async def verify_streamed_prop_carry(host: Seat, guest: Seat, pawn: str, evidence: dict) -> dict:
-    from tools.silverfish import native_loose_pickup as loose
-
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     checkpoint = campaign_save_hashes(host.campaign)
     snapshots = await asyncio.gather(*(wait_resident_status(run, lambda frame:
@@ -6191,13 +6189,45 @@ async def verify_streamed_prop_carry(host: Seat, guest: Seat, pawn: str, evidenc
                     break
                 await asyncio.sleep(.08)
 
+    for seat in (guest, host):
+        assert await call(seat, "streamunload") == "unloading"
+        async with asyncio.timeout(8):
+            while await state(seat) is not None:
+                await asyncio.sleep(.08)
+    await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == OBSERVATORY
+        and not frame["game"].get(native_prop_carry.HELD))
+    assert campaign_save_hashes(host.campaign) == checkpoint, "A streamed carry wrote a campaign checkpoint"
+    return {"streamed_prop_carry": evidence}
+
+
+async def verify_streamed_loose_pickup(host: Seat, guest: Seat, pawn: str) -> dict:
+    from tools.silverfish import native_loose_pickup as loose
+
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    checkpoint = campaign_save_hashes(host.campaign)
+    frames = await asyncio.gather(*(wait_resident_status(run, lambda frame:
+        frame.get("game", {}).get("map") == OBSERVATORY and frame["game"].get("pawns", {}).get("local", {}).get("name"))
+        for run in (host_run, guest_run)))
+    host_pawn, guest_pawn = (frame["game"]["pawns"]["local"]["name"] for frame in frames)
+
+    async def call(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-lantern",
+                                            f"{action}\t{host_pawn if seat is host else guest_pawn}")
+
     async def read_loot(seat):
         message = await call(seat, "streamloot")
         return None if message == "absent" else message.split(";")
 
-    host_item = await read_loot(host)
-    guest_item = await read_loot(guest)
+    async def load(seat):
+        assert await call(seat, "streamload") == "loading"
+        async with asyncio.timeout(12):
+            while (view := await read_loot(seat)) is None:
+                await asyncio.sleep(.08)
+        return view
+
+    host_item, guest_item = await load(host), await load(guest)
     assert host_item == guest_item and host_item[1:] == ["true", "true"], (host_item, guest_item)
+    assert await call(host, "streamstockflag") == "false"
     source = f"{OBSERVATORY}|{host_item[0]}"
     target = f"loose:{source}"
     assert loose.target_path(target) == source
@@ -6208,13 +6238,14 @@ async def verify_streamed_prop_carry(host: Seat, guest: Seat, pawn: str, evidenc
     assert taken["ok"], taken
     async with asyncio.timeout(8):
         while True:
-            claims = [event for event in await resident_events(host_run, snapshots[0])
+            claims = [event for event in await resident_events(host_run, frames[0])
                       if event.get("event") == "native_loose_pickup_claimed" and event.get("actor") == source]
             if claims:
                 claim, = claims
                 break
             await asyncio.sleep(.08)
     assert claim["owner"] != "host" and claim["actor"] == source, claim
+    assert await call(host, "streamstockflag") == "false"
     item = await submit(guest_run, "native-inventory-list")
     assert item["ok"] and any(row["guid"] == claim.get("inventory_guid", claim["guid"])
                              for row in item["native_inventory"]["items"]), item
@@ -6230,17 +6261,21 @@ async def verify_streamed_prop_carry(host: Seat, guest: Seat, pawn: str, evidenc
     async with asyncio.timeout(8):
         while await read_loot(guest) != [host_item[0], "false", "true"]:
             await asyncio.sleep(.08)
-    evidence["placed_pickup"] = {"claim": claim, "persistent_copy_visible": True, "claimed_after_reshow": True}
-
     for seat in (guest, host):
         assert await call(seat, "streamunload") == "unloading"
         async with asyncio.timeout(8):
-            while await state(seat) is not None:
+            while await call(seat, "streamloaded") == "true":
                 await asyncio.sleep(.08)
-    await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == OBSERVATORY
-        and not frame["game"].get(native_prop_carry.HELD))
-    assert campaign_save_hashes(host.campaign) == checkpoint, "A streamed carry wrote a campaign checkpoint"
-    return {"streamed_prop_carry": evidence}
+    for seat in (host, guest):
+        assert await call(seat, "streamreload") == "loading"
+        async with asyncio.timeout(12):
+            while await read_loot(seat) != [host_item[0], "false", "true"]:
+                await asyncio.sleep(.08)
+    for seat in (guest, host):
+        assert await call(seat, "streamunload") == "unloading"
+    assert campaign_save_hashes(host.campaign) == checkpoint, "A streamed pickup wrote a campaign checkpoint"
+    return {"streamed_loose_pickup": {"claim": claim, "persistent_copy_visible": True,
+                                     "claimed_after_reshow": True, "claimed_after_reload": True}}
 
 
 async def verify_stock_host_prop_observer(host: Seat, guest: Seat, pawn: str, evidence: dict) -> dict:
@@ -7563,6 +7598,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_npc_rivalry: bool = False, stock_throwables: str | None = None,
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
+                 stock_streamed_pickup: bool = False,
                  resident_held_queue: bool = False, resident_stale_quick_slot: bool = False,
                  rusty_pistol: bool = False, tutorial_dock_combat: bool = False, tutorial_dock_retaliation: bool = False,
                  tutorial_dock_melee: bool = False, tutorial_dock_pursuit: bool = False,
@@ -7698,6 +7734,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_spawned_prop_carry(host, guest, pawn, proof.setdefault("spawned_prop_carry", {}))),
         (stock_host_prop_observer, "streamed_prop_carry", "streamed_prop_carry",
          lambda host, guest, pawn: verify_streamed_prop_carry(host, guest, pawn, proof.setdefault("streamed_prop_carry", {}))),
+        (stock_streamed_pickup, "streamed_loose_pickup", "streamed_loose_pickup", verify_streamed_loose_pickup),
         (stock_flashlights, "observatory", "stock_flashlights", verify_stock_flashlights),
         (stock_melee_edges, "observatory", "stock_melee_edges", verify_stock_melee_edges_only),
         (stock_avatar_tail, "observatory", "stock_avatar_tail", verify_stock_avatar_tail),
@@ -8185,7 +8222,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(portable_script_overlay(game, "native_inventory_view.lua", add_stock_inventory_witness))
                 for game in games
             ]
-        if stock_prop_grip or stock_host_prop_observer:
+        if stock_prop_grip or stock_host_prop_observer or stock_streamed_pickup:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableLanternProbe",
                                                      fixture="portable_lantern_probe.lua"))
@@ -8742,6 +8779,8 @@ if __name__ == "__main__":
     parser.add_argument("--stock-prop-grip", action="store_true", help="verify default guest carry filtering in one portable lantern session")
     parser.add_argument("--stock-host-prop-observer", action="store_true",
                         help="sample a carried lantern and verify stock light and heavy prop impacts")
+    parser.add_argument("--stock-streamed-pickup", action="store_true",
+                        help="claim a stock item in a streamed sublevel and check its same-named persistent copy")
     parser.add_argument("--stock-crate-ring", action="store_true", help="verify one guest stock F crate open through the in-process ring")
     parser.add_argument("--compact-crate-status", action="store_true",
                         help="test normal crate status routing with one private muted portable pair and a temporary Lua overlay")
@@ -8867,7 +8906,7 @@ if __name__ == "__main__":
                               "stock_avatar_lean", "stock_footsteps",
                               "stock_interaction_feedback",
                               "stock_loki_control", "stock_loki_guest",
-                              "stock_host_corpse_carry", "stock_host_prop_observer", "stock_flashlights", "stock_simmi_jammers",
+                              "stock_host_corpse_carry", "stock_host_prop_observer", "stock_streamed_pickup", "stock_flashlights", "stock_simmi_jammers",
                               "stock_weather_travel", "stock_lightning", "stock_crossroads_door", "stock_dock_gate",
                               "stock_storm_ambience",
                               "stock_melee_family", "stock_melee_edges", "stock_warehouse_switch", "stock_warehouse_board", "stock_bottle",
@@ -8999,6 +9038,7 @@ if __name__ == "__main__":
                        stock_throwables=args.stock_throwables,
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
+                       stock_streamed_pickup=args.stock_streamed_pickup,
                        resident_held_queue=args.resident_held_queue, resident_stale_quick_slot=args.resident_stale_quick_slot,
                        rusty_pistol=args.rusty_pistol, tutorial_dock_combat=args.tutorial_dock_combat,
                        tutorial_dock_melee=args.tutorial_dock_melee, tutorial_dock_pursuit=args.tutorial_dock_pursuit,

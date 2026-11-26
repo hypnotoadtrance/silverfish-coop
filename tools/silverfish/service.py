@@ -5388,7 +5388,7 @@ class Client:
         self.viewer_role = "guest"
         self.expected_zone = None
         self.loot_tracking = None
-        self.loose_pickup_view = native_loose_pickup.GuestView()
+        self.loose_pickup_view = native_loose_pickup.PickupView()
         self.pickup_playback = native_pickup_audio.Playback()
         self.voice_playback = native_voice.Playback()
         self.hurt_playback = native_damage_feedback.Playback()

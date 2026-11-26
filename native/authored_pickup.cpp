@@ -465,7 +465,7 @@ namespace
     std::set<std::string, std::less<>> loose_carry_pending;
     std::vector<U::FWeakObjectPtr> loose_candidates;
     std::size_t next_loose_candidate{};
-    std::set<std::string, std::less<>> guest_loose_hidden;
+    std::set<std::string, std::less<>> loose_hidden;
     std::uint64_t loose_generation{};
     U::FWeakObjectPtr loose_pawn{}, loose_world{};
     bool loose_host{};
@@ -1064,7 +1064,12 @@ namespace
             scope.restore_simulation = false;
         }
         scope.claimed = claimed;
-        if (claimed) scope.observed = {};
+        if (claimed)
+        {
+            scope.observed = {};
+            if (scope.host && scope.profile->discovered && scope.profile->source.contains('|'))
+                loose_hidden.emplace(scope.profile->source);
+        }
         return true;
     }
 
@@ -1091,7 +1096,7 @@ namespace
         loose_candidates.clear();
         loose_carry_pending.clear();
         next_loose_candidate = 0;
-        guest_loose_hidden.clear();
+        loose_hidden.clear();
         loose_pawn.Reset();
         loose_world.Reset();
         loose_rescan = {};
@@ -2228,6 +2233,13 @@ namespace
             !silverfish::content_paths::item_class(std::basic_string_view{item.data(), item.size()}) ||
             generic_payload_fault(actor, silverfish::stock_cash::is_family(actor->GetClassPrivate()))) return;
 
+        if (source.contains('|') && mode->GetPropertyValueInContainer(actor) != 0)
+        {
+            // Stock placement keys use the World name and actor leaf, which can be identical
+            // for a persistent item and a streamed copy. Apply that copy's co-op ledger instead.
+            call.PreventOriginalFunctionCall();
+            return;
+        }
         if (seat == RespawnSeat::Guest)
         {
             // This stock function only removes placed items. Let the host resolve its
@@ -2265,12 +2277,12 @@ namespace
         return 1;
     }
 
-    void apply_guest_loose_view(std::string_view path, Scope& scope)
+    void apply_loose_view(std::string_view path, Scope& scope)
     {
         auto* actor = static_cast<U::AActor*>(scope.actor.Get());
-        if (scope.host || !live(actor)) return;
+        if (!live(actor) || (scope.host && !path.contains('|'))) return;
 
-        const bool hidden = guest_loose_hidden.contains(path);
+        const bool hidden = loose_hidden.contains(path);
         if (scope.claimed != hidden ||
             (hidden && (actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), true))))
             set_visibility(scope, hidden);
@@ -2309,7 +2321,7 @@ namespace
         const auto source = loose_source_key(path, seat.profile->world, actor->GetLevel() != object(world, STR("PersistentLevel")));
         if (loose_actor_path(source, RC::to_utf8_string(seat.profile->world)).empty()) return nullptr;
         if ((!actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false)) &&
-            (seat.host || (!guest_loose_hidden.contains(source) && !remotely_hidden_loose(actor)))) return nullptr;
+            (seat.host || (!loose_hidden.contains(source) && !remotely_hidden_loose(actor)))) return nullptr;
         const auto class_path = actor->GetClassPrivate()->GetPathName();
         if (authored_path(path) ||
             !silverfish::content_paths::item_class(std::basic_string_view{class_path.data(), class_path.size()})) return nullptr;
@@ -2334,7 +2346,7 @@ namespace
         loose.carry_candidate = seat.host && !cash && carryable_placed_item(actor);
         loose.carry_enrolled = false;
         if (loose.carry_candidate) loose_carry_pending.emplace(entry->first);
-        apply_guest_loose_view(source, loose.scope);
+        apply_loose_view(source, loose.scope);
         return &loose;
     }
 
@@ -2372,13 +2384,13 @@ namespace
         const bool hidden = lua.get_bool();
         auto* world = loose_world.Get();
         auto* pawn = loose_pawn.Get();
-        if (loose_host || generation <= 0 || static_cast<std::uint64_t>(generation) != loose_generation ||
+        if (generation <= 0 || static_cast<std::uint64_t>(generation) != loose_generation ||
             !live(world) || !live(pawn))
             return result(lua, false, "loose_pickup_projection_scope_changed");
         const auto world_path = world->GetPathName();
         const Profile seat_profile{.world = world_path.c_str()};
         const Scope seat{world, pawn, nullptr, nullptr, object(pawn, STR("Controller")),
-            object(world, STR("NetDriver")), &seat_profile, false};
+            object(world, STR("NetDriver")), &seat_profile, loose_host};
         if (!local_scope(seat)) return result(lua, false, "loose_pickup_projection_scope_changed");
 
         const auto area = RC::to_utf8_string(world_path);
@@ -2388,17 +2400,17 @@ namespace
         {
             if (!lua.is_string()) return result(lua, false, "loose_pickup_projection_arguments");
             std::string path{lua.get_string()};
-            if (loose_actor_path(path, area).empty())
+            if (loose_actor_path(path, area).empty() || (loose_host && !path.contains('|')))
                 return result(lua, false, "loose_pickup_projection_source");
             paths.push_back(std::move(path));
         }
 
         for (const auto& path : paths)
         {
-            if (hidden) guest_loose_hidden.insert(path);
-            else guest_loose_hidden.erase(path);
+            if (hidden) loose_hidden.insert(path);
+            else loose_hidden.erase(path);
             if (auto found = loose_sources.find(path); found != loose_sources.end())
-                apply_guest_loose_view(path, found->second.scope);
+                apply_loose_view(path, found->second.scope);
         }
         return result(lua, true, "loose_pickup_projection_applied");
     }
@@ -2552,7 +2564,7 @@ namespace
             auto* actor = static_cast<U::AActor*>(scope.actor.Get());
             if (!live(actor) || (path.contains('|') && !boolean(actor->GetLevel(), STR("bIsVisible"), true))) continue;
             // The ledger stays active even when the source is outside the reported nearby list.
-            apply_guest_loose_view(path, scope);
+            apply_loose_view(path, scope);
             auto at = scope.hidden_at ? *scope.hidden_at :
                 loose.static_position ? *loose.static_position : actor->K2_GetActorLocation();
             const auto dx = at.GetX() - center.GetX(), dy = at.GetY() - center.GetY(), dz = at.GetZ() - center.GetZ();
@@ -2932,26 +2944,30 @@ namespace
         auto* mark = find<U::UFunction>(resolve_save_mode);
         silverfish::stock_wallet::Wallet wallet;
         const auto amount = loose_cash_value(actor);
-        const auto flag = cash_flag(actor, scope->world.Get());
+        const bool streamed = scope->profile->source.contains('|');
+        const auto flag = streamed ? std::string{"-"} : cash_flag(actor, scope->world.Get());
         if (!amount || flag.empty() || !wallet.bind(instance) || object(pawn, STR("As Game Instance FP")) != instance ||
             !mark || mark->GetOuterPrivate() != find<U::UClass>(base_class) || mark->GetNumParms() != 0 ||
             mark->GetParmsSize() != 0 || mark->GetReturnProperty() || mark->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net))
             return result(lua, false, "authored_cash_stock_schema_unqualified");
         const auto key = RC::to_wstring(flag);
         const auto before = wallet.amount(instance);
-        if (wallet.flag_value(instance, key.c_str()).second)
+        if (!streamed && wallet.flag_value(instance, key.c_str()).second)
             return result(lua, false, "authored_cash_stock_flag_already_recorded");
         if (before < 0 || before > (std::numeric_limits<int>::max)() - amount)
             return result(lua, false, "authored_cash_stock_wallet_out_of_range");
 
-        // Preserve the cooked permanent actor flag and stock wallet function in the same guarded turn.
-        actor->ProcessEvent(mark, nullptr);
-        if (wallet.flag_value(instance, key.c_str()) != std::pair{1, true} || wallet.amount(instance) != before ||
-            object(instance, STR("SaveSlot_Ref")) != canonical || !authorized(*scope, pawn, target))
-            return result(lua, false, "mutation_unverified_authored_cash_flag_readback");
+        // Persistent items keep the cooked save flag. Streamed copies use their own co-op claim.
+        if (!streamed)
+        {
+            actor->ProcessEvent(mark, nullptr);
+            if (wallet.flag_value(instance, key.c_str()) != std::pair{1, true} || wallet.amount(instance) != before ||
+                object(instance, STR("SaveSlot_Ref")) != canonical || !authorized(*scope, pawn, target))
+                return result(lua, false, "mutation_unverified_authored_cash_flag_readback");
+        }
         wallet.change(instance, amount, false);
         const auto after = wallet.amount(instance);
-        if (after != before + amount || wallet.flag_value(instance, key.c_str()) != std::pair{1, true} ||
+        if (after != before + amount || (!streamed && wallet.flag_value(instance, key.c_str()) != std::pair{1, true}) ||
             object(instance, STR("SaveSlot_Ref")) != canonical || !authorized(*scope, pawn, target) || !set_visibility(*scope, true))
             return result(lua, false, "mutation_unverified_authored_cash_settlement");
         result(lua, true, "cash_credited");
