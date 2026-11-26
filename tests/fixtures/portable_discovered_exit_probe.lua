@@ -6,7 +6,9 @@ local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory
 local exit_path = observatory .. ":PersistentLevel.Level_Exit_BP_C_1"
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
 local shop = "/Game/Classes/Maps/Maps_SafeZones/Shop_Default.Shop_Default"
-local campaign_worlds = {["World " .. observatory] = true, ["World " .. crossroads] = true, ["World " .. shop] = true}
+local demo = "/Game/Synty/PolygonSciFiHorror/Maps/Demo_Exterior.Demo_Exterior"
+local campaign_worlds = {["World " .. observatory] = true, ["World " .. crossroads] = true,
+    ["World " .. shop] = true, ["World " .. demo] = true}
 local streamed_entrance = "Mod-Stream-Arrival"
 local last, copy, approach, outside, stream
 local arrival_pending, arrival_stream
@@ -94,7 +96,7 @@ end
 
 local function run(world, action)
     local current = world:GetFullName()
-    local in_shop = current == "World " .. shop
+    local in_shop = current == "World " .. shop or current == "World " .. demo
     local stock = StaticFindObject(current == "World " .. crossroads
         and crossroads .. ":PersistentLevel.Level_Exit_BP_C_2" or exit_path)
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
@@ -105,7 +107,7 @@ local function run(world, action)
         stream = playtest_stream(world, "CoopStreamExitProbe")
         return valid(stream) and "loading" or "failed"
     end
-    if action == "spawn" or action == "spawnstream" or action == "shop" or action == "return" then
+    if action == "spawn" or action == "spawnstream" or action == "shop" or action == "demo" or action == "return" then
         copy = nil
         assert(in_shop or valid(stock) and not stock.Box:IsOverlappingActor(pawn))
         if in_shop then pawn.CharacterMovement:DisableMovement() end
@@ -141,9 +143,9 @@ local function run(world, action)
             copy:K2_SetActorRotation(stock:K2_GetActorRotation(), false)
         end
         assert(valid(copy) and copy:HasAuthority() and valid(copy.Box))
-        if action == "shop" or action == "return" then
+        if action == "shop" or action == "demo" or action == "return" then
             local system = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
-            local destination = in_shop and crossroads or shop
+            local destination = in_shop and crossroads or action == "demo" and demo or shop
             copy.NextLevel = system:Conv_SoftObjPathToSoftObjRef(system:MakeSoftObjectPath(destination))
             copy["Entrance Tag"] = in_shop and "Obsv_Etr" or "Unlisted-Shop"
         else

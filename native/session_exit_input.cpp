@@ -1,4 +1,5 @@
 #include "session_exit_input.hpp"
+#include "world_path.hpp"
 
 #include <array>
 #include <atomic>
@@ -260,7 +261,7 @@ namespace
         {
             auto* w = widget->GetWorld();
             if (!live(w) || address(w) != lease.world ||
-                !std::wstring_view{w->GetPathName()}.starts_with(STR("/Game/Classes/Maps/"))) return false;
+                !silverfish::world_path::object(std::wstring_view{w->GetPathName()})) return false;
             auto* game = object_field(w, STR("OwningGameInstance"));
             if (!exact(game, instance_path)) return false;
             ObjectArray players(game, STR("LocalPlayers"));

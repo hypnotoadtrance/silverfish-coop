@@ -1,4 +1,5 @@
 local inventory_view = {}
+local world_path = require("world_path")
 local weapon_profiles = require("guest_weapon_registry")
 local guest_weapon = require("native_guest_weapon")
 local throwables = require("native_flare").equipment
@@ -72,7 +73,7 @@ end
 
 local function context(state, phase)
     if not enabled or not event_path or phase ~= "connected" or not state.listening or state.server ~= true
-        or not valid(state.world) or type(state.map) ~= "string" or not state.map:match("^/Game/Classes/Maps/[%w_/]+$") then
+        or not valid(state.world) or not world_path.leaf(state.map) then
         return nil
     end
     local detail, controller = state.local_pawn, state.controller

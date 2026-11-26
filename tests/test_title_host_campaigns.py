@@ -68,7 +68,7 @@ class SavedCampaignTests(unittest.TestCase):
         self.assertEqual(before, [(path.stat().st_mtime_ns, path.read_bytes()) for path in objects])
 
     def test_unlisted_map_is_visible_and_selectable_from_a_verified_scoped_save(self):
-        area = "/Game/Classes/Maps/Custom/ModOutpost"
+        area = "/CustomCampaign/Maps/ModOutpost"
         directory, slot = self.checkpoint("Outpost", area=area)
         before = slot.read_bytes()
         self.assertEqual([row.name for row in campaign_entries(self.campaign, self.saved)], ["Outpost"])

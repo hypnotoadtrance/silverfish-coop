@@ -5,6 +5,7 @@ local host_save = require("native_host_save")
 local players = require("players")
 local vitals = require("vitals")
 local zones = require("zone_maps")
+local world_path = require("world_path")
 
 local configured_mode = os.getenv("SILVERFISH_COOP_NATIVE_DEATH")
 local embedded = os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") == "1"
@@ -57,8 +58,7 @@ function native_death.admit_client(session, epoch, map)
     local function token(value)
         return type(value) == "string" and #value == 32 and value:match("^[a-f0-9]+$") and value:find("[^0]")
     end
-    if not authored_routes or not token(session) or not token(epoch) or type(map) ~= "string"
-        or #map > 256 or not map:match("^/Game/Classes/Maps/[A-Za-z0-9_/]+$") then
+    if not authored_routes or not token(session) or not token(epoch) or not world_path.leaf(map) then
         error("The native client requires an authenticated host and zone", 0)
     end
     client_visit = {session = session, epoch = epoch, map = map}

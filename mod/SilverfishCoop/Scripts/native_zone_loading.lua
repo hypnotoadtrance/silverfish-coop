@@ -1,4 +1,5 @@
 local loading = {}
+local world_path = require("world_path")
 local fade_class = "/Game/Classes/GUI/FadeToBlack_Widget.FadeToBlack_Widget_C"
 local transition_sound = "/Game/Assets/Sounds/UI_Sounds/sw_UI_GameStart.sw_UI_GameStart"
 local widgets = "/Script/UMG.Default__WidgetBlueprintLibrary"
@@ -161,7 +162,7 @@ end
 
 function loading.begin(state, phase, destination)
     local seat = seats[phase]
-    if not seat or type(destination) ~= "string" or not destination:match("^/Game/Classes/Maps/[%w_/]+$")
+    if not seat or not world_path.leaf(destination)
         or not valid(state.world) then return false end
     local previous = active_cover()
     if previous and previous.destination == destination and previous.seat == seat then

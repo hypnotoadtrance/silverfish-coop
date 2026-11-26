@@ -8,7 +8,7 @@ import uuid
 
 CHALLENGE = "map_package_challenge"
 VOTE = "map_package_vote"
-_PACKAGE = re.compile(r"/Game/Classes/Maps/(?:[A-Za-z0-9_]+/)*[A-Za-z0-9_]+")
+_PACKAGE = re.compile(r"/(?:[A-Za-z0-9_]+/)+[A-Za-z0-9_]+")
 _TITLE = "/Game/Classes/Maps/MainMenu_P"
 
 

@@ -1,5 +1,6 @@
 local arrival = {}
 local bed = require("native_bed")
+local world_path = require("world_path")
 
 local spawn_class = "LevelExit_Spawn_BP_C"
 local spawn_type = "/Game/Classes/ScriptingActors/LevelExit_Spawn_BP.LevelExit_Spawn_BP_C"
@@ -63,8 +64,7 @@ function arrival.prepare_time(state, phase, step)
         error("Expected a nonnegative signed 32-bit stock travel time step", 0)
     end
     local map = state.map
-    local basename = type(map) == "string" and map:match("^/Game/Classes/Maps/[%w_/]+$")
-        and map:match("/([%w_]+)$")
+    local basename = map == main_menu and "MainMenu_P" or world_path.leaf(map)
     if not basename then error("Expected a stock travel source map", 0) end
     local destination = map .. "." .. basename
     local instance
@@ -179,8 +179,7 @@ end
 
 function arrival.place(state, phase, tag, kind, actor_name)
     local map = state.map
-    local basename = type(map) == "string" and map:match("^/Game/Classes/Maps/[%w_/]+$")
-        and map:match("/([%w_]+)$")
+    local basename = world_path.leaf(map)
     local class = kind == "overlap" and spawn_class or kind == "door" and door_class
     local discovered_door = kind == "door" and actor_name == "-"
     local exact_door = kind == "door" and not discovered_door

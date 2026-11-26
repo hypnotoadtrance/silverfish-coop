@@ -309,7 +309,7 @@ class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await host.travel_authored(bridge, None, route),
                          {"ok": False, "error": "exit_crossing_unavailable"})
         bridge.command.assert_not_awaited()
-        invalid = replace(route, destination="/Game/Classes/Maps/Custom/Arena")
+        invalid = replace(route, destination="/CustomCampaign/Maps/Arena")
         self.assertEqual(await host.travel_authored(bridge, None, invalid, exit_crossing=17),
                          {"ok": False, "error": "destination_package_unavailable"})
         bridge.command.assert_awaited_once_with("native-map-package", invalid.destination, "register", timeout=3)

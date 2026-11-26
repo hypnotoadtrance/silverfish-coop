@@ -1,5 +1,6 @@
 #include "zone_exit.hpp"
 #include "authored_exit_registry.hpp"
+#include "world_path.hpp"
 
 #include <algorithm>
 #include <array>
@@ -610,11 +611,7 @@ namespace
 
     bool campaign_map_package(RC::StringViewType package)
     {
-        const auto leaf = package.substr(package.rfind(STR('/')) + 1);
-        return package.starts_with(STR("/Game/Classes/Maps/")) &&
-            package.size() + 1 + leaf.size() <= 180 &&
-            package != STR("/Game/Classes/Maps/MainMenu_P") &&
-            package.find(STR('-')) == package.npos && package_path(package);
+        return package != STR("/Game/Classes/Maps/MainMenu_P") && silverfish::world_path::package(package);
     }
 
     std::string_view map_package_status(RC::StringViewType package)

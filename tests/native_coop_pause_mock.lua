@@ -99,7 +99,11 @@ local env = setmetatable({
             return true
         end,
     },
-    require = function(name) assert(name == "native_menu_controls"); return controls end,
+    require = function(name)
+        if name == "world_path" then return dofile("mod/SilverfishCoop/Scripts/world_path.lua") end
+        assert(name == "native_menu_controls")
+        return controls
+    end,
     FText = function(text) return text end,
     StaticFindObject = function(path)
         if path:find("PlayerControler_FP", 1, true) then return controller_class end

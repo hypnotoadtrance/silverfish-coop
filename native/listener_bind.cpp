@@ -1,4 +1,5 @@
 #include "listener_bind.hpp"
+#include "world_path.hpp"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -182,10 +183,8 @@ namespace
 
     std::wstring package(std::string_view path, bool world_object)
     {
-        if (path.size() > 180 || !path.starts_with("/Game/Classes/Maps/") ||
-            path.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/.") != std::string_view::npos ||
-            path.find("..") != std::string_view::npos || (!world_object && path.find('.') != std::string_view::npos))
-            return {};
+        const auto valid = world_object ? silverfish::world_path::object(path) : silverfish::world_path::package(path);
+        if (!valid) return {};
         return {path.begin(), path.end()};
     }
 

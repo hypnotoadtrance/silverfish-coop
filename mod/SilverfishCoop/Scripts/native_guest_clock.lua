@@ -1,4 +1,5 @@
 local clock = {}
+local world_path = require("world_path")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_CLOCK") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_CLOCK_FIXTURES") == "1"
@@ -22,7 +23,7 @@ end
 
 local function context(state, phase)
     if not enabled or phase ~= "connected" or state.listening ~= true or state.server ~= true
-        or type(state.map) ~= "string" or not state.map:match("^/Game/Classes/Maps/[%w_/%-]+$") then return end
+        or not world_path.leaf(state.map) then return end
     local world, controller, detail = state.world, state.controller, state.local_pawn
     local pawn = detail and detail.pawn
     if not valid(world) or world:GetFullName():match("^World (/[^%.:]+)%.") ~= state.map

@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 import re
 
+from .native_map_preflight import valid_campaign_package
+
 
 _DRIVER_ID = re.compile(r"d[1-9][0-9]{0,12}\Z")
 _CONNECTION_ID = re.compile(r"c[1-9][0-9]{0,12}\Z")
@@ -83,8 +85,7 @@ def _census(game: dict | None) -> _Census:
 
     sequence, map_name = game.get("sequence"), game.get("map")
     driver, count, rows = roster.get("driver"), roster.get("count"), roster.get("connections")
-    if (type(sequence) is not int or sequence < 1 or not _text(map_name)
-            or not map_name.startswith("/Game/Classes/Maps/")
+    if (type(sequence) is not int or sequence < 1 or not valid_campaign_package(map_name)
             or not isinstance(driver, str) or not _DRIVER_ID.fullmatch(driver)
             or type(count) is not int or not 0 <= count <= _MAX_CONNECTIONS
             or type(game.get("remote_clients")) is not int or game["remote_clients"] != count

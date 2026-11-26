@@ -14,6 +14,7 @@ from .campaign import CampaignFormatError
 from .authored_loot import CRATES, loot_capacity, random_lid, valid_item_transform, valid_lid_angle, valid_loot_trait_calls
 from .enemy_loot_profiles import BY_MAP as ENEMY_LOOT_ZONES, SHELLS, for_roll as enemy_loot_profile
 from .native_gold import valid_guid
+from .native_map_preflight import valid_campaign_package
 from .native_guest_drop_record import active_frames as stack_drop_frames
 from .native_host_dig_live import escrow_frames as dig_escrow_frames
 from .native_tape_profiles import (
@@ -141,7 +142,7 @@ def verify(profile: Profile, world: dict) -> dict | None:
 def verify_record(profile: Profile, saved: dict) -> None:
     core_keys = {"slot", "map", "size", "sha256"}
     if (type(saved) is not dict or set(saved) - {"eather_remainder"} != core_keys
-            or not isinstance(saved["map"], str) or not saved["map"].startswith("/Game/Classes/Maps/")
+            or not valid_campaign_package(saved["map"])
             or type(saved["size"]) is not int or not isinstance(saved["sha256"], str)
             or not SHA256.fullmatch(saved["sha256"])):
         raise CampaignFormatError("The campaign's Unreal save reference is invalid")

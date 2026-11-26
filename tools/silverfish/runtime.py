@@ -58,6 +58,7 @@ from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
 from .enemy_loot_profiles import BY_ACTOR as ENEMY_LOOT_ACTORS
 from .native_host_save import SLOT
+from .native_map_preflight import valid_campaign_package
 from . import native_smg_hold
 from .guest_weapon_profiles import AMMO_BY_PATH
 from .native_guest_weapon import (
@@ -1479,10 +1480,8 @@ class Bridge:
                 crossing = int(token)
             match = next((route for route in AUTHORED_ROUTES if route.source == source and route.actor == actor), None)
             if kind in ("discovered-overlap", "discovered-door"):
-                maps = r"/Game/Classes/Maps/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+"
                 if ((kind == "discovered-overlap" and match) or crossing is None or source == destination
-                        or max(len(source), len(destination)) > 240
-                        or not all(re.fullmatch(maps, area) for area in (source, destination))
+                        or not all(valid_campaign_package(area) for area in (source, destination))
                         or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", entrance) or entrance == "None"
                         or not re.fullmatch(r"[A-Za-z0-9_-]{1,96}", actor)
                         or not re.fullmatch(r"(?:0|[1-9][0-9]{0,9})", step) or int(step) > 2**31 - 1):
@@ -1601,7 +1600,7 @@ class Bridge:
                     if (len(fields) != 6 or key in data or data.get("mode") != "client"
                             or data.get("state") not in ("joining", "connected")
                             or not all(re.fullmatch(r"[0-9a-f]{32}", value) and value != "0" * 32 for value in fields[1:3])
-                            or not re.fullmatch(r"/Game/Classes/Maps/[A-Za-z0-9_/]{1,236}", fields[3])
+                            or not valid_campaign_package(fields[3])
                             or not re.fullmatch(r"-?[0-9]{1,10}", fields[4]) or not re.fullmatch(r"[0-9]{1,15}", fields[5])):
                         raise ValueError("Invalid guest world start status")
                     seed, milliseconds = int(fields[4]), int(fields[5])
@@ -3570,12 +3569,12 @@ class Bridge:
                         "location": [_finite(axis) for axis in fields[2:5]], "name": fields[5],
                     })
                 elif (fields[0] == "native-zone-loading-cover" and len(fields) == 2
-                      and fields[1].startswith("/Game/Classes/Maps/")):
+                      and valid_campaign_package(fields[1])):
                     data["native_zone_loading_cover"] = fields[1]
                 elif fields == ["native-zone-loading-support", "1"]:
                     data["native_zone_loading_support"] = True
                 elif (fields[0] == "native-zone-loading-cue" and len(fields) == 4
-                      and fields[1].startswith("/Game/Classes/Maps/") and fields[2] in ("host", "guest")
+                      and valid_campaign_package(fields[1]) and fields[2] in ("host", "guest")
                       and fields[3] in ("0", "1")):
                     data["native_zone_loading_cue"] = {"destination": fields[1], "seat": fields[2],
                                                        "dispatched": fields[3] == "1"}
@@ -4098,7 +4097,7 @@ class Bridge:
         if captured:
             header = (frame if marker else frame.removesuffix("\n")).split("\t", 6)
             if (len(frame) > 1024 or len(header) != 7 or header[:4] != [_GUEST_UI_READ_REPLY, "1", nonce, "hosting"]
-                    or not re.fullmatch(r"/Game/Classes/Maps/[A-Za-z0-9_/-]{1,236}", header[4])
+                    or not valid_campaign_package(header[4])
                     or not re.fullmatch(r"[ -~]+", header[6])):
                 raise RuntimeError("The resident guest view reply did not match the request")
             _, _, _, phase, area, result, message = header
@@ -4106,7 +4105,7 @@ class Bridge:
         elif projected:
             header = frame[:-1].split("\t") if frame.endswith("\n") and "\n" not in frame[:-1] else []
             if (len(frame) > 1024 or len(header) != 9 or header[:4] != [_GUEST_UI_PROJECT_REPLY, "1", nonce, "connected"]
-                    or not re.fullmatch(r"/Game/Classes/Maps/[A-Za-z0-9_/-]{1,236}", header[4])
+                    or not valid_campaign_package(header[4])
                     or not re.fullmatch(r"-|[a-f0-9]{32}", header[5])
                     or not re.fullmatch(r"[ -~]{1,512}", header[6])
                     or header[7] not in {"accepted", "error"} or not re.fullmatch(r"[ -~]+", header[8])):

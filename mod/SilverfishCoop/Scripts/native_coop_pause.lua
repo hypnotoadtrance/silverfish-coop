@@ -1,4 +1,5 @@
 local pause = {}
+local world_path = require("world_path")
 
 local embedded = os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
@@ -34,8 +35,7 @@ local function context(state, phase)
     if not role or state.listening ~= true or state.server ~= (role == "guest") then return end
     local world, controller = state.world, state.controller
     local pawn = state.local_pawn and state.local_pawn.pawn
-    local leaf = type(state.map) == "string" and state.map:match("^/Game/Classes/Maps/.+")
-        and state.map:match("/([^/]+)$")
+    local leaf = world_path.leaf(state.map)
     if not valid(world) or not leaf or world:GetFullName() ~= "World " .. state.map .. "." .. leaf
         or not exact(controller, controller_class) or not exact(pawn, pawn_class)
         or controller.Loading ~= false or not controller:IsLocalController() or not pawn:IsLocallyControlled()

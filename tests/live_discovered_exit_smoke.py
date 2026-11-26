@@ -14,6 +14,7 @@ from tools.silverfish.travel import CISTERN, CROSSROADS, OBSERVATORY
 
 
 UNLISTED_SHOP = "/Game/Classes/Maps/Maps_SafeZones/Shop_Default"
+UNLISTED_DEMO = "/Game/Synty/PolygonSciFiHorror/Maps/Demo_Exterior"
 
 
 def route_between(source, destination):
@@ -32,10 +33,10 @@ async def wait_for_party(host_run, guest_run, destination):
 
 
 async def live_exit(host, guest, pawn, probe, *, unlisted_only=False, save_in_shop=False, with_door=False,
-                    **options):
+                    unlisted_map=UNLISTED_SHOP, **options):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     unlisted_world = "/Game/Classes/Maps/Maps_OverWorld/Campus_04_P"
-    shop = UNLISTED_SHOP
+    shop = unlisted_map
     assert not {unlisted_world, shop} & (MAPS | AUTHORED_MAPS)
     lookups = {
         OBSERVATORY: "world",
@@ -84,7 +85,7 @@ async def live_exit(host, guest, pawn, probe, *, unlisted_only=False, save_in_sh
     route = route_between(CROSSROADS, OBSERVATORY)
     for participant in (reached["game"]["native_guest_save"]["pawn"], "local"):
         await host.bridge.command("native-exit-position", participant, "near", route.entrance, route.actor)
-    outbound = await cross_unlisted(host, guest, probe, "shop", CROSSROADS, shop)
+    outbound = await cross_unlisted(host, guest, probe, "demo" if shop == UNLISTED_DEMO else "shop", CROSSROADS, shop)
     if save_in_shop:
         return dict(evidence, entered_unlisted_map=outbound)
     returned = await cross_unlisted(host, guest, probe, "return", shop, CROSSROADS)
@@ -145,30 +146,30 @@ async def cross_unlisted(host, guest, probe, action, source, destination):
     return departure
 
 
-async def check_unlisted_resume(host, guest, character_name, **kwargs):
+async def check_unlisted_resume(host, guest, character_name, *, unlisted_map=UNLISTED_SHOP, **kwargs):
     save = {}
 
     async def capture_checkpoint(_host, _status, saved, character):
-        assert saved["world"]["map"] == UNLISTED_SHOP
+        assert saved["world"]["map"] == unlisted_map
         save.update(host_slot=saved["world"]["native_host_save"]["slot"],
                     guest_slot=saved["characters"][character]["state"]["native_guest_save"]["slot"],
                     revision=saved["revision"])
 
     async def verify_reloaded(host, guest, pawn):
         host_run, guest_run = host.campaign / "run", guest.client / "run"
-        active = await wait_for_party(host_run, guest_run, UNLISTED_SHOP)
+        active = await wait_for_party(host_run, guest_run, unlisted_map)
         events = await suite.resident_events(host_run, active)
         restored_host, = (event for event in events if event["event"] == "native_host_save_restored")
         restored_guest, = (event for event in events if event["event"] == "native_guest_save_restored"
                            and event["pawn"] == pawn)
-        assert restored_host["map"] == restored_guest["map"] == UNLISTED_SHOP
+        assert restored_host["map"] == restored_guest["map"] == unlisted_map
         assert (restored_host["slot"], restored_guest["slot"]) == (save["host_slot"], save["guest_slot"])
-        result = await cross_unlisted(host, guest, suite.portable_probe_command, "return", UNLISTED_SHOP, CROSSROADS)
+        result = await cross_unlisted(host, guest, suite.portable_probe_command, "return", unlisted_map, CROSSROADS)
         return {"restored_host": restored_host, "restored_guest": restored_guest, "return_to_crossroads": result}
 
     first = await start_pair(host, guest, character_name, **kwargs, after_exit=capture_checkpoint)
     second = await start_pair(host, guest, character_name, load_existing=True, resume_character=first["character_id"],
-                              initial_map=UNLISTED_SHOP, wait_status=suite.wait_resident_status, on_join=verify_reloaded,
+                              initial_map=unlisted_map, wait_status=suite.wait_resident_status, on_join=verify_reloaded,
                               host_exit_actions=("prompt", "confirm"))
     assert second["campaign_id"] == first["campaign_id"] and second["character_id"] == first["character_id"]
     assert second["revision"] > save["revision"] == first["revision"]
@@ -238,13 +239,16 @@ if __name__ == "__main__":
     parser.add_argument("--unlisted-only", action="store_true")
     parser.add_argument("--resume-unlisted", action="store_true")
     parser.add_argument("--discovered-door", action="store_true")
+    parser.add_argument("--outside-tree", action="store_true")
     args = parser.parse_args()
     work, first, second, saves = (path.resolve() for path in (args.work, args.first_game, args.second_game, args.vanilla_saved))
     work.mkdir(parents=True, exist_ok=True)
+    unlisted = UNLISTED_DEMO if args.outside_tree else UNLISTED_SHOP
     suite.verify_weather_travel = partial(live_exit, unlisted_only=args.unlisted_only or args.resume_unlisted,
-                                        save_in_shop=args.resume_unlisted, with_door=args.discovered_door)
+                                        save_in_shop=args.resume_unlisted, with_door=args.discovered_door,
+                                        unlisted_map=unlisted)
     if args.resume_unlisted:
-        suite.start_pair = check_unlisted_resume
+        suite.start_pair = partial(check_unlisted_resume, unlisted_map=unlisted)
     with suite.installed_probe(first, mod="SilverfishPortableExitDiscoveryProbe", fixture="portable_discovered_exit_probe.lua"):
         asyncio.run(suite.verify(work, first, second, saves, stock_weather_travel=True,
                                  stock_placed_item=not args.resume_unlisted))

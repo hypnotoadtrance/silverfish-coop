@@ -889,9 +889,7 @@ local function run_command(fields, state, current_phase)
         end
         local verdict = SilverfishInspectMapPackage(argument) or "registry-unavailable"
         if register and verdict == "world" and not zone_maps[argument] then
-            local leaf = argument:match("^/Game/Classes/Maps/[%w_/]+/([%w_]+)$")
-                or argument:match("^/Game/Classes/Maps/([%w_]+)$")
-            if not leaf or #argument + #leaf + 1 > 180 or argument == main_menu then
+            if not require("world_path").leaf(argument) then
                 return "map-package:invalid-package"
             end
             zone_maps[argument] = {expanded = true}

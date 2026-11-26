@@ -1,4 +1,5 @@
 #include "guest_clock.hpp"
+#include "world_path.hpp"
 
 #include <array>
 #include <atomic>
@@ -164,7 +165,7 @@ namespace
             auto* local_class = find<U::UClass>(STR("/Script/Engine.LocalPlayer"));
             auto* conn_class = find<U::UClass>(STR("/Script/Engine.NetConnection"));
             if (!live(w) || address(w) != world_address ||
-                !std::wstring_view{w->GetPathName()}.starts_with(STR("/Game/Classes/Maps/")) ||
+                !silverfish::world_path::object(std::wstring_view{w->GetPathName()}) ||
                 address(c) != controller_address || !exact(c, controller_path) || !exact(game, instance_path) ||
                 !exact(slot, save_path) || !live(l) || !local_class || !l->IsA(local_class) ||
                 !live(net) || !conn_class || !net->IsA(conn_class)) return false;
