@@ -1371,6 +1371,8 @@ class _ClientProtocol(_LinkProtocol):
                 if (self.client._protocol is self and self.authorized and self.game_access and not self.terminated
                         and self.session_end is None and len(payload) == 16):
                     self.gameplay_change = (self._loop.time(), payload.hex())
+                    if handler := self.client._gameplay_change_handler:
+                        handler()
                 return
             if header in (_WEAPON_SHOT_HEADER, _LOOT_MOTION_HEADER):
                 if self.authorized and self.game_access and not self.terminated:
@@ -1543,6 +1545,7 @@ class ClientLink:
         self._weapon_shots_received = asyncio.Event()
         self._footsteps: deque[tuple[float, bytes]] = deque(maxlen=16)
         self._loot_motion: deque[tuple[float, bytes]] = deque(maxlen=32)
+        self._gameplay_change_handler: Callable[[], None] | None = None
         self.game_local_datagrams = 0
         self.game_packets_sent = 0
         self.game_packets_received = 0
@@ -1765,6 +1768,9 @@ class ClientLink:
             return False
         received, changed_epoch = protocol.gameplay_change
         return changed_epoch == epoch and protocol._loop.time() - received <= _GAMEPLAY_CHANGE_MAX_AGE
+
+    def set_gameplay_change_handler(self, handler: Callable[[], None] | None) -> None:
+        self._gameplay_change_handler = handler
 
     def consume_gameplay_change(self) -> None:
         if self._protocol is not None:

@@ -701,15 +701,16 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         guest_id = self.request["guest_id"]
         self.assertTrue((await self.connect_guest())["accepted"])
         visit = "a" * 32
+        arrived = asyncio.Event()
+        self.client.set_gameplay_change_handler(arrived.set)
         with self.host.hold_game_routes():
             self.host.send_gameplay_change(visit)
         self.assertFalse(self.client.gameplay_changed(visit))
+        self.assertFalse(arrived.is_set())
 
         self.host.restrict_game_routes({guest_id})
         self.host.send_gameplay_change(visit)
-        async with asyncio.timeout(1):
-            while not self.client.gameplay_changed(visit):
-                await asyncio.sleep(.002)
+        await asyncio.wait_for(arrived.wait(), 1)
         self.assertFalse(self.client.gameplay_changed("b" * 32))
         self.assertTrue(self.client.gameplay_changed(visit))
         self.client.consume_gameplay_change()

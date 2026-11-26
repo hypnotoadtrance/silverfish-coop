@@ -6276,6 +6276,10 @@ class Client:
                 and time.monotonic() >= self.last_snapshot_started + _GAMEPLAY_CHANGE_INTERVAL
                 and self.transport.gameplay_changed(self.zone_epoch))
 
+    def wake_for_gameplay_change(self) -> None:
+        if self.gameplay_change_ready():
+            self.bridge.wake_guest_update()
+
     async def cancel_gameplay_snapshot(self) -> None:
         if self.snapshot_request is not None:
             pending, self.snapshot_request = self.snapshot_request, None
@@ -6316,9 +6320,11 @@ class Client:
             await self.start_guest_zone_loading(visit, destination)
 
     async def _request_gameplay_snapshot(self, request: dict) -> tuple[dict, float]:
-        reply = await self.transport.request(request, timeout=2)
-        # Projection and native input work can delay consuming the completed request.
-        return reply, time.monotonic()
+        try:
+            reply = await self.transport.request(request, timeout=2)
+            return reply, time.monotonic()
+        finally:
+            self.bridge.wake_guest_update()
 
     def _schedule_gameplay_snapshot(self, *, edges_only: bool = False) -> None:
         if self.snapshot_request is not None or self.stopping:
@@ -7092,9 +7098,13 @@ class Client:
         world_loot = asyncio.create_task(self.run_world_loot()) if resident else None
         prop_poses = (asyncio.create_task(self.prop_carry.stream_local_poses())
                       if self.prop_carry.has_local_pose_stream else None)
+        if isinstance(self.transport, link.ClientLink):
+            self.transport.set_gameplay_change_handler(self.wake_for_gameplay_change)
         try:
             await self.run_session(pause_exit=pause_exit)
         finally:
+            if isinstance(self.transport, link.ClientLink):
+                self.transport.set_gameplay_change_handler(None)
             input_tasks = (interact, crates, cues, combat, world_loot)
             for task in input_tasks:
                 if task is not None:

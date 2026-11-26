@@ -777,6 +777,7 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
     async def cancel_wait(self, task):
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
     async def test_world_change_requests_one_early_snapshot_with_current_delta_base(self):
         epoch = "a" * 32
         transport = Mock(spec=service.link.ClientLink)
@@ -791,7 +792,10 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         transport.request = AsyncMock(side_effect=snapshot)
         transport.gameplay_changed.side_effect = lambda visit: visit == epoch
         transport.consume_gameplay_change.side_effect = lambda: setattr(transport.gameplay_changed, "side_effect", lambda _: False)
-        client = service.Client(Mock(), transport, {"character_id": "guest"}, Mock())
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        bridge = runtime.Bridge(Path(temporary.name), Mock())
+        client = service.Client(Mock(), transport, {"character_id": "guest"}, bridge)
         self.addAsyncCleanup(client.cancel_gameplay_snapshot)
         client.zone_epoch, client.expected_zone = epoch, OBSERVATORY
         client.last_game = {"state": "connected", "map": OBSERVATORY}
@@ -802,14 +806,27 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(service, "time", SimpleNamespace(monotonic=clock)):
             await client.refresh_gameplay(project=False, wait=False)
             self.assertIsNone(client.snapshot_request)
+            client.wake_for_gameplay_change()
+            self.assertFalse(bridge._guest_update_wakeup.is_set())
             clock.return_value = 100.15
+            client.zone_epoch = "c" * 32
+            client.wake_for_gameplay_change()
+            self.assertFalse(bridge._guest_update_wakeup.is_set())
+            client.zone_epoch = epoch
             self.assertTrue(client.gameplay_change_ready())
+            waiter = asyncio.create_task(bridge.wait_for_interaction(5, guest=True))
+            await asyncio.sleep(0)
+            client.wake_for_gameplay_change()
+            await asyncio.wait_for(waiter, .2)
             await client.refresh_gameplay(project=False, wait=False)
             await client.refresh_gameplay(project=False, wait=False)
             await asyncio.sleep(0)
             transport.request.assert_awaited_once_with({"action": "snapshot", gameplay_snapshot.BASE: "b" * 32}, timeout=2)
             transport.consume_gameplay_change.assert_called_once_with()
+            waiter = asyncio.create_task(bridge.wait_for_interaction(5, guest=True))
+            await asyncio.sleep(0)
             release.set()
+            await asyncio.wait_for(waiter, .2)
             await client.refresh_gameplay(project=False)
             self.assertFalse(client.gameplay_change_ready())
             self.assertEqual(client.next_snapshot, 100.65)

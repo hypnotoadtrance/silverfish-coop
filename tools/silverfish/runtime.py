@@ -896,7 +896,7 @@ class Bridge:
         self._local_interaction_records = deque(maxlen=64)
         self._local_menu_inputs = {tag: deque(maxlen=64) for tag in
                                    (b"wire-board", b"dialogue-input", b"inventory-view", b"shop-view")}
-        self._local_menu_wakeup = asyncio.Event()
+        self._guest_update_wakeup = asyncio.Event()
         self._local_crate_records = deque(maxlen=64)
         self._local_door_confirmations: deque[bytes] = deque()
         self._local_death_records = deque(maxlen=64)
@@ -919,12 +919,15 @@ class Bridge:
         self._local_wallet = None
         self._local_guest_weapon = None
 
+    def wake_guest_update(self) -> None:
+        self._guest_update_wakeup.set()
+
     async def wait_for_interaction(self, timeout: float, *, wake_if=None, wake_event: asyncio.Event | None = None,
                                    guest=False) -> None:
         """Wake for local input, a new game frame, or pending network work."""
-        menu_wake = guest and self.local_bridge is not None and wake_event is None
-        if menu_wake:
-            wake_event = self._local_menu_wakeup
+        guest_wake = guest and wake_event is None
+        if guest_wake:
+            wake_event = self._guest_update_wakeup
         deadline = time.monotonic() + timeout
         streams = [("input.tsv", self.input_offset)] if self.local_bridge is None else []
         if guest:
@@ -975,8 +978,8 @@ class Bridge:
                     break
                 except TimeoutError:
                     pass
-        if menu_wake:
-            self._local_menu_wakeup.clear()
+        if guest_wake:
+            self._guest_update_wakeup.clear()
 
     def _take_local_inputs(self, pending: deque[bytes]) -> list[bytes]:
         # Keep unread interaction, combat, and travel inputs in the native FIFO until their collectors have room.
@@ -991,7 +994,7 @@ class Bridge:
                 menu_inputs = self._local_menu_inputs.get(record.partition(b"\t")[0])
                 if menu_inputs is not None:
                     menu_inputs.append(record)
-                    self._local_menu_wakeup.set()
+                    self.wake_guest_update()
                 elif record.startswith((b"loot-crate-open\t", b"loot-lockpick\t")):
                     self._local_crate_records.append(record)
                 elif record.startswith(b"stock-door-settled\t"):
@@ -1028,8 +1031,6 @@ class Bridge:
                     self._local_interaction_records.append(record)
         records = list(pending)
         pending.clear()
-        if self._local_menu_wakeup.is_set() and not any(self._local_menu_inputs.values()):
-            self._local_menu_wakeup.clear()
         return records
 
     def stock_door_confirmations(self):
