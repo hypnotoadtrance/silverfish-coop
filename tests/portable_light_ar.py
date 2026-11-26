@@ -13,6 +13,8 @@ from tools.silverfish.travel import OBSERVATORY
 
 
 async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
+    from live_portable_title_smoke import verify_first_person_recoil
+
     profile = next(weapon for weapon in FIREARMS if weapon.kind == "light-ar-01")
     assert profile.magazine.ammo == FIVE_SIX_FMJ
     units = FIVE_SIX_FMJ.fixture_units
@@ -134,6 +136,7 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
         if denied["ok"]:
             await submit(guest_run, native_smg_hold.LOCAL_FIXTURE, target="release")
         assert denied["ok"] is False and "native_guest_held_fire_fixture_requires_automatic_mode" in denied["error"], denied
+        assert await command(guest, "clear") == "clear"
         assert await command(host, "crossfire-arm") == "armed"
         shot = await stock_input("primary", guest_frame, guid)
         assert (shot["before"], shot["after"], shot["projectiles"]) == (1, 0, 1), shot
@@ -143,6 +146,7 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
         assert observed == "fired", observed
         projectile_calls, shot_sounds, muzzle_flashes, clicks = map(int, (await command(host, "shot-read")).split(","))
         assert projectile_calls in (1, 2) and clicks == 0, (projectile_calls, clicks)
+        recoil = await verify_first_person_recoil(host, guest, command)
 
         reserve = await command(host, "seed-reserve")
         assert re.fullmatch(rf"[0-9A-F]{{32}},{units}", reserve), reserve
@@ -203,6 +207,7 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
     return {"stock_light_ar": {"weapon": profile.path, "ammo": FIVE_SIX_FMJ.item_path, "shot": shot,
                                "stock_projectile_calls": projectile_calls, "stock_fire_sounds": shot_sounds,
                                "stock_muzzle_flashes": muzzle_flashes, "reload": reloaded,
+                               "guest_shot_stock_recoil": recoil,
                                "semi_hold_blocked": True, "automatic_burst": burst, "burst_muzzle_yaws": burst_directions,
                                "nested_host_shots_excluded_from_guest_counts": 2,
                                "host_stored_both_modes": True, "semi_after_re_equip": re_equip,

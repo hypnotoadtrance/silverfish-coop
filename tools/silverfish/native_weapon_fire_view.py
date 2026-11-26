@@ -45,7 +45,7 @@ def valid_cycle(cue):
 
 
 def valid_shot(cue):
-    if type(cue) is not list or len(cue) not in (11, 12, 19):
+    if type(cue) is not list or len(cue) not in (11, 12, 19, 22):
         return False
     serial, path = cue[:2]
     pose = cue[2:11]
@@ -56,7 +56,8 @@ def valid_shot(cue):
             and all(type(value) in (int, float) and low <= value <= high
                     for value, (low, high) in zip(pose[6:], ((0, 10), (0, 10), (-26, 24)), strict=True))
             and (len(cue) == 11 or type(cue[11]) is int and 0 <= cue[11] <= 2147483647)
-            and (len(cue) != 19 or valid_recoil(cue[11:])))
+            and (len(cue) < 19 or valid_recoil(cue[11:19]))
+            and (len(cue) != 22 or all(type(angle) in (int, float) and -45 <= angle <= 45 for angle in cue[19:])))
 
 
 def valid_recoil(recoil):
@@ -187,7 +188,7 @@ def _captured(data):
             if valid_door_motion(cue, area):
                 cues.append(cue)
             continue
-        if len(fields) not in (11, 12, 19):
+        if len(fields) not in (11, 12, 19, 22):
             continue
         try:
             cue = [int(fields[0]), fields[1], *map(float, fields[2:11])]

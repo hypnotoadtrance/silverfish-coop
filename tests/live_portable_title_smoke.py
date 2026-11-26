@@ -783,6 +783,28 @@ def weapon_cue_files(host, guest):
             if os.path.lexists(path := seat.bridge.directory / name)]
 
 
+async def verify_first_person_recoil(host, guest, command):
+    async def read(seat):
+        local, peer = (await command(seat, "recoil-read")).split(";")
+        return {
+            "local": [list(map(float, row.split(","))) for row in local.split("|") if row],
+            "peer": [list(map(float, row.split(","))) for row in peer.split("|") if row],
+        }
+
+    async with asyncio.timeout(6):
+        while True:
+            source, replay = await asyncio.gather(read(host), read(guest))
+            if source["peer"] and replay["local"]:
+                break
+            await asyncio.sleep(.05)
+    assert not source["local"] and not replay["peer"], (source, replay)
+    original, = source["peer"]
+    applied, = replay["local"]
+    assert any(abs(angle) > .02 for angle in original[6:]), original
+    assert all(abs(before - after) <= .011 for before, after in zip(original, applied, strict=True)), (original, applied)
+    return {"host": source, "guest": replay}
+
+
 async def verify_resident_footsteps(host: Seat, guest: Seat) -> list[dict]:
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-footstep", action)
@@ -902,6 +924,7 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
         while (attached_flash := int((await command(guest, "first-person-read")).split(";")[0])) != 1:
             assert attached_flash == 0, "The guest played a duplicate first-person flash"
             await asyncio.sleep(.05)
+    recoil = await verify_first_person_recoil(host, guest, command)
     after_round = [entry for entry in await resident_events(guest_run, guest_frame) if entry["event"] in tracked]
 
     for seat in (host, guest):
@@ -977,6 +1000,7 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
             "guest_reload_input": reloaded, "guest_reload": reload, "reserve_before": reserve, "reserve_after": reserve_left,
             "guest_reload_delivery": {key: reload_event[key] for key in ("input_source", "capture_to_send_ms") if key in reload_event},
             "guest_muzzle_attachments": attached_flash,
+            "guest_shot_stock_recoil": recoil,
             "guest_first_person_reload": {"stock_clip": reload_clip, "playhead_seconds": float(position)},
             "both_games_projected_reloaded_magazine": True, "host_magazine_and_reserve_unchanged": True}
 

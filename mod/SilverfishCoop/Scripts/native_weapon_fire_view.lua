@@ -30,7 +30,7 @@ local local_attenuation = "/Game/Assets/Sounds/SoundClasses/SmallSound_Attenuati
 local npc_impact_attenuation = "/Game/Assets/Sounds/SoundClasses/Default_Attenuation.Default_Attenuation"
 local sound_types = {SoundCue = true, SoundWave = true, MetaSoundSource = true}
 local maximum, range = 36, 30000
-local current, hooked, melee_hooked, recoil_hooked, cycle_hooked, visit, last_played, last_round
+local current, hooked, melee_hooked, recoil_hooked, cycle_hooked, visit, last_played
 local serial, pending = 0, {}
 local use_hooked, location_sound_hooked, turret_hooked, decal_hooked
 
@@ -337,7 +337,7 @@ local function capture(context)
         local id = current.avatar.player_id({pawn = player, controller_object = player.Controller})
         if id then
             row[12] = id
-            last_round = {row = row, weapon = receiver, at = now}
+            row.receiver, row.shot_at = receiver, now
         end
     end
     record(row)
@@ -369,10 +369,24 @@ local function valid_recoil(player, values)
         and bounded(values[7], .02, 1.5)
 end
 
-local function capture_recoil(context, target, orientation)
+local function valid_camera_recoil(pitch, yaw, roll)
+    return bounded(pitch, -45, 45) and bounded(yaw, -45, 45) and bounded(roll, -45, 45)
+end
+
+local function capture_recoil(context, target, orientation, camera)
     local weapon, pawn = equipped_player(context:get())
-    if not weapon or not last_round or not same(last_round.weapon, weapon) or #last_round.row ~= 12
-        or current.statics:GetRealTimeSeconds(pawn) - last_round.at > .06 then return end
+    if not weapon then return end
+    local now = current.statics:GetRealTimeSeconds(pawn)
+    local row
+    for index = #pending, 1, -1 do
+        local shot = pending[index]
+        if shot.receiver and same(shot.receiver, weapon) then
+            if #shot ~= 12 or now - shot.shot_at > .06 then return end
+            row = shot
+            break
+        end
+    end
+    if not row then return end
     local offset, rotation = target:get(), orientation:get()
     local math_api = StaticFindObject(math_path)
     if not valid(math_api) then return end
@@ -383,9 +397,12 @@ local function capture_recoil(context, target, orientation)
     local avatar = current.avatar
     local player = avatar.player_id({pawn = pawn, controller_object = pawn.Controller})
     if not valid_recoil(player, values) then return end
-    local row = last_round.row
     row[12] = player
     for index, value in ipairs(values) do row[12 + index] = value end
+    local view_kick = camera and camera:get()
+    if view_kick and valid_camera_recoil(view_kick.Pitch, view_kick.Yaw, view_kick.Roll) then
+        row[20], row[21], row[22] = view_kick.Pitch, view_kick.Yaw, view_kick.Roll
+    end
     if not pawn:IsLocallyControlled() then avatar.play_recoil(current.world, player, row[2], row[1], values) end
 end
 
@@ -458,13 +475,13 @@ function view.sync(state, phase, avatar)
     npc_melee.sync(state, phase, record_npc_melee)
     if phase ~= "hosting" or not valid(state.world) then
         clear_local_cues()
-        current, pending, last_round = nil, {}, nil
+        current, pending = nil, {}
         return
     end
     if not current or not same(current.world, state.world) then
         clear_local_cues()
         current = {world = state.world, map = state.map, statics = StaticFindObject(statics_path), avatar = avatar}
-        pending, last_round = {}, nil
+        pending = {}
     end
     current.listener = state.local_pawn and state.local_pawn.pawn
     local use = consumable_base .. ":Use_Item_Primary"
@@ -477,7 +494,9 @@ function view.sync(state, phase, avatar)
     end
     local recoil = weapon_base .. ":ApplyRecoil"
     if not recoil_hooked and valid(StaticFindObject(recoil)) then
-        RegisterHook(recoil, function(context, target, orientation) pcall(capture_recoil, context, target, orientation) end)
+        RegisterHook(recoil, function(context, target, orientation, camera)
+            pcall(capture_recoil, context, target, orientation, camera)
+        end)
         recoil_hooked = true
     end
     local path = weapon_base .. ":SpawnProjectile"
@@ -543,7 +562,7 @@ local function local_muzzle(pawn, path)
     end
 end
 
-local function play_local_recoil(pawn, weapon, path, kick)
+local function play_local_recoil(pawn, weapon, path, kick, camera)
     if not valid(weapon) or pawn.Dead ~= false or not same(weapon.User, pawn) then return end
     local receiver = path == loki_path and pawn.EquipedItem or weapon
     local base = StaticFindObject(weapon_base)
@@ -552,7 +571,7 @@ local function play_local_recoil(pawn, weapon, path, kick)
         or not same(receiver, pawn.EquipedItem) or not same(receiver.User, pawn)
         or not valid(StaticFindObject(weapon_base .. ":ApplyRecoil")) then return end
     local rotation = math_api:ComposeRotators(stock_rest_rotation, {Pitch = kick[4], Yaw = kick[5], Roll = kick[6]})
-    receiver:ApplyRecoil({X = kick[1], Y = kick[2], Z = kick[3]}, rotation, {Pitch = 0, Yaw = 0, Roll = 0})
+    receiver:ApplyRecoil({X = kick[1], Y = kick[2], Z = kick[3]}, rotation, camera)
     return true
 end
 
@@ -721,7 +740,7 @@ function view.command(args, state, phase, avatar)
         pitch_angle, yaw, roll = tonumber(pitch_angle), tonumber(yaw), tonumber(roll)
         scale, volume, pitch = tonumber(scale), tonumber(volume), tonumber(pitch)
         if id and id > last_played and ((#values == 11 and (stock_weapon(path) or stock_turret(path)))
-            or ((#values == 12 or #values == 19) and stock_weapon(path)
+            or ((#values == 12 or #values == 19 or #values == 22) and stock_weapon(path)
                 and math.tointeger(tonumber(values[12])) and tonumber(values[12]) >= 0
                 and tonumber(values[12]) <= 2147483647))
             and bounded(x, -1e7, 1e7) and bounded(y, -1e7, 1e7) and bounded(z, -1e7, 1e7)
@@ -745,13 +764,17 @@ function view.command(args, state, phase, avatar)
                 local ok, particles, audio, stock_sound = pcall(play, pawn, path, point, rotation,
                     scale, volume, pitch, distance, muzzle, firing_weapon)
                 local recoil = false
-                if #values == 19 then
+                if #values == 19 or #values == 22 then
                     local kick = {}
                     for index = 1, 7 do kick[index] = tonumber(values[12 + index]) end
                     if valid_recoil(source, kick) then
                         local applied, moved
                         if source == local_id then
-                            applied, moved = pcall(play_local_recoil, pawn, firing_weapon, path, kick)
+                            local pitch_kick, yaw_kick, roll_kick = tonumber(values[20]), tonumber(values[21]), tonumber(values[22])
+                            local camera = valid_camera_recoil(pitch_kick, yaw_kick, roll_kick)
+                                and {Pitch = pitch_kick, Yaw = yaw_kick, Roll = roll_kick}
+                                or {Pitch = 0, Yaw = 0, Roll = 0}
+                            applied, moved = pcall(play_local_recoil, pawn, firing_weapon, path, kick, camera)
                         else
                             applied, moved = pcall(avatar.play_recoil, state.world, source, path, id, kick)
                         end

@@ -131,7 +131,8 @@ local weapon_class = object({
     GetCDO = function() return defaults end,
 })
 local held = object({User = pawn, MuzzleFlash = first_person_flash,
-    GetWorld = function() return state.world end, GetClass = function() return weapon_class end})
+    GetWorld = function() return state.world end, GetClass = function() return weapon_class end,
+    IsA = function(_, other) return other == weapon_base end})
 held.Arrow_Muzzle = object({
     GetOwner = function() return held end,
     K2_GetComponentLocation = function() return muzzle_location end,
@@ -152,9 +153,16 @@ local niagara = object({
 })
 FName = function(name) return name end
 local resolve = StaticFindObject
+local weapon_base_path = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
+local recoil_function = object({})
+local math_library = object({ComposeRotators = function(_, rest, kick)
+    return {Pitch = kick.Pitch, Yaw = rest.Yaw + kick.Yaw, Roll = kick.Roll}
+end})
 StaticFindObject = function(path)
     if path == weapon_path then return weapon_class end
-    if path == "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C" then return weapon_base end
+    if path == weapon_base_path then return weapon_base end
+    if path == weapon_base_path .. ":ApplyRecoil" then return recoil_function end
+    if path == "/Script/Engine.Default__KismetMathLibrary" then return math_library end
     if path == "/Script/Niagara.Default__NiagaraFunctionLibrary" then return niagara end
     return resolve(path)
 end
@@ -167,7 +175,28 @@ end
 view.command({"-", "native-weapon-play-shots", area, ("1"):rep(32), shot(1, 17), shot(2, 18)}, state, "connected", avatar)
 assert(#projected == 2 and projected[1].muzzle == held.Arrow_Muzzle)
 assert(projected[2].point.X == 100 and projected[2].yaw == 15)
+local local_kicks, avatar_kicks = {}, {}
+pawn.Dead = false
+held.ApplyRecoil = function(_, offset, rotation, camera)
+    assert(offset.X == -12 and rotation.Yaw == -90)
+    local_kicks[#local_kicks + 1] = camera
+end
+avatar.play_recoil = function(world, player, path, serial, kick)
+    assert(world == state.world and player == 18 and path == weapon_path and serial == 4)
+    assert(#kick == 7)
+    avatar_kicks[#avatar_kicks + 1] = kick
+    return true
+end
+local values = "|-12|0|0|1|0|-2|0.2"
+local camera = "|1.18|0.71|0.12"
+view.command({"-", "native-weapon-play-shots", area, ("1"):rep(32),
+    shot(3, 17) .. values .. camera, shot(4, 18) .. values .. camera,
+    shot(5, 17) .. values}, state, "connected", avatar)
+assert(#local_kicks == 2 and #avatar_kicks == 1)
+assert(local_kicks[1].Pitch == 1.18 and local_kicks[1].Yaw == 0.71 and local_kicks[1].Roll == 0.12)
+assert(local_kicks[2].Pitch == 0 and local_kicks[2].Yaw == 0 and local_kicks[2].Roll == 0)
 pawn.EquipedItem = nil
-view.command({"-", "native-weapon-play-shots", area, ("1"):rep(32), shot(3, 17)}, state, "connected", avatar)
-assert(#projected == 2, "a delayed shot must not flash at the old position after holstering")
+view.command({"-", "native-weapon-play-shots", area, ("1"):rep(32), shot(6, 17) .. values .. camera},
+    state, "connected", avatar)
+assert(#projected == 5 and #local_kicks == 2, "a delayed shot must not flash or kick after holstering")
 print("Weapon cues preserve in-memory delivery and use the firing guest's live muzzle")

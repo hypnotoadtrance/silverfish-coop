@@ -47,6 +47,7 @@ local clicks, projectiles, shot_sounds, muzzle_flashes = {}, 0, 0, 0
 local burst_directions
 local crossfire, crossfire_host_class, crossfire_guest_class, crossfire_projectile
 local local_flashes, local_reload = 0, nil
+local local_recoil, peer_recoil = {}, {}
 local retire_projectile, projectile_retired
 
 local function valid(value) return value and value:IsValid() end
@@ -151,6 +152,17 @@ local function arm()
             end
         end
     end)
+    RegisterHook("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:ApplyRecoil",
+        function(context, offset, rotation, camera)
+            if not observing() then return end
+            local weapon = context:get()
+            local seen = same(weapon, local_pawn.EquipedItem) and local_recoil
+                or same(weapon, peer.EquipedItem) and peer_recoil
+            if not seen then return end
+            local moved, turned, view = offset:get(), rotation:get(), camera:get()
+            seen[#seen + 1] = ("%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f"):format(
+                moved.X, moved.Y, moved.Z, turned.Pitch, turned.Yaw, turned.Roll, view.Pitch, view.Yaw, view.Roll)
+        end)
     RegisterHook("/Script/Engine.GameplayStatics:SpawnSoundAttached", function(_, sound, attached)
         if not observing() then return end
         local weapon = peer_muzzle(attached:get())
@@ -599,8 +611,12 @@ local function run(action, argument)
     if action == "clear" then
         clicks, projectiles, shot_sounds, muzzle_flashes, failure = {}, 0, 0, 0, nil
         local_flashes, local_reload = 0, nil
+        local_recoil, peer_recoil = {}, {}
         burst_directions = nil
         return "clear"
+    end
+    if action == "recoil-read" then
+        return table.concat(local_recoil, "|") .. ";" .. table.concat(peer_recoil, "|")
     end
     if action == "shot-read" then return ("%d,%d,%d,%d"):format(projectiles, shot_sounds, muzzle_flashes, #clicks) end
     if action == "first-person-read" then

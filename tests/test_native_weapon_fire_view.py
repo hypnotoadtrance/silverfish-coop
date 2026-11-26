@@ -31,6 +31,14 @@ class ItemUseCueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cues[0][-1], 257)
         self.assertEqual(len(cues[1]), 11)
 
+    def test_stock_shot_camera_recoil_is_retained_and_bounded(self):
+        weapon = "/Game/Classes/Weapons/Wep_RustyPistol.Wep_RustyPistol_C"
+        shot = f"{weapon}|1|2|3|0|13|0|1|1|2|257|-12|0|0|1|0|-2|.2"
+        _, cues = _captured(f"{self.area}\n1|{shot}|1.18|0.71|0.12\n2|{shot}|1|0|99\n3|{shot}\n")
+        self.assertEqual([cue[0] for cue in cues], [1, 3])
+        self.assertEqual(cues[0][-3:], [1.18, .71, .12])
+        self.assertEqual(len(cues[1]), 19)
+
     async def test_relayed_use_is_played_once_in_its_visit(self):
         game = {"map": self.area}
         bridge = SimpleNamespace(command=AsyncMock(return_value={"ack": {"message": "1:consume,1:consume_visual"}}))
