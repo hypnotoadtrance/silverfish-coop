@@ -243,7 +243,7 @@ async def verify_stock_dock_gate(host, guest):
 
 
 
-async def verify_streamed_door(host, guest, pawn, probe):
+async def verify_streamed_door(host, guest, probe):
     """Use the actual stock dock gate in an instance loaded under Crossroads."""
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     checkpoint = campaign_save_hashes(host.campaign)
@@ -264,8 +264,10 @@ async def verify_streamed_door(host, guest, pawn, probe):
     def observed(frame):
         return frame.get("game", {}).get(door.KEY, {}).get(actor, {})
 
-    initial = observed(await wait_resident_status(host_run, lambda frame:
-        observed(frame).get("locked") is False))
+    ready = await wait_resident_status(host_run, lambda frame:
+        observed(frame).get("locked") is False and frame["game"].get("native_guest_save", {}).get("state") == "bound")
+    pawn = ready["game"]["native_guest_save"]["pawn"]
+    initial = observed(ready)
     await wait_resident_status(guest_run, lambda frame: door.matches(observed(frame), initial))
     poses = []
     for opens in (not initial["open"], initial["open"]):
