@@ -86,6 +86,8 @@ _TIMED_INTERACTIONS = (frozenset({"native-loot-inspect", "native-loot-open", "na
                        if os.environ.get("SILVERFISH_COOP_TITLE_FIXTURES") == "1" else frozenset())
 _NATIVE_REQUESTS_PER_PASS = 3
 _NATIVE_REQUEST_PASS_SECONDS = .025
+# Cap early refreshes during bursts without changing the ordinary snapshot fallback.
+_GAMEPLAY_CHANGE_INTERVAL = .125
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
                         native_dialogue.OPEN, native_dialogue.CHOOSE, native_borough_barter.ACTION, native_borough_barter.CRAFT_ACTION,
                         native_borough_barter.CRAFT_PREFLIGHT,
@@ -364,6 +366,9 @@ class Host:
         self.native_requests = asyncio.Queue(maxsize=8)
         self.native_request_ready = asyncio.Event()
         self.stock_doors = native_stock_door.Interactions()
+        self.gameplay_change_scope = None
+        self.gameplay_change_state = None
+        self.next_gameplay_change = 0.0
         self.prepared_guest_leaves: dict[str, GuestLeave] = {}
         self.confirmed_guest_leaves: set[str] = set()
         self.session_stop_reason: str | None = None
@@ -4550,10 +4555,38 @@ class Host:
                     if snapshot is not self.last_game:
                         self.last_game, self.last_seen = snapshot, time.monotonic()
             self.stock_doors.settle(self, bridge.stock_door_confirmations())
+            self.publish_gameplay_change(transport)
             self.publish_host_status(transport, bridge)
             await bridge.wait_for_interaction(
                 .25, wake_event=None if self.native_checkpoint_unsafe else self.native_request_ready,
             )
+
+    def publish_gameplay_change(self, transport) -> None:
+        game, epoch = self.last_game, self.zone_epoch
+        now = time.monotonic()
+        if (now < self.next_gameplay_change or self.stopping or self.transitioning or self.native_checkpoint_unsafe
+                or game.get("state") != "hosting" or not isinstance(transport, link.HostLink)
+                or not isinstance(epoch, str) or not party.REQUEST_ID.fullmatch(epoch)
+                or not self.game_link_connected(transport)):
+            return
+        self.next_gameplay_change = now + _GAMEPLAY_CHANGE_INTERVAL
+        scope = game.get("map"), epoch
+        doors = game.get(native_stock_door.KEY, {})
+        door_flags = {actor: (row["open"], row["locked"], row["broken"]) for actor, row in doors.items()}
+        if self.stock_doors.confirmed_scope == scope:
+            for actor, (sequence, row) in self.stock_doors.confirmed.items():
+                if sequence >= game.get("sequence", 0):
+                    door_flags[actor] = row["open"], row["locked"], row["broken"]
+        switch_flags = {actor: (row["powered"], row.get("lamp"), row["lights"])
+                        for actor, row in game.get(native_stock_switch.KEY, {}).items()}
+        # Crate opens and claims replace the ledger or its affected rows.
+        state = door_flags, switch_flags, self.party.get(native_loot.STATE_KEY, {})
+        if scope == self.gameplay_change_scope and state != self.gameplay_change_state:
+            # Guests still fetch the authorized snapshot. A lost notice only delays that fetch.
+            transport.send_gameplay_change(epoch)
+            if _TIMED_INTERACTIONS:
+                self.control.event("host_gameplay_change_notice", zone_epoch=epoch)
+        self.gameplay_change_scope, self.gameplay_change_state = scope, state
 
     def publish_host_status(self, transport, bridge):
         linked = self.game_link_connected(transport)
@@ -5250,6 +5283,7 @@ class Client:
         self.loot_motion_playback = native_stock_enemy_drops.MotionPlayback()
         self.snapshot_request: asyncio.Task[tuple[dict, float]] | None = None
         self.next_snapshot = 0.0
+        self.last_snapshot_started = float("-inf")
         self.last_sprint_sent = None
         self.last_aim_sent = None
         self.last_lighter_sent = None
@@ -5360,6 +5394,7 @@ class Client:
         self.native_return_reservation = None
         self.native_return_retry_allowed = False
         self.next_snapshot = 0.0
+        self.last_snapshot_started = float("-inf")
         self.last_sprint_sent = self.last_aim_sent = self.last_lighter_sent = self.last_visor_sent = None
         self.last_flashlight_sent = None
         self.stack_drop_projection.rebind()
@@ -6230,6 +6265,13 @@ class Client:
     def gameplay_snapshot_ready(self) -> bool:
         return self.snapshot_request is not None and self.snapshot_request.done()
 
+    def gameplay_change_ready(self) -> bool:
+        return (self.snapshot_request is None and isinstance(self.transport, link.ClientLink)
+                and self.zone_epoch is not None and not self.needs_travel and not self.server_transitioning
+                and self.last_game.get("state") == "connected" and self.last_game.get("map") == self.expected_zone
+                and time.monotonic() >= self.last_snapshot_started + _GAMEPLAY_CHANGE_INTERVAL
+                and self.transport.gameplay_changed(self.zone_epoch))
+
     async def cancel_gameplay_snapshot(self) -> None:
         if self.snapshot_request is not None:
             pending, self.snapshot_request = self.snapshot_request, None
@@ -6300,9 +6342,15 @@ class Client:
         flashlight_changed = flashlight_ready and native_flashlight.guest_edge(flashlight_update) != native_flashlight.guest_edge(
             self.last_flashlight_sent)
         if not (sprint_changed or aim_changed or flashlight_changed or lighter_changed or visor_changed) and (
-            edges_only or now < self.next_snapshot
-        ):
-            return
+                edges_only or now < self.next_snapshot):
+            if not self.gameplay_change_ready():
+                return
+            if _TIMED_INTERACTIONS:
+                self.control.event("guest_gameplay_change_refresh", zone_epoch=self.zone_epoch,
+                                   ahead_ms=round(max(0., self.next_snapshot - now) * 1000, 1))
+        if active and isinstance(self.transport, link.ClientLink) and self.transport.gameplay_changed(self.zone_epoch):
+            self.transport.consume_gameplay_change()
+        self.last_snapshot_started = now
         self.next_snapshot = now + 0.5
         request = {"action": "snapshot"}
         if self.gameplay_snapshots.base is not None:
@@ -7217,7 +7265,7 @@ class Client:
                 await self.project_gameplay()
             self.publish_gameplay_status(active)
             await self.bridge.wait_for_interaction(
-                .25, wake_if=lambda: self.gameplay_snapshot_ready()
+                .25, wake_if=lambda: self.gameplay_snapshot_ready() or self.gameplay_change_ready()
                 or (self.bridge.local_bridge is None and self.transport.weapon_shots_ready())
                 or self.transport.loot_motion_ready() or self.guest_ui.stock_refresh_ready(), guest=True)
 

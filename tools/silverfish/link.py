@@ -109,6 +109,8 @@ _LOOT_MOTION_HEADER = _FRAGMENT_HEADER.pack(0, 0, 2)
 _PROP_POSE_HEADER = _FRAGMENT_HEADER.pack(0, 0, 3)
 _AVATAR_POSE_HEADER = _FRAGMENT_HEADER.pack(0, 0, 4)
 _FOOTSTEP_HEADER = _FRAGMENT_HEADER.pack(0, 0, 5)
+_GAMEPLAY_CHANGE_HEADER = _FRAGMENT_HEADER.pack(0, 0, 6)
+_GAMEPLAY_CHANGE_MAX_AGE = .25
 _FOOTSTEP_MAX_AGE = .20
 _FOOTSTEP_MAX_SIZE = 48
 _WEAPON_SHOT_MAX_AGE = .25
@@ -628,7 +630,7 @@ class _LinkProtocol(QuicConnectionProtocol):
         self._expire_game_queue(now)
         pending = self._quic._datagrams_pending
         frame = header + data
-        if header in (_PROP_POSE_HEADER, _AVATAR_POSE_HEADER):
+        if header in (_PROP_POSE_HEADER, _AVATAR_POSE_HEADER, _GAMEPLAY_CHANGE_HEADER):
             for index, queued in enumerate(pending):
                 if queued.startswith(header):
                     # Preserve the channel's queue position while discarding the older pose.
@@ -636,7 +638,7 @@ class _LinkProtocol(QuicConnectionProtocol):
                     self._game_enqueued[index] = now
                     if header == _PROP_POSE_HEADER:
                         self._stats.prop_pose_datagrams_replaced += 1
-                    else:
+                    elif header == _AVATAR_POSE_HEADER:
                         self._stats.avatar_pose_datagrams_replaced += 1
                     return True
         if len(pending) >= _MAX_QUEUED_FRAMES:
@@ -1242,6 +1244,10 @@ class HostLink:
     def send_loot_motion(self, data: bytes, allowed: Callable[[str], bool]) -> None:
         self._send_presentation(_LOOT_MOTION_HEADER, (data,), allowed)
 
+    def send_gameplay_change(self, epoch: str) -> None:
+        """Hint that the current visit has newer authoritative snapshot state."""
+        self._send_presentation(_GAMEPLAY_CHANGE_HEADER, (bytes.fromhex(epoch),), lambda _: True)
+
     def _send_presentation(self, header: bytes, frames: Sequence[bytes], allowed: Callable[[str], bool]) -> None:
         for guest_id, protocol in self._protocols.items():
             if self.connected(guest_id) and self._native_route_permitted(guest_id) and allowed(guest_id):
@@ -1313,6 +1319,7 @@ class _ClientProtocol(_LinkProtocol):
         self._session_end_bytes = bytearray()
         self.session_end: tuple[str, int] | None = None
         self.avatar_pose: tuple[float, bytes] | None = None
+        self.gameplay_change: tuple[float, str] | None = None
         self.keepalive_rtt_us = -1
         self._keepalive_probe = (0, 0)
 
@@ -1358,6 +1365,12 @@ class _ClientProtocol(_LinkProtocol):
                 if (self.client._protocol is self and self.authorized and self.game_access and not self.terminated
                         and self.session_end is None and 0 < len(payload) <= _FOOTSTEP_MAX_SIZE):
                     self.client._footsteps.append((self._loop.time(), payload))
+                return
+            if header == _GAMEPLAY_CHANGE_HEADER:
+                payload = event.data[_FRAGMENT_HEADER.size:]
+                if (self.client._protocol is self and self.authorized and self.game_access and not self.terminated
+                        and self.session_end is None and len(payload) == 16):
+                    self.gameplay_change = (self._loop.time(), payload.hex())
                 return
             if header in (_WEAPON_SHOT_HEADER, _LOOT_MOTION_HEADER):
                 if self.authorized and self.game_access and not self.terminated:
@@ -1745,6 +1758,17 @@ class ClientLink:
     def _receive_loot_motion(self, data: bytes, now: float) -> None:
         if 0 < len(data) <= _FRAGMENT_SIZE:
             self._loot_motion.append((now, data))
+
+    def gameplay_changed(self, epoch: str) -> bool:
+        protocol = self._protocol
+        if not self.game_access or protocol is None or protocol.session_end is not None or not protocol.gameplay_change:
+            return False
+        received, changed_epoch = protocol.gameplay_change
+        return changed_epoch == epoch and protocol._loop.time() - received <= _GAMEPLAY_CHANGE_MAX_AGE
+
+    def consume_gameplay_change(self) -> None:
+        if self._protocol is not None:
+            self._protocol.gameplay_change = None
 
     def loot_motion_ready(self) -> bool:
         return bool(self._loot_motion)

@@ -697,6 +697,25 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
                 close.assert_not_called()
         await self.exchange(1200)
 
+    async def test_gameplay_change_notice_follows_the_authorized_route_and_current_visit(self):
+        guest_id = self.request["guest_id"]
+        self.assertTrue((await self.connect_guest())["accepted"])
+        visit = "a" * 32
+        with self.host.hold_game_routes():
+            self.host.send_gameplay_change(visit)
+        self.assertFalse(self.client.gameplay_changed(visit))
+
+        self.host.restrict_game_routes({guest_id})
+        self.host.send_gameplay_change(visit)
+        async with asyncio.timeout(1):
+            while not self.client.gameplay_changed(visit):
+                await asyncio.sleep(.002)
+        self.assertFalse(self.client.gameplay_changed("b" * 32))
+        self.assertTrue(self.client.gameplay_changed(visit))
+        self.client.consume_gameplay_change()
+        self.assertFalse(self.client.gameplay_changed(visit))
+        await self.exchange(1200)
+
     async def test_prop_pose_reaches_only_the_current_authenticated_game_route(self):
         guest_id = self.request["guest_id"]
         received = asyncio.Queue()

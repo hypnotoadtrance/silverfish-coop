@@ -777,3 +777,74 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
     async def cancel_wait(self, task):
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+    async def test_world_change_requests_one_early_snapshot_with_current_delta_base(self):
+        epoch = "a" * 32
+        transport = Mock(spec=service.link.ClientLink)
+        transport.address = ("127.0.0.1", 7777)
+        transport.session_end = None
+        release = asyncio.Event()
+
+        async def snapshot(payload, *, timeout):
+            await release.wait()
+            return {"ok": True, "gameplay": {"players": {}}, "zone_epoch": epoch, "zone": OBSERVATORY}
+
+        transport.request = AsyncMock(side_effect=snapshot)
+        transport.gameplay_changed.side_effect = lambda visit: visit == epoch
+        transport.consume_gameplay_change.side_effect = lambda: setattr(transport.gameplay_changed, "side_effect", lambda _: False)
+        client = service.Client(Mock(), transport, {"character_id": "guest"}, Mock())
+        self.addAsyncCleanup(client.cancel_gameplay_snapshot)
+        client.zone_epoch, client.expected_zone = epoch, OBSERVATORY
+        client.last_game = {"state": "connected", "map": OBSERVATORY}
+        client.gameplay_snapshots.base = "b" * 32
+        client.last_snapshot_started, client.next_snapshot = 100.0, 100.5
+        clock = Mock(return_value=100.05)
+
+        with patch.object(service, "time", SimpleNamespace(monotonic=clock)):
+            await client.refresh_gameplay(project=False, wait=False)
+            self.assertIsNone(client.snapshot_request)
+            clock.return_value = 100.15
+            self.assertTrue(client.gameplay_change_ready())
+            await client.refresh_gameplay(project=False, wait=False)
+            await client.refresh_gameplay(project=False, wait=False)
+            await asyncio.sleep(0)
+            transport.request.assert_awaited_once_with({"action": "snapshot", gameplay_snapshot.BASE: "b" * 32}, timeout=2)
+            transport.consume_gameplay_change.assert_called_once_with()
+            release.set()
+            await client.refresh_gameplay(project=False)
+            self.assertFalse(client.gameplay_change_ready())
+            self.assertEqual(client.next_snapshot, 100.65)
+
+    def test_host_coalesces_door_switch_and_crate_visibility_changes_in_their_visit(self):
+        host = service.Host.__new__(service.Host)
+        host.stopping = host.transitioning = host.native_checkpoint_unsafe = False
+        host.gameplay_change_scope = host.gameplay_change_state = None
+        host.next_gameplay_change = 0
+        host.game_link_connected = Mock(return_value=True)
+        host.zone_epoch = "a" * 32
+        host.stock_doors = native_stock_door.Interactions()
+        doors = native_stock_door.KEY
+        switches = service.native_stock_switch.KEY
+        host.last_game = {"state": "hosting", "map": OBSERVATORY, "sequence": 4,
+                          doors: {"door": {"open": False, "locked": False, "broken": False}},
+                          switches: {"switch": {"powered": False, "lights": {}}}}
+        host.party = {}
+        transport = Mock(spec=service.link.HostLink)
+        clock = Mock(return_value=100.)
+        with patch.object(service, "time", SimpleNamespace(monotonic=clock)):
+            host.publish_gameplay_change(transport)
+            transport.send_gameplay_change.assert_not_called()
+            host.stock_doors.confirmed_scope = OBSERVATORY, host.zone_epoch
+            host.stock_doors.confirmed["door"] = 5, host.last_game[doors]["door"] | {"open": True}
+            host.last_game = {**host.last_game, switches: {"switch": {"powered": True, "lights": {}}}}
+            host.party[native_loot.STATE_KEY] = {"crate": {"id": "roll"}}
+            host.publish_gameplay_change(transport)
+            transport.send_gameplay_change.assert_not_called()
+            clock.return_value = 100.2
+            host.publish_gameplay_change(transport)
+            transport.send_gameplay_change.assert_called_once_with("a" * 32)
+            clock.return_value = 100.4
+            host.publish_gameplay_change(transport)
+            host.zone_epoch = "b" * 32
+            clock.return_value = 100.6
+            host.publish_gameplay_change(transport)
+            transport.send_gameplay_change.assert_called_once_with("a" * 32)
