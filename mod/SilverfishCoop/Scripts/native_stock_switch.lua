@@ -125,7 +125,10 @@ local function census(state, phase)
                 if entry and (phase ~= "hosting" or actor:HasAuthority()) then
                     local name = actor:GetFullName()
                     if entry.power then
-                        entries[name] = {power = entry.power, path = name:match("^%S+ (.+)$"), candle = entry.candle}
+                        if not entries[name] or not same(entries[name].actor, actor) then
+                            entries[name] = {actor = actor, class = class, power = entry.power,
+                                path = name:match("^%S+ (.+)$"), candle = entry.candle}
+                        end
                     elseif not entries[name] or not same(entries[name].actor, actor) then
                         entry.lights = light_links(actor, world)
                         entries[name] = entry
@@ -165,9 +168,14 @@ end
 
 function switches.read_row(entry, name, state, phase, row)
     if entry.power then
-        local actor = entry.actor or StaticFindObject(entry.path)
-        local powered
-        if qualified(actor, state.world) then powered = actor[entry.power] end
+        local actor = entry.actor
+        if not qualified(actor, state.world) then
+            if not entry.path then return end
+            actor = StaticFindObject(entry.path)
+            if not qualified(actor, state.world) or not same(actor:GetClass(), entry.class) then return end
+            entry.actor = actor
+        end
+        local powered = actor[entry.power]
         if type(powered) == "boolean" then
             if entry.candle and phase == "connected" then
                 local sphere = actor.Sphere

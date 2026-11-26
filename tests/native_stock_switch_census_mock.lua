@@ -8,10 +8,12 @@ local function object(fields)
 end
 
 local callbacks, paths, scans = {}, {}, {}
+local actor_lookups = 0
 function NotifyOnNewObject(path, callback)
     callbacks[path] = callback
 end
 function StaticFindObject(path)
+    if path:find(":PersistentLevel", 1, true) then actor_lookups = actor_lookups + 1 end
     return paths[path]
 end
 
@@ -79,12 +81,20 @@ local function radio_readback()
     end
 end
 local unpowered = radio_readback()
-assert(unpowered[4] == "0" and radio_readback() == unpowered, "An unchanged radio reuses its status row")
+assert(unpowered[4] == "0" and radio_readback() == unpowered and actor_lookups == 0,
+    "An unchanged radio reuses the live actor and status row")
 paths[radio_path].Powered = true
 local powered = radio_readback()
 assert(powered[4] == "1" and powered ~= unpowered, "A power change immediately replaces the cached row")
 paths[radio_path].IsActorBeingDestroyed = function() return true end
 assert(not radio_readback(), "A destroyed radio cannot publish a cached row")
+paths[radio_path] = device(world, wall_class, radio_name)
+assert(not radio_readback(), "The same path cannot bind an actor of a different class")
+paths[radio_path] = device(world, radio_class, radio_name)
+local replacement = radio_readback()
+local replacement_lookups = actor_lookups
+assert(replacement[4] == "0" and radio_readback() == replacement and actor_lookups == replacement_lookups,
+    "A qualified replacement should publish its own state and be reused")
 state.world = object({PersistentLevel = object({}), actors = {}})
 assert(#switches.rows(state, "hosting", row) == 0, "A previous world's devices must not leak across travel")
 print("Stock switch discovery enrolls both wall switch profiles and refreshes only the late class")

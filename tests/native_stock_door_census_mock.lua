@@ -1,7 +1,7 @@
 package.path = "mod/SilverfishCoop/Scripts/?.lua;" .. package.path
 
 local tick, frames, work = nil, 100, 0
-local actor_lookups, qualifiers = 0, 0
+local actor_lookups, qualifiers, encodes = 0, 0, 0
 os.time = function() return frames end
 os.clock = function() return work end
 function LoopInGameThreadWithDelay(delay, callback)
@@ -72,7 +72,10 @@ local function make_state(name, count)
     return {map = map, world = world, server = true, listening = true}
 end
 
-local function row(...) return {...} end
+local function row(...)
+    encodes = encodes + 1
+    return {...}
+end
 local function current_rows(doors, state, command)
     return doors.rows(state, "connected", row, command)
 end
@@ -94,7 +97,8 @@ local target = state.world.doors[30]
 local command = {"request", "native-stock-door-project", state.map, target.name .. "|0|0|1|0|90|0|0|5|0"}
 assert(doors.command(command, state, "connected") and target.Open and actor_lookups == 1)
 local exact = current_rows(doors, state, command)
-assert(#exact == 1 and exact[1][3] == target.name and exact[1][6] == 1, "the exact action must read back before ack")
+assert(#exact == 1 and exact[1][1] == "native-stock-door-state"
+    and exact[1][3] == "BasicDoor_30" and exact[1][6] == 1, "the exact action must read back before ack")
 
 for _ = 1, 40 do
     tick()
@@ -113,7 +117,21 @@ assert(#current_rows(doors, state) == 30 and qualifiers == before,
 tick()
 local new = make_state("DeadBridge_P", 2)
 local fresh = current_rows(doors, new)
-assert(#fresh == 2 and fresh[1][2] == new.map and fresh[2][2] == new.map, "travel must retire the old census")
+local stable_encodes = encodes
+assert(#fresh == 2 and current_rows(doors, new)[1] == fresh[1] and encodes == stable_encodes,
+    "unchanged doors in a small census must keep their encoded rows")
+local moved = new.world.doors[1]
+moved.Arrow.RelativeRotation.Yaw = 90
+moved.Box_Knob.K2_GetComponentLocation = function() return {X = 3, Y = 0, Z = 0} end
+local current = current_rows(doors, new)
+assert(encodes == stable_encodes + 1, "only the door that moved should be encoded again")
+for _, reading in ipairs(current) do
+    assert(reading[1] == "native-stock-door-state" and reading[2] == "BasicDoor_C"
+        and (reading[3] == "BasicDoor_1" or reading[3] == "BasicDoor_2"), "travel must retire the old census")
+    if reading[3] == "BasicDoor_1" then
+        assert(reading[8] == "90.000" and reading[16] == "3.000", "the updated hinge and knob must be published together")
+    end
+end
 tick()
 assert(#current_rows(doors, new) == 2, "an old background pass must never publish into the new world")
 

@@ -349,17 +349,33 @@ local function sample_door(scan, name, ready_pose)
     local center, grip = panel:K2_GetComponentLocation(), knob:K2_GetComponentLocation()
     local collision = math.tointeger(panel:GetCollisionEnabled())
     if center and grip and collision and collision >= 0 and collision <= 5 then
+        local previous = scan.samples and scan.samples[name]
+        if previous and previous[10] == center.X and previous[11] == center.Y and previous[12] == center.Z
+            and previous[13] == grip.X and previous[14] == grip.Y and previous[15] == grip.Z and previous[16] == collision then
+            local unchanged = true
+            for index = 1, 9 do
+                if previous[index] ~= value[index] then unchanged = false; break end
+            end
+            if unchanged then return previous.row end
+        end
         local kind, object = name:match("^([%w_]+) .+:PersistentLevel%.([%w_]+)$")
         local tag, scope, id = "native-stock-door", scan.map, name
         if not scan.confirmation and kind then
             tag, scope, id = "native-stock-door-state", kind, object
         end
-        return scan.row(tag, scope, id,
+        local encoded = scan.row(tag, scope, id,
             value[1] and 1 or 0, value[2] and 1 or 0, value[3] and 1 or 0,
             string.format("%.3f", value[4]), string.format("%.3f", value[5]), string.format("%.3f", value[6]),
             string.format("%.3f", value[7]), string.format("%.3f", value[8]), string.format("%.3f", value[9]),
             string.format("%.3f", center.X), string.format("%.3f", center.Y), string.format("%.3f", center.Z),
             string.format("%.3f", grip.X), string.format("%.3f", grip.Y), string.format("%.3f", grip.Z), collision)
+        if scan.samples then
+            value[10], value[11], value[12] = center.X, center.Y, center.Z
+            value[13], value[14], value[15], value[16] = grip.X, grip.Y, grip.Z, collision
+            value.row = encoded
+            scan.samples[name] = value
+        end
+        return encoded
     end
 end
 
@@ -481,17 +497,20 @@ function doors.rows(state, phase, status_row, fields)
     local known = census(state, phase)
     local result = {}
     if not active_world then return result end
-    if not sampler or sampler.actors ~= known or sampler.phase ~= phase then
+    if not sampler or sampler.actors ~= known or sampler.phase ~= phase or sampler.map ~= state.map
+        or sampler.row ~= status_row then
         local previous = sampler
         sampler = {actors = known, world = state.world, phase = phase, map = state.map, row = status_row,
-            names = {}, readings = {}, next = 1}
+            names = {}, readings = {}, samples = {}, next = 1}
         for name, actor in pairs(known) do
             if #sampler.names >= 240 then break end
             if actor then
                 sampler.names[#sampler.names + 1] = name
-                if previous and previous.phase == phase and same(previous.world, state.world)
+                if previous and previous.phase == phase and previous.map == state.map and previous.row == status_row
+                    and same(previous.world, state.world)
                     and same(previous.actors[name], actor) then
                     sampler.readings[name] = previous.readings[name]
+                    sampler.samples[name] = previous.samples[name]
                 end
             end
         end
