@@ -313,7 +313,7 @@ namespace
         Unreal::FStrProperty* entrance_tag{};
         Unreal::FByteProperty* role{};
         const Route* route{};
-        RC::StringViewType authored_world;
+        RC::StringType authored_world;
         const Authored::Route* authored_request{};
         ExitApproach approach;
         ExitCrossing crossing;
@@ -605,6 +605,15 @@ namespace
         }
     }
 
+    bool campaign_map_package(RC::StringViewType package)
+    {
+        const auto leaf = package.substr(package.rfind(STR('/')) + 1);
+        return package.starts_with(STR("/Game/Classes/Maps/")) &&
+            package.size() + 1 + leaf.size() <= 180 &&
+            package != STR("/Game/Classes/Maps/MainMenu_P") &&
+            package.find(STR('-')) == package.npos && package_path(package);
+    }
+
     std::string_view map_package_status(RC::StringViewType package)
     {
         if (!package_path(package)) return "invalid-package";
@@ -684,8 +693,8 @@ namespace
         const RC::StringViewType entrance{*tag->GetPropertyValueInContainer(exit)};
         const auto split = object.find(STR('.'));
         const auto slash = object.rfind(STR('/'));
-        if (object.size() > 240 || !object.starts_with(STR("/Game/Classes/Maps/")) ||
-            split == object.npos || slash >= split || object.substr(slash + 1, split - slash - 1) != object.substr(split + 1) ||
+        if (split == object.npos || slash >= split || !campaign_map_package(object.substr(0, split)) ||
+            object.substr(slash + 1, split - slash - 1) != object.substr(split + 1) ||
             !exit_token(object.substr(split + 1)) || object == scope.authored_world ||
             entrance.size() > 64 || entrance == STR("None") || !exit_token(entrance)) return {};
         const double time = duration->GetPropertyValueInContainer(exit);
@@ -882,8 +891,15 @@ namespace
             }
         }
         next.world = world;
-        next.authored_world = expanded_world(map);
-        if (!next.route && next.authored_world.empty()) return "This world has no authored co-op routes";
+        next.authored_world.assign(expanded_world(map));
+        if (!next.route && next.authored_world.empty())
+        {
+            const auto package = RC::StringViewType{map}.substr(0, map.rfind(STR('.')));
+            if (!env_flag("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES") || !campaign_map_package(package) ||
+                (scope.world.Get() != world && map_package_status(package) != "world"))
+                return "This world has no qualified co-op routes";
+            next.authored_world = map;
+        }
         if (fixture)
         {
             const auto* authored = expanded_route(next, fixture);
@@ -1038,12 +1054,7 @@ namespace
     std::optional<DiscoveredExit> unregistered_exit(Unreal::UObject* exit, Unreal::UWorld* world)
     {
         if (!live_object(exit) || expanded_route(scope, exit) || is_route_exit(scope, exit, world)) return {};
-        const auto route = discover_exit(exit, read_object(field<Unreal::FObjectProperty>(exit, STR("Box")), exit), world);
-        if (!route) return {};
-        auto destination = route->destination;
-        destination += STR(".");
-        destination += RC::StringViewType{route->destination}.substr(route->destination.rfind(STR('/')) + 1);
-        return expanded_world(destination).empty() ? std::nullopt : route;
+        return discover_exit(exit, read_object(field<Unreal::FObjectProperty>(exit, STR("Box")), exit), world);
     }
 
     int lua_discovered_overlap(const Lua& lua)
@@ -1527,7 +1538,7 @@ namespace
             return 0;
         }
         scope.crossing.published = scope.crossing.ticket != 0;
-        const auto source = discovered ? scope.authored_world : route->source_world;
+        const RC::StringViewType source = discovered ? RC::StringViewType{scope.authored_world} : route->source_world;
         lua.set_string(RC::to_string(source.substr(0, source.rfind(STR('.')))));
         if (discovered)
         {

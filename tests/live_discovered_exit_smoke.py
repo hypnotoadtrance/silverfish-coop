@@ -65,7 +65,26 @@ async def live_exit(host, guest, pawn, probe, **options):
         await host.bridge.command("native-exit-position", participant, position, route.entrance, route.actor)
     reached = await wait_for_party(host_run, guest_run, OBSERVATORY)
     streamed = await live_discovered_exit(host, guest, reached["game"]["native_guest_save"]["pawn"], probe, streamed=True)
-    return {"persistent_exit": spawned, "streamed_exit": streamed, "map_package_verdicts": lookups}
+    reached = await wait_for_party(host_run, guest_run, CROSSROADS)
+    route = route_between(CROSSROADS, OBSERVATORY)
+    for participant in (reached["game"]["native_guest_save"]["pawn"], "local"):
+        await host.bridge.command("native-exit-position", participant, "near", route.entrance, route.actor)
+    dynamic = []
+    for action, source, destination in (("campus", CROSSROADS, unlisted_world), ("return", unlisted_world, CROSSROADS)):
+        actor = (await probe(host.bridge, "portable-discovered-exit", action)).strip().rsplit(".", 1)[-1]
+        await asyncio.sleep(1.2)
+        assert (await probe(host.bridge, "portable-discovered-exit", "regroup")).strip() == "near"
+        await suite.wait_resident_status(host_run, lambda frame: (
+            frame.get("game", {}).get("map") == source and frame["game"]["native_zone_wall"]["host_open"]))
+        assert (await probe(host.bridge, "portable-discovered-exit", "cross")).strip() == "entered"
+        reached = await wait_for_party(host_run, guest_run, destination)
+        events = await suite.resident_events(host_run, reached)
+        departure, = (row for row in events if row["event"] == "native_authored_zone_request" and row["actor"] == actor
+                      and row["source"] == source)
+        assert departure["discovered"] and departure["destination"] == destination and departure["result"]["ok"], departure
+        dynamic.append(departure)
+    return {"persistent_exit": spawned, "streamed_exit": streamed, "map_package_verdicts": lookups,
+            "unlisted_map_round_trip": dynamic}
 
 
 async def live_discovered_exit(host, guest, pawn, probe, *, streamed):

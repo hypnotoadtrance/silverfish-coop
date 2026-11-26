@@ -27,6 +27,7 @@ from .campaign import CampaignError, CampaignFormatError, CampaignStore, DEFAULT
 from . import native_npc_barter, native_spratt, native_spratt_fixture
 from .authored_routes import AUTHORED_ROUTES, MAPS as EXPANDED_MAPS, AuthoredRoute
 from .authored_world_view import WORLD_VIEW_ACTORS
+from . import native_map_preflight
 from .control import Control
 from .embedded_engine import BRIDGE_ENV, OPT_IN_ENV, EmbeddedEngine, select_save_scope
 from .local_bridge import (GUEST_INTERACTION_BROKER, GUEST_INTERACTION_DIALOGUE, GUEST_INTERACTION_MOSBY,
@@ -268,6 +269,8 @@ def _set_host_dig_heartbeat(bridge: Bridge, timestamp: int) -> bool:
 
 
 class Host:
+    map_preflight: native_map_preflight.Preflight | None = None
+
     def __init__(self, store: CampaignStore, control: Control, game_build: str, identity,
                  bind: str, port: int, fixtures: bool, death_rules: dict | None, *,
                  native_backend: str | None, native_events: bool, native_guest: bool, native_zones: bool = False,
@@ -1468,6 +1471,20 @@ class Host:
                 or exit_crossing is not None and (route.kind != "overlap" or not self.last_game.get("native_zone_party_guard"))):
             return {"ok": False, "error": "exit_crossing_unavailable"}
         roles = self.roles()
+        if route.discovered and route.destination not in AUTHORED_MAPS | EXPANDED_MAPS:
+            if not await native_map_preflight.register(bridge, route.destination):
+                return {"ok": False, "error": "destination_package_unavailable"}
+            preflight = native_map_preflight.Preflight(route.destination, self.zone_epoch, set(roles.values()) - {"host"})
+            self.map_preflight = preflight
+            try:
+                if not await preflight.wait():
+                    return {"ok": False, "error": "guest_destination_package_unavailable",
+                            "characters": sorted(preflight.missing | preflight.pending)}
+            finally:
+                self.map_preflight = None
+            if self.stopping or self.roles() != roles or self.zone_epoch != preflight.epoch:
+                return {"ok": False, "error": "travel_source_changed"}
+            self.allowed_maps |= {route.destination}
         if refusal := self.travel_refusal(route.destination, roles, exit_crossing=exit_crossing):
             return refusal
         self.transitioning = True
@@ -2139,6 +2156,8 @@ class Host:
             reply["loading_zone"] = destination
         if source := getattr(self, "zone_fade_from", None):
             reply["zone_fade_from"] = source
+        if self.map_preflight and (challenge := self.map_preflight.offer(character)):
+            reply[native_map_preflight.CHALLENGE] = challenge
         return reply
 
     async def project_guest_sprints(self, bridge):
@@ -2187,8 +2206,10 @@ class Host:
         if request.get("action") == "snapshot" and request.keys() <= {
             "action", "voice_events", "avatar_aim", "sprinting", "zone_epoch", native_guest_clock.WORLD_START,
             native_flashlight.GUEST_SOURCE, native_player_avatar.GUEST_LIGHTER, native_player_avatar.GUEST_VISOR,
-            gameplay_snapshot.BASE, gameplay_snapshot.ROW_UPDATES,
+            gameplay_snapshot.BASE, gameplay_snapshot.ROW_UPDATES, native_map_preflight.VOTE,
         }:
+            if self.map_preflight:
+                self.map_preflight.receive(character, request.get("zone_epoch"), request.get(native_map_preflight.VOTE))
             if request.get("zone_epoch") == self.zone_epoch and not self.transitioning:
                 member = self.native_recipients().get(character) if self.native_guest else None
                 if member and member["connected"] and time.monotonic() - self.last_seen < 2:
@@ -4895,6 +4916,9 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             raise ValueError("Load an existing campaign from the Host menu")
         entry_map = old_world.get("map", OBSERVATORY if start_preset or stock_creator else start_zone or MAP)
         authored = entry_map in AUTHORED_MAPS or expanded_zones and entry_map in EXPANDED_MAPS
+        dynamic_entry = (not authored and entry_map not in PLAYTEST_MAPS and expanded_zones
+                         and native_map_preflight.valid_campaign_package(entry_map))
+        authored = authored or dynamic_entry
         if authored and not (native_zones and qualified_authored_routes(work)):
             raise ValueError("Authored co-op routes require the qualified C++ stage and --native-zones")
         if not authored and entry_map not in PLAYTEST_MAPS:
@@ -4963,6 +4987,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                                  runtime_listener=runtime_listener, **game_options)
                 bridge = Bridge(bridge_directory, process)
             ready = await bridge.wait_for(lambda state: state["state"] == "ready")
+            if dynamic_entry and not await native_map_preflight.register(bridge, entry_map):
+                raise ValueError(f"The save's map package is unavailable: {entry_map}")
             if save_scope:
                 if embedded is None:
                     await select_save_scope(bridge, save_scope)
@@ -5081,6 +5107,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                               exact_guest_binding=persist_guest and staged_script(work, "guest_save.lua", "native-guest-bind-exact"),
                               **multi_options)
             controller.internal_port = internal_port
+            if dynamic_entry:
+                controller.allowed_maps |= {entry_map}
             if controller.smg_holds:
                 controller.smg_holds.bridge = bridge
             controller.last_game = bridge.snapshot() or initial_game
@@ -5298,13 +5326,17 @@ async def _character_catalog(invite: dict, name: str | None, operation_id: str |
 
 
 class Client:
+    map_package_vote: tuple[str, str, bool] | None = None
+
     def __init__(self, control: Control, transport, invite: dict, bridge: Bridge, auto_delay: float = 1, *,
-                 allowed_maps: frozenset[str] = PLAYTEST_MAPS, guest_primary_input: bool = False, guest_clock: bool = False):
+                 allowed_maps: frozenset[str] = PLAYTEST_MAPS, guest_primary_input: bool = False, guest_clock: bool = False,
+                 dynamic_maps: bool = False):
         self.control = control
         self.transport = transport
         self.invite = invite
         self.bridge = bridge
         self.allowed_maps = allowed_maps
+        self.dynamic_maps = dynamic_maps
         self.endpoint = f"127.0.0.1:{transport.address[1]}"
         self.auto_delay = auto_delay
         self.next_retry = 0.0
@@ -5408,6 +5440,7 @@ class Client:
     async def connect(self, timeout: float = 6, *, queue: bool = False) -> dict:
         await self.cancel_gameplay_snapshot()
         self.gameplay_snapshots.clear()
+        self.map_package_vote = None
         request = {key: self.invite[key] for key in ("guest_id", "credential", "character_id", "game_build")}
         request["protocol_version"] = PROTOCOL
         if isinstance(self.transport.runtime_id, str):
@@ -5436,9 +5469,15 @@ class Client:
             self.loot_tracking = None
             self.gameplay_seen = 0.0
             self.server_transitioning = False
-        if result.get("zone") not in self.allowed_maps or not isinstance(result.get("zone_epoch"), str):
+        destination = result.get("zone")
+        if not isinstance(result.get("zone_epoch"), str) or not isinstance(destination, str):
             await self.transport.disconnect()
-            raise RuntimeError("Host did not return a supported zone")
+            raise RuntimeError("Host did not return a valid zone")
+        if destination not in self.allowed_maps:
+            if not self.dynamic_maps or not await native_map_preflight.register(self.bridge, destination):
+                await self.transport.disconnect()
+                raise RuntimeError(f"The host's map is unavailable on this guest: {destination}")
+            self.allowed_maps |= {destination}
         if self.zone_epoch and result["zone_epoch"] != self.zone_epoch:
             self.needs_travel = True
             self.empty_zone_retry.note_transition(session, result["zone_epoch"], result["zone"])
@@ -6419,7 +6458,8 @@ class Client:
         aim_changed = aim_update is not None and aim_update != self.last_aim_sent
         flashlight_changed = flashlight_ready and native_flashlight.guest_edge(flashlight_update) != native_flashlight.guest_edge(
             self.last_flashlight_sent)
-        if not (sprint_changed or aim_changed or flashlight_changed or lighter_changed or visor_changed) and (
+        voting = self.map_package_vote
+        if not (sprint_changed or aim_changed or flashlight_changed or lighter_changed or visor_changed or voting) and (
                 edges_only or now < self.next_snapshot):
             if not self.gameplay_change_ready():
                 return
@@ -6431,6 +6471,8 @@ class Client:
         self.last_snapshot_started = now
         self.next_snapshot = now + 0.5
         request = {"action": "snapshot"}
+        if voting and voting[0] == self.zone_epoch:
+            request.update({"zone_epoch": voting[0], native_map_preflight.VOTE: [voting[1], voting[2]]})
         if self.gameplay_snapshots.base is not None:
             request[gameplay_snapshot.BASE] = self.gameplay_snapshots.base
             if self.gameplay_snapshots.row_updates:
@@ -6492,6 +6534,16 @@ class Client:
                     self.zone_epoch = epoch
                     self.expected_zone = reply["zone"]
                     self.zone_fade_from = reply.get("zone_fade_from")
+                    challenge = native_map_preflight.challenge(reply.get(native_map_preflight.CHALLENGE))
+                    if self.dynamic_maps and challenge and not self.needs_travel and not self.server_transitioning:
+                        nonce, package = challenge
+                        if not self.map_package_vote or self.map_package_vote[:2] != (epoch, nonce):
+                            installed = await native_map_preflight.register(self.bridge, package)
+                            if installed:
+                                self.allowed_maps |= {package}
+                            self.map_package_vote = (epoch, nonce, installed)
+                    else:
+                        self.map_package_vote = None
                     await self.sync_zone_loading(reply.get("loading_zone"))
                     # Send the latest edges after handoff without waiting for
                     # another idle iteration or blocking the input loop.
@@ -7516,7 +7568,8 @@ async def join_game(work: Path, directory: Path, invitation: Path | direct_ip.Co
             if game_options["expanded_zones"]:
                 maps |= EXPANDED_MAPS
             client = Client(control, transport, invite, bridge, allowed_maps=maps,
-                            guest_primary_input=game_options["guest_primary_input"], guest_clock=game_options["guest_clock"])
+                            guest_primary_input=game_options["guest_primary_input"], guest_clock=game_options["guest_clock"],
+                            dynamic_maps=game_options["expanded_zones"])
             await bridge.wait_for(lambda state: state["state"] == "ready")
             await client.connect(queue=True)
             try:

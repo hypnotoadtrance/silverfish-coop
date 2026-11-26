@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import replace
 import time
 import tempfile
@@ -288,19 +289,55 @@ class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(host.transitioning)
         self.assertFalse(host.stopping)
 
-    async def test_discovered_route_requires_a_native_ticket_and_supported_destination(self):
+    async def test_discovered_route_requires_a_native_ticket_and_installed_destination(self):
         route = replace(next(route for route in AUTHORED_ROUTES if route.kind == "overlap"), discovered=True)
         host = self.host(route.source, route.destination)
         host.last_game = self.frame(route.source, 1, 500, guarded=True)
-        bridge = Mock(command=AsyncMock())
+        bridge = Mock(command=AsyncMock(return_value={"ack": {"message": "map-package:missing"}}))
         self.assertEqual(await host.travel_authored(bridge, None, route),
                          {"ok": False, "error": "exit_crossing_unavailable"})
+        bridge.command.assert_not_awaited()
         invalid = replace(route, destination="/Game/Classes/Maps/Custom/Arena")
         self.assertEqual(await host.travel_authored(bridge, None, invalid, exit_crossing=17),
-                         {"ok": False, "error": "travel_blocked",
-                          "blockers": [{"id": "host", "reason": "unknown_destination"}]})
-        bridge.command.assert_not_awaited()
+                         {"ok": False, "error": "destination_package_unavailable"})
+        bridge.command.assert_awaited_once_with("native-map-package", invalid.destination, "register", timeout=3)
         host.checkpoint_native.assert_not_awaited()
+
+    async def test_unlisted_world_requires_every_guest_and_matches_current_visit(self):
+        route = replace(next(route for route in AUTHORED_ROUTES if route.kind == "overlap"), discovered=True,
+                        destination="/Game/Classes/Maps/Custom/Arena")
+        for installed in (False, True):
+            host = self.host(route.source, route.source)
+            host.last_game = self.frame(route.source, 1, 500, guarded=True)
+            host.zone_epoch = "source-visit"
+            host.roles.return_value = {"host": "host", "guest": "scout", "guest2": "miner"}
+            host.travel_refusal = Mock(return_value=None)
+            host.switch_zone = AsyncMock(return_value={"ok": True})
+            bridge = Mock(command=AsyncMock(return_value={"ack": {"message": "map-package:world"}}))
+            travel = asyncio.create_task(host.travel_authored(bridge, None, route, exit_crossing=17))
+            await asyncio.sleep(0)
+            preflight = host.map_preflight
+            self.assertIsNotNone(preflight)
+            nonce, package = preflight.offer("scout")
+            self.assertEqual(package, route.destination)
+            self.assertIsNone(preflight.offer("outsider"))
+            preflight.receive("miner", "expired-visit", [nonce, True])
+            preflight.receive("scout", host.zone_epoch, [nonce, True])
+            await asyncio.sleep(0)
+            self.assertFalse(travel.done())
+            preflight.receive("miner", host.zone_epoch, [nonce, installed])
+            result = await travel
+            self.assertIsNone(host.map_preflight)
+            if installed:
+                self.assertEqual(result, {"ok": True})
+                self.assertIn(route.destination, host.allowed_maps)
+                host.switch_zone.assert_awaited_once()
+            else:
+                self.assertEqual(result, {"ok": False, "error": "guest_destination_package_unavailable",
+                                          "characters": ["miner"]})
+                self.assertNotIn(route.destination, host.allowed_maps)
+                host.switch_zone.assert_not_awaited()
+                host.checkpoint_native.assert_not_awaited()
 
     async def test_crossing_cannot_survive_an_application_roster_change(self):
         route = next(route for route in AUTHORED_ROUTES if route.kind == "overlap")

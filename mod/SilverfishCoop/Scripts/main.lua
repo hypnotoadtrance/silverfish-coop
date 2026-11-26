@@ -883,10 +883,20 @@ local function run_command(fields, state, current_phase)
         last_green_arrival = native_green.arrival(state, current_phase)
         return "qualified stock Green Cube arrival"
     elseif command == "native-map-package" then
-        if not expanded_routes or #fields ~= 3 or type(SilverfishInspectMapPackage) ~= "function" then
+        local register = #fields == 4 and fields[4] == "register"
+        if not expanded_routes or (#fields ~= 3 and not register) or type(SilverfishInspectMapPackage) ~= "function" then
             error("Native map package lookup is unavailable", 0)
         end
-        return "map-package:" .. (SilverfishInspectMapPackage(argument) or "registry-unavailable")
+        local verdict = SilverfishInspectMapPackage(argument) or "registry-unavailable"
+        if register and verdict == "world" and not zone_maps[argument] then
+            local leaf = argument:match("^/Game/Classes/Maps/[%w_/]+/([%w_]+)$")
+                or argument:match("^/Game/Classes/Maps/([%w_]+)$")
+            if not leaf or #argument + #leaf + 1 > 180 or argument == main_menu then
+                return "map-package:invalid-package"
+            end
+            zone_maps[argument] = {expanded = true}
+        end
+        return "map-package:" .. verdict
     elseif command == "native-authored-arrival" then
         last_authored_arrival = nil
         if not expanded_routes or #fields ~= 5 or role ~= "host" or current_phase ~= "hosting" then

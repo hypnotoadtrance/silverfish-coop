@@ -5,6 +5,8 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_TI
 local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
 local exit_path = observatory .. ":PersistentLevel.Level_Exit_BP_C_1"
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
+local campus = "/Game/Classes/Maps/Maps_OverWorld/Campus_04_P.Campus_04_P"
+local campaign_worlds = {["World " .. observatory] = true, ["World " .. crossroads] = true, ["World " .. campus] = true}
 local streamed_entrance = "Mod-Stream-Arrival"
 local last, copy, approach, outside, stream
 local arrival_pending, arrival_stream
@@ -54,16 +56,20 @@ local function prepare_arrival(world)
 end
 
 local function run(world, action)
-    local stock = StaticFindObject(exit_path)
+    local current = world:GetFullName()
+    local on_campus = current == "World " .. campus
+    local stock = StaticFindObject(current == "World " .. crossroads
+        and crossroads .. ":PersistentLevel.Level_Exit_BP_C_2" or exit_path)
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     local pawn = api:GetPlayerPawn(world, 0)
-    assert(valid(stock) and valid(pawn) and pawn:HasAuthority() and pawn:IsLocallyControlled())
+    assert(valid(pawn) and pawn:HasAuthority() and pawn:IsLocallyControlled())
     if action == "load" then
         stream = playtest_stream(world, "CoopStreamExitProbe")
         return valid(stream) and "loading" or "failed"
     end
-    if action == "spawn" or action == "spawnstream" then
-        assert(not valid(copy) and not stock.Box:IsOverlappingActor(pawn))
+    if action == "spawn" or action == "spawnstream" or action == "campus" or action == "return" then
+        copy = nil
+        assert(on_campus or valid(stock) and not stock.Box:IsOverlappingActor(pawn))
         if action == "spawnstream" then
             if not valid(stream) or not stream:IsLevelVisible() then return "waiting" end
             local streamed = stream:GetLoadedLevel()
@@ -80,20 +86,31 @@ local function run(world, action)
             end
             assert(valid(copy), "No stock exit was found in the loaded streamed level")
         end
-        local player_point, stock_point = pawn:K2_GetActorLocation(), stock.Box:K2_GetComponentLocation()
-        local dx, dy = player_point.X - stock_point.X, player_point.Y - stock_point.Y
+        local player_point = pawn:K2_GetActorLocation()
+        local stock_point = not on_campus and stock.Box:K2_GetComponentLocation()
+        local dx, dy = 1, 0
+        if stock_point then dx, dy = player_point.X - stock_point.X, player_point.Y - stock_point.Y end
         local distance = math.sqrt(dx * dx + dy * dy)
-        assert(distance > 100, "The stock approach does not identify an outward lane")
+        assert(on_campus or distance > 100, "The stock approach does not identify an outward lane")
         local point = {X = player_point.X + 1250 * dx / distance, Y = player_point.Y + 1250 * dy / distance, Z = player_point.Z + 80}
-        if action == "spawn" then
-            copy = world:SpawnActor(stock:GetClass(), point, stock:K2_GetActorRotation())
+        if action ~= "spawnstream" then
+            local exit_class = on_campus and StaticFindObject("/Game/Classes/ScriptingActors/Level_Exit_BP.Level_Exit_BP_C")
+                or stock:GetClass()
+            copy = world:SpawnActor(exit_class, point, on_campus and pawn:K2_GetActorRotation() or stock:K2_GetActorRotation())
         else
             assert(copy:K2_SetActorLocation(point, false, {}, false))
             copy:K2_SetActorRotation(stock:K2_GetActorRotation(), false)
         end
         assert(valid(copy) and copy:HasAuthority() and valid(copy.Box))
-        copy.NextLevel = stock.NextLevel
-        copy["Entrance Tag"] = action == "spawnstream" and streamed_entrance or "Obsv_Etr"
+        if action == "campus" or action == "return" then
+            local system = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+            local destination = on_campus and crossroads or campus
+            copy.NextLevel = system:Conv_SoftObjPathToSoftObjRef(system:MakeSoftObjectPath(destination))
+            copy["Entrance Tag"] = on_campus and "Obsv_Etr" or "Unlisted-Campus"
+        else
+            copy.NextLevel = stock.NextLevel
+            copy["Entrance Tag"] = action == "spawnstream" and streamed_entrance or "Obsv_Etr"
+        end
         copy.Travel_TimeStep = action == "spawnstream" and 19 or 17
         copy.Box:SetBoxExtent({X = 160, Y = 160, Z = 180}, false)
         copy.Box:SetGenerateOverlapEvents(true)
@@ -148,7 +165,7 @@ LoopInGameThreadWithDelay(50, function()
             arrival_pending = nil
         end
     end
-    if #driver.ClientConnections ~= 1 or world:GetFullName() ~= "World " .. observatory then return end
+    if #driver.ClientConnections ~= 1 or not campaign_worlds[world:GetFullName()] then return end
     local file = io.open(bridge .. "/portable-discovered-exit-command.tsv", "rb")
     if not file then return end
     local input = file:read("*l")

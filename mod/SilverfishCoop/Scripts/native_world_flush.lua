@@ -4,7 +4,8 @@ local routes = require("zone_maps")
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 local enabled = bridge and bridge ~= "" and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local expanded = {}
-if os.getenv("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES") == "1" then
+local expanded_enabled = os.getenv("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES") == "1"
+if expanded_enabled then
     for _, map in ipairs(require("authored_zone_maps")) do expanded[map] = true end
 end
 local statics_path = "/Script/Engine.Default__GameplayStatics"
@@ -171,8 +172,9 @@ end
 
 function native_world_flush.flush(state, phase)
     local result = { state = "skipped", antfarm = "skipped", explosives = "skipped" }
-    if not enabled or phase ~= "hosting" or type(state) ~= "table" or not state.listening or state.server ~= false
-        or not (expanded[state.map] or routes[state.map] and routes[state.map].entrance) then
+    local route = type(state) == "table" and routes[state.map]
+    if not enabled or phase ~= "hosting" or not route or not state.listening or state.server ~= false
+        or not (expanded[state.map] or route.entrance or expanded_enabled and route.expanded) then
         result.reason = "authored_listen_host_required"
         return result
     end

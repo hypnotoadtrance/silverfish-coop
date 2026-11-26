@@ -364,7 +364,7 @@ local function discovered_walls(world, known)
             local box = name and not registered and actor.Box
             if box and valid(box) and box:GetGenerateOverlapEvents() then
                 local destination, tag = SilverfishInspectDiscoveredOverlap(path, actor:GetAddress())
-                if destination and zones[destination] and tag then
+                if destination and tag then
                     sources[path] = {fixture = actor, tag = tag, kind = "overlap", discovered = true}
                 end
             end
