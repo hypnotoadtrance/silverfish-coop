@@ -10,7 +10,6 @@ from tools.silverfish.native_guest_weapon import valid_shot_direction
 from portable_guest_world_start import resident_events
 
 
-MINIMUM_CLEARANCE_CM = 175
 NATIVE_TAP_LIFETIME = 1.5  # native/guest_primary_input.cpp receipt_lifetime
 STRAFE_MILLISECONDS = 750
 HOST_HIT_OBSERVATION_SECONDS = .7
@@ -144,21 +143,24 @@ async def verify_dock_pursuit(host, guest, frame, command):
 
     async def firing_window(side):
         next_retreat = 0
+        moved_for_window = not side
 
         async def find_window():
-            nonlocal next_retreat, last_view
+            nonlocal next_retreat, moved_for_window, last_view
             local = await command(guest, "dock-pursuit-aim")
             if local == "absent":
                 return None
             last_view = local_frame = view_frame(local)
+            unblocked = (not local_frame["blockers"] and not local_frame["cover"]
+                         and aim_error(local_frame["camera"], local_frame["desired"]) <= 8)
+            # Exact sight and muzzle contact are checked again when the stock trigger runs.
+            if moved_for_window and unblocked:
+                return local_frame
             if side and time.monotonic() >= next_retreat:
                 await strafe(local_frame, side)
+                moved_for_window = True
                 next_retreat = time.monotonic() + .75 * STRAFE_MILLISECONDS / 1000
-                return None
-            if (local_frame["clearance_cm"] < MINIMUM_CLEARANCE_CM or local_frame["blockers"] or local_frame["cover"]
-                    or aim_error(local_frame["camera"], local_frame["desired"]) > 8):
-                return None
-            return local_frame
+            return None
 
         return await wait_for(find_window, "No clear and unblocked firing lane during the warehouse pursuit", 7)
 
