@@ -40,7 +40,7 @@ local function run(world, action)
     local guest = connection.PlayerController.Pawn
     assert(valid(guest) and guest:HasAuthority() and not guest:IsLocallyControlled())
     local normal = copy:GetActorForwardVector()
-    local separation = action == "alone" and 2700 or 600
+    local separation = action == "regroup" and 600 or 2700
     assert(guest:K2_SetActorLocation({X = point.X + separation * normal.X, Y = point.Y + separation * normal.Y, Z = point.Z},
         false, {}, false), "The remote pawn could not be positioned for the party-radius check")
     if action == "regroup" then

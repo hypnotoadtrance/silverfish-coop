@@ -68,7 +68,8 @@ async def live_exit(host, guest, pawn, probe, **options):
     assert fallback["native_authored_arrival"]["placement"] == "stock-spawn:entrance-unavailable"
     assert fallback["state"] == "hosting" and fallback["map"] == CROSSROADS
     assert all(not (seat.bridge.directory / "native-authored-exit-events").exists() for seat in (host, guest))
-    return {"stock_exit_discovery": departure, "arrival": arrival, "discovered_wall_blocked_and_opened": True}
+    return {"stock_exit_discovery": departure, "arrival": arrival, "discovered_wall_blocked_and_opened": True,
+            "admitted_crossing_survived_guest_movement": True}
 
 
 if __name__ == "__main__":
