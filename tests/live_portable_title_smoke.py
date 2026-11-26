@@ -6069,6 +6069,16 @@ return actions
 def instrument_crate_loot_presentation(script: str) -> str:
     marker = "            local pickable = ok and not item.moving\n"
     assert script.count(marker) == 1
+    frame_reply = "function projection.frame_reply(fields, state, phase, row)\n"
+    if frame_reply in script:
+        script = script.replace(frame_reply, frame_reply + '''    if phase == "connected" then
+        local micros = SilverfishBridgeProfileStamp()
+        local path = os.getenv("SILVERFISH_COOP_BRIDGE") .. "/portable-crate-loot.tsv"
+        local output = assert(io.open(path, "ab"))
+        output:write("frame", "\\t", micros, "\\n")
+        output:close()
+    end
+''', 1)
     return script.replace(marker, marker + '''            if phase == "connected" and pickable and not was_pickable then
                 local micros = SilverfishBridgeProfileStamp()
                 local path = os.getenv("SILVERFISH_COOP_BRIDGE") .. "/portable-crate-loot.tsv"
@@ -6152,6 +6162,7 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
         items = {native_world_loot.crate_identity(roll["id"], item["guid"]) for item in roll["items"]}
         assert items
         first_views = {}
+        frame_starts = set()
         async with asyncio.timeout(6):
             while items - first_views.keys():
                 if presentation.is_file():
@@ -6159,6 +6170,8 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
                         identity, _, micros = row.partition("\t")
                         if identity in items and micros.isascii() and micros.isdigit():
                             first_views.setdefault(identity, int(micros))
+                        elif identity == "frame" and micros.isascii() and micros.isdigit():
+                            frame_starts.add(int(micros))
                 if items - first_views.keys():
                     await asyncio.sleep(.02)
         pressed_wall_us = pressed_us + wall_offset_us
@@ -6183,6 +6196,10 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
                    "stock_action_ms": round((finished - started) / 1000, 2),
                    "stock_action_steps_ms": steps_ms,
                    "stock_action_to_host_roll_ms": round(committed_ms - (finished - pressed_us) / 1000, 2)}
+        if starts := [stamp for stamp in frame_starts if pressed_us <= stamp <= min(first_views.values())]:
+            started = max(starts)
+            timings["press_to_guest_projection_ms"] = round((started - pressed_us) / 1000, 2)
+            timings["projection_to_first_world_item_ms"] = round((min(first_views.values()) - started) / 1000, 2)
     assert save_fingerprints() == before
     return {
         "local_bridge": {"host": host_state["local_bridge"], "guest": guest_state["local_bridge"]},

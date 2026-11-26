@@ -96,6 +96,35 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaisesRegex(party.RuleError, "native_world_loot_intent_stale"):
                         view.claim_target(current, intent)
 
+    async def test_immediate_world_loot_receipt_replaces_only_the_scoped_loot_records(self):
+        client, view = self.client(), native_world_loot.Projection()
+        loot = native_world_loot
+        game, rows = client.last_game, client.gameplay[record.STATE]
+        old_id = "f" * 32
+        game.update(sequence=42, native_world_view={"rain_intensity": .5},
+                    **{loot.KEY: {old_id: {}}, loot.ERROR_KEY: {old_id: {}}, loot.PHYSICS: {old_id: {}}})
+        identity = loot.player_drop_identity(ID)
+        reply_pawn = PAWN
+
+        async def command(action, area, epoch, *args, timeout):
+            header = (loot.FRAME_REPLY, "1", OPERATION, "connected", area, reply_pawn, epoch, "accepted", "ready")
+            readback = (loot.ROW, area, epoch, identity, reply_pawn, ACTOR, "0", record.ITEM)
+            reply = "\t".join(header) + "\n" + ("\t".join(readback) + "\n" if args else "")
+            return loot.parse_frame_reply(reply, (OPERATION, action, area, epoch, *args))
+
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=command))
+        snapshot = await view.sync(bridge, game, {}, "first", client.zone_epoch, active=True, player_drops=rows)
+        self.assertEqual(snapshot[loot.KEY][identity]["actor"], ACTOR)
+        self.assertEqual(snapshot["sequence"], game["sequence"])
+        self.assertIs(snapshot["native_world_view"], game["native_world_view"])
+        self.assertNotIn(loot.ERROR_KEY, snapshot)
+        self.assertNotIn(loot.PHYSICS, snapshot)
+        self.assertEqual(list(game[loot.KEY]), [old_id])
+
+        reply_pawn = PAWN.replace("404", "405")
+        with self.assertRaisesRegex(RuntimeError, "different game seat"):
+            await view.sync(bridge, snapshot, {}, "first", client.zone_epoch, active=False)
+
     async def test_enemy_drop_keeps_its_identity_when_it_lands_and_becomes_claimable(self):
         client, view = self.client(), native_world_loot.Projection()
         game, zone = client.last_game, client.zone_epoch

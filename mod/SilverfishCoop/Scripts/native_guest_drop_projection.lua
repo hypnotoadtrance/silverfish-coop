@@ -226,6 +226,29 @@ local function same_pose(first, second)
     return true
 end
 
+local function append_world_rows(rows, state, phase, row, pawn, epoch_filter)
+    for id, item in pairs(world_items) do
+        if item.map ~= state.map or not same(pawn, item.pawn) or not same(state.world, item.world) then
+            if SilverfishClearNativeGuestDropProjection(item.slot) then world_items[id] = nil end
+        elseif epoch_filter and item.epoch ~= epoch_filter then
+            -- An older projection may still be retiring from the same world.
+        elseif item.error then
+            rows[#rows + 1] = row("native-world-loot-projection-error", item.map, item.epoch, id, item.class, item.error)
+        else
+            local active, epoch, observed, name, press = SilverfishReadNativeGuestDropProjection(item.slot)
+            if active and epoch == item.epoch and observed == id then
+                if item.carryable then item.actor_name = name end
+                local fields = {"native-world-loot-item", item.map, epoch, id, pawn:GetFullName(), name, press, item.class}
+                if item.moving then fields[#fields + 1] = "moving" end
+                rows[#rows + 1] = row(table.unpack(fields))
+                if phase == "hosting" and item.motion then
+                    rows[#rows + 1] = motion_row(item, id, row)
+                end
+            end
+        end
+    end
+end
+
 function projection.rows(state, phase, row)
     local rows, pawn = {}, local_pawn(state, phase)
     local shared_pickups = valid(pawn) and type(SilverfishSyncNativeWorldLootItem) == "function"
@@ -242,24 +265,7 @@ function projection.rows(state, phase, row)
         rows[#rows + 1] = row("native-guest-drop-projection", current.map, current.epoch, current.id,
             current.pawn:GetFullName(), actor, sequence)
     end
-    for id, item in pairs(world_items) do
-        if item.map ~= state.map or not same(pawn, item.pawn) or not same(state.world, item.world) then
-            if SilverfishClearNativeGuestDropProjection(item.slot) then world_items[id] = nil end
-        elseif item.error then
-            rows[#rows + 1] = row("native-world-loot-projection-error", item.map, item.epoch, id, item.class, item.error)
-        else
-            local active, epoch, observed, name, press = SilverfishReadNativeGuestDropProjection(item.slot)
-            if active and epoch == item.epoch and observed == id then
-                if item.carryable then item.actor_name = name end
-                local fields = {"native-world-loot-item", item.map, epoch, id, pawn:GetFullName(), name, press, item.class}
-                if item.moving then fields[#fields + 1] = "moving" end
-                rows[#rows + 1] = row(table.unpack(fields))
-                if phase == "hosting" and item.motion then
-                    rows[#rows + 1] = motion_row(item, id, row)
-                end
-            end
-        end
-    end
+    append_world_rows(rows, state, phase, row, pawn)
     return rows, shared_pickups
 end
 
@@ -338,6 +344,15 @@ local function item_frame(fields, state, phase)
     if changed then pcall(projection.refresh_stock_inventory, state, false) end
     if errors > 0 then return "stock world loot synchronized with projection errors" end
     return "stock world loot synchronized"
+end
+
+function projection.frame_reply(fields, state, phase, row)
+    local pawn = local_pawn(state, phase)
+    local accepted, message = pcall(item_frame, fields, state, phase)
+    local records = {row("native-world-loot-frame-reply", 1, fields[1], phase, state.map,
+        pawn and pawn:GetFullName() or "-", fields[4] or "-", accepted and "accepted" or "error", message)}
+    if accepted then append_world_rows(records, state, phase, row, pawn, fields[4]) end
+    return table.concat(records, "\n") .. "\n"
 end
 
 local function fixture(pawn, proof_for)

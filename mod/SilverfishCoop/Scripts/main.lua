@@ -1782,6 +1782,14 @@ local function tick(fields, pending, periodic)
     end
     local state, current_phase = observe_session()
     if not state then return end
+    if fields and pending and fields[2] == "native-world-loot-frame" and status_publication.steady(state, current_phase) then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        SilverfishPublishLocalBridgeReply(pending.ticket,
+            native_guest_drop_projection.frame_reply(fields, state, current_phase, status_row))
+        if not periodic then return true end
+        fields, pending = nil, nil
+    end
     local board_menu = fields and status_publication.board_menu[fields[2]]
     if board_menu and pending and status_publication.steady(state, current_phase) then
         if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end

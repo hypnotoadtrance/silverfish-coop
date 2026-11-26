@@ -3908,6 +3908,8 @@ class Bridge:
                 return _parse_local_stock_loot(raw, fields, opening=False)
             if action == "native-loot-open" and raw.startswith("native-loot-open-reply\t"):
                 return _parse_local_stock_loot(raw, fields, opening=True)
+            if action == native_world_loot.FRAME and raw.startswith(native_world_loot.FRAME_REPLY + "\t"):
+                return native_world_loot.parse_frame_reply(raw, fields)
             if action == native_weather_view.LOCAL_APPLY and raw.startswith("native-world-view-reply\t"):
                 return self._local_world_view_reply(raw, fields)
             if action == native_storm_ambience.COMMAND and raw.startswith(native_storm_ambience.REPLY + "\t"):

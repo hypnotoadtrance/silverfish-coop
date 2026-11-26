@@ -22,6 +22,7 @@ PHYSICS_ROW = "native-world-loot-physics"
 PHYSICS = "native_world_loot_physics"
 MOVING = "native_world_loot_moving"
 FRAME = "native-world-loot-frame"
+FRAME_REPLY = "native-world-loot-frame-reply"
 RETIRE = "native-world-loot-retire"
 PRESENT_HOST_CLAIM = "native-world-loot-present-host-claim"
 HOST_PRESENTATION = "native_world_loot_host_presentation"
@@ -100,6 +101,36 @@ def parse_physics(fields, phase, area):
     if not valid_item_transform(transform):
         raise ValueError("Invalid stock world loot physics transform")
     return dict(id=identity, epoch=epoch, class_path=item_class, state=state, transform=transform)
+
+
+def parse_frame_reply(raw: str, request: tuple[str, ...]) -> dict:
+    rows = [line.split("\t") for line in raw.splitlines()] if len(raw) <= 96_000 and raw.endswith("\n") else []
+    if not rows or len(rows[0]) != 9 or len(rows) > 1 + 2 * _MAX_VISIBLE or len(request) < 4:
+        raise RuntimeError("The stock world loot reply was malformed")
+    tag, version, nonce, phase, area, pawn, epoch, status, message = rows[0]
+    if (tag, version, nonce, area, epoch) != (FRAME_REPLY, "1", request[0], *request[2:4]):
+        raise RuntimeError("The stock world loot reply did not match the request")
+    if status != "accepted":
+        raise RuntimeError(message or "The stock world loot frame was refused")
+    if phase not in {"hosting", "connected"} or not pawn_matches(area, pawn):
+        raise RuntimeError("The stock world loot reply did not match the game seat")
+    readers = {ROW: (KEY, parse), ERROR_ROW: (ERROR_KEY, parse_projection_error), PHYSICS_ROW: (PHYSICS, parse_physics)}
+    observed = {KEY: {}, ERROR_KEY: {}, PHYSICS: {}}
+    try:
+        expected = {identity: item_class for identity, item_class, _ in (value.split("|", 2) for value in request[4:])}
+        for line in rows[1:]:
+            key, read = readers[line[0]]
+            item = read(line, phase, area)
+            identity = item["id"]
+            if (item["epoch"] != epoch or expected.get(identity) != item["class_path"]
+                    or identity in observed[key] or item.get("pawn", pawn) != pawn):
+                raise ValueError("Unexpected actor in the stock world loot reply")
+            observed[key][identity] = item
+        if observed[KEY].keys() & observed[ERROR_KEY].keys() or observed[PHYSICS].keys() - observed[KEY].keys():
+            raise ValueError("Incompatible actor readbacks in the stock world loot reply")
+    except (KeyError, ValueError) as error:
+        raise RuntimeError("The stock world loot reply contained invalid actors") from error
+    return {FRAME_REPLY: (phase, area, pawn), **observed}
 
 
 @dataclass(frozen=True)
@@ -359,6 +390,16 @@ class Projection:
         self.next_sync = now + .65
         self.previous = signature
         snapshot = await bridge.command(FRAME, area, epoch, *args, timeout=3)
+        if FRAME_REPLY in snapshot:
+            if snapshot[FRAME_REPLY] != seat:
+                raise RuntimeError("The stock world loot reply belonged to a different game seat")
+            merged = game.copy()
+            for key in (KEY, ERROR_KEY, PHYSICS):
+                if snapshot[key]:
+                    merged[key] = snapshot[key]
+                else:
+                    merged.pop(key, None)
+            snapshot = merged
         self.epoch = epoch
         self.seat = seat
         self.last_error = None
