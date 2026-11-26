@@ -6792,6 +6792,11 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         async with asyncio.timeout(10):
             while True:
                 entries = await resident_events(guest_run, frame)
+                preview = next((row for row in entries if row.get("mode") == "merge" and row.get("guid") == split_id), None)
+                if preview:
+                    rejection = next((row for row in entries if row.get("event") == "native_stock_inventory_rejected"
+                                      and row.get("operation_id") == preview["operation_id"]), None)
+                    assert rejection is None, rejection
                 found = [row for row in entries if row.get(native_inventory.MERGE_KEY, {}).get("source_guid") == split_id]
                 if found:
                     break
@@ -7520,6 +7525,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     ):
         if enabled:
             resident_campaigns.setdefault(campaign, []).append((name, check))
+    if stock_split and resident_campaigns:
+        resident_campaigns["stock_split"] = [("stock_split_and_merge",
+            lambda host, guest, pawn: verify_gameplay(host, guest, pawn, stock_split=True))]
     single_scenario = (bool(resident_campaigns) or stock_prop_grip
                        or stock_crate_ring or guest_world_start
                        or guest_ui_memory or compact_crate_status or compact_world_view or guest_shop_lease
@@ -8117,10 +8125,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
 
                 before_join = {"storm": storm_trial.prepare} if storm_trial else {}
                 before_join["tutorial_dock_late_join"] = prepare_warehouse
+                create_character = {"stash": create_stock_bag_character, "stock_split": create_stock_split_character}
                 session = asyncio.create_task(start_pair(
                     host, second, "Gameplay scout", on_join=run_checks,
                     before_join=before_join.get(campaign),
-                    create_character=create_stock_bag_character if campaign == "stash" else None,
+                    create_character=create_character.get(campaign),
                     initial_map=WAREHOUSE_DOCK if campaign == "tutorial_dock_late_join" else OBSERVATORY,
                     wait_status=wait_resident_status, host_exit_actions=exit_actions,
                     after_reconnect=after_reconnect, friendly_fire=campaign == "friendly_fire_enabled"))
@@ -8532,7 +8541,7 @@ if __name__ == "__main__":
             args.guest_world_start, args.guest_world_start_travel, args.guest_ui_memory, args.compact_crate_status,
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
-    resident_check_options = {"guest_shop_lease", "stock_unequip", "stock_food", "stock_personal_consumable", "stock_wipe_chooser",
+    resident_check_options = {"guest_shop_lease", "stock_unequip", "stock_split", "stock_food", "stock_personal_consumable", "stock_wipe_chooser",
                               "stock_campfire", "stock_npc_override", "stock_dock_population",
                               "stock_dead_drops",
                               "stock_board_offers", "stock_quarry_photo", "resident_weapon_cues", "resident_held_queue", "resident_stale_quick_slot",

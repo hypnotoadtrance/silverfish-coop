@@ -15,7 +15,6 @@ local save_class = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local item_class = "/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"
 local texture_class = "/Script/Engine.Texture2D"
 local quest_photos = "/Game/Classes/GUI/GUI_Elements/QuestPhotos/"
-local missing_contact_package = "/Game/Classes/Items/Key_Items/Package_Item_FarmHouse.Package_Item_FarmHouse_C"
 local item = {
     class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81",
     ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788",
@@ -94,6 +93,23 @@ local function fields(array, wrap)
     return result
 end
 
+local function item_path(class)
+    local path = valid(class) and class:GetFullName():match("^BlueprintGeneratedClass (/Game/[%w_./%-]+_C)$")
+    if path and #path <= 512 and not path:find("..", 1, true) then return path end
+end
+
+local function resolve_item_class(name)
+    if #name > 512 or not name:match("^/Game/[%w_./%-]+_C$") or name:find("..", 1, true) then return end
+    local class = StaticFindObject(name)
+    if not valid(class) then
+        if not pcall(LoadAsset, name) then return end
+        class = StaticFindObject(name)
+    end
+    local base = StaticFindObject(item_class)
+    local defaults = item_path(class) and class:GetCDO()
+    if valid(defaults) and valid(base) and defaults:IsA(base) then return class end
+end
+
 local function photo_name(texture)
     if not exact(texture, texture_class) then return "-" end
     local path = texture:GetFullName():match("^Texture2D (.+)$")
@@ -155,7 +171,7 @@ local function capture(state, phase, pawn_name)
             local entry = array and source[index] or source
             local class = entry and entry[item.class]
             if valid(class) then
-                local class_path = class:GetFullName():match("^BlueprintGeneratedClass (/Game/[%w_./%-]+)$")
+                local class_path = item_path(class)
                 local guid, pieces = entry[item.guid], {}
                 if not class_path then error("Invalid co-op inventory class", 0) end
                 for j, name in ipairs(axes) do pieces[j] = tostring(guid[name]) end
@@ -174,12 +190,20 @@ local function capture(state, phase, pawn_name)
         local id, entry = key:get():ToString(), value:get()
         if not id:match("^[A-Za-z0-9_]+$") or #id > 96 then error("Invalid co-op quest identifier", 0) end
         local images = fields(entry[quest.images], photo_name)
-        quests[#quests+1] = table.concat({"quest", id, entry[quest.kind], quest_catalog.tracked_step(canonical, entry), entry[quest.final],
-            encode(entry[quest.name]), encode(entry[quest.giver]), photo_name(entry[quest.icon]), table.concat(images, ","),
-            table.unpack(fields(entry[quest.descriptions], encode))}, "\t")
+        local objectives = {}
+        for index = 1, count(entry[quest.objectives]) do
+            local path = item_path(entry[quest.objectives][index])
+            if path then objectives[#objectives + 1] = path end
+        end
+        local row = {#objectives > 0 and "quest-objectives" or "quest", id, entry[quest.kind],
+            quest_catalog.tracked_step(canonical, entry), entry[quest.final], encode(entry[quest.name]),
+            encode(entry[quest.giver]), photo_name(entry[quest.icon]), table.concat(images, ",")}
+        if #objectives > 0 then row[#row + 1] = table.concat(objectives, ",") end
+        for _, description in ipairs(fields(entry[quest.descriptions], encode)) do row[#row + 1] = description end
+        quests[#quests+1] = {id = id, row = table.concat(row, "\t")}
     end)
-    table.sort(quests)
-    for _, row in ipairs(quests) do rows[#rows+1] = row end
+    table.sort(quests, function(first, second) return first.id < second.id end)
+    for _, quest_frame in ipairs(quests) do rows[#rows+1] = quest_frame.row end
     local contents = table.concat(rows, "\n") .. "\n"
     if #rows > max_rows or #contents > max_size then error("The co-op view exceeds its transfer bounds", 0) end
     return contents
@@ -187,12 +211,9 @@ end
 
 local function item_row(columns)
     local name = columns[4]
-    if #columns ~= 12 or not slots[columns[2]] or #name > 512 or not name:match("^/Game/[%w_./%-]+_C$")
-        or name:find("..", 1, true) then error("Invalid co-op inventory row", 0) end
-    local class = StaticFindObject(name)
-    if not valid(class) then LoadAsset(name); class = StaticFindObject(name) end
-    local stock = StaticFindObject(item_class)
-    if not valid(class) or not valid(stock) or not class:GetCDO():IsA(stock) then error("Invalid co-op item class", 0) end
+    if #columns ~= 12 or not slots[columns[2]] then error("Invalid co-op inventory row", 0) end
+    local class = resolve_item_class(name)
+    if not class then error("Invalid co-op item class", 0) end
     local guid, weight = {}, tonumber(columns[6])
     if not weight or not (weight >= 0 and weight <= 100000) then error("Invalid co-op item weight", 0) end
     for index, axis in ipairs(axes) do guid[axis] = integer(columns[index+8], -2147483648, 4294967295) end
@@ -278,7 +299,8 @@ local function project(state, phase, character, path, raw, sequence)
             if image then attachments = attachments + 1 end
             local body = journal[note_count][notes.body]
             for i = 4, #row do body[i - 3] = decode(row[i]) end
-        elseif row[1] == "quest" and #row >= 9 and #row[2] <= 96 and row[2]:match("^[A-Za-z0-9_]+$") then
+        elseif (row[1] == "quest" and #row >= 9 or row[1] == "quest-objectives" and #row >= 10)
+            and #row[2] <= 96 and row[2]:match("^[A-Za-z0-9_]+$") then
             local key, quests = FName(row[2]), view.ActiveQuests
             local step = integer(row[4], min_int32, max_int32)
             local icon = photo(row[8])
@@ -288,13 +310,20 @@ local function project(state, phase, character, path, raw, sequence)
             if step == completed_step then completed = completed + 1 end
             if icon then attachments = attachments + 1 end
             local entry = quests:Find(key):get()
-            if row[2]:lower() == "note_farmhouse" then
-                -- The stock inventory checks the objective class before opening its quest warning.
-                local package = StaticFindObject(missing_contact_package)
-                if valid(package) then entry[quest.objectives][1] = package end
+            local first_description = 10
+            if row[1] == "quest-objectives" then
+                first_description = 11
+                local index = 0
+                for path in (row[10] .. ","):gmatch("([^,]*),") do
+                    local objective = resolve_item_class(path)
+                    if objective then
+                        index = integer(index + 1, 1, max_rows)
+                        entry[quest.objectives][index] = objective
+                    end
+                end
             end
             local descriptions, images = entry[quest.descriptions], entry[quest.images]
-            for i = 10, #row do descriptions[i - 9] = decode(row[i]) end
+            for i = first_description, #row do descriptions[i - first_description + 1] = decode(row[i]) end
             if row[9] ~= "" then
                 local index = 0
                 for name in (row[9] .. ","):gmatch("([^,]*),") do
