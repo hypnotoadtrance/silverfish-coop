@@ -1824,6 +1824,69 @@ local function solo_combat(world, action, slot)
     return ("stock inventory and lethal drone damage %.3f"):format(total.TotalDamage)
 end
 
+
+local streamed_npc_fixture
+
+local function streamed_npc(world, pawn, host, action)
+    if action == "stream-npc-load" then
+        local loading = StaticFindObject("/Script/Engine.Default__LevelStreamingDynamic")
+        local stream = loading:LoadLevelInstance(world, "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P",
+            {X=45000,Y=45000,Z=2000}, {Pitch=0,Yaw=0,Roll=0}, {}, "CoopNpcSublevel", nil, false)
+        assert(valid(stream), "could not load the NPC test sublevel")
+        streamed_npc_fixture = {world=world, stream=stream}
+        return "loading"
+    end
+    local fixture = streamed_npc_fixture
+    assert(fixture and same(fixture.world, world) and valid(fixture.stream))
+    if not fixture.stream:IsLevelVisible() then return "waiting" end
+    local level = fixture.stream:GetLoadedLevel()
+    assert(valid(level) and not same(level, world.PersistentLevel))
+    local actor = fixture.actor
+    if not valid(actor) then
+        local path = level:GetFullName():match("^%S+ (.+)$")
+        actor = StaticFindObject(path .. ".NPC_Survivor_Worker_C_1")
+        if not valid(actor) then return "waiting" end
+        fixture.actor = actor
+    end
+    assert(same(actor:GetOuter(), level), "the NPC must belong to the visible streamed sublevel of this campaign")
+    if action == "stream-npc-world" then
+        local read, owning = pcall(function() return level.OwningWorld end)
+        return ("actor-world=%s;level-owning-world=%s"):format(actor:GetWorld():GetFullName(),
+            read and valid(owning) and owning:GetFullName() or "-")
+    end
+    if action == "stream-npc-stage" then
+        assert(host and actor.Alive and actor:HasAuthority())
+        local origin = pawn:K2_GetActorLocation()
+        assert(actor:K2_SetActorLocation({X=origin.X+180,Y=origin.Y,Z=origin.Z+18}, false, {}, true))
+        actor.CharacterMovement:DisableMovement()
+        actor:SetActorTickEnabled(false)
+        actor.bAlwaysRelevant = true
+        actor:SetReplicates(true)
+        actor:ForceNetUpdate()
+        return actor:GetFullName()
+    end
+    if action == "stream-npc-status" then
+        return ("%d,%s,%.6f,%s"):format(actor:GetLocalRole(), tostring(actor.Alive),
+            actor.Health, tostring(actor.Mesh:IsAnySimulatingPhysics()))
+    end
+    if action == "stream-npc-damage" then
+        assert(actor.Alive and actor.Health > 0 and actor.bReplicates
+            and actor:GetLocalRole() == (host and 3 or 1), "the NPC must be a live authority or enrolled replica")
+        local before = actor.Health
+        local total, lethal = {}, {}
+        actor:DealDamage({[damage_key]=2000}, {}, pawn, {X=0,Y=0,Z=0}, false, total, lethal)
+        if host then
+            assert(total.TotalDamage > 0 and lethal.IsLethal and not actor.Alive, "authority damage did not kill the NPC")
+            return "killed"
+        end
+        assert(total.TotalDamage == 0 and lethal.IsLethal == false and actor.Health == before and actor.Alive,
+            ("streamed NPC took local guest damage: %s, %s (%.3f to %.3f)"):format(
+                tostring(total.TotalDamage), tostring(lethal.IsLethal), before, actor.Health))
+        return "damage denied"
+    end
+    error("unknown streamed NPC probe")
+end
+
 local function run(action, actor_path)
     if action == "disarm-weapon-observers" then
         shot_turret, turret_effects = nil, nil
@@ -1847,6 +1910,7 @@ local function run(action, actor_path)
     local pawn = statics:GetPlayerPawn(world, 0)
     assert(valid(pawn) and pawn:IsLocallyControlled() and same(pawn:GetWorld(), world), "local stock pawn unavailable")
     local host = pawn:HasAuthority()
+    if action:match("^stream%-npc%-") then return streamed_npc(world, pawn, host, action) end
     if action == "melee-local-arm" or action == "melee-local-read" then
         assert(not host, "first-person melee observer requires the guest")
         return observe_local_melee(action, pawn)

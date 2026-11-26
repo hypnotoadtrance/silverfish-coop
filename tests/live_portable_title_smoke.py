@@ -5026,6 +5026,36 @@ async def verify_resident_npc_override(host: Seat, guest: Seat, _pawn=None, *, f
                                       "ragdoll_on_both": True, "campaign_checkpoint_unchanged": True}}
 
 
+async def verify_stock_streamed_npc(host: Seat, guest: Seat, _pawn: str) -> dict:
+    async def command(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-npc-override", f"stream-npc-{action}")
+
+    checkpoint = campaign_save_hashes(host.campaign)
+    for seat in (host, guest):
+        assert await command(seat, "load") == "loading"
+        async with asyncio.timeout(8):
+            while await command(seat, "status") == "waiting":
+                await asyncio.sleep(.1)
+    ownership = [await command(seat, "world") for seat in (host, guest)]
+    actor = await command(host, "stage")
+    assert "CoopNpcSublevel" in actor, actor
+    async with asyncio.timeout(8):
+        while not (observed := await command(guest, "status")).startswith("1,true,"):
+            await asyncio.sleep(.1)
+    host_before = await command(host, "status")
+    assert await command(guest, "damage") == "damage denied", ownership
+    assert await command(host, "status") == host_before, ownership
+    assert await command(host, "damage") == "killed"
+    async with asyncio.timeout(8):
+        while not (await command(guest, "status")).endswith(",true"):
+            await asyncio.sleep(.1)
+    after = [await command(seat, "status") for seat in (host, guest)]
+    assert all(row.split(",")[1] == "false" and row.endswith(",true") for row in after), after
+    assert campaign_save_hashes(host.campaign) == checkpoint
+    return {"actor": actor, "world_lookup": ownership, "guest_before": observed, "final_states": after,
+            "guest_local_damage_denied": True, "campaign_checkpoint_unchanged": True}
+
+
 async def verify_stock_host_corpse_carry(host: Seat, guest: Seat, _pawn: str) -> dict:
     async def carry(seat, action, *, read=False):
         return await portable_probe_command(seat.bridge, "portable-npc-override",
@@ -7640,6 +7670,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_personal_consumable: bool = False,
                  stock_wipe_chooser: bool = False,
                  stock_npc_override: bool = False, stock_dock_population: bool = False,
+                 stock_streamed_npc: bool = False,
                  manage_saves: bool = False,
                  stock_dead_drops: bool = False,
                  stock_board_offers: bool = False, stock_streamed_board: bool = False, stock_quarry_photo: bool = False,
@@ -7775,6 +7806,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (guest_shop_lease, "shop_lease", "stock_shop_lease", verify_guest_shop_lease),
         (stock_campfire, "observatory", "stock_campfire", verify_resident_campfire),
         (stock_npc_override and not resident_weapon_cues, "observatory", "stock_npc_override", verify_resident_npc_override),
+        (stock_streamed_npc, "streamed_npc", "stock_streamed_npc", verify_stock_streamed_npc),
         (stock_dead_drops, "crossroads_dead_drop", "crossroads_dead_drop",
          lambda host, guest, _pawn: verify_dead_drop(host, guest, native_computer_board.DEAD_DROP,
                                                      native_dead_drop.CROSSROADS_DROP)),
@@ -8191,7 +8223,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if ((stock_npc_override and resident_weapon_cues) or stock_melee_family or tutorial_dock_melee
                 or tutorial_dock_combat or stock_host_corpse_carry):
             proof["npc_combat_overlays"] = [probes.enter_context(host_npc_combat_overlay(game)) for game in games]
-        elif stock_npc_rivalry or stock_npc_override or stock_melee_edges or stock_dock_population:
+        elif stock_npc_rivalry or stock_npc_override or stock_streamed_npc or stock_melee_edges or stock_dock_population:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
                                                      fixture="portable_npc_override_probe.lua"))
@@ -8740,6 +8772,7 @@ if __name__ == "__main__":
                         help="Observe stock handheld and offhand beams on the connected seat")
     parser.add_argument("--stock-host-corpse-carry", action="store_true",
                         help="Measure stock host ragdoll carry on the guest and verify physics returns on release")
+    parser.add_argument("--stock-streamed-npc", action="store_true", help="check stock NPC damage in a streamed sublevel")
     parser.add_argument("--stock-npc-override", action="store_true",
                         help="verify stock drone damage authority in co-op and stock combat after returning to Singleplayer")
     parser.add_argument("--stock-split", action="store_true", help="test the stock guest stack-split popup with a Veteran loadout")
@@ -8951,7 +8984,7 @@ if __name__ == "__main__":
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
     resident_check_options = {"guest_shop_lease", "stock_unequip", "stock_split", "stock_food", "stock_personal_consumable", "stock_wipe_chooser",
-                              "stock_campfire", "stock_npc_override", "stock_dock_population",
+                              "stock_campfire", "stock_npc_override", "stock_dock_population", "stock_streamed_npc",
                               "stock_dead_drops",
                               "stock_board_offers", "stock_quarry_photo", "resident_weapon_cues", "resident_held_queue", "resident_stale_quick_slot",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "tutorial_dock_pursuit",
@@ -9009,7 +9042,7 @@ if __name__ == "__main__":
     if args.crossroads_profile:
         resident_check_options.add("stock_crate_ring")
     if any((args.stock_food, args.stock_cooked_meal, args.stock_personal_consumable, args.stock_wipe_chooser,
-            args.stock_campfire, args.stock_npc_override, args.stock_dock_population,
+            args.stock_campfire, args.stock_npc_override, args.stock_dock_population, args.stock_streamed_npc,
             args.stock_dead_drops,
             args.stock_board_offers, args.stock_quarry_photo, args.tutorial_dock_melee,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_buried_placements,
@@ -9068,6 +9101,7 @@ if __name__ == "__main__":
                        stock_personal_consumable=args.stock_personal_consumable,
                        stock_wipe_chooser=args.stock_wipe_chooser,
                        stock_npc_override=args.stock_npc_override, stock_dock_population=args.stock_dock_population,
+                       stock_streamed_npc=args.stock_streamed_npc,
                        manage_saves=args.manage_saves,
                        stock_dead_drops=args.stock_dead_drops,
                        stock_board_offers=args.stock_board_offers,

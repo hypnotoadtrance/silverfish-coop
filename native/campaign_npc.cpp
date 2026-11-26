@@ -266,11 +266,21 @@ namespace
         return actor_type && actor_type->GetFName() == type && exact(actor, spawner_class);
     }
 
-    bool in_level(U::UObject* actor, U::UWorld* world)
+    U::UWorld* visible_level_owner(U::UObject* level)
     {
-        return live(actor) && static_cast<U::AActor*>(actor)->GetWorld() == world &&
-            static_cast<U::AActor*>(actor)->GetLevel() == object(world, STR("PersistentLevel")) &&
-            bool_field(actor, STR("bActorIsBeingDestroyed"), false);
+        if (!live(level) || !bool_field(level, STR("bIsVisible"), true)) return nullptr;
+        auto* owner = object(level, STR("OwningWorld"));
+        return live(owner) ? U::Cast<U::UWorld>(owner) : nullptr;
+    }
+
+    bool in_level(U::UObject* actor, U::UWorld* world, bool include_streamed = false)
+    {
+        if (!live(actor) || !live(world)) return false;
+        auto* candidate = static_cast<U::AActor*>(actor);
+        auto* level = candidate->GetLevel();
+        const bool in_world = level && level == object(world, STR("PersistentLevel"))
+            ? candidate->GetWorld() == world : include_streamed && visible_level_owner(level) == world;
+        return in_world && bool_field(actor, STR("bActorIsBeingDestroyed"), false);
     }
 
     bool env(const char* variable)
@@ -320,6 +330,16 @@ namespace
     {
         auto* driver = object(world, STR("NetDriver"));
         return live(driver) ? driver : nullptr;
+    }
+
+    U::UWorld* combat_world(U::UObject* receiver)
+    {
+        auto* world = actor_world(receiver);
+        if (!world || world_driver(world)) return world;
+        // Streamed actors can return the asset world through UE4SS. The visible
+        // level's owning world supplies the campaign driver without a nested call.
+        auto* owner = visible_level_owner(static_cast<U::AActor*>(receiver)->GetLevel());
+        return world_driver(owner) ? owner : world;
     }
 
     const DirectorProfile* director_for(std::wstring_view path)
@@ -1709,7 +1729,7 @@ namespace
         const auto action = std::ranges::find(actions, function->GetFName(), &Action::name);
         if (action == actions.end() || function->GetReturnProperty() ||
             function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return false;
-        auto* world = actor_world(receiver);
+        auto* world = combat_world(receiver);
         auto* driver = world_driver(world);
         if (!driver) return false;
         // The stock parent also covers children that implement their own strike.
@@ -1719,7 +1739,7 @@ namespace
         while (ancestor && ancestor->GetPathName() != action->path) ancestor = ancestor->GetSuperStruct();
         if (!ancestor) return false;
 
-        if (!in_level(receiver, world) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
+        if (!in_level(receiver, world, true) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
             object(driver, STR("World")) != world) return false;
         const auto role = byte_field(receiver, STR("Role"));
         auto* connection = object(driver, STR("ServerConnection"));
@@ -1747,12 +1767,12 @@ namespace
         static const U::FName fire{STR("FireRound")};
         if (!production_roster || !receiver || !function || function->GetFName() != fire ||
             call.OriginalFunctionCallPrevented()) return false;
-        auto* world = actor_world(receiver);
+        auto* world = combat_world(receiver);
         auto* driver = world_driver(world);
         if (!driver) return false;
         auto* owner = U::Cast<U::UClass>(function->GetOuterPrivate());
         if (function->GetPathName() != turret_fire_path || !owner || !receiver->GetClassPrivate()->IsChildOf(owner)) return false;
-        if (!in_level(receiver, world) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
+        if (!in_level(receiver, world, true) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
             object(driver, STR("World")) != world) return false;
         const auto role = byte_field(receiver, STR("Role"));
         auto* connection = object(driver, STR("ServerConnection"));
@@ -1795,7 +1815,7 @@ namespace
 
         // Reject standalone and listen-server damage before inspecting Blueprint ancestry.
         // A joining guest can execute a local Blueprint before World.NetDriver is set.
-        auto* world = actor_world(receiver);
+        auto* world = combat_world(receiver);
         if (!world) return false;
         auto* driver = world_driver(world);
         auto* server = object(driver, STR("ServerConnection"));
@@ -1823,7 +1843,7 @@ namespace
 
         // The game may call a fresh local actor before its queued removal.
         if (ghost ? !local_client_npc(receiver, world)
-            : !in_level(receiver, world) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
+            : !in_level(receiver, world, true) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
                 object(driver, STR("World")) != world || !server_connection(server, driver))
             return false;
         auto* total = damage ? hit_field<U::FDoubleProperty>(function, STR("TotalDamage"), 0x178, true) : nullptr;
