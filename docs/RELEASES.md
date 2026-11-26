@@ -6,9 +6,9 @@ Candidates are listed by publication time, newest first. When older candidates a
 
 | Published (UTC) | Release notes | ZIP |
 | --- | --- | --- |
+| 2026-11-26 19:25:08 | [`rc-1c86690`](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-1c86690) | [Download](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/rc-1c86690/Silverfish-Coop-RC-1c86690.zip) |
 | 2026-11-26 19:04:13 | [`rc-e3ce0b3`](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-e3ce0b3) | [Download](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/rc-e3ce0b3/Silverfish-Coop-RC-e3ce0b3.zip) |
 | 2026-11-26 18:44:19 | [`rc-e46942a`](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-e46942a) | [Download](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/rc-e46942a/Silverfish-Coop-RC-e46942a.zip) |
-| 2026-11-26 18:26:58 | [`rc-863f4f0`](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-863f4f0) | [Download](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/rc-863f4f0/Silverfish-Coop-RC-863f4f0.zip) |
 | 2026-11-26 06:52:30 | [`rc-3429efb`](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-3429efb) | [Download](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/rc-3429efb/Silverfish-Coop-RC-3429efb.zip) |
 | 2026-11-25 02:08:05 | [`rc-161145a`](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-161145a) | [Download](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/rc-161145a/Silverfish-Coop-RC-161145a.zip) |
 | 2026-11-24 06:44:56 | [`rc-77eb667`](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-77eb667) | [Download](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/rc-77eb667/Silverfish-Coop-RC-77eb667.zip) |
