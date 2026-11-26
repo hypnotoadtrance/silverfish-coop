@@ -126,7 +126,8 @@ async def check_unlisted_resume(host, guest, character_name, **kwargs):
 
     first = await start_pair(host, guest, character_name, **kwargs, after_exit=capture_checkpoint)
     second = await start_pair(host, guest, character_name, load_existing=True, resume_character=first["character_id"],
-                              initial_map=UNLISTED_SHOP, wait_status=suite.wait_resident_status, on_join=verify_reloaded)
+                              initial_map=UNLISTED_SHOP, wait_status=suite.wait_resident_status, on_join=verify_reloaded,
+                              host_exit_actions=("prompt", "confirm"))
     assert second["campaign_id"] == first["campaign_id"] and second["character_id"] == first["character_id"]
     assert second["revision"] > save["revision"] == first["revision"]
     assert (second["host_pid"], second["guest_pid"]) == (first["host_pid"], first["guest_pid"])
