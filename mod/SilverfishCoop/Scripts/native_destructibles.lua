@@ -1,5 +1,5 @@
 local props = {}
-local class_path = "/Game/Assets/StaticMeshes/Destructable/Static_DestructableObject_Master_BP.Static_DestructableObject_Master_BP_C"
+local world_path = require("world_path")
 local max_actors, max_roster_bytes = 512, 30 * 1024
 local visit
 
@@ -39,12 +39,10 @@ local function census(state, phase)
     if visit and same(visit.world, state.world) then props.clear() else visit = nil end
     if type(SilverfishQualifyNativePlacedDestructible) ~= "function" then return end
     local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
-    local class = StaticFindObject(class_path)
-    if not valid(statics) or not valid(class) then return end
-    local output = {}
-    statics:GetAllActorsOfClass(state.world, class, output)
+    local paths = valid(statics) and world_path.actor_paths(state.world, "destructible")
+    if not paths then return end
     visit = {actors = {}, addresses = {}, ids = {}, phase = phase, world = state.world, map = state.map,
-        statics = statics, pending = output.OutActors or output, cursor = 1}
+        statics = statics, pending = paths, cursor = 1}
 end
 
 function props.update(current_world)
@@ -62,14 +60,13 @@ function props.update(current_world)
             current.pending, current.ready = nil, true
             return
         end
-        local actor = current.pending[current.cursor]
+        local path = current.pending[current.cursor]
         current.cursor = current.cursor + 1
-        if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
+        local actor = StaticFindObject(path)
         -- Client copies of authored non-replicating actors can have a simulated role.
-        if live(actor) and actor.bReplicates == false and (guest or actor:HasAuthority()) then
-            local path = actor:GetFullName():match("^%S+ (.+)$")
-            local placed, remote
-            if path then placed, remote = SilverfishQualifyNativePlacedDestructible(path) end
+        if live(actor) and same(actor:GetWorld(), current.world) and actor.bReplicates == false
+            and (guest or actor:HasAuthority()) then
+            local placed, remote = SilverfishQualifyNativePlacedDestructible(path)
             if placed and remote == guest then
                 local id = path:match(":PersistentLevel%.([^%.]+)$")
                 -- Publish only after the entire roster is qualified.

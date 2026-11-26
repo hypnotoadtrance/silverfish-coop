@@ -16,6 +16,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <Helpers/String.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
@@ -25,6 +26,7 @@
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/FFrame.hpp>
 #include <Unreal/FWeakObjectPtr.hpp>
+#include <Unreal/GameplayStatics.hpp>
 #include <Unreal/Hooks.hpp>
 #include <Unreal/SoftObjectPtr.hpp>
 #include <Unreal/UAssetRegistryHelpers.hpp>
@@ -666,6 +668,36 @@ namespace
         if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_string(1)) return 0;
         const auto status = map_package_status(RC::to_wstring(lua.get_string()));
         lua.set_string(std::string{status});
+        return 1;
+    }
+
+    int lua_snapshot_world_actor_paths(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 3 || !lua.is_integer(1) ||
+            !lua.is_string(2) || !lua.is_string(3)) return 0;
+        const auto address_expected = static_cast<Address>(lua.get_integer());
+        const auto world_path = RC::to_wstring(lua.get_string());
+        const auto kind = lua.get_string();
+        const auto* class_path = kind == "destructible"
+            ? STR("/Game/Assets/StaticMeshes/Destructable/Static_DestructableObject_Master_BP.Static_DestructableObject_Master_BP_C")
+            : kind == "physics-prop" ? STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C") : nullptr;
+        if (!class_path || !silverfish::world_path::object(RC::StringViewType{world_path})) return 0;
+        auto* world = find<Unreal::UWorld>(world_path.c_str());
+        auto* base = find<Unreal::UClass>(class_path);
+        if (!live_object(world) || address(world) != address_expected || world->GetPathName() != world_path || !base) return 0;
+
+        std::vector<Unreal::AActor*> actors;
+        Unreal::UGameplayStatics::GetAllActorsOfClass(world, base, actors);
+        std::string paths;
+        for (auto* actor : actors)
+        {
+            if (!live_object(actor)) continue;
+            const auto path = RC::to_utf8_string(actor->GetPathName());
+            if (path.empty() || path.find_first_of("\r\n\t") != std::string::npos) continue;
+            paths.append(path);
+            paths.push_back('\n');
+        }
+        lua.set_string(paths);
         return 1;
     }
 
@@ -1735,6 +1767,7 @@ namespace silverfish::native_zone
         lua.register_function("SilverfishSetNativeExitApproach", lua_exit_approach);
         lua.register_function("SilverfishInspectDiscoveredOverlap", lua_discovered_overlap);
         lua.register_function("SilverfishInspectMapPackage", lua_inspect_map_package);
+        lua.register_function("SilverfishSnapshotNativeWorldActorPaths", lua_snapshot_world_actor_paths);
         lua.register_function("SilverfishCheckNativeExitCrossing", lua_exit_crossing);
         lua.register_function("SilverfishTakeNativeZoneEvent", lua_take_event);
         lua.register_function("SilverfishTakeNativeAuthoredRoute", lua_take_authored_route);

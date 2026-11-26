@@ -21,6 +21,16 @@ end
 local function valid(object) return object and object:IsValid() end
 local function same(left, right) return valid(left) and valid(right) and left:GetAddress() == right:GetAddress() end
 
+function world_path.actor_paths(world, kind)
+    if not valid(world) or type(SilverfishSnapshotNativeWorldActorPaths) ~= "function" then return end
+    local name = world:GetFullName():match("^World (.+)$")
+    local encoded = name and SilverfishSnapshotNativeWorldActorPaths(world:GetAddress(), name, kind)
+    if type(encoded) ~= "string" then return end
+    local paths = {}
+    for path in encoded:gmatch("[^\n]+") do paths[#paths + 1] = path end
+    return paths
+end
+
 function world_path.visible_streaming_level(level, world)
     if not valid(level) or level.bIsVisible ~= true then return end
     local subworld = level:GetOuter()

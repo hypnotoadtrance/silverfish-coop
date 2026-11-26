@@ -151,12 +151,9 @@ local function enroll_placed_props(state, phase)
     end
     local streams = world_path.visible_streams(state.world)
     if not placed_props or not same(placed_props.world, state.world) or placed_props.streams ~= streams then
-        local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
-        local base = StaticFindObject(prop_path)
-        if not valid(api) or not valid(base) then return end
-        local result = {}
-        api:GetAllActorsOfClass(state.world, base, result)
-        placed_props = {world = state.world, streams = streams, actors = {}, pending = result.OutActors or result, index = 1}
+        local paths = world_path.actor_paths(state.world, "physics-prop")
+        if not paths then return end
+        placed_props = {world = state.world, streams = streams, actors = {}, pending = paths, index = 1}
     end
     local scan = placed_props
     if not scan.pending then return end
@@ -164,8 +161,7 @@ local function enroll_placed_props(state, phase)
     local bone = FName("None", EFindName.FNAME_Find)
     local finish = math.min(#scan.pending, scan.index + 11)
     for index = scan.index, finish do
-        local actor = scan.pending[index]
-        if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
+        local actor = StaticFindObject(scan.pending[index])
         local mesh = valid(actor) and root_mesh(actor)
         local level = mesh and carry.placed_level(actor, state.world, streams)
         if level and (not valid(core) or not actor:IsA(core)) and actor:HasAuthority()
