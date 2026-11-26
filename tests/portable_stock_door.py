@@ -128,7 +128,7 @@ async def toggle_door(host, guest, actor, pawn, expected_open, *, inspect_during
     return receipt, first, preview
 
 
-async def verify_stock_crossroads_door(host, guest, pawn, *, lockpick=None):
+async def verify_stock_crossroads_door(host, guest, pawn, *, lockpick=None, inspect_during_motion=True):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
 
     def observed(frame):
@@ -169,7 +169,15 @@ async def verify_stock_crossroads_door(host, guest, pawn, *, lockpick=None):
         return row["panel"]
 
     query = "0" if await panel(host, "0") else "2"
-    assert await panel(host, query) and await panel(guest, query)
+
+    async def check_passage(blocked):
+        collisions = [await panel(seat, query) for seat in (host, guest)]
+        if collisions != [blocked, blocked]:
+            frames = await asyncio.gather(*(wait_resident_status(run, lambda frame: bool(observed(frame)))
+                                            for run in (host_run, guest_run)))
+            assert collisions == [blocked, blocked], (blocked, collisions, [observed(frame) for frame in frames])
+
+    await check_passage(True)
     checkpoint = campaign_save_hashes(host.campaign)
     refused = await submit(guest_run, door.ACTION, target=WOOD_DOOR)
     assert refused.get("error") == "stock_door_locked", refused
@@ -183,14 +191,14 @@ async def verify_stock_crossroads_door(host, guest, pawn, *, lockpick=None):
         observed(frame).get("open") is True and observed(frame).get("locked") is False)
     await wait_resident_status(guest_run, lambda frame: door.matches(observed(frame), observed(opened)))
 
-    crate = full_name(CROSSROADS, "LootCrate_Small_BP_C_9")
+    crate = full_name(CROSSROADS, "LootCrate_Small_BP_C_9") if inspect_during_motion else None
     closed, close_motion, close_preview = await toggle_door(host, guest, WOOD_DOOR, pawn, False, inspect_during_motion=crate)
-    assert await panel(host, query) and await panel(guest, query)
+    await check_passage(True)
     reopened, reopen_motion, reopen_preview = await toggle_door(host, guest, WOOD_DOOR, pawn, True)
-    assert not await panel(host, query) and not await panel(guest, query)
+    await check_passage(False)
     replay = await submit(guest_run, door.ACTION, operation_id=closed["operation_id"], target=WOOD_DOOR)
     assert replay.get("ok") and replay[door.RESULT] == closed[door.RESULT]
-    assert not await panel(host, query) and not await panel(guest, query)
+    await check_passage(False)
     assert campaign_save_hashes(host.campaign) == checkpoint
     snapshot_rows = None
     if row_counter is not None and len(arrival["game"][door.KEY]) >= 4:
@@ -203,7 +211,7 @@ async def verify_stock_crossroads_door(host, guest, pawn, *, lockpick=None):
                                      "host_settlement": [closed.get(door.SETTLEMENT), reopened.get(door.SETTLEMENT)],
                                      "guest_movement_start_ms": [close_motion, reopen_motion],
                                      "guest_preview_start_ms": [close_preview, reopen_preview],
-                                     "independent_inspection": closed["independent_inspection"],
+                                     "independent_inspection": closed.get("independent_inspection"),
                                      "snapshot_rows_changed": snapshot_rows,
                                      "close_replay_preserved_open_door": True,
                                      "collision_verified_both_seats": True, "campaign_unchanged": True}}
