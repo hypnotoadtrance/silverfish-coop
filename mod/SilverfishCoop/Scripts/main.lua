@@ -1853,6 +1853,12 @@ status_publication.dead_drop_actions = {
     ["native-dead-drop-clear"] = true,
 }
 
+status_publication.spatial_cues = {
+    ["native-anomaly-play-cues"] = 4,
+    ["native-sound-voice"] = 4,
+    ["native-weather-lightning-play"] = 3,
+}
+
 status_publication.board_menu = {
     ["native-board-contract-catalog"] = native_board_contract.catalog_reply,
     ["native-wire-board-stock-open"] = native_wire_board.open_reply,
@@ -1961,6 +1967,21 @@ local function tick(fields, pending, periodic)
             fields, state, current_phase, not pickup_presentation and native_player_avatar)
         SilverfishPublishLocalBridgeReply(pending.ticket,
             status_row(tag, fields[1], accepted and "accepted" or "error", message or "") .. "\n")
+        if not periodic then return true end
+        fields, pending = nil, nil
+    end
+    if fields and pending and status_publication.spatial_cues[fields[2]] and status_publication.steady(state, current_phase) then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        local accepted, message = pcall(run_command, fields, state, current_phase)
+        local reply = status_row("native-spatial-cue-reply", 1, fields[1], fields[2], current_phase, state.map,
+            state.local_pawn.name, fields[status_publication.spatial_cues[fields[2]]] or "-",
+            accepted and "accepted" or "error", message or "") .. "\n"
+        if accepted and fields[2] == "native-weather-lightning-play" and message == "played" then
+            local proof = native_world_view.lightning_rows(status_row)[1]
+            if proof then reply = reply .. proof .. "\n" end
+        end
+        SilverfishPublishLocalBridgeReply(pending.ticket, reply)
         if not periodic then return true end
         fields, pending = nil, nil
     end

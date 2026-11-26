@@ -5,6 +5,7 @@ import math
 import re
 import time
 
+from .local_bridge import SPATIAL_CUE_RECEIPT_BYTES, spatial_cue_matches
 from .native_guest_drop_record import valid_id, valid_position
 
 KEY = "native_weather_sirens"
@@ -131,7 +132,11 @@ class LightningPlayback:
             except (OSError, RuntimeError) as error:
                 control.event("native_weather_lightning_unavailable", serial=serial, reason=str(error))
                 continue
-            if (result.get("state"), result.get("map")) != ("connected", area):
+            compact = SPATIAL_CUE_RECEIPT_BYTES in result
+            if compact:
+                if not spatial_cue_matches(game, result):
+                    continue
+            elif (result.get("state"), result.get("map")) != ("connected", area):
                 return result
             receipt = result.get("ack", {}).get("message")
             if receipt in {"played", "duplicate"}:
@@ -143,8 +148,12 @@ class LightningPlayback:
                                 and all(type(proof.get(key)) is bool for key in LIGHTNING_COMPONENTS))
                     components = {key: proof[key] for key in LIGHTNING_COMPONENTS} if verified else {}
                     control.event("native_weather_lightning_played", serial=serial, position=point,
-                                  rotation=angles, **components)
-            game = result
+                                  rotation=angles, **components,
+                                  **({"receipt_bytes": result[SPATIAL_CUE_RECEIPT_BYTES]} if compact else {}))
+                    if compact and verified:
+                        game = {**game, LIGHTNING_PLAYBACK: proof}
+            if not compact:
+                game = result
         return game
 
 

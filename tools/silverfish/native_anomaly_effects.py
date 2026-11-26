@@ -5,10 +5,12 @@ import math
 import re
 import time
 
+from .local_bridge import SPATIAL_CUE_RECEIPT_BYTES, spatial_cue_matches
 from .native_guest_drop_record import valid_id, valid_position
 
 
 KEY = "native_anomaly_cues"
+PLAY_CUES = "native-anomaly-play-cues"
 VORTEX_SENSORS = "native_vortex_sensors"
 ELECTRODE_PHASES = "native_electrode_phases"
 ANGLER_COLORS = "native_angler_colors"
@@ -336,9 +338,12 @@ class Playback:
         if not arguments:
             return game
         try:
-            snapshot = await bridge.command("native-anomaly-play-cues", area, epoch, *arguments, timeout=1.5)
+            snapshot = await bridge.command(PLAY_CUES, area, epoch, *arguments, timeout=1.5)
         except (OSError, RuntimeError, TimeoutError) as error:
             control.event("native_anomaly_effect_unavailable", reason=str(error))
+            return game
+        compact = SPATIAL_CUE_RECEIPT_BYTES in snapshot
+        if compact and not spatial_cue_matches(game, snapshot):
             return game
         for receipt in snapshot.get("ack", {}).get("message", "").split(","):
             number, *result = receipt.split(":")
@@ -357,5 +362,6 @@ class Playback:
                 control.event(CUE_EVENTS.get(kind, "native_starburst_effect_played"),
                               cue=kind, serial=serial, location=position, map=area, particles=particles == "1",
                               animated=animated == "1", scale=scale, volume=volume,
-                              **({"length": shape[3], "break_point": shape[4:]} if shape else {}))
-        return snapshot
+                              **({"length": shape[3], "break_point": shape[4:]} if shape else {}),
+                              **({"receipt_bytes": snapshot[SPATIAL_CUE_RECEIPT_BYTES]} if compact else {}))
+        return game if compact else snapshot

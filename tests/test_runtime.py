@@ -132,6 +132,36 @@ class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
             await bridge.command("travel-party", destination, source)
         self.assertIs(bridge._local_status, published)
 
+    async def test_spatial_cue_receipts_preserve_status_and_verify_the_exact_strike(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        area, pawn, epoch = "/Game/Maps/Camp", "Player_FP_C listener", "a" * 32
+        published = {"sequence": 42, "state": "connected", "map": area}
+        bridge._local_status = published
+        proof_serial = "7"
+        proof_point = "1\t2\t3"
+
+        async def reply(payload, _timeout):
+            nonce, action, *_ = payload.decode().rstrip("\n").split("\t")
+            message = "played" if action == runtime.native_weather_view.LIGHTNING_PLAY else "1:1:0"
+            result = f"native-spatial-cue-reply\t1\t{nonce}\t{action}\tconnected\t{area}\t{pawn}\t{epoch}\taccepted\t{message}\n"
+            if message == "played":
+                result += (f"native-weather-lightning-played\t{epoch}\t{proof_serial}\t{proof_point}"
+                           "\t0\t90\t0\t1\t1\t1\t0\n")
+            return result
+
+        bridge.local_bridge = Mock(command=AsyncMock(side_effect=reply))
+        cue = await bridge.command(runtime.native_anomaly_effects.PLAY_CUES, area, epoch, "1|bottle|1|2|3|1|1")
+        self.assertEqual((cue["ack"]["message"], cue["pawn"]), ("1:1:0", pawn))
+        self.assertLess(cue[runtime.SPATIAL_CUE_RECEIPT_BYTES], 256)
+        strike = runtime.native_weather_view.LIGHTNING_PLAY, epoch, "7", "1", "2", "3", "0", "90", "0"
+        receipt = await bridge.command(*strike)
+        self.assertEqual(receipt[runtime.native_weather_view.LIGHTNING_PLAYBACK]["position"], [1, 2, 3])
+        self.assertFalse(receipt[runtime.native_weather_view.LIGHTNING_PLAYBACK]["audio_component"])
+        proof_serial = "6"
+        with self.assertRaisesRegex(RuntimeError, "did not match the requested strike"):
+            await bridge.command(*strike)
+        self.assertIs(bridge._local_status, published)
+
     async def test_stock_loot_inspection_receipt_preserves_the_resident_world_frame(self):
         bridge = runtime.Bridge(Path("unused"), None)
         area = runtime.AUTHORED_CRATES[runtime.native_loot.CRATE]

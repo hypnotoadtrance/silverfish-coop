@@ -12,10 +12,17 @@ INPUT_LIMIT = 1536
 INPUT_CAPACITY = 64
 ZONE_ROSTER_LIMIT = 8192
 WEAPON_CUES_LIMIT = 16 * 1024
+SPATIAL_CUE_RECEIPT_BYTES = "native_spatial_cue_receipt_bytes"
 GUEST_INTERACTION_SHOP = 1
 GUEST_INTERACTION_BROKER = 2
 GUEST_INTERACTION_DIALOGUE = 4
 GUEST_INTERACTION_MOSBY = 8
+
+
+def spatial_cue_matches(game: dict, receipt: dict) -> bool:
+    pawn = game.get("pawns", {}).get("local", {}).get("name")
+    return (receipt.get("state"), receipt.get("map"), receipt.get("pawn")) == (
+        game.get("state"), game.get("map"), pawn)
 
 
 class LocalBridge:

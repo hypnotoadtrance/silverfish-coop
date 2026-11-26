@@ -6,6 +6,7 @@ import re
 import time
 import uuid
 
+from .local_bridge import SPATIAL_CUE_RECEIPT_BYTES, spatial_cue_matches
 from .native_guest_drop_record import valid_id, valid_position
 
 
@@ -124,9 +125,13 @@ class Playback:
             result = await bridge.command(COMMAND, game["map"], epoch, *arguments, timeout=1.5)
         except (OSError, RuntimeError, TimeoutError):
             return game
+        compact = SPATIAL_CUE_RECEIPT_BYTES in result
+        if compact and not spatial_cue_matches(game, result):
+            return game
         for nonce in result.get("ack", {}).get("message", "").split(","):
             if nonce in selected:
                 self.seen.append(nonce)
                 kind, personality = selected.pop(nonce)
-                control.event("native_voice_played", cue=kind, personality=personality)
-        return result
+                control.event("native_voice_played", cue=kind, personality=personality,
+                              **({"receipt_bytes": result[SPATIAL_CUE_RECEIPT_BYTES]} if compact else {}))
+        return game if compact else result

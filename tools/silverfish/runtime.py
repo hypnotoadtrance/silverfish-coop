@@ -79,6 +79,7 @@ from .native_quest_catalog import parse as parse_quest_catalog
 from .native_roster import Assignment
 from .travel import CROSSROADS, SCIENTIST_SHOP
 from . import udp_ownership
+from .local_bridge import SPATIAL_CUE_RECEIPT_BYTES
 
 REPO = Path(__file__).resolve().parents[2]
 MOD_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
@@ -3988,6 +3989,34 @@ class Bridge:
             raise RuntimeError(row[7] or "The game declined the departure request")
         return {"sequence": sequence, "ack": {"id": row[2], "result": row[6], "message": row[7]}}
 
+    @staticmethod
+    def _local_spatial_cue_reply(raw: str, fields: tuple[str, ...]) -> dict:
+        lightning = fields[1] == native_weather_view.LIGHTNING_PLAY
+        rows = [line.split("\t") for line in raw[:-1].split("\n")] if len(raw) <= 4096 and raw.endswith("\n") else []
+        if (len(fields) < 4 or not rows or len(rows[0]) != 10
+                or rows[0][:4] != ["native-spatial-cue-reply", "1", *fields[:2]]):
+            raise RuntimeError("The spatial cue receipt did not match the request")
+        _, _, nonce, _, phase, area, pawn, epoch, status, message = rows[0]
+        expected_phase = {"hosting", "connected"} if fields[1] == native_voice.COMMAND else {"connected"}
+        if (phase not in expected_phase or not valid_campaign_package(area) or not 0 < len(pawn) <= 512
+                or not pawn.startswith("Player_FP_C ") or not native_guest_drop_record.valid_id(epoch)
+                or (epoch != fields[2] if lightning else (area, epoch) != fields[2:4])):
+            raise RuntimeError("The spatial cue receipt did not match the current world")
+        if status != "accepted":
+            raise RuntimeError(message or "The game declined the spatial cue")
+        reply = {"state": phase, "map": area, "pawn": pawn, "ack": {"id": nonce, "result": status, "message": message},
+                 SPATIAL_CUE_RECEIPT_BYTES: len(raw.encode("utf-8"))}
+        if lightning and message == "played":
+            if len(rows) != 2 or rows[1][:3] != [native_weather_view.LIGHTNING_PLAYED_TAG, epoch, fields[3]]:
+                raise RuntimeError("The lightning receipt did not match the requested strike")
+            try:
+                reply[native_weather_view.LIGHTNING_PLAYBACK] = native_weather_view.parse_lightning_playback(rows[1])
+            except ValueError as error:
+                raise RuntimeError("The lightning receipt contained an invalid effect record") from error
+        elif len(rows) != 1:
+            raise RuntimeError("The spatial cue returned an unexpected effect record")
+        return reply
+
     async def command(self, action: str, *arguments: str, timeout: float = 8, update_status: bool = True,
                       stash_payload: bytes | None = None) -> dict:
         fields = (uuid.uuid4().hex, action, *arguments)
@@ -4014,6 +4043,9 @@ class Bridge:
             raw = await self.local_bridge.command(request.encode("utf-8") + (stash_payload or b""), timeout)
             if action in {"travel", "travel-party"} and raw.startswith("native-travel-reply\t"):
                 return self._local_travel_reply(raw, fields)
+            if action in {native_voice.COMMAND, native_anomaly_effects.PLAY_CUES, native_weather_view.LIGHTNING_PLAY}:
+                if raw.startswith("native-spatial-cue-reply\t"):
+                    return self._local_spatial_cue_reply(raw, fields)
             if action == native_stash.RENDER_MEMORY and _GUEST_UI_REPLY in raw:
                 raise RuntimeError("The resident stash renderer returned an unexpected body")
             receipt_tag = None
