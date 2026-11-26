@@ -1671,7 +1671,8 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         end
         for _, row in ipairs(native_hazard.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_damage_feedback.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
-        for _, row in ipairs(native_anomaly_fields.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_anomaly_fields.rows(state, current_phase, status_row,
+            resident_title and status_publication.installed and status_publication.memory_live)) do rows[#rows + 1] = row end
         local native_ok, native_rows = pcall(native_world.rows, state, current_phase, status_row)
         if native_ok then
             for _, row in ipairs(native_rows) do rows[#rows + 1] = row end

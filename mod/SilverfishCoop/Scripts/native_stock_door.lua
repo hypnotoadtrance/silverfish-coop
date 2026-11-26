@@ -349,7 +349,12 @@ local function sample_door(scan, name, ready_pose)
     local center, grip = panel:K2_GetComponentLocation(), knob:K2_GetComponentLocation()
     local collision = math.tointeger(panel:GetCollisionEnabled())
     if center and grip and collision and collision >= 0 and collision <= 5 then
-        return scan.row("native-stock-door", scan.map, name,
+        local kind, object = name:match("^([%w_]+) .+:PersistentLevel%.([%w_]+)$")
+        local tag, scope, id = "native-stock-door", scan.map, name
+        if not scan.confirmation and kind then
+            tag, scope, id = "native-stock-door-state", kind, object
+        end
+        return scan.row(tag, scope, id,
             value[1] and 1 or 0, value[2] and 1 or 0, value[3] and 1 or 0,
             string.format("%.3f", value[4]), string.format("%.3f", value[5]), string.format("%.3f", value[6]),
             string.format("%.3f", value[7]), string.format("%.3f", value[8]), string.format("%.3f", value[9]),
@@ -383,7 +388,7 @@ local function send_confirmations()
             local actual = parts and valid(parts[1]) and pose(actor, parts[1])
             local expected = actual and {false, actual[2], pending.opens, table.unpack(pending.goal)}
             local record = actual and matches(actual, expected)
-                and sample_door({actors = actors, map = pending.map, row = confirmation_row}, name, actual)
+                and sample_door({actors = actors, map = pending.map, row = confirmation_row, confirmation = true}, name, actual)
             if record and SilverfishEnqueueLocalBridgeInput(
                 confirmation_row("stock-door-settled", pending.id, confirmation_sequence(),
                     string.format("%.1f", (now - pending.start) * 1000)) .. "\t" .. record .. "\n") then

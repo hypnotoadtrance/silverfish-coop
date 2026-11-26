@@ -11,6 +11,7 @@ from .native_gold import valid_guid
 
 
 TAG = "native-stock-door"
+STATE_TAG = TAG + "-state"
 KEY = "native_stock_doors"
 ACTION = "native-stock-door-interact"
 DISPATCH = TAG + "-guest-interact"
@@ -66,6 +67,17 @@ def parse(fields, phase, area):
     return (dict(zip(_FLAGS, (flag == "1" for flag in fields[3:6]))) | dict(zip(_ANGLES, angles))
             | dict(zip(_OFFSET, offsets))
             | {"panel_location": geometry[:3], "knob_location": geometry[3:], "collision": int(fields[18])})
+
+
+def parse_state(fields, phase, area):
+    if fields[0] == STATE_TAG:
+        if len(fields) != 19 or not isinstance(area, str):
+            raise ValueError("Invalid stock hinged door state")
+        _, kind, object_name, *values = fields
+        actor = f"{kind} {area}.{area.rsplit('/', 1)[-1]}:PersistentLevel.{object_name}"
+        fields = [TAG, area, actor, *values]
+    report = parse(fields, phase, area)
+    return fields[2], report
 
 
 def parse_pry(fields, phase, area):

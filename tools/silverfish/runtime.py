@@ -1859,12 +1859,12 @@ class Bridge:
                 elif fields[0] == native_stock_switch.TAG:
                     data.setdefault(native_stock_switch.KEY, {})[fields[2]] = native_stock_switch.parse(
                         fields, data.get("state"), data.get("map"))
-                elif fields[0] == native_stock_door.TAG:
-                    report = native_stock_door.parse(fields, data.get("state"), data.get("map"))
+                elif fields[0] in (native_stock_door.TAG, native_stock_door.STATE_TAG):
+                    actor, report = native_stock_door.parse_state(fields, data.get("state"), data.get("map"))
                     doors = data.setdefault(native_stock_door.KEY, {})
-                    if fields[2] in doors or len(doors) >= 240:
+                    if actor in doors or len(doors) >= 240:
                         raise ValueError("Repeated or oversized stock hinged door frame")
-                    doors[fields[2]] = report
+                    doors[actor] = report
                 elif fields[0] == "native-stock-door-pry":
                     data[native_stock_door.PRY_RESULT] = native_stock_door.parse_pry(fields, data.get("state"), data.get("map"))
                 elif (fields[0] == native_stock_door.TRACE_FIXTURE and len(fields) == 5
@@ -3155,16 +3155,22 @@ class Bridge:
                             (mode in {"0", "1"} or mode == "2" and placed and data["state"] == "hosting")):
                         phases.append({"path": path if placed else None, "location": location, "phase": int(mode), "center": center,
                                        "particles_active": lit == "1"})
-                elif fields[0] == "native-vortex-sensor" and len(fields) == 14:
+                elif (fields[0] == "native-vortex-sensor" and len(fields) == 14
+                      or fields[0] == "native-vortex-placement" and len(fields) == 5):
                     sensors = data.setdefault(native_anomaly_effects.VORTEX_SENSORS, [])
                     area = data.get("map", "")
                     path = fields[1]
+                    placement = fields[0] == "native-vortex-placement"
                     coords = [_finite(axis) for axis in fields[2:]]
+                    placed = (area.startswith("/Game/Classes/Maps/") and len(path) <= 512
+                              and path.startswith(f"{area}.{area.rsplit('/', 1)[-1]}:"))
                     if (len(sensors) < native_anomaly_effects.MAX_SENSORS and None not in coords and
-                            (path == "-" or (area.startswith("/Game/Classes/Maps/") and len(path) <= 512
-                             and path.startswith(f"{area}.{area.rsplit('/', 1)[-1]}:")))):
-                        sensors.append({"path": None if path == "-" else path, "root": coords[:3],
-                                        "relative": coords[3:6], "center": coords[6:9], "visual": coords[9:]})
+                            (placed or not placement and path == "-")):
+                        if placement:
+                            sensors.append({"path": path, "relative": coords})
+                        else:
+                            sensors.append({"path": None if path == "-" else path, "root": coords[:3],
+                                            "relative": coords[3:6], "center": coords[6:9], "visual": coords[9:]})
                 elif fields[0] == "native-burner-jet" and len(fields) == 6:
                     jets = data.setdefault("native_burner_jets", [])
                     if len(jets) < 64 and all(bit in {"0", "1"} for bit in fields[4:]):

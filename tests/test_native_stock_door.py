@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock
 
-from tools.silverfish import native_stock_door as door, party
+from tools.silverfish import native_stock_door as door, party, runtime
 from tools.silverfish.travel import CROSSROADS
 
 
@@ -25,6 +25,19 @@ class StockDoorActionTests(unittest.IsolatedAsyncioTestCase):
         if future is None:
             future = asyncio.get_running_loop().create_future()
         return await self.actions.dispatch(self.host, self.bridge, "guest", f"{self.epoch}@{self.actor}", self.operation, future)
+
+    def test_status_reconstructs_door_identity_and_geometry(self):
+        bridge = runtime.Bridge(None, None)
+        header = f"schema\t1\nseq\t11\nsession\tclient\tconnected\t{CROSSROADS}\t0\t1\n"
+        pose = "0\t1\t1\t0\t90\t0\t0\t0\t0\t1\t2\t3\t4\t5\t6\t1\n"
+        full = f"{door.TAG}\t{CROSSROADS}\t{self.actor}\t{pose}"
+        compact = f"{door.STATE_TAG}\tDoor_Wood_04_BP_C\tDoor_Wood_04_BP_C_1719\t{pose}"
+        self.assertLess(len(compact), len(full))
+        decoded = bridge._parse_status(header + compact)
+        self.assertEqual(decoded, bridge._parse_status(header + full))
+        self.assertEqual(decoded[door.KEY][self.actor]["knob_location"], [4, 5, 6])
+        self.assertIsNone(bridge._parse_status(header + full + compact))
+        self.assertIsNone(bridge._parse_status(header + compact.replace("1719", "../1719")))
 
     async def test_close_is_acknowledged_even_when_periodic_sample_already_says_closed(self):
         self.bridge.command.return_value = {

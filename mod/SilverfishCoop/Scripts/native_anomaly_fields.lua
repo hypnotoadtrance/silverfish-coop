@@ -682,7 +682,7 @@ function fields.update_destructibles(current_world)
     destructibles.update(current_world)
 end
 
-function fields.rows(state, phase, row)
+function fields.rows(state, phase, row, compact)
     if phase ~= "hosting" and phase ~= "connected" or not valid(state.world) then
         recovery = nil
         lamps.clear()
@@ -792,12 +792,20 @@ function fields.rows(state, phase, row)
                 rows[#rows + 1] = row("native-placed-anomaly", entry.placed, entry.kind, position.X, position.Y, position.Z,
                     collision, actor:GetLocalRole())
             end
-            if entry.kind == "vortex" then
-                local sensor, mesh = vortex_sensor(actor), actor.Sphere1
-                if sensor and valid(mesh) and same(mesh:GetOwner(), actor) then
-                    local relative, center, visual = sensor.RelativeLocation, sensor:K2_GetComponentLocation(), mesh:K2_GetComponentLocation()
-                    rows[#rows + 1] = row("native-vortex-sensor", entry.placed or "-", position.X, position.Y, position.Z,
-                        relative.X, relative.Y, relative.Z, center.X, center.Y, center.Z, visual.X, visual.Y, visual.Z)
+            if entry.kind == "vortex" and (not compact or entry.placed) then
+                local sensor = vortex_sensor(actor)
+                if sensor then
+                    local relative = sensor.RelativeLocation
+                    if compact then
+                        rows[#rows + 1] = row("native-vortex-placement", entry.placed, relative.X, relative.Y, relative.Z)
+                    else
+                        local mesh = actor.Sphere1
+                        if valid(mesh) and same(mesh:GetOwner(), actor) then
+                            local center, visual = sensor:K2_GetComponentLocation(), mesh:K2_GetComponentLocation()
+                            rows[#rows + 1] = row("native-vortex-sensor", entry.placed or "-", position.X, position.Y, position.Z,
+                                relative.X, relative.Y, relative.Z, center.X, center.Y, center.Z, visual.X, visual.Y, visual.Z)
+                        end
+                    end
                 end
             elseif entry.kind == "electrode" then
                 rows[#rows + 1] = electrodes.observe(entry, phase, row, position)

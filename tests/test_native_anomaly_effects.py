@@ -363,19 +363,26 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sensor_projection_only_updates_changed_placed_actors_in_the_current_visit(self):
         epoch = "b" * 32
-        game = {"state": "connected", "map": "Funnel", VORTEX_SENSORS: [
-            {"path": "Trap1", "relative": [0, 0, 110]},
-            {"path": "Trap2", "relative": [0, 0, 150]},
-            {"path": None, "relative": [0, 0, 195]},
-        ]}
-        frame = {"map": game["map"], "epoch": epoch, "sensors": [
-            ["Trap1", [0, 0, 185]], ["Trap2", [0, 0, 150]], ["Missing", [0, 0, 102]], [None, [0, 0, 185]],
+        area = "/Game/Classes/Maps/Maps_Dungeons/Funnel_01_P"
+        path = f"{area}.Funnel_01_P:PersistentLevel.VortexTrap_BP_C_"
+        header = f"schema\t1\nseq\t1\nsession\tclient\tconnected\t{area}\t0\t1\n"
+        status = (f"{header}native-vortex-placement\t{path}1\t0\t0\t110\n"
+                  f"native-vortex-placement\t{path}2\t0\t0\t150\n"
+                  "native-vortex-placement\t-\t0\t0\t100\n"
+                  "native-vortex-sensor\t-\t1\t2\t3\t0\t0\t195\t1\t2\t198\t4\t5\t6\n")
+        game = Bridge(None, None)._parse_status(status)
+        self.assertEqual(game[VORTEX_SENSORS], [
+            {"path": path + "1", "relative": [0, 0, 110]}, {"path": path + "2", "relative": [0, 0, 150]},
+            {"path": None, "relative": [0, 0, 195], "root": [1, 2, 3], "center": [1, 2, 198], "visual": [4, 5, 6]},
+        ])
+        frame = {"map": area, "epoch": epoch, "sensors": [
+            [path + "1", [0, 0, 185]], [path + "2", [0, 0, 150]], [path + "3", [0, 0, 102]], [None, [0, 0, 185]],
         ]}
         bridge = Mock(command=AsyncMock(return_value=game))
         await project_sensors(bridge, game, frame, "a" * 32)
         bridge.command.assert_not_awaited()
         await project_sensors(bridge, game, frame, epoch)
-        bridge.command.assert_awaited_once_with("native-vortex-apply-sensors", "Funnel", epoch, "Trap1|0|0|185", timeout=1.5)
+        bridge.command.assert_awaited_once_with("native-vortex-apply-sensors", area, epoch, f"{path}1|0|0|185", timeout=1.5)
 
     async def test_electrode_phases_address_placed_and_unique_generated_actors(self):
         epoch = "b" * 32
