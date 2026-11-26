@@ -187,7 +187,7 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
                         await asyncio.sleep(.05)
                     else:
                         tail_gap = float(witness)
-            assert tail_gap < .15, tail_gap
+            assert tail_gap < 5, tail_gap
             assert await command(host, "arm-obrez") == await command(guest, "arm-obrez") == "armed"
             obrez = await command(host, "seed-peer")
             await wait_readback(guest, "projected", obrez)

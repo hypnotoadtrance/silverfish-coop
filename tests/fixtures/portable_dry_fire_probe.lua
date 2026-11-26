@@ -517,14 +517,16 @@ local function run(action, argument)
     end
     if action == "tail-witness" then
         assert(observing())
-        local socket, root = FName("TailSocket_01", EFindName.FNAME_Find), FName("Tail_01", EFindName.FNAME_Find)
+        local hips = FName("Hips", EFindName.FNAME_Find)
+        local math_api = asset("/Script/Engine.Default__KismetMathLibrary")
         for _, part in ipairs(peer:K2_GetComponentsByClass(asset("/Script/Engine.SkeletalMeshComponent"))) do
             if type(part) == "userdata" and part:type() == "RemoteUnrealParam" then part = part:get() end
-            if same(part.SkinnedAsset, asset(skeletal_tail)) and part:GetAttachSocketName():ToString() == "TailSocket_01"
-                and part:GetBoneIndex(root) >= 0 and part.RelativeRotation.Yaw < -9 then
-                local source = part:GetSocketLocation(root)
-                local target = part:GetAttachParent():GetSocketLocation(socket)
-                return ("%.4f"):format(math.sqrt((source.X-target.X)^2 + (source.Y-target.Y)^2 + (source.Z-target.Z)^2))
+            if same(part.SkinnedAsset, asset(skeletal_tail)) and part:GetAttachSocketName():ToString() == "Hips"
+                and part.RelativeRotation.Roll < -89 then
+                local seam = math_api:TransformLocation(part:K2_GetComponentToWorld(), {X = -44, Y = 0, Z = 82})
+                local hip = part:GetAttachParent():GetSocketTransform(hips, 0)
+                local posterior = math_api:TransformLocation(hip, {X = -15, Y = 9, Z = 0})
+                return ("%.4f"):format(math.sqrt((seam.X-posterior.X)^2 + (seam.Y-posterior.Y)^2 + (seam.Z-posterior.Z)^2))
             end
         end
         return "waiting"
