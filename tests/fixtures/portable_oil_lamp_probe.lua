@@ -62,7 +62,9 @@ end
 local function stage(lamp, pawn, participant)
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local lamp_pos = lamp.PropMesh:K2_GetComponentLocation()
-    for _, offset in ipairs({105, 145, 80}) do
+    local origin, sphere = lamp:K2_GetActorLocation(), lamp.Sphere:K2_GetComponentLocation()
+    local reach = participant.InteractionRange - 5
+    for _, offset in ipairs({80, 105, 145}) do
         for _, dir in ipairs(dirs) do
             local x,y = lamp_pos.X + dir[1]*offset, lamp_pos.Y + dir[2]*offset
             local hit = {}
@@ -71,8 +73,13 @@ local function stage(lamp, pawn, participant)
                 local floor = hit.OutHit or hit
                 local z = floor.ImpactPoint.Z + participant.CapsuleComponent:GetScaledCapsuleHalfHeight() + 3
                 local eye = {X=x,Y=y,Z=z+60}
-                if floor.ImpactNormal.Z > .78 and not trace:LineTraceSingle(pawn, eye, lamp_pos, 1, true,
-                    {pawn,participant,lamp}, 0, {}, true, clear, clear, 0)
+                local function near(point)
+                    return (point.X-x)^2 + (point.Y-y)^2 + (point.Z-z)^2 < reach^2
+                end
+                -- Keep the other player in the sightline test when staging the guest.
+                if floor.ImpactNormal.Z > .78 and near(origin) and near(sphere) and near(lamp_pos)
+                    and not trace:LineTraceSingle(participant, eye, lamp_pos, 1, true,
+                    {participant,lamp}, 0, {}, true, clear, clear, 0)
                     and participant:K2_TeleportTo({X=x,Y=y,Z=z},
                         {Pitch=0,Yaw=math.deg(math.atan(-dir[2],-dir[1])),Roll=0}) then
                     participant:ForceNetUpdate()
