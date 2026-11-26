@@ -68,45 +68,79 @@ local function shape(save, row)
     if row[keys.kind] ~= 2 or not int(step) or not int(final) or final < 1 or not int(cash) or cash < 0
         or not int(xp) or xp < 0 or not int(row[keys.redeem]) or len(row[keys.items]) ~= 0
         or len(row[keys.chained]) ~= 0 or not ping_supported
-        or not (quantity == 0 and type(consumed) == "boolean" or quantity == 1 and consumed == true)
+        or not int(quantity) or quantity < 0 or quantity > 16
+        or not (quantity == 0 and type(consumed) == "boolean" or quantity > 0 and consumed == true)
         or not row[keys.flags] or #row[keys.flags] > 16 or not row[keys.rep] or #row[keys.rep] > 16 then
         refuse("specialized_recipe")
     end
-    local result = {step = step, final = final, cash = cash, xp = xp,
-        objective = quantity == 1 and row[keys.objective][1] or nil, empty_consumption = quantity == 0 and consumed}
-    if quantity == 1 then
-        if not valid(result.objective) then refuse("objective_class_unqualified") end
-        result.path = result.objective:GetFullName():match("^BlueprintGeneratedClass (/%S+)$")
-        local defaults = content_paths.item_class(result.path) and result.objective:GetCDO()
-        if not valid(defaults) or not same(defaults:GetClass(), result.objective) or type(defaults.Stacks) ~= "boolean" then
+    local result = {step = step, final = final, cash = cash, xp = xp, objectives = {}, by_class = {},
+        empty_consumption = quantity == 0 and consumed}
+    for index = 1, quantity do
+        local class = row[keys.objective][index]
+        if not valid(class) then refuse("objective_class_unqualified") end
+        local path = class:GetFullName():match("^BlueprintGeneratedClass (/%S+)$")
+        local defaults = content_paths.item_class(path) and class:GetCDO()
+        if not valid(defaults) or not same(defaults:GetClass(), class) or type(defaults.Stacks) ~= "boolean" then
             refuse("objective_class_unqualified")
         end
-        result.stacks = defaults.Stacks
+        local address = class:GetAddress()
+        if not result.by_class[address] then
+            local objective = {address = address, path = path, stacks = defaults.Stacks}
+            result.by_class[address] = objective
+            result.objectives[#result.objectives + 1] = objective
+        end
     end
     return result
 end
 
-local function backpack_objectives(save, contract, allow_multiple)
+local function backpack_objectives(save, contract)
     local result, seen = {}, {}
     for slot, rows in ipairs({save.PlayerBackpack, save.PlayerEquipment}) do
         local size = len(rows)
         if not int(size) or size < 0 or size > 4096 then refuse("inventory_unqualified") end
         for index = 1, size do
             local row = rows[index]
-            if row and same(row[class_key], contract.objective) then
+            local class = row and row[class_key]
+            local objective = valid(class) and contract.by_class[class:GetAddress()]
+            if objective then
                 local units, id = row[units_key], row[guid_key]
-                if slot ~= 1 or (#result > 0 and not allow_multiple) or not int(units) or units < (contract.stacks and 1 or 0)
+                if slot ~= 1 or not int(units) or units < (objective.stacks and 1 or 0)
                     or not id or not int(id.A) or not int(id.B) or not int(id.C) or not int(id.D) then
-                    refuse("objective_requires_one_unambiguous_backpack_stack")
+                    refuse("objective_requires_unambiguous_backpack_stack")
                 end
                 local guid = ("%08X%08X%08X%08X"):format(id.A & 0xffffffff, id.B & 0xffffffff, id.C & 0xffffffff, id.D & 0xffffffff)
                 if not guid:find("[^0]") or seen[guid] then refuse("objective_guid_unqualified") end
                 seen[guid] = true
-                result[#result + 1] = {guid = guid, units = units}
+                result[#result + 1] = {guid = guid, units = units, objective = objective}
             end
         end
     end
     return result
+end
+
+local function required_items(contract, owned)
+    local first, selected = {}, {}
+    for _, item in ipairs(owned) do
+        first[item.objective.address] = first[item.objective.address] or item
+    end
+    for _, objective in ipairs(contract.objectives) do
+        local item = first[objective.address]
+        if not item then return end
+        selected[#selected + 1] = {guid = item.guid, units = item.units, path = objective.path,
+            remaining = objective.stacks and item.units - 1 or 0, consumed = "-"}
+    end
+    return selected
+end
+
+local function additional_deposits(outcome, include_consumed)
+    local rows = {}
+    for index = 2, #outcome.deposits do
+        local part = outcome.deposits[index]
+        local fields = {part.guid, part.units, part.remaining}
+        if include_consumed then fields[4] = part.consumed end
+        rows[#rows + 1] = table.concat(fields, ":")
+    end
+    return #rows > 0 and table.concat(rows, ",") or "-"
 end
 
 local function balances(context)
@@ -239,10 +273,9 @@ local function catalog(fields, state, phase)
         end
         local supported, contract = pcall(shape, context.save, row)
         if not supported or contract.step <= 0 then return end
-        if contract.objective then
-            local guest = not same(context.save, context.receiving_save)
-            local permitted, owned = pcall(backpack_objectives, context.receiving_save, contract, guest)
-            if not permitted or not owned[1] then return end
+        if #contract.objectives > 0 then
+            local permitted, owned = pcall(backpack_objectives, context.receiving_save, contract)
+            if not permitted or not required_items(contract, owned) then return end
         elseif contract.step < contract.final then
             return
         end
@@ -290,7 +323,7 @@ function board_contract.command(fields, state, phase)
     local outcome = {
         verb = verb, mode = mode, pawn = pawn, board = board, quest = quest, context = context,
         before = step or "-", after = step or "-", cash_before = cash_before, cash_after = cash_before,
-        xp_before = xp_before, xp_after = xp_before, cash = 0, xp = 0, guid = "-", consumed = "-", state = "already",
+        xp_before = xp_before, xp_after = xp_before, cash = 0, xp = 0, guid = "-", consumed = "-", state = "already", deposits = {},
     }
     if (verb == "start" and active) or (verb == "turnin" and step == completed_step) then
         last = outcome
@@ -310,13 +343,12 @@ function board_contract.command(fields, state, phase)
         contract = shape(context.save, active)
         if contract.step <= 0 then refuse("objective_not_complete") end
         outcome.cash, outcome.xp = contract.cash, contract.xp
-        if contract.objective then
-            local guest = not same(context.save, context.receiving_save)
-            objective_before = backpack_objectives(context.receiving_save, contract, guest)
-            local selected = objective_before[1]
-            if not selected then refuse("missing_objective") end
-            outcome.guid, outcome.units = selected.guid, selected.units
-            outcome.remaining = contract.stacks and outcome.units - 1 or 0
+        if #contract.objectives > 0 then
+            objective_before = backpack_objectives(context.receiving_save, contract)
+            outcome.deposits = required_items(contract, objective_before)
+            if not outcome.deposits then refuse("missing_objective") end
+            local first = outcome.deposits[1]
+            outcome.guid, outcome.units, outcome.remaining = first.guid, first.units, first.remaining
         elseif contract.step < contract.final then
             refuse("objective_not_complete")
         end
@@ -336,27 +368,44 @@ function board_contract.command(fields, state, phase)
     if fields[8] ~= outcome.guid or fields[9] ~= tostring(outcome.units or "-") then refuse("objective_changed") end
     local inspected = table.concat({outcome.before, outcome.expected_step, outcome.cash, outcome.xp,
         outcome.remaining or "-"}, "|")
+    if #outcome.deposits > 1 then inspected = inspected .. "|" .. additional_deposits(outcome, false) end
     if fields[10] ~= inspected then refuse("inspection_changed") end
 
     local has_deposit = outcome.guid ~= "-"
     local guest_deposit = has_deposit and not same(context.save, context.receiving_save)
     if guest_deposit then
-        if type(SilverfishRedeemBoardObjective) ~= "function" then refuse("native_objective_redemption_unavailable") end
-        local redeemed, reason, moved = SilverfishRedeemBoardObjective(context.interactor:GetAddress(),
-            context.receiving_save:GetAddress(), context.save:GetAddress(), outcome.guid, quest, contract.path,
-            contract.final, contract.cash, contract.xp, outcome.units)
+        if type(SilverfishRedeemBoardObjectives) ~= "function" then refuse("native_objective_redemption_unavailable") end
+        local requested = {}
+        for _, item in ipairs(outcome.deposits) do
+            requested[#requested + 1] = table.concat({item.guid, item.units, item.path}, "|")
+        end
+        local redeemed, reason, moved = SilverfishRedeemBoardObjectives(context.interactor:GetAddress(),
+            context.receiving_save:GetAddress(), context.save:GetAddress(), quest, contract.final, contract.cash, contract.xp,
+            table.concat(requested, ","))
         if redeemed ~= true then
             if type(reason) == "string" and reason:match("^mutation_unverified_") then error(reason, 0) end
             refuse("objective_redemption_rejected")
         end
-        if type(moved) ~= "string" or #moved ~= 32 or moved:find("[^0-9A-F]") or not moved:find("[^0]")
-            or (moved == outcome.guid) ~= (outcome.remaining == 0) then
-            error("mutation_unverified_stock_board_objective_guid", 0)
+        local index, seen = 0, {}
+        if type(moved) ~= "string" or #moved ~= #outcome.deposits * 33 - 1 then
+            error("mutation_unverified_stock_board_objective_guids", 0)
         end
-        outcome.consumed = moved
-    elseif has_deposit and outcome.remaining == 0 then
-        outcome.consumed = outcome.guid
+        for guid in (moved .. ","):gmatch("([^,]*),") do
+            index = index + 1
+            local item = outcome.deposits[index]
+            if not item or #guid ~= 32 or guid:find("[^0-9A-F]") or not guid:find("[^0]") or seen[guid]
+                or (guid == item.guid) ~= (item.remaining == 0) then
+                error("mutation_unverified_stock_board_objective_guid", 0)
+            end
+            seen[guid], item.consumed = true, guid
+        end
+        if index ~= #outcome.deposits then error("mutation_unverified_stock_board_objective_guids", 0) end
+    elseif has_deposit then
+        for _, item in ipairs(outcome.deposits) do
+            if item.remaining == 0 then item.consumed = item.guid end
+        end
     end
+    if has_deposit then outcome.consumed = outcome.deposits[1].consumed end
 
     local applied = pcall(function()
         if verb == "start" then
@@ -365,16 +414,19 @@ function board_contract.command(fields, state, phase)
         else
             if not guest_deposit and not turn_in(context, library, active, contract.empty_consumption) then return end
             if has_deposit then
-                local observed = backpack_objectives(context.receiving_save, contract, guest_deposit)
-                if outcome.remaining > 0 then
-                    objective_before[1].units = outcome.remaining
-                else
-                    table.remove(objective_before, 1)
+                local observed = backpack_objectives(context.receiving_save, contract)
+                local remaining = {}
+                for _, item in ipairs(outcome.deposits) do remaining[item.guid] = item.remaining end
+                for index = #objective_before, 1, -1 do
+                    local item = objective_before[index]
+                    local left = remaining[item.guid]
+                    if left == 0 then table.remove(objective_before, index)
+                    elseif left then item.units = left end
                 end
                 if #observed ~= #objective_before then return end
                 for index, row in ipairs(observed) do
                     local expected = objective_before[index]
-                    if row.guid ~= expected.guid or row.units ~= expected.units then return end
+                    if row.guid ~= expected.guid or row.units ~= expected.units or row.objective ~= expected.objective then return end
                 end
             end
             for _, effect in ipairs(effects) do
@@ -408,7 +460,7 @@ function board_contract.rows(state, phase, status_row)
     return {status_row(operation, last.verb, last.mode, state.map, last.pawn, last.board, last.quest,
         last.state, last.before, last.after, last.expected_step or "-", last.cash_before, last.cash_after,
         last.xp_before, last.xp_after, last.cash, last.xp, last.guid,
-        last.units or "-", last.remaining or "-", last.consumed)}
+        last.units or "-", last.remaining or "-", last.consumed, additional_deposits(last, true))}
 end
 
 return board_contract

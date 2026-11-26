@@ -18,7 +18,7 @@ VISIT = "12" * 16
 
 
 def result(quest, verb, mode, before, expected, *, cash=0, xp=0, guid="-", board_name=BOARD,
-           raw_units=1, remaining=0, consumed=None):
+           raw_units=1, remaining=0, consumed=None, additional="-"):
     applied = mode == "apply"
     if consumed is None:
         consumed = guid if applied else "-"
@@ -27,7 +27,7 @@ def result(quest, verb, mode, before, expected, *, cash=0, xp=0, guid="-", board
               str(expected) if applied else "-" if before is None else str(before),
               str(expected), "17", str(17 + cash if applied else 17), "3", str(3 + xp if applied else 3),
               str(cash), str(xp), guid, str(raw_units) if guid != "-" else "-",
-              str(remaining) if guid != "-" else "-", consumed)
+              str(remaining) if guid != "-" else "-", consumed, additional)
     return {"state": "hosting", "map": SHOPKEEP, board.KEY: board.parse(fields)}
 
 
@@ -75,6 +75,35 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.command.await_count, 4)
         host.checkpoint_native.assert_not_awaited()
         host.checkpoint.assert_not_called()
+
+    async def test_multiple_objectives_bind_every_debit_and_pay_once(self):
+        armor = "Clct_Armor_Simmi"
+        helmet, split = "34" * 16, "23" * 16
+        inspected = f"{helmet}:0:0:-"
+        applied = f"{helmet}:0:0:{helmet}"
+        host = self.host()
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+            result(armor, "turnin", "inspect", 1, -10, cash=8000, xp=1, guid=GUID,
+                   raw_units=2, remaining=1, additional=inspected),
+            result(armor, "turnin", "apply", 1, -10, cash=8000, xp=1, guid=GUID,
+                   raw_units=2, remaining=1, consumed=split, additional=applied),
+        ]))
+        with patch.object(board.native_inventory, "retain_guest_save", return_value=True) as retain:
+            paid = await board.perform(host, bridge, "guest", "turnin", armor)
+            retain.assert_awaited_once()
+        self.assertTrue(bridge.command.await_args.args[-1].endswith(f"|{helmet}:0:0"))
+        self.assertEqual([(row["objective_guid"], row["objective_units_remaining"], row["consumed_guid"])
+                          for row in paid["objective_deposits"]], [(GUID, 1, split), (helmet, 0, helmet)])
+        self.assertEqual((paid["cash"], paid["wallet"]), (8000, 8017))
+        self.assertEqual((await board.perform(host, bridge, "guest", "turnin", armor))["effect"],
+                         "native_quest_already_settled")
+        self.assertEqual(bridge.command.await_count, 2)
+
+    def test_invalid_additional_objectives_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Unqualified additional"):
+            result(EYE, "turnin", "inspect", 1, -10, guid=GUID, additional=f"{GUID}:1:0:-")
+        with self.assertRaisesRegex(ValueError, "Unexpected additional"):
+            result(EYE, "start", "inspect", None, 1, additional=f"{GUID}:1:0:-")
 
     async def test_selected_board_cannot_be_substituted_by_another_board_in_the_same_map(self):
         host = self.host()

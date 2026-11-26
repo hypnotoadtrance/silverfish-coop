@@ -14,8 +14,10 @@
 #include <cstdlib>
 #include <format>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
@@ -319,7 +321,7 @@ namespace
     bool objective_recipe(U::UObject* stock, const U::TCHAR* quest, U::UClass* wanted, int expected_cash,
                           U::UClass* first_reward, U::UClass* second_reward, WirePhase phase,
                           int expected_final_step = 2, int expected_xp = 1, int exact_active_step = 0,
-                          const U::TCHAR* display_alias = nullptr)
+                          const U::TCHAR* display_alias = nullptr, std::span<U::UClass* const> board_objectives = {})
     {
         auto* type = find<U::UScriptStruct>(quest_path);
         auto* map = field<U::FMapProperty>(stock, STR("ActiveQuests"));
@@ -362,8 +364,25 @@ namespace
             current_step < 1 || current_step > expected_final_step || (exact_active_step && current_step != exact_active_step))
             return false;
         U::FScriptArrayHelper requested(objectives, objectives->ContainerPtrToValuePtr<void>(found));
-        if (requested.Num() != (wanted ? 1 : 0) ||
-            (wanted && objective->GetObjectPropertyValue(requested.GetRawPtr()) != wanted)) return false;
+        if (board_objectives.empty())
+        {
+            if (requested.Num() != (wanted ? 1 : 0) ||
+                (wanted && objective->GetObjectPropertyValue(requested.GetRawPtr()) != wanted)) return false;
+        }
+        else
+        {
+            if (requested.Num() < static_cast<int>(board_objectives.size()) || requested.Num() > 16) return false;
+            // Stock looks for every objective and consumes each distinct class once.
+            std::size_t distinct = 0;
+            for (int index = 0; index < requested.Num(); ++index)
+            {
+                auto* type = objective->GetObjectPropertyValue(requested.GetRawPtr(index));
+                const auto seen = board_objectives.first(distinct);
+                if (std::ranges::find(seen, type) != seen.end()) continue;
+                if (distinct == board_objectives.size() || type != board_objectives[distinct++]) return false;
+            }
+            if (distinct != board_objectives.size()) return false;
+        }
         U::FScriptArrayHelper rewards(items, items->ContainerPtrToValuePtr<void>(found));
         if (!first_reward) return !second_reward && rewards.Num() == 0;
         return rewards.Num() == (second_reward ? 2 : 1) && item->GetObjectPropertyValue(rewards.GetRawPtr(0)) == first_reward &&
@@ -722,9 +741,7 @@ namespace
 
     struct BoardDeposit
     {
-        int units;
         U::FName quest;
-        Guid consumed{};
 
         U::UObject* library{};
         U::UFunction* turn_in{};
@@ -791,7 +808,7 @@ namespace
     int stage_objective_transfer(const Lua& lua, const Check& matches_recipe, const Fail& fail,
                                  const std::array<Address, 3>& args, PartyWorld location, Party& party,
                                  const Inventory& inventory, U::UClass* wanted, const Guid& objective_id,
-                                 bool stackable_unit, bool sealed_package, BoardDeposit* deposit = nullptr)
+                                         bool stackable_unit, bool sealed_package)
     {
         auto* defaults = wanted ? wanted->GetClassDefaultObject().Get() : nullptr;
         if (!wanted || !wanted->IsChildOf(inventory.base_class) || !defaults || !defaults->HasAnyFlags(U::RF_ClassDefaultObject) ||
@@ -804,8 +821,8 @@ namespace
         if (!inventory.locate(party.detached, objective_id, source) || source.count != 1 || source.backpack_index < 0 ||
             !is_objective(source.row)) return fail("wire_objective_exact_guest_backpack_item_required");
         const auto ammo = inventory.ammo->GetPropertyValueInContainer(source.row);
-        if (ammo < (stackable_unit ? 1 : 0) || (deposit ? ammo != deposit->units : ammo > 1))
-            return fail(deposit ? "board_objective_quantity_changed" : "wire_objective_single_item_required");
+        if (ammo < (stackable_unit ? 1 : 0) || ammo > 1)
+            return fail("wire_objective_single_item_required");
         if (sealed_package)
         {
             std::string stock_guid;
@@ -813,9 +830,8 @@ namespace
                 read_guid(stock_guid) != objective_id) return fail("wire_objective_sealed_package_unqualified");
         }
         bool host_conflict = false;
-        if (!inventory.visit(party.stock, [&](const void* row, bool, int backpack_index) {
-                host_conflict |= inventory.identity(row) == objective_id ||
-                    (is_objective(row) && (!deposit || backpack_index < 0));
+        if (!inventory.visit(party.stock, [&](const void* row, bool, int) {
+                host_conflict |= inventory.identity(row) == objective_id || is_objective(row);
             })) return fail("wire_objective_host_inventory_unqualified");
         if (host_conflict) return fail("wire_objective_canonical_item_conflict");
 
@@ -861,63 +877,23 @@ namespace
         };
         if (!same_party_and_recipe() || !protected_unchanged(0)) return fail("wire_objective_authority_or_inventory_changed");
 
-        const bool partial = deposit && stackable_unit && ammo > 1;
-        Guid consumed = objective_id;
-        const void* moving = source.row;
-        Value portion(nullptr, {inventory.row}), remainder(nullptr, {inventory.row});
-        if (partial)
-        {
-            U::FScriptArrayHelper saved_rows(inventory.backpack, inventories[0].before[0].get());
-            const void* snapshot = saved_rows.GetRawPtr(source.backpack_index);
-            portion.reset(inventory.row->AllocateAndInitializeValue());
-            remainder.reset(inventory.row->AllocateAndInitializeValue());
-            if (!portion || !remainder) return fail("board_objective_split_storage_unavailable");
-            const bool split = silverfish::native_guest_item::split_stock_stack(
-                party.target, inventory.row, snapshot, 1, portion.get(), remainder.get());
-            if (!same_party_and_recipe() || !protected_unchanged(0))
-                return fail("mutation_unverified_stock_board_objective_split");
-            if (!split) return fail("board_objective_stock_split_unavailable");
-            consumed = inventory.identity(portion.get());
-            if (consumed == Guid{} || consumed == objective_id ||
-                !split_row_matches(inventory, snapshot, portion.get(), 1, consumed) ||
-                !split_row_matches(inventory, snapshot, remainder.get(), ammo - 1, objective_id))
-                return fail("board_objective_stock_split_unverified");
-            for (auto* owner : owners)
-            {
-                if (!owner) break;
-                Inventory::Match collision;
-                if (!inventory.locate(owner, consumed, collision) || collision.count)
-                    return fail("board_objective_split_guid_conflict");
-            }
-            moving = portion.get();
-        }
-
         auto prepared_from = copy(inventory.backpack, inventories[0].before[0].get());
         auto prepared_to = copy(inventory.backpack, inventories[1].before[0].get());
         if (!prepared_from || !prepared_to) return fail("wire_objective_transfer_preparation_unavailable");
         U::FScriptArrayHelper planned_from(inventory.backpack, prepared_from.get());
         U::FScriptArrayHelper planned_to(inventory.backpack, prepared_to.get());
-        if (deposit)
-        {
-            // The stock quest consumes the first matching item on the host.
-            // Expose the guest's unit without exposing the host's own stacks.
-            for (int i = planned_to.Num() - 1; i >= 0; --i)
-                if (is_objective(planned_to.GetRawPtr(i))) planned_to.RemoveValues(i, 1);
-        }
         const int host_rows = planned_to.Num();
         const auto new_index = planned_to.AddValues(1);
         if (new_index != host_rows || planned_to.Num() != host_rows + 1)
             return fail("wire_objective_prepared_append_unverified");
-        inventory.row->CopyCompleteValue(planned_to.GetRawPtr(new_index), moving);
-        if (!inventory.identical(planned_to.GetRawPtr(new_index), moving)) return fail("wire_objective_typed_copy_unverified");
-        if (partial) inventory.row->CopyCompleteValue(planned_from.GetRawPtr(source.backpack_index), remainder.get());
-        else planned_from.RemoveValues(source.backpack_index, 1);
-        if (planned_from.Num() != from_rows.Num() - (partial ? 0 : 1))
+        inventory.row->CopyCompleteValue(planned_to.GetRawPtr(new_index), source.row);
+        if (!inventory.identical(planned_to.GetRawPtr(new_index), source.row)) return fail("wire_objective_typed_copy_unverified");
+        planned_from.RemoveValues(source.backpack_index, 1);
+        if (planned_from.Num() != from_rows.Num() - 1)
             return fail("wire_objective_prepared_debit_unverified");
         for (int i = 0; i < planned_from.Num(); ++i)
         {
-            const void* expected = partial && i == source.backpack_index ? remainder.get() :
-                from_rows.GetRawPtr(i + (!partial && i >= source.backpack_index));
+            const void* expected = from_rows.GetRawPtr(i + (i >= source.backpack_index));
             if (!inventory.identical(planned_from.GetRawPtr(i), expected))
                 return fail("wire_objective_prepared_guest_row_changed");
         }
@@ -925,7 +901,6 @@ namespace
         for (int i = 0; i < to_rows.Num(); ++i)
         {
             const auto* row = to_rows.GetRawPtr(i);
-            if (deposit && is_objective(row)) continue;
             if (retained >= host_rows || !inventory.identical(planned_to.GetRawPtr(retained++), row))
                 return fail("wire_objective_prepared_host_row_changed");
         }
@@ -942,37 +917,7 @@ namespace
             inventory.backpack->CopyCompleteValue(from, inventories[0].before[0].get());
             return fail(protected_unchanged(0) ? "wire_objective_transfer_rolled_back" : "mutation_unverified_wire_objective_rollback");
         }
-        if (!deposit) return reply(lua, true, "staged");
-
-        bool redeemed = false;
-        bool verified_debit = false;
-        {
-            // The stock callback completes synchronously. Restore the host's
-            // exact original pack before releasing the game-thread operation.
-            const auto restore_host = [&](void* target) {
-                inventory.backpack->CopyCompleteValue(target, inventories[1].before[0].get());
-            };
-            const std::unique_ptr<void, decltype(restore_host)> restored_pack(to, restore_host);
-            try
-            {
-                redeemed = deposit->redeem(party);
-                planned_to.RemoveValues(new_index, 1);
-                verified_debit = verified(to, prepared_to) && verified(from, prepared_from);
-            }
-            catch (const std::exception&)
-            {
-                // The enclosing action quarantines an ambiguous stock redemption.
-            }
-        }
-        Party current;
-        if (!redeemed || !verified_debit || !protected_unchanged(1) || !inventories[1].unchanged() ||
-            !current.read(args[0], args[1], args[2], true, location) || !party.same_identity(current))
-        {
-            inventory.backpack->CopyCompleteValue(from, inventories[0].before[0].get());
-            return fail("mutation_unverified_stock_board_objective_redemption");
-        }
-        deposit->consumed = consumed;
-        return reply(lua, true, "redeemed");
+        return reply(lua, true, "staged");
     }
 
     template <const ObjectiveQuest& Quest>
@@ -1010,51 +955,231 @@ namespace
             wanted, objective_id, Quest.stackable_unit, &Quest == &missing_contact_objective);
     }
 
-    int redeem_board_objective(const Lua& lua)
+    struct BoardObjective
+    {
+        U::UClass* type{};
+        Guid guid{};
+        int units{};
+        int slot{};
+    };
+
+    std::vector<BoardObjective> read_board_objectives(std::string_view input, const Inventory& inventory)
+    {
+        std::vector<BoardObjective> objectives;
+        if (input.empty() || input.size() > 16 * 302 || input.back() == ',') return {};
+        while (!input.empty())
+        {
+            const auto end = input.find(',');
+            const auto entry = input.substr(0, end);
+            const auto first = entry.find('|');
+            const auto second = first == entry.npos ? entry.npos : entry.find('|', first + 1);
+            if (first != 32 || second == entry.npos || objectives.size() >= 16) return {};
+            const auto guid = read_guid(entry.substr(0, first));
+            const auto count = entry.substr(first + 1, second - first - 1);
+            const auto path = entry.substr(second + 1);
+            int units{};
+            const auto parsed = std::from_chars(count.data(), count.data() + count.size(), units);
+            if (guid == Guid{} || parsed.ec != std::errc{} || parsed.ptr != count.data() + count.size() ||
+                units < 0 || !silverfish::content_paths::item_class(path)) return {};
+            const std::wstring name(path.begin(), path.end());
+            auto* type = find<U::UClass>(name.c_str());
+            if (!live(type) || !type->IsChildOf(inventory.base_class) || type->GetPathName() != name ||
+                std::ranges::find(objectives, type, &BoardObjective::type) != objectives.end() ||
+                std::ranges::find(objectives, guid, &BoardObjective::guid) != objectives.end()) return {};
+            objectives.push_back({type, guid, units});
+            if (end == input.npos) break;
+            input.remove_prefix(end + 1);
+        }
+        return objectives;
+    }
+
+    int redeem_board_objectives(const Lua& lua)
     {
         const auto fail = [&](std::string_view reason) { return reply(lua, false, reason); };
-        std::array<Address, 3> addresses{};
-        if (!available(lua, 10) || !lua.is_string(4) || !lua.is_string(5) || !lua.is_string(6) ||
-            !lua.is_integer(7) || !lua.is_integer(8) || !lua.is_integer(9) || !lua.is_integer(10) ||
-            !read_addresses(lua, addresses))
+        std::array<Address, 3> args{};
+        if (!available(lua, 8) || !lua.is_string(4) || !lua.is_integer(5) || !lua.is_integer(6) ||
+            !lua.is_integer(7) || !lua.is_string(8) || !read_addresses(lua, args))
             return fail("board_objective_arguments_unqualified");
-        const auto objective_id = read_guid(lua.get_string());
-        const std::string quest{lua.get_string()}, class_path{lua.get_string()};
-        const auto final_step = lua.get_integer(), cash = lua.get_integer(), xp = lua.get_integer(), units = lua.get_integer();
+        const std::string quest{lua.get_string()};
+        const auto final_step = lua.get_integer(), cash = lua.get_integer(), xp = lua.get_integer();
+        const std::string selection{lua.get_string()};
         constexpr auto max_value = 2147483647;
         const auto word = [](char value) {
             return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z') ||
                 (value >= '0' && value <= '9') || value == '_';
         };
-        if (objective_id == Guid{} || quest.empty() || quest.size() > 96 || !std::ranges::all_of(quest, word) ||
-            !silverfish::content_paths::item_class(std::string_view{class_path}) ||
-            final_step < 1 || final_step > max_value || cash < 0 || cash > max_value || xp < 0 || xp > max_value ||
-            units < 0 || units > max_value)
+        if (quest.empty() || quest.size() > 96 || !std::ranges::all_of(quest, word) ||
+            final_step < 1 || final_step > max_value || cash < 0 || cash > max_value || xp < 0 || xp > max_value)
             return fail("board_objective_arguments_unqualified");
 
         constexpr auto location = PartyWorld::current_campaign;
         Party party;
         Inventory inventory;
-        if (!party.read(addresses[0], addresses[1], addresses[2], true, location) || !inventory.bind(false))
+        if (!party.read(args[0], args[1], args[2], true, location) || !inventory.bind(false))
             return fail("board_objective_exact_detached_guest_required");
-        const std::wstring quest_name(quest.begin(), quest.end()), stock_class(class_path.begin(), class_path.end());
-        auto* wanted = find<U::UClass>(stock_class.c_str());
-        if (!wanted || !wanted->IsChildOf(inventory.base_class)) return fail("board_objective_class_unavailable");
+        auto objectives = read_board_objectives(selection, inventory);
+        if (objectives.empty()) return fail("board_objective_arguments_unqualified");
+        std::vector<U::UClass*> classes;
+        for (const auto& item : objectives) classes.push_back(item.type);
+        const std::wstring quest_name(quest.begin(), quest.end());
         const auto matches_recipe = [&] {
-            return objective_recipe(party.stock, quest_name.c_str(), wanted, static_cast<int>(cash),
-                nullptr, nullptr, WirePhase::active, static_cast<int>(final_step), static_cast<int>(xp));
+            return objective_recipe(party.stock, quest_name.c_str(), classes.front(), static_cast<int>(cash),
+                nullptr, nullptr, WirePhase::active, static_cast<int>(final_step), static_cast<int>(xp), 0, nullptr, classes);
         };
         if (!matches_recipe()) return fail("board_objective_active_recipe_required");
-        auto* default_item = wanted->GetClassDefaultObject().Get();
-        auto* stacks = field<U::FBoolProperty>(default_item, STR("Stacks"));
-        if (!stacks) return fail("board_objective_stack_layout_unqualified");
-        BoardDeposit deposit{static_cast<int>(units), U::FName{quest_name.c_str(), U::FNAME_Find}};
+        BoardDeposit deposit{U::FName{quest_name.c_str(), U::FNAME_Find}};
         if (!deposit.bind()) return fail("board_objective_turnin_unavailable");
-        const auto results = stage_objective_transfer(lua, matches_recipe, fail, addresses, location, party, inventory,
-            wanted, objective_id, stacks->GetPropertyValueInContainer(default_item), false, &deposit);
-        if (deposit.consumed == Guid{}) return results;
-        lua.set_string(guid_text(deposit.consumed));
-        return results + 1;
+
+        auto* from = inventory.backpack->ContainerPtrToValuePtr<void>(party.detached);
+        auto* to = inventory.backpack->ContainerPtrToValuePtr<void>(party.stock);
+        U::FScriptArrayHelper from_rows(inventory.backpack, from);
+        U::FScriptArrayHelper to_rows(inventory.backpack, to);
+        const auto* from_buffer = from_rows.Num() > 0 ? from_rows.GetRawPtr() : nullptr;
+        const auto* to_buffer = to_rows.Num() > 0 ? to_rows.GetRawPtr() : nullptr;
+        std::array<U::UObject*, max_guests + 2> owners{party.detached, party.stock};
+        std::ranges::copy(party.other, owners.begin() + 2);
+        std::array<ProtectedInventory, max_guests + 2> inventories;
+        for (std::size_t index = 0; index < owners.size() && owners[index]; ++index)
+        {
+            for (auto* part : {inventory.backpack, inventory.equipment})
+            {
+                auto* data = part->ContainerPtrToValuePtr<void>(owners[index]);
+                U::FScriptArrayHelper rows(part, data);
+                if (rows.Num() < 0 || rows.Num() > max_inventory) return fail("board_objective_inventory_unqualified");
+                const auto* buffer = rows.Num() > 0 ? rows.GetRawPtr() : nullptr;
+                if ((index != 0 || part != inventory.backpack) && (data == from || (from_buffer && from_buffer == buffer)))
+                    return fail("board_objective_inventory_alias");
+                if ((index != 1 || part != inventory.backpack) && (data == to || (to_buffer && to_buffer == buffer)))
+                    return fail("board_objective_inventory_alias");
+            }
+            if (!inventories[index].capture(inventory, owners[index])) return fail("board_objective_inventory_unavailable");
+        }
+        const auto protected_unchanged = [&](std::size_t start) {
+            for (std::size_t index = 0; index < owners.size() && owners[index]; ++index)
+                if (!inventories[index].unchanged(index < 2 ? start : 0)) return false;
+            return true;
+        };
+        const auto same_party = [&] {
+            Party current;
+            return current.read(args[0], args[1], args[2], true, location) && party.same_identity(current);
+        };
+        const auto guid_count = [&](const Guid& guid, std::size_t first) {
+            int found = 0;
+            for (auto index = first; index < owners.size() && owners[index]; ++index)
+            {
+                Inventory::Match match;
+                if (!inventory.locate(owners[index], guid, match)) return -1;
+                found += match.count;
+            }
+            return found;
+        };
+        for (auto& item : objectives)
+        {
+            Inventory::Match match;
+            if (!inventory.locate(party.detached, item.guid, match) || match.count != 1 || match.backpack_index < 0 ||
+                inventory.klass(match.row) != item.type || inventory.ammo->GetPropertyValueInContainer(match.row) != item.units ||
+                guid_count(item.guid, 1) != 0) return fail("board_objective_selection_changed");
+            item.slot = match.backpack_index;
+            for (int index = 0; index < item.slot; ++index)
+                if (inventory.klass(from_rows.GetRawPtr(index)) == item.type) return fail("board_objective_first_stack_changed");
+        }
+
+        auto prepared_from = copy(inventory.backpack, inventories[0].before[0].get());
+        auto prepared_to = copy(inventory.backpack, inventories[1].before[0].get());
+        if (!prepared_from || !prepared_to) return fail("board_objective_transfer_preparation_unavailable");
+        U::FScriptArrayHelper planned_from(inventory.backpack, prepared_from.get());
+        U::FScriptArrayHelper planned_to(inventory.backpack, prepared_to.get());
+        U::FScriptArrayHelper original(inventory.backpack, inventories[0].before[0].get());
+        for (int index = planned_to.Num() - 1; index >= 0; --index)
+            if (std::ranges::find(classes, inventory.klass(planned_to.GetRawPtr(index))) != classes.end())
+                planned_to.RemoveValues(index, 1);
+        const int host_rows = planned_to.Num();
+        if (host_rows + objectives.size() > max_inventory) return fail("board_objective_canonical_inventory_full");
+
+        std::vector<Guid> consumed;
+        std::vector<int> removed;
+        for (const auto& item : objectives)
+        {
+            auto* defaults = item.type->GetClassDefaultObject().Get();
+            auto* stacks = field<U::FBoolProperty>(defaults, STR("Stacks"));
+            if (!stacks || !defaults->HasAnyFlags(U::RF_ClassDefaultObject))
+                return fail("board_objective_stack_layout_unqualified");
+            const bool stackable = stacks->GetPropertyValueInContainer(defaults);
+            if (stackable && !item.units) return fail("board_objective_quantity_changed");
+            const void* moving = original.GetRawPtr(item.slot);
+            Value portion(nullptr, {inventory.row}), remainder(nullptr, {inventory.row});
+            Guid spent = item.guid;
+            if (stackable && item.units > 1)
+            {
+                portion.reset(inventory.row->AllocateAndInitializeValue());
+                remainder.reset(inventory.row->AllocateAndInitializeValue());
+                if (!portion || !remainder || !silverfish::native_guest_item::split_stock_stack(
+                        party.target, inventory.row, moving, 1, portion.get(), remainder.get()))
+                    return fail("board_objective_stock_split_unavailable");
+                spent = inventory.identity(portion.get());
+                if (spent == Guid{} || guid_count(spent, 0) != 0 ||
+                    !split_row_matches(inventory, moving, portion.get(), 1, spent) ||
+                    !split_row_matches(inventory, moving, remainder.get(), item.units - 1, item.guid))
+                    return fail("board_objective_stock_split_unverified");
+                moving = portion.get();
+                auto* row = planned_from.GetRawPtr(item.slot);
+                inventory.row->CopyCompleteValue(row, remainder.get());
+                if (!inventory.identical(row, remainder.get())) return fail("board_objective_remainder_unverified");
+            }
+            else removed.push_back(item.slot);
+            if (std::ranges::find(consumed, spent) != consumed.end()) return fail("board_objective_guid_collision");
+            consumed.push_back(spent);
+            auto* destination = planned_to.GetRawPtr(planned_to.AddValue());
+            inventory.row->CopyCompleteValue(destination, moving);
+            if (!inventory.identical(destination, moving)) return fail("board_objective_typed_copy_unverified");
+        }
+        std::ranges::sort(removed, std::greater<>{});
+        for (auto index : removed) planned_from.RemoveValues(index, 1);
+        if (!protected_unchanged(0) || !same_party() || !matches_recipe())
+            return fail("board_objective_authority_or_inventory_changed");
+
+        const auto verified = [&](const void* data, const Value& expected) {
+            return inventory.backpack->Identical(data, expected.get());
+        };
+        const auto restore = [&](std::size_t index, void* data) {
+            inventory.backpack->CopyCompleteValue(data, inventories[index].before[0].get());
+        };
+        bool redeemed = false;
+        {
+            // Only the staged guest items are visible to the synchronous stock callback.
+            const auto restore_host = [&](void* data) { restore(1, data); };
+            const std::unique_ptr<void, decltype(restore_host)> original_host(to, restore_host);
+            inventory.backpack->CopyCompleteValue(to, prepared_to.get());
+            if (!verified(to, prepared_to)) return fail("board_objective_escrow_unverified");
+            try
+            {
+                redeemed = deposit.redeem(party);
+                planned_to.RemoveValues(host_rows, static_cast<int>(objectives.size()));
+                redeemed = redeemed && verified(to, prepared_to) && inventories[0].unchanged();
+            }
+            catch (const std::exception&)
+            {
+                redeemed = false;
+            }
+        }
+        if (!redeemed || !protected_unchanged(0) || !same_party())
+            return fail("mutation_unverified_stock_board_objective_redemption");
+
+        inventory.backpack->CopyCompleteValue(from, prepared_from.get());
+        if (!verified(from, prepared_from) || !protected_unchanged(1) || !inventories[1].unchanged())
+        {
+            restore(0, from);
+            return fail("mutation_unverified_stock_board_objective_debit");
+        }
+        std::string receipt;
+        for (const auto& guid : consumed)
+        {
+            if (!receipt.empty()) receipt += ',';
+            receipt += guid_text(guid);
+        }
+        const auto result = reply(lua, true, "redeemed");
+        lua.set_string(receipt);
+        return result + 1;
     }
 
     template <bool MeetBroker>
@@ -1745,7 +1870,7 @@ void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishStagePocketWatchObjective", stage_objective<pocket_watch_objective>);
     lua.register_function("SilverfishStageSavloRingObjective", stage_objective<savlo_ring_objective>);
     lua.register_function("SilverfishStageMolassesObjective", stage_objective<molasses_objective>);
-    lua.register_function("SilverfishRedeemBoardObjective", redeem_board_objective);
+    lua.register_function("SilverfishRedeemBoardObjectives", redeem_board_objectives);
     lua.register_function("SilverfishStageSavloKeycardObjective", stage_objective<savlo_keycard_objective>);
     lua.register_function("SilverfishStagePumpRoomObjective", stage_objective<pump_room_objective>);
     lua.register_function("SilverfishStageStoneMazeObjective", stage_objective<stone_maze_objective>);

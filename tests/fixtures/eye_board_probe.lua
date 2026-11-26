@@ -12,6 +12,8 @@ local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local amount_field = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local step_field = "Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A"
+local objectives_field = "Objective_Items_56_9FD46BE9431873A188AED4B08F0AF083"
+local armor_contract = "Clct_Armor_Simmi"
 local previous, prepared_save, leveled, seeded
 local streamed
 local discovered_path = shopkeep .. ".Shop_ShopKeep_P:PersistentLevel.BountyBoard_BP_C_2"
@@ -86,6 +88,39 @@ local function prepare(state, host, operation)
     assert(same(owner, remote) and same(save, remote.Save) and not same(save, instance.SaveSlot_Ref))
     if operation == "approach" then return approach_board(state, remote, discovered_path) end
     if operation == "approachturnin" then return approach_board(state, remote, turnin_path) end
+    if operation == "multiquest" or operation == "multifirst" or operation == "multisecond" then
+        assert(state.map == shopkeep)
+        local quest = FName(armor_contract, EFindName.FNAME_Find)
+        local read_row = require("native_wire_quest").stock_row
+        if operation == "multiquest" then
+            assert(not read_row(host.Save.ActiveQuests, quest))
+            instance:AddQuest_ByName(quest)
+            local board = StaticFindObject(turnin_path)
+            local redeemable = board.RedeemableQuests
+            redeemable[redeemable:GetArrayNum() + 1] = quest
+            assert(redeemable[redeemable:GetArrayNum()]:ToString() == armor_contract)
+        end
+        local row = assert(read_row(host.Save.ActiveQuests, quest))
+        assert(row[step_field] == 1 and row[objectives_field]:GetArrayNum() == 2)
+        if operation == "multiquest" then return "1" end
+        local index = operation == "multifirst" and 1 or 2
+        local class = row[objectives_field][index]
+        assert(valid(class) and class:GetCDO().Stacks == false)
+        local factory = StaticFindObject(factory_path)
+        local function append(owner, backpack)
+            local out = {}
+            factory:MakeDefaultItem(class, owner, out)
+            local stock = out.Item or out
+            local guid = identity(stock)
+            assert(same(stock[class_field], class) and guid:find("[^0]"))
+            local slot = backpack:GetArrayNum() + 1
+            backpack[slot] = stock
+            assert(identity(backpack[slot]) == guid)
+            return guid
+        end
+        return table.concat({append(remote, save.PlayerBackpack), append(host, host.Save.PlayerBackpack),
+            class:GetFullName():match("^%S+ (.+)$")}, ";")
+    end
     assert(operation == "eye" and not seeded)
     local item = StaticFindObject(class_path)
     if not valid(item) then LoadAsset(class_path); item = StaticFindObject(class_path) end
@@ -158,9 +193,10 @@ local function sync(state, phase)
     local operation, nonce = request:gsub("\r$", ""):match("^(%a+)|(%x+)$")
     if not nonce then return end
     local ok, result
-    if operation == "journal" then
+    if operation == "journal" or operation == "multijournal" then
         ok, result = pcall(function()
-            local row = require("native_wire_quest").stock_row(pawn.Save.ActiveQuests, FName("Clt_Eye_02", EFindName.FNAME_Find))
+            local key = operation == "journal" and "Clt_Eye_02" or armor_contract
+            local row = require("native_wire_quest").stock_row(pawn.Save.ActiveQuests, FName(key, EFindName.FNAME_Find))
             return row and row[step_field] or "-"
         end)
     elseif (operation == "stream" or operation == "placeboard") and state.map == overview then

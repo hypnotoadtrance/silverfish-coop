@@ -81,14 +81,14 @@ def require_visit(host, visit):
 
 
 def parse(fields):
-    if len(fields) != 21:
+    if len(fields) not in (21, 22):
         raise ValueError("Invalid native board result")
     proof = dict(zip(("verb", "mode", "map", "pawn", "board", "quest", "state"), fields[1:8], strict=True))
     proof.update(zip(("step_before", "step_after", "expected_step"),
                      (None if field == "-" else int(field) for field in fields[8:11]), strict=True))
     proof.update(zip(("cash_before", "cash_after", "xp_before", "xp_after", "cash", "xp"),
                      map(int, fields[11:17]), strict=True))
-    proof["guid"], units, remaining, proof["consumed"] = fields[17:]
+    proof["guid"], units, remaining, proof["consumed"] = fields[17:21]
     proof["units"] = None if units == "-" else int(units)
     proof["remaining"] = None if remaining == "-" else int(remaining)
     if (not quest_id(proof["quest"]) or proof["verb"] not in {"start", "turnin"}
@@ -98,14 +98,31 @@ def parse(fields):
     if proof["guid"] == "-":
         if proof["units"] is not None or proof["remaining"] is not None or proof["consumed"] != "-":
             raise ValueError("Unexpected board deposit result")
-    elif (not valid_guid(proof["guid"]) or proof["verb"] != "turnin"
-            or proof["units"] is None or proof["remaining"] is None
-            or not 0 <= proof["units"] <= 2_147_483_647
-            or proof["remaining"] not in {0, max(0, proof["units"] - 1)}
-            or (proof["state"] != "applied" and proof["consumed"] != "-")
-            or (proof["consumed"] != "-" and not valid_guid(proof["consumed"]))):
+    elif not _valid_deposit(proof, proof):
         raise ValueError("Unqualified board deposit result")
+    proof["additional_deposits"] = []
+    extra = fields[21] if len(fields) == 22 else "-"
+    if extra != "-":
+        if len(extra) > 1200 or proof["guid"] == "-":
+            raise ValueError("Unexpected additional board deposits")
+        pending, spent = {proof["guid"]}, {proof["consumed"]}
+        for row in extra.split(","):
+            guid, count, left, consumed = row.split(":")
+            part = {"guid": guid, "units": int(count), "remaining": int(left), "consumed": consumed}
+            if (len(proof["additional_deposits"]) >= 15 or not _valid_deposit(proof, part)
+                    or guid in pending or (consumed != "-" and consumed in spent)):
+                raise ValueError("Unqualified additional board deposit")
+            pending.add(guid)
+            spent.add(consumed)
+            proof["additional_deposits"].append(part)
     return proof
+
+
+def _valid_deposit(proof, part):
+    units, remaining, consumed = part["units"], part["remaining"], part["consumed"]
+    return (proof["verb"] == "turnin" and valid_guid(part["guid"]) and units is not None
+            and 0 <= units <= 2_147_483_647 and remaining in {0, max(0, units - 1)}
+            and (consumed == "-" or proof["state"] == "applied" and valid_guid(consumed)))
 
 
 def parse_catalog(fields):
@@ -165,6 +182,8 @@ def _receipt(actor, before, result):
     for key in (*_INSPECTED_FIELDS, "guid", "units"):
         if result[key] != before[key]:
             raise RuntimeError("The stock board action differs from its inspected recipe")
+    if _additional_inspection(result) != _additional_inspection(before):
+        raise RuntimeError("The stock board action differs from its inspected deposits")
     cash, xp = result["cash"], result["xp"]
     # A separate stock action can change the balance between inspection and apply.
     # Use the game-thread balance at apply time and verify the exact reward delta.
@@ -174,16 +193,28 @@ def _receipt(actor, before, result):
     if step == COMPLETE:
         record.update(cash=cash, xp=xp, wallet=result["cash_after"])
         if result["guid"] != "-":
-            guid, left, consumed = result["guid"], result["remaining"], result["consumed"]
-            if ((left == 0 and consumed != guid)
-                    or (left > 0 and actor == "host" and consumed != "-")
-                    or (left > 0 and actor != "host" and consumed in {"-", guid})):
-                raise RuntimeError("The stock board action reported the wrong consumed or remaining item")
-            record.update(objective_guid=guid, objective_owner=actor, objective_units_before=left + 1,
-                          objective_units_consumed=1, objective_units_remaining=left)
-            if consumed != "-":
-                record["consumed_guid"] = consumed
+            deposits = [_deposit_receipt(actor, part) for part in (result, *result["additional_deposits"])]
+            record.update(deposits[0])
+            if len(deposits) > 1:
+                record["objective_deposits"] = deposits
     return record
+
+
+def _deposit_receipt(actor, part):
+    guid, left, consumed = part["guid"], part["remaining"], part["consumed"]
+    if ((left == 0 and consumed != guid)
+            or (left > 0 and actor == "host" and consumed != "-")
+            or (left > 0 and actor != "host" and consumed in {"-", guid})):
+        raise RuntimeError("The stock board action reported the wrong consumed or remaining item")
+    record = dict(objective_guid=guid, objective_owner=actor, objective_units_before=left + 1,
+                  objective_units_consumed=1, objective_units_remaining=left)
+    if consumed != "-":
+        record["consumed_guid"] = consumed
+    return record
+
+
+def _additional_inspection(proof):
+    return ",".join(f"{part['guid']}:{part['units']}:{part['remaining']}" for part in proof["additional_deposits"])
 
 
 def apply_arguments(proof):
@@ -191,6 +222,9 @@ def apply_arguments(proof):
         return "-" if value is None else str(value)
 
     inspected = "|".join(encode(proof[key]) for key in _INSPECTED_FIELDS)
+    additional = _additional_inspection(proof)
+    if additional:
+        inspected = f"{inspected}|{additional}"
     return proof["guid"], encode(proof["units"]), inspected
 
 

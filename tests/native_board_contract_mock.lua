@@ -135,10 +135,10 @@ function StaticFindObject(path)
 end
 EFindName = {FNAME_Find = 1}
 function FName(text) return text end
-function SilverfishRedeemBoardObjective(pawn, source, dest, guid, quest_id, path, limit, payout, experience, units)
+function SilverfishRedeemBoardObjectives(pawn, source, dest, quest_id, limit, payout, experience, selected)
     assert(pawn == guest:GetAddress() and source == bag:GetAddress() and dest == store:GetAddress())
-    assert(guid == want_guid and quest_id == eye and path == item_path and limit == 2 and payout == 801 and experience == 1)
-    assert(units == 2 and bag.PlayerBackpack[1] == row_item)
+    assert(quest_id == eye and limit == 2 and payout == 801 and experience == 1)
+    assert(selected == want_guid .. "|2|" .. item_path and bag.PlayerBackpack[1] == row_item)
     row_item[item_units] = 1
     local host_pack = store.PlayerBackpack
     assert(host_pack[1] == host_stack)
