@@ -132,7 +132,6 @@ async def verify_stock_personal_consumable(host, guest, pawn, probe):
     blue_mushroom = await use_stock_item(guest_run, frame, blue, FALLBACK_RECEIPT)
     assert (blue_mushroom["guid"], blue_mushroom["class_path"], blue_mushroom["quantity_after"]) == (
         blue, BLUE_MUSHROOM, 0), blue_mushroom
-    await stock_inventory_open(guest_run, False)
     async with asyncio.timeout(12):
         while True:
             guest_shift = (await guest.bridge.command("native-time-shift-fixture", "observe"))["ack"]["message"].split(";")
@@ -141,10 +140,10 @@ async def verify_stock_personal_consumable(host, guest, pawn, probe):
             await asyncio.sleep(.08)
     host_shift = (await host.bridge.command("native-time-shift-fixture", "observe"))["ack"]["message"].split(";")
     assert host_shift[:2] == ["0", "1.000"] and guest_shift[:2] == ["1", "1.000"], (host_shift, guest_shift)
+    await stock_inventory_open(guest_run, False)
     assert campaign_save_hashes(host.campaign) == saves, "Blue Mushroom use wrote an early checkpoint"
-    food = blue_mushroom["vitals"]["food"]
-    fatigue = blue_mushroom["vitals"]["fatigue"]
-    intox = blue_mushroom["vitals"]["intox"]
+    vitals = blue_mushroom["vitals"]
+    food, regen, fatigue, intox = (vitals[key] for key in ("food", "regen", "fatigue", "intox"))
     return {"stock_personal_consumable": {
         "pawn": pawn, "character_id": frame["character_id"], "guid": spare, "remaining": 1, "food": food, "regen": regen,
         "fatigue": fatigue, "intox": intox, "frog_guids": frogs,
