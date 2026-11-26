@@ -7750,9 +7750,6 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                      fixture="portable_lantern_probe.lua"))
         if compact_crate_status:
             proof["crate_status_overlay"] = {str(game): probes.enter_context(compact_crate_status_overlay(game)) for game in games}
-        if manage_saves:
-            managed = proof["save_management"] = await verify_save_management(first, second)
-            proof["sessions"].extend((managed["created"], managed["reopened"]))
         if nonmirrored_startup:
             proof["nonmirrored_startup_overlay"] = {
                 str(game): probes.enter_context(nonmirrored_startup_overlay(game)) for game in games
@@ -7845,6 +7842,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 evidence["guest_stock_nearby_container_pickup"] = await verify_container_pickup(
                     host, guest, pawn, memory_ui=guest_ui_memory)
             return evidence
+        if manage_saves:
+            managed = proof["save_management"] = await verify_save_management(first, second)
+            proof["sessions"].extend((managed["created"], managed["reopened"]))
         if nonmirrored_startup:
             startup = proof["nonmirrored_startup"] = {}
             proof["sessions"].append(await verify_nonmirrored_startup(first, second, startup))
@@ -8039,7 +8039,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     assert reopened["campaign_id"] == session["campaign_id"]
                     assert reopened["revision"] > session["revision"]
                     proof["sessions"].append(dict(reopened, resident_campaign="loki_reopened"))
-            assert len({row["campaign_id"] for row in proof["sessions"]}) == len(resident_campaigns) + int(stock_unequip)
+            assert len({row["campaign_id"] for row in proof["sessions"]}) == (
+                len(resident_campaigns) + int(stock_unequip) + int(manage_saves))
             assert all(row["host_pid"] == first.bridge.process.pid and row["guest_pid"] == second.bridge.process.pid
                        for row in proof["sessions"])
             if resident_weapon_cues:

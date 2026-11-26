@@ -94,6 +94,26 @@ class TitleJoinSettingsTests(unittest.IsolatedAsyncioTestCase):
         await settings.close()
         self.assertFalse(resolved.exists() or settings.request_path.exists())
 
+    async def test_publishes_steam_creator_and_one_local_profile_image_for_the_roster(self):
+        account = "76561198000000002"
+        creator = {"name": "Steam Test Guest", "steam_account": account}
+        catalog = AsyncMock(return_value={"ok": True, "characters": [ROW], "creator": creator})
+        photos = AsyncMock(return_value={account: "89504e47"})
+        settings = TitleJoinSettings(self.work, self.bridge, catalog=catalog, profile_avatars=photos)
+        self.addAsyncCleanup(settings.close)
+        self.write_import(settings, self.invitation())
+        async with asyncio.timeout(2):
+            while not settings.response_path.exists():
+                settings.poll(GEN)
+                await asyncio.sleep(.002)
+        header, attribution, character = settings.response_path.read_text(encoding="utf8").splitlines()
+        schema, generation, operation, state, identity, count = header.split("\t")
+        self.assertEqual((schema, generation, operation, state, count), ("2", GEN, FIRST, "ok", "1"))
+        self.assertEqual(attribution, f"{creator['name']}\t89504e47")
+        self.assertEqual(character, f"{CHARACTER}\tÀlex")
+        photos.assert_awaited_once_with({account})
+        self.assertTrue(settings.resolve(GEN, identity, CHARACTER).is_file())
+
     async def test_create_retries_one_host_operation_when_roster_refresh_is_lost(self):
         names = {CHARACTER: ROW["name"]}
         operations, lose_next_roster = [], False
