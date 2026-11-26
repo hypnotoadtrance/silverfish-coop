@@ -9,6 +9,7 @@ local click = "SoundCue /Game/Assets/Sounds/CUEs/Weapon_Cues/Reload_Cues/Trigger
 local factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local reserve_9mm = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
 local reserve_9mm_ap = "/Game/Classes/Items/Ammo_9mm_AP_BP.Ammo_9mm_AP_BP_C"
+local launcher_reserves = {Flare = true, Thermo = true, Gas = true, BuckShot = true, Lightning = true}
 local arm_profiles = {
     arm = {"/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C", reserve_9mm, 9, 2},
     ["arm-rusty"] = {"/Game/Classes/Weapons/Wep_RustyPistol.Wep_RustyPistol_C", reserve_9mm, 9, 2},
@@ -328,14 +329,22 @@ local function run(action, argument)
     end
     if action == "seed-local" then return seed(local_pawn, 0) end
     if action == "seed-peer" then return seed(peer, 1) end
+    if action == "launcher-reserve-type" then
+        assert(observing() and weapon_path == arm_profiles["arm-grenade-launcher"][1]
+            and launcher_reserves[argument], "The test requires a stock 40 mm load")
+        local item = "Ammo_40mm_" .. argument
+        reserve_path = "/Game/Classes/Items/" .. item .. "." .. item .. "_C"
+        return reserve_path
+    end
     if action == "seed-launcher-reserve" then
         assert(observing() and local_pawn:HasAuthority() and peer:HasAuthority()
             and weapon_path == arm_profiles["arm-grenade-launcher"][1] and not same(local_pawn.Save, peer.Save)
             and read_reserve(peer) == "", "fixture requires an empty detached 40 mm reserve")
         local class, out = asset(reserve_path), {}
-        asset(factory):MakeItemStack(class, 2, peer, out)
+        local count = reserve_path == arm_profiles["arm-grenade-launcher"][2] and 2 or 1
+        asset(factory):MakeItemStack(class, count, peer, out)
         local row, pack = out.Item or out, peer.Save.PlayerBackpack
-        assert(same(row[item_class], class) and row[ammo] == 2)
+        assert(same(row[item_class], class) and row[ammo] == count)
         pack[pack:GetArrayNum() + 1] = row
         return read_reserve(peer)
     end
