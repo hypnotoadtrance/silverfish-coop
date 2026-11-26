@@ -28,6 +28,7 @@ from tools.silverfish import (
     native_stock_door, native_stock_enemy_drops, native_world_loot, runtime,
 )
 from tools.silverfish.authored_loot import GUARANTEED_CRATES
+from tools.silverfish import native_computer_board, native_dead_drop
 from tools.silverfish.control import NAME, current_status, submit
 from tools.silverfish.guest_weapon_profiles import FIREARMS, SHOTGUN_AMMO, THIRTY_06_FMJ, THIRTY_06_INCENDIARY
 from tools.silverfish.service import PROTOCOL, menu_host_checkpoint
@@ -45,6 +46,8 @@ from live_same_process_listener_smoke import choose_ports
 from live_stock_creator_smoke import creator_action, installed_probe
 from live_stock_pause_exit_smoke import stock_pause
 from live_unified_title_smoke import Seat, offered, start_pair
+from portable_dead_drop import (allow_resident_contract_xp, allow_resident_dead_drop_fixtures,
+                                observe_dead_drop_replies, verify_dead_drop)
 from portable_dock_pursuit import verify_dock_pursuit
 from portable_held_mask import verify_stock_held_mask
 from portable_eye_board import verify_stock_eye_stacks
@@ -6932,6 +6935,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_personal_consumable: bool = False,
                  stock_wipe_chooser: bool = False,
                  stock_npc_override: bool = False, stock_dock_population: bool = False,
+                 stock_dead_drops: bool = False,
                  stock_board_offers: bool = False, stock_quarry_photo: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
                  stock_weather_travel: bool = False, stock_lightning: bool = False, stock_storm_ambience: bool = False,
@@ -7063,6 +7067,12 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_footsteps, "observatory", "stock_footsteps", check_footsteps),
         (stock_campfire, "observatory", "stock_campfire", verify_resident_campfire),
         (stock_npc_override and not resident_weapon_cues, "observatory", "stock_npc_override", verify_resident_npc_override),
+        (stock_dead_drops, "crossroads_dead_drop", "crossroads_dead_drop",
+         lambda host, guest, _pawn: verify_dead_drop(host, guest, native_computer_board.DEAD_DROP,
+                                                     native_dead_drop.CROSSROADS_DROP)),
+        (stock_dead_drops, "metro_dead_drop", "metro_dead_drop",
+         lambda host, guest, _pawn: verify_dead_drop(host, guest, native_computer_board.METRO_DEAD_DROP,
+                                                     native_dead_drop.METRO_DROP)),
         (stock_board_offers, "stock_board_offers", "stock_board_offers", verify_resident_board_offers),
         (stock_quarry_photo, "quarry_photo", "stock_quarry_photo",
          lambda host, guest, pawn: verify_quarry_photo(host, guest, pawn, portable_probe_command)),
@@ -7356,9 +7366,15 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["loose_revisit_overlays"] = [probes.enter_context(loose_revisit_overlay(game)) for game in games]
         if stock_shovel or stock_buried_placements:
             proof["stock_shovel_overlays"] = [probes.enter_context(stock_shovel_overlay(game)) for game in games]
-        if stock_shovel_quest:
+        if stock_shovel_quest or stock_dead_drops:
             for game in games:
                 probes.enter_context(stock_board_approach_overlay(game))
+        if stock_dead_drops:
+            for game in games:
+                probes.enter_context(portable_main_overlay(game, observe_dead_drop_replies))
+                probes.enter_context(portable_script_overlay(game, "native_computer_board.lua", allow_resident_contract_xp))
+                for name in ("native_authored_pickup.lua", "native_authored_pickup_input_fixture.lua"):
+                    probes.enter_context(portable_script_overlay(game, name, allow_resident_dead_drop_fixtures))
         if stardust_handoff_check:
             for game in games:
                 probes.enter_context(guest_weapon_fixture_overlay(game, "portable_stardust_handoff_probe.lua"))
@@ -7452,6 +7468,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 or stardust_handoff_check
                 or stock_critters or stock_placed_item
                 or stock_crossroads_door or stock_dock_gate
+                or stock_dead_drops
                 or stock_board_offers or stock_quarry_photo or stock_eye_stacks or stock_lingering_teleport or stock_acid_pool or stock_mushrooms):
             overlay_key = ("weather_zone_overlays" if stock_weather_travel or stock_lightning else
                            "jammer_zone_overlays" if stock_simmi_jammers else
@@ -7753,6 +7770,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_shot_view", "tutorial_dock_buckshot",
                     "tutorial_dock_melee", "tutorial_dock_late_join", "dock_population", "stock_melee_family",
                     "crossroads", "crossroads_anomaly", "quarry_photo", "buried_placements",
+                    "crossroads_dead_drop", "metro_dead_drop",
                     "lab_east_wing_acid", "lab_terminal", "oil_lamps", "shopkeep", "simmi", "stock_board_offers", "missing_contact_untracked",
                     "friendly_fire_enabled", "friendly_fire_default", "stardust_handoff"
                 } or stock_host_prop_observer and campaign == prop_campaign else ("save_and_quit",)
@@ -7966,6 +7984,8 @@ if __name__ == "__main__":
     parser.add_argument("--stock-personal-consumable", action="store_true",
                         help="use an unlisted stock consumable through the guest inventory and recover it across reconnect")
     parser.add_argument("--stock-campfire", action="store_true", help="verify stock campfire damage and feedback, combinable with food and weapon cues")
+    parser.add_argument("--stock-dead-drops", action="store_true",
+                        help="Verify the Crossroads and Metro Dead Drops in one resident pair")
     parser.add_argument("--stock-board-offers", action="store_true",
                         help="compare stock board offers and complete a Forest fuel tank bounty through guest gunfire")
     parser.add_argument("--stock-simmi-jammers", action="store_true",
@@ -8190,6 +8210,7 @@ if __name__ == "__main__":
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
     resident_check_options = {"stock_unequip", "stock_food", "stock_personal_consumable", "stock_wipe_chooser",
                               "stock_campfire", "stock_npc_override", "stock_dock_population",
+                              "stock_dead_drops",
                               "stock_board_offers", "stock_quarry_photo", "resident_weapon_cues", "resident_held_queue", "resident_stale_quick_slot",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "tutorial_dock_pursuit",
                               "tutorial_dock_held_mask", "tutorial_dock_gait",
@@ -8247,6 +8268,7 @@ if __name__ == "__main__":
         resident_check_options.add("stock_crate_ring")
     if any((args.stock_food, args.stock_cooked_meal, args.stock_personal_consumable, args.stock_wipe_chooser,
             args.stock_campfire, args.stock_npc_override, args.stock_dock_population,
+            args.stock_dead_drops,
             args.stock_board_offers, args.stock_quarry_photo, args.tutorial_dock_melee,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_buried_placements,
             args.stock_take_ammo, args.stock_shotguns,
@@ -8304,6 +8326,7 @@ if __name__ == "__main__":
                        stock_personal_consumable=args.stock_personal_consumable,
                        stock_wipe_chooser=args.stock_wipe_chooser,
                        stock_npc_override=args.stock_npc_override, stock_dock_population=args.stock_dock_population,
+                       stock_dead_drops=args.stock_dead_drops,
                        stock_board_offers=args.stock_board_offers,
                        stock_quarry_photo=args.stock_quarry_photo,
                        stock_npc_rivalry=args.stock_npc_rivalry,
