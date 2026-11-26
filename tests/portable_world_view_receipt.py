@@ -39,9 +39,13 @@ end
     scope = "        and world_view_enabled and status_publication.compact() and status_publication.steady(state, current_phase)"
     published_scope = "    if resident_title and status_publication.installed and status_publication.memory_live and not status_publication.mirror then"
     capability = '    if current_phase == "connected" and world_view_enabled and compact_crates then'
-    short_reply = "        SilverfishPublishLocalBridgeReply(pending.ticket, reply)\n        return true"
+    short_reply = ("        SilverfishPublishLocalBridgeReply(pending.ticket, reply)\n        return true\n    end\n"
+                   '    if fields and pending and fields[2] == "native-guest-ui-read-memory"')
     full_reply = "            SilverfishPublishLocalBridgeReply(pending.ticket, frame)\n        end"
     dispatch = '    if fields and pending and fields[2] == "native-world-view-apply-local" and not periodic'
+    if dispatch not in text:
+        dispatch = ('    if fields and pending and (fields[2] == "native-world-view-apply-local"'
+                    ' or fields[2] == "native-weather-ambience-apply")')
     replacements = {
         "function status_publication.steady(state, current_phase)": support + "function status_publication.steady(state, current_phase)",
         capability: capability.replace("and compact_crates", f"and (compact_crates or {tag}())"),
