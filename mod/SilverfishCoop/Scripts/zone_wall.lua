@@ -226,6 +226,11 @@ local function in_world(actor, world)
     return valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed()
 end
 
+local function source_visible(source, world)
+    if source.discovered then return visible_exit(source.fixture, world) end
+    return in_world(source.fixture, world)
+end
+
 function wall.placed_actor(world, class, name)
     if not name or not valid(world) then return end
     local world_path = world:GetFullName():match("^World (.+)$")
@@ -288,7 +293,7 @@ function wall.update(get_world)
         SilverfishSetNativeExitApproach("")
         return
     end
-    if selected and visible_exit(selected.fixture, scope.world) and SilverfishSetNativeExitApproach(key) then
+    if selected and source_visible(selected, scope.world) and SilverfishSetNativeExitApproach(key) then
         if not open_exit then
             set_ignore(scope.capsule, selected.actor, true)
             selected.host_capsule, open_exit = scope.capsule, selected
@@ -409,8 +414,7 @@ local function sync_permissions(scope, previous)
     if previous.permitted == scope.permitted then return true end
     local desired = scope.permitted and scope.capsule or nil
     for key, record in pairs(records) do
-        local active = record.discovered and visible_exit(record.fixture, scope.world) or in_world(record.fixture, scope.world)
-        if not record.managed and (not active
+        if not record.managed and (not source_visible(record, scope.world)
             or not same(record.original, record.fixture.Box) or not pcall(set_host_capsule, record, desired)) then
             clear_record(key)
             return false
@@ -433,8 +437,7 @@ local function sync_geometry(scope, route)
     end
     local first_ready, diagnostics, had_error = nil, {}, false
     for key, source in pairs(sources) do
-        local active = source.discovered and visible_exit(source.fixture, world) or in_world(source.fixture, world)
-        local source_actor = active and source.fixture or nil
+        local source_actor = source_visible(source, world) and source.fixture or nil
         local managed = scope.manages_overlap and source.kind == "overlap"
         local keep = records[key] and records[key].host_capsule
         local target

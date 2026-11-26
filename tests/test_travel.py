@@ -216,6 +216,23 @@ class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "arrival could not be verified"):
                 await host.authored_arrival(bridge, route)
 
+    async def test_overlap_arrival_retries_missing_marker_in_a_loading_sublevel(self):
+        route = next(route for route in AUTHORED_ROUTES if route.kind == "overlap")
+        host = self.host(route.source, route.destination)
+        fallback = self.frame(route.destination, 4, 0)
+        fallback["native_authored_arrival"] = {
+            "destination": route.destination, "actor": "host-pawn",
+            "placement": "stock-spawn:entrance-unavailable", "location": [1, 2, 3],
+        }
+        arrived = self.frame(route.destination, 5, 0)
+        arrived["native_authored_arrival"] = {
+            "destination": route.destination, "actor": "ModArrival_C /Game/Mod/Streamed.Streamed:PersistentLevel.Marker",
+            "placement": "streamed-arrow", "location": [4, 5, 6],
+        }
+        bridge = Mock(command=AsyncMock(side_effect=(fallback, arrived)))
+        self.assertIs(await host.authored_arrival(bridge, route), arrived)
+        self.assertEqual(bridge.command.await_count, 2)
+
     async def test_overlap_arrival_can_keep_verified_stock_spawn_when_tag_is_ambiguous(self):
         route = next(route for route in AUTHORED_ROUTES if route.kind == "overlap")
         host = self.host(route.source, route.destination)

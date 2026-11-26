@@ -1416,13 +1416,21 @@ class Host:
     async def authored_arrival(self, bridge: Bridge, route: AuthoredRoute) -> dict:
         tag = getattr(route, "arrival_entrance", None) or route.entrance
         door = route.kind == "door"
-        try:
-            snapshot = await bridge.command("native-authored-arrival", tag, route.kind,
-                                            route.arrival_actor if door else "-", timeout=7)
-        except (OSError, RuntimeError, ValueError) as error:
-            self.control.event("native_authored_arrival_failed", map=route.destination, entrance=tag, reason=str(error)[:256])
-            raise
-        proof = snapshot.get("native_authored_arrival", {})
+        deadline = time.monotonic() + 2
+        while True:
+            try:
+                snapshot = await bridge.command("native-authored-arrival", tag, route.kind,
+                                                route.arrival_actor if door else "-", timeout=7)
+            except (OSError, RuntimeError, ValueError) as error:
+                self.control.event("native_authored_arrival_failed", map=route.destination, entrance=tag, reason=str(error)[:256])
+                raise
+            proof = snapshot.get("native_authored_arrival", {})
+            if (door or snapshot.get("state") != "hosting" or snapshot.get("map") != route.destination
+                    or proof.get("destination") != route.destination
+                    or proof.get("placement") != "stock-spawn:entrance-unavailable" or time.monotonic() >= deadline):
+                break
+            # Streamed actors may become visible a few frames after the listener.
+            await asyncio.sleep(0.2)
         basename = route.destination.rsplit("/", 1)[-1]
         level = f"{route.destination}.{basename}:PersistentLevel."
         actor, placement = proof.get("actor"), proof.get("placement")
@@ -1434,12 +1442,17 @@ class Host:
             matches = actor and actor == snapshot.get("pawns", {}).get("local", {}).get("name")
         elif door:
             matches = actor == f"Dungeon_TransitionDoor_BP_C {level}{route.arrival_actor}"
+        elif placement == "streamed-arrow":
+            # The game-thread reply already checked the exact visible sublevel in this world.
+            matches = isinstance(actor, str) and len(actor) <= 512 and re.fullmatch(
+                r"[A-Za-z0-9_-]+_C /(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
+                r":PersistentLevel\.[A-Za-z0-9_-]+", actor) and not actor.split(" ", 1)[1].startswith(level)
         else:
-            matches = isinstance(actor, str) and re.fullmatch(
+            matches = placement == "arrow" and isinstance(actor, str) and re.fullmatch(
                 r"[A-Za-z0-9_-]+_C " + re.escape(level) + r"[A-Za-z0-9_-]+", actor)
         if (snapshot.get("state") != "hosting" or snapshot.get("map") != route.destination
                 or proof.get("destination") != route.destination or not matches
-                or (not fallback and placement != "arrow") or None in proof.get("location", [None])):
+                or (door and placement != "arrow") or None in proof.get("location", [None])):
             raise RuntimeError("The stock authored arrival could not be verified")
         if fallback:
             self.control.event("native_authored_arrival_fallback", map=route.destination, entrance=tag,

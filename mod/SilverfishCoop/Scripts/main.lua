@@ -883,6 +883,7 @@ local function run_command(fields, state, current_phase)
         last_green_arrival = native_green.arrival(state, current_phase)
         return "qualified stock Green Cube arrival"
     elseif command == "native-authored-arrival" then
+        last_authored_arrival = nil
         if not expanded_routes or #fields ~= 5 or role ~= "host" or current_phase ~= "hosting" then
             error("Expected a qualified authored route arrival", 0)
         end

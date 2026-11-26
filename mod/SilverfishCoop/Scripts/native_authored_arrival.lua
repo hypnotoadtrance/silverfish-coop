@@ -89,8 +89,21 @@ local function same_world_actor(actor, world)
     return valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed()
 end
 
-local function marker_for_tag(world, tag)
-    local match
+local function marker_level(statics, marker, world)
+    local level = marker:GetOuter()
+    if same(level, world.PersistentLevel) then return "arrow" end
+    if not valid(level) or level.bIsVisible ~= true then return end
+    local subworld = level:GetOuter()
+    local package = valid(subworld) and subworld:GetOuter()
+    local name = valid(package) and package:GetFullName():match("^Package (/.+)$")
+    local streaming = name and statics:GetStreamingLevel(world, FName(name))
+    if valid(streaming) and streaming:IsLevelVisible() and same(streaming:GetLoadedLevel(), level) then
+        return "streamed-arrow"
+    end
+end
+
+local function marker_for_tag(world, tag, kind)
+    local match, placement
     local statics, class = StaticFindObject(statics_path), StaticFindObject(spawn_type)
     if not valid(statics) or not valid(class) then error("The stock entrance marker class is unavailable", 0) end
     local found = {}
@@ -98,17 +111,25 @@ local function marker_for_tag(world, tag)
     for _, candidate in ipairs(found.OutActors or found) do
         local marker = candidate
         if type(marker.type) == "function" and marker:type() == "RemoteUnrealParam" then marker = marker:get() end
-        if same_world_actor(marker, world) and marker:IsA(class) then
+        if valid(marker) and not marker:IsActorBeingDestroyed() and marker:IsA(class) then
             local name = marker.EntranceTag
             if type(name) ~= "string" and name then name = name:ToString() end
             if name == tag and name ~= "None" then
-                if match then return nil, "duplicate-entrance-tag" end
-                match = marker
+                local position
+                if kind == "door" then
+                    position = same_world_actor(marker, world) and "arrow"
+                else
+                    position = marker_level(statics, marker, world)
+                end
+                if position then
+                    if match then return nil, "duplicate-entrance-tag" end
+                    match, placement = marker, position
+                end
             end
         end
     end
     if not match or not match:HasAuthority() then return nil, "entrance-unavailable" end
-    return match
+    return match, placement
 end
 
 local function door_for_marker(world, expected, marker, tag)
@@ -157,15 +178,15 @@ function arrival.place(state, phase, tag, kind, actor_name)
     local destination = map .. "." .. basename
     local pawn, controller, world = host_context(state, phase, destination)
     local expected = class .. " " .. destination .. ":PersistentLevel." .. actor_name
-    local marker, reason = marker_for_tag(world, tag)
+    local marker, placement = marker_for_tag(world, tag, kind)
     if not marker then
-        if kind == "overlap" then return keep_stock_spawn(map, pawn, reason) end
+        if kind == "overlap" then return keep_stock_spawn(map, pawn, placement) end
         error("The door arrival marker is unavailable or ambiguous", 0)
     end
     local actor = marker
     if kind == "door" then
         actor = door_for_marker(world, expected, marker, tag)
-    elseif not same(marker:GetOuter(), world.PersistentLevel) or valid(marker:GetParentComponent()) then
+    elseif valid(marker:GetParentComponent()) then
         return keep_stock_spawn(map, pawn, "entrance-not-standalone")
     end
     local arrow = marker.Arrow
@@ -181,7 +202,7 @@ function arrival.place(state, phase, tag, kind, actor_name)
     if x * x + y * y + z * z > max_placement_error * max_placement_error then
         error("The stock arrival could not be placed within two meters of its Arrow", 0)
     end
-    return { destination = map, actor = actor:GetFullName(), placement = "arrow",
+    return { destination = map, actor = actor:GetFullName(), placement = placement,
         x = location.X, y = location.Y, z = location.Z }
 end
 

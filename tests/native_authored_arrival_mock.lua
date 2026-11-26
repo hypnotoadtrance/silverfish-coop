@@ -18,6 +18,12 @@ local world = object("World " .. destination, {PersistentLevel = level})
 local save = object("SaveGame_BP_C Save")
 local host = object("Player_FP_C Host", { Save = save, GetWorld = function() return world end })
 local pc = object("PlayerControler_FP_C Controller", { Pawn = host, GetWorld = host.GetWorld, IsLocalController = function() return true end })
+local package_name = "/Game/Content/Streamed"
+local package_object = object("Package " .. package_name)
+local subworld = object("World " .. package_name .. ".Streamed", {GetOuter = function() return package_object end})
+local sublevel = object("Level", {bIsVisible = true, GetOuter = function() return subworld end})
+local streaming = object("LevelStreaming", {IsLevelVisible = function() return true end,
+    GetLoadedLevel = function() return sublevel end})
 local base = object("Class")
 local arrow_type = object("Class")
 local instance = object("GameInstance_FP_C Instance", {SaveSlot_Ref = save})
@@ -26,6 +32,10 @@ host.K2_GetActorLocation = function() return target end
 local location_calls = 0
 local statics = object("GameplayStatics", {
     GetGameInstance = function() return instance end,
+    GetStreamingLevel = function(_, found_world, name)
+        assert(found_world == world and name == package_name)
+        return streaming
+    end,
     GetAllActorsOfClass = function(_, found_world, class, out)
         assert(found_world == world and class == base)
         out.OutActors = {}
@@ -34,6 +44,7 @@ local statics = object("GameplayStatics", {
         end
     end,
 })
+function FName(value) return value end
 function StaticFindObject(path)
     if path == "/Script/Engine.Default__GameplayStatics" then return statics end
     if path == "/Script/Engine.ArrowComponent" then return arrow_type end
@@ -66,3 +77,19 @@ candidates = {}
 retained = arrival.place(state, "hosting", "Mod-Entrance", "overlap", "-")
 assert(retained.placement == "stock-spawn:entrance-unavailable" and retained.actor == host:GetFullName())
 assert(location_calls == 1)
+
+local streamed = marker("StreamedMarker_8")
+streamed.GetOuter = function() return sublevel end
+streamed.GetWorld = function() return subworld end
+candidates = {streamed}
+local placement = arrival.place(state, "hosting", "Mod-Entrance", "overlap", "-")
+assert(placement.placement == "streamed-arrow" and placement.actor == streamed:GetFullName())
+assert(location_calls == 2)
+candidates[2] = marker("PersistentMarker_1")
+retained = arrival.place(state, "hosting", "Mod-Entrance", "overlap", "-")
+assert(retained.placement == "stock-spawn:duplicate-entrance-tag")
+sublevel.bIsVisible = false
+assert(arrival.place(state, "hosting", "Mod-Entrance", "overlap", "-").actor == candidates[2]:GetFullName())
+sublevel.bIsVisible = true
+streaming.GetLoadedLevel = function() return level end
+assert(arrival.place(state, "hosting", "Mod-Entrance", "overlap", "-").actor == candidates[2]:GetFullName())

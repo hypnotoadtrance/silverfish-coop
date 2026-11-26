@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import math
 from pathlib import Path
 
 import live_portable_title_smoke as suite
@@ -83,10 +84,16 @@ async def live_discovered_exit(host, guest, pawn, probe, *, streamed):
     departure, = (row for row in events if row["event"] == "native_authored_zone_request" and row["actor"] == actual_name)
     step = 19 if streamed else 17
     assert departure["discovered"] is True and departure["exit_crossing"] > 0 and departure["travel_time_step"] == step
-    assert departure["destination"] == CROSSROADS and departure["entrance"] == route.entrance and departure["result"]["ok"]
+    tag = "Mod-Stream-Arrival" if streamed else route.entrance
+    assert departure["destination"] == CROSSROADS and departure["entrance"] == tag and departure["result"]["ok"]
     arrival, = (row["authored_arrival"] for row in events if row["event"] == "zone_travel_ready"
                 and row["epoch"] == reached["zone_epoch"])
-    assert arrival["placement"] == "arrow"
+    assert arrival["placement"] == ("streamed-arrow" if streamed else "arrow"), arrival
+    if streamed:
+        assert "CoopStreamArrivalProbe" in arrival["actor"], arrival
+        players = reached["game"]["pawns"]
+        assert math.dist(players["local"]["location"], arrival["location"]) <= 200, reached
+        assert math.dist(players["guest"]["location"], players["local"]["location"]) <= 250, reached
     fallback = await host.bridge.command("native-authored-arrival", "Missing-Mod-Entrance", "overlap", "-")
     assert fallback["native_authored_arrival"]["placement"] == "stock-spawn:entrance-unavailable"
     assert fallback["state"] == "hosting" and fallback["map"] == CROSSROADS

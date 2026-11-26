@@ -4,9 +4,54 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_TI
 
 local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
 local exit_path = observatory .. ":PersistentLevel.Level_Exit_BP_C_1"
+local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
+local streamed_entrance = "Mod-Stream-Arrival"
 local last, copy, approach, outside, stream
+local arrival_pending, arrival_stream
 
 local function valid(object) return object and object:IsValid() end
+
+local function playtest_stream(world, name)
+    local loader = StaticFindObject("/Script/Engine.Default__LevelStreamingDynamic")
+    assert(valid(loader))
+    return loader:LoadLevelInstance(world, "/Game/Classes/Maps/PlaytestMap_01",
+        {X = 45000, Y = 45000, Z = 2000}, {Pitch = 0, Yaw = 0, Roll = 0}, {}, name, nil, false)
+end
+
+local function prepare_arrival(world)
+    if not valid(arrival_stream) then
+        arrival_stream = playtest_stream(world, "CoopStreamArrivalProbe")
+        assert(valid(arrival_stream), "Could not load the fixture's destination sublevel")
+        return
+    end
+    if not arrival_stream:IsLevelVisible() then return end
+    local level = arrival_stream:GetLoadedLevel()
+    local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+    local stock = StaticFindObject(crossroads .. ":PersistentLevel.LevelExit_Spawn_BP_C_2")
+    local exit_class = StaticFindObject("/Game/Classes/ScriptingActors/Level_Exit_BP.Level_Exit_BP_C")
+    assert(valid(level) and valid(stock) and valid(exit_class))
+    local found, owner = {}, nil
+    api:GetAllActorsOfClass(world, exit_class, found)
+    for _, actor in ipairs(found.OutActors or found) do
+        if type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
+        if valid(actor) and actor:GetOuter():GetAddress() == level:GetAddress() then
+            owner = actor
+            break
+        end
+    end
+    assert(valid(owner), "Could not find an actor owned by the fixture's destination sublevel")
+    local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+    local origin, rotation = stock:K2_GetActorLocation(), stock:K2_GetActorRotation()
+    local transform = math_api:MakeTransform(origin, rotation, {X = 1, Y = 1, Z = 1})
+    local marker = api:BeginDeferredActorSpawnFromClass(world, stock:GetClass(), transform, 1, owner, 0)
+    assert(valid(marker) and marker:GetOuter():GetAddress() == level:GetAddress(), "The spawned marker is outside the streamed sublevel")
+    marker.EntranceTag = streamed_entrance
+    api:FinishSpawningActor(marker, transform, 0)
+    local tag = marker.EntranceTag
+    if type(tag) ~= "string" and tag then tag = tag:ToString() end
+    assert(valid(marker.Arrow) and tag == streamed_entrance)
+    arrival_pending = nil
+end
 
 local function run(world, action)
     local stock = StaticFindObject(exit_path)
@@ -14,10 +59,7 @@ local function run(world, action)
     local pawn = api:GetPlayerPawn(world, 0)
     assert(valid(stock) and valid(pawn) and pawn:HasAuthority() and pawn:IsLocallyControlled())
     if action == "load" then
-        local loader = StaticFindObject("/Script/Engine.Default__LevelStreamingDynamic")
-        assert(valid(loader))
-        stream = loader:LoadLevelInstance(world, "/Game/Classes/Maps/PlaytestMap_01",
-            {X = 45000, Y = 45000, Z = 2000}, {Pitch = 0, Yaw = 0, Roll = 0}, {}, "CoopStreamExitProbe", nil, false)
+        stream = playtest_stream(world, "CoopStreamExitProbe")
         return valid(stream) and "loading" or "failed"
     end
     if action == "spawn" or action == "spawnstream" then
@@ -51,7 +93,7 @@ local function run(world, action)
         end
         assert(valid(copy) and copy:HasAuthority() and valid(copy.Box))
         copy.NextLevel = stock.NextLevel
-        copy["Entrance Tag"] = "Obsv_Etr"
+        copy["Entrance Tag"] = action == "spawnstream" and streamed_entrance or "Obsv_Etr"
         copy.Travel_TimeStep = action == "spawnstream" and 19 or 17
         copy.Box:SetBoxExtent({X = 160, Y = 160, Z = 180}, false)
         copy.Box:SetGenerateOverlapEvents(true)
@@ -80,6 +122,7 @@ local function run(world, action)
     local moved = pawn:K2_SetActorLocation({X = point.X, Y = point.Y, Z = point.Z}, true, hit, false)
     if action == "cross" then
         assert(moved and copy.Box:IsOverlappingActor(pawn), "The local pawn did not enter the test exit")
+        if valid(stream) and stream:IsLevelVisible() then arrival_pending = true end
         return "entered"
     end
     hit = hit.SweepHitResult or hit.OutSweepHitResult or hit
@@ -97,8 +140,15 @@ LoopInGameThreadWithDelay(50, function()
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
     local driver = valid(world) and world.NetDriver
-    if not valid(driver) or valid(driver.ServerConnection) or #driver.ClientConnections ~= 1
-        or world:GetFullName() ~= "World " .. observatory then return end
+    if not valid(driver) or valid(driver.ServerConnection) then return end
+    if arrival_pending and world:GetFullName() == "World " .. crossroads then
+        local ok, problem = pcall(prepare_arrival, world)
+        if not ok then
+            print("Portable streamed arrival fixture: " .. tostring(problem))
+            arrival_pending = nil
+        end
+    end
+    if #driver.ClientConnections ~= 1 or world:GetFullName() ~= "World " .. observatory then return end
     local file = io.open(bridge .. "/portable-discovered-exit-command.tsv", "rb")
     if not file then return end
     local input = file:read("*l")
