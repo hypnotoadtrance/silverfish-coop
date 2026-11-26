@@ -51,7 +51,12 @@ local function run(action, argument)
     if action == "binding" then
         local target = sight(world)
         local primitive = target.Targets:GetArrayNum() == 1 and target.Targets[1]
-        if not primitive or not valid(primitive) then return "unbound" end
+        if not primitive or not valid(primitive) then
+            local actor = target:GetOwner()
+            local mesh = actor.StaticMeshComponent
+            return ("unbound target=%s slots=%d weight=%.2f mesh=%s material=%s"):format(target:GetFullName(),
+                target.Targets:GetArrayNum(), target.SumOfWeights, mesh.StaticMesh:GetFullName(), mesh:GetMaterial(0):GetFullName())
+        end
         if quest == quarry_quest then assert(same(primitive, target:GetOwner().StaticMeshComponent)) end
         return "bound"
     end
@@ -98,29 +103,39 @@ local function run(action, argument)
         local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
         local center = point_for(sight(world))
         local color = {R=0,G=0,B=0,A=0}
-        local height = guest.CapsuleComponent:GetScaledCapsuleHalfHeight()
+        local function standing_point(x, y, height)
+            local ground = {}
+            if trace:LineTraceSingle(pawn, {X=x,Y=y,Z=center.Z+600}, {X=x,Y=y,Z=center.Z-4000}, 0, false,
+                {pawn,guest}, 0, ground, true, color, color, 0) then
+                local floor = (ground.OutHit or ground).ImpactPoint
+                return {X=x,Y=y,Z=floor.Z+height+4}
+            end
+        end
+        local guest_height = guest.CapsuleComponent:GetScaledCapsuleHalfHeight()
+        local host_height = pawn.CapsuleComponent:GetScaledCapsuleHalfHeight()
         local floors, visible = 0, 0
         for _, distance in ipairs({800, 1300, 2000, 2800, 4200}) do
             for index = 0, 15 do
                 local angle = math.pi * index / 8
-                local x, y = center.X + distance * math.cos(angle), center.Y + distance * math.sin(angle)
-                local ground, hit = {}, {}
-                if trace:LineTraceSingle(pawn, {X=x,Y=y,Z=center.Z+600}, {X=x,Y=y,Z=center.Z-4000}, 0, false,
-                    {pawn,guest}, 0, ground, true, color, color, 0) then
+                local cosine, sine = math.cos(angle), math.sin(angle)
+                local x, y = center.X + distance * cosine, center.Y + distance * sine
+                local point = standing_point(x, y, guest_height)
+                if point then
                     floors = floors + 1
-                    local floor = (ground.OutHit or ground).ImpactPoint
-                    local point = {X=x,Y=y,Z=floor.Z+height+4}
                     local eye = {X=x,Y=y,Z=point.Z+60}
                     local blocked = trace:LineTraceSingle(pawn, eye, center, 0, true, {pawn,guest},
-                        0, hit, true, color, color, 0)
+                        0, {}, true, color, color, 0)
                     if not blocked then
                         visible = visible + 1
                         if guest:K2_TeleportTo(point, {Pitch=0,Yaw=0,Roll=0}) then
-                            local observer = {X=point.X+210,Y=point.Y,Z=point.Z}
-                            assert(pawn:K2_TeleportTo(observer, {Pitch=0,Yaw=0,Roll=0}), "host cannot observe stock shutter")
-                            pawn:ForceNetUpdate()
-                            guest:ForceNetUpdate()
-                            return ("%.3f,%.3f,%.3f"):format(point.X,point.Y,point.Z)
+                            for _, offset in ipairs({{-210*sine, 210*cosine}, {210*sine, -210*cosine}, {240*cosine, 240*sine}}) do
+                                local observer = standing_point(x + offset[1], y + offset[2], host_height)
+                                if observer and pawn:K2_TeleportTo(observer, {Pitch=0,Yaw=0,Roll=0}) then
+                                    pawn:ForceNetUpdate()
+                                    guest:ForceNetUpdate()
+                                    return ("%.3f,%.3f,%.3f"):format(point.X,point.Y,point.Z)
+                                end
+                            end
                         end
                     end
                 end

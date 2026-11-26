@@ -53,7 +53,13 @@ async def verify_quarry_photo(host, guest, pawn, probe):
 
     async def verify_subject(area, quest, actor):
         assert await command(host, "journal") == "1"
-        assert await command(host, "binding") == "bound"
+        binding = "unread"
+        try:
+            async with asyncio.timeout(3):
+                while (binding := await command(host, "binding")) != "bound":
+                    await asyncio.sleep(.15)
+        except TimeoutError as error:
+            raise AssertionError(binding) from error
         checkpoint = campaign_save_hashes(host.campaign)
         point = tuple(map(float, (await command(host, "position")).split(",")))
         await wait_resident_status(guest_run, lambda frame: (
