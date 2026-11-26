@@ -65,7 +65,7 @@ from portable_stock_door import verify_stock_crossroads_door, verify_stock_dock_
 from portable_stock_shovel import verify_stock_buried_placements, verify_stock_shovel, verify_stock_shovel_reconnect
 from portable_mushrooms import instrument_mushroom_sampler, verify_stock_mushrooms
 from portable_placed_item import placed_item_overlay, verify_stock_placed_item
-from portable_pickup_preview import pickup_preview_overlay, verified_drop_preview
+from portable_pickup_preview import pickup_preview_overlay, recorded_drop_motion, verified_drop_preview
 from portable_cash_popup import cash_pickup_overlay, verify_stock_cash_popup
 from portable_crossroads_canister import allow_portable_canister_fixture, instrument_canisters, verify_crossroads_canister
 from portable_world_view_receipt import patch_world_view_receipts, verify_world_view_receipt
@@ -2834,7 +2834,15 @@ async def verify_dock_enemy_drop(host: Seat, guest: Seat, arrival: dict) -> dict
     refused = await submit(host_run, scope.CLAIM, target=guid)
     assert refused.get("error") == "stock_enemy_loot_already_claimed", refused
     assert campaign_save_hashes(host.campaign) == checkpoint, "Stock enemy drop pickup wrote the campaign before a save"
+    heights = recorded_drop_motion(guest, identity)
+    moving_heights = [z for phase, z, _ in heights if phase == "moving"]
+    resting_heights = [z for phase, z, _ in heights if phase == "resting"]
+    assert moving_heights and resting_heights, heights
+    assert max(moving_heights) - resting_heights[0] > 3, heights
+    assert math.isclose(resting_heights[0], item["transform"]["position"][2], abs_tol=2), heights
+    assert len({actor for _, _, actor in heights}) == 1, heights
     return {"item": item["class_path"], "stock_source": item["source"], "inventory_guid": guid,
+            "moving_heights_cm": moving_heights, "resting_height_cm": resting_heights[0],
             "pickup_preview": await verified_drop_preview(guest, identity),
             "duplicate": refused["error"], "checkpoint_unchanged": True}
 
@@ -7358,7 +7366,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if stock_placed_item or projected_drops:
             for game in games:
                 probes.enter_context(pickup_preview_overlay(game, portable_script_overlay,
-                                                           projected_drops=projected_drops))
+                                                           projected_drops=projected_drops,
+                                                           track_drop_motion=tutorial_dock_combat))
         if stock_placed_item:
             proof["stock_placed_item_overlays"] = [
                 probes.enter_context(placed_item_overlay(game, portable_script_overlay)) for game in games

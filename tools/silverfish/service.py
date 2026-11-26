@@ -4208,7 +4208,7 @@ class Host:
             transport.set_footstep_handler(footstep_io.receive)
         weapon_shots = (asyncio.create_task(native_weapon_fire_view.relay(self, bridge, transport, footsteps=footstep_io))
                         if self.native_guest else None)
-        loot_motion = (asyncio.create_task(native_stock_enemy_drops.relay_motion(self, transport))
+        loot_motion = (asyncio.create_task(native_stock_enemy_drops.relay_motion(self, bridge, transport))
                        if self.native_events else None)
         lean = (asyncio.create_task(native_avatar_lean.relay(self, bridge, transport))
                 if pose_link and self.native_guest and native_avatar_lean.enabled(bridge) else None)

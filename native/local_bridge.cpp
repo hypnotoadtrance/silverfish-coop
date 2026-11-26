@@ -32,6 +32,7 @@ namespace
     constexpr std::uint32_t prop_poses_limit = 4 * 257;
     constexpr std::uint32_t avatar_poses_limit = 512;
     constexpr std::uint32_t local_prop_pose_limit = 768;
+    constexpr std::uint32_t stock_loot_motion_limit = 64 * 1024;
     constexpr std::uint32_t remote_footsteps_limit = 2048;
     constexpr std::uint32_t weapon_cues_limit = 16 * 1024;
     constexpr std::size_t weapon_cue_capacity = 36;
@@ -59,6 +60,7 @@ namespace
     std::deque<std::string> input;
     std::string prop_poses;
     std::string local_prop_pose;
+    std::string stock_loot_motion;
     std::string local_avatar_pose;
     std::string remote_avatar_poses;
     std::string remote_footsteps;
@@ -405,6 +407,11 @@ namespace
         return publish_presentation(lua, local_prop_pose, local_prop_pose_limit);
     }
 
+    int publish_stock_loot_motion(const Lua& lua)
+    {
+        return publish_presentation(lua, stock_loot_motion, stock_loot_motion_limit);
+    }
+
     void clear_weapon_cues()
     {
         weapon_cues.clear();
@@ -483,6 +490,7 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCloseV1()
     input.clear();
     prop_poses.clear();
     local_prop_pose.clear();
+    stock_loot_motion.clear();
     local_avatar_pose.clear();
     remote_avatar_poses.clear();
     remote_footsteps.clear();
@@ -638,6 +646,11 @@ extern "C" __declspec(dllexport) std::uint32_t SilverfishBridgeTakeLocalPropPose
     return take_local_pose(local_prop_pose, buffer, capacity);
 }
 
+extern "C" __declspec(dllexport) std::uint32_t SilverfishBridgeTakeStockLootMotionV1(char* buffer, std::uint32_t capacity)
+{
+    return take_local_pose(stock_loot_motion, buffer, capacity);
+}
+
 extern "C" __declspec(dllexport) int SilverfishBridgeEnableLocalWeaponCuesV1()
 {
     std::lock_guard lock(mutex);
@@ -758,6 +771,7 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishEnqueueLocalBridgeInput", enqueue_input);
         lua.register_function("SilverfishTakeLocalPropPoses", take_prop_poses);
         lua.register_function("SilverfishPublishLocalPropPose", publish_local_prop_pose);
+        lua.register_function("SilverfishPublishStockLootMotion", publish_stock_loot_motion);
         lua.register_function("SilverfishPublishLocalWeaponCue", publish_weapon_cue);
         lua.register_function("SilverfishClearLocalWeaponCues", clear_local_weapon_cues);
         lua.register_function("SilverfishPublishLocalAvatarPose", publish_avatar_pose);
@@ -782,6 +796,7 @@ namespace silverfish::local_bridge
         input.clear();
         prop_poses.clear();
         local_prop_pose.clear();
+        stock_loot_motion.clear();
         local_avatar_pose.clear();
         remote_avatar_poses.clear();
         remote_footsteps.clear();

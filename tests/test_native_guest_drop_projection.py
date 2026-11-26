@@ -125,6 +125,23 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "different game seat"):
             await view.sync(bridge, snapshot, {}, "first", client.zone_epoch, active=False)
 
+    def test_resident_drop_motion_uses_the_current_host_and_overrides_older_status(self):
+        drops = native_stock_enemy_drops
+        game = dict(self.client().last_game, state="hosting")
+        npc = f"NPC_Survivor_Worker_Light_C {WORLD}NPC_Survivor_Worker_C_2"
+        fields = (drops.TAG, MAP, "1", "1", npc, "-", ACTOR, record.ITEM, "1", "moving", "200",
+                  "10", "20", "130", "0", "0", "0", "1", "1", "1")
+        raw = (f"stock-loot-motion-v1\t{MAP}\t{PAWN}\n" + "\t".join(fields)).encode()
+        observed = drops.read_resident_motion(raw, game)
+        stale_status = drops.parse([*fields[:13], "185", *fields[14:]], "hosting", MAP)
+        game[drops.KEY] = {ACTOR: stale_status}
+        zone = "1" * 32
+        identity = drops.motion_identity(zone, ACTOR)
+        motion = drops.moving_frame(game, zone, set(), observed=observed)
+        self.assertEqual(motion["items"][identity]["transform"]["position"], [10, 20, 130])
+        self.assertIsNone(drops.moving_frame(game, zone, {1}, observed=observed))
+        self.assertIsNone(drops.read_resident_motion(raw.replace(PAWN.encode(), PAWN.replace("404", "405").encode()), game))
+
     async def test_enemy_drop_keeps_its_identity_when_it_lands_and_becomes_claimable(self):
         client, view = self.client(), native_world_loot.Projection()
         game, zone = client.last_game, client.zone_epoch

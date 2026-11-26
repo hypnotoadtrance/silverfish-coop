@@ -7,10 +7,14 @@ PREVIEW_FIXTURE = "native-loose-pickup-preview-fixture"
 
 
 @contextmanager
-def pickup_preview_overlay(game, overlay, *, projected_drops):
+def pickup_preview_overlay(game, overlay, *, projected_drops, track_drop_motion=False):
     with overlay(game, "native_authored_pickup.lua", instrument_preview):
         if projected_drops:
-            with overlay(game, "native_guest_drop_projection.lua", instrument_drop_press):
+            def projected(source):
+                source = instrument_drop_press(source)
+                return instrument_drop_motion(source) if track_drop_motion else source
+
+            with overlay(game, "native_guest_drop_projection.lua", projected):
                 yield
         else:
             yield
@@ -20,6 +24,30 @@ def instrument_drop_press(source):
     anchor = "        return pickup_fixture.press_world_loot(state, pawn, actor, actor.Box, function()"
     assert source.count(anchor) == 1
     return source.replace(anchor, anchor + "\n            SilverfishPickupPreviewFixturePressed()")
+
+
+def instrument_drop_motion(source):
+    anchor = "            local was_pickable = previous ~= nil and not previous.error and not previous.moving\n"
+    assert source.count(anchor) == 1
+    return source.replace(anchor, '''            if phase == "connected" and ok and item.class:match("%.MeleeWep_OldPipe_C$") then
+                local active, _, identity, name = SilverfishReadNativeGuestDropProjection(slot)
+                local path = active and identity == id and name:match("^%S+ (.+)$")
+                local actor = path and StaticFindObject(path)
+                if valid(actor) and not actor.bHidden then
+                    local output = assert(io.open(os.getenv("SILVERFISH_COOP_BRIDGE") .. "/portable-enemy-drop-motion.tsv", "ab"))
+                    local location = actor:K2_GetActorLocation()
+                    output:write(id, "\\t", item.moving and "moving" or "resting", "\\t",
+                        ("%.3f"):format(location.Z), "\\t", name, "\\n")
+                    output:close()
+                end
+            end
+''' + anchor)
+
+
+def recorded_drop_motion(guest, identity):
+    report = guest.bridge.directory / "portable-enemy-drop-motion.tsv"
+    return [(phase, float(height), actor) for candidate, phase, height, actor in
+            (line.split("\t") for line in report.read_text(encoding="utf-8").splitlines()) if candidate == identity]
 
 
 async def read_preview(guest, target):

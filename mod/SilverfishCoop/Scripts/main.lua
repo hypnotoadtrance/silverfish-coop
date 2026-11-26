@@ -2137,6 +2137,7 @@ end
 LoopInGameThreadWithDelay(25, function()
     pcall(native_zone_loading.refresh, current_world)
     if not leaving and role == "host" then pcall(native_mushrooms.update, current_world) end
+    if not leaving and role == "host" then pcall(native_stock_enemy_drops.update_motion, current_world, status_row) end
     if not leaving and (role == "host" or role == "client") then
         pcall(native_anomaly_fields.update_destructibles, current_world)
         pcall(native_authored_pickup.refresh_loose, current_world)

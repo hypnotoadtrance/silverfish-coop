@@ -90,6 +90,12 @@ class LocalBridge:
             self._take_local_prop_pose.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
             self._take_local_prop_pose.restype = ctypes.c_uint32
             self._local_prop_pose_buffer = ctypes.create_string_buffer(768)
+        self._take_stock_loot_motion = getattr(library, "SilverfishBridgeTakeStockLootMotionV1", None)
+        self._stock_loot_motion_buffer = None
+        if self._take_stock_loot_motion is not None:
+            self._take_stock_loot_motion.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            self._take_stock_loot_motion.restype = ctypes.c_uint32
+            self._stock_loot_motion_buffer = ctypes.create_string_buffer(64 * 1024)
         self._publish_footsteps = getattr(library, "SilverfishBridgePublishFootstepsV1", None)
         if self._publish_footsteps is not None:
             self._publish_footsteps.argtypes = [ctypes.c_char_p, ctypes.c_uint32]
@@ -259,6 +265,13 @@ class LocalBridge:
     @property
     def local_prop_pose_available(self) -> bool:
         return self._local_prop_pose_buffer is not None
+
+    def take_stock_loot_motion(self) -> bytes | None:
+        buffer = self._stock_loot_motion_buffer
+        if buffer is None:
+            return None
+        size = self._take_stock_loot_motion(buffer, len(buffer))
+        return buffer[:size] if 0 < size <= len(buffer) else None
 
     def take_local_prop_pose(self) -> bytes | None:
         buffer = self._local_prop_pose_buffer

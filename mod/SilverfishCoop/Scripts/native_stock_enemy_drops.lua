@@ -6,6 +6,7 @@ local transport = require("native_transport")
 local motion = require("native_enemy_drop_motion")
 local escrow = require("native_loot_actions")
 local world, latest, observed
+local host_pawn, host_map, next_motion_sample, sent_motion
 local proof, bank, claim, broker_defeated
 local black_market = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
 local black_market_level = black_market .. ".Shop_BlackMarket_01:PersistentLevel."
@@ -49,7 +50,7 @@ local function sample_pose(record, actor, now)
     if not actor or actor.bReplicates ~= false then
         clear_pose(record)
     elseif not record.next_pose or now >= record.next_pose then
-        record.next_pose = now + .08
+        record.next_pose = now + .05
         local pose = transform(actor)
         if pose then
             for index, axis in ipairs(pose) do record[index + 9] = axis end
@@ -88,20 +89,10 @@ local function remove_broker_cue(fields, state, phase)
     return "stock Broker dialogue collision removed"
 end
 
-function drops.rows(state, phase, row)
-    local rows = {}
-    if phase == "connected" and market_scope(state, phase) and broker_cue_removed() then
-        rows[#rows + 1] = row("native-stock-broker-cue-removed", black_market)
-    end
-    if phase ~= "hosting" or state.server ~= false or not state.listening
-        or type(SilverfishReadStockEnemyDrop) ~= "function" then return rows end
-    local pawn = state.local_pawn and state.local_pawn.pawn
-    if not pawn or not pawn:IsValid() or not same(pawn:GetWorld(), state.world) then return {} end
-    if not same(world, state.world) then
-        world, latest, observed = state.world, 0, {}
-        proof, bank, claim, broker_defeated = nil, nil, nil, nil
-    end
-    local address = pawn:GetAddress()
+local function sample_drops(now)
+    if now < next_motion_sample then return false end
+    next_motion_sample = now + .05
+    local address = host_pawn:GetAddress()
     for _ = 1, 64 do
         local sequence, roll, npc, killer, actor, class, live = SilverfishReadStockEnemyDrop(address, latest)
         if math.type(sequence) ~= "integer" or sequence <= latest then break end
@@ -117,10 +108,6 @@ function drops.rows(state, phase, row)
             if bank and bank[1] == expired then bank = nil end
         end
     end
-    if broker_defeated and market_scope(state, phase) then
-        rows[#rows + 1] = row("native-stock-broker-cue-removed", black_market)
-    end
-    local now = os.clock()
     for _, record in ipairs(observed) do
         if not record.finished then
             local actor = record[7] == 1 and live_actor(record)
@@ -129,6 +116,50 @@ function drops.rows(state, phase, row)
             sample_pose(record, actor, now)
             if not actor then record.finished = true end
         end
+    end
+    return true
+end
+
+function drops.update_motion(current_world, row)
+    if type(SilverfishPublishStockLootMotion) ~= "function" or not same(world, current_world())
+        or not host_pawn or not host_pawn:IsValid() or not same(host_pawn:GetWorld(), world) then return end
+    if not sample_drops(os.clock()) then return end
+    local rows = {}
+    for _, record in ipairs(observed) do
+        if #rows == 32 then break end
+        if record[18] then rows[#rows + 1] = row("native-stock-enemy-drop", host_map, table.unpack(record)) end
+    end
+    if #rows == 0 and not sent_motion then return end
+    local scope = row("stock-loot-motion-v1", host_map, host_pawn:GetFullName()) .. "\n"
+    if SilverfishPublishStockLootMotion(scope .. table.concat(rows, "\n")) then sent_motion = #rows > 0 end
+end
+
+function drops.rows(state, phase, row)
+    local rows = {}
+    if phase == "connected" and market_scope(state, phase) and broker_cue_removed() then
+        rows[#rows + 1] = row("native-stock-broker-cue-removed", black_market)
+    end
+    if phase ~= "hosting" or state.server ~= false or not state.listening
+        or type(SilverfishReadStockEnemyDrop) ~= "function" then
+        host_pawn = nil
+        return rows
+    end
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    if not pawn or not pawn:IsValid() or not same(pawn:GetWorld(), state.world) then
+        host_pawn = nil
+        return rows
+    end
+    if not same(world, state.world) then
+        world, latest, observed = state.world, 0, {}
+        proof, bank, claim, broker_defeated = nil, nil, nil, nil
+        next_motion_sample, sent_motion = 0, false
+    end
+    host_pawn, host_map = pawn, state.map
+    sample_drops(os.clock())
+    if broker_defeated and market_scope(state, phase) then
+        rows[#rows + 1] = row("native-stock-broker-cue-removed", black_market)
+    end
+    for _, record in ipairs(observed) do
         rows[#rows + 1] = row("native-stock-enemy-drop", state.map, table.unpack(record))
     end
     if type(SilverfishReferenceNativeDetachedSave) == "function" then

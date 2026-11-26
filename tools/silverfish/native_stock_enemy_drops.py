@@ -189,7 +189,22 @@ def uses_shell_view(game, drop):
             and native_enemy_loot.source_for(game, drop["source"]).get("ammo_actor") == drop["actor"])
 
 
-def moving_frame(game, zone, processed):
+def read_resident_motion(raw, game):
+    area = game.get("map")
+    pawn = game.get("pawns", {}).get("local", {}).get("name")
+    if not raw or len(raw) > 64 * 1024 or not area or not pawn:
+        return None
+    try:
+        scope, *rows = raw.decode("utf-8").splitlines()
+        if scope.split("\t") != ["stock-loot-motion-v1", area, pawn] or len(rows) > MOTION_LIMIT:
+            return None
+        observations = [parse(row.split("\t"), game.get("state"), area) for row in rows]
+    except (ValueError, UnicodeError):
+        return None
+    return {row["actor"]: row for row in observations}
+
+
+def moving_frame(game, zone, processed, *, observed=None):
     from .native_guest_drop_record import valid_position
 
     if game.get("state") != "hosting" or not isinstance(zone, str) or not party.REQUEST_ID.fullmatch(zone):
@@ -197,7 +212,8 @@ def moving_frame(game, zone, processed):
     area = game.get("map")
     points = [row["location"] for row in game.get("pawns", {}).values() if valid_position(row.get("location"))]
     moving = {}
-    for drop in game.get(KEY, {}).values():
+    observations = game.get(KEY, {}) if observed is None else observed
+    for drop in observations.values():
         pose = drop.get("transform")
         if (drop["map"] == area and drop["sequence"] not in processed and pose and not uses_shell_view(game, drop)
                 and any(math.dist(point, pose["position"]) <= 2000 for point in points)):
@@ -207,15 +223,30 @@ def moving_frame(game, zone, processed):
     return {"map": area, "epoch": zone, "items": moving} if moving else None
 
 
-async def relay_motion(host, transport):
+async def relay_motion(host, bridge, transport):
     previous = {}
     sequence = 0
+    scope = None
+    observed = None
+    observed_at = 0.0
     while not host.stopping:
         await asyncio.sleep(MOTION_INTERVAL)
-        if host.transitioning or time.monotonic() - host.last_seen > 1:
+        now = time.monotonic()
+        game = host.last_game
+        current_scope = (host.zone_epoch, game.get("map"), game.get("pawns", {}).get("local", {}).get("name"))
+        if current_scope != scope:
+            scope, observed = current_scope, None
             previous.clear()
+        if host.transitioning or now - host.last_seen > 1:
+            previous.clear()
+            observed = None
             continue
-        frame = moving_frame(host.last_game, host.zone_epoch, host.processed_stock_enemy_drops)
+        if bridge.local_bridge is not None:
+            latest = read_resident_motion(bridge.local_bridge.take_stock_loot_motion(), game)
+            if latest is not None:
+                observed, observed_at = latest, now
+        frame = moving_frame(game, host.zone_epoch, host.processed_stock_enemy_drops,
+                             observed=observed if now - observed_at < .25 else None)
         if carried := host.world_loot.moving:
             frame = frame or {"map": host.last_game.get("map"), "epoch": host.zone_epoch, "items": {}}
             frame["items"] = dict(list({**carried, **frame["items"]}.items())[:MOTION_LIMIT])
@@ -231,7 +262,6 @@ async def relay_motion(host, transport):
             member = host.authenticated_guest(guest_id)
             return bool(member and member[1] in seats)
 
-        now = time.monotonic()
         items = frame["items"]
         previous = {identity: state for identity, state in previous.items() if identity in items}
         for identity, item in items.items():
