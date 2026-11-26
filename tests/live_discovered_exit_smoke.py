@@ -37,10 +37,14 @@ async def live_exit(host, guest, pawn, probe, **options):
         "/Game/CoopFixture/AbsentMap": "missing",
         "/Game/../AbsentMap": "invalid-package",
     }
+    observed = []
     for seat in (host, guest):
-        for path, status in lookups.items():
+        verdicts = {}
+        for path in lookups:
             found = await seat.bridge.command("native-map-package", path)
-            assert found["ack"]["message"] == "map-package:" + status, (path, found["ack"])
+            verdicts[path] = found["ack"]["message"].removeprefix("map-package:")
+        observed.append(verdicts)
+    assert all(verdicts == lookups for verdicts in observed), observed
 
     for source, destination in ((OBSERVATORY, CROSSROADS), (CROSSROADS, OBSERVATORY)):
         route = route_between(source, destination)

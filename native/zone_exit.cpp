@@ -623,14 +623,17 @@ namespace
         auto* found_asset = field<Unreal::FNameProperty>(asset_type, STR("AssetName"));
         auto* found_class = field<Unreal::FStructProperty>(asset_type, STR("AssetClassPath"));
         alignas(16) std::array<std::byte, 384> storage{};
-        if (!lookup || !result || !asset_type || result->GetStruct().Get() != asset_type || !class_type ||
-            !object_path || !disk_only || !found_package || !found_asset || !found_class ||
-            found_class->GetStruct().Get() != class_type || found_class->GetSize() != sizeof(Unreal::FTopLevelAssetPath) ||
+        if (!lookup || !result || !object_path || !disk_only ||
             lookup->GetNumParms() != 3 || lookup->GetParmsSize() > storage.size() ||
-            result->GetOffset_Internal() + result->GetSize() > lookup->GetParmsSize()) return "registry-unavailable";
+            result->GetOffset_Internal() + result->GetSize() > lookup->GetParmsSize()) return "registry-lookup-schema";
+        if (!asset_type || result->GetStruct().Get() != asset_type || !class_type ||
+            !found_package || !found_asset || !found_class || found_class->GetStruct().Get() != class_type ||
+            found_class->GetSize() != sizeof(Unreal::FTopLevelAssetPath)) return "registry-asset-schema";
         auto* registry = Unreal::UAssetRegistryHelpers::GetAssetRegistry().ObjectPointer;
         auto* registry_class = find<Unreal::UClass>(STR("/Script/AssetRegistry.AssetRegistryImpl"));
-        if (!live_object(registry) || !registry_class || !registry->IsA(registry_class)) return "registry-unavailable";
+        // The engine registry may be exposed through its class default object.
+        if (!registry || !registry_class || !registry->IsA(registry_class) || registry->IsUnreachable() ||
+            registry->HasAnyFlags(static_cast<Unreal::EObjectFlags>(Unreal::RF_BeginDestroyed | Unreal::RF_FinishDestroyed))) return "registry-unavailable";
 
         result->InitializeValue_InContainer(storage.data());
         const auto release = [result](std::byte* bytes) { result->DestroyValue_InContainer(bytes); };
