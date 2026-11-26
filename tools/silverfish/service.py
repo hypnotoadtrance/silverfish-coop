@@ -1401,7 +1401,13 @@ class Host:
             revision = await self.checkpoint_native(bridge, candidate)
             if candidate is not None:
                 self.party = candidate
-        except (OSError, RuntimeError, ValueError):
+        except (OSError, RuntimeError, ValueError) as error:
+            with contextlib.suppress(OSError, RuntimeError, ValueError):
+                last_frame = bridge.snapshot() or {}
+                self.control.event("zone_travel_failed", source=current, destination=destination, reason=str(error)[:256],
+                                   observed_map=last_frame.get("map"), observed_state=last_frame.get("state"),
+                                   host_pawn=bool(last_frame.get("pawns", {}).get("local")),
+                                   status_error=bridge.status_error)
             self.stopping = True
             raise
         finally:

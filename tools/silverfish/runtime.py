@@ -905,6 +905,7 @@ class Bridge:
         self._status_revision: tuple[int, int] | None = None
         self._status_text = ""
         self._status_snapshot: dict | None = None
+        self.status_error: str | None = None
         self.local_bridge = None
         self._local_interaction_records = deque(maxlen=64)
         self._local_menu_inputs = {tag: deque(maxlen=64) for tag in
@@ -1557,11 +1558,13 @@ class Bridge:
         return self._with_guest_weapon(game, pawn, weapon)
 
     def _parse_status(self, text: str, *, cache: bool = True) -> dict | None:
+        fields = [""]
         try:
             if cache and text == getattr(self, "_status_text", None):
                 return self._status_snapshot
             if cache:
                 self._status_text, self._status_snapshot = text, None
+                self.status_error = None
             data = {"pawns": {}, "player_effects": {}, "loot_actors": []}
             quest_rows, board_rows = [], []
             dialogue_frame, dialogue_progress, dialogue_lines, dialogue_choices = None, None, [], []
@@ -3789,7 +3792,9 @@ class Bridge:
                 if cache:
                     self._status_snapshot = data
                 return data
-        except (OSError, UnicodeError, ValueError):
+        except (OSError, UnicodeError, ValueError) as error:
+            if cache:
+                self.status_error = f"{fields[0]}: {str(error)[:200]}"
             return None
         return None
 

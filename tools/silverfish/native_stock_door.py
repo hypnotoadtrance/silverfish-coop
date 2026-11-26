@@ -8,6 +8,7 @@ import time
 
 from . import native_inventory, party
 from .native_gold import valid_guid
+from .native_map_preflight import valid_campaign_package
 
 
 TAG = "native-stock-door"
@@ -27,7 +28,7 @@ SETTLEMENT = "native_stock_door_settlement"
 PRY_RESULT = "native_stock_door_pry"
 PRY_ACTIONS = {"blowtorch": "native-guest-door-blowtorch", "crowbar": "native-guest-door-crowbar"}
 TARGET_PREFIX = "stock-door:"
-_ACTOR = re.compile(r"[A-Za-z0-9_]+ (/Game/Classes/Maps/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):PersistentLevel\.[A-Za-z0-9_]+")
+_ACTOR = re.compile(r"[A-Za-z0-9_]+ (/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):PersistentLevel\.[A-Za-z0-9_]+")
 _FLAGS = ("locked", "broken", "open")
 _ANGLES = ("pitch", "yaw", "roll")
 _OFFSET = ("x", "y", "z")
@@ -35,7 +36,7 @@ _OFFSET = ("x", "y", "z")
 
 def actor_map(actor):
     match = _ACTOR.fullmatch(actor) if isinstance(actor, str) and len(actor) <= 384 else None
-    if match and match[1].rsplit("/", 1)[-1] == match[2]:
+    if match and valid_campaign_package(match[1]) and match[1].rsplit("/", 1)[-1] == match[2]:
         return match[1]
     return None
 

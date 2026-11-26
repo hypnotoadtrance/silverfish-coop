@@ -317,6 +317,9 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await board.catalog(host, bridge, "guest", actor), {board.CATALOG_KEY: proof})
         bridge.command.assert_awaited_once_with(board.CATALOG, PAWN, actor, "-", "-", timeout=5)
         self.assertIsNone(board.board_map(actor.replace(".Shop_ShopKeep_P", ".Other")))
+        area = "/CommunityWorld/Maps/Shop_ShopKeep_P"
+        self.assertEqual(board.board_map(actor.replace(SHOPKEEP, area)), area)
+        self.assertIsNone(board.board_map(actor.replace(SHOPKEEP, "/CommunityWorld//Shop_ShopKeep_P")))
 
     async def test_resident_catalog_receipt_does_not_replace_world_status(self):
         host = self.host()

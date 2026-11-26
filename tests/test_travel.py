@@ -92,6 +92,17 @@ class TravelGateTests(unittest.TestCase):
 
 
 class AuthoredCrossingEventTests(unittest.TestCase):
+    def test_mounted_campaign_world_can_publish_stock_player_identity(self):
+        area = "/CommunityWorld/Maps/Outpost"
+        pawn = f"Player_FP_C {area}.Outpost:PersistentLevel.Player_FP_C_1"
+        bridge = Bridge(Path("unused"), Mock())
+        status = ("schema\t1\nseq\t7\n" f"session\thost\thosting\t{area}\t0\t0\n"
+                  f"native-avatar-outfit\t5\t{pawn}\t-\t-\n")
+        frame = bridge._parse_status(status)
+        self.assertEqual(frame["native_avatar_outfits"]["5"]["pawn"], pawn)
+        self.assertIsNone(bridge._parse_status(status.replace(".Outpost:", ".Other:")))
+        self.assertIn("Invalid authoritative outfit identity", bridge.status_error)
+
     def test_unregistered_exit_uses_its_live_route_and_requires_a_crossing_ticket(self):
         route = next(row for row in AUTHORED_ROUTES if row.kind == "overlap")
         fields = ["authored-request", "4", route.source, route.destination, "LiveEntrance_8", "CustomExit_72",

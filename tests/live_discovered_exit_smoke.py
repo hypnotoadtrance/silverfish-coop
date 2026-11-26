@@ -14,7 +14,7 @@ from tools.silverfish.travel import CISTERN, CROSSROADS, OBSERVATORY
 
 
 UNLISTED_SHOP = "/Game/Classes/Maps/Maps_SafeZones/Shop_Default"
-UNLISTED_DEMO = "/Game/Synty/PolygonSciFiHorror/Maps/Demo_Exterior"
+UNLISTED_DEMO = "/Game/PolygonHorrorAsylum/Maps/Overview"
 
 
 def route_between(source, destination):
@@ -138,7 +138,15 @@ async def cross_unlisted(host, guest, probe, action, source, destination):
     await suite.wait_resident_status(host_run, lambda frame: (
         frame.get("game", {}).get("map") == source and frame["game"]["native_zone_wall"]["host_open"]))
     assert (await probe(host.bridge, "portable-discovered-exit", "enter")).strip() == "entered"
-    reached = await wait_for_party(host_run, guest_run, destination)
+    try:
+        reached = await wait_for_party(host_run, guest_run, destination)
+    except RuntimeError as error:
+        for seat in (host, guest):
+            frame = seat.bridge.snapshot() or {}
+            print(f"Travel diagnostic for {seat.profile.name}: "
+                  f"{frame.get('state')}, {frame.get('map')}, {frame.get('diagnostic')}, {seat.bridge.status_error}",
+                  flush=True)
+        raise AssertionError(f"The party did not settle in {destination}") from error
     events = await suite.resident_events(host_run, reached)
     departure, = (row for row in events if row["event"] == "native_authored_zone_request" and row["actor"] == actor
                   and row["source"] == source)

@@ -5,6 +5,7 @@ import time
 
 from . import native_computer_board, native_inventory, native_loot, native_rewards, party
 from .native_gold import valid_guid
+from .native_map_preflight import valid_campaign_package
 from .travel import PLAYTEST_MAPS
 
 COMMAND = "native-board-contract"
@@ -18,7 +19,7 @@ REFUSAL = "stock_board_contract_"
 QUEST_ID = re.compile(r"[A-Za-z0-9_]{1,96}")
 VISIT_ID = re.compile(r"[0-9a-f]{32}")
 BOARD_PATH = re.compile(
-    r"[A-Za-z0-9_-]+_C (?P<map>/Game/Classes/Maps/[A-Za-z0-9_/]+)\.(?P<level>[A-Za-z0-9_]+)"
+    r"[A-Za-z0-9_-]+_C (?P<map>/[A-Za-z0-9_/]+)\.(?P<level>[A-Za-z0-9_]+)"
     r":PersistentLevel\.[A-Za-z0-9_-]+"
 )
 COMPLETE = -10
@@ -31,7 +32,8 @@ def quest_id(value):
 
 def board_map(name):
     match = BOARD_PATH.fullmatch(name) if isinstance(name, str) and len(name) <= 512 else None
-    if match and match["map"].rsplit("/", 1)[-1] == match["level"] and match["map"] not in PLAYTEST_MAPS:
+    if (match and valid_campaign_package(match["map"]) and match["map"] not in PLAYTEST_MAPS
+            and match["map"].rsplit("/", 1)[-1] == match["level"]):
         return match["map"]
     return None
 

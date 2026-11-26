@@ -1,5 +1,6 @@
 local board_view = {}
 local stock = require("native_wire_quest")
+local world_leaf = require("world_path").leaf
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_DEATH") == "cpp"
@@ -227,7 +228,7 @@ local function local_context(state, phase)
     local host = phase == "hosting" and state.server == false
     local client = phase == "connected" and state.server == true
     local world, area = state.world, state.map
-    local leaf = type(area) == "string" and area:match("^/Game/Classes/Maps/[%w_/]+/([%w_]+)$")
+    local leaf = world_leaf(area)
     local world_path = leaf and area .. "." .. leaf
     if not enabled or not events or not (host or client) or not world_path or state.listening ~= true
         or not valid(world) or world:GetFullName() ~= "World " .. world_path then return end

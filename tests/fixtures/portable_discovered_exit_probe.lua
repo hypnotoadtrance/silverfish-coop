@@ -6,13 +6,14 @@ local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory
 local exit_path = observatory .. ":PersistentLevel.Level_Exit_BP_C_1"
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
 local shop = "/Game/Classes/Maps/Maps_SafeZones/Shop_Default.Shop_Default"
-local demo = "/Game/Synty/PolygonSciFiHorror/Maps/Demo_Exterior.Demo_Exterior"
+local demo = "/Game/PolygonHorrorAsylum/Maps/Overview.Overview"
 local campaign_worlds = {["World " .. observatory] = true, ["World " .. crossroads] = true,
     ["World " .. shop] = true, ["World " .. demo] = true}
 local streamed_entrance = "Mod-Stream-Arrival"
 local last, copy, approach, outside, stream
 local arrival_pending, arrival_stream
 local test_door, door_guest_point
+local watch_custom_arrival, last_arrival
 
 local function valid(object) return object and object:IsValid() end
 
@@ -148,6 +149,7 @@ local function run(world, action)
             local destination = in_shop and crossroads or action == "demo" and demo or shop
             copy.NextLevel = system:Conv_SoftObjPathToSoftObjRef(system:MakeSoftObjectPath(destination))
             copy["Entrance Tag"] = in_shop and "Obsv_Etr" or "Unlisted-Shop"
+            if action == "demo" then watch_custom_arrival = true end
         else
             copy.NextLevel = stock.NextLevel
             copy["Entrance Tag"] = action == "spawnstream" and streamed_entrance or "Obsv_Etr"
@@ -201,6 +203,20 @@ LoopInGameThreadWithDelay(50, function()
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
     local driver = valid(world) and world.NetDriver
+    if watch_custom_arrival and valid(world) then
+        local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+        local controller = api:GetPlayerController(world, 0)
+        local pawn = api:GetPlayerPawn(world, 0)
+        local gm = api:GetGameMode(world)
+        local function identify(actor) return valid(actor) and actor:GetClass():GetFullName() or "-" end
+        local receipt = table.concat({world:GetFullName(), identify(driver), identify(gm), identify(controller), identify(pawn)}, "\t")
+        if receipt ~= last_arrival then
+            last_arrival = receipt
+            local file = assert(io.open(bridge .. "/portable-discovered-map-observations.tsv", "ab"))
+            file:write(receipt, "\n")
+            file:close()
+        end
+    end
     if not valid(driver) or valid(driver.ServerConnection) then return end
     if arrival_pending and world:GetFullName() == "World " .. crossroads then
         local ok, problem = pcall(prepare_arrival, world)

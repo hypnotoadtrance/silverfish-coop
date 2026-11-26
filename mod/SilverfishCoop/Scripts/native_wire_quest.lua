@@ -1,5 +1,6 @@
 local guest_save = require("guest_save")
 local players = require("players")
+local world_leaf = require("world_path").leaf
 local simmi_jobs = require("native_jammer_profiles").by_tag["native-crossroads-jammer"]
 
 local meet = {
@@ -429,7 +430,7 @@ meet.stock_board_context = context_for
 
 function meet.live_stock_board_context(state, phase, name, full_board_name, quest)
     local map = state.map
-    local leaf = type(map) == "string" and map:match("^/Game/Classes/Maps/[%w_/]+/([%w_]+)$")
+    local leaf = world_leaf(map)
     local world = leaf and map .. "." .. leaf
     local path = type(full_board_name) == "string"
         and full_board_name:match("^[A-Za-z0-9_%-]+_C (.+)$")
