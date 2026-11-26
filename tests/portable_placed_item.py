@@ -170,7 +170,7 @@ async def verify_stock_placed_item(host, guest, pawn):
     assert inventory["class_path"] == item_class and inventory["source"] == "backpack", inventory
     repeated = await submit(host_run, loose.CLAIM, target=target)
     assert not repeated["ok"] and repeated["error"] == "loose_pickup_already_claimed", repeated
-    visibility = await asyncio.gather(fixture(host, "placed-visibility", path), fixture(guest, "placed-visibility", path))
+    visibility = [await fixture(seat, "placed-visibility", path) for seat in (host, guest)]
     assert all(value in ("absent", "hidden") for value in visibility), visibility
     accepted_preview = await read_preview(guest, target)
     assert accepted_preview[0] > 0 and accepted_preview[1:3] == (1, 0) and 0 <= accepted_preview[3] < 100, accepted_preview
