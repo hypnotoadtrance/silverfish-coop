@@ -35,7 +35,7 @@ from .native_pickup import NativePickup, STAGED_SHOPS
 from . import native_guest_drop, native_guest_drop_projection, native_guest_drop_record
 from . import native_world_loot, native_zone_lease
 from . import native_guest_melee
-from . import native_guest_ui, native_wallet
+from . import native_guest_ui, native_wallet, native_inventory_grant
 from . import native_host_dig, native_host_dig_live, native_host_landmine, native_package_handoff_journal
 from . import native_kill_volume
 from .native_roster import RosterEnrollment, _census
@@ -102,7 +102,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         "native-inventory-list", native_inventory.SPLIT, native_inventory.TAKE_AMMO, native_inventory.SORT,
                         native_inventory.STORE_EQUIPMENT, native_inventory.UNEQUIP,
                         native_stash.LIST, native_stash.MOVE,
-                        native_guest_ui.ACTION, native_wallet.REPORT,
+                        native_guest_ui.ACTION, native_wallet.REPORT, native_inventory_grant.REPORT,
                         "native-loot-inspect", "native-loot-open", "native-loot-claim", native_loot.LOCKPICK,
                         *native_loot.PRY_TOOL_ACTIONS.values(),
                         native_stock_door.ACTION, *native_stock_door.PRY_ACTIONS.values(), *native_stock_switch.ACTIONS,
@@ -393,6 +393,7 @@ class Host:
         self.zone_epoch = uuid.uuid4().hex
         self.gameplay_snapshots = gameplay_snapshot.HostSnapshots()
         self.guest_wallet_receipts = {}
+        self.guest_inventory_grants = {}
         self.transitioning = False
         self.stock_photo_in_progress = False
         self.loading_zone: str | None = None
@@ -2364,6 +2365,8 @@ class Host:
                 result = await native_guest_ui.capture(self, bridge, character, target)
             elif action == native_wallet.REPORT:
                 result = await native_wallet.settle(self, bridge, character, target, request["operation_id"])
+            elif action == native_inventory_grant.REPORT:
+                result = await native_inventory_grant.accept(self, bridge, character, target, request["operation_id"])
             elif action == "native-inventory-list":
                 offset = target if target is not None else "0"
                 if not isinstance(offset, str) or not offset.isascii() or not offset.isdigit() or len(offset) > 4:
@@ -5331,6 +5334,7 @@ class Client:
         self.last_stock_inventory_action = 0
         self.guest_ui = native_guest_ui.GuestView()
         self.guest_wallet = native_wallet.GuestWallet()
+        self.guest_grants = native_inventory_grant.GuestGrants()
         self.inventory_view_scope = None
         self.inventory_drop_scope = None
         self.crate_intents = native_loot.OpenIntents()
@@ -7134,6 +7138,7 @@ class Client:
             await self.cancel_gameplay_snapshot()
             await self.guest_ui.close()
             await self.guest_wallet.close()
+            await self.guest_grants.close()
             if pause_exit is not None:
                 pause_exit.close()
             if self.mindcore_carry:
@@ -7249,6 +7254,7 @@ class Client:
                 epoch = f"{self.host_session}:{self.zone_epoch}"
                 self.last_game = await self.dialogue_view.sync(self.last_game, epoch, current, self.gameplay_action)
             await self.guest_wallet.sync(self)
+            await self.guest_grants.sync(self)
             if self.npc_barter_view:
                 await self.npc_barter_view.sync(self, active and not self.stopping and time.monotonic() - self.gameplay_seen < 2)
             if self.mosby_station:

@@ -37,7 +37,7 @@ from . import native_prop_carry
 from . import native_flare
 from . import native_stock_enemy_drops
 from . import native_flashlight, native_lantern, native_stock_door, native_stock_switch
-from . import native_player_avatar, native_wallet
+from . import native_player_avatar, native_wallet, native_inventory_grant
 from . import native_weapon_fire_view
 from . import native_damage_feedback, native_guest_clock, native_storm_ambience, native_weather_view
 from . import native_voice
@@ -1576,6 +1576,8 @@ class Bridge:
                 elif fields[0] == "session" and len(fields) == 6:
                     data.update({"mode": fields[1], "state": fields[2], "map": fields[3],
                                  "remote_clients": int(fields[4]), "server_connection": fields[5] == "1"})
+                elif fields[0] == "native-inventory-grant-ready" and len(fields) == 2 and data.get("state") == "connected":
+                    data[native_inventory_grant.READY] = native_inventory_grant.parse_ready(fields)
                 elif fields == ["native-guest-ui-memory", "1"] and data.get("state") in ("hosting", "connected"):
                     data[GUEST_UI_MEMORY] = True
                 elif fields[0] == "native-save-scope":
@@ -3945,7 +3947,9 @@ class Bridge:
     async def command(self, action: str, *arguments: str, timeout: float = 8, update_status: bool = True,
                       stash_payload: bytes | None = None) -> dict:
         fields = (uuid.uuid4().hex, action, *arguments)
-        if any(len(value) > (8192 if action == native_board_contract.MENU_OPEN and index in (5, 6) else 1024)
+        long_fields = ((5, 6) if action == native_board_contract.MENU_OPEN else
+                       (5,) if action == native_inventory_grant.APPLY and self.local_bridge is not None else ())
+        if any(len(value) > (8192 if index in long_fields else 1024)
                or "\t" in value or "\r" in value or "\n" in value for index, value in enumerate(fields)):
             raise ValueError("Invalid game bridge command value")
         request = "\t".join(fields) + "\n"

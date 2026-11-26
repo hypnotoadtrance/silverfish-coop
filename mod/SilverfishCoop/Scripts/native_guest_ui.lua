@@ -2,6 +2,7 @@ local guest_ui = {}
 local guest_save = require("guest_save")
 local scope = require("native_save_scope")
 local wallet = require("wallet")
+local inventory_grant = require("native_inventory_grant")
 local creator = require("native_guest_creator")
 local appearance = require("native_avatar_character_view")
 local native_world = require("native_world")
@@ -211,7 +212,7 @@ end
 local function project(state, phase, character, path, raw, sequence)
     local old, pawn, id = scope.bind_guest(state, phase)
     if not old or character:gsub("-", "") ~= id then error("The co-op view belongs to another guest", 0) end
-    if not inventory_view.accept_layout_projection(pawn, sequence) then
+    if inventory_grant.pending(state, phase) or not inventory_view.accept_layout_projection(pawn, sequence) then
         return "stock personal inventory update pending"
     end
     if path then
@@ -317,6 +318,12 @@ local function project(state, phase, character, path, raw, sequence)
         local array = view[name]
         for index = 1, layout[key] do array[index] = positions[index] or {} end
         if count(array) ~= layout[key] then error("The stock co-op inventory layout failed readback", 0) end
+    end
+    if type(SilverfishPreserveInventoryGrantPayloads) == "function" then
+        local path = view:GetFullName():match("^%S+ (.+)$")
+        if not path then error("The staged inventory projection is unavailable", 0) end
+        local preserved, reason = SilverfishPreserveInventoryGrantPayloads(pawn:GetAddress(), old:GetAddress(), path)
+        if not preserved then error(reason, 0) end
     end
     local selected = old.PlayerEquipIndex
     local projected_selection = layout.selected

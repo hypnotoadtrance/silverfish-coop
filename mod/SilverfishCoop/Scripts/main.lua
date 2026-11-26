@@ -118,6 +118,7 @@ local players = require("players")
 local native_avatar_lean_bridge = require("native_avatar_lean_bridge")
 local vitals = require("vitals")
 local wallet = require("wallet")
+local native_inventory_grant = require("native_inventory_grant")
 local weapon_inventory = require("weapon_inventory")
 local native_guest_armor = require("native_guest_armor")
 local native_guest_melee = require("native_guest_melee")
@@ -575,6 +576,7 @@ local function run_command(fields, state, current_phase)
         if native_stock_creator.guest_busy() then error("Finish returning from the co-op guest creator first", 0) end
         native_save_scope.release(argument)
         wallet.release()
+        if type(SilverfishClearInventoryGrants) == "function" then SilverfishClearInventoryGrants() end
         native_title_entry.refresh_singleplayer(context)
         native_fresh_campaign.clear()
         native_stock_creator.clear_host()
@@ -1185,6 +1187,7 @@ local function run_command(fields, state, current_phase)
         or native_damage_feedback.command(fields, state, current_phase)
         or native_anomaly_fields.command(fields, state, current_phase)
         or native_inventory.command(fields, state, current_phase)
+        or native_inventory_grant.command(fields, state, current_phase)
         or native_stash.command(fields, state, current_phase)
         or native_stash_view.command(fields, state, current_phase)
         or native_inventory_view.command(fields, state, current_phase)
@@ -1501,6 +1504,7 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         if vitals_ok and vitals_row then rows[#rows + 1] = vitals_row end
         for _, row in ipairs(wallet.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_inventory_grant.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_stash.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_stash_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_inventory_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

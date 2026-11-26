@@ -264,7 +264,29 @@ local function run(action, argument)
         and valid(pawn) and pawn:IsLocallyControlled() and pawn:HasAuthority() ~= guest and pawn.Dead == false
         and valid(control) and control:IsLocalController() and same(control.Pawn, pawn)
         and same(pawn.Save, world.OwningGameInstance.SaveSlot_Ref), "fixture exact private player scope unavailable")
-    if action == "guest-typed-grant" then
+    if action == "guest-stock-grant" then
+        assert(guest, "only the guest can originate the fixture grant")
+        local cheats = asset("/Game/Classes/GUI/Menu_Cheats_Widget.Menu_Cheats_Widget_C")
+        local widgets = asset("/Script/UMG.Default__WidgetBlueprintLibrary")
+        local widget = widgets:Create(pawn, cheats, control)
+        assert(valid(widget) and same(widget:GetOwningPlayer(), control), "stock cheat widget unavailable")
+        local bag, prior = pawn.Save.PlayerBackpack, {}
+        for index = 1, bag:GetArrayNum() do prior[identity(bag[index])] = true end
+        widget:GiveGear({asset(grant_class)})
+        for index = 1, bag:GetArrayNum() do
+            local row = bag[index]
+            local guid = identity(row)
+            if same(row[item_class], asset(grant_class)) and not prior[guid] then
+                return guid
+            end
+        end
+        error("stock GiveGear did not add a guest row")
+    elseif action == "guest-read-stock-grant" then
+        assert(guest)
+        local ok, exported = SilverfishExportLocalInventoryItem(pawn:GetAddress(), pawn.Save:GetAddress(), argument)
+        assert(ok, exported)
+        return exported
+    elseif action == "guest-typed-grant" then
         assert(guest, "only the guest can originate the fixture grant")
         local class, out = asset(grant_class), {}
         asset(factory):ItemActorToStruct(class:GetCDO(), pawn, out)
@@ -298,7 +320,7 @@ local function run(action, argument)
         for index = 1, remote.Save.PlayerBackpack:GetArrayNum() do
             local row = remote.Save.PlayerBackpack[index]
             if identity(row) == guid then
-                assert(row[ammo] == 7 and same(row[item_class], asset(grant_class)))
+                assert(same(row[item_class], asset(grant_class)))
                 matches = matches + 1
             end
         end

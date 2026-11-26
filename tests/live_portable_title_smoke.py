@@ -5769,6 +5769,23 @@ async def verify_stock_unequip(first, second, evidence):
         assert saves() == before, "Mirroring the typed grant wrote a campaign file"
         evidence["guest_typed_grant"] = {"guid": grant_guid, "ammo": 7, "typed_payload_preserved": True,
                                          "replay_added_no_row": True, "mismatched_guid_refused": True}
+        start = await wait_resident_status(guest_run, lambda frame: frame.get("state") == "connected")
+        stock_guid = await portable_probe_command(guest.bridge, probe, "guest-stock-grant")
+        assert re.fullmatch(r"[0-9A-F]{32}", stock_guid) and stock_guid != grant_guid, stock_guid
+        async with asyncio.timeout(10):
+            while True:
+                outcomes = await resident_events(guest_run, start)
+                stock_reports = [row for row in outcomes if row["event"] == "native_guest_inventory_grant"
+                                 and row["guid"] == stock_guid]
+                if stock_reports:
+                    break
+                await asyncio.sleep(.07)
+        assert len(stock_reports) == 1 and stock_reports[0]["status"] == "added", stock_reports
+        await wait_resident_status(guest_run, lambda frame: not frame.get("game", {}).get("native_inventory_grant_ready"))
+        read = await portable_probe_command(host.bridge, probe, f"remote-typed-read\t{pawn}\t{stock_guid}\t")
+        assert read == await portable_probe_command(guest.bridge, probe, f"guest-read-stock-grant\t{stock_guid}")
+        assert saves() == before, "The stock gear grant wrote a save before a checkpoint"
+        evidence["guest_stock_gear_grant"] = stock_reports[0]
         return {"selected_and_inactive_slots_checked": True, "guest_duplicate_clicks_rejected": True,
                 "guest_worn_slots_checked": True, "guest_equipped_host_drop": True,
                 "saves_unchanged_before_checkpoint": True}
