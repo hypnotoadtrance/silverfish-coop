@@ -1374,6 +1374,10 @@ function status_publication.compact()
         and not status_publication.mirror and status_publication.memory_live
 end
 
+function status_publication.listen_departing()
+    return type(SilverfishNativeListenTravelPending) == "function" and SilverfishNativeListenTravelPending() == true
+end
+
 function status_publication.steady(state, current_phase)
     local published = status_publication.context
     local pawn = state.local_pawn and state.local_pawn.pawn
@@ -2248,7 +2252,7 @@ guest_save.start(bridge, function(name)
 end)
 native_zone.start(bridge)
 native_guest_smg_hold.start_fast(bridge, status_row, function(state)
-    return phase(state) == "hosting" and same_object(state.world, current_world())
+    return not status_publication.listen_departing() and phase(state) == "hosting" and same_object(state.world, current_world())
 end)
 status_publication.next_snapshot = 0
 
@@ -2264,6 +2268,7 @@ end
 if resident_title and status_publication.installed then
     LoopInGameThreadWithDelay(8, function()
         if leaving or not status_publication.memory_live or (role ~= "host" and role ~= "client") then return end
+        if status_publication.listen_departing() then return end
         local fields, pending = read_command(false, true)
         if not fields or not pending then return end
         local action = fields[2]
@@ -2277,6 +2282,8 @@ if resident_title and status_publication.installed then
 end
 
 LoopInGameThreadWithDelay(25, function()
+    -- Keep delayed observers off the source world until the native listen handoff finishes.
+    if status_publication.listen_departing() then return end
     pcall(native_zone_loading.refresh, current_world)
     if not leaving and role == "host" then pcall(native_mushrooms.update, current_world) end
     if not leaving and role == "host" then pcall(native_stock_enemy_drops.update_motion, current_world, status_row) end

@@ -248,6 +248,13 @@ namespace
         lua.set_bool(true);
         return 1;
     }
+
+    int listen_travel_pending(const Lua& lua)
+    {
+        if (!U::IsInGameThreadRaw() || lua.get_stack_size() != 0) return 0;
+        lua.set_bool(load.context || (pending.port && GetTickCount64() <= pending.expires));
+        return 1;
+    }
 }
 
 void silverfish::native_listener_bind::install_hooks()
@@ -290,4 +297,5 @@ void silverfish::native_listener_bind::register_lua(Lua& lua)
 {
     lua.register_function("SilverfishArmNativeListenPort", arm);
     lua.register_function("SilverfishArmNativeGuestSocket", arm_client);
+    lua.register_function("SilverfishNativeListenTravelPending", listen_travel_pending);
 }

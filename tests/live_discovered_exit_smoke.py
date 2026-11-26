@@ -38,7 +38,8 @@ async def wait_for_party(host_run, guest_run, destination):
 
 
 async def live_exit(host, guest, pawn, probe, *, unlisted_only=False, save_in_shop=False, with_door=False,
-                    unlisted_map=UNLISTED_SHOP, mounted_items=False, mounted_quest=False, **options):
+                    unlisted_map=UNLISTED_SHOP, mounted_items=False, mounted_quest=False,
+                    defer_host_travel=False, **options):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     unlisted_world = "/Game/Classes/Maps/Maps_OverWorld/Campus_04_P"
     shop = unlisted_map
@@ -91,6 +92,12 @@ async def live_exit(host, guest, pawn, probe, *, unlisted_only=False, save_in_sh
     for participant in (reached["game"]["native_guest_save"]["pawn"], "local"):
         await host.bridge.command("native-exit-position", participant, "near", route.entrance, route.actor)
     outbound = await cross_unlisted(host, guest, probe, "demo" if shop == UNLISTED_DEMO else "shop", CROSSROADS, shop)
+    if defer_host_travel:
+        reads = (host.bridge.directory / "portable-listener-handoff.txt").read_text(encoding="ascii")
+        pending, interaction, maintenance = reads.strip().split("|")
+        assert pending == "true" and int(interaction) > 0 and int(maintenance) > 0, reads
+        evidence["deferred_listener_handoff"] = {"paused_input_polls": int(interaction),
+                                                "paused_maintenance_polls": int(maintenance)}
     try:
         if mounted_items:
             evidence["mounted_items"] = await live_mounted_items(host, guest, shop)
@@ -103,6 +110,39 @@ async def live_exit(host, guest, pawn, probe, *, unlisted_only=False, save_in_sh
     if save_in_shop:
         return dict(evidence, entered_unlisted_map=outbound)
     return dict(evidence, unlisted_map_round_trip=[outbound, returned])
+
+
+def defer_listener_open(source):
+    marker = '    statics:OpenLevel(context, FName(level), true, options)'
+    hold = r'''
+    if level == "/Game/PolygonHorrorAsylum/Maps/Overview" and options == "listen" then
+        local proof = {input = 0, maintenance = 0}
+        status_publication.deferred_listener_fixture = proof
+        ExecuteInGameThreadWithDelay(200, function()
+            local file = assert(io.open(bridge .. "/portable-listener-handoff.txt", "wb"))
+            file:write(tostring(SilverfishNativeListenTravelPending()), "|", proof.input, "|", proof.maintenance, "\n")
+            file:close()
+            status_publication.deferred_listener_fixture = nil
+            statics:OpenLevel(context, FName(level), true, options)
+        end)
+        return
+    end
+'''
+    assert source.count(marker) == 1
+    source = source.replace(marker, hold + marker)
+    checks = (("        ", "input"), ("    ", "maintenance"))
+    for indent, counter in checks:
+        line = f"\n{indent}if status_publication.listen_departing() then return end\n"
+        instrumented = f"""
+{indent}if status_publication.listen_departing() then
+{indent}    local proof = status_publication.deferred_listener_fixture
+{indent}    if proof then proof.{counter} = proof.{counter} + 1 end
+{indent}    return
+{indent}end
+"""
+        assert source.count(line) == 1
+        source = source.replace(line, instrumented)
+    return source
 
 
 async def live_mounted_quest(host, guest):
@@ -340,16 +380,19 @@ if __name__ == "__main__":
     parser.add_argument("--outside-tree", action="store_true")
     parser.add_argument("--mounted-items", action="store_true")
     parser.add_argument("--mounted-quest", action="store_true")
+    parser.add_argument("--defer-host-travel", action="store_true")
     args = parser.parse_args()
     if args.mounted_quest and not args.outside_tree:
         parser.error("--mounted-quest requires --outside-tree")
+    if args.defer_host_travel and not args.outside_tree:
+        parser.error("--defer-host-travel requires --outside-tree")
     work, first, second, saves = (path.resolve() for path in (args.work, args.first_game, args.second_game, args.vanilla_saved))
     work.mkdir(parents=True, exist_ok=True)
     unlisted = UNLISTED_DEMO if args.outside_tree else UNLISTED_SHOP
     suite.verify_weather_travel = partial(live_exit, unlisted_only=args.unlisted_only or args.resume_unlisted,
                                         save_in_shop=args.resume_unlisted, with_door=args.discovered_door,
                                         unlisted_map=unlisted, mounted_items=args.mounted_items,
-                                        mounted_quest=args.mounted_quest)
+                                        mounted_quest=args.mounted_quest, defer_host_travel=args.defer_host_travel)
     if args.resume_unlisted:
         suite.start_pair = partial(check_unlisted_resume, unlisted_map=unlisted)
     if args.mounted_items:
@@ -366,5 +409,8 @@ if __name__ == "__main__":
         if args.mounted_items:
             for game in (first, second):
                 probes.enter_context(suite.installed_probe(game))
+        if args.defer_host_travel:
+            for game in (first, second):
+                probes.enter_context(suite.portable_main_overlay(game, defer_listener_open))
         asyncio.run(suite.verify(work, first, second, saves, stock_weather_travel=True,
                                  stock_placed_item=not args.resume_unlisted, stock_eye_stacks=args.mounted_quest))
