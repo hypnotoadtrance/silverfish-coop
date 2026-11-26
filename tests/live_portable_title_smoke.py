@@ -3794,14 +3794,17 @@ async def verify_stock_avatar_tail(host: Seat, guest: Seat, _pawn: str) -> dict:
                         assert row[0] < .01 and row[1] < 3 and row[2] < .15, row
                         assert row[12] < (5 if row[11] else .15), row
                         return {"yaw": row[9], "airborne": bool(row[10]), "long_tail": bool(row[11]),
-                                "seam_distance_cm": row[12], "body_offset_cm": row[1]}
+                                "seam_distance_cm": row[12], "body_offset_cm": row[1],
+                                "native_aim_matches_stock": bool(row[13]), "stock_pitch_deg": row[14],
+                                "head_pitch_error_deg": row[15], "head_yaw_error_deg": row[16]}
                 await asyncio.sleep(.025)
 
     await command(host, "style")
     initial, docked = await asyncio.gather(observe(guest, lambda row: row[11] == 1 and row[10] == 0),
                                           observe(host, lambda row: row[11] == 0 and row[10] == 0))
     await command(host, "turn")
-    turned = await observe(guest, lambda row: abs((row[9] - initial["yaw"] + 180) % 360 - 180) > 60)
+    turned = await observe(guest, lambda row: abs((row[9] - initial["yaw"] + 180) % 360 - 180) > 60
+                            and row[15] < 2 and row[16] < 2)
     await command(host, "jump")
     airborne = await observe(guest, lambda row: row[10] == 1)
     landed = await observe(guest, lambda row: row[10] == 0)

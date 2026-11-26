@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
@@ -22,6 +23,7 @@
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/FFrame.hpp>
 #include <Unreal/FWeakObjectPtr.hpp>
+#include <Unreal/GameplayStatics.hpp>
 #include <Unreal/Hooks.hpp>
 #include <Unreal/Property/FEnumProperty.hpp>
 #include <Unreal/UnrealInitializer.hpp>
@@ -1869,6 +1871,90 @@ namespace
         return 1;
     }
 
+    int read_remote_aim(const Lua& lua)
+    {
+        if (!available() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_integer(2)) return 0;
+        const auto world_address = lua.get_integer();
+        const auto pawn_address = lua.get_integer();
+        auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
+        auto* local = scope.pawn.Get();
+        auto* driver = scope.driver.Get();
+        const auto now = Clock::now();
+        if (!live(world) || address(world) != world_address || !live(local) || !live(driver) ||
+            pawn_address <= 0 || address(local) == pawn_address ||
+            now >= scope.expires || scope.generation != generation.load(std::memory_order_acquire) ||
+            object_field(world, STR("NetDriver")) != driver || object_field(driver, STR("World")) != world)
+            return 0;
+
+        struct Census
+        {
+            Unreal::FWeakObjectPtr world, local;
+            std::array<Unreal::FWeakObjectPtr, 5> remotes{};
+            Clock::time_point next_scan{};
+        };
+        static Census census;
+        if (census.world.Get() != world || census.local.Get() != local)
+        {
+            census = {};
+            census.world = world;
+            census.local = local;
+        }
+        const auto remote = [&]() -> Unreal::UObject* {
+            for (const auto& item : census.remotes)
+                if (auto* pawn = item.Get(); address(pawn) == pawn_address &&
+                    live_actor(pawn, world, scope.host ? 3 : 1)) return pawn;
+            return nullptr;
+        };
+        auto* pawn = remote();
+        if (!pawn && now >= census.next_scan)
+        {
+            census.next_scan = now + std::chrono::milliseconds(250);
+            census.remotes = {};
+            auto* type = find<Unreal::UClass>(pawn_path);
+            if (!type) return 0;
+            std::vector<Unreal::AActor*> actors;
+            Unreal::UGameplayStatics::GetAllActorsOfClass(world, type, actors);
+            std::size_t count = 0;
+            for (auto* actor : actors)
+            {
+                if (count == census.remotes.size()) break;
+                if (actor != local && live(actor) && actor->GetClassPrivate() == type &&
+                    live_actor(actor, world, scope.host ? 3 : 1))
+                    census.remotes[count++] = actor;
+            }
+            pawn = remote();
+        }
+        if (!pawn) return 0;
+
+        using Rotation = std::array<double, 3>;
+        static Unreal::FWeakObjectPtr cached_aim;
+        auto* aim = static_cast<Unreal::UFunction*>(cached_aim.Get());
+        if (!aim)
+        {
+            aim = find<Unreal::UFunction>(STR("/Script/Engine.Pawn:GetBaseAimRotation"));
+            auto* result = aim ? Unreal::CastField<Unreal::FStructProperty>(aim->GetReturnProperty()) : nullptr;
+            auto* rotator = find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.Rotator"));
+            if (!result || !rotator || result->GetStruct().Get() != rotator || result->GetArrayDim() != 1 ||
+                result->GetSize() != sizeof(Rotation) || result->GetOffset_Internal() != 0 ||
+                !aim->HasAnyFunctionFlags(Unreal::FUNC_Native) || aim->GetNumParms() != 1 ||
+                aim->GetParmsSize() != sizeof(Rotation) ||
+                aim->GetOuterPrivate() != find<Unreal::UClass>(STR("/Script/Engine.Pawn"))) return 0;
+            constexpr std::array axes{STR("Pitch"), STR("Yaw"), STR("Roll")};
+            for (std::size_t index = 0; index < axes.size(); ++index)
+            {
+                auto* axis = field<Unreal::FDoubleProperty>(rotator, axes[index]);
+                if (!axis || axis->GetOffset_Internal() != static_cast<int>(index * sizeof(double))) return 0;
+            }
+            cached_aim = aim;
+        }
+        Rotation rotation{};
+        pawn->ProcessEvent(aim, rotation.data());
+        if (!std::isfinite(rotation[0]) || !std::isfinite(rotation[1])) return 0;
+        lua.set_number(rotation[0]);
+        lua.set_number(rotation[1]);
+        return 2;
+    }
+
     int dispatch_valve(const Lua& lua)
     {
         const auto respond = [&](bool value) { lua.set_bool(value); return 1; };
@@ -2315,6 +2401,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishTakeNativeSubwayValvePress", take_valve_press);
         lua.register_function("SilverfishTakeNativeStashPress", take_stash_press);
         lua.register_function("SilverfishReadNativeLocalLean", read_local_lean);
+        lua.register_function("SilverfishReadNativeRemoteAim", read_remote_aim);
         lua.register_function("SilverfishTakeNativeLanternPress", take_lantern_press);
         lua.register_function("SilverfishDispatchNativeSubwayValve", dispatch_valve);
         mosby_station_input::register_lua(lua);

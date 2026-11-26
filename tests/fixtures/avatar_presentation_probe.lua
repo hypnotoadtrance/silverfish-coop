@@ -182,12 +182,28 @@ local function rig(pawn)
     local actual = head.RelativeLocation
     local expected_location = { X = -expected.X, Y = -expected.Y, Z = -expected.Z }
     local aim = head:K2_GetComponentRotation()
+    local stock = pawn:GetBaseAimRotation()
+    local native_pitch, native_yaw
+    local difference = function(value, expected) return math.abs((value - expected + 180) % 360 - 180) end
+    if type(SilverfishReadNativeRemoteAim) == "function" then
+        local world, actor = pawn:GetWorld():GetAddress(), pawn:GetAddress()
+        native_pitch, native_yaw = SilverfishReadNativeRemoteAim(world, actor)
+        assert(SilverfishReadNativeRemoteAim(world + 1, actor) == nil
+            and SilverfishReadNativeRemoteAim(world, actor + 1) == nil, "remote aim accepted a different scope")
+        if native_pitch then
+            assert(difference(native_pitch, stock.Pitch) < 0.001 and difference(native_yaw, stock.Yaw) < 0.001,
+                "native aim disagreed with engine readback")
+        end
+    end
+    local head_aim = pivot:K2_GetComponentRotation()
+    local wanted_pitch = math.max(-45, math.min(45, (stock.Pitch + 180) % 360 - 180))
     return string.format(
-        "%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%d	%d	%.5f",
+        "%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%.5f	%d	%d	%.5f	%d	%.5f	%.5f	%.5f",
         math.sqrt(base.X^2 + base.Y^2), math.sqrt(location.X^2 + location.Y^2),
         distance(pivot:K2_GetComponentLocation(), neck), distance(actual, expected_location), aim.Roll, aim.Yaw,
         tail_at.X, tail_at.Z, tail_rot.Yaw, pawn:K2_GetActorRotation().Yaw, pawn.CharacterMovement:IsFalling() and 1 or 0,
-        skeletal_tail and 1 or 0, tail_gap)
+        skeletal_tail and 1 or 0, tail_gap, native_pitch and 1 or 0, wanted_pitch,
+        difference(head_aim.Pitch, wanted_pitch), difference(head_aim.Yaw, stock.Yaw))
 end
 
 local clips = {"HandGun_Idle", "HandGun_Idle_2", "HandGun_Idle_3", "Rifle_Aiming_Idle"}

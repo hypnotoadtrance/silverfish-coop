@@ -682,10 +682,17 @@ local function apply_lean(entry, now, math_api)
     return true
 end
 
-local function aim_head(entry, now, lean_changed, math_api)
-    local rotation = entry.pawn:GetBaseAimRotation()
-    local pitch = math.max(-45, math.min(45, (rotation.Pitch + 180) % 360 - 180))
-    local yaw, previous = rotation.Yaw, entry.head_aim
+local function aim_head(entry, address, now, lean_changed, math_api)
+    local pitch, yaw
+    if type(SilverfishReadNativeRemoteAim) == "function" then
+        pitch, yaw = SilverfishReadNativeRemoteAim(entry.world, address)
+    end
+    if not pitch then
+        local rotation = entry.pawn:GetBaseAimRotation()
+        pitch, yaw = rotation.Pitch, rotation.Yaw
+    end
+    pitch = math.max(-45, math.min(45, (pitch + 180) % 360 - 180))
+    local previous = entry.head_aim
     if previous then
         local elapsed = now - previous.time
         if elapsed <= 0 then return end
@@ -719,7 +726,7 @@ function avatar.animate_head(get_world)
     if not valid(world) or not valid(clock) then return end
     local scope, now = world:GetAddress(), clock:GetRealTimeSeconds(world)
     local math_api
-    for _, entry in pairs(avatars) do
+    for address, entry in pairs(avatars) do
         if entry.world == scope and valid(entry.head_pivot) and valid(entry.pawn)
             and not entry.pawn:IsActorBeingDestroyed() then
             local lean_changed = false
@@ -729,7 +736,7 @@ function avatar.animate_head(get_world)
                     lean_changed = apply_lean(entry, now, math_api)
                 end
             end
-            aim_head(entry, now, lean_changed, math_api)
+            aim_head(entry, address, now, lean_changed, math_api)
             character_view.align_tail(entry)
             if not uses[entry] and not swings[entry] then gait.advance(entry, now) end
             if entry.rifle_grip and (entry.rifle_idle or entry.rifle_rotated) then
