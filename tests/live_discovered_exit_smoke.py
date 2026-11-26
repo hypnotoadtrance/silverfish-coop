@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import math
+from functools import partial
 from pathlib import Path
 
 import live_portable_title_smoke as suite
@@ -26,13 +27,15 @@ async def wait_for_party(host_run, guest_run, destination):
     return reached
 
 
-async def live_exit(host, guest, pawn, probe, **options):
+async def live_exit(host, guest, pawn, probe, *, unlisted_only=False, **options):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     unlisted_world = "/Game/Classes/Maps/Maps_OverWorld/Campus_04_P"
-    assert unlisted_world not in MAPS | AUTHORED_MAPS
+    shop = "/Game/Classes/Maps/Maps_SafeZones/Shop_Default"
+    assert not {unlisted_world, shop} & (MAPS | AUTHORED_MAPS)
     lookups = {
         OBSERVATORY: "world",
         unlisted_world: "world",
+        shop: "world",
         "/Game/Textures/ScifiWorlds_Texture_Custom_01": "non-world",
         "/Game/CoopFixture/AbsentMap": "missing",
         "/Game/../AbsentMap": "invalid-package",
@@ -46,7 +49,8 @@ async def live_exit(host, guest, pawn, probe, **options):
         observed.append(verdicts)
     assert all(verdicts == lookups for verdicts in observed), observed
 
-    for source, destination in ((OBSERVATORY, CROSSROADS), (CROSSROADS, OBSERVATORY)):
+    stock_routes = ((OBSERVATORY, CROSSROADS),) if unlisted_only else ((OBSERVATORY, CROSSROADS), (CROSSROADS, OBSERVATORY))
+    for source, destination in stock_routes:
         route = route_between(source, destination)
         for participant, position in ((pawn, "near"), ("local", "near"), ("local", "inside")):
             await host.bridge.command("native-exit-position", participant, position, route.entrance, route.actor)
@@ -57,34 +61,36 @@ async def live_exit(host, guest, pawn, probe, **options):
         assert settled["result"]["ok"] and not settled["discovered"], settled
         pawn = reached["game"]["native_guest_save"]["pawn"]
 
-    spawned = await live_discovered_exit(host, guest, pawn, probe, streamed=False)
-    reached = await wait_for_party(host_run, guest_run, CROSSROADS)
-    route = route_between(CROSSROADS, OBSERVATORY)
-    for participant, position in ((reached["game"]["native_guest_save"]["pawn"], "near"),
-                                  ("local", "near"), ("local", "inside")):
-        await host.bridge.command("native-exit-position", participant, position, route.entrance, route.actor)
-    reached = await wait_for_party(host_run, guest_run, OBSERVATORY)
-    streamed = await live_discovered_exit(host, guest, reached["game"]["native_guest_save"]["pawn"], probe, streamed=True)
+    evidence = {"map_package_verdicts": lookups}
+    if not unlisted_only:
+        evidence["persistent_exit"] = await live_discovered_exit(host, guest, pawn, probe, streamed=False)
+        reached = await wait_for_party(host_run, guest_run, CROSSROADS)
+        route = route_between(CROSSROADS, OBSERVATORY)
+        for participant, position in ((reached["game"]["native_guest_save"]["pawn"], "near"),
+                                      ("local", "near"), ("local", "inside")):
+            await host.bridge.command("native-exit-position", participant, position, route.entrance, route.actor)
+        reached = await wait_for_party(host_run, guest_run, OBSERVATORY)
+        evidence["streamed_exit"] = await live_discovered_exit(
+            host, guest, reached["game"]["native_guest_save"]["pawn"], probe, streamed=True)
     reached = await wait_for_party(host_run, guest_run, CROSSROADS)
     route = route_between(CROSSROADS, OBSERVATORY)
     for participant in (reached["game"]["native_guest_save"]["pawn"], "local"):
         await host.bridge.command("native-exit-position", participant, "near", route.entrance, route.actor)
     dynamic = []
-    for action, source, destination in (("campus", CROSSROADS, unlisted_world), ("return", unlisted_world, CROSSROADS)):
+    for action, source, destination in (("shop", CROSSROADS, shop), ("return", shop, CROSSROADS)):
         actor = (await probe(host.bridge, "portable-discovered-exit", action)).strip().rsplit(".", 1)[-1]
         await asyncio.sleep(1.2)
         assert (await probe(host.bridge, "portable-discovered-exit", "regroup")).strip() == "near"
         await suite.wait_resident_status(host_run, lambda frame: (
             frame.get("game", {}).get("map") == source and frame["game"]["native_zone_wall"]["host_open"]))
-        assert (await probe(host.bridge, "portable-discovered-exit", "cross")).strip() == "entered"
+        assert (await probe(host.bridge, "portable-discovered-exit", "enter")).strip() == "entered"
         reached = await wait_for_party(host_run, guest_run, destination)
         events = await suite.resident_events(host_run, reached)
         departure, = (row for row in events if row["event"] == "native_authored_zone_request" and row["actor"] == actor
                       and row["source"] == source)
         assert departure["discovered"] and departure["destination"] == destination and departure["result"]["ok"], departure
         dynamic.append(departure)
-    return {"persistent_exit": spawned, "streamed_exit": streamed, "map_package_verdicts": lookups,
-            "unlisted_map_round_trip": dynamic}
+    return dict(evidence, unlisted_map_round_trip=dynamic)
 
 
 async def live_discovered_exit(host, guest, pawn, probe, *, streamed):
@@ -146,9 +152,10 @@ if __name__ == "__main__":
     parser.add_argument("--first-game", type=Path, required=True)
     parser.add_argument("--second-game", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
+    parser.add_argument("--unlisted-only", action="store_true")
     args = parser.parse_args()
     work, first, second, saves = (path.resolve() for path in (args.work, args.first_game, args.second_game, args.vanilla_saved))
     work.mkdir(parents=True, exist_ok=True)
-    suite.verify_weather_travel = live_exit
+    suite.verify_weather_travel = partial(live_exit, unlisted_only=args.unlisted_only)
     with suite.installed_probe(first, mod="SilverfishPortableExitDiscoveryProbe", fixture="portable_discovered_exit_probe.lua"):
         asyncio.run(suite.verify(work, first, second, saves, stock_weather_travel=True, stock_placed_item=True))

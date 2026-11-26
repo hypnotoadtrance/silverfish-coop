@@ -5,8 +5,8 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_TI
 local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
 local exit_path = observatory .. ":PersistentLevel.Level_Exit_BP_C_1"
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
-local campus = "/Game/Classes/Maps/Maps_OverWorld/Campus_04_P.Campus_04_P"
-local campaign_worlds = {["World " .. observatory] = true, ["World " .. crossroads] = true, ["World " .. campus] = true}
+local shop = "/Game/Classes/Maps/Maps_SafeZones/Shop_Default.Shop_Default"
+local campaign_worlds = {["World " .. observatory] = true, ["World " .. crossroads] = true, ["World " .. shop] = true}
 local streamed_entrance = "Mod-Stream-Arrival"
 local last, copy, approach, outside, stream
 local arrival_pending, arrival_stream
@@ -57,7 +57,7 @@ end
 
 local function run(world, action)
     local current = world:GetFullName()
-    local on_campus = current == "World " .. campus
+    local in_shop = current == "World " .. shop
     local stock = StaticFindObject(current == "World " .. crossroads
         and crossroads .. ":PersistentLevel.Level_Exit_BP_C_2" or exit_path)
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
@@ -67,9 +67,10 @@ local function run(world, action)
         stream = playtest_stream(world, "CoopStreamExitProbe")
         return valid(stream) and "loading" or "failed"
     end
-    if action == "spawn" or action == "spawnstream" or action == "campus" or action == "return" then
+    if action == "spawn" or action == "spawnstream" or action == "shop" or action == "return" then
         copy = nil
-        assert(on_campus or valid(stock) and not stock.Box:IsOverlappingActor(pawn))
+        assert(in_shop or valid(stock) and not stock.Box:IsOverlappingActor(pawn))
+        if in_shop then pawn.CharacterMovement:DisableMovement() end
         if action == "spawnstream" then
             if not valid(stream) or not stream:IsLevelVisible() then return "waiting" end
             local streamed = stream:GetLoadedLevel()
@@ -87,26 +88,26 @@ local function run(world, action)
             assert(valid(copy), "No stock exit was found in the loaded streamed level")
         end
         local player_point = pawn:K2_GetActorLocation()
-        local stock_point = not on_campus and stock.Box:K2_GetComponentLocation()
+        local stock_point = not in_shop and stock.Box:K2_GetComponentLocation()
         local dx, dy = 1, 0
         if stock_point then dx, dy = player_point.X - stock_point.X, player_point.Y - stock_point.Y end
         local distance = math.sqrt(dx * dx + dy * dy)
-        assert(on_campus or distance > 100, "The stock approach does not identify an outward lane")
+        assert(in_shop or distance > 100, "The stock approach does not identify an outward lane")
         local point = {X = player_point.X + 1250 * dx / distance, Y = player_point.Y + 1250 * dy / distance, Z = player_point.Z + 80}
         if action ~= "spawnstream" then
-            local exit_class = on_campus and StaticFindObject("/Game/Classes/ScriptingActors/Level_Exit_BP.Level_Exit_BP_C")
+            local exit_class = in_shop and StaticFindObject("/Game/Classes/ScriptingActors/Level_Exit_BP.Level_Exit_BP_C")
                 or stock:GetClass()
-            copy = world:SpawnActor(exit_class, point, on_campus and pawn:K2_GetActorRotation() or stock:K2_GetActorRotation())
+            copy = world:SpawnActor(exit_class, point, in_shop and pawn:K2_GetActorRotation() or stock:K2_GetActorRotation())
         else
             assert(copy:K2_SetActorLocation(point, false, {}, false))
             copy:K2_SetActorRotation(stock:K2_GetActorRotation(), false)
         end
         assert(valid(copy) and copy:HasAuthority() and valid(copy.Box))
-        if action == "campus" or action == "return" then
+        if action == "shop" or action == "return" then
             local system = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
-            local destination = on_campus and crossroads or campus
+            local destination = in_shop and crossroads or shop
             copy.NextLevel = system:Conv_SoftObjPathToSoftObjRef(system:MakeSoftObjectPath(destination))
-            copy["Entrance Tag"] = on_campus and "Obsv_Etr" or "Unlisted-Campus"
+            copy["Entrance Tag"] = in_shop and "Obsv_Etr" or "Unlisted-Shop"
         else
             copy.NextLevel = stock.NextLevel
             copy["Entrance Tag"] = action == "spawnstream" and streamed_entrance or "Obsv_Etr"
@@ -121,23 +122,26 @@ local function run(world, action)
         return copy:GetFullName()
     end
     assert(valid(copy) and approach and not copy.Box:IsOverlappingActor(pawn))
-    assert(action == "cross" or action == "alone" or action == "regroup")
+    assert(action == "cross" or action == "alone" or action == "regroup" or action == "enter")
     local point = copy.Box:K2_GetComponentLocation()
     local connection = world.NetDriver.ClientConnections[1]
     local guest = connection.PlayerController.Pawn
     assert(valid(guest) and guest:HasAuthority() and not guest:IsLocallyControlled())
-    local normal = copy:GetActorForwardVector()
-    local separation = action == "regroup" and 600 or 2700
-    assert(guest:K2_SetActorLocation({X = point.X + separation * normal.X, Y = point.Y + separation * normal.Y, Z = point.Z},
-        false, {}, false), "The remote pawn could not be positioned for the party-radius check")
+    if in_shop then guest.CharacterMovement:DisableMovement() end
+    if action ~= "enter" then
+        local normal = copy:GetActorForwardVector()
+        local separation = action == "regroup" and 600 or 2700
+        assert(guest:K2_SetActorLocation({X = point.X + separation * normal.X, Y = point.Y + separation * normal.Y, Z = point.Z},
+            false, {}, false), "The remote pawn could not be positioned for the party-radius check")
+    end
     if action == "regroup" then
         assert(pawn:K2_SetActorLocation(approach, false, {}, false))
         return "near"
     end
     if action == "alone" then assert(pawn:K2_SetActorLocation(approach, false, {}, false)) end
     local hit = {}
-    local moved = pawn:K2_SetActorLocation({X = point.X, Y = point.Y, Z = point.Z}, true, hit, false)
-    if action == "cross" then
+    local moved = pawn:K2_SetActorLocation({X = point.X, Y = point.Y, Z = point.Z}, action ~= "enter", hit, false)
+    if action == "cross" or action == "enter" then
         assert(moved and copy.Box:IsOverlappingActor(pawn), "The local pawn did not enter the test exit")
         if valid(stream) and stream:IsLevelVisible() then arrival_pending = true end
         return "entered"
