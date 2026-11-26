@@ -81,6 +81,9 @@ NATIVE_RUNTIME_RETIRING = "native_runtime_retiring"
 # The stock driver can retain a silent connection for 110 seconds.
 NATIVE_RUNTIME_RETIREMENT_WAIT = 130.0
 NOTHING_VOLUME = f"KillVolume_BP_C {NOTHING}.Nothing_P:PersistentLevel.KillVolume_BP_C_0"
+_TIMED_INTERACTIONS = (frozenset({"native-loot-inspect", "native-loot-open", "native-loot-claim",
+                                  native_authored_pickup.ACTION, native_loose_pickup.CLAIM})
+                       if os.environ.get("SILVERFISH_COOP_TITLE_FIXTURES") == "1" else frozenset())
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
                         native_dialogue.OPEN, native_dialogue.CHOOSE, native_borough_barter.ACTION, native_borough_barter.CRAFT_ACTION,
                         native_borough_barter.CRAFT_PREFLIGHT,
@@ -2237,6 +2240,8 @@ class Host:
             self.native_requests.put_nowait((guest_id, request, future))
         except asyncio.QueueFull:
             return {"ok": False, "error": "native_actions_busy"}
+        if request["action"] in _TIMED_INTERACTIONS:
+            self.control.event("host_interaction_queued", action=request["action"], operation_id=request["operation_id"])
         self.native_request_ready.set()
         return await future
 
@@ -2253,6 +2258,9 @@ class Host:
             self.native_request_ready.clear()
         if future.cancelled():
             return
+        timed = request["action"] in _TIMED_INTERACTIONS
+        if timed:
+            self.control.event("host_interaction_started", action=request["action"], operation_id=request["operation_id"])
         try:
             identity = self.authenticated_guest(guest_id)
             if not identity:
@@ -2429,6 +2437,9 @@ class Host:
             if reply["ok"] and (cue := self.pickup_audio.frame(
                     self.last_game, self.zone_epoch, operation=request["operation_id"])):
                 reply[native_pickup_audio.KEY] = cue
+            if timed:
+                self.control.event("host_interaction_finished", action=request["action"],
+                                   operation_id=request["operation_id"], ok=reply["ok"])
             future.set_result(reply)
 
     async def read_quest_catalog(self, bridge: Bridge) -> dict:
@@ -5553,7 +5564,12 @@ class Client:
         if action == "keep":
             request["retained"] = retained
         timeout = link.checkpoint_action_timeout(request) or (7 if action in GUEST_NATIVE_ACTIONS else 4)
+        timed = action in _TIMED_INTERACTIONS
+        if timed:
+            self.control.event("guest_interaction_sent", action=action, operation_id=operation_id)
         reply = await self.transport.request(request, timeout=timeout)
+        if timed:
+            self.control.event("guest_interaction_received", action=action, operation_id=operation_id, ok=reply.get("ok"))
         if not reply.get("ok"):
             raise ValueError(reply.get("error", "interaction_refused"))
         if (self.last_game.get("map"), self.zone_epoch, self.host_session) == (area, epoch, session) and epoch:
