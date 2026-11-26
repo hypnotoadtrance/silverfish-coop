@@ -548,6 +548,40 @@ namespace
         return level && static_cast<Unreal::AActor*>(actor)->GetLevel() == level;
     }
 
+    bool active_exit_level(Unreal::UObject* actor, Unreal::UWorld* world)
+    {
+        if (!live_object(actor) || !live_object(world)) return false;
+        auto* level = static_cast<Unreal::AActor*>(actor)->GetLevel();
+        if (!live_object(level)) return false;
+        if (level == read_object(field<Unreal::FObjectProperty>(world, STR("PersistentLevel")), world)) return true;
+        auto* visible = field<Unreal::FBoolProperty>(level, STR("bIsVisible"));
+        auto* subworld = level->GetOuterPrivate();
+        auto* package = live_object(subworld) ? subworld->GetOuterPrivate() : nullptr;
+        if (!visible || !visible->GetPropertyValueInContainer(level) || !live_object(package)) return false;
+
+        auto* statics = find<Unreal::UObject>(STR("/Script/Engine.Default__GameplayStatics"));
+        auto* lookup = find<Unreal::UFunction>(STR("/Script/Engine.GameplayStatics:GetStreamingLevel"));
+        auto* loaded = find<Unreal::UFunction>(STR("/Script/Engine.LevelStreaming:GetLoadedLevel"));
+        if (!statics || !lookup || !loaded) return false;
+        struct
+        {
+            Unreal::UObject* context;
+            Unreal::FName package;
+            Unreal::UObject* result{};
+        } args{world, package->GetFName()};
+        Unreal::UObject* result{};
+        if (lookup->GetNumParms() != 3 || lookup->GetParmsSize() != sizeof(args) ||
+            !lookup->GetReturnProperty() || lookup->GetReturnProperty()->GetOffset_Internal() != offsetof(decltype(args), result) ||
+            !field<Unreal::FObjectProperty>(lookup, STR("WorldContextObject")) ||
+            !field<Unreal::FNameProperty>(lookup, STR("PackageName")) ||
+            loaded->GetNumParms() != 1 || loaded->GetParmsSize() != sizeof(result) ||
+            !loaded->GetReturnProperty() || loaded->GetReturnProperty()->GetOffset_Internal() != 0) return false;
+        statics->ProcessEvent(lookup, &args);
+        if (!live_object(args.result)) return false;
+        args.result->ProcessEvent(loaded, &result);
+        return result == level;
+    }
+
     bool exit_token(RC::StringViewType text)
     {
         return !text.empty() && std::ranges::all_of(text, [](RC::CharType c) {
@@ -558,7 +592,7 @@ namespace
     std::optional<DiscoveredExit> discover_exit(Unreal::UObject* exit, Unreal::UObject* box, Unreal::UWorld* world)
     {
         if (scope.authored_world.empty() || !scope.exit_class || !live_object(exit) || !live_object(box) ||
-            !exit->GetClassPrivate()->IsChildOf(scope.exit_class) || !in_persistent_level(exit, world) ||
+            !exit->GetClassPrivate()->IsChildOf(scope.exit_class) || !active_exit_level(exit, world) ||
             box->GetOuterPrivate() != exit || box != read_object(field<Unreal::FObjectProperty>(exit, STR("Box")), exit) ||
             box->GetClassPrivate() != find<Unreal::UClass>(STR("/Script/Engine.BoxComponent"))) return {};
         const auto actor_name = exit->GetName();
@@ -590,7 +624,9 @@ namespace
 
     const Authored::Route* expanded_route(const Scope& current, Unreal::UObject* actor)
     {
-        return !current.authored_world.empty() && actor ? Authored::find(current.authored_world, actor->GetName()) : nullptr;
+        auto* world = static_cast<Unreal::UWorld*>(current.world.Get());
+        return !current.authored_world.empty() && live_object(actor) && world && in_persistent_level(actor, world)
+            ? Authored::find(current.authored_world, actor->GetName()) : nullptr;
     }
 
     bool is_expanded_exit(const Scope& current, Unreal::UObject* actor, Unreal::UWorld* world, const Authored::Route& route)
@@ -774,6 +810,7 @@ namespace
                 break;
             }
         }
+        next.world = world;
         next.authored_world = expanded_world(map);
         if (!next.route && next.authored_world.empty()) return "This world has no authored co-op routes";
         if (fixture)
@@ -783,7 +820,6 @@ namespace
                 return "The placed exit differs from its authored route";
         }
 
-        next.world = world;
         next.instance = read_object(field<Unreal::FObjectProperty>(world, STR("OwningGameInstance")), world);
         next.host = host;
         next.role = field<Unreal::FByteProperty>(next.pawn_class, STR("Role"));
@@ -906,13 +942,26 @@ namespace
 
     Unreal::UObject* exit_by_name(std::string_view name)
     {
-        if (name.empty() || name.size() > 96 || scope.authored_world.empty()) return nullptr;
-        const auto actor_name = RC::to_wstring(name);
-        if (!exit_token(actor_name)) return nullptr;
-        RC::StringType path{scope.authored_world};
-        path += STR(":PersistentLevel.");
-        path += actor_name;
-        return find<Unreal::UObject>(path.c_str());
+        if (name.empty() || name.size() > 512 || scope.authored_world.empty()) return nullptr;
+        const auto key = RC::to_wstring(name);
+        RC::StringType path;
+        if (exit_token(key))
+        {
+            path = scope.authored_world;
+            path += STR(":PersistentLevel.");
+            path += key;
+        }
+        else
+        {
+            constexpr RC::StringViewType level_separator{STR(":PersistentLevel.")};
+            const auto level = key.find(level_separator);
+            if (!key.starts_with(STR("/")) || level == key.npos ||
+                !exit_token(RC::StringViewType{key}.substr(level + level_separator.size()))) return nullptr;
+            path = key;
+        }
+        auto* actor = find<Unreal::UObject>(path.c_str());
+        return live_object(actor) && scope.exit_class && actor->IsA(scope.exit_class) && actor->GetPathName() == path
+            ? actor : nullptr;
     }
 
     std::optional<DiscoveredExit> unregistered_exit(Unreal::UObject* exit, Unreal::UWorld* world)
@@ -950,11 +999,16 @@ namespace
             auto* local = scope.local.Get();
             if (scope.crossing.ticket && !scope.authored_request && !crossing_current(local)) revoke_crossing();
             auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
-            if (!name.empty() && name.size() <= 96 && world && !scope.authored_world.empty())
+            if (!name.empty() && name.size() <= 512 && world && !scope.authored_world.empty())
             {
                 const auto actor_name = RC::to_wstring(name);
+                const auto same_exit = [&](Unreal::UObject* exit) {
+                    return exit && (exit_token(actor_name)
+                        ? exit->GetName() == actor_name && in_persistent_level(exit, world)
+                        : exit->GetPathName() == actor_name);
+                };
                 auto* exit = scope.crossing.actor.Get();
-                if (exit && exit->GetName() == actor_name)
+                if (same_exit(exit))
                 {
                     allowed = scope.authored_request || crossing_current(local);
                 }
@@ -964,11 +1018,11 @@ namespace
                     exit = scope.approach.actor.Get();
                     if (!allows_distance_from(scope, position))
                     {
-                        allowed = exit && exit->GetName() == actor_name && approaching(exit, position);
+                        allowed = same_exit(exit) && approaching(exit, position);
                     }
                     else
                     {
-                        if (!exit || exit->GetName() != actor_name) exit = exit_by_name(name);
+                        if (!same_exit(exit)) exit = exit_by_name(name);
                         const auto* route = expanded_route(scope, exit);
                         const bool qualified = route
                             ? is_expanded_exit(scope, exit, world, *route) && matches_expanded_exit(exit, *route)
@@ -1173,8 +1227,16 @@ namespace
         if (!is_overlap && !is_instance && callee != scope.activate && callee != scope.door &&
             callee != scope.exit_power && callee != scope.door_power) return;
         auto* world = scope.world.Get();
-        if (!world || (is_instance ? scope.instance.Get() != context : actor_world(context) != world) ||
-            iteration.OriginalFunctionCallPrevented()) return;
+        if (!world || iteration.OriginalFunctionCallPrevented()) return;
+        if (is_instance)
+        {
+            if (scope.instance.Get() != context) return;
+        }
+        else if ((is_overlap || callee == scope.activate) && scope.exit_class && context->IsA(scope.exit_class))
+        {
+            if (!active_exit_level(context, static_cast<Unreal::UWorld*>(world))) return;
+        }
+        else if (actor_world(context) != world) return;
 
         if (callee == scope.door)
         {

@@ -4,7 +4,7 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_TI
 
 local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
 local exit_path = observatory .. ":PersistentLevel.Level_Exit_BP_C_1"
-local last, copy, approach, outside
+local last, copy, approach, outside, stream
 
 local function valid(object) return object and object:IsValid() end
 
@@ -13,18 +13,45 @@ local function run(world, action)
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     local pawn = api:GetPlayerPawn(world, 0)
     assert(valid(stock) and valid(pawn) and pawn:HasAuthority() and pawn:IsLocallyControlled())
-    if action == "spawn" then
+    if action == "load" then
+        local loader = StaticFindObject("/Script/Engine.Default__LevelStreamingDynamic")
+        assert(valid(loader))
+        stream = loader:LoadLevelInstance(world, "/Game/Classes/Maps/PlaytestMap_01",
+            {X = 45000, Y = 45000, Z = 2000}, {Pitch = 0, Yaw = 0, Roll = 0}, {}, "CoopStreamExitProbe", nil, false)
+        return valid(stream) and "loading" or "failed"
+    end
+    if action == "spawn" or action == "spawnstream" then
         assert(not valid(copy) and not stock.Box:IsOverlappingActor(pawn))
+        if action == "spawnstream" then
+            if not valid(stream) or not stream:IsLevelVisible() then return "waiting" end
+            local streamed = stream:GetLoadedLevel()
+            assert(valid(streamed) and streamed:GetAddress() ~= world.PersistentLevel:GetAddress())
+            local found = {}
+            api:GetAllActorsOfClass(world, stock:GetClass(), found)
+            for _, actor in ipairs(found.OutActors or found) do
+                if type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
+                if valid(actor) and actor:GetOuter():GetAddress() == streamed:GetAddress() then
+                    assert(not valid(copy), "Expected exactly one stock overlap in the streamed fixture")
+                    copy = actor
+                end
+            end
+            assert(valid(copy), "No stock exit was found in the loaded streamed level")
+        end
         local player_point, stock_point = pawn:K2_GetActorLocation(), stock.Box:K2_GetComponentLocation()
         local dx, dy = player_point.X - stock_point.X, player_point.Y - stock_point.Y
         local distance = math.sqrt(dx * dx + dy * dy)
         assert(distance > 100, "The stock approach does not identify an outward lane")
         local point = {X = player_point.X + 1250 * dx / distance, Y = player_point.Y + 1250 * dy / distance, Z = player_point.Z + 80}
-        copy = world:SpawnActor(stock:GetClass(), point, stock:K2_GetActorRotation())
+        if action == "spawn" then
+            copy = world:SpawnActor(stock:GetClass(), point, stock:K2_GetActorRotation())
+        else
+            assert(copy:K2_SetActorLocation(point, false, {}, false))
+            copy:K2_SetActorRotation(stock:K2_GetActorRotation(), false)
+        end
         assert(valid(copy) and copy:HasAuthority() and valid(copy.Box))
         copy.NextLevel = stock.NextLevel
         copy["Entrance Tag"] = "Obsv_Etr"
-        copy.Travel_TimeStep = 17
+        copy.Travel_TimeStep = action == "spawnstream" and 19 or 17
         copy.Box:SetBoxExtent({X = 160, Y = 160, Z = 180}, false)
         copy.Box:SetGenerateOverlapEvents(true)
         local center = copy.Box:K2_GetComponentLocation()

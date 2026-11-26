@@ -216,6 +216,12 @@ local function sync_shape(index, world, fixture, desired, discovered)
     return ready
 end
 
+local function visible_exit(actor, world)
+    if not valid(actor) or actor:IsActorBeingDestroyed() then return false end
+    local level = actor:GetOuter()
+    return same(level, world.PersistentLevel) or valid(level) and level.bIsVisible == true
+end
+
 local function in_world(actor, world)
     return valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed()
 end
@@ -282,7 +288,7 @@ function wall.update(get_world)
         SilverfishSetNativeExitApproach("")
         return
     end
-    if selected and in_world(selected.fixture, scope.world) and SilverfishSetNativeExitApproach(key) then
+    if selected and visible_exit(selected.fixture, scope.world) and SilverfishSetNativeExitApproach(key) then
         if not open_exit then
             set_ignore(scope.capsule, selected.actor, true)
             selected.host_capsule, open_exit = scope.capsule, selected
@@ -346,14 +352,15 @@ local function discovered_walls(world, known)
     for index = 1, math.min(#candidates, 128) do
         local actor = candidates[index]
         if type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
-        if in_world(actor, world) and same(actor:GetOuter(), world.PersistentLevel)
-            and not valid(actor:GetParentComponent()) and actor:GetActorEnableCollision() then
-            local name = actor:GetFullName():match(":PersistentLevel%.([A-Za-z0-9_%-]+)$")
-            local box = name and not known[name] and actor.Box
+        if visible_exit(actor, world) and not valid(actor:GetParentComponent()) and actor:GetActorEnableCollision() then
+            local path = actor:GetFullName():match("^%S+ (/.+)$")
+            local name = path and path:match(":PersistentLevel%.([A-Za-z0-9_%-]+)$")
+            local registered = name and known[name] and same(actor:GetOuter(), world.PersistentLevel)
+            local box = name and not registered and actor.Box
             if box and valid(box) and box:GetGenerateOverlapEvents() then
-                local destination, tag = SilverfishInspectDiscoveredOverlap(name, actor:GetAddress())
+                local destination, tag = SilverfishInspectDiscoveredOverlap(path, actor:GetAddress())
                 if destination and zones[destination] and tag then
-                    sources[name] = {fixture = actor, tag = tag, kind = "overlap", discovered = true}
+                    sources[path] = {fixture = actor, tag = tag, kind = "overlap", discovered = true}
                 end
             end
         end
@@ -393,7 +400,7 @@ local function intact(scope, previous)
         or not same(previous.capsule, scope.capsule) then return false end
     for _, record in pairs(records) do
         if not valid(record.actor) or not valid(record.component) or not valid(record.fixture)
-            or not valid(record.original) then return false end
+            or not valid(record.original) or record.discovered and not visible_exit(record.fixture, scope.world) then return false end
     end
     return true
 end
@@ -402,7 +409,8 @@ local function sync_permissions(scope, previous)
     if previous.permitted == scope.permitted then return true end
     local desired = scope.permitted and scope.capsule or nil
     for key, record in pairs(records) do
-        if not record.managed and (not in_world(record.fixture, scope.world)
+        local active = record.discovered and visible_exit(record.fixture, scope.world) or in_world(record.fixture, scope.world)
+        if not record.managed and (not active
             or not same(record.original, record.fixture.Box) or not pcall(set_host_capsule, record, desired)) then
             clear_record(key)
             return false
@@ -425,7 +433,8 @@ local function sync_geometry(scope, route)
     end
     local first_ready, diagnostics, had_error = nil, {}, false
     for key, source in pairs(sources) do
-        local source_actor = in_world(source.fixture, world) and source.fixture or nil
+        local active = source.discovered and visible_exit(source.fixture, world) or in_world(source.fixture, world)
+        local source_actor = active and source.fixture or nil
         local managed = scope.manages_overlap and source.kind == "overlap"
         local keep = records[key] and records[key].host_capsule
         local target
@@ -440,7 +449,8 @@ local function sync_geometry(scope, route)
             diagnostics[#diagnostics + 1] = key .. " (" .. (problem or source.problem or "waiting for wall geometry") .. ")"
         else
             local record = records[key]
-            record.tag, record.approach, record.kind, record.managed = source.tag, source.approach, source.kind, managed
+            record.tag, record.approach, record.kind = source.tag, source.approach, source.kind
+            record.managed, record.discovered = managed, source.discovered
             if not first_ready or key < first_ready then first_ready = key end
         end
     end

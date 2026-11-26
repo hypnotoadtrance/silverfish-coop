@@ -37,10 +37,32 @@ async def live_exit(host, guest, pawn, probe, **options):
         assert settled["result"]["ok"] and not settled["discovered"], settled
         pawn = reached["game"]["native_guest_save"]["pawn"]
 
+    spawned = await live_discovered_exit(host, guest, pawn, probe, streamed=False)
+    reached = await wait_for_party(host_run, guest_run, CROSSROADS)
+    route = route_between(CROSSROADS, OBSERVATORY)
+    for participant, position in ((reached["game"]["native_guest_save"]["pawn"], "near"),
+                                  ("local", "near"), ("local", "inside")):
+        await host.bridge.command("native-exit-position", participant, position, route.entrance, route.actor)
+    reached = await wait_for_party(host_run, guest_run, OBSERVATORY)
+    streamed = await live_discovered_exit(host, guest, reached["game"]["native_guest_save"]["pawn"], probe, streamed=True)
+    return {"persistent_exit": spawned, "streamed_exit": streamed}
+
+
+async def live_discovered_exit(host, guest, pawn, probe, *, streamed):
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
     route = route_between(OBSERVATORY, CROSSROADS)
     for participant in (pawn, "local"):
         await host.bridge.command("native-exit-position", participant, "near", route.entrance, route.actor)
-    actor = (await probe(host.bridge, "portable-discovered-exit", "spawn")).strip()
+    if streamed:
+        assert (await probe(host.bridge, "portable-discovered-exit", "load")).strip() == "loading"
+        for _ in range(15):
+            actor = (await probe(host.bridge, "portable-discovered-exit", "spawnstream")).strip()
+            if actor != "waiting":
+                break
+            await asyncio.sleep(0.2)
+        assert "CoopStreamExitProbe" in actor, actor
+    else:
+        actor = (await probe(host.bridge, "portable-discovered-exit", "spawn")).strip()
     actual_name = actor.rsplit(".", 1)[-1]
     assert actual_name != route.actor and not any(row.source == OBSERVATORY and row.actor == actual_name
                                                   for row in AUTHORED_ROUTES)
@@ -59,7 +81,8 @@ async def live_exit(host, guest, pawn, probe, **options):
     reached = await wait_for_party(host_run, guest_run, CROSSROADS)
     events = await suite.resident_events(host_run, reached)
     departure, = (row for row in events if row["event"] == "native_authored_zone_request" and row["actor"] == actual_name)
-    assert departure["discovered"] is True and departure["exit_crossing"] > 0 and departure["travel_time_step"] == 17
+    step = 19 if streamed else 17
+    assert departure["discovered"] is True and departure["exit_crossing"] > 0 and departure["travel_time_step"] == step
     assert departure["destination"] == CROSSROADS and departure["entrance"] == route.entrance and departure["result"]["ok"]
     arrival, = (row["authored_arrival"] for row in events if row["event"] == "zone_travel_ready"
                 and row["epoch"] == reached["zone_epoch"])
@@ -68,7 +91,7 @@ async def live_exit(host, guest, pawn, probe, **options):
     assert fallback["native_authored_arrival"]["placement"] == "stock-spawn:entrance-unavailable"
     assert fallback["state"] == "hosting" and fallback["map"] == CROSSROADS
     assert all(not (seat.bridge.directory / "native-authored-exit-events").exists() for seat in (host, guest))
-    return {"stock_exit_discovery": departure, "arrival": arrival, "discovered_wall_blocked_and_opened": True,
+    return {"actor_path": actor, "stock_exit_discovery": departure, "arrival": arrival, "discovered_wall_blocked_and_opened": True,
             "admitted_crossing_survived_guest_movement": True}
 
 
