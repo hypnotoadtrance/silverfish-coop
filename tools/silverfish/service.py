@@ -368,7 +368,6 @@ class Host:
         self.stock_doors = native_stock_door.Interactions()
         self.gameplay_change_scope = None
         self.gameplay_change_state = None
-        self.next_gameplay_change = 0.0
         self.prepared_guest_leaves: dict[str, GuestLeave] = {}
         self.confirmed_guest_leaves: set[str] = set()
         self.session_stop_reason: str | None = None
@@ -4565,19 +4564,18 @@ class Host:
             )
 
     async def relay_gameplay_changes(self, transport) -> None:
-        while not self.stopping:
+        async for _ in link.network_ticks():
+            if self.stopping:
+                return
             self.publish_gameplay_change(transport)
-            await asyncio.sleep(_GAMEPLAY_CHANGE_INTERVAL)
 
     def publish_gameplay_change(self, transport) -> None:
         game, epoch = self.last_game, self.zone_epoch
-        now = time.monotonic()
-        if (now < self.next_gameplay_change or self.stopping or self.transitioning or self.native_checkpoint_unsafe
+        if (self.stopping or self.transitioning or self.native_checkpoint_unsafe
                 or game.get("state") != "hosting" or not isinstance(transport, link.HostLink)
                 or not isinstance(epoch, str) or not party.REQUEST_ID.fullmatch(epoch)
                 or not self.game_link_connected(transport)):
             return
-        self.next_gameplay_change = now + _GAMEPLAY_CHANGE_INTERVAL
         scope = game.get("map"), epoch
         doors = game.get(native_stock_door.KEY, {})
         door_flags = {actor: (row["open"], row["locked"], row["broken"]) for actor, row in doors.items()}

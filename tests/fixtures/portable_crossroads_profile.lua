@@ -265,6 +265,15 @@ LoopInGameThreadWithDelay(50, function()
         else
             message = "native game-thread clock unavailable"
         end
+    elseif (action == "lowfps" or action == "uncap") and not capture then
+        local world = current_world()
+        local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+        local system = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+        local controller = valid(world) and valid(statics) and statics:GetPlayerController(world, 0)
+        if controller and valid(controller) and controller:IsLocalController() and valid(system) then
+            system:ExecuteConsoleCommand(world, action == "lowfps" and "t.MaxFPS 10" or "t.MaxFPS 0", controller)
+            message = action
+        end
     elseif action == "gcstate" and not capture then
         local original = status_publication.original_collection
         local expected = original and "generational" or "incremental"

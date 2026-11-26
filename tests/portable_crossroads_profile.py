@@ -534,6 +534,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
     runs = {"host": host.campaign / "run", "guest": guest_run}
     counters = ("quic_datagrams_sent", "quic_payload_bytes_sent", "quic_payload_bytes_received", "game_packets_queued",
                 "game_packets_delivered", "game_payload_bytes_queued", "game_wire_payload_bytes_queued", "game_packets_compressed",
+                "keepalive_probes_queued", "keepalive_probes_acked", "keepalive_ticks_congested",
                 "relay_queue_evicted_frames", "relay_queue_expired_frames", "snapshot_responses_encoded", "snapshot_delta_responses",
                 "snapshot_row_delta_responses", "snapshot_rows_changed",
                 "snapshot_encoded_bytes", "snapshot_plaintext_bytes", "snapshot_responses_decoded", "snapshot_received_bytes")
@@ -623,6 +624,29 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
     await arm()
     idle = await collect()
     after_idle = await transport()
+    heartbeat = {}
+    if area == CROSSROADS and "keepalive_probes_queued" in after_idle["guest"]:
+        clock = asyncio.get_running_loop().time
+        try:
+            assert await asyncio.gather(*(command(seat, "lowfps") for seat in seats.values())) == ["lowfps", "lowfps"]
+            start = clock()
+            heartbeat_before = await transport()
+            await arm()
+            low_fps = await collect()
+            heartbeat_after = await transport()
+            seconds = clock() - start
+        finally:
+            assert await asyncio.gather(*(command(seat, "uncap") for seat in seats.values())) == ["uncap", "uncap"]
+        frame_ms = {seat: profile["timings"]["frame"]["p50_ms"] for seat, profile in low_fps.items()}
+        rates = traffic(heartbeat_before, heartbeat_after)
+        guest_pulses = rates["guest"]
+        queued = guest_pulses["keepalive_probes_queued"]
+        acked = guest_pulses["keepalive_probes_acked"]
+        heartbeat = {"low_fps_heartbeat": {"seconds": seconds, "median_frame_interval_ms": frame_ms,
+                                           "guest_probes_per_second": queued / seconds, "link": rates}}
+        assert all(ms >= 75 for ms in frame_ms.values()), heartbeat
+        assert 17 <= queued / seconds <= 23 and acked >= queued - 3, heartbeat
+
     async def walk(laps):
         movement = []
         # Use normal guest movement with short pulses near the stock arrival point.

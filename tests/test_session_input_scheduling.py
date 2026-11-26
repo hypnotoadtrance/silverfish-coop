@@ -835,7 +835,6 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         host = service.Host.__new__(service.Host)
         host.stopping = host.transitioning = host.native_checkpoint_unsafe = False
         host.gameplay_change_scope = host.gameplay_change_state = None
-        host.next_gameplay_change = 0
         host.game_link_connected = Mock(return_value=True)
         host.zone_epoch = "a" * 32
         host.stock_doors = native_stock_door.Interactions()
@@ -846,22 +845,15 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
                           switches: {"switch": {"powered": False, "lights": {}}}}
         host.party = {}
         transport = Mock(spec=service.link.HostLink)
-        clock = Mock(return_value=100.)
-        with patch.object(service, "time", SimpleNamespace(monotonic=clock)):
-            host.publish_gameplay_change(transport)
-            transport.send_gameplay_change.assert_not_called()
-            host.stock_doors.confirmed_scope = OBSERVATORY, host.zone_epoch
-            host.stock_doors.confirmed["door"] = 5, host.last_game[doors]["door"] | {"open": True}
-            host.last_game = {**host.last_game, switches: {"switch": {"powered": True, "lights": {}}}}
-            host.party[native_loot.STATE_KEY] = {"crate": {"id": "roll"}}
-            host.publish_gameplay_change(transport)
-            transport.send_gameplay_change.assert_not_called()
-            clock.return_value = 100.2
-            host.publish_gameplay_change(transport)
-            transport.send_gameplay_change.assert_called_once_with("a" * 32)
-            clock.return_value = 100.4
-            host.publish_gameplay_change(transport)
-            host.zone_epoch = "b" * 32
-            clock.return_value = 100.6
-            host.publish_gameplay_change(transport)
-            transport.send_gameplay_change.assert_called_once_with("a" * 32)
+        host.publish_gameplay_change(transport)
+        transport.send_gameplay_change.assert_not_called()
+        host.stock_doors.confirmed_scope = OBSERVATORY, host.zone_epoch
+        host.stock_doors.confirmed["door"] = 5, host.last_game[doors]["door"] | {"open": True}
+        host.last_game = {**host.last_game, switches: {"switch": {"powered": True, "lights": {}}}}
+        host.party[native_loot.STATE_KEY] = {"crate": {"id": "roll"}}
+        host.publish_gameplay_change(transport)
+        transport.send_gameplay_change.assert_called_once_with("a" * 32)
+        host.publish_gameplay_change(transport)
+        host.zone_epoch = "b" * 32
+        host.publish_gameplay_change(transport)
+        transport.send_gameplay_change.assert_called_once_with("a" * 32)

@@ -13,7 +13,7 @@ import ssl
 import struct
 import zlib
 from collections import deque
-from collections.abc import Awaitable, Callable, Coroutine, Iterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -98,7 +98,8 @@ _CHECKPOINT_QUESTS = {"Photo_DB_Turrets", "Clt_ComputerBoard", "Clt_CoupReport_0
 _MAX_CERTIFICATE = 8192
 _ADMISSION_TIMEOUT = 8.0
 _IDLE_TIMEOUT = 12.0
-_KEEPALIVE_INTERVAL = 3.0
+_CATALOG_KEEPALIVE_INTERVAL = 3.0
+_MAX_KEEPALIVE_PROBES = 8
 _MAX_GAME_PACKET = 65507
 _FRAGMENT_SIZE = 1024
 _FRAGMENT_HEADER = struct.Struct("!IHH")
@@ -163,6 +164,23 @@ def checkpoint_action_timeout(payload: Action) -> float | None:
 def _valid_session_end(session: object, revision: object) -> bool:
     return (isinstance(session, str) and len(session) == 32 and all(ch in "0123456789abcdef" for ch in session)
             and type(revision) is int and 0 < revision < 2**53)
+
+
+async def network_ticks(interval: float = STATE_INTERVAL) -> AsyncIterator[None]:
+    """Schedule worker updates from monotonic deadlines and skip missed slots."""
+    clock = asyncio.get_running_loop().time
+    deadline = clock() + interval
+    while True:
+        while (remaining := deadline - clock()) > 0:
+            await asyncio.sleep(remaining)
+        now = clock()
+        deadline += interval
+        if deadline <= now:
+            deadline = now + interval
+        yield
+        now = clock()
+        if deadline <= now:
+            deadline += (int((now - deadline) / interval) + 1) * interval
 
 
 class LinkError(ConnectionError):
@@ -366,6 +384,9 @@ class _TransportStatistics:
     quic_payload_bytes_received: int = 0
     quic_timer_callbacks: int = 0
     quic_timer_late_max_ns: int = 0
+    keepalive_probes_queued: int = 0
+    keepalive_probes_acked: int = 0
+    keepalive_ticks_congested: int = 0
     game_packets_queued: int = 0
     game_payload_bytes_queued: int = 0
     game_wire_payload_bytes_queued: int = 0
@@ -1348,16 +1369,20 @@ class _ClientProtocol(_LinkProtocol):
         self.avatar_pose: tuple[float, bytes] | None = None
         self.gameplay_change: tuple[float, str] | None = None
         self.keepalive_rtt_us = -1
-        self._keepalive_probe = (0, 0)
+        self._keepalive_serial = 0
+        self._keepalive_latest_ack = 0
+        self._keepalive_probes: dict[int, int] = {}
 
     def quic_event_received(self, event: events.QuicEvent) -> None:
         if isinstance(event, events.HandshakeCompleted):
             self.handshake.set()
         elif isinstance(event, events.PingAcknowledged):
-            uid, sent_ns = self._keepalive_probe
-            if event.uid == uid and sent_ns:
-                self.keepalive_rtt_us = (perf_counter_ns() - sent_ns) // 1000
-                self._keepalive_probe = (uid, 0)
+            sent_ns = self._keepalive_probes.pop(event.uid, None)
+            if sent_ns is not None:
+                self._stats.keepalive_probes_acked += 1
+                if event.uid > self._keepalive_latest_ack:
+                    self._keepalive_latest_ack = event.uid
+                    self.keepalive_rtt_us = (perf_counter_ns() - sent_ns) // 1000
         elif isinstance(event, events.StreamDataReceived):
             if event.stream_id == _ADMISSION_STREAM:
                 payload = self._admission_payload(event)
@@ -1496,14 +1521,20 @@ class _ClientProtocol(_LinkProtocol):
             action.response.set_exception(error)
 
     async def keepalive(self) -> None:
-        while self.authorized and not self.terminated:
-            await asyncio.sleep(_KEEPALIVE_INTERVAL)
-            if self.authorized and not self.terminated:
-                # Measure the existing keepalive without extra traffic or game-thread work.
-                uid = self._keepalive_probe[0] + 1
-                self._keepalive_probe = (uid, perf_counter_ns())
-                self._quic.send_ping(uid)
-                self.transmit()
+        interval = STATE_INTERVAL if self.game_access else _CATALOG_KEEPALIVE_INTERVAL
+        async for _ in network_ticks(interval):
+            if not self.authorized or self.terminated:
+                return
+            # QUIC retries lost PINGs. Bound outstanding probes on a slow or blocked path.
+            if len(self._keepalive_probes) >= _MAX_KEEPALIVE_PROBES:
+                self._stats.keepalive_ticks_congested += 1
+                continue
+            self._keepalive_serial += 1
+            uid = self._keepalive_serial
+            self._keepalive_probes[uid] = perf_counter_ns()
+            self._stats.keepalive_probes_queued += 1
+            self._quic.send_ping(uid)
+            self.transmit()
 
 
 @asynccontextmanager

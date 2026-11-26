@@ -27,6 +27,36 @@ from tools.silverfish.service import Client, Host
 from tools.silverfish.udp_ownership import verify_loopback_socket
 
 
+class NetworkTickTests(unittest.IsolatedAsyncioTestCase):
+    async def test_monotonic_slots_skip_worker_stalls_without_replaying_ticks(self):
+        now = 0.0
+
+        async def sleep(delay):
+            nonlocal now
+            now += delay
+            if abs(now - .15) < .001:
+                now += .18
+
+        loop = SimpleNamespace(time=lambda: now)
+        ticks = link.network_ticks()
+        try:
+            with patch.object(link, "asyncio", SimpleNamespace(get_running_loop=lambda: loop, sleep=sleep)):
+                await anext(ticks)
+                self.assertAlmostEqual(now, .05)
+                now += .012
+                await anext(ticks)
+                self.assertAlmostEqual(now, .10)
+                await anext(ticks)
+                self.assertAlmostEqual(now, .33)
+                await anext(ticks)
+                self.assertAlmostEqual(now, .38)
+                now += .105
+                await anext(ticks)
+                self.assertAlmostEqual(now, .53)
+        finally:
+            await ticks.aclose()
+
+
 class DatagramInbox(asyncio.DatagramProtocol):
     def __init__(self):
         self.messages = asyncio.Queue()
@@ -156,6 +186,24 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stats["relay_queue_expired_frames"], 0)
             stats["game_packets_queued"] = 0
             self.assertEqual(relay.statistics()["game_packets_queued"], len(sizes))
+
+    async def test_admitted_idle_link_has_a_20_hz_worker_heartbeat_without_unreal_frames(self):
+        self.assertTrue((await self.connect_guest())["accepted"])
+        client_before = self.client.statistics()
+        host_before = self.host.statistics()
+        await asyncio.sleep(.62)
+        client_after = self.client.statistics()
+        host_after = self.host.statistics()
+        queued = client_after["keepalive_probes_queued"] - client_before["keepalive_probes_queued"]
+        acked = client_after["keepalive_probes_acked"] - client_before["keepalive_probes_acked"]
+        self.assertGreaterEqual(queued, 10)
+        self.assertLessEqual(queued, 14)
+        self.assertGreaterEqual(acked, queued - 2)
+        self.assertEqual(client_after["keepalive_ticks_congested"], 0)
+        self.assertGreaterEqual(host_after["quic_datagrams_received"] - host_before["quic_datagrams_received"], acked)
+        self.assertGreater(client_after["keepalive_rtt_us"], 0)
+        self.assertEqual(client_after["game_packets_queued"], 0)
+        self.assertEqual(host_after["game_packets_queued"], 0)
 
     async def test_relay_statistics_count_overflow_and_expiry(self):
         self.assertTrue((await self.connect_guest())["accepted"])
@@ -1238,7 +1286,7 @@ class ClientReconnectTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.025)
 
     async def test_production_client_reauthenticates_after_bidirectional_packet_blackhole(self):
-        self.enterContext(patch.multiple(link, _IDLE_TIMEOUT=1.5, _KEEPALIVE_INTERVAL=0.2))
+        self.enterContext(patch.object(link, "_IDLE_TIMEOUT", 1.5))
         directory = Path(self.enterContext(TemporaryDirectory()))
         store = self.enterContext(CampaignStore(directory))
         game_host, host_inbox = await self.udp(DatagramInbox)
@@ -1320,6 +1368,7 @@ class ClientReconnectTests(unittest.IsolatedAsyncioTestCase):
             reserved, = store.status()["leases"]
             self.assertEqual((reserved["character_id"], reserved["state"]), (character_id, "reserved"))
             self.assertGreater(proxy.discarded, 0)
+            self.assertGreater(transport.statistics()["keepalive_ticks_congested"], 0)
             self.assertFalse(client.suspended)
             last_gameplay_before_resume = client.gameplay_seen
         finally:

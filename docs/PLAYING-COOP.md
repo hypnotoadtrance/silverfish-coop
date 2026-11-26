@@ -62,6 +62,10 @@ Steam relay carries the connection without a publicly reachable UDP port. The ho
 
 The host sent an in-game Steam invite and the guest accepted it and joined the campaign in a two-PC playtest. Automated tests cover the new lobby choices, the friend join callback, and selection from the public browser. A later two-PC test found that the Public browser missed a lobby the guest could join by invite. The discovery fix passed an automated check and needs a two-account Steam retest. Friends Only joining through Steam, reconnect, and longer sessions also need live retests. If Steam is unavailable, check the `steam-coop-status.json` file in the current game bridge for the initialization result.
 
+### Network timing
+
+The network worker targets a 20 Hz heartbeat on active Steam and Direct IP connections. It also checks host world changes every 50 ms. Requests and action cues can still send as soon as they are ready. Unreal applies gameplay changes on its game thread, so low frame rates can still delay when an update appears in the world.
+
 ### Steam Cloud backups
 
 The installed mod mirrors each hosted campaign as a complete backup under `%LOCALAPPDATA%\SilverFish\Saved\SaveGames\SilverfishCoopCloud`. The backup includes the world, host and guest characters, and the campaign’s private host identity so returning guests can use their existing characters. Keep the backup files within the host’s Steam account. Steam Auto-Cloud uploads these files on exit and downloads them on launch when Steam Cloud is enabled for Project Silverfish. The mod reads downloaded backups when you open the Host campaign picker. The same Steam account and a compatible mod build are required on the other PC.

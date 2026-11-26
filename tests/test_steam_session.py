@@ -109,7 +109,7 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(host_api.presence)
 
     async def test_invite_only_character_admission_reaches_resident_ready_and_resumes_on_same_route(self):
-        self.enterContext(patch.multiple(link, _IDLE_TIMEOUT=1.5, _KEEPALIVE_INTERVAL=.2))
+        self.enterContext(patch.object(link, "_IDLE_TIMEOUT", 1.5))
         host_api, host, host_mailbox = await self.start(HOST)
         guest_api, guest, guest_mailbox = await self.start(GUEST)
         build = "fixture-build"
