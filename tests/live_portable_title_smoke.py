@@ -6190,6 +6190,7 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
         "input_source": received["input_source"], "sequence": received["sequence"],
         "roll_id": roll["id"], "roll_count": 1, "guest_scope_cleared_before_press": cold,
         "saves_unchanged_after_open": True,
+        "host_bridge_reply_bytes": applied.get("bridge_reply_bytes"),
         "pre_open_diagnostics": diagnostics,
         "probe_request_to_press_reply_ms": round(1000 * (pressed_at - request_at), 2),
         "probe_request_to_visible_roll_ms": round(1000 * (visible_at - request_at), 2),

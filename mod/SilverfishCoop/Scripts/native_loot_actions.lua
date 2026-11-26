@@ -413,17 +413,31 @@ local function result_row(row, status_row)
         row.retained and 1 or 0, row.memory_escrow and 1 or 0)
 end
 
-function actions.inspect_reply(fields, state, phase, status_row)
+local function item_row(item, status_row)
+    return status_row("native-loot-item", item.actor, item.class_path, item.guid, item.ammo,
+        table.unpack(item.transform))
+end
+
+function actions.compact_open(fields, state, phase)
+    if phase ~= "hosting" or #fields ~= 6 or fields[6] ~= "memory-escrow" then return false end
+    local profile = loot.profile(state.map, fields[4])
+    return profile and not profile.key_unlock_only and not profile.random_lid
+end
+
+function actions.local_reply(fields, state, phase, status_row)
+    local opening = fields[2] == "native-loot-open"
     local previous = observation
     observation = nil
     local accepted, message = pcall(actions.command, fields, state, phase)
     local result = observation
     observation = previous
-    local reply = status_row("native-loot-inspection-reply", 1) .. "\n"
+    local reply = status_row(opening and "native-loot-open-reply" or "native-loot-inspection-reply", 1) .. "\n"
     if not accepted or not result then
-        return reply .. status_row("ack", fields[1], "error", message or "stock loot inspection unavailable") .. "\n"
+        return reply .. status_row("ack", fields[1], "error", message or "stock loot receipt unavailable") .. "\n"
     end
-    return reply .. status_row("ack", fields[1], "accepted", message) .. "\n" .. result_row(result, status_row) .. "\n"
+    local records = {reply .. status_row("ack", fields[1], "accepted", message), result_row(result, status_row)}
+    for _, item in ipairs(result.items) do records[#records + 1] = item_row(item, status_row) end
+    return table.concat(records, "\n") .. "\n"
 end
 
 function actions.rows(state, phase, status_row)
@@ -455,8 +469,7 @@ function actions.rows(state, phase, status_row)
             merge.amount, merge.before, merge.after)
     end
     for _, item in ipairs(row.items) do
-        records[#records + 1] = status_row("native-loot-item", item.actor, item.class_path, item.guid, item.ammo,
-            table.unpack(item.transform))
+        records[#records + 1] = item_row(item, status_row)
     end
     return records
 end

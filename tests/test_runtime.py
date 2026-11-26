@@ -114,6 +114,41 @@ class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
             await bridge.command("native-loot-inspect", pawn, crate)
         self.assertIs(bridge._local_status, published)
 
+    async def test_compact_stock_crate_open_requires_every_item_and_the_exact_escrow(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        crate = runtime.native_loot.CRATE
+        area = runtime.AUTHORED_CRATES[crate]
+        pawn, slot = "Player_FP_C exact participant", "stock-escrow"
+        published = {"sequence": 42, "state": "hosting", "map": area}
+        bridge._local_status = published
+        receipt_slot = slot
+        items = ["native-loot-item\tTestActor\t/Game/Test.Test_C\t" + "A" * 32
+                 + "\t7\t4\t5\t6\t0\t90\t0\t1\t1\t1\n"]
+
+        async def reply(payload, _timeout):
+            nonce, *_ = payload.decode().split("\t")
+            row = ("native-loot", "open", area, crate, pawn, "1", "opened", "1", "0", "none", "0",
+                   "24", "1", "1", receipt_slot, "0", "1")
+            return (f"native-loot-open-reply\t1\nack\t{nonce}\taccepted\topened\n"
+                    + "\t".join(row) + "\n" + "".join(items))
+
+        bridge.local_bridge = Mock(command=AsyncMock(side_effect=reply))
+        request = ("native-loot-open", pawn, crate, slot, "memory-escrow")
+        response = await bridge.command(*request)
+        item, = response["native_loot"]["items"]
+        self.assertEqual((item["guid"], item["ammo"], item["transform"]["position"]), ("A" * 32, 7, [4, 5, 6]))
+        self.assertGreater(response[runtime.native_loot.OPEN_REPLY_BYTES], 0)
+        self.assertTrue(response["native_loot"]["memory_escrow"])
+
+        receipt_slot = "different-escrow"
+        with self.assertRaisesRegex(RuntimeError, "invalid escrow"):
+            await bridge.command(*request)
+        receipt_slot = slot
+        items.clear()
+        with self.assertRaisesRegex(RuntimeError, "malformed"):
+            await bridge.command(*request)
+        self.assertIs(bridge._local_status, published)
+
     async def test_pickup_presentation_receipts_do_not_replace_resident_status(self):
         bridge = runtime.Bridge(Path("unused"), None)
         bridge.local_bridge = Mock(command=AsyncMock())

@@ -40,6 +40,7 @@ PLACEMENT_KEY = "native_loot_placement"
 FORCED_ROLL_STATUS = "opened_fixture_seeded"
 SPECIAL_MEMORY_CAPABILITY = "native_loot_special_memory"
 INSPECTION_BYTES = "native_loot_inspection_reply_bytes"
+OPEN_REPLY_BYTES = "native_loot_open_reply_bytes"
 
 
 def public_roll(roll: dict) -> dict:
@@ -942,7 +943,9 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             raise party.RuleError(proof["status"] or "native_loot_refused")
         if action == "inspect" and INSPECTION_BYTES in snapshot:
             return {"native_loot": proof, INSPECTION_BYTES: snapshot[INSPECTION_BYTES]}
-        host.last_game, host.last_seen = snapshot, time.monotonic()
+        compact_open = OPEN_REPLY_BYTES in snapshot
+        if not compact_open:
+            host.last_game, host.last_seen = snapshot, time.monotonic()
         if action == "open":
             if proof.get("status") == "unlocked":
                 if (pried or fixture_nonempty or tool_receipt or not key_unlock_only(crate, area)
@@ -1012,7 +1015,8 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             host.party = candidate
             host.native_checkpoint_unsafe = False
             if memory_escrow:
-                host.control.event("native_loot_roll_accepted", **result["native_loot_roll"])
+                host.control.event("native_loot_roll_accepted", **result["native_loot_roll"],
+                                   bridge_reply_bytes=snapshot.get(OPEN_REPLY_BYTES))
             else:
                 host.control.event("native_loot_roll_committed", revision=revision, **result["native_loot_roll"])
             if fixture_nonempty:

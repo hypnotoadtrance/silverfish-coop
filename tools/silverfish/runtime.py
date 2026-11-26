@@ -770,30 +770,62 @@ def _parse_stock_loot_receipt(fields: list[str]) -> dict:
     return result
 
 
-def _parse_stock_loot_inspection(raw: str, request: tuple[str, ...]) -> dict:
-    rows = [line.split("\t") for line in raw.splitlines()] if len(raw) <= 4096 and raw.endswith("\n") else []
-    if len(rows) not in (2, 3) or rows[0] != ["native-loot-inspection-reply", "1"]:
-        raise RuntimeError("The local stock loot inspection reply was malformed")
+def _parse_stock_loot_item(fields: list[str]) -> dict:
+    item = {"actor": fields[1], "class_path": fields[2]}
+    if len(fields) >= 4:
+        item["guid"] = fields[3]
+    if len(fields) >= 13:
+        position, rotation, scale = fields[-9:-6], fields[-6:-3], fields[-3:]
+        transform = dict(position=list(map(_finite, position)),
+                         rotation=list(map(_finite, rotation)), scale=list(map(_finite, scale)))
+        if not valid_item_transform(transform):
+            raise ValueError("Stock loot actor reported an invalid transform")
+        item["transform"] = transform
+        if len(fields) == 14:
+            raw_ammo = int(fields[4])
+            if not -(2**31) <= raw_ammo < 2**31:
+                raise ValueError("Stock loot actor reported invalid ammo")
+            item["ammo"] = raw_ammo
+    return item
+
+
+def _parse_local_stock_loot(raw: str, request: tuple[str, ...], *, opening: bool) -> dict:
+    tag = "native-loot-open-reply" if opening else "native-loot-inspection-reply"
+    byte_key = native_loot.OPEN_REPLY_BYTES if opening else native_loot.INSPECTION_BYTES
+    limit = 16384 if opening else 4096
+    rows = [line.split("\t") for line in raw.splitlines()] if len(raw) <= limit and raw.endswith("\n") else []
+    if len(rows) < 2 or rows[0] != [tag, "1"]:
+        raise RuntimeError("The local stock loot reply was malformed")
     ack = rows[1]
     if len(ack) != 4 or ack[:2] != ["ack", request[0]]:
-        raise RuntimeError("The local stock loot inspection reply did not match the request")
+        raise RuntimeError("The local stock loot reply did not match the request")
     if ack[2] == "error" and len(rows) == 2:
-        raise RuntimeError(ack[3] or "The game declined the stock loot inspection")
-    if len(request) != 4 or ack[2] != "accepted" or len(rows) != 3 or len(rows[2]) != 17:
-        raise RuntimeError("The local stock loot inspection reply was incomplete")
+        raise RuntimeError(ack[3] or "The game declined the stock loot request")
+    if len(request) != (6 if opening else 4) or ack[2] != "accepted" or len(rows) < 3 or len(rows[2]) != 17:
+        raise RuntimeError("The local stock loot reply was incomplete")
     row = rows[2]
     pawn, crate = request[2:4]
-    if (row[0:2] != ["native-loot", "inspect"] or row[3:5] != [crate, pawn]
-            or any(row[index] not in ("0", "1") for index in (5, 8))
-            or any(row[index] != "0" for index in (7, 10, 12, 13, 15, 16)) or row[14] != "-"):
-        raise RuntimeError("The local stock loot inspection reply had an invalid scope or result")
+    if (row[0:2] != ["native-loot", "open" if opening else "inspect"] or row[3:5] != [crate, pawn]
+            or any(row[index] not in ("0", "1") for index in (5, 7, 8, 13, 16)) or row[15] != "0"):
+        raise RuntimeError("The local stock loot reply had an invalid scope or result")
+    if opening:
+        if (request[5] != "memory-escrow" or row[6] == "unlocked"
+                or (row[14], row[16]) != ((request[4], "1") if row[5] == "1" else ("-", "0"))):
+            raise RuntimeError("The local stock loot reply had an invalid escrow result")
+    elif len(rows) != 3 or any(row[index] != "0" for index in (7, 10, 12, 13, 16)) or row[14] != "-":
+        raise RuntimeError("The local stock loot reply had an invalid inspection result")
     try:
         proof = _parse_stock_loot_receipt(row)
+        if proof["item_count"] != len(rows) - 3 or any(
+            len(item) != 14 or item[0] != "native-loot-item" for item in rows[3:]
+        ):
+            raise ValueError("Incomplete stock loot item receipt")
+        proof["items"] = [_parse_stock_loot_item(item) for item in rows[3:]]
     except ValueError as error:
-        raise RuntimeError("The local stock loot inspection reply was malformed") from error
+        raise RuntimeError("The local stock loot reply was malformed") from error
     return {"state": "hosting", "map": proof["map"], "native_loot": proof, "ack": {
         "id": request[0], "result": "accepted", "message": ack[3]},
-        native_loot.INSPECTION_BYTES: len(raw.encode("utf-8"))}
+        byte_key: len(raw.encode("utf-8"))}
 
 
 def _parse_world_view(fields: list[str], phase: str | None) -> dict:
@@ -2888,22 +2920,7 @@ class Bridge:
                     loot = data["native_loot"]
                     if len(loot["items"]) >= loot["item_count"]:
                         raise ValueError("Stock container reported more rows than its receipt")
-                    item = {"actor": fields[1], "class_path": fields[2]}
-                    if len(fields) >= 4:
-                        item["guid"] = fields[3]
-                    if len(fields) >= 13:
-                        position, rotation, scale = fields[-9:-6], fields[-6:-3], fields[-3:]
-                        transform = dict(position=list(map(_finite, position)),
-                                         rotation=list(map(_finite, rotation)), scale=list(map(_finite, scale)))
-                        if not valid_item_transform(transform):
-                            raise ValueError("Stock loot actor reported an invalid transform")
-                        item["transform"] = transform
-                        if len(fields) == 14:
-                            raw_ammo = int(fields[4])
-                            if not -(2**31) <= raw_ammo < 2**31:
-                                raise ValueError("Stock loot actor reported invalid ammo")
-                            item["ammo"] = raw_ammo
-                    loot["items"].append(item)
+                    loot["items"].append(_parse_stock_loot_item(fields))
                 elif fields[0] == "native-loot-cash" and len(fields) == 5 and "native_loot" in data:
                     loot = data["native_loot"]
                     if loot.get("action") != "claim" or "cash" in loot or "merge" in loot:
@@ -3888,7 +3905,9 @@ class Bridge:
                     raise RuntimeError(receipt[3] or f"The game declined the {action} command")
                 return {"ack": {"id": receipt[1], "result": receipt[2], "message": receipt[3]}}
             if action == "native-loot-inspect" and raw.startswith("native-loot-inspection-reply\t"):
-                return _parse_stock_loot_inspection(raw, fields)
+                return _parse_local_stock_loot(raw, fields, opening=False)
+            if action == "native-loot-open" and raw.startswith("native-loot-open-reply\t"):
+                return _parse_local_stock_loot(raw, fields, opening=True)
             if action == native_weather_view.LOCAL_APPLY and raw.startswith("native-world-view-reply\t"):
                 return self._local_world_view_reply(raw, fields)
             if action == native_storm_ambience.COMMAND and raw.startswith(native_storm_ambience.REPLY + "\t"):
