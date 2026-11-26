@@ -57,7 +57,9 @@ from portable_alternate_ammo import verify_alternate_ammo
 from portable_light_ar import verify_fire_mode_reopen, verify_stock_light_ar
 from portable_loki_control import verify_guest_loki, verify_guest_loki_reconnected, verify_guest_loki_reopened, verify_stock_loki_control
 from portable_lingering_teleport import lingering_overlay, verify_stock_lingering_teleport
-from portable_personal_consumable import verify_personal_consumable_reconnect, verify_stock_personal_consumable
+from portable_personal_consumable import (
+    BLUE_MUSHROOM, verify_blue_mushroom, verify_personal_consumable_reconnect, verify_stock_personal_consumable,
+)
 from portable_wipe_chooser import verify_stock_wipe_chooser
 from portable_save_management import verify_save_management
 from portable_simmi_jammer import instrument_jammer_sampler, verify_stock_simmi_jammers
@@ -2609,7 +2611,7 @@ async def verify_roaming_barter(host: Seat, guest: Seat, _pawn: str) -> dict:
     trade, = commits
     assert trade["trader"] == identity and trade["cash_before"] - cash == trade["cash"], trade
     received, = trade["transfers"]
-    assert received["guid"] == item and received["direction"] == "receive", received
+    assert (received["guid"], received["direction"], received["class_path"]) == (item, "receive", BLUE_MUSHROOM), received
     host_after, guest_after = await asyncio.gather(inspect(host, point), inspect(guest, point))
     assert host_after["stock_items"] == guest_after["stock_items"] and item not in host_after["stock_items"].split("|")
     host_updated = await screen(host, point)
@@ -2640,10 +2642,12 @@ async def verify_roaming_barter(host: Seat, guest: Seat, _pawn: str) -> dict:
     assert await operate(guest, "deadopen", point) == "refused"
     await wait_resident_status(guest_run, lambda frame: not scope(frame))
     assert unbought in (await inspect(host, point))["stock_items"].split("|")
+    blue_mushroom, time_shift = await verify_blue_mushroom(host, guest, recovered, item)
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"stock_roaming_barter": {"stock_ids": [host_before["stock_trader_id"], guest_before["stock_trader_id"]],
                                      "late_merchant_registration": True,
                                      "shared_identity": identity, "committed_trade": trade, "stock_view": scope(new_view),
+                                     "purchased_blue_mushroom": blue_mushroom, "personal_time_shift": time_shift,
                                      "host_purchase_refreshed_same_guest_widget": True,
                                      "guest_purchase_refreshed_same_host_widget": True,
                                      "wallet": [guest_screen["wallet"], updated["wallet"], host_updated["wallet"]],

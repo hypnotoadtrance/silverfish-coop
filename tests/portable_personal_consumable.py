@@ -48,6 +48,24 @@ async def use_stock_item(run, frame, guid, result_key, *, drag=False):
             await asyncio.sleep(.10)
 
 
+async def verify_blue_mushroom(host, guest, frame, guid):
+    run = guest.client / "run"
+    blue = await use_stock_item(run, frame, guid, FALLBACK_RECEIPT)
+    assert (blue["guid"], blue["class_path"], blue["quantity_after"]) == (guid, BLUE_MUSHROOM, 0), blue
+
+    async def observe(seat):
+        reply = await seat.bridge.command("native-time-shift-fixture", "observe")
+        return reply["ack"]["message"].split(";")
+
+    async with asyncio.timeout(12):
+        while (guest_shift := await observe(guest))[0] != "1":
+            await asyncio.sleep(.08)
+    host_shift = await observe(host)
+    assert host_shift[:2] == ["0", "1.000"] and guest_shift[:2] == ["1", "1.000"], (host_shift, guest_shift)
+    await stock_inventory_open(run, False)
+    return blue, {"guest": guest_shift, "host": host_shift}
+
+
 async def verify_stock_personal_consumable(host, guest, pawn, probe):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     saves = campaign_save_hashes(host.campaign)
@@ -129,18 +147,7 @@ async def verify_stock_personal_consumable(host, guest, pawn, probe):
     assert weta not in after and mre not in after and after[spare]["quantity"] == 1, after
     assert await inventory(host_run) == starting_host
     assert campaign_save_hashes(host.campaign) == saves, "Fallback item use wrote an early checkpoint"
-    blue_mushroom = await use_stock_item(guest_run, frame, blue, FALLBACK_RECEIPT)
-    assert (blue_mushroom["guid"], blue_mushroom["class_path"], blue_mushroom["quantity_after"]) == (
-        blue, BLUE_MUSHROOM, 0), blue_mushroom
-    async with asyncio.timeout(12):
-        while True:
-            guest_shift = (await guest.bridge.command("native-time-shift-fixture", "observe"))["ack"]["message"].split(";")
-            if guest_shift[0] == "1":
-                break
-            await asyncio.sleep(.08)
-    host_shift = (await host.bridge.command("native-time-shift-fixture", "observe"))["ack"]["message"].split(";")
-    assert host_shift[:2] == ["0", "1.000"] and guest_shift[:2] == ["1", "1.000"], (host_shift, guest_shift)
-    await stock_inventory_open(guest_run, False)
+    blue_mushroom, time_shift = await verify_blue_mushroom(host, guest, frame, blue)
     assert campaign_save_hashes(host.campaign) == saves, "Blue Mushroom use wrote an early checkpoint"
     vitals = blue_mushroom["vitals"]
     food, regen, fatigue, intox = (vitals[key] for key in ("food", "regen", "fatigue", "intox"))
@@ -148,7 +155,7 @@ async def verify_stock_personal_consumable(host, guest, pawn, probe):
         "pawn": pawn, "character_id": frame["character_id"], "guid": spare, "remaining": 1, "food": food, "regen": regen,
         "fatigue": fatigue, "intox": intox, "frog_guids": frogs,
         "fallback": fallback, "ordinary_recipe": registered, "blue_mushroom": blue_mushroom,
-        "personal_time_shift": {"guest": guest_shift, "host": host_shift}, "original_host_state_unchanged": True,
+        "personal_time_shift": time_shift, "original_host_state_unchanged": True,
         "deferred_save": True,
     }}
 

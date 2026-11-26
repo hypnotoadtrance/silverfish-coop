@@ -11,10 +11,12 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 | Oil lanterns | Gold and gray oil lanterns disagree on lit state. A guest who joined after the host broke a lamp saw it intact. Candles and radios synchronized in the same playtest. |
 | Guest character creation | A saved guest character can show a different name from the one entered in the stock editor. |
 | Guest weapon recoil | The guest's first-person weapon lacks the firing recoil animation. |
-| Blue Mushroom | A guest could buy a Blue Mushroom from a trader and see Eat in the context menu. Selecting Eat had no effect. |
+| Blue Mushroom | A guest could buy a Blue Mushroom from a trader and see Eat in the context menu. Selecting Eat had no effect. The same purchase and Eat flow passed on `rc-c78ae67` over Direct IP. Steam playtest confirmation is pending. |
 | Three-guest performance | The four-player playtest reported better responsiveness, with interaction latency still noticeable. |
 
 ## Current playtest checks
+
+- **Eating a purchased Blue Mushroom.** In two muted Direct IP launches on `rc-c78ae67`, a guest bought a Blue Mushroom through the stock roaming trader window and ate that same item through the backpack context menu. The purchase deducted shared cash and eating removed one mushroom. The personal time shift activated for the guest while both world clocks stayed at normal speed. The same two instances also verified ordinary food, an unlisted consumable, and eating a frog after reconnect. The original save baseline was preserved. [Release candidate](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-c78ae67)
 
 - **Four-player shutdown.** A follow-up Direct IP check on `rc-c78ae67` read the stock Pause button and found Save and Quit visible but disabled in Crossroads. The host used Quit to Menu and confirmed. The same four muted instances then opened a fresh Observatory campaign where the stock button was enabled, and the host used Save and Quit. Each exit committed a new checkpoint with three distinct guest save slots, received all three acknowledgements, and returned the four players to reusable title screens. The test used four launches and preserved the stock save baseline. [Player guide](PLAYING-COOP.md#leave-through-the-stock-pause-menu)
 

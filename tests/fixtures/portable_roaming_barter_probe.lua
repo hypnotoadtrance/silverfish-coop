@@ -67,11 +67,11 @@ local function roaming_probe(fields, state, phase)
                         assert(guest:K2_TeleportTo(target, angle), "guest could not approach the trader")
                         local funds = state.world.OwningGameInstance
                         funds:Give_PlayerCash(1200, false)
-                        local asset = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
-                        local class = load(asset)
-                        assert(valid(class))
+                        local bandage = load("/Game/Classes/Items/Item_Bandage.Item_Bandage_C")
+                        local mushroom = load("/Game/Classes/Items/Item_BlueMushroom.Item_BlueMushroom_C")
+                        assert(valid(bandage) and valid(mushroom))
                         local ids = {}
-                        for index = 1, 4 do
+                        for index, class in ipairs({bandage, mushroom, bandage, bandage}) do
                             local output = {}
                             actor:GenerateItem(class, 1, output)
                             local item = output.Item or output
@@ -122,12 +122,12 @@ local function roaming_probe(fields, state, phase)
                             local row = actor.Inventory[index]
                             if guid(row[item_guid]) == fields[5] then stock = row break end
                         end
-                        assert(stock, "the host bandage was missing from guest stock")
+                        assert(stock, "the requested stock item was missing from the trader")
                         local quotation = {}
                         actor:ValueItem(stock, quotation)
                         local minimum = screen.MinBalance + .020
                         local price = math.ceil(quotation.TraderValue * minimum / (1 - minimum) / actor.MerchantData.CashValueMod)
-                        assert(price > 0 and price < 1200, "unexpected stock bandage price")
+                        assert(price > 0 and price < 1200, "unexpected stock item price")
                         local staged = StaticFindObject("/Script/Engine.Default__GameplayStatics"):CreateSaveGameObject(load(save_class))
                         staged.PlayerBackpack[1] = stock
                         local removed, offered = {}, {}
