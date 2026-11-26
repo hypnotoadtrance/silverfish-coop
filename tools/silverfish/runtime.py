@@ -106,10 +106,12 @@ CPP_MOD_NAME = "SilverfishCoopNative"
 CPP_RUNTIME_DLL = Path("ue4ss/UE4SS.dll")
 CPP_ADDON_DLL = Path(f"ue4ss/Mods/{CPP_MOD_NAME}/dlls/main.dll")
 GUEST_UI_MEMORY = "native_guest_ui_memory"
+GUEST_UI_PROJECTION_BYTES = "native_guest_ui_projection_reply_bytes"
 GUEST_UI_MAX_BYTES = 20_000
 _GUEST_UI_MAX_ROWS = 128
 _GUEST_UI_REPLY = "\nnative-guest-ui-body\t"
 _GUEST_UI_READ_REPLY = "native-guest-ui-read-reply"
+_GUEST_UI_PROJECT_REPLY = "native-guest-ui-project-reply"
 _GUEST_UI_BYTES = re.compile(rb"[\t\n -~]+")
 MOD_SCRIPTS = Path("ue4ss/Mods/SilverfishCoop/Scripts")
 DEATH_PATCH = "zzzz_SilverfishCoop_Death_P"
@@ -3894,8 +3896,9 @@ class Bridge:
 
         raw = await self.local_bridge.command(request, timeout)
         frame, marker, remainder = raw.partition(_GUEST_UI_REPLY)
-        compact = payload is None and frame.startswith(_GUEST_UI_READ_REPLY + "\t")
-        if compact:
+        captured = payload is None and frame.startswith(_GUEST_UI_READ_REPLY + "\t")
+        projected = payload is not None and frame.startswith(_GUEST_UI_PROJECT_REPLY + "\t")
+        if captured:
             header = (frame if marker else frame.removesuffix("\n")).split("\t", 6)
             if (len(frame) > 1024 or len(header) != 7 or header[:4] != [_GUEST_UI_READ_REPLY, "1", nonce, "hosting"]
                     or not re.fullmatch(r"/Game/Classes/Maps/[A-Za-z0-9_/-]{1,236}", header[4])
@@ -3903,6 +3906,18 @@ class Bridge:
                 raise RuntimeError("The resident guest view reply did not match the request")
             _, _, _, phase, area, result, message = header
             state = {"state": phase, "map": area, "ack": {"id": nonce, "result": result, "message": message}}
+        elif projected:
+            header = frame[:-1].split("\t") if frame.endswith("\n") and "\n" not in frame[:-1] else []
+            if (len(frame) > 1024 or len(header) != 9 or header[:4] != [_GUEST_UI_PROJECT_REPLY, "1", nonce, "connected"]
+                    or not re.fullmatch(r"/Game/Classes/Maps/[A-Za-z0-9_/-]{1,236}", header[4])
+                    or not re.fullmatch(r"-|[a-f0-9]{32}", header[5])
+                    or not re.fullmatch(r"[ -~]{1,512}", header[6])
+                    or header[7] not in {"accepted", "error"} or not re.fullmatch(r"[ -~]+", header[8])):
+                raise RuntimeError("The resident guest projection reply did not match the request")
+            _, _, _, phase, area, save_scope, pawn, result, message = header
+            state = {"state": phase, "map": area, "save_scope": save_scope, "pawn": pawn,
+                     "ack": {"id": nonce, "result": result, "message": message},
+                     GUEST_UI_PROJECTION_BYTES: len(raw.encode("utf-8"))}
         else:
             state = self._parse_status(frame + "\n" if marker else frame)
         ack = state.get("ack", {}) if state else {}
@@ -3919,7 +3934,7 @@ class Bridge:
             body = checked_body(text.encode("ascii"))
         elif marker:
             raise RuntimeError("The resident guest view projection returned an unexpected body")
-        if not compact:
+        if not captured and not projected:
             self._local_status = state
         return state, body
 

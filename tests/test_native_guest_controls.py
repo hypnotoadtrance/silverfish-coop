@@ -205,6 +205,33 @@ class ResidentGuestUIBridgeTests(unittest.IsolatedAsyncioTestCase):
         regular = await self.bridge.command("native-test", "ordinary")
         self.assertEqual(regular["ack"]["message"], "ordinary reply")
 
+    async def test_compact_projection_leaves_current_inventory_context_and_status_intact(self):
+        owner = str(self.character)
+        current = {"state": "connected", "map": self.area, "save_scope": self.character.hex,
+                   "pawns": {"local": {"name": self.target}}, runtime.GUEST_UI_MEMORY: True}
+        client = SimpleNamespace(last_game=current, zone_epoch="a" * 32, bridge=self.bridge, control=Mock())
+        saved = {"sequence": 47}
+        self.bridge._local_status = saved
+
+        def compact(request, _):
+            nonce = request.partition(b"\t")[0].decode("ascii")
+            return (f"native-guest-ui-project-reply\t1\t{nonce}\tconnected\t{self.area}\t{self.character.hex}\t"
+                    f"{self.target}\taccepted\tstock co-op inventory and Journal projected 0 0 0 0 0\n")
+
+        self.bridge.local_bridge.command.side_effect = compact
+        view = native_guest_ui.GuestView()
+        self.assertTrue(await view.project(client, owner, self.body.decode()))
+        self.assertIs(client.last_game, current)
+        self.assertIs(self.bridge._local_status, saved)
+        self.assertGreater(client.control.event.call_args.kwargs["local_reply_bytes"], 0)
+
+        self.bridge.local_bridge.command.side_effect = lambda request, timeout: compact(
+            request, timeout).replace(self.target, self.target + "2")
+        self.assertFalse(await view.project(client, owner, self.body.decode(), layout_sequence="5"))
+        client.control.event.assert_called_once()
+        self.assertIs(client.last_game, current)
+        self.assertIs(self.bridge._local_status, saved)
+
     async def test_wrong_ticket_missing_body_bad_length_and_oversize_are_refused(self):
         for error in ("wrong-ticket", "missing", "wrong-size", "oversize", "reserved", "refused"):
             with self.subTest(error=error):

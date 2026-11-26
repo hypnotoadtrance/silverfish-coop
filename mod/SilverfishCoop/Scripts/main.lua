@@ -1876,6 +1876,18 @@ local function tick(fields, pending, periodic)
         SilverfishPublishLocalBridgeReply(pending.ticket, reply)
         return true
     end
+    if fields and pending and fields[2] == "native-guest-ui-project-memory" and not periodic and current_phase == "connected"
+        and resident_title and status_publication.installed and status_publication.memory_live
+        and status_publication.steady(state, current_phase) then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        local accepted, message = pcall(native_guest_ui.memory_command, fields, state, current_phase, pending.body)
+        pending.body = nil
+        local reply = status_row("native-guest-ui-project-reply", 1, fields[1], current_phase, state.map,
+            native_save_scope.selected() or "-", state.local_pawn.name, accepted and "accepted" or "error", message)
+        SilverfishPublishLocalBridgeReply(pending.ticket, reply .. "\n")
+        return true
+    end
     native_mindcore_replication.sync(state, current_phase)
     native_datasilo_lift.sync(state, current_phase)
     native_datasilo_door.sync(state, current_phase)

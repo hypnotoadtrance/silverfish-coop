@@ -167,6 +167,10 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
             if splitting:
                 local_result = created
             if unloading:
+                await client.cancel_gameplay_snapshot()
+                equipment = client.gameplay.get("native_equipped_weapon", {})
+                if (client.zone_epoch, equipment.get("map"), equipment.get("guid")) == (epoch, area, guid):
+                    client.gameplay["native_equipped_weapon"] = {**equipment, "rounds": 0}
                 client.last_game = await client.bridge.command("native-inventory-stock-project-unloaded", epoch, sequence, timeout=3)
         elif mode == "equip":
             if entry != "equip" or quantity != 1:

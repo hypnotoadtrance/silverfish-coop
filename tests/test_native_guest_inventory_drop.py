@@ -116,6 +116,33 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
         for target in (f"{GUID}|0", f"{GUID}|{too_many}", f"{GUID}|1|2", f"{'0' * 32}|1"):
             self.assertIsNone(native_inventory.take_ammo_target(target))
 
+    async def test_take_ammo_clears_the_retained_magazine_before_guest_projection(self):
+        client = self.client()
+        weapon = "/Game/Classes/Weapons/Wep_50SemiAuto.Wep_50SemiAuto_C"
+        ammo = "/Game/Classes/Items/Ammo_50Cal_BP.Ammo_50Cal_BP_C"
+        loaded = {"map": MAP, "pawn": PAWN, "guid": GUID, "rounds": 1, "ammo_class": ammo}
+        equipped_key = "native_equipped_weapon"
+        client.gameplay[equipped_key] = loaded
+        client.guest_ui = SimpleNamespace(refresh=AsyncMock())
+        client.cancel_gameplay_snapshot = AsyncMock()
+        operation = "a" * 32
+        receipt = {"state": "unloaded", "owner": client.invite["character_id"], "map": MAP, "source_guid": GUID,
+                   "quantity_before": 1, "split": 1, "remaining": 0, "weapon_class": weapon,
+                   "class_path": ammo, "new_guid": "B" * 32}
+        client.gameplay_action.side_effect = None
+        client.gameplay_action.return_value = {native_inventory.TAKE_AMMO_KEY: receipt}
+
+        async def local_projection(*args, **kwargs):
+            client.cancel_gameplay_snapshot.assert_awaited_once()
+            self.assertEqual(client.gameplay[equipped_key], dict(loaded, rounds=0))
+            return {"ack": {"message": "verified stock unload"}}
+
+        client.bridge.command.side_effect = local_projection
+        result = await drop.settle_stock_action(client, MAP, client.zone_epoch, operation, "unload", "take-ammo",
+                                                GUID, 1, "5", "1", (GUID, 1, 1))
+        self.assertEqual(result[native_inventory.TAKE_AMMO_KEY], receipt)
+        self.assertEqual(loaded["rounds"], 1)
+
     async def test_stock_utility_slot_equip_requires_the_requested_destination(self):
         client = self.client()
         client.guest_ui = SimpleNamespace(refresh=AsyncMock())

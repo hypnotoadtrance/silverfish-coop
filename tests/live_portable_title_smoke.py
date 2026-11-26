@@ -3886,7 +3886,8 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
         after = (await submit(guest_run, "native-guest-weapon-inspect", target=guid))["native_guest_weapon"]
         assert (after["status"], after["stored_ammo"]) == (source, 0), after
         if source == "equipped":
-            assert after["actor_ammo"] == 0 and await read_loadout() == "0,0", after
+            local_ammo = await read_loadout()
+            assert after["actor_ammo"] == 0 and local_ammo == "0,0", (after, local_ammo)
         elif source == "stored_equipment":
             assert await read_loadout() == "0,stored"
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]

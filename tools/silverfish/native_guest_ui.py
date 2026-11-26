@@ -310,6 +310,7 @@ class GuestView:
     async def project(self, client, character, contents, *, layout_sequence=None):
         bridge, game = client.bridge, getattr(client, "last_game", {})
         path = None
+        epoch = getattr(client, "zone_epoch", None)
         try:
             if game.get(runtime.GUEST_UI_MEMORY) is True and bridge.local_bridge is not None:
                 layout = {"layout_sequence": layout_sequence} if layout_sequence is not None else {}
@@ -323,6 +324,13 @@ class GuestView:
                 runtime.write_text(path, contents, newline="")
                 layout = (layout_sequence,) if layout_sequence is not None else ()
                 response = await bridge.command("native-guest-ui-project", character, nonce, *layout, timeout=4)
+            bytes_used = response.get(runtime.GUEST_UI_PROJECTION_BYTES)
+            if bytes_used is not None:
+                current = client.last_game
+                if ((current.get("state"), current.get("map"), current.get("save_scope"),
+                     current.get("pawns", {}).get("local", {}).get("name"), client.zone_epoch)
+                        != ("connected", response["map"], response["save_scope"], response["pawn"], epoch)):
+                    return False
             message = response.get("ack", {}).get("message", "")
             if message == "stock personal inventory update pending":
                 return False
@@ -330,9 +338,12 @@ class GuestView:
             if not receipt:
                 raise RuntimeError("The isolated guest inventory and Journal did not verify")
             items, notes, quests, completed, attachments = map(int, receipt.groups())
-            client.last_game = response
-            client.control.event("native_guest_ui_projected", items=items, notes=notes, quests=quests,
-                                 completed=completed, attachments=attachments)
+            evidence = dict(items=items, notes=notes, quests=quests, completed=completed, attachments=attachments)
+            if bytes_used is None:
+                client.last_game = response
+            else:
+                evidence["local_reply_bytes"] = bytes_used
+            client.control.event("native_guest_ui_projected", **evidence)
             return True
         finally:
             if path is not None:
