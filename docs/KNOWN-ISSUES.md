@@ -20,6 +20,8 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 
 The current release can still restore a host copy over a guest's personal equipment edit. The planned change gives every admitted player the same gameplay privileges, starting with worn gear, quick slots, and reported lockpick outcomes. The same design covers locally spawned items and money changes. The host continues to order shared updates and maintain the campaign checkpoint. [Design](DESIGN.md)
 
+Development build `rc-070f888` accepted a successful guest lockpick on an exact Crossroads door while the host reported a stale pick stack. Both seats saw the door unlock, and the host logged the inventory discrepancy. The muted Direct IP runs preserved the original saves. One pair also passed ordinary locker tests, Expedition Light and helmet changes, and Land Mine equip. The repeat pair could not start one Observatory locker fixture. Worn inventory ownership, pick-stack reconciliation on a mismatch, and cheat-tool inventory and cash are open. [Build source](https://github.com/hypnotoadtrance/silverfish-coop/commit/070f88889c61ccaa46a2ac12aa5b419f7bf78662)
+
 ## Current playtest checks
 
 - **Lobby version checks and character attribution.** `rc-7677507` shows each Public lobby's release and flags mismatches. Steam browser selections, invites, and Join Game share the build check. The host's admission check also covers Direct IP. A simulated Steam session verified creator identity and catalog access after a matching join. The muted game verified the edited stock character name and imported a Steam-sized fixture image in Manage Characters. Two real Steam accounts are still needed to try the live version notice and profile picture.

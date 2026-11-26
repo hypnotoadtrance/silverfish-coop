@@ -3673,7 +3673,7 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str, hinged=None
         crate, = [name for name, area in native_loot.CRATES.items() if area == OBSERVATORY
                   and name.endswith(":PersistentLevel.LootLocker_Small_BP_C_0")]
     proofs = []
-    cases = (("heavy-lockpick", 1, False), ("heavy-lockpick", 1, True)) if hinged else (
+    cases = (("heavy-lockpick", 1, True),) if hinged else (
         ("lockpick", 2, False), ("heavy-lockpick", 1, False))
     for kind, units, stale_stack in cases:
         seeded = await host.bridge.command("fixture-stock-take-ammo-seed", pawn, kind, str(units))

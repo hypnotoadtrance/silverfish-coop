@@ -26,6 +26,38 @@ ITEM = {"actor": "stock Bandage", "class_path": "/Game/Classes/Items/Item_Bandag
 OPERATION = "f" * 32
 
 
+class GuestLockpickTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reported_unlock_can_settle_once_without_discarding_stale_stack(self):
+        crate = next(name for name in CRATES if name.startswith("LootLocker_Small_BP_C ")
+                     and CRATES[name] == OBSERVATORY)
+        character, pawn, guid, epoch = "guest", "Player_FP_C exact guest", "A" * 32, "e" * 32
+        inventory = {guid: {"quantity": 1}}
+        host = SimpleNamespace(
+            native_loot_input=True, zone_epoch=epoch, stopping=False, transitioning=False,
+            native_checkpoint_unsafe=False, native_pickup=Mock(), control=Mock(),
+            last_game={"state": "hosting", "map": OBSERVATORY},
+            native_recipients=lambda: {character: {"connected": True, "pawn": pawn}},
+            party={"players": {character: {"downed": False, "native_inventory": inventory}},
+                   "pending_spawns": {}, "receipts": {}},
+        )
+        frame = {"state": "hosting", "map": OBSERVATORY, "ack": {"message": "unlocked:pick-stack-stale"}}
+        bridge = SimpleNamespace(command=AsyncMock(return_value=frame))
+        target = "@".join((epoch, crate, guid, "1", "1", "1"))
+        with patch("tools.silverfish.native_inventory.retain_guest_save", AsyncMock(return_value=True)):
+            first = await native_loot.settle_lockpick(host, bridge, character, target, OPERATION)
+            repeated = await native_loot.settle_lockpick(host, bridge, character, target, OPERATION)
+        self.assertIs(repeated, first)
+        self.assertEqual(first[native_loot.LOCKPICK_RESULT], {
+            "map": OBSERVATORY, "crate": crate, "guid": guid, "locked": False, "remaining": 0,
+            "inventory_reconciled": False,
+        })
+        bridge.command.assert_awaited_once_with(native_loot.LOCKPICK, crate, pawn, guid, "1", "1", "1", timeout=3)
+        self.assertIn(guid, inventory)
+        host.native_pickup.forget_committed_row.assert_not_called()
+        host.control.event.assert_called_once_with("native_guest_lockpick_stack_stale", actor=crate,
+                                                   character=character, operation_id=OPERATION)
+
+
 class AuthoredCrateRegistryTests(unittest.TestCase):
     def test_compact_status_indices_match_every_generated_lua_profile(self):
         registry = outputs()["mod/SilverfishCoop/Scripts/authored_loot_registry.lua"]
