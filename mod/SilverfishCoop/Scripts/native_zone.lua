@@ -158,7 +158,7 @@ local function handle_expanded_event(map, host, pawn, world)
     local source, destination, tag, actor, kind, travel_time, crossing = SilverfishTakeNativeAuthoredRoute()
     if not source then return true end
     if host and source == map and heartbeat_fresh() and destination and tag and actor
-        and (kind == "overlap" or kind == "door" or kind == "discovered-overlap" and crossing) then
+        and (kind == "overlap" or kind == "door" or ((kind == "discovered-overlap" or kind == "discovered-door") and crossing)) then
         local fields = {"authored-request", source, destination, tag, actor, kind, travel_time and tostring(travel_time) or "-"}
         if crossing then fields[#fields + 1] = tostring(crossing) end
         return emit(expanded_event_path, fields, pawn, world)

@@ -26,6 +26,7 @@ local streaming = object("LevelStreaming", {IsLevelVisible = function() return t
     GetLoadedLevel = function() return sublevel end})
 local base = object("Class")
 local arrow_type = object("Class")
+local door_type = object("Class")
 local instance = object("GameInstance_FP_C Instance", {SaveSlot_Ref = save})
 local target, candidates = {X = 10, Y = 20, Z = 30}, {}
 host.K2_GetActorLocation = function() return target end
@@ -48,6 +49,7 @@ function FName(value) return value end
 function StaticFindObject(path)
     if path == "/Script/Engine.Default__GameplayStatics" then return statics end
     if path == "/Script/Engine.ArrowComponent" then return arrow_type end
+    if path == "/Game/Classes/Actors/Dungeon_TransitionDoor_BP.Dungeon_TransitionDoor_BP_C" then return door_type end
     if path == "/Game/Classes/ScriptingActors/LevelExit_Spawn_BP.LevelExit_Spawn_BP_C" then return base end
 end
 package.loaded.native_bed = {place_host = function(pawn, controller, current, point, _, type)
@@ -93,3 +95,18 @@ assert(arrival.place(state, "hosting", "Mod-Entrance", "overlap", "-").actor == 
 sublevel.bIsVisible = true
 streaming.GetLoadedLevel = function() return level end
 assert(arrival.place(state, "hosting", "Mod-Entrance", "overlap", "-").actor == candidates[2]:GetFullName())
+
+local entrance = marker("DoorMarker_13")
+local door = object("ModDoor_C " .. destination .. ":PersistentLevel.Door_83", {
+    GetOuter = entrance.GetOuter, IsA = function(_, class) return class == door_type end,
+    ["Entrance Tag"] = "Mod-Entrance",
+})
+local component = object("ChildActorComponent", {GetOwner = function() return door end, ChildActor = entrance})
+entrance.GetParentComponent = function() return component end
+door.LevelExit_Spawn_BP = component
+candidates = {entrance}
+local discovered = arrival.place(state, "hosting", "Mod-Entrance", "door", "-")
+assert(discovered.actor == door:GetFullName() and discovered.placement == "arrow")
+door.LevelExit_Spawn_BP = nil
+local wrong_owner = arrival.place(state, "hosting", "Mod-Entrance", "door", "-")
+assert(wrong_owner.actor == host:GetFullName() and wrong_owner.placement == "stock-spawn:arrival-door-unavailable")

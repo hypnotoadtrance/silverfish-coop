@@ -1473,20 +1473,22 @@ class Bridge:
             crossing = None
             if len(fields) == 9:
                 token = fields[8]
-                if (kind not in ("overlap", "discovered-overlap") or not token.isascii() or not token.isdigit() or len(token) > 16
+                if (kind not in ("overlap", "discovered-overlap", "discovered-door") or not token.isascii() or not token.isdigit() or len(token) > 16
                         or not 0 < int(token) < 2**53):
                     continue
                 crossing = int(token)
             match = next((route for route in AUTHORED_ROUTES if route.source == source and route.actor == actor), None)
-            if kind == "discovered-overlap":
+            if kind in ("discovered-overlap", "discovered-door"):
                 maps = r"/Game/Classes/Maps/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+"
-                if (match or crossing is None or source == destination or max(len(source), len(destination)) > 240
+                if ((kind == "discovered-overlap" and match) or crossing is None or source == destination
+                        or max(len(source), len(destination)) > 240
                         or not all(re.fullmatch(maps, area) for area in (source, destination))
                         or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", entrance) or entrance == "None"
                         or not re.fullmatch(r"[A-Za-z0-9_-]{1,96}", actor)
                         or not re.fullmatch(r"(?:0|[1-9][0-9]{0,9})", step) or int(step) > 2**31 - 1):
                     continue
-                route = AuthoredRoute(source, destination, entrance, "overlap", actor, "-", int(step), discovered=True)
+                route = AuthoredRoute(source, destination, entrance, kind.removeprefix("discovered-"), actor, "-",
+                                      int(step), discovered=True)
                 requests.append((int(fields[1]), route, crossing))
             elif match and (match.destination, match.entrance, match.kind,
                           "-" if match.travel_time_step is None else str(match.travel_time_step)) == (

@@ -1418,7 +1418,7 @@ class Host:
 
     async def authored_arrival(self, bridge: Bridge, route: AuthoredRoute) -> dict:
         tag = getattr(route, "arrival_entrance", None) or route.entrance
-        door = route.kind == "door"
+        door = route.kind == "door" and not route.discovered
         deadline = time.monotonic() + 2
         while True:
             try:
@@ -1439,7 +1439,7 @@ class Host:
         actor, placement = proof.get("actor"), proof.get("placement")
         fallback = not door and placement in (
             "stock-spawn:duplicate-entrance-tag", "stock-spawn:entrance-unavailable",
-            "stock-spawn:entrance-not-standalone", "stock-spawn:arrival-arrow-unavailable",
+            "stock-spawn:entrance-not-standalone", "stock-spawn:arrival-door-unavailable", "stock-spawn:arrival-arrow-unavailable",
         )
         if fallback:
             matches = actor and actor == snapshot.get("pawns", {}).get("local", {}).get("name")
@@ -1468,7 +1468,8 @@ class Host:
                 or self.last_game.get("state") != "hosting" or self.last_game.get("map") != route.source):
             return {"ok": False, "error": "authored_route_unavailable"}
         if ((route.discovered and exit_crossing is None)
-                or exit_crossing is not None and (route.kind != "overlap" or not self.last_game.get("native_zone_party_guard"))):
+                or exit_crossing is not None and not (
+                    (route.discovered or route.kind == "overlap") and self.last_game.get("native_zone_party_guard"))):
             return {"ok": False, "error": "exit_crossing_unavailable"}
         roles = self.roles()
         if route.discovered and route.destination not in AUTHORED_MAPS | EXPANDED_MAPS:

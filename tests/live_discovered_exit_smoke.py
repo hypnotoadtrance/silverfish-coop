@@ -10,7 +10,7 @@ import live_portable_title_smoke as suite
 from live_unified_title_smoke import start_pair
 from tools.silverfish.authored_routes import AUTHORED_ROUTES, MAPS
 from tools.silverfish.travel import AUTHORED_MAPS
-from tools.silverfish.travel import CROSSROADS, OBSERVATORY
+from tools.silverfish.travel import CISTERN, CROSSROADS, OBSERVATORY
 
 
 UNLISTED_SHOP = "/Game/Classes/Maps/Maps_SafeZones/Shop_Default"
@@ -31,7 +31,8 @@ async def wait_for_party(host_run, guest_run, destination):
     return reached
 
 
-async def live_exit(host, guest, pawn, probe, *, unlisted_only=False, save_in_shop=False, **options):
+async def live_exit(host, guest, pawn, probe, *, unlisted_only=False, save_in_shop=False, with_door=False,
+                    **options):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     unlisted_world = "/Game/Classes/Maps/Maps_OverWorld/Campus_04_P"
     shop = UNLISTED_SHOP
@@ -77,6 +78,9 @@ async def live_exit(host, guest, pawn, probe, *, unlisted_only=False, save_in_sh
         evidence["streamed_exit"] = await live_discovered_exit(
             host, guest, reached["game"]["native_guest_save"]["pawn"], probe, streamed=True)
     reached = await wait_for_party(host_run, guest_run, CROSSROADS)
+    if with_door:
+        evidence["discovered_and_registered_door"] = await live_discovered_door(host, guest, reached, probe)
+        reached = await wait_for_party(host_run, guest_run, CROSSROADS)
     route = route_between(CROSSROADS, OBSERVATORY)
     for participant in (reached["game"]["native_guest_save"]["pawn"], "local"):
         await host.bridge.command("native-exit-position", participant, "near", route.entrance, route.actor)
@@ -85,6 +89,44 @@ async def live_exit(host, guest, pawn, probe, *, unlisted_only=False, save_in_sh
         return dict(evidence, entered_unlisted_map=outbound)
     returned = await cross_unlisted(host, guest, probe, "return", shop, CROSSROADS)
     return dict(evidence, unlisted_map_round_trip=[outbound, returned])
+
+
+async def live_discovered_door(host, guest, crossed, probe):
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    route = route_between(CROSSROADS, CISTERN)
+    for participant in (crossed["game"]["native_guest_save"]["pawn"], "local"):
+        await host.bridge.command("native-door-position", participant, "near", route.entrance)
+    path = (await probe(host.bridge, "portable-discovered-exit", "doorSpawn")).strip()
+    actor = path.rsplit(".", 1)[-1]
+    assert actor != route.actor and not any(row.source == CROSSROADS and row.actor == actor for row in AUTHORED_ROUTES)
+
+    for action, decision in (("doorGuest", "guest_denied"), ("doorHost", "host_locked"),
+                             ("doorFar", "host_out_of_range")):
+        await probe(host.bridge, "portable-discovered-exit", action)
+        frame = await suite.wait_resident_status(host_run, lambda frame: (
+            frame["game"].get("native_door", {}).get("decision") == decision), timeout=5)
+        assert frame["zone_epoch"] == crossed["zone_epoch"]
+    await probe(host.bridge, "portable-discovered-exit", "doorRegroup")
+    await probe(host.bridge, "portable-discovered-exit", "doorHost")
+    reached = await wait_for_party(host_run, guest_run, CISTERN)
+    events = await suite.resident_events(host_run, reached)
+    departure, = (row for row in events if row["event"] == "native_authored_zone_request" and row["actor"] == actor)
+    assert departure["discovered"] and departure["exit_crossing"] > 0 and departure["travel_time_step"] == 23, departure
+    assert departure["destination"] == CISTERN and departure["entrance"] == route.entrance and departure["result"]["ok"]
+    arrival, = (row["authored_arrival"] for row in events if row["event"] == "zone_travel_ready"
+                and row["epoch"] == reached["zone_epoch"])
+    assert arrival["placement"] == "arrow" and arrival["actor"].endswith("." + route.arrival_actor), arrival
+    registered = route_between(CISTERN, CROSSROADS)
+    for participant in (reached["game"]["native_guest_save"]["pawn"], "local"):
+        await host.bridge.command("native-door-position", participant, "near", registered.entrance)
+    await host.bridge.command("native-door-probe", "local", registered.entrance)
+    returned = await wait_for_party(host_run, guest_run, CROSSROADS)
+    events = await suite.resident_events(host_run, returned)
+    reverse, = (row for row in events if row["event"] == "native_authored_zone_request"
+                and row["source"] == CISTERN and row["actor"] == registered.actor)
+    assert reverse["result"]["ok"] and not reverse["discovered"], reverse
+    return {"departure": departure, "arrival": arrival, "registered_return": reverse,
+            "guest_denied": True, "locked_denied": True, "out_of_range_denied": True}
 
 
 async def cross_unlisted(host, guest, probe, action, source, destination):
@@ -195,11 +237,12 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--unlisted-only", action="store_true")
     parser.add_argument("--resume-unlisted", action="store_true")
+    parser.add_argument("--discovered-door", action="store_true")
     args = parser.parse_args()
     work, first, second, saves = (path.resolve() for path in (args.work, args.first_game, args.second_game, args.vanilla_saved))
     work.mkdir(parents=True, exist_ok=True)
     suite.verify_weather_travel = partial(live_exit, unlisted_only=args.unlisted_only or args.resume_unlisted,
-                                        save_in_shop=args.resume_unlisted)
+                                        save_in_shop=args.resume_unlisted, with_door=args.discovered_door)
     if args.resume_unlisted:
         suite.start_pair = check_unlisted_resume
     with suite.installed_probe(first, mod="SilverfishPortableExitDiscoveryProbe", fixture="portable_discovered_exit_probe.lua"):

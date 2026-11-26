@@ -14,6 +14,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <Helpers/String.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
@@ -262,6 +263,7 @@ namespace
     {
         Unreal::FWeakObjectPtr actor;
         Unreal::FWeakObjectPtr box;
+        Unreal::FWeakObjectPtr door;
         const Authored::Route* route{};
         DiscoveredExit discovered;
         std::int64_t ticket{};
@@ -325,6 +327,7 @@ namespace
         std::string_view door_event;
         std::string_view door_detail;
         Unreal::FWeakObjectPtr pending_door;
+        std::optional<DiscoveredExit> pending_door_route;
         Unreal::FWeakObjectPtr pending_child;
         Clock::time_point pending_expires{};
         bool dream_return_requested{};
@@ -669,18 +672,19 @@ namespace
         return 1;
     }
 
-    std::optional<DiscoveredExit> discover_exit(Unreal::UObject* exit, Unreal::UObject* box, Unreal::UWorld* world)
+    bool uses_stock_function(Unreal::UObject* actor, Unreal::UFunction* stock)
     {
-        if (scope.authored_world.empty() || !scope.exit_class || !live_object(exit) || !live_object(box) ||
-            !exit->GetClassPrivate()->IsChildOf(scope.exit_class) || !active_exit_level(exit, world) ||
-            box->GetOuterPrivate() != exit || box != read_object(field<Unreal::FObjectProperty>(exit, STR("Box")), exit) ||
-            box->GetClassPrivate() != find<Unreal::UClass>(STR("/Script/Engine.BoxComponent"))) return {};
-        const auto actor_name = exit->GetName();
-        if (actor_name.size() > 96 || !exit_token(actor_name)) return {};
-        for (auto* stock : {scope.overlap, scope.activate, scope.exit_power})
-        {
-            if (!stock || exit->GetClassPrivate()->GetFunctionByNameInChain(stock->GetFName()) != stock) return {};
-        }
+        return stock && actor->GetClassPrivate()->GetFunctionByNameInChain(stock->GetFName()) == stock;
+    }
+
+    bool has_route_actor_name(Unreal::UObject* actor)
+    {
+        const auto name = actor->GetName();
+        return name.size() <= 96 && exit_token(name);
+    }
+
+    std::optional<DiscoveredExit> read_discovered_route(Unreal::UObject* exit)
+    {
         auto* level = field<Unreal::FSoftObjectProperty>(exit, STR("NextLevel"));
         auto* tag = field<Unreal::FStrProperty>(exit, STR("Entrance Tag"));
         auto* duration = field<Unreal::FDoubleProperty>(exit, STR("Travel_TimeStep"));
@@ -700,6 +704,17 @@ namespace
         const double time = duration->GetPropertyValueInContainer(exit);
         if (!std::isfinite(time) || time < 0 || time > 2147483647 || std::trunc(time) != time) return {};
         return DiscoveredExit{RC::StringType{object.substr(0, split)}, RC::StringType{entrance}, static_cast<std::int32_t>(time)};
+    }
+
+    std::optional<DiscoveredExit> discover_exit(Unreal::UObject* exit, Unreal::UObject* box, Unreal::UWorld* world)
+    {
+        if (scope.authored_world.empty() || !scope.exit_class || !live_object(exit) || !live_object(box) ||
+            !exit->GetClassPrivate()->IsChildOf(scope.exit_class) || !active_exit_level(exit, world) ||
+            box->GetOuterPrivate() != exit || box != read_object(field<Unreal::FObjectProperty>(exit, STR("Box")), exit) ||
+            box->GetClassPrivate() != find<Unreal::UClass>(STR("/Script/Engine.BoxComponent")) ||
+            !has_route_actor_name(exit) || !uses_stock_function(exit, scope.overlap) ||
+            !uses_stock_function(exit, scope.activate) || !uses_stock_function(exit, scope.exit_power)) return {};
+        return read_discovered_route(exit);
     }
 
     const Authored::Route* expanded_route(const Scope& current, Unreal::UObject* actor)
@@ -1005,6 +1020,33 @@ namespace
         return child;
     }
 
+    Unreal::UObject* discover_door_child(Unreal::UObject* door, Unreal::UWorld* world)
+    {
+        if (scope.authored_world.empty() || !active_exit_level(door, world) ||
+            !has_route_actor_name(door) || !uses_stock_function(door, scope.door) ||
+            !uses_stock_function(door, scope.door_power)) return nullptr;
+        auto* component = read_object(field<Unreal::FObjectProperty>(door, STR("Level_Exit_BP")), door);
+        if (!live_object(component) || component->GetOuterPrivate() != door ||
+            component->GetClassPrivate() != find<Unreal::UClass>(STR("/Script/Engine.ChildActorComponent"))) return nullptr;
+        auto* child = read_object(field<Unreal::FObjectProperty>(component, STR("ChildActor")), component);
+        if (!live_object(child) || !scope.exit_class || !child->IsA(scope.exit_class) ||
+            child != read_object(field<Unreal::FObjectProperty>(door, STR("As Level Exit BP")), door) ||
+            static_cast<Unreal::AActor*>(child)->GetLevel() != static_cast<Unreal::AActor*>(door)->GetLevel() ||
+            !uses_stock_function(child, scope.exit_power) || !uses_stock_function(child, scope.activate)) return nullptr;
+        return child;
+    }
+
+    std::optional<DiscoveredExit> discover_door_route(Unreal::UObject* door, Unreal::UObject* child)
+    {
+        if (!child) return {};
+        auto route = read_discovered_route(child);
+        if (!route) return {};
+        auto destination = route->destination + STR('.') + route->destination.substr(route->destination.rfind(STR('/')) + 1);
+        if (!matches_target(door, field<Unreal::FSoftObjectProperty>(door, STR("Next Level")),
+                            field<Unreal::FStrProperty>(door, STR("Entrance Tag")), destination, route->entrance)) return {};
+        return route;
+    }
+
     bool approaching(Unreal::UObject* actor, const Point& at)
     {
         const auto delta = at - scope.approach.position;
@@ -1022,6 +1064,12 @@ namespace
         if (!scope.request_latched || !crossing.ticket || !world || !scope.host ||
             !live_object(local) || actor_world(local) != world || !is_local_pawn(local) ||
             scope.role->GetPropertyValueInContainer(local) != 3 || game_roster_failure(scope)) return false;
+        if (auto* door = crossing.door.Get())
+        {
+            auto* locked = field<Unreal::FBoolProperty>(door, STR("Locked"));
+            return locked && !locked->GetPropertyValueInContainer(door) && allows_distance(scope, local) &&
+                exit && discover_door_child(door, world) == exit && discover_door_route(door, exit) == crossing.discovered;
+        }
         return crossing.route
             ? is_expanded_exit(scope, exit, world, *crossing.route) && matches_expanded_exit(exit, *crossing.route)
             : discover_exit(exit, crossing.box.Get(), world) == crossing.discovered;
@@ -1166,7 +1214,15 @@ namespace
             scope.door_event = "guest_denied";
             return;
         }
-        auto* child = matching_door_child(door, expanded_route(scope, door));
+        const auto* authored = expanded_route(scope, door);
+        auto* child = matching_door_child(door, authored);
+        std::optional<DiscoveredExit> discovered;
+        if (!child && !authored)
+        {
+            child = discover_door_child(door, static_cast<Unreal::UWorld*>(scope.world.Get()));
+            discovered = discover_door_route(door, child);
+            if (!discovered) child = nullptr;
+        }
         auto* locked = field<Unreal::FBoolProperty>(door, STR("Locked"));
         auto* hit = read_object(scope.door_hit, locals);
         if (!child || !locked || !hit || (hit != read_object(field<Unreal::FObjectProperty>(door, STR("Box")), door) &&
@@ -1191,6 +1247,7 @@ namespace
         // The stock unlocked branch starts its animation, then powers this
         // exact child after 0.75 seconds. That child owns the travel handoff.
         scope.pending_door = door;
+        scope.pending_door_route = std::move(discovered);
         scope.pending_child = child;
         scope.pending_expires = Clock::now() + ttl;
         scope.door_event = "host_opening";
@@ -1204,8 +1261,11 @@ namespace
         auto* local = scope.local.Get();
         auto* locked = field<Unreal::FBoolProperty>(door, STR("Locked"));
         const auto* authored = expanded_route(scope, door);
+        const auto discovered = std::exchange(scope.pending_door_route, std::nullopt);
         scope.pending_door.Reset();
         scope.pending_child.Reset();
+        auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
+        auto* child = discovered ? discover_door_child(door, world) : matching_door_child(door, authored);
         std::string_view detail;
         if (!door || !locked || !locals || !scope.exit_powered || !scope.exit_instigator)
             detail = "stock_power_context";
@@ -1215,8 +1275,11 @@ namespace
             detail = "stock_power_instigator";
         else if (locked->GetPropertyValueInContainer(door))
             detail = "stock_door_locked";
-        else if (matching_door_child(door, authored) != context)
+        else if (child != context)
             detail = "stock_door_child_changed";
+        else if (discovered && (discover_door_route(door, child) != discovered ||
+            crossing_sequence >= (std::int64_t{1} << 53) - 1))
+            detail = "stock_door_route_changed";
         else if (Clock::now() >= scope.pending_expires)
             detail = "stock_power_late";
         else if (!host_is_ready(local))
@@ -1229,7 +1292,18 @@ namespace
             scope.door_detail = detail;
             return;
         }
-        queue_request(authored, "door_request");
+        if (discovered)
+        {
+            scope.crossing.actor = context;
+            scope.crossing.door = door;
+            scope.crossing.discovered = *discovered;
+            scope.crossing.ticket = ++crossing_sequence;
+            scope.request_latched = true;
+        }
+        else
+        {
+            queue_request(authored, "door_request");
+        }
         scope.door_event = "travel_requested";
     }
 
@@ -1314,7 +1388,9 @@ namespace
         {
             if (scope.instance.Get() != context) return;
         }
-        else if ((is_overlap || callee == scope.activate) && scope.exit_class && context->IsA(scope.exit_class))
+        else if (callee == scope.door || callee == scope.door_power ||
+                 ((is_overlap || callee == scope.activate || callee == scope.exit_power) &&
+                  scope.exit_class && context->IsA(scope.exit_class)))
         {
             if (!active_exit_level(context, static_cast<Unreal::UWorld*>(world))) return;
         }
@@ -1544,8 +1620,9 @@ namespace
         {
             lua.set_string(RC::to_string(crossing.discovered.destination));
             lua.set_string(RC::to_string(crossing.discovered.entrance));
-            lua.set_string(RC::to_string(crossing.actor.Get()->GetName()));
-            lua.set_string("discovered-overlap");
+            auto* door = crossing.door.Get();
+            lua.set_string(RC::to_string((door ? door : crossing.actor.Get())->GetName()));
+            lua.set_string(door ? "discovered-door" : "discovered-overlap");
             lua.set_integer(crossing.discovered.time_step);
             lua.set_integer(crossing.ticket);
             return 7;

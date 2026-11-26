@@ -111,6 +111,18 @@ class AuthoredCrossingEventTests(unittest.TestCase):
         self.assertEqual((live_route.entrance, live_route.actor, live_route.travel_time_step),
                          ("LiveEntrance_8", "CustomExit_72", 37))
 
+    def test_discovered_door_requires_a_ticket_from_the_native_hook(self):
+        door = next(route for route in AUTHORED_ROUTES if route.kind == "door")
+        fields = ("authored-request", "5", door.source, door.destination, "BackDoor", "RuntimeDoor_22",
+                  "discovered-door", "12")
+        with tempfile.TemporaryDirectory() as directory:
+            bridge = Bridge(Path(directory), Mock())
+            (bridge.directory / "native-authored-exit-events").write_text(
+                "\t".join((*fields, "2")) + "\n" + "\t".join(fields) + "\n", encoding="utf-8")
+            (sequence, route, ticket), = bridge.authored_zone_requests()
+        self.assertEqual((sequence, route.kind, route.discovered, ticket), (5, "door", True, 2))
+        self.assertEqual((route.entrance, route.arrival_actor, route.travel_time_step), ("BackDoor", "-", 12))
+
     def test_only_exact_stock_overlaps_carry_a_positive_ticket(self):
         overlap = next(route for route in AUTHORED_ROUTES if route.kind == "overlap")
         door = next(route for route in AUTHORED_ROUTES if route.kind == "door")

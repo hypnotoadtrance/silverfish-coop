@@ -4,6 +4,7 @@ local bed = require("native_bed")
 local spawn_class = "LevelExit_Spawn_BP_C"
 local spawn_type = "/Game/Classes/ScriptingActors/LevelExit_Spawn_BP.LevelExit_Spawn_BP_C"
 local door_class = "Dungeon_TransitionDoor_BP_C"
+local door_type = "/Game/Classes/Actors/Dungeon_TransitionDoor_BP.Dungeon_TransitionDoor_BP_C"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local main_menu = "/Game/Classes/Maps/MainMenu_P"
 local max_placement_error = 200
@@ -151,6 +152,18 @@ local function door_for_marker(world, expected, marker, tag)
     return match
 end
 
+local function discovered_door_for_marker(marker, tag)
+    local component = marker:GetParentComponent()
+    local door = valid(component) and component:GetOwner()
+    local class = StaticFindObject(door_type)
+    if not valid(door) or not valid(class) or not door:IsA(class) or door:IsActorBeingDestroyed()
+        or not door:HasAuthority() or not same(door:GetOuter(), marker:GetOuter())
+        or not same(door.LevelExit_Spawn_BP, component) or not same(component.ChildActor, marker) then return end
+    local door_tag = door["Entrance Tag"]
+    if type(door_tag) ~= "string" and door_tag then door_tag = door_tag:ToString() end
+    if door_tag == tag then return door end
+end
+
 local function keep_stock_spawn(map, pawn, reason)
     local location = pawn:K2_GetActorLocation()
     local axes = {location.X, location.Y, location.Z}
@@ -169,9 +182,11 @@ function arrival.place(state, phase, tag, kind, actor_name)
     local basename = type(map) == "string" and map:match("^/Game/Classes/Maps/[%w_/]+$")
         and map:match("/([%w_]+)$")
     local class = kind == "overlap" and spawn_class or kind == "door" and door_class
+    local discovered_door = kind == "door" and actor_name == "-"
+    local exact_door = kind == "door" and not discovered_door
     if not basename or type(tag) ~= "string" or #tag > 64 or not tag:match("^[A-Za-z0-9_%-]+$")
         or not class or type(actor_name) ~= "string"
-        or (kind == "door" and not actor_name:match("^" .. door_class .. "_%d+$"))
+        or (exact_door and not actor_name:match("^" .. door_class .. "_%d+$"))
         or (kind == "overlap" and actor_name ~= "-" and not actor_name:match("^" .. spawn_class .. "_%d+$")) then
         error("Expected a stock entrance tag and a qualified arrival kind", 0)
     end
@@ -179,21 +194,24 @@ function arrival.place(state, phase, tag, kind, actor_name)
     local destination = map .. "." .. basename
     local pawn, controller, world = host_context(state, phase, destination)
     local expected = class .. " " .. destination .. ":PersistentLevel." .. actor_name
-    local marker, placement = marker_for_tag(world, tag, kind)
+    local marker, placement = marker_for_tag(world, tag, exact_door and "door" or "overlap")
     if not marker then
-        if kind == "overlap" then return keep_stock_spawn(map, pawn, placement) end
+        if not exact_door then return keep_stock_spawn(map, pawn, placement) end
         error("The door arrival marker is unavailable or ambiguous", 0)
     end
     local actor = marker
-    if kind == "door" then
+    if exact_door then
         actor = door_for_marker(world, expected, marker, tag)
+    elseif discovered_door then
+        actor = discovered_door_for_marker(marker, tag)
+        if not actor then return keep_stock_spawn(map, pawn, "arrival-door-unavailable") end
     elseif valid(marker:GetParentComponent()) then
         return keep_stock_spawn(map, pawn, "entrance-not-standalone")
     end
     local arrow = marker.Arrow
     if not valid(arrow) or not same(arrow:GetClass(), StaticFindObject("/Script/Engine.ArrowComponent"))
         or not same(arrow:GetOwner(), marker) then
-        if kind == "overlap" then return keep_stock_spawn(map, pawn, "arrival-arrow-unavailable") end
+        if not exact_door then return keep_stock_spawn(map, pawn, "arrival-arrow-unavailable") end
         error("The exact authored entrance has no stock Arrow component", 0)
     end
 

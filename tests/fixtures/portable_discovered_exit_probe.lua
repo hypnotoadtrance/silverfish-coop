@@ -10,6 +10,7 @@ local campaign_worlds = {["World " .. observatory] = true, ["World " .. crossroa
 local streamed_entrance = "Mod-Stream-Arrival"
 local last, copy, approach, outside, stream
 local arrival_pending, arrival_stream
+local test_door, door_guest_point
 
 local function valid(object) return object and object:IsValid() end
 
@@ -55,6 +56,42 @@ local function prepare_arrival(world)
     arrival_pending = nil
 end
 
+local function run_door(world, pawn, action)
+    assert(world:GetFullName() == "World " .. crossroads)
+    local guest = world.NetDriver.ClientConnections[1].PlayerController.Pawn
+    assert(valid(guest) and guest:HasAuthority() and not guest:IsLocallyControlled())
+    if action == "doorSpawn" then
+        local stock = StaticFindObject(crossroads .. ":PersistentLevel.Dungeon_TransitionDoor_BP_C_1")
+        assert(valid(stock) and valid(stock["As Level Exit BP"]))
+        local point = pawn:K2_GetActorLocation()
+        local direction = pawn:GetActorForwardVector()
+        local location = {X = point.X + 140 * direction.X, Y = point.Y + 140 * direction.Y, Z = point.Z}
+        test_door = world:SpawnActor(stock:GetClass(), location, stock:K2_GetActorRotation())
+        assert(valid(test_door) and valid(test_door["As Level Exit BP"]), "The stock door did not initialize")
+        test_door["Next Level"] = stock["Next Level"]
+        test_door["Entrance Tag"] = stock["Entrance Tag"]
+        local child = test_door["As Level Exit BP"]
+        child.NextLevel = stock["As Level Exit BP"].NextLevel
+        child["Entrance Tag"] = stock["As Level Exit BP"]["Entrance Tag"]
+        child.Travel_TimeStep = 23
+        test_door.Locked = true
+        door_guest_point = guest:K2_GetActorLocation()
+        return test_door:GetFullName()
+    end
+    assert(valid(test_door) and valid(test_door.Box))
+    if action == "doorFar" or action == "doorRegroup" then
+        test_door.Locked = false
+        local point = door_guest_point
+        local location = action == "doorFar" and {X = point.X + 2800, Y = point.Y, Z = point.Z} or point
+        assert(guest:K2_SetActorLocation(location, false, {}, false))
+        guest:ForceNetUpdate()
+    end
+    if action ~= "doorRegroup" then
+        test_door:SendInteractionToActor(action == "doorGuest" and guest or pawn, test_door.Box)
+    end
+    return action
+end
+
 local function run(world, action)
     local current = world:GetFullName()
     local in_shop = current == "World " .. shop
@@ -63,6 +100,7 @@ local function run(world, action)
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     local pawn = api:GetPlayerPawn(world, 0)
     assert(valid(pawn) and pawn:HasAuthority() and pawn:IsLocallyControlled())
+    if action:match("^door") then return run_door(world, pawn, action) end
     if action == "load" then
         stream = playtest_stream(world, "CoopStreamExitProbe")
         return valid(stream) and "loading" or "failed"
