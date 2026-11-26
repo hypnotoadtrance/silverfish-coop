@@ -21,8 +21,9 @@ async def verify_save_management(host, guest):
 
     original = read()
     storage = native_host_save.checkpoint_profile(profile, original)
-    slots = {entry["slot"]: native_host_save.slot_path(storage, entry["slot"]).read_bytes()
-             for entry in native_host_save.references(original)}
+    host_slot = native_host_save.slot_path(storage, original["world"]["native_host_save"]["slot"])
+    guest_slot = native_host_save.slot_path(storage, original["characters"][character]["state"]["native_guest_save"]["slot"])
+    host_bytes = host_slot.read_bytes()
     fixture = "native-title-button-fixture"
 
     async def title_control(action, name):
@@ -81,32 +82,38 @@ async def verify_save_management(host, guest):
     await click("delete-character")
     await click("confirm")
     deleted_character = await saved_after(original["revision"])
-    assert deleted_character["characters"][character]["state"][DELETED] is True
+    assert deleted_character["characters"][character]["state"] == {DELETED: True}
+    assert host_slot.read_bytes() == host_bytes and not guest_slot.exists()
+    assert b"Management scout" not in (checkpoint / "campaign.previous.json").read_bytes()
 
     await focused("save:" + campaign_id)
-    await click("save:" + campaign_id)
-    await click("characters")
-    await click("character:" + character)
-    await click("restore-character")
-    restored_character = await saved_after(deleted_character["revision"])
-    assert DELETED not in restored_character["characters"][character]["state"]
+    await click("back")
+    await focused("manage")
+    await click("back")
+    reopened = await start_pair(host, guest, "Replacement scout", load_existing=True)
+    assert reopened["campaign_id"] == created["campaign_id"] and reopened["character_id"] != character
+    assert reopened["host_pid"] == created["host_pid"] and reopened["guest_pid"] == created["guest_pid"]
 
+    await click("multiplayer")
+    await click("host")
+    await click("manage")
     await click("save:" + campaign_id)
     await click("delete-save")
     await focused("back")
-    assert read()["revision"] == restored_character["revision"]
+    assert read()["revision"] == reopened["revision"]
     await click("confirm")
-    deleted_save = await saved_after(restored_character["revision"])
-    assert deleted_save["world"][DELETED] is True
     async with asyncio.timeout(8):
         while True:
             try:
                 catalog = (host.bridge.directory / title_host_campaigns.FILE).read_text(encoding="utf-8")
             except FileNotFoundError:
                 catalog = ""
-            if f"\t{campaign_id}\t{deleted_save['revision']}\tdeleted\n" in catalog:
+            if catalog and campaign_id not in catalog:
                 break
             await asyncio.sleep(.1)
+    assert not (checkpoint / "campaign.json").exists()
+    assert not (checkpoint / "campaign.previous.json").exists()
+    assert not list(native_host_save.directory(storage).glob("*.sav"))
     await click("back")
     await focused("manage")
     await click("browse")
@@ -119,19 +126,7 @@ async def verify_save_management(host, guest):
 
     await click("back")
     await click("manage")
-    await click("save:" + campaign_id)
-    await click("restore-save")
-    restored_save = await saved_after(deleted_save["revision"])
-    assert restored_save["world"] == original["world"]
-    assert restored_save["characters"] == original["characters"]
-    assert all(native_host_save.slot_path(storage, slot).read_bytes() == data for slot, data in slots.items())
-    await click("back")
-    await click("back")
-
-    reopened = await start_pair(host, guest, "Management scout", load_existing=True, resume_character=character)
-    assert reopened["campaign_id"] == created["campaign_id"] and reopened["character_id"] == character
-    assert reopened["host_pid"] == created["host_pid"] and reopened["guest_pid"] == created["guest_pid"]
-    return {"created": created, "reopened": reopened, "deleted_saves_hidden": True,
-            "confirmation_cancelled": True, "title_focus_verified": True, "native_slots_preserved": len(slots),
-            "revisions": [original["revision"], deleted_character["revision"], restored_character["revision"],
-                          deleted_save["revision"], restored_save["revision"]]}
+    await focused("back")
+    return {"created": created, "reopened": reopened, "campaign_files_erased": True,
+            "guest_slot_erased": True, "confirmation_cancelled": True, "title_focus_verified": True,
+            "revisions": [original["revision"], deleted_character["revision"], reopened["revision"]]}

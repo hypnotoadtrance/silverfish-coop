@@ -15,6 +15,7 @@ import uuid
 from . import native_host_save, runtime
 from .campaign import CampaignError, CampaignFormatError, CampaignStore, DELETED, StoreBusyError
 from .control import NAME
+from .steam_cloud import deleted_campaign, record_deletion
 from .title_handoff import TOKEN, _unlink
 
 
@@ -22,7 +23,7 @@ FILE = "title-host-campaigns.tsv"
 REQUEST = "title-save-request.tsv"
 RESPONSE = "title-save-response.tsv"
 MAX_CHARACTERS = 256
-_OPERATIONS = {"characters", "delete-save", "restore-save", "delete-character", "restore-character"}
+_OPERATIONS = {"characters", "delete-save", "delete-character"}
 MAX_CAMPAIGNS = 64
 _SCAN_LIMIT = 256
 _LOG = logging.getLogger(__name__)
@@ -81,6 +82,8 @@ def _qualified_campaign(campaign: Path, saved: Path, name: str) -> tuple[Path, d
     checkpoint = menu_host_checkpoint(selected, profile=saved.parent, require_scoped=True)
     if checkpoint is None:
         raise ValueError("The selected campaign checkpoint is missing")
+    if deleted_campaign(campaign.parent, uuid.UUID(checkpoint["campaign_id"]).hex):
+        raise ValueError("The selected co-op campaign was deleted")
     return selected, checkpoint
 
 
@@ -88,7 +91,7 @@ def saved_campaign(campaign: Path, saved: Path, name: str) -> tuple[Path, str]:
     """Verify a named campaign against this title's active native save profile."""
     selected, checkpoint = _qualified_campaign(campaign, saved, name)
     if checkpoint["world"].get(DELETED) is True:
-        raise ValueError("Restore this co-op campaign in Manage Saves before hosting it")
+        raise ValueError("The selected co-op campaign was deleted")
     return selected, checkpoint["world"]["map"]
 
 
@@ -134,13 +137,13 @@ def manage_campaign(campaign: Path, saved: Path, entry: CampaignEntry, action: s
     if (checkpoint["campaign_id"], checkpoint["revision"]) != (campaign_id, entry.revision):
         raise CampaignError("This co-op save has changed.")
 
-    def characters(data):
-        rows = ((key, value["name"], value["state"].get(DELETED) is True)
-                for key, value in data["characters"].items())
-        return tuple(sorted(rows, key=lambda row: (row[2], row[1].casefold(), row[0]))[:MAX_CHARACTERS])
-
     if action == "characters":
-        return characters(checkpoint)
+        rows = ((key, value["name"], False) for key, value in checkpoint["characters"].items()
+                if value["state"].get(DELETED) is not True)
+        return tuple(sorted(rows, key=lambda row: (row[1].casefold(), row[0]))[:MAX_CHARACTERS])
+    if action not in {"delete-save", "delete-character"}:
+        raise ValueError("Unknown save management operation")
+    storage = native_host_save.checkpoint_profile(saved.parent, checkpoint)
     lock = selected / "save" / ".campaign.lock"
     if os.path.lexists(lock):
         info = lock.lstat()
@@ -154,14 +157,46 @@ def manage_campaign(campaign: Path, saved: Path, entry: CampaignEntry, action: s
 
     with CampaignStore(selected / "save", require_existing=True, verify_world=verify_travel_checkpoint,
                        verify_checkpoint=verify, max_read_bytes=_MENU_CHECKPOINT_BYTES) as store:
-        store.set_deleted(campaign_id, entry.revision, action.startswith("delete-"), character_id=character)
+        if action == "delete-character":
+            remaining = store.remove_character(campaign_id, entry.revision, character)
+            native_host_save.prune(storage, {record["slot"] for record in native_host_save.references(remaining)})
+        else:
+            store.require_management_revision(campaign_id, entry.revision)
+            _erase_campaign(selected, store, storage)
     if cloud_backups is not None:
-        # The deletion is already durable locally. A future host checkpoint can retry a failed mirror.
         try:
-            cloud_backups.publish(selected)
+            if action == "delete-save":
+                cloud_backups.publish_deletion(entry.campaign_id)
+            else:
+                cloud_backups.publish(selected)
         except (OSError, CampaignError, ValueError, RuntimeError) as error:
             _LOG.warning("Could not mirror the updated co-op save: %s", error)
     return ()
+
+
+def _erase_campaign(selected, store, scope):
+    from .direct_ip import RESTORED_IDENTITY
+
+    if not isinstance(scope, native_host_save.SaveScope):
+        raise CampaignFormatError("Only scoped co-op saves can be deleted.")
+    native_dir = native_host_save.directory(scope)
+    _directory(native_dir)
+    slots = [path for path in native_dir.iterdir()
+             if re.fullmatch(r"SFCoop(?:Live)?_[0-9a-f]{32}\.sav", path.name)]
+    paths = [store.path, store.previous_path, selected / "save" / RESTORED_IDENTITY, *slots]
+    present = []
+    for path in paths:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            continue
+        if (not stat.S_ISREG(info.st_mode) or path.resolve(strict=True) != path
+                or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+            raise CampaignFormatError("The selected save file is redirected.")
+        present.append(path)
+    record_deletion(selected.parent, scope.id)
+    for path in present:
+        path.unlink()
 
 
 class TitleHostCampaigns:
@@ -242,7 +277,7 @@ class TitleHostCampaigns:
                       (entry.name, entry.campaign_id, str(entry.revision)) == (name, key, revision)), None)
         status, data = "error", "stale"
         try:
-            needs_character = action in {"delete-character", "restore-character"}
+            needs_character = action == "delete-character"
             valid_character = (character == "-" if not needs_character else str(uuid.UUID(character)) == character)
             if entry and self._published and action in _OPERATIONS and valid_character:
                 rows = await asyncio.to_thread(self._manage, entry, action, None if character == "-" else character)

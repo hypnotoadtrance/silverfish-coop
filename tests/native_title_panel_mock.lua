@@ -134,6 +134,9 @@ local modules = {
         probe = function(state, phase)
             if state.qualified and phase == "ready" then return context end
         end,
+        starting = function(state, phase)
+            if state.qualified and phase == "opening" then return context end
+        end,
         refresh_singleplayer = function(owner) assert(owner == context) end,
     },
 }
@@ -553,6 +556,7 @@ save_reply("characters", 1, "-", "1\n" .. character .. "\tCourier\tactive\n")
 click("character:" .. character)
 click("delete-character")
 assert(not files[save_request] and display.title == "Delete Character?")
+assert(display.focus == "back" and display.note:find("cannot be undone", 1, true))
 click("back")
 assert(not files[save_request])
 click("delete-character")
@@ -563,17 +567,23 @@ click("save:" .. campaign_id)
 click("delete-save")
 assert(not files[save_request] and display.title == "Delete Save?")
 click("confirm")
-manage_list(3, "deleted")
+files[host_catalog] = ("3\t%s\t0\n"):format(manage_generation)
 save_reply("delete-save", 2, "-", "0\n")
 click("back")
 click("browse")
 rejected("title_panel_fixture_button_unavailable", button("load:Expedition"))
 click("back")
 click("manage")
-click("save:" .. campaign_id)
-click("restore-save")
-manage_list(4, "active")
-save_reply("restore-save", 3, "-", "0\n")
-click("back")
-click("browse")
-assert(display.buttons["load:Expedition"])
+rejected("title_panel_fixture_button_unavailable", button("save:" .. campaign_id))
+assert(display.note == "No co-op saves.")
+
+now, files[descriptor] = 10000, nil
+sync()
+flags.SILVERFISH_COOP_INSTALLED_TITLE = "1"
+panel = start_panel()
+panel.sync(state, "opening")
+assert(display.title == "Project Silverfish" and stock_root.visibility == 2)
+sync()
+local before = display
+offer("host,join", now + 8, generation("f"), defaults)
+assert(display == before and report()[3] == "ready")

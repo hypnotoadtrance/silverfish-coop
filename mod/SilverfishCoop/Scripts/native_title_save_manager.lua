@@ -34,7 +34,7 @@ local function draw(state, note, focus)
             note = note or "No co-op saves."
         else
             page_rows(rows, state.saves, state.first, function(entry)
-                local detail = entry.deleted and "Deleted" or entry.timestamp
+                local detail = entry.deleted and "Previously deleted" or entry.timestamp
                 return button("save:" .. entry.id, clip(save_label(entry), 25), detail)
             end)
         end
@@ -42,34 +42,29 @@ local function draw(state, note, focus)
     elseif state.screen == "save" then
         heading = clip(save_label(save), 32)
         note = note or (save.deleted and "Deleted co-op campaign" or save.area .. "  ·  " .. save.timestamp)
-        if save.deleted then
-            rows[#rows + 1] = {button("restore-save", "Restore Save")}
-        else
-            rows[#rows + 1] = {button("characters", "Manage Characters")}
-            rows[#rows + 1] = {button("delete-save", "Delete Save")}
-        end
+        if not save.deleted then rows[#rows + 1] = {button("characters", "Manage Characters")} end
+        rows[#rows + 1] = {button("delete-save", "Delete Save")}
         rows[#rows + 1] = {button("back", "Back")}
     elseif state.screen == "characters" then
         heading = "Manage Characters"
         note = note or clip(save_label(save), 32)
         if #state.characters == 0 then note = "No guest characters in this save." end
         page_rows(rows, state.characters, state.character_first, function(character)
-            return button("character:" .. character.id, clip(character.name, 25), character.deleted and "Deleted" or "Guest")
+            return button("character:" .. character.id, clip(character.name, 25), "Guest")
         end)
         rows[#rows + 1] = {button("back", "Back")}
     elseif state.screen == "character" then
         local character = state.character
         heading = clip(character.name, 32)
-        note = note or (character.deleted and "Deleted guest character" or "Guest character")
-        rows[1] = {button(character.deleted and "restore-character" or "delete-character",
-            character.deleted and "Restore Character" or "Delete Character")}
+        note = note or "Guest character"
+        rows[1] = {button("delete-character", "Delete Character")}
         rows[2] = {button("back", "Back")}
     elseif state.screen == "confirm" then
         local character = state.confirm == "delete-character"
         heading = character and "Delete Character?" or "Delete Save?"
-        note = (character and clip(state.character.name, 32) .. " will be removed from Join."
-            or clip(save_label(save), 32) .. " and its characters will be removed from Load Game.")
-            .. " You can restore it from Manage Saves."
+        note = (character and clip(state.character.name, 32) .. " and their progress will be permanently deleted."
+            or clip(save_label(save), 32) .. " and all of its characters will be permanently deleted.")
+            .. " This cannot be undone."
         rows = {{button("back", "Cancel"), button("confirm", character and "Delete Character" or "Delete Save")}}
     else
         note = note or "Updating co-op saves…"
@@ -168,16 +163,11 @@ function manager.press(state, action)
         local entry = find(state.characters, action:match("^character:(.+)$"))
         if not entry then return end
         state.character, state.screen = entry, "character"
-    elseif (screen == "save" and action == "delete-save" and not state.save.deleted)
-        or (screen == "character" and action == "delete-character" and not state.character.deleted) then
+    elseif screen == "save" and action == "delete-save" or screen == "character" and action == "delete-character" then
         state.confirm, state.screen = action, "confirm"
         focus = "back"
     elseif screen == "confirm" and action == "confirm" then
         start_request(state, state.confirm)
-        return
-    elseif (screen == "save" and action == "restore-save" and state.save.deleted)
-        or (screen == "character" and action == "restore-character" and state.character.deleted) then
-        start_request(state, action)
         return
     else
         return
@@ -203,7 +193,7 @@ local function response(state)
         local key, name, flag = data:sub(first, ending - 1):match("^([0-9a-f%-]+)\t([^\t]+)\t([a-z]+)$")
         if not key or #key ~= 36 or not utf8.len(name) or name:find("%c")
             or (flag ~= "active" and flag ~= "deleted") then return end
-        entries[#entries + 1] = {id = key, name = name, deleted = flag == "deleted"}
+        if flag == "active" then entries[#entries + 1] = {id = key, name = name} end
         first = ending + 1
     end
     if first == #data + 1 then return entries end
@@ -229,7 +219,7 @@ function manager.poll(state)
         draw(state)
     else
         local name = pending.action:match("%-character$") and "Character" or "Save"
-        open_list(state, name .. (pending.action:match("^restore") and " restored." or " moved to Deleted."), state.save.id)
+        open_list(state, name .. " deleted.", state.save.id)
     end
 end
 

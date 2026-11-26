@@ -380,7 +380,7 @@ class CampaignStore:
             if temp_path is not None:
                 temp_path.unlink(missing_ok=True)
 
-    def _commit(self, candidate, *, verify_content=True):
+    def _commit(self, candidate, *, verify_content=True, discard_previous=False):
         # The caller holds _writer through publication. The prior checkpoint
         # remains available to readers while validation and disk writes run.
         with self._mutex:
@@ -390,37 +390,34 @@ class CampaignStore:
         self._validate(candidate)
         if verify_content:
             self._verify_content(candidate)
-        self._write(self.previous_path, previous)
+        self._write(self.previous_path, candidate if discard_previous else previous)
         self._write(self.path, candidate)
         with self._mutex:
             self._data = candidate
         return candidate["revision"]
 
-    def set_deleted(self, campaign_id, revision, deleted, *, character_id=None):
-        """Remove or restore a campaign or guest character while it is offline."""
-        if type(deleted) is not bool or not _is_uuid(campaign_id) or type(revision) is not int:
-            raise CharacterError("The selected co-op save is invalid.")
+    def require_management_revision(self, campaign_id, revision):
+        if (campaign_id, revision) != (self._data["campaign_id"], self._data["revision"]):
+            raise CharacterError("This co-op save changed. Reopen it to review the latest version.")
+
+    def remove_character(self, campaign_id, revision, character_id):
+        """Discard the character data while preserving its identity in world ledgers."""
         with self._writer, self._mutex:
             self._require_open()
-            if (campaign_id, revision) != (self._data["campaign_id"], self._data["revision"]):
-                raise CharacterError("This co-op save changed. Reopen it to review the latest version.")
+            self.require_management_revision(campaign_id, revision)
             self._expire_leases(self._clock())
             if self._lease_by_id:
                 raise StoreBusyError("Close the hosted campaign before managing its saves.")
             candidate = copy.deepcopy(self._data)
-            target = candidate["world"]
-            if character_id is not None:
-                character = candidate["characters"].get(character_id) if _is_uuid(character_id) else None
-                if character is None or target.get(DELETED) is True:
-                    raise CharacterError("The saved character is unavailable.")
-                target = character["state"]
-            if (target.get(DELETED) is True) != deleted:
-                if deleted:
-                    target[DELETED] = True
-                else:
-                    target.pop(DELETED, None)
-                self._commit(candidate)
-            return self._data["revision"]
+            character = candidate["characters"].get(character_id)
+            if not character or candidate["world"].get(DELETED) is True:
+                raise CharacterError("The saved character is unavailable.")
+            wipe = (candidate["world"].get("party") or {}).get("wipe")
+            if wipe and character_id in wipe.get("roster", ()):
+                raise StoreBusyError("Complete the pending party wipe before deleting this character.")
+            character.update(name="Deleted character", state={DELETED: True})
+            self._commit(candidate, discard_previous=True)
+            return copy.deepcopy(candidate)
 
     @staticmethod
     def _add_guest(candidate, name):

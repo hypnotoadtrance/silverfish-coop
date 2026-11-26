@@ -3,6 +3,7 @@ local title = require("native_title_entry")
 local surface = require("native_title_surface")
 local controls = require("native_menu_controls")
 local resident = os.getenv("SILVERFISH_COOP_RESIDENT_TITLE") == "1"
+local installed = os.getenv("SILVERFISH_COOP_INSTALLED_TITLE") == "1"
 local direct_join = os.getenv("SILVERFISH_COOP_TITLE_DIRECT_JOIN") == "1"
 
 local actions = {
@@ -13,6 +14,7 @@ local steam_join_path, steam_cancel_path, steam_opened_path, last_steam_invite, 
 local steam_handoff, steam_cancel_retry
 local dismissed, submitted
 local singleplayer_title
+local startup_seen
 local guest_creation
 local dispatch
 local settings_fixture, credits_fixture
@@ -168,11 +170,11 @@ local function multiplayer(offer, focus)
     present({title = "Multiplayer", rows = rows, navigation = resident, focus = focus})
 end
 
-local function modes(owner, focus)
+local function modes(owner, focus, note)
     controls.remove(owner.solo_back)
     owner.solo_back = nil
     show_stock(owner, false)
-    present({title = "Project Silverfish", navigation = resident, focus = focus, rows = {
+    present({title = "Project Silverfish", navigation = resident, focus = focus, note = note, rows = {
         {button("singleplayer", "Singleplayer")},
         {button("multiplayer", "Multiplayer")},
         {button("quit", "Quit")},
@@ -197,7 +199,7 @@ local function mount(context, offer)
     local root = valid(tree) and tree.RootWidget
     if not valid(root) or not same(root:GetOuter(), tree) then error("title_panel_stock_menu_unavailable", 0) end
     local owner = {context = context, offer = offer, parent = parent, root = root,
-        stock_visibility = root:GetVisibility()}
+        stock_visibility = root:GetVisibility(), startup_until = not offer and os.time() + 8 or nil}
     session = owner
     if same_title(singleplayer_title, context) then
         singleplayer(owner)
@@ -249,7 +251,7 @@ local function write_request(generation, action, form_values, friendly_fire)
 end
 
 local function can_choose(context)
-    return session and same_title(context, session.context) and os.time() <= session.offer.expires
+    return session and session.offer and same_title(context, session.context) and os.time() <= session.offer.expires
         and valid(session.root)
 end
 
@@ -919,7 +921,7 @@ local function settings_fixture_command(fields, state, phase)
 end
 
 local function update_title()
-    if not session then return end
+    if not session or not session.offer then return end
     local context = current and title.probe(current.state, current.phase)
     if not can_choose(context) then
         remove_display()
@@ -945,7 +947,7 @@ local function update_title()
 end
 
 local function unavailable()
-    local choices = session and session.offer.choices
+    local choices = session and session.offer and session.offer.choices
     remove_display()
     report = choices and {state = "unavailable", choices = choices, reason = "title_panel_input_unavailable"} or nil
 end
@@ -953,8 +955,18 @@ end
 dispatch = function(action)
     local ok = pcall(function()
         local context = current and title.probe(current.state, current.phase)
-        if not can_choose(context) or submitted == session.offer.generation then return end
+        if not session or not same_title(context, session.context) then return end
+        if session.offer then
+            if not can_choose(context) or submitted == session.offer.generation then return end
+        elseif action == "multiplayer" then
+            session.startup_multiplayer = true
+            modes(session, "multiplayer", "Starting multiplayer…")
+            return
+        elseif action ~= "singleplayer" and action ~= "modes" and action ~= "quit" then
+            return
+        end
         if action == "singleplayer" then
+            session.startup_multiplayer = nil
             close_form(session)
             singleplayer_title = session.context
             singleplayer(session)
@@ -993,6 +1005,8 @@ function panel.sync(state, phase)
         end
     end
     local context = title.probe(state, phase)
+    local starting = installed and resident and (not startup_seen or session and not session.offer)
+        and (context or title.starting(state, phase))
     if settings_fixture and not same_title(settings_fixture.context, context) then remove_settings_fixture() end
     local offer = context and read_offer()
     if steam_handoff and offer and offer.generation ~= steam_handoff.generation then
@@ -1007,12 +1021,32 @@ function panel.sync(state, phase)
         return
     end
     if not offer then
+        if starting and session and not session.offer and same_title(starting, session.context)
+            and os.time() <= session.startup_until then
+            current = {state = state, phase = phase}
+            return
+        end
         remove_display()
         report = nil
+        if starting and not startup_seen then
+            startup_seen = true
+            current = {state = state, phase = phase}
+            if not pcall(mount, starting, nil) then remove_display() end
+        end
         return
     end
+    startup_seen = true
     current = {state = state, phase = phase}
     if dismissed == offer.generation then return end
+    if session and not session.offer and same_title(context, session.context) then
+        session.offer = offer
+        if session.startup_multiplayer and not pcall(multiplayer, offer) then
+            unavailable()
+            return
+        end
+        report = {state = "ready", choices = offer.choices}
+        return
+    end
     if session and same_title(context, session.context) and session.offer.generation == offer.generation
         and session.offer.choices == offer.choices then
         session.offer = offer

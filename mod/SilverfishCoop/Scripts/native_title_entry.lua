@@ -98,6 +98,11 @@ function title.probe(state, phase)
     if report and report.state == "ready" then return report end
 end
 
+function title.starting(state, phase)
+    local report = observe(state, phase)
+    if report and (report.state == "ready" or report.reason == "stock_title_opening") then return report end
+end
+
 function title.refresh_singleplayer(context)
     local instance = context.world.OwningGameInstance
     if require("native_save_scope").selected() or not exact(instance, instance_path) then

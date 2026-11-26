@@ -20,6 +20,8 @@ from .campaign import CampaignError, CampaignFormatError, CampaignStore
 FOLDER = "SilverfishCoopCloud"
 _ARCHIVE = re.compile(r"SFCoopBackup-([0-9a-f]{32})\.sav\Z")
 _CHECKPOINT = "campaign.json"
+_DELETION = "deleted-campaign"
+_CAMPAIGN_KEY = re.compile(r"[0-9a-f]{32}\Z")
 _IDENTITY_LIMIT = 4096
 _BACKUP_INTERVAL = 20
 _MAX_CAMPAIGNS = 256
@@ -37,6 +39,37 @@ def _exact(path, file_type):
 
 def _campaign_hex(checkpoint):
     return checkpoint["campaign_id"].replace("-", "")
+
+
+def deletion_marker(campaigns, campaign_id):
+    if not _CAMPAIGN_KEY.fullmatch(campaign_id):
+        raise CampaignFormatError("Invalid deleted campaign identity.")
+    return campaigns.parent / "deleted-campaigns" / campaign_id
+
+
+def deleted_campaign(campaigns, campaign_id):
+    marker = deletion_marker(campaigns, campaign_id)
+    try:
+        _exact(marker.parent, stat.S_ISDIR)
+        return _exact(marker, stat.S_ISREG).st_size == 0
+    except FileNotFoundError:
+        return False
+
+
+def record_deletion(campaigns, campaign_id):
+    marker = deletion_marker(campaigns, campaign_id)
+    _exact(marker.parent.parent, stat.S_ISDIR)
+    marker.parent.mkdir(exist_ok=True)
+    _exact(marker.parent, stat.S_ISDIR)
+    if not deleted_campaign(campaigns, campaign_id):
+        with marker.open("xb"):
+            pass
+
+
+def _contains_deletion(archive, campaign_id):
+    members = archive.infolist()
+    return (len(members) == 1 and members[0].filename == _DELETION
+            and members[0].file_size == 32 and archive.read(members[0]) == campaign_id.encode("ascii"))
 
 
 def _slots(profile, checkpoint):
@@ -127,6 +160,30 @@ class CloudBackups:
         self.root = profile / "Saved" / "SaveGames"
         self.directory = self.root / FOLDER
 
+    def publish_deletion(self, campaign_id):
+        """Replace the full cloud archive with its campaign ID alone."""
+        if not deleted_campaign(self.campaigns, campaign_id):
+            raise CampaignFormatError("The local co-op deletion is missing.")
+        for directory in (self.profile, self.root.parent, self.root):
+            _exact(directory, stat.S_ISDIR)
+        self.directory.mkdir(exist_ok=True)
+        _exact(self.directory, stat.S_ISDIR)
+        path = self.directory / f"SFCoopBackup-{campaign_id}.sav"
+        if os.path.lexists(path):
+            _exact(path, stat.S_ISREG)
+        temp = None
+        try:
+            with NamedTemporaryFile(dir=self.directory, suffix=".tmp", delete=False) as stream:
+                temp = Path(stream.name)
+                with ZipFile(stream, "w") as archive:
+                    archive.writestr(_DELETION, campaign_id)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp, path)
+        finally:
+            if temp is not None:
+                temp.unlink(missing_ok=True)
+
     def publish(self, campaign: Path) -> bool:
         """Publish a snapshot only after its checkpoint and every generation verify."""
         from .service import menu_host_checkpoint
@@ -138,14 +195,20 @@ class CloudBackups:
         checkpoint = menu_host_checkpoint(campaign, profile=self.profile, require_scoped=True)
         if checkpoint is None:
             return False
+        campaign_id = _campaign_hex(checkpoint)
+        if deleted_campaign(self.campaigns, campaign_id):
+            return False
         storage = native_host_save.checkpoint_profile(self.profile, checkpoint)
         for directory in (self.profile, self.root.parent, self.root):
             _exact(directory, stat.S_ISDIR)
         self.directory.mkdir(exist_ok=True)
         _exact(self.directory, stat.S_ISDIR)
-        path = self.directory / f"SFCoopBackup-{_campaign_hex(checkpoint)}.sav"
+        path = self.directory / f"SFCoopBackup-{campaign_id}.sav"
         try:
             with _open_backup(path) as present:
+                if _contains_deletion(present, campaign_id):
+                    record_deletion(self.campaigns, campaign_id)
+                    return False
                 remote, _, _ = _read_archive(present, path, self.profile)
             if remote["revision"] >= checkpoint["revision"]:
                 return False
@@ -221,7 +284,14 @@ class CloudBackups:
             return
         for path in backups:
             try:
+                campaign_id = _ARCHIVE.fullmatch(path.name)[1]
                 with _open_backup(path) as archive:
+                    removed = _contains_deletion(archive, campaign_id)
+                    if removed:
+                        record_deletion(self.campaigns, campaign_id)
+                        continue
+                    if deleted_campaign(self.campaigns, campaign_id):
+                        continue
                     checkpoint, slots, identity = _read_archive(archive, path, self.profile)
                     matches = local.get(checkpoint["campaign_id"], ())
                     if len(matches) > 1:

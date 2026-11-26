@@ -9,7 +9,8 @@ from zipfile import ZipFile
 
 from tools.silverfish import direct_ip, native_host_save, runtime, service
 from tools.silverfish.campaign import CampaignStore, DELETED
-from tools.silverfish.steam_cloud import CloudBackups
+from tools.silverfish.steam_cloud import CloudBackups, deleted_campaign
+from tools.silverfish.title_host_campaigns import campaign_entries, manage_campaign
 from tools.silverfish.travel import CROSSROADS
 
 
@@ -88,19 +89,31 @@ class CloudBackupTests(unittest.TestCase):
         old = self.backup.read_bytes()
         self.download.write_bytes(old)
         self.second.restore()
-        with CampaignStore(self.campaign / "save", require_existing=True) as store:
-            identity = store.status()["campaign_id"]
-            store.set_deleted(identity, store.revision, True, character_id=self.character)
-            store.set_deleted(identity, store.revision, True)
-        self.assertTrue(self.first.publish(self.campaign))
+        saved = self.first.profile / "Saved"
+        entry, = campaign_entries(self.campaign, saved)
+        manage_campaign(self.campaign, saved, entry, "delete-character", self.character, self.first)
         shutil.copyfile(self.backup, self.download)
         self.second.restore()
         deleted = self.checkpoint(self.second, self.restored)
-        self.assertIs(deleted["world"][DELETED], True)
-        self.assertIs(deleted["characters"][self.character]["state"][DELETED], True)
+        self.assertEqual(deleted["characters"][self.character]["state"], {DELETED: True})
+        with ZipFile(self.backup) as archive:
+            self.assertNotIn(self.guest_frame["slot"] + ".sav", archive.namelist())
         self.download.write_bytes(old)
         self.second.restore()
         self.assertEqual(self.checkpoint(self.second, self.restored), deleted)
+
+        entry, = campaign_entries(self.campaign, saved)
+        manage_campaign(self.campaign, saved, entry, "delete-save", None, self.first)
+        with ZipFile(self.backup) as archive:
+            self.assertEqual(archive.namelist(), ["deleted-campaign"])
+        self.backup.with_suffix(".tmp").write_bytes(old)
+        shutil.copyfile(self.backup, self.download)
+        self.second.restore()
+        self.assertTrue(deleted_campaign(self.second.campaigns, self.campaign_hex))
+        shutil.copyfile(self.backup.with_suffix(".tmp"), self.backup)
+        self.first.restore()
+        self.assertIsNone(self.checkpoint(self.first, self.campaign))
+        self.assertEqual(campaign_entries(self.restored, self.second.profile / "Saved"), ())
         self.assertEqual((self.second.root / "20260101-101010.sav").read_bytes(), b"unchanged solo slot")
 
     def test_newer_backup_updates_same_campaign_and_keeps_previous_checkpoint(self):

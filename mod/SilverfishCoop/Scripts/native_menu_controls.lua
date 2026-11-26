@@ -14,6 +14,15 @@ local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:G
 local function exact(object, path) return valid(object) and same(object:GetClass(), StaticFindObject(path)) end
 local function reject(reason) error("native_menu_control_" .. reason, 0) end
 
+function controls.title_reference(context)
+    local menu = context.menu
+    local button = valid(menu) and menu.Button_NewGame
+    if exact(button, button_path) and exact(button.Button_63, "/Script/UMG.Button")
+        and exact(button.TextBlock_0, "/Script/UMG.TextBlock") then
+        return button
+    end
+end
+
 local function attached(record)
     return record and active[record.address] == record and exact(record.widget, button_path)
         and same(record.widget:GetParent(), record.parent)
@@ -88,6 +97,15 @@ function controls.create(context, parent, label, callback, font_size)
         record.slot = parent[attachment.attach](parent, widget)
         if not exact(record.slot, attachment.slot) or not same(record.slot:GetOuter(), parent)
             or not same(widget:GetParent(), parent) then reject("slot_unverified") end
+        local reference = controls.title_reference(context)
+        if reference then
+            -- Copy the stock brushes and Slate sounds, including hover and press.
+            record.inner:SetStyle(reference.Button_63.WidgetStyle)
+            record.inner:SetBackgroundColor(reference.Button_63.BackgroundColor)
+            record.inner:SetColorAndOpacity(reference.Button_63.ColorAndOpacity)
+            widget.TextBlock_0:SetFont(reference.TextBlock_0.Font)
+            widget.TextBlock_0:SetColorAndOpacity(reference.TextBlock_0.ColorAndOpacity)
+        end
         if font_size then
             local font = widget.TextBlock_0.Font
             font.Size = font_size

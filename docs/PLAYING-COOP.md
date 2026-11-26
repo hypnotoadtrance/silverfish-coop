@@ -38,9 +38,9 @@ Host container pickups take effect immediately. The live campaign writes a check
 
 Open **Multiplayer → Host Game → Manage Saves** on the host PC. Select a campaign to open its details.
 
-- **Manage Characters** lists the guest characters for that campaign. Select a character and confirm **Delete Character** to remove it from that guest's Join list.
-- **Delete Save** removes the entire campaign from Load Game, including access to its host character and guest roster.
-- Deleted campaigns and characters stay visible in Manage Saves. Select one and choose **Restore Save** or **Restore Character** to make it playable again. The mod retains save data for recovery and records the change as a new campaign revision. Singleplayer slots are stored separately.
+- **Manage Characters** lists the guest characters for that campaign. Confirm **Delete Character** to erase the selected guest's progress and remove that character from their Join list.
+- Confirm **Delete Save** to erase the campaign and its characters. The host character belongs to the campaign and is deleted with it.
+- Both confirmations start on **Cancel**. Confirmed deletions are permanent. The mod keeps a deletion record to prevent older Steam Cloud backups from bringing the data back. Singleplayer slots are stored separately.
 
 ## Join from the co-op title
 

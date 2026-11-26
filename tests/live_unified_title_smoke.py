@@ -92,8 +92,8 @@ async def start_pair(host, guest, character_name, *, on_join=None, create_charac
         if await screen("catalog;count=1", "trust_host") == "trust_host":
             await guest.bridge.command("native-title-button-fixture", "trust")
     else:
-        await screen("trust_host")
-        await guest.bridge.command("native-title-button-fixture", "trust")
+        if await screen("trust_host", "catalog;count=0") == "trust_host":
+            await guest.bridge.command("native-title-button-fixture", "trust")
         await screen("catalog;count=0")
         if create_character is None:
             await join("create", character_name)
@@ -101,7 +101,9 @@ async def start_pair(host, guest, character_name, *, on_join=None, create_charac
             await create_character(guest, join, character_name)
     await screen("catalog;count=1")
     checkpoint = CampaignStore.read_existing(host.campaign / "save", verify_world=service.verify_travel_checkpoint)
-    character, = checkpoint["characters"]
+    from tools.silverfish.campaign import DELETED
+
+    character, = (key for key, row in checkpoint["characters"].items() if row["state"].get(DELETED) is not True)
     if resume_character is not None:
         assert character == resume_character, (character, resume_character)
     await join("select", character)

@@ -33,7 +33,7 @@ function display.mount(context, text, layout_options)
         or not same(widget.TextBlock_Notes:GetClass(), StaticFindObject("/Script/UMG.TextBlock")) then
         error("title_panel_widget_unqualified", 0)
     end
-    local ok, failure = pcall(function()
+    local ok, metrics = pcall(function()
         local options = layout_options or {}
         widget:SetVisibility(3) -- Keep the overlay outside stock pointer hit testing.
         widget.TextBlock_Notes:SetColorAndOpacity({SpecifiedColor = {R = 0.60, G = 0.90, B = 1.0, A = 1.0}, ColorUseRule = 0})
@@ -48,22 +48,27 @@ function display.mount(context, text, layout_options)
         if not width or width < 1 or width > 16384 or type(scale) ~= "number" or not (scale >= 0.25 and scale <= 8) then
             error("title_panel_viewport_size_unavailable", 0)
         end
+        local viewport_width, viewport_height = width / scale, tonumber(size.Y) / scale
         local panel_width, panel_height = options.width or 344, options.height or 148
-        local x = options.center and (width / scale - panel_width) / 2 or width / scale - panel_width - 20
-        local y = options.center and (tonumber(size.Y) / scale - panel_height) / 2 or 62
+        local x = options.center and (viewport_width - panel_width) / 2 or viewport_width - panel_width - 20
+        local y = options.center and (viewport_height - panel_height) / 2 or 62
+        local rail
         if options.navigation then
-            x = width / scale * 0.07
-            y = tonumber(size.Y) / scale * 0.82 - panel_height
+            rail = math.max(options.navigation_width + 48, viewport_width * 0.26)
+            x = (rail - options.navigation_width) / 2 - 20
+            y = viewport_height * 0.59 - panel_height
         end
+        x, y = math.max(0, x), math.max(12, y)
         widget:SetDesiredSizeInViewport({X = panel_width, Y = panel_height})
-        widget:SetPositionInViewport({X = math.max(12, x), Y = math.max(12, y)}, false)
+        widget:SetPositionInViewport({X = x, Y = y}, false)
         display.text(widget, text)
+        return {x = x, y = y, height = viewport_height, rail = rail}
     end)
     if not ok then
         display.remove(widget)
-        error(failure, 0)
+        error(metrics, 0)
     end
-    return widget
+    return widget, metrics
 end
 
 return display
