@@ -1,5 +1,6 @@
 local pickup = {}
 local guest_save = require("guest_save")
+local wallet = require("wallet")
 local stock_input_fixture = require("native_authored_pickup_input_fixture")
 local drill_head = require("native_prototype_drill_pickup")
 local loot_projection = require("native_guest_drop_projection")
@@ -954,6 +955,64 @@ local function sample_authored_rows(rows, state, phase, row)
     return true
 end
 
+local function append_claim_rows(rows, state, status_row, report)
+    if report.loose then
+        local profile, cash, merge = report.loose, report.cash, report.stack_merge
+        local evidence = merge and {merge.source, merge.destination, merge.amount, merge.before, merge.after} or {}
+        rows[#rows + 1] = status_row("native-loose-pickup-claim", state.map, profile.source, profile.class,
+            profile.mode, report.pawn, report.slot, report.status, report.ok and 1 or 0, report.applied and 1 or 0,
+            report.guid or "-", cash and cash.amount or 0, cash and cash.before or 0, cash and cash.after or 0,
+            report.memory and "memory" or "disk", table.unpack(evidence))
+    else
+        rows[#rows + 1] = status_row("native-authored-pickup-claim", report.source, state.map, report.pawn,
+            report.ok and 1 or 0, report.applied and 1 or 0, report.status, report.guid or "-", report.slot,
+            (report.memory or report.cash) and "memory" or "disk")
+        if report.effect then
+            rows[#rows + 1] = status_row("native-authored-pickup-effect", report.source, state.map, report.pawn,
+                report.slot, report.effect)
+        end
+        if report.stack then
+            rows[#rows + 1] = status_row("native-authored-supply-merge", report.source, state.map, report.pawn,
+                report.slot, report.guid, report.stack, report.before, report.after)
+        end
+        if report.cash then
+            local cash = report.cash
+            rows[#rows + 1] = status_row("native-authored-cash-credit", report.source, state.map, report.pawn, report.slot,
+                cash.amount, cash.before, cash.after, cash.flag)
+        end
+        if report.drill then
+            rows[#rows + 1] = status_row("native-authored-prototype-drill", report.source, state.map, report.pawn, report.slot,
+                report.guid, drill_head.quest, 1, report.drill.before, report.drill.after)
+        end
+    end
+end
+
+function pickup.claim_reply(fields, state, phase, sequence, status_row)
+    local previous = report
+    report = nil
+    local accepted, message = pcall(pickup.command, fields, state, phase)
+    local outcome = report
+    report = previous
+    if accepted and not outcome then
+        accepted, message = false, "authored_pickup_claim_readback_unavailable"
+    end
+    local rows = {
+        "native-pickup-claim-reply\t1",
+        status_row("schema", 1),
+        status_row("seq", sequence),
+        status_row("ack", fields[1], accepted and "accepted" or "error", message),
+        status_row("session", "host", phase, state.map, state.clients, state.server and 1 or 0),
+    }
+    if accepted then
+        append_claim_rows(rows, state, status_row, outcome)
+        if outcome.cash then
+            local wallet_rows = wallet.rows(state, phase, status_row)
+            for _, row in ipairs(wallet_rows) do rows[#rows + 1] = row end
+        end
+    end
+    return table.concat(rows, "\n") .. "\n"
+end
+
 function pickup.rows(state, phase, status_row)
     local rows = {}
     local host = phase == "hosting" and state.server == false
@@ -1013,35 +1072,7 @@ function pickup.rows(state, phase, status_row)
             rows[#rows + 1] = status_row("native-loose-pickup-check-result", state.map, checked[1], checked[2])
         end
     end
-    if report and phase == "hosting" and report.loose then
-        local profile, cash, merge = report.loose, report.cash, report.stack_merge
-        local evidence = merge and {merge.source, merge.destination, merge.amount, merge.before, merge.after} or {}
-        rows[#rows + 1] = status_row("native-loose-pickup-claim", state.map, profile.source, profile.class,
-            profile.mode, report.pawn, report.slot, report.status, report.ok and 1 or 0, report.applied and 1 or 0,
-            report.guid or "-", cash and cash.amount or 0, cash and cash.before or 0, cash and cash.after or 0,
-            report.memory and "memory" or "disk", table.unpack(evidence))
-    elseif report and phase == "hosting" then
-        rows[#rows + 1] = status_row("native-authored-pickup-claim", report.source, state.map, report.pawn,
-            report.ok and 1 or 0, report.applied and 1 or 0, report.status, report.guid or "-", report.slot,
-            (report.memory or report.cash) and "memory" or "disk")
-        if report.effect then
-            rows[#rows + 1] = status_row("native-authored-pickup-effect", report.source, state.map, report.pawn,
-                report.slot, report.effect)
-        end
-        if report.stack then
-            rows[#rows + 1] = status_row("native-authored-supply-merge", report.source, state.map, report.pawn,
-                report.slot, report.guid, report.stack, report.before, report.after)
-        end
-        if report.cash then
-            local cash = report.cash
-            rows[#rows + 1] = status_row("native-authored-cash-credit", report.source, state.map, report.pawn, report.slot,
-                cash.amount, cash.before, cash.after, cash.flag)
-        end
-        if report.drill then
-            rows[#rows + 1] = status_row("native-authored-prototype-drill", report.source, state.map, report.pawn, report.slot,
-                report.guid, drill_head.quest, 1, report.drill.before, report.drill.after)
-        end
-    end
+    if report and phase == "hosting" then append_claim_rows(rows, state, status_row, report) end
     return rows
 end
 

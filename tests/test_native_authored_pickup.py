@@ -156,6 +156,42 @@ class AuthoredPickupSelectorTests(unittest.TestCase):
 
 
 class AuthoredPickupTransactionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_compact_cash_reply_has_exact_ticket_and_preserves_world_snapshot(self):
+        path = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        bridge = runtime.Bridge(path, Mock())
+        stock = f"schema\t1\nseq\t4\nsession\thost\thosting\t{CITY}\t1\t0\nwallet\t50\n"
+        original = bridge._parse_status(stock)
+        bridge._local_status = original
+        slot = "SFCoop_" + "a" * 32
+
+        async def command(request, timeout):
+            ticket = request.decode().split("\t", 1)[0]
+            return (pickup.CLAIM_REPLY_HEADER + stock.replace("wallet\t50", "wallet\t57")
+                    + f"ack\t{ticket}\taccepted\tauthored cash pickup reported\n"
+                    + f"{pickup.ACTION}\t{CASH}\t{CITY}\t{PAWN}\t1\t1\tcash_credited\t-\t{slot}\tmemory\n"
+                    + f"{pickup.CASH_TAG}\t{CASH}\t{CITY}\t{PAWN}\t{slot}\t7\t50\t57\tItem_Money_CoupleBills_C_7-City_01_P-\n")
+
+        bridge.local_bridge = SimpleNamespace(command=command)
+        receipt = await bridge.command(pickup.ACTION, PAWN, slot, CASH)
+        self.assertEqual(receipt[pickup.CASH_KEY]["amount"], 7)
+        self.assertGreater(receipt[pickup.CLAIM_REPLY_BYTES], 0)
+        self.assertIs(bridge._local_status, original)
+        self.assertIs(bridge._parse_status(stock), original)
+        host = SimpleNamespace(last_game=original, last_seen=1.0)
+        pickup.remember_claim_snapshot(host, receipt)
+        self.assertEqual(host.last_game, dict(original, native_wallet=57))
+        self.assertEqual(host.last_seen, 1.0)
+
+        valid = bridge.local_bridge.command
+
+        async def wrong_ticket(request, timeout):
+            ticket = request.decode().split("\t", 1)[0]
+            return (await valid(request, timeout)).replace(f"ack\t{ticket}", f"ack\t{'f' * 32}")
+
+        bridge.local_bridge.command = wrong_ticket
+        with self.assertRaisesRegex(RuntimeError, "did not match the request"):
+            await bridge.command(pickup.ACTION, PAWN, slot, CASH)
+
     async def test_lab_blank_commits_only_the_current_detached_owner_and_replays_once(self):
         source = pickup.LAB_E206_BLANK_TAPE
         guid, epoch, operation = "BB" * 16, "a" * 32, "b" * 32

@@ -1786,6 +1786,11 @@ status_publication.pickup_presentation = {
     ["native-world-loot-present-host-claim"] = native_guest_drop_projection.command,
 }
 
+status_publication.pickup_claims = {
+    ["native-authored-pickup-claim"] = true,
+    ["native-loose-pickup-claim"] = true,
+}
+
 status_publication.stock_interactions = {
     ["native-stock-door-guest-interact"] = {phase = "hosting", command = native_stock_door.command},
     ["native-stock-switch-interact"] = {phase = "hosting", command = native_stock_switch.command},
@@ -1861,6 +1866,15 @@ local function tick(fields, pending, periodic)
         pending.dispatched = true
         SilverfishPublishLocalBridgeReply(pending.ticket,
             native_loot_actions.local_reply(fields, state, current_phase, status_row))
+        if not periodic then return true end
+        fields, pending = nil, nil
+    end
+    if fields and pending and status_publication.pickup_claims[fields[2]] and current_phase == "hosting"
+        and status_publication.steady(state, current_phase) then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        SilverfishPublishLocalBridgeReply(pending.ticket,
+            native_authored_pickup.claim_reply(fields, state, current_phase, sequence, status_row))
         if not periodic then return true end
         fields, pending = nil, nil
     end
@@ -2152,7 +2166,8 @@ if resident_title and status_publication.installed then
         if not fields or not pending then return end
         local action = fields[2]
         if action == "native-world-loot-frame" or action == "native-loot-open" or action == "native-loot-inspect"
-            or status_publication.stock_interactions[action] or status_publication.pickup_presentation[action] then
+            or status_publication.stock_interactions[action] or status_publication.pickup_presentation[action]
+            or status_publication.pickup_claims[action] then
             status_publication.dispatch(os.clock(), fields, pending, false)
         end
     end)

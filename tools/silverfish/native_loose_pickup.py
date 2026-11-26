@@ -4,7 +4,7 @@ import asyncio
 import re
 import time
 
-from . import native_inventory, native_loot, native_pickup_audio, party
+from . import native_authored_pickup, native_inventory, native_loot, native_pickup_audio, party
 from .native_gold import valid_guid
 from .native_guest_drop_record import valid_position
 
@@ -278,7 +278,7 @@ async def claim(host, bridge, character, requested, operation, *, local_input=Fa
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        host.last_game, host.last_seen = snapshot, time.monotonic()
+        native_authored_pickup.remember_claim_snapshot(host, snapshot)
         deferred = retained and (proof.get("memory") or row["class_path"] in native_loot.CASH_RANGES)
         revision = None
         if not deferred:
@@ -290,7 +290,8 @@ async def claim(host, bridge, character, requested, operation, *, local_input=Fa
         host.loose_pickups.replenished.discard(path)
         host.native_checkpoint_unsafe = False
         host.control.event("native_loose_pickup_claimed", revision=revision, operation_id=operation,
-                           escrow="memory" if proof.get("memory") else "disk", **row)
+                           escrow="memory" if proof.get("memory") else "disk",
+                           bridge_reply_bytes=snapshot.get(native_authored_pickup.CLAIM_REPLY_BYTES), **row)
         native_pickup_audio.committed(host, pawn, operation, row["class_path"], credit=row.get("wallet_credit"))
         return result
     finally:

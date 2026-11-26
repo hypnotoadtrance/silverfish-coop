@@ -1470,11 +1470,12 @@ class Bridge:
             self._local_world_view = None
         return frame
 
-    def _parse_status(self, text: str) -> dict | None:
+    def _parse_status(self, text: str, *, cache: bool = True) -> dict | None:
         try:
-            if text == getattr(self, "_status_text", None):
+            if cache and text == getattr(self, "_status_text", None):
                 return self._status_snapshot
-            self._status_text, self._status_snapshot = text, None
+            if cache:
+                self._status_text, self._status_snapshot = text, None
             data = {"pawns": {}, "player_effects": {}, "loot_actors": []}
             quest_rows, board_rows = [], []
             dialogue_frame, dialogue_progress, dialogue_lines, dialogue_choices = None, None, [], []
@@ -3685,7 +3686,8 @@ class Bridge:
                         data["native_matrix"] = parse_matrix_report(matrix_rows)
                     except ValueError:
                         data["native_matrix_error"] = "invalid_stock_report"
-                self._status_snapshot = data
+                if cache:
+                    self._status_snapshot = data
                 return data
         except (OSError, UnicodeError, ValueError):
             return None
@@ -3908,6 +3910,18 @@ class Bridge:
                 return _parse_local_stock_loot(raw, fields, opening=False)
             if action == "native-loot-open" and raw.startswith("native-loot-open-reply\t"):
                 return _parse_local_stock_loot(raw, fields, opening=True)
+            if action in (native_authored_pickup.ACTION, native_loose_pickup.CLAIM) and raw.startswith(
+                    native_authored_pickup.CLAIM_REPLY_HEADER):
+                body = raw.removeprefix(native_authored_pickup.CLAIM_REPLY_HEADER)
+                receipt = self._parse_status(body, cache=False)
+                if (not receipt or receipt.get("mode") != "host" or receipt.get("state") != "hosting"
+                        or receipt.get("ack", {}).get("id") != fields[0]):
+                    raise RuntimeError("The local pickup receipt did not match the request")
+                ack = receipt["ack"]
+                if ack["result"] != "accepted":
+                    raise RuntimeError(ack["message"] or f"The game declined the {action} command")
+                receipt[native_authored_pickup.CLAIM_REPLY_BYTES] = len(raw.encode("utf-8"))
+                return receipt
             if action == native_world_loot.FRAME and raw.startswith(native_world_loot.FRAME_REPLY + "\t"):
                 return native_world_loot.parse_frame_reply(raw, fields)
             if action == native_weather_view.LOCAL_APPLY and raw.startswith("native-world-view-reply\t"):
