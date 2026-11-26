@@ -7255,9 +7255,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(portable_script_overlay(game, "native_save_scope.lua", instrument_vital_reads))
                 for game in games
             ]
-            guest_save_path = (first_game / runtime.SHIPPING).parent / runtime.MOD_SCRIPTS / "guest_save.lua"
-            if "function guest_save.status_context(" in guest_save_path.read_text(encoding="utf-8"):
-                probes.enter_context(portable_script_overlay(first_game, "guest_save.lua", instrument_guest_status_binding))
+            for game in games:
+                guest_save_path = (game / runtime.SHIPPING).parent / runtime.MOD_SCRIPTS / "guest_save.lua"
+                if "function guest_save.status_context(" in guest_save_path.read_text(encoding="utf-8"):
+                    probes.enter_context(portable_script_overlay(game, "guest_save.lua", instrument_guest_status_binding))
             proof["crossroads_anomaly_overlays"] = [
                 probes.enter_context(portable_script_overlay(game, "native_anomaly_fields.lua", instrument_anomaly_work))
                 for game in games
