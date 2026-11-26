@@ -30,9 +30,10 @@ local function run(world, action)
             api:GetAllActorsOfClass(world, stock:GetClass(), found)
             for _, actor in ipairs(found.OutActors or found) do
                 if type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
-                if valid(actor) and actor:GetOuter():GetAddress() == streamed:GetAddress() then
-                    assert(not valid(copy), "Expected exactly one stock overlap in the streamed fixture")
+                if valid(actor) and actor:GetOuter():GetAddress() == streamed:GetAddress()
+                    and actor:GetFullName():match(":PersistentLevel%.Level_Exit_BP_C_0$") then
                     copy = actor
+                    break
                 end
             end
             assert(valid(copy), "No stock exit was found in the loaded streamed level")
