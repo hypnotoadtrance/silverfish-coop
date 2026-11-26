@@ -5,7 +5,7 @@ import math
 import time
 
 from live_multi_smoke import campaign_save_hashes
-from portable_guest_world_start import resident_events, wait_resident_status
+from portable_guest_world_start import resident_events, verify_stock_clock, wait_resident_status
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.control import current_status
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
@@ -40,9 +40,11 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
                                          and f["game"].get("native_world_view", {}).get("weather_verified") is True)
     performance = {}
     if profile:
+        from live_stock_creator_smoke import verify_personal_time_shift
         from portable_crossroads_profile import profile_world
 
         performance["observatory"] = await profile_world(host, guest, OBSERVATORY, probe)
+        performance["personal_time_shift"] = await verify_personal_time_shift(host, guest)
     before_travel = campaign_save_hashes(host.campaign)
     blocked_departures = await enter_crossroads(host, pawn, verify_wall=profile)
 
@@ -123,6 +125,14 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
         assert clear["epoch"] == wet["epoch"] == dry["epoch"] and clear["epoch"] != initial["zone_epoch"]
         assert campaign_save_hashes(host.campaign) == checkpoint, "Weather projection wrote a campaign save"
         if profile:
+            def ready_after_travel(frame):
+                game = frame.get("game", {})
+                return (frame.get("state") == "connected" and game.get("map") == CROSSROADS
+                        and "native_zone_loading_cover" not in game and game.get("pawns", {}).get("local", {}).get("name"))
+
+            settled = await wait_resident_status(guest_run, ready_after_travel)
+            pawn_name = settled["game"]["pawns"]["local"]["name"]
+            performance["crossroads_clock"] = await verify_stock_clock(guest_run, CROSSROADS, settled["zone_epoch"], pawn_name)
             performance["crossroads"] = await profile_world(host, guest, CROSSROADS, probe, gc_trial=gc_trial)
     finally:
         assert await weather(host, "resume") == "restored"

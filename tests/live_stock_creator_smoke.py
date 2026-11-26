@@ -236,7 +236,10 @@ async def verify_voice_and_bullet_time(host: Seat, guest: Seat, hosted: dict, jo
             await asyncio.sleep(.12)
     assert await heard(host_run, hosted["generation"], guest, "cough") == "Fem_02"
     host_voice = await heard(guest_run, joined["generation"], host, "hurt")
+    return {"guest_cough": "Fem_02", "host_hurt": host_voice, **await verify_personal_time_shift(host, guest)}
 
+
+async def verify_personal_time_shift(host: Seat, guest: Seat) -> dict:
     async def shift(seat, verb):
         snapshot = await seat.bridge.command("native-time-shift-fixture", verb)
         active, dilation, walk = snapshot["ack"]["message"].split(";")
@@ -249,7 +252,7 @@ async def verify_voice_and_bullet_time(host: Seat, guest: Seat, hosted: dict, jo
     async with asyncio.timeout(6):
         while (await shift(host, "observe"))[0]:
             await asyncio.sleep(.15)
-    return {"guest_cough": "Fem_02", "host_hurt": host_voice, "bullet_time_world_dilation": dilation,
+    return {"bullet_time_world_dilation": dilation,
             "owner_walk_speed_before": host_before[2], "owner_walk_speed_during": walk}
 
 

@@ -28,11 +28,14 @@ local function asset(path)
     return object
 end
 
-local function finish_guest_loading(state, phase)
+local function finish_guest_loading(state, phase, checking_cover)
     if phase ~= "connected" or not state.listening or not state.server or not valid(state.world) then return end
     local controller = state.controller
+    if not valid(controller) then return end
+    local pending = controller.Loading
+    if pending ~= true and (pending ~= false or not checking_cover) then return end
     local pawn = state.local_pawn and state.local_pawn.pawn
-    if not valid(controller) or not valid(pawn)
+    if not valid(pawn)
         or not same(controller:GetClass(), StaticFindObject(controller_class))
         or not same(pawn:GetClass(), StaticFindObject(pawn_class))
         or not controller:IsLocalController() or not pawn:IsLocallyControlled() or pawn:HasAuthority()
@@ -41,8 +44,7 @@ local function finish_guest_loading(state, phase)
     local driver, instance = state.world.NetDriver, state.world.OwningGameInstance
     if not valid(driver) or not valid(driver.ServerConnection) or not same(driver.World, state.world)
         or not same(driver.ServerConnection.Driver, driver) or not valid(instance) then return end
-    if controller.Loading == false then return true end
-    if controller.Loading ~= true then return end
+    if pending == false then return true end
     local class = StaticFindObject(level_class)
     if not valid(class) then return end
     for _, level in ipairs(FindAllOf("LevelControler_BP_C") or {}) do
@@ -144,10 +146,11 @@ function loading.refresh(get_world)
 end
 
 function loading.sync(state, phase)
-    local ready = finish_guest_loading(state, phase)
     local cover = active_cover()
+    local checking_cover = cover and cover.seat == "guest" and state.map == cover.destination
+    local ready = finish_guest_loading(state, phase, checking_cover)
     if not cover then return end
-    if cover.seat == "guest" and ready and state.map == cover.destination then
+    if checking_cover and ready then
         loading.clear(cover.destination)
         return
     end

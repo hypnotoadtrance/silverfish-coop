@@ -155,10 +155,15 @@ function clock.command_reply(fields, state, phase, sequence, status_row)
 end
 
 function clock.rows(state, phase, status_row)
-    if not lease then return {} end
-    local checked, current = pcall(context, state, phase)
-    if not checked or not same_context(current, lease) then return {} end
-    local report = read(current)
+    local current, local_player = lease, state.local_pawn
+    if not current or phase ~= "connected" or state.listening ~= true or state.server ~= true
+        or current.map ~= state.map or not local_player or local_player.name ~= current.name
+        or not same(local_player.pawn, current.pawn) or not same(state.world, current.world)
+        or not same(state.controller, current.controller) then return {} end
+    -- The native read also validates the connection, possession, save,
+    -- loading state and lease before returning a row for this seat.
+    local checked, report = pcall(read, current)
+    if not checked then return {} end
     if not report then return {} end
     local rows = {lease_row(current, report, status_row)}
     if fixture and fixture.epoch == lease.epoch then

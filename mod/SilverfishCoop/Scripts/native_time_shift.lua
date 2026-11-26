@@ -1,7 +1,7 @@
 local shift = {}
 local instance_class = "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
-local current, installed
+local current, installed, expected_class
 
 local function valid(object)
     return object and object:IsValid()
@@ -12,10 +12,11 @@ local function scope(state, phase)
     if (phase ~= "hosting" and phase ~= "connected") or not valid(pawn) or not pawn:IsLocallyControlled()
         or not valid(state.world) then return end
     local instance = state.world.OwningGameInstance
-    local class = StaticFindObject(instance_class)
-    if valid(instance) and valid(class) and instance:GetClass():GetAddress() == class:GetAddress() then
-        return instance, pawn
-    end
+    if not valid(instance) then return end
+    local address = instance:GetClass():GetAddress()
+    if valid(expected_class) and expected_class:GetAddress() == address then return instance, pawn end
+    expected_class = StaticFindObject(instance_class)
+    if valid(expected_class) and expected_class:GetAddress() == address then return instance, pawn end
 end
 
 function shift.sync(state, phase)

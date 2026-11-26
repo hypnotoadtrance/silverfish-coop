@@ -39,6 +39,29 @@ async def resident_events(run, frame):
     return [json.loads(line) for line in (run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
 
 
+async def verify_stock_clock(run, area, epoch, pawn):
+    scope = area, epoch, pawn
+
+    def ready(frame):
+        clock = frame.get("game", {}).get("native_guest_clock", {})
+        return (frame.get("state") == "connected" and frame.get("zone_epoch") == epoch
+                and (clock.get("map"), clock.get("epoch"), clock.get("pawn")) == scope
+                and type(clock.get("milliseconds")) is int)
+
+    await wait_resident_status(run, ready, timeout=25)
+    drawn = await submit(run, native_guest_clock.FIXTURE)
+    assert drawn["ok"], drawn
+    clock, widget = (drawn[key] for key in (native_guest_clock.KEY, "native_guest_clock_fixture"))
+    for record in (clock, widget):
+        assert (record["map"], record["epoch"], record["pawn"]) == scope
+    keys = ("sequence", "milliseconds", "calls")
+    assert tuple(clock[key] for key in keys) == tuple(widget[key] for key in keys)
+    day, minute_of_day = divmod(widget["milliseconds"] // 60_000, 1440)
+    hour, minute = divmod(minute_of_day, 60)
+    assert widget["calls"] >= 1 and widget["text"].endswith(f"DAY {day}  {hour:02d}:{minute:02d}")
+    return widget
+
+
 class GuestWorldStartProof:
     def __init__(self, guest):
         self.request = guest.bridge.directory / "portable-guest-world-start-request.tsv"
@@ -233,24 +256,7 @@ class GuestWorldStartProof:
             transitions.append({"source": source, "destination": destination, "entrance": entrance, "actor": actor,
                                 "guest_pawn": next_pawn, "startup": startup})
 
-            def clock_ready(frame):
-                clock = frame.get("game", {}).get("native_guest_clock", {})
-                return (self._resident_guest(frame, destination) and frame["zone_epoch"] == epoch
-                        and (clock.get("map"), clock.get("epoch"), clock.get("pawn")) == (destination, epoch, next_pawn)
-                        and type(clock.get("milliseconds")) is int)
-
-            await wait_resident_status(guest_run, clock_ready, timeout=25)
-            drawn = await submit(guest_run, native_guest_clock.FIXTURE)
-            assert drawn["ok"], drawn
-            clock, widget = (drawn[key] for key in ("native_guest_clock", "native_guest_clock_fixture"))
-            for record in (clock, widget):
-                assert (record["map"], record["epoch"], record["pawn"]) == (destination, epoch, next_pawn)
-            keys = ("sequence", "milliseconds", "calls")
-            assert tuple(clock[key] for key in keys) == tuple(widget[key] for key in keys)
-            minutes = widget["milliseconds"] // 60_000
-            day, minute_of_day = divmod(minutes, 1440)
-            hour, minute = divmod(minute_of_day, 60)
-            assert widget["calls"] >= 1 and widget["text"].endswith(f"DAY {day}  {hour:02d}:{minute:02d}")
+            widget = await verify_stock_clock(guest_run, destination, epoch, next_pawn)
             live_host = await wait_resident_status(host_run, lambda frame: host_ready(frame, destination))
             draw_host_ms = round(live_host["game"]["native_scene"]["game_seconds"] * 1000)
             assert abs(widget["milliseconds"] - draw_host_ms) <= 60_000
