@@ -829,12 +829,14 @@ local function track_population_weapon(kind, actor, weapon)
     end
 end
 
-local function dock_spawn_population(pawn, world, host)
+local function dock_spawn_population(pawn, world, host, burst)
     assert(not next(population_fixture), "clean stock NPC population fixture required")
     local origin = pawn:K2_GetActorLocation()
     local points = {}
-    for index, kind in ipairs({"bandit", "state"}) do
-        local point = {X=origin.X + 125 * index, Y=origin.Y + 200, Z=origin.Z}
+    for index = 1, burst and 10 or 2 do
+        local kind = index % 2 == 1 and "bandit" or "state"
+        local point = {X=origin.X + 125 * (1 + (index - 1) % 5),
+            Y=origin.Y + 200 + 125 * math.floor((index - 1) / 5), Z=origin.Z}
         local actor = create_stock_npc(pawn, world, kind, point, 0)
         actor.CharacterMovement:DisableMovement()
         actor:SetActorTickEnabled(false)
@@ -844,9 +846,11 @@ local function dock_spawn_population(pawn, world, host)
             actor:SetReplicateMovement(false)
             assert(actor.bReplicates == false, "fixture must start with an unpublished host NPC")
         end
-        population_fixture[kind] = actor
-        if not valid(actor.Weapon_Ranged) then actor:Equip_RangedWeapon() end
-        track_population_weapon(kind, actor, assert(population_weapon(actor), "stock NPC did not equip a local firearm"))
+        population_fixture[index] = actor
+        if not burst then
+            if not valid(actor.Weapon_Ranged) then actor:Equip_RangedWeapon() end
+            track_population_weapon(kind, actor, assert(population_weapon(actor), "stock NPC did not equip a local firearm"))
+        end
         local at = actor:K2_GetActorLocation()
         points[#points + 1] = ("%s,%.3f,%.3f,%.3f"):format(kind, at.X, at.Y, at.Z)
     end
@@ -1763,9 +1767,9 @@ local function run(action, actor_path)
         return select_equipment(pawn, function(row)
             return row[item_class]:GetFName():ToString() == "Wep_RustyPistol_C"
         end)
-    elseif action == "dock-population-spawn" then
+    elseif action == "dock-population-spawn" or action == "dock-population-burst" then
         assert(world:GetFullName() == "World " .. dock)
-        return dock_spawn_population(pawn, world, host)
+        return dock_spawn_population(pawn, world, host, action == "dock-population-burst")
     elseif action == "dock-population-at" or action == "dock-population-paths" then
         assert(world:GetFullName() == "World " .. dock)
         return dock_population_at(world, actor_path, action == "dock-population-paths")

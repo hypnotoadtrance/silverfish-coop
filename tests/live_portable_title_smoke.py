@@ -2977,7 +2977,7 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
                                                      "downed_aggro_and_queued_strike_denied": True},
                                      "stock_swing": {"host": source, "guest": observer, "received": received}}}
 
-async def verify_dock_npc_population(host: Seat, guest: Seat, _pawn: str) -> dict:
+async def verify_dock_npc_population(host: Seat, guest: Seat, _pawn: str, *, burst=False) -> dict:
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-npc-override", action)
 
@@ -3001,6 +3001,18 @@ async def verify_dock_npc_population(host: Seat, guest: Seat, _pawn: str) -> dic
             raise AssertionError(f"Stock weapons outlived their NPCs on the guest: {observed}. {details}") from error
 
     try:
+        if burst:
+            local_points = await command(guest, "dock-population-burst")
+            await wait_for_population(guest, local_points, "empty")
+            await wait_for_population(host, local_points, "empty")
+            authoritative_points = await command(host, "dock-population-burst")
+            for seat, role in ((host, 3), (guest, 1)):
+                expected = ",".join([f"bandit={role}"] * 5 + [f"state={role}"] * 5)
+                await wait_for_population(seat, authoritative_points, expected)
+            assert await command(host, "dock-population-cleanup") == "cleared"
+            await wait_for_population(guest, authoritative_points, "empty")
+            return {"guest_only_retired": 10, "host_authorities": 10, "guest_replicas": 10,
+                    "host_removal_seen": True}
         local_points = await command(guest, "dock-population-spawn")
         await wait_for_population(guest, local_points, "empty")
         await wait_for_population(host, local_points, "empty")
@@ -3044,8 +3056,9 @@ async def verify_stock_dock_population(host: Seat, guest: Seat, pawn: str) -> di
             trials.append(evidence["tutorial_dock_npc_population"])
         except (AssertionError, OSError, RuntimeError) as error:
             failures[trial] = str(error)
-    assert not failures, {"passed_trials": len(trials), "failures": failures}
-    return {"stock_dock_population": trials}
+    burst = await verify_dock_npc_population(host, guest, pawn, burst=True)
+    assert not failures, {"passed_trials": len(trials), "failures": failures, "burst": burst}
+    return {"stock_dock_population": trials, "stock_dock_population_burst": burst}
 
 
 async def verify_dock_garage_shots(host: Seat, guest: Seat, frame: dict, command, *,

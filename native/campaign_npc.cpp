@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <optional>
 #include <span>
 #include <string>
@@ -750,12 +751,18 @@ namespace
         }
     };
 
-    Handles pending_dynamic_npcs;
+    struct PendingNpc
+    {
+        U::FWeakObjectPtr actor, world;
+        Clock::time_point expires;
+    };
+    constexpr std::size_t npc_work_per_tick = 8;
+    std::deque<PendingNpc> pending_dynamic_npcs;
     struct RetiringWeapon
     {
         U::FWeakObjectPtr weapon, npc, world, driver;
     };
-    std::vector<RetiringWeapon> retiring_weapons;
+    std::deque<RetiringWeapon> retiring_weapons;
     bool dynamic_births_active{};
     bool hook_ready();
 
@@ -773,9 +780,12 @@ namespace
 
     bool local_npc_weapon(U::AActor* weapon, U::UWorld* world)
     {
-        const auto* base = find<U::UClass>(npc_weapon_base);
-        return base && live(weapon) && weapon->GetWorld() == world && weapon->IsA(base) &&
-            !weapon->HasAnyFlags(U::RF_WasLoaded) && byte_field(weapon, STR("Role")) == 3 &&
+        if (!live(weapon) || weapon->GetWorld() != world || weapon->HasAnyFlags(U::RF_WasLoaded)) return false;
+        // EndPlay can run inside a stock Blueprint callback. Follow loaded ancestry there.
+        static const U::FName base{STR("Weapon_Master_BP_C")};
+        const U::UStruct* type = weapon->GetClassPrivate();
+        while (type && type->GetFName() != base) type = type->GetSuperStruct();
+        return type && type->GetPathName() == npc_weapon_base && byte_field(weapon, STR("Role")) == 3 &&
             bool_field(weapon, STR("bReplicates"), false) && bool_field(weapon, STR("HeldByPlayer"), false) &&
             bool_field(weapon, STR("bActorIsBeingDestroyed"), false);
     }
@@ -797,12 +807,13 @@ namespace
         retiring_weapons.push_back({weapon, npc, active.world, active.driver});
     }
 
-    void finish_retiring_weapons()
+    void finish_retiring_weapons(Clock::time_point deadline)
     {
-        std::vector<RetiringWeapon> batch;
-        batch.swap(retiring_weapons);
-        for (const auto& row : batch)
+        const auto count = std::min(npc_work_per_tick, retiring_weapons.size());
+        for (std::size_t index = 0; index < count && (index == 0 || Clock::now() < deadline); ++index)
         {
+            const auto row = retiring_weapons.front();
+            retiring_weapons.pop_front();
             auto* weapon = U::Cast<U::AActor>(row.weapon.Get());
             if (!live(weapon)) continue;
             const auto active = network(static_cast<U::UWorld*>(row.world.Get()), true, true);
@@ -822,17 +833,19 @@ namespace
 
     void settle_dynamic_npcs()
     {
-        if (!hook_ready()) return;
-        if (!retiring_weapons.empty()) finish_retiring_weapons();
-        if (pending_dynamic_npcs.empty()) return;
-        Handles batch;
-        batch.swap(pending_dynamic_npcs);
-        for (const auto& handle : batch)
+        if (!hook_ready() || (pending_dynamic_npcs.empty() && retiring_weapons.empty())) return;
+        const auto deadline = Clock::now() + std::chrono::milliseconds{1};
+        finish_retiring_weapons(deadline);
+        const auto count = std::min(npc_work_per_tick, pending_dynamic_npcs.size());
+        for (std::size_t index = 0; index < count && (index == 0 || Clock::now() < deadline); ++index)
         {
-            auto* actor = handle.Get();
-            if (!dynamic_stock_npc(actor)) continue;
+            const auto pending = pending_dynamic_npcs.front();
+            pending_dynamic_npcs.pop_front();
+            auto* actor = pending.actor.Get();
+            auto* world = actor_world(actor);
+            if (!world || world != pending.world.Get() || !dynamic_stock_npc(actor)) continue;
             auto* npc = static_cast<U::AActor*>(actor);
-            const auto active = network(npc->GetWorld(), true, true);
+            const auto active = network(world, true, true);
             if (active.seat == Seat::Client)
             {
                 queue_retiring_weapon(npc, active);
@@ -841,6 +854,8 @@ namespace
             else if (active.seat == Seat::Host && (!bool_field(actor, STR("bReplicates"), true) ||
                 !bool_field(actor, STR("bReplicateMovement"), true) || byte_field(actor, STR("RemoteRole")) != 1))
                 Replication{}.apply(std::array{actor});
+            else if (active.seat == Seat::Inactive && Clock::now() < pending.expires)
+                pending_dynamic_npcs.push_back(pending);
         }
     }
 
@@ -2825,7 +2840,7 @@ namespace silverfish::campaign_npc
                 auto* world = candidate->GetWorld();
                 if (!live(world) || (!world_driver(world) && !pending_client_load.context)) return;
                 if (dynamic_births_active && dynamic_stock_npc(candidate))
-                    pending_dynamic_npcs.emplace_back(candidate);
+                    pending_dynamic_npcs.push_back({candidate, world, Clock::now() + std::chrono::seconds{2}});
                 const auto family = npc_family(candidate);
                 if (family == NpcFamily::Unknown || (family == NpcFamily::NotDeer && !operate_not_deer) ||
                     byte_field(candidate, STR("Role")) != 3) return;
