@@ -3,6 +3,7 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_TI
     or not mailbox or not mailbox:match("[/\\]portable%-title%-%x+[/\\][%a]+[/\\]titles[/\\]local[/\\]run[/\\]game%-bridge[/\\]%x+$") then return end
 
 local prefix = mailbox .. "/portable-npc-override-"
+local command_limit = 4096
 local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
 local dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P.Tut_Dock_P"
 local class_path = "/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C"
@@ -829,13 +830,41 @@ local function track_population_weapon(kind, actor, weapon)
     end
 end
 
+local function dock_burst_footing(pawn, origin, shift)
+    local points = {}
+    local height = pawn.CapsuleComponent:GetScaledCapsuleHalfHeight()
+    local radius = pawn.CapsuleComponent:GetScaledCapsuleRadius()
+    for row = 0, 5 do
+        for column = 0, 7 do
+            local x, y = origin.X + 125 * (column + 1), origin.Y + 200 + shift + row * 125
+            local hit = {}
+            if trace:LineTraceSingle(pawn, {X=x,Y=y,Z=origin.Z+200}, {X=x,Y=y,Z=origin.Z-320},
+                0, false, {pawn}, 0, hit, true, color, color, 0) then
+                hit = hit.OutHit or hit
+                local component = hit.Component and hit.Component:Get()
+                local floor = hit.ImpactPoint
+                if floor and hit.ImpactNormal.Z > .9 and valid(component) and component:GetCollisionObjectType() == 0 then
+                    local point = {X=x,Y=y,Z=floor.Z+height+5}
+                    if not trace:CapsuleTraceSingle(pawn, {X=x,Y=y,Z=point.Z+8}, point, radius, height, 0, false,
+                        {pawn}, 0, {}, true, color, color, 0) then
+                        points[#points + 1] = point
+                        if #points == 10 then return points end
+                    end
+                end
+            end
+        end
+    end
+    error("no clear stock footing for ten Dock NPCs")
+end
+
 local function dock_spawn_population(pawn, world, host, burst)
     assert(not next(population_fixture), "clean stock NPC population fixture required")
     local origin = pawn:K2_GetActorLocation()
     local points = {}
+    local footing = burst and dock_burst_footing(pawn, origin, host and 0 or 100)
     for index = 1, burst and 10 or 2 do
         local kind = index % 2 == 1 and "bandit" or "state"
-        local point = {X=origin.X + 125 * (1 + (index - 1) % 5),
+        local point = footing and footing[index] or {X=origin.X + 125 * (1 + (index - 1) % 5),
             Y=origin.Y + 200 + 125 * math.floor((index - 1) / 5), Z=origin.Z}
         local actor = create_stock_npc(pawn, world, kind, point, 0)
         actor.CharacterMovement:DisableMovement()
@@ -847,7 +876,11 @@ local function dock_spawn_population(pawn, world, host, burst)
             assert(actor.bReplicates == false, "fixture must start with an unpublished host NPC")
         end
         population_fixture[index] = actor
-        if not burst then
+        if burst then
+            -- Separate the queue stress from the live faction fight and weapon cases.
+            actor.Initialized = true
+            actor:SetActorEnableCollision(false)
+        else
             if not valid(actor.Weapon_Ranged) then actor:Equip_RangedWeapon() end
             track_population_weapon(kind, actor, assert(population_weapon(actor), "stock NPC did not equip a local firearm"))
         end
@@ -855,6 +888,20 @@ local function dock_spawn_population(pawn, world, host, burst)
         points[#points + 1] = ("%s,%.3f,%.3f,%.3f"):format(kind, at.X, at.Y, at.Z)
     end
     return table.concat(points, ";")
+end
+
+local function dock_population_fixture_state()
+    local rows = {}
+    for index, actor in ipairs(population_fixture) do
+        local state = "invalid"
+        if valid(actor) then
+            local point = actor:K2_GetActorLocation()
+            state = ("%s,role=%d,alive=%s,destroying=%s,position=(%.1f,%.1f,%.1f)"):format(actor:GetFName():ToString(),
+                actor:GetLocalRole(), tostring(actor.Alive), tostring(actor:IsActorBeingDestroyed()), point.X, point.Y, point.Z)
+        end
+        rows[#rows + 1] = index .. "=" .. state
+    end
+    return table.concat(rows, ";")
 end
 
 local function population_weapons_at(world, points)
@@ -929,16 +976,29 @@ end
 
 local function dock_population_at(world, points, include_paths)
     local visible = {}
+    local population = {}
     for point in points:gmatch("[^;]+") do
         local kind, x, y, z = point:match("^(%w+),([^,]+),([^,]+),([^,]+)$")
-        local class = assert(shooter_paths[kind]):match("%.([^%.]+)$")
-        x, y, z = tonumber(x), tonumber(y), tonumber(z)
-        for _, actor in ipairs(FindAllOf(class) or {}) do
-            if valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed() then
-                local at = actor:K2_GetActorLocation()
-                if (at.X-x)^2 + (at.Y-y)^2 + (at.Z-z)^2 < 40^2 then
-                    visible[#visible + 1] = kind .. "=" .. (include_paths and actor:GetFullName() or actor:GetLocalRole())
+        if not population[kind] then
+            local class = StaticFindObject(assert(shooter_paths[kind]))
+            local candidates = {}
+            if valid(class) then statics:GetAllActorsOfClass(world, class, candidates) end
+            population[kind] = {}
+            for _, parameter in ipairs(candidates.OutActors or candidates) do
+                local actor = type(parameter.type) == "function" and parameter:type() == "RemoteUnrealParam"
+                    and parameter:get() or parameter
+                if valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed() then
+                    local at = actor:K2_GetActorLocation()
+                    -- Copy the location before the next reflected lookup.
+                    population[kind][#population[kind] + 1] = {actor=actor, x=at.X, y=at.Y, z=at.Z}
                 end
+            end
+        end
+        x, y, z = tonumber(x), tonumber(y), tonumber(z)
+        for _, entry in ipairs(population[kind]) do
+            if (entry.x-x)^2 + (entry.y-y)^2 + (entry.z-z)^2 < 40^2 then
+                local actor = entry.actor
+                visible[#visible + 1] = kind .. "=" .. (include_paths and actor:GetFullName() or actor:GetLocalRole())
             end
         end
     end
@@ -1773,6 +1833,8 @@ local function run(action, actor_path)
     elseif action == "dock-population-at" or action == "dock-population-paths" then
         assert(world:GetFullName() == "World " .. dock)
         return dock_population_at(world, actor_path, action == "dock-population-paths")
+    elseif action == "dock-population-fixture-state" then
+        return dock_population_fixture_state()
     elseif action == "dock-population-observe-view" then
         assert(world:GetFullName() == "World " .. dock and not host)
         return population_weapons_at(world, actor_path)
@@ -2248,12 +2310,13 @@ LoopInGameThreadWithDelay(40, function()
     track_pursuit()
     local request = io.open(prefix .. "command.tsv", "rb")
     if not request then return end
-    local data = request:read(400)
+    local data = request:read(command_limit + 1)
     request:close()
     local ticket, action, actor_path = (data or ""):match("^(%x+)\t([a-z%-]+)\t?([^\r\n]*)$")
     if not ticket or #ticket ~= 32 or ticket == last then return end
     last = ticket
-    local ok, response = pcall(run, action, actor_path)
+    local ok, response = false, "portable NPC probe command exceeds its size limit"
+    if #data <= command_limit then ok, response = pcall(run, action, actor_path) end
     local output = assert(io.open(prefix .. "reply.tsv", "wb"))
     local message = tostring(response):gsub("[\r\n\t]", " ")
     output:write(ticket, "\t", ok and "ok" or "error", "\t", message)

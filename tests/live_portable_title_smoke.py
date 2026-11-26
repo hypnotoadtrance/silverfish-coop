@@ -2988,7 +2988,9 @@ async def verify_dock_npc_population(host: Seat, guest: Seat, _pawn: str, *, bur
                 while (observed := await command(seat, f"dock-population-at\t{points}")) != expected:
                     await asyncio.sleep(.05)
         except TimeoutError as error:
-            raise AssertionError(f"Expected {expected} at {points}, saw {observed}") from error
+            seat_name = "host" if seat is host else "guest"
+            fixture = await command(seat, "dock-population-fixture-state")
+            raise AssertionError(f"{seat_name} expected {expected} at {points}, saw {observed}. Spawned actors: {fixture}") from error
 
     async def guest_weapons_clear():
         observed = "unavailable"
@@ -3056,7 +3058,11 @@ async def verify_stock_dock_population(host: Seat, guest: Seat, pawn: str) -> di
             trials.append(evidence["tutorial_dock_npc_population"])
         except (AssertionError, OSError, RuntimeError) as error:
             failures[trial] = str(error)
-    burst = await verify_dock_npc_population(host, guest, pawn, burst=True)
+    try:
+        burst = await verify_dock_npc_population(host, guest, pawn, burst=True)
+    except Exception as error:
+        error.add_note(f"Single-pair population trials: {len(trials)} passed, failures={failures}")
+        raise
     assert not failures, {"passed_trials": len(trials), "failures": failures, "burst": burst}
     return {"stock_dock_population": trials, "stock_dock_population_burst": burst}
 
