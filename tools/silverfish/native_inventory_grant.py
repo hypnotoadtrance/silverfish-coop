@@ -66,6 +66,9 @@ async def accept(host, bridge, character, target, operation):
         return {RESULT: prior[1]}
     if not await native_inventory.retain_guest_save(host, bridge, character, pawn):
         raise party.RuleError("native_inventory_grant_scope_changed")
+    current = host.native_recipients().get(character, {})
+    if epoch != host.zone_epoch or host.transitioning or current.get("pawn") != pawn or not current.get("connected"):
+        raise party.RuleError("native_inventory_grant_scope_changed")
 
     frame = await bridge.command(APPLY, pawn, guid, item_class, text, timeout=3)
     state = frame.get("ack", {}).get("message")

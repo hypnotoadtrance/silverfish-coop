@@ -2,6 +2,7 @@ local inventory = {}
 local guest_save = require("guest_save")
 local host_save = require("native_host_save")
 local weapon_profiles = require("guest_weapon_registry")
+local inventory_grant = require("native_inventory_grant")
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local observation, split, unloaded, sorted, stored, removed
 local stock_backpack = "/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C"
@@ -78,6 +79,8 @@ local function sort_backpack(fields, state, phase)
 end
 
 function inventory.command(fields, state, phase)
+    local grant = inventory_grant.command(fields, state, phase)
+    if grant then return grant end
     if fields[2] == "native-inventory-sort" then return sort_backpack(fields, state, phase) end
     if fields[2] == "native-inventory-split" then return split_stack(fields, state, phase) end
     if fields[2] == "native-inventory-take-ammo" then return take_ammo(fields, state, phase) end
@@ -194,7 +197,7 @@ function inventory.reset()
 end
 
 function inventory.rows(state, phase, status_row)
-    if phase ~= "hosting" then return {} end
+    if phase ~= "hosting" then return inventory_grant.rows(state, phase, status_row) end
     local rows = {}
     if type(SilverfishReadLiveNativeInventoryCensus) == "function" then
         rows[#rows + 1] = status_row("native-live-inventory-census", 1)

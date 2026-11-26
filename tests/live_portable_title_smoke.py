@@ -5769,6 +5769,9 @@ async def verify_stock_unequip(first, second, evidence):
         assert saves() == before, "Mirroring the typed grant wrote a campaign file"
         evidence["guest_typed_grant"] = {"guid": grant_guid, "ammo": 7, "typed_payload_preserved": True,
                                          "replay_added_no_row": True, "mismatched_guid_refused": True}
+        assert await portable_probe_command(guest.bridge, probe, "guest-prepare-stock-grant") == "loaded"
+        fresh = guest.bridge.snapshot()["sequence"]
+        await guest.bridge.wait_for(lambda frame: frame["sequence"] > fresh)
         start = await wait_resident_status(guest_run, lambda frame: frame.get("state") == "connected")
         stock_guid = await portable_probe_command(guest.bridge, probe, "guest-stock-grant")
         assert re.fullmatch(r"[0-9A-F]{32}", stock_guid) and stock_guid != grant_guid, stock_guid

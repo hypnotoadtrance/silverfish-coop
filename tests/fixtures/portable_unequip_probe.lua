@@ -264,7 +264,12 @@ local function run(action, argument)
         and valid(pawn) and pawn:IsLocallyControlled() and pawn:HasAuthority() ~= guest and pawn.Dead == false
         and valid(control) and control:IsLocalController() and same(control.Pawn, pawn)
         and same(pawn.Save, world.OwningGameInstance.SaveSlot_Ref), "fixture exact private player scope unavailable")
-    if action == "guest-stock-grant" then
+    if action == "guest-prepare-stock-grant" then
+        assert(guest)
+        asset("/Game/Classes/GUI/Menu_Cheats_Widget.Menu_Cheats_Widget_C")
+        asset(grant_class)
+        return "loaded"
+    elseif action == "guest-stock-grant" then
         assert(guest, "only the guest can originate the fixture grant")
         local cheats = asset("/Game/Classes/GUI/Menu_Cheats_Widget.Menu_Cheats_Widget_C")
         local widgets = asset("/Script/UMG.Default__WidgetBlueprintLibrary")
