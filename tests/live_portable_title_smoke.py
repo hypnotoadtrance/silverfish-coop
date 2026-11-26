@@ -4373,7 +4373,7 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str, *, wo
         area = areas[-1]
         # Earlier Dry Dock runs lost the firing lane to three unrelated melee attackers.
         # Keep the authored target and stock damage path active during this objective check.
-        paused_npcs = int(await command(host, "quiet-dry-dock")) if area == dry_dock else 0
+        removed_npcs = int(await command(host, "clear-dry-dock-npcs")) if area == dry_dock else 0
         prefix = f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel."
         for actor in actors:
             target = prefix + actor
@@ -4387,6 +4387,8 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str, *, wo
             for source, destination in zip(reversed(areas[1:]), reversed(areas[:-1])):
                 await cross(source, destination)
             raise AssertionError(f"No reachable position outside the blast for {actors} in {area}")
+        if area == dry_dock:
+            removed_npcs += int(await command(host, "clear-dry-dock-npcs"))
         save_hashes = campaign_save_hashes(host.campaign)
 
         def prop(frame):
@@ -4429,6 +4431,8 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str, *, wo
         for shot_number in range(magazine):
             if shot_number:
                 aimed = await host.bridge.command("native-fixed-explosive-aim-fixture", target, pawn, guid, timeout=6)
+                if area == dry_dock:
+                    removed_npcs += int(await command(host, "clear-dry-dock-npcs"))
             await at_point(aimed["pawns"]["guest"]["location"])
             async with asyncio.timeout(7):
                 while True:
@@ -4436,7 +4440,9 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str, *, wo
                         tap = await guest.bridge.command("native-guest-primary-input-fixture", local_pawn, target)
                         break
                     except RuntimeError as exc:
-                        if str(exc) != "Stock primary input is temporarily blocked by the equipped player's state":
+                        if area == dry_dock and str(exc) == "The guest camera and muzzle need a clear path to the stock explosive prop":
+                            removed_npcs += int(await command(host, "clear-dry-dock-npcs"))
+                        elif str(exc) != "Stock primary input is temporarily blocked by the equipped player's state":
                             raise
                         await asyncio.sleep(.15)
             sequence = tap["native_guest_primary_fixture"]["sequence"]
@@ -4477,7 +4483,7 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str, *, wo
         await approach_board()
         return {"actor": target, "guest_magazine": fired, "stock_counter": [count, count + 1],
                 "host_mesh": prop(destroyed)["mesh"], "guest_mesh": prop(witness)["mesh"],
-                "paused_dry_dock_npcs": paused_npcs, "intact_samples": intact_samples, "destroyed_samples": destroyed_samples,
+                "removed_dry_dock_npcs": removed_npcs, "intact_samples": intact_samples, "destroyed_samples": destroyed_samples,
                 "denied_guest_local_callbacks": True, "no_save_on_destruction": True, "guest_blast_relay": cues[0]}
 
     checkpoint = campaign_save_hashes(host.campaign)
@@ -6975,7 +6981,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_footsteps, "observatory", "stock_footsteps", check_footsteps),
         (stock_campfire, "observatory", "stock_campfire", verify_resident_campfire),
         (stock_npc_override and not resident_weapon_cues, "observatory", "stock_npc_override", verify_resident_npc_override),
-        (stock_board_offers, "observatory", "stock_board_offers", verify_resident_board_offers),
+        (stock_board_offers, "stock_board_offers", "stock_board_offers", verify_resident_board_offers),
         (stock_quarry_photo, "quarry_photo", "stock_quarry_photo",
          lambda host, guest, pawn: verify_quarry_photo(host, guest, pawn, portable_probe_command)),
         (stock_host_corpse_carry, "observatory", "stock_host_corpse_carry", verify_stock_host_corpse_carry),
@@ -7654,7 +7660,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_shot_view", "tutorial_dock_buckshot",
                     "tutorial_dock_melee", "tutorial_dock_late_join", "dock_population",
                     "crossroads", "crossroads_anomaly", "quarry_photo", "buried_placements",
-                    "lab_east_wing_acid", "lab_terminal", "oil_lamps", "shopkeep", "simmi", "missing_contact_untracked",
+                    "lab_east_wing_acid", "lab_terminal", "oil_lamps", "shopkeep", "simmi", "stock_board_offers", "missing_contact_untracked",
                     "friendly_fire_enabled", "friendly_fire_default", "stardust_handoff"
                 } or stock_host_prop_observer and campaign == prop_campaign else ("save_and_quit",)
                 after_reconnect = None

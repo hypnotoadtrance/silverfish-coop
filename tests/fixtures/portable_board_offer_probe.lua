@@ -61,7 +61,7 @@ local function run(action, quest)
     local world_path = world:GetFullName():match("^World (.+)$")
     local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     local pawn = statics:GetPlayerPawn(world, 0)
-    if action == "quiet-dry-dock" then
+    if action == "clear-dry-dock-npcs" then
         assert(world_path == dry_dock and valid(pawn) and pawn:IsLocallyControlled() and pawn:HasAuthority())
         local class = StaticFindObject("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C")
         local actors = {}
@@ -71,13 +71,10 @@ local function run(action, quest)
             local actor = type(parameter.type) == "function" and parameter:type() == "RemoteUnrealParam"
                 and parameter:get() or parameter
             if valid(actor) and actor.Alive and actor:HasAuthority() and same(actor:GetWorld(), world) then
-                local controller = actor.Controller
-                if valid(controller) then
-                    controller:StopMovement()
-                    controller:SetActorTickEnabled(false)
-                end
-                actor.CharacterMovement:StopMovementImmediately()
-                actor:SetActorTickEnabled(false)
+                -- This disposable campaign measures the sabotage prop, while the
+                -- separate combat trial exercises stock attacks and retaliation.
+                actor:K2_DestroyActor()
+                assert(not valid(actor) or actor:IsActorBeingDestroyed(), "Could not clear a stock NPC from the firing test")
                 count = count + 1
             end
         end
