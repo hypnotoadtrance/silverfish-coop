@@ -35,13 +35,13 @@ def instrument_profile(source, *, stock_receipts=False):
         ("    if not failure then\n", f'    {mark}("status_base_rows")\n'),
         ("        local crate_rows\n", f'        {mark}("status_gameplay_rows")\n'),
         ('    rows[#rows + 1] = ""\n', f'    {mark}("status_world_rows")\n'),
-        ('    local frame = table.concat(rows, "\\n")\n', None),
+        ('    local frame = not join_in_native and table.concat(rows, "\\n") or nil\n', None),
         ("    if resident_title and status_publication.installed and status_publication.memory_live",
          f'    {mark}("status_native_publish")\n'),
     ):
         assert status_code.count(needle) == 1, needle
         if call is None:
-            status_code = status_code.replace(needle, needle + f'    {mark}("status_concat", #rows - 1, #frame)\n'
+            status_code = status_code.replace(needle, needle + f'    {mark}("status_concat", #rows - 1, frame and #frame or nil)\n'
                                               '    status_publication.profile.status_size(rows)\n')
         else:
             status_code = status_code.replace(needle, call + needle)

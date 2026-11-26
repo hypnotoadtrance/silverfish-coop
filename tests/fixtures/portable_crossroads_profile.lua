@@ -63,6 +63,9 @@ function probe.status_size(rows)
             if tag then sizes[tag] = (sizes[tag] or 0) + #line + 1 end
         end
     end
+    local sum = 0
+    for _, size in pairs(sizes) do sum = sum + size end
+    active.max_status_bytes = math.max(active.max_status_bytes, sum)
     active.status_sizes = sizes
 end
 
@@ -102,7 +105,7 @@ function probe.status_mark(tag, rows, bytes)
         end
         if rows then
             active.max_status_rows = math.max(active.max_status_rows, rows)
-            active.max_status_bytes = math.max(active.max_status_bytes, bytes)
+            active.max_status_bytes = math.max(active.max_status_bytes, bytes or 0)
         end
     end
     active.status_at, active.status_cycles, active.status_heap = now, cycles, heap

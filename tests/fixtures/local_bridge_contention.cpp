@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <cstdio>
 #include <future>
 #include <string_view>
 #include <thread>
@@ -101,6 +102,81 @@ int main()
     }
     done = true;
     reader.join();
+    lua_newtable(stack);
+    for (const auto& row : {std::string("schema\t1"), std::string("opaque\t\0data", 12), std::string{}})
+    {
+        lua_pushlstring(stack, row.data(), row.size());
+        lua_rawseti(stack, 1, static_cast<lua_Integer>(lua_rawlen(stack, 1) + 1));
+    }
+    assert(publish_status_rows(lua) == 1 && lua_toboolean(stack, -1));
+    lua_settop(stack, 0);
+    std::uint64_t version{};
+    const auto row_bytes = SilverfishBridgeCopyStatusV1(200, output.data(), packet_size, &version);
+    assert(version == 201 && std::string_view(output.data(), row_bytes) == std::string_view("schema\t1\nopaque\t\0data\n", 22));
+
+    lua_newtable(stack);
+    lua_pushboolean(stack, true);
+    lua_rawseti(stack, 1, 1);
+    assert(publish_status_rows(lua) == 1 && !lua_toboolean(stack, -1));
+    assert(SilverfishBridgeStatusRevisionV1() == 0);
+    lua_settop(stack, 0);
+
+    lua_newtable(stack);
+    const auto oversized = std::string(reply_limit + 1, 'X');
+    lua_pushlstring(stack, oversized.data(), oversized.size());
+    lua_rawseti(stack, 1, 1);
+    assert(publish_status_rows(lua) == 1 && !lua_toboolean(stack, -1));
+    assert(SilverfishBridgeStatusRevisionV1() == 0);
+    lua_settop(stack, 0);
+
+    luaL_openlibs(stack);
+    constexpr int measured_count = 128;
+    lua_createtable(stack, 233, 0);
+    for (int index = 1; index < 233; ++index)
+    {
+        const auto text = "native-item\t" + std::to_string(index) + '\t' + std::string(125, 'X');
+        lua_pushlstring(stack, text.data(), text.size());
+        lua_rawseti(stack, 1, index);
+    }
+    lua_pushliteral(stack, "");
+    lua_rawseti(stack, 1, 233);
+    const auto rows = luaL_ref(stack, LUA_REGISTRYINDEX);
+    const auto allocated = [&] { return lua_gc(stack, LUA_GCCOUNT) * 1024 + lua_gc(stack, LUA_GCCOUNTB); };
+    const auto growth = [&](bool native) {
+        lua_gc(stack, LUA_GCCOLLECT);
+        lua_gc(stack, LUA_GCSTOP);
+        const auto before = allocated();
+        for (int index = 0; index < measured_count; ++index)
+        {
+            if (native)
+            {
+                lua_rawgeti(stack, LUA_REGISTRYINDEX, rows);
+                assert(publish_status_rows(lua) == 1);
+            }
+            else
+            {
+                lua_getglobal(stack, "table");
+                lua_getfield(stack, -1, "concat");
+                lua_remove(stack, -2);
+                lua_rawgeti(stack, LUA_REGISTRYINDEX, rows);
+                lua_pushliteral(stack, "\n");
+                lua_call(stack, 2, 1);
+                assert(publish_status(lua) == 1);
+            }
+            assert(lua_toboolean(stack, -1));
+            lua_settop(stack, 0);
+        }
+        const auto bytes = allocated() - before;
+        lua_gc(stack, LUA_GCRESTART);
+        return bytes;
+    };
+    const auto lua_bytes = growth(false);
+    const auto native_bytes = growth(true);
+    assert(lua_bytes > 30 * 1024 * measured_count && native_bytes < lua_bytes / 100);
+    std::printf("Snapshot assembly across %d frames: %d Lua bytes through concat, %d directly through C++\n",
+                measured_count, lua_bytes, native_bytes);
+    luaL_unref(stack, LUA_REGISTRYINDEX, rows);
+
     const auto ticket = SilverfishBridgeSubmitV1("test", 4);
     assert(ticket > 0 && take(lua) == 3);
     lua_settop(stack, 0);

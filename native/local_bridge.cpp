@@ -1,6 +1,7 @@
 #include "local_bridge.hpp"
 #include "local_stash_ticket.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cctype>
@@ -233,12 +234,10 @@ namespace
         return 0;
     }
 
-    int publish_status(const Lua& lua)
+    int publish_status_frame(const Lua& lua, std::string frame)
     {
-        if (lua.get_stack_size() != 1 || !lua.is_string()) return 0;
-        const auto frame = lua.get_string();
         auto snapshot = !frame.empty() && frame.size() <= reply_limit
-            ? std::make_shared<const std::string>(frame) : nullptr;
+            ? std::make_shared<const std::string>(std::move(frame)) : nullptr;
         bool published{};
         {
             std::lock_guard lock(mutex);
@@ -252,6 +251,39 @@ namespace
         }
         lua.set_bool(published);
         return 1;
+    }
+
+    int publish_status(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 1 || !lua.is_string()) return 0;
+        const auto frame = lua.get_string();
+        return publish_status_frame(lua, frame.size() <= reply_limit ? std::string{frame} : std::string{});
+    }
+
+    int publish_status_rows(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        if (lua_gettop(stack) != 1 || lua_type(stack, 1) != LUA_TTABLE) return 0;
+        const auto count = lua_rawlen(stack, 1);
+        if (count > reply_limit + 1) return publish_status_frame(lua, {});
+        std::string frame;
+        frame.reserve((std::min)(count * 160, std::size_t{65536}));
+        for (std::size_t index = 1; index <= count; ++index)
+        {
+            lua_rawgeti(stack, 1, static_cast<lua_Integer>(index));
+            std::size_t size{};
+            const auto* row = lua_type(stack, -1) == LUA_TSTRING ? lua_tolstring(stack, -1, &size) : nullptr;
+            const std::size_t separator = index != 1;
+            if (!row || size + separator > reply_limit - frame.size())
+            {
+                lua_pop(stack, 1);
+                return publish_status_frame(lua, {});
+            }
+            if (separator) frame.push_back('\n');
+            frame.append(row, size);
+            lua_pop(stack, 1);
+        }
+        return publish_status_frame(lua, std::move(frame));
     }
 
     int read_heartbeat(const Lua& lua, const std::int64_t& mailbox)
@@ -768,6 +800,7 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishFormatLocalStatusRow", format_status_row);
         lua.register_function("SilverfishPublishLocalBridgeReply", publish);
         lua.register_function("SilverfishPublishLocalBridgeStatus", publish_status);
+        lua.register_function("SilverfishPublishLocalBridgeStatusRows", publish_status_rows);
         lua.register_function("SilverfishEnqueueLocalBridgeInput", enqueue_input);
         lua.register_function("SilverfishTakeLocalPropPoses", take_prop_poses);
         lua.register_function("SilverfishPublishLocalPropPose", publish_local_prop_pose);

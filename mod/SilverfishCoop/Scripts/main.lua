@@ -1681,9 +1681,18 @@ local function write_status(state, current_phase, failure, fields, pending, crat
     end
     if failure then rows[#rows + 1] = status_row("diagnostic", failure) end
 
+    local reply_due = pending and pending.dispatched and acknowledged_id == pending.fields[1]
+    local now = os.clock()
+    local file_command = fields and not pending
+    local periodic_due = file_command or now >= status_publication.next_frame
+    if not reply_due and not periodic_due then return end
+
     rows[#rows + 1] = ""
-    local frame = table.concat(rows, "\n")
-    if pending and pending.dispatched and acknowledged_id == pending.fields[1] then
+    local join_in_native = periodic_due and not reply_due and not file_command
+        and resident_title and status_publication.installed and status_publication.memory_live
+        and type(SilverfishPublishLocalBridgeStatusRows) == "function"
+    local frame = not join_in_native and table.concat(rows, "\n") or nil
+    if reply_due then
         local view = pending.guest_view_reply
         if view then
             pending.guest_view_reply = nil
@@ -1695,20 +1704,23 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         end
     end
 
-    local now = os.clock()
-    local file_command = fields and not pending
-    if not file_command and now < status_publication.next_frame then return end
+    if not periodic_due then return end
     status_publication.next_frame = now + 0.25
-    -- The embedded worker reads the latest frame directly. Isolated diagnostics and
-    -- explicit filesystem commands can still observe their game-thread receipts.
-    status_publication.memory_live = type(SilverfishPublishLocalBridgeStatus) == "function"
-        and SilverfishPublishLocalBridgeStatus(frame)
+    -- Ordinary resident frames are joined in C++. Only explicit replies and
+    -- private file mirrors need the joined snapshot in the Lua heap.
+    if join_in_native then
+        status_publication.memory_live = SilverfishPublishLocalBridgeStatusRows(rows)
+    else
+        status_publication.memory_live = type(SilverfishPublishLocalBridgeStatus) == "function"
+            and SilverfishPublishLocalBridgeStatus(frame)
+    end
     if resident_title and status_publication.installed and status_publication.memory_live then
         status_publication.context = {phase = current_phase, map = state.map, clients = state.clients, world = state.world, pawn = pawn}
     else
         status_publication.context = nil
     end
     if status_publication.memory_live and not status_publication.mirror and not file_command then return end
+    frame = frame or table.concat(rows, "\n")
     if crate_details then frame = frame .. crate_details .. "\n" end
     -- A memory command can publish a newer frame before a file client polls.
     local destination = file_command and status_publication.memory_live and bridge .. "/command-reply.tsv" or status_path
