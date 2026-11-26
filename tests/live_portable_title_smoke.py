@@ -7829,6 +7829,14 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
 
             async def check_cabinet_saved(host, stopped, saved, character):
                 cabinet_evidence["stock_save_and_quit"] = await verify_saved_pickup(host, stopped, saved, seeded)
+                for pickup in cabinet_evidence["after_checkpoint"]:
+                    items = saved["world"]["party"][native_loot.STATE_KEY][pickup["cabinet"]]["items"]
+                    row, = [item for item in items if item["guid"] == pickup["guid"]]
+                    assert row["claimed_by"] == pickup["claimed_by"], row
+                if cabinet_evidence["after_checkpoint"]:
+                    guest_pickup, = [row for row in cabinet_evidence["after_checkpoint"] if row["claimed_by"] == character]
+                    assert character in saved["characters"] and guest_pickup["both_projected_views_retired"]
+                    cabinet_evidence["stock_save_and_quit"]["guest_claimed_guid"] = guest_pickup["guid"]
 
             proof["sessions"].append(await start_pair(first, second, "Cabinet scout", on_join=check_cabinet,
                                                       load_existing=True, wait_status=wait_resident_status,

@@ -86,8 +86,8 @@ RESIDENT_PROBES = {
 
 
 CURRENT_MAIN_PROBES = {
-    "accepted, message = pcall(run_command, fields, state, current_phase)": (
-        "accepted, message = pcall(require('cabinet_pickup_profile').timed, 'command:' .. fields[2], "
+    "            accepted, message = pcall(run_command, fields, state, current_phase)": (
+        "            accepted, message = pcall(require('cabinet_pickup_profile').timed, 'command:' .. fields[2], "
         "run_command, fields, state, current_phase)"
     ),
     "pcall(tick, fields, pending, periodic)": (
@@ -102,6 +102,13 @@ def source_with_probe(name: str, before: bytes, *, combined: bool = False) -> by
     anchors = PROBES.get(name) or RESIDENT_PROBES[name]
     if name == "main.lua" and "local function tick(fields, pending, periodic)" in text:
         anchors = CURRENT_MAIN_PROBES
+    if name == "native_loot_actions.lua" and "function actions.claim_reply(" in text:
+        anchors = {**anchors, "pcall(actions.command, fields, state, phase)":
+                   "pcall(cabinet_probe.timed, 'command:' .. fields[2], actions.command, fields, state, phase)"}
+    if name == "players.lua" and "elseif SilverfishEnqueueLocalBridgeInput(record) ~= true then" in text:
+        staged = "pending_interactions = {world = pawn:GetWorld(), expires = now(pawn) + 1.5, lines = {record}}"
+        anchors = {staged: staged + "\n        else\n"
+                   "            cabinet_probe.mark('input-memory', target and target:match('^world%-loot:%x+:(%x+):'))"}
     if combined and name == "main.lua":
         publish = "SilverfishPublishLocalBridgeReply(pending.ticket, frame)"
         anchors = {**anchors, publish: publish + "\n            "
@@ -419,7 +426,9 @@ async def verify_resident_pickup(host, guest, guest_pawn: str, source: tuple[dic
                  if Path(name).name.startswith("SFCoop_")}
         return campaign_save_hashes(host.campaign), stock
 
-    async def pick_up(crate, current_roll, current_item, *, move_guest=True):
+    async def pick_up(crate, current_roll, current_item, *, move_guest=True, by_guest=False):
+        picker = guest if by_guest else host
+        picker_run = guest_run if by_guest else host_run
         guid = current_item["guid"]
         identity = native_world_loot.crate_identity(current_roll["id"], guid)
 
@@ -447,22 +456,24 @@ async def verify_resident_pickup(host, guest, guest_pawn: str, source: tuple[dic
         before = save_fingerprints()
         assert all(before)
 
-        trace = await arm_probe(host.bridge.directory, identity)
-        fired = await host.bridge.command(native_world_loot.FIXTURE, identity, timeout=5)
+        trace = await arm_probe(host.bridge.directory, identity) if not by_guest else None
+        fired = await picker.bridge.command(native_world_loot.FIXTURE, identity, timeout=5)
         assert fired["ack"]["message"] == "stock world loot interaction intercepted", fired["ack"]
 
         def settled(state):
             rows = state.get("gameplay", {}).get(native_loot.STATE_KEY, {}).get(crate, {}).get("items", ())
             return identity not in state.get("game", {}).get(native_world_loot.KEY, {}) and any(
-                row["guid"] == guid and row.get("claimed_by") == "host" for row in rows)
+                row["guid"] == guid and row.get("claimed_by") and (row["claimed_by"] != "host") == by_guest
+                for row in rows)
 
         await asyncio.gather(wait_resident_status(host_run, settled), wait_resident_status(guest_run, settled))
-        await finish_probe(trace)
+        if trace is not None:
+            await finish_probe(trace)
         records = await resident_events(host_run, host_state)
         claim, = [row for row in records if row["event"] == "native_loot_claim_accepted" and row.get("guid") == guid]
         receipt = claim["operation_id"]
         played, = [row for row in records if row["event"] == "native_pickup_sound_played" and row.get("operation_id") == receipt]
-        inventory = (await submit_ok(host_run, "native-inventory-list"))["native_inventory"]
+        inventory = (await submit_ok(picker_run, "native-inventory-list"))["native_inventory"]
         if current_item["class_path"] in native_loot.CASH_RANGES:
             credit = claim["wallet_credit"]
             assert credit["after"] - credit["before"] == credit["amount"] > 0
@@ -481,10 +492,11 @@ async def verify_resident_pickup(host, guest, guest_pawn: str, source: tuple[dic
                 assert row["quantity"] == claim.get("stack_merge", {}).get("after", current_item["ammo"])
             received = {"inventory": row}
         assert save_fingerprints() == before
-        timings = summarize(trace, resident=True, combined_operation=receipt if combined else None)
+        timings = summarize(trace, resident=True, combined_operation=receipt if combined else None) if trace else None
         return {"cabinet": crate, "stock_class": current_item["class_path"], "guid": guid, "projection": identity,
-                "operation": receipt, **received, "native_claim_unix": claim["time_unix"],
-                "sound_receipt_unix": played["time_unix"], "timings": timings, "trace": str(trace),
+                "operation": receipt, "claimed_by": claim["claimed_by"], **received,
+                "bridge_reply_bytes": claim.get("bridge_reply_bytes"), "native_claim_unix": claim["time_unix"],
+                "sound_receipt_unix": played["time_unix"], "timings": timings, "trace": str(trace) if trace else None,
                 "both_projected_views_retired": True, "saves_unchanged_after_pickup": True}
 
     pickup = await pick_up(CABINET, roll, item)
@@ -529,8 +541,9 @@ async def verify_resident_pickup(host, guest, guest_pawn: str, source: tuple[dic
         assert all(row in durable["items"] for row in candidates), durable
         await collect_probe_garbage(host.bridge.directory)
         for index, candidate in enumerate(candidates):
-            checkpoint_pickup = await pick_up(crate, durable, candidate, move_guest=index == 0)
-            assert checkpoint_pickup["timings"]["escrow_load_ms"] is None, checkpoint_pickup
+            checkpoint_pickup = await pick_up(crate, durable, candidate, by_guest=index == 1)
+            if checkpoint_pickup["timings"] is not None:
+                assert checkpoint_pickup["timings"]["escrow_load_ms"] is None, checkpoint_pickup
             checkpoint_pickup.update(checkpoint_revision=checkpoint["revision"], engine_gc_verified=True)
             after_checkpoint.append(checkpoint_pickup)
         assert cached_replays["native_claims"] == 2 and cached_replays["escrow_disk_loads"] == 0, [

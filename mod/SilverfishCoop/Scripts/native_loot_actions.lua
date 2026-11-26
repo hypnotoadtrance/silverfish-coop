@@ -424,13 +424,18 @@ function actions.compact_open(fields, state, phase)
     return profile and not profile.key_unlock_only and not profile.random_lid
 end
 
-function actions.local_reply(fields, state, phase, status_row)
-    local opening = fields[2] == "native-loot-open"
+local function capture_reply(fields, state, phase)
     local previous = observation
     observation = nil
     local accepted, message = pcall(actions.command, fields, state, phase)
     local result = observation
     observation = previous
+    return accepted, message, result
+end
+
+function actions.local_reply(fields, state, phase, status_row)
+    local opening = fields[2] == "native-loot-open"
+    local accepted, message, result = capture_reply(fields, state, phase)
     local reply = status_row(opening and "native-loot-open-reply" or "native-loot-inspection-reply", 1) .. "\n"
     if not accepted or not result then
         return reply .. status_row("ack", fields[1], "error", message or "stock loot receipt unavailable") .. "\n"
@@ -438,6 +443,36 @@ function actions.local_reply(fields, state, phase, status_row)
     local records = {reply .. status_row("ack", fields[1], "accepted", message), result_row(result, status_row)}
     for _, item in ipairs(result.items) do records[#records + 1] = item_row(item, status_row) end
     return table.concat(records, "\n") .. "\n"
+end
+
+local function append_transfer_rows(records, result, status_row)
+    if result.cash then
+        local cash = result.cash
+        records[#records + 1] = status_row("native-loot-cash", cash.guid, cash.amount, cash.before, cash.after)
+    end
+    if result.merge then
+        local merge = result.merge
+        records[#records + 1] = status_row("native-loot-stack-merge", merge.guid, merge.inventory_guid,
+            merge.amount, merge.before, merge.after)
+    end
+end
+
+function actions.claim_reply(fields, state, phase, status_row)
+    local accepted, message, result = capture_reply(fields, state, phase)
+    if not accepted then return false, message end
+    if not result then return false, "native_loot_claim_readback_unavailable" end
+    local records = {result_row(result, status_row)}
+    append_transfer_rows(records, result, status_row)
+    if result.retained then
+        for _, details in ipairs(state.pawns) do
+            if details.name == result.pawn then
+                records[#records + 1] = status_row("pawn", details.slot or details.kind, details.name,
+                    details.health or "-", details.x, details.y, details.z, details.controller, details.max_health or "-")
+                break
+            end
+        end
+    end
+    return true, message, records, result.cash ~= nil
 end
 
 function actions.rows(state, phase, status_row)
@@ -459,15 +494,7 @@ function actions.rows(state, phase, status_row)
     end
     if not row or row.map ~= state.map then return records end
     records[#records + 1] = result_row(row, status_row)
-    if row.cash then
-        local cash = row.cash
-        records[#records + 1] = status_row("native-loot-cash", cash.guid, cash.amount, cash.before, cash.after)
-    end
-    if row.merge then
-        local merge = row.merge
-        records[#records + 1] = status_row("native-loot-stack-merge", merge.guid, merge.inventory_guid,
-            merge.amount, merge.before, merge.after)
-    end
+    append_transfer_rows(records, row, status_row)
     for _, item in ipairs(row.items) do
         records[#records + 1] = item_row(item, status_row)
     end

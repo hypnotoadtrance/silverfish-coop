@@ -167,7 +167,7 @@ class AuthoredPickupTransactionTests(unittest.IsolatedAsyncioTestCase):
 
         async def command(request, timeout):
             ticket = request.decode().split("\t", 1)[0]
-            return (pickup.CLAIM_REPLY_HEADER + stock.replace("wallet\t50", "wallet\t57")
+            return (native_loot.CLAIM_REPLY_HEADER + stock.replace("wallet\t50", "wallet\t57")
                     + f"ack\t{ticket}\taccepted\tauthored cash pickup reported\n"
                     + f"{pickup.ACTION}\t{CASH}\t{CITY}\t{PAWN}\t1\t1\tcash_credited\t-\t{slot}\tmemory\n"
                     + f"{pickup.CASH_TAG}\t{CASH}\t{CITY}\t{PAWN}\t{slot}\t7\t50\t57\tItem_Money_CoupleBills_C_7-City_01_P-\n")
@@ -175,11 +175,11 @@ class AuthoredPickupTransactionTests(unittest.IsolatedAsyncioTestCase):
         bridge.local_bridge = SimpleNamespace(command=command, read_status=Mock(return_value=stock))
         receipt = await bridge.command(pickup.ACTION, PAWN, slot, CASH)
         self.assertEqual(receipt[pickup.CASH_KEY]["amount"], 7)
-        self.assertGreater(receipt[pickup.CLAIM_REPLY_BYTES], 0)
+        self.assertGreater(receipt[native_loot.CLAIM_REPLY_BYTES], 0)
         self.assertIs(bridge._local_status, original)
         self.assertIs(bridge._parse_status(stock), original)
         host = SimpleNamespace(last_game=original, last_seen=1.0)
-        pickup.remember_claim_snapshot(host, bridge, receipt)
+        native_loot.remember_claim_snapshot(host, bridge, receipt)
         self.assertEqual(host.last_game, dict(original, native_wallet=57))
         self.assertEqual(host.last_seen, 1.0)
         self.assertEqual(bridge.snapshot()["native_wallet"], 57)

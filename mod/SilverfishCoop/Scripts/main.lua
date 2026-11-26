@@ -1787,9 +1787,28 @@ status_publication.pickup_presentation = {
 }
 
 status_publication.pickup_claims = {
-    ["native-authored-pickup-claim"] = true,
-    ["native-loose-pickup-claim"] = true,
+    ["native-authored-pickup-claim"] = native_authored_pickup.claim_reply,
+    ["native-loose-pickup-claim"] = native_authored_pickup.claim_reply,
+    ["native-loot-claim"] = native_loot_actions.claim_reply,
 }
+
+function status_publication.pickup_claim_reply(claim, fields, state, phase)
+    local accepted, message, records, cash = claim(fields, state, phase, status_row)
+    local rows = {
+        "native-pickup-claim-reply\t1",
+        status_row("schema", 1),
+        status_row("seq", sequence),
+        status_row("ack", fields[1], accepted and "accepted" or "error", message),
+        status_row("session", "host", phase, state.map, state.clients, state.server and 1 or 0),
+    }
+    if accepted then
+        for _, row in ipairs(records) do rows[#rows + 1] = row end
+        if cash then
+            for _, row in ipairs(wallet.rows(state, phase, status_row)) do rows[#rows + 1] = row end
+        end
+    end
+    return table.concat(rows, "\n") .. "\n"
+end
 
 status_publication.stock_interactions = {
     ["native-stock-door-guest-interact"] = {phase = "hosting", command = native_stock_door.command},
@@ -1869,12 +1888,13 @@ local function tick(fields, pending, periodic)
         if not periodic then return true end
         fields, pending = nil, nil
     end
-    if fields and pending and status_publication.pickup_claims[fields[2]] and current_phase == "hosting"
+    local pickup_claim = fields and status_publication.pickup_claims[fields[2]]
+    if pickup_claim and pending and current_phase == "hosting"
         and status_publication.steady(state, current_phase) then
         if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
         pending.dispatched = true
         SilverfishPublishLocalBridgeReply(pending.ticket,
-            native_authored_pickup.claim_reply(fields, state, current_phase, sequence, status_row))
+            status_publication.pickup_claim_reply(pickup_claim, fields, state, current_phase))
         if not periodic then return true end
         fields, pending = nil, nil
     end

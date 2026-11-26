@@ -41,10 +41,20 @@ FORCED_ROLL_STATUS = "opened_fixture_seeded"
 SPECIAL_MEMORY_CAPABILITY = "native_loot_special_memory"
 INSPECTION_BYTES = "native_loot_inspection_reply_bytes"
 OPEN_REPLY_BYTES = "native_loot_open_reply_bytes"
+CLAIM = "native-loot-claim"
+CLAIM_REPLY_HEADER = "native-pickup-claim-reply\t1\n"
+CLAIM_REPLY_BYTES = "native_pickup_claim_reply_bytes"
 
 
 def public_roll(roll: dict) -> dict:
     return {key: value for key, value in roll.items() if key != "escrow"}
+
+
+def remember_claim_snapshot(host, bridge, snapshot):
+    if CLAIM_REPLY_BYTES not in snapshot:
+        host.last_game, host.last_seen = snapshot, time.monotonic()
+    elif "native_wallet" in snapshot:
+        host.last_game = bridge.remember_local_wallet(host.last_game, snapshot)
 
 
 async def flush_pending_escrows(host, bridge, state):
@@ -943,8 +953,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             raise party.RuleError(proof["status"] or "native_loot_refused")
         if action == "inspect" and INSPECTION_BYTES in snapshot:
             return {"native_loot": proof, INSPECTION_BYTES: snapshot[INSPECTION_BYTES]}
-        compact_open = OPEN_REPLY_BYTES in snapshot
-        if not compact_open:
+        if action != "claim" and OPEN_REPLY_BYTES not in snapshot:
             host.last_game, host.last_seen = snapshot, time.monotonic()
         if action == "open":
             if proof.get("status") == "unlocked":
@@ -1032,6 +1041,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                 merge = verified_stack_merge(proof.get("merge", {}), guid, item.get("ammo"))
             elif proof["status"] not in ("claimed", "already_claimed") or "cash" in proof or "merge" in proof:
                 raise RuntimeError("The exact stock crate item transfer did not verify")
+            remember_claim_snapshot(host, bridge, snapshot)
 
             candidate = party.load_party(host.party)
             claimed = next(row for row in candidate[STATE_KEY][crate]["items"] if row["guid"] == guid)
@@ -1048,14 +1058,15 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                 if character == "host":
                     host.pending_host_save = bool(host.pending_host_save or merge)
                 else:
-                    host.queue_guest_save(character, pawn)
+                    host.queue_guest_save(character, pawn, game=snapshot)
             else:
                 revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}),
                                                         typed_inventory=bool(merge))
             host.party = candidate
             host.native_checkpoint_unsafe = False
             if deferred:
-                host.control.event("native_loot_claim_accepted", operation_id=operation_id, **result["native_loot_claim"])
+                host.control.event("native_loot_claim_accepted", operation_id=operation_id,
+                                   bridge_reply_bytes=snapshot.get(CLAIM_REPLY_BYTES), **result["native_loot_claim"])
             else:
                 host.control.event("native_loot_claim_committed", revision=revision, **result["native_loot_claim"])
             native_pickup_audio.committed(host, pawn, operation_id, claimed["class_path"], credit=credit)

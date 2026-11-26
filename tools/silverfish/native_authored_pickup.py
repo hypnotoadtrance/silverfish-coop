@@ -3,7 +3,7 @@
 import asyncio
 import time
 
-from . import native_black_box, native_dead_drop, native_dust_cabinet, native_host_save, native_pickup_audio, native_savlo_locker, party
+from . import native_black_box, native_dead_drop, native_dust_cabinet, native_host_save, native_loot, native_pickup_audio, native_savlo_locker, party
 from .authored_cash import BY_SOURCE as STOCK_CASH
 from .authored_supply import BY_SOURCE as STOCK_SUPPLIES, CRASH_SITE
 from .native_dialogue import PROTOTYPE_QUEST
@@ -105,8 +105,6 @@ MAP_SOURCES: dict[str, list[str]] = {}
 for source, (area, _, _) in SOURCES.items():
     MAP_SOURCES.setdefault(area, []).append(source)
 ACTION = "native-authored-pickup-claim"
-CLAIM_REPLY_HEADER = "native-pickup-claim-reply\t1\n"
-CLAIM_REPLY_BYTES = "native_pickup_claim_reply_bytes"
 MEMORY_CAPABILITY = "native_authored_pickup_memory"
 STATE_KEY = "native_authored_pickups"
 SOURCES_KEY = "native_authored_pickup_sources"
@@ -288,13 +286,6 @@ def parse_effect(fields, snapshot):
     return effect
 
 
-def remember_claim_snapshot(host, bridge, snapshot):
-    if CLAIM_REPLY_BYTES not in snapshot:
-        host.last_game, host.last_seen = snapshot, time.monotonic()
-    elif "native_wallet" in snapshot:
-        host.last_game = bridge.remember_local_wallet(host.last_game, snapshot)
-
-
 async def claim(host, bridge, character: str, target: str | None, operation_id: str, *, local_input=False) -> dict:
     if not isinstance(target, str) or not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
         raise party.RuleError("invalid_authored_pickup_request")
@@ -397,7 +388,7 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
             raise RuntimeError("The authored pickup append reported an unexpected stack merge")
         if not is_cash and not defer_save:
             await asyncio.to_thread(native_host_save.record, host.native_profile, slot, area, flush=True)
-        remember_claim_snapshot(host, bridge, snapshot)
+        native_loot.remember_claim_snapshot(host, bridge, snapshot)
         row = {"source": target, "map": area, "actor": actor, "class_path": item_class, "owner": character}
         if is_cash:
             row["wallet_credit"] = {key: credit[key] for key in ("amount", "before", "after", "stock_flag")}
@@ -430,6 +421,6 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
     host.party = candidate
     host.native_checkpoint_unsafe = False
     host.control.event("native_authored_pickup_committed", revision=revision, operation_id=operation_id,
-                       bridge_reply_bytes=snapshot.get(CLAIM_REPLY_BYTES), **row)
+                       bridge_reply_bytes=snapshot.get(native_loot.CLAIM_REPLY_BYTES), **row)
     native_pickup_audio.committed(host, pawn, operation_id, row["class_path"], credit=row.get("wallet_credit"))
     return result

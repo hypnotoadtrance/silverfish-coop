@@ -670,10 +670,11 @@ class Host:
     def guest_lease_ids(self) -> dict[str, str]:
         return {self.guest["character_id"]: self.guest["lease_id"]} if self.guest else {}
 
-    def queue_guest_save(self, character: str, pawn: str) -> None:
-        for alias, details in self.last_game.get("pawns", {}).items():
+    def queue_guest_save(self, character: str, pawn: str, *, game: dict | None = None) -> None:
+        game = self.last_game if game is None else game
+        for alias, details in game.get("pawns", {}).items():
             if details.get("name") == pawn:
-                self.pending_guest_saves[character] = (pawn, _pawn(self.last_game, alias))
+                self.pending_guest_saves[character] = (pawn, _pawn(game, alias))
                 return
         raise RuntimeError("The retained guest did not report its character state")
 

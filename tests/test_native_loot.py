@@ -12,6 +12,7 @@ from tools.silverfish.authored_loot import (CRATES, CRATE_NAMES_BY_INDEX, LEGACY
                                            PLACEMENTS, OVERRIDDEN_PLACEMENTS, SMALL_CABINET, full_name,
                                            lockable_container, loot_capacity, random_lid)
 from tools.silverfish.campaign import CampaignFormatError
+from tools.silverfish.service import Host
 from tools.silverfish.generate_authored_loot_registry import outputs, survey
 from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, OBSERVATORY, RAIL_YARD
 
@@ -642,6 +643,39 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
             await native_loot.perform(*args, "2" * 32, defer_save=True)
         host.checkpoint_native.assert_not_awaited()
         bridge.command.assert_awaited_once()
+
+    async def test_compact_guest_claim_preserves_world_cache_and_queues_exact_retained_pawn(self):
+        guest, pawn = "guest", "exact guest pawn"
+        roll = self.roll(CROSSROADS, OTHER_CRATE, "1" * 32)
+        item = roll["items"][0]
+        item["ammo"] = 4
+        host = self.host(CROSSROADS, {OTHER_CRATE: roll})
+        party.add_player(host.party, guest)
+        host.native_recipients = lambda: {guest: {"pawn": pawn, "connected": True}}
+        host.pending_guest_saves = {}
+        host.queue_guest_save = Host.queue_guest_save.__get__(host)
+        host.last_game["native_guest_save_retention"] = True
+        previous = host.last_game
+        bridge = runtime.Bridge(self.root, None)
+
+        async def reply(payload, timeout):
+            ticket, action, claimant, crate, guid, slot, retention = payload.decode().strip().split("\t")
+            self.assertEqual((action, claimant, crate, guid, slot, retention),
+                             (native_loot.CLAIM, pawn, OTHER_CRATE, item["guid"], roll["escrow"]["slot"], "defer-save"))
+            return (native_loot.CLAIM_REPLY_HEADER + f"schema\t1\nseq\t9\nsession\thost\thosting\t{CROSSROADS}\t1\t0\n"
+                    f"ack\t{ticket}\taccepted\tclaim\n"
+                    f"native-loot\tclaim\t{CROSSROADS}\t{crate}\t{pawn}\t1\tmerged\t0\t0\t-\t0\t100\t0\t1\t{slot}\t1\t0\n"
+                    f"native-loot-stack-merge\t{guid}\t{'B' * 32}\t4\t7\t11\n"
+                    f"pawn\tguest\t{pawn}\t90\t11\t22\t33\tcontroller\t100\n")
+
+        bridge.local_bridge = SimpleNamespace(command=AsyncMock(side_effect=reply))
+        result = await native_loot.perform(host, bridge, guest, "claim", f"{item['guid']}@{OTHER_CRATE}", OPERATION,
+                                           defer_save=True)
+        self.assertEqual(result["native_loot_claim"]["stack_merge"], dict(amount=4, before=7, after=11))
+        self.assertEqual(host.pending_guest_saves, {guest: (pawn, dict(map=CROSSROADS, location=[11, 22, 33], health=90))})
+        self.assertIs(host.last_game, previous)
+        self.assertIsNone(bridge._local_status)
+        host.checkpoint_native.assert_not_awaited()
 
     async def test_unverified_stock_crate_merge_fences_checkpoint_and_leaves_the_item_unclaimed(self):
         roll = self.roll(CROSSROADS, OTHER_CRATE, "1" * 32)

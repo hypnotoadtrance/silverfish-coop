@@ -1,6 +1,5 @@
 local pickup = {}
 local guest_save = require("guest_save")
-local wallet = require("wallet")
 local stock_input_fixture = require("native_authored_pickup_input_fixture")
 local drill_head = require("native_prototype_drill_pickup")
 local loot_projection = require("native_guest_drop_projection")
@@ -987,30 +986,17 @@ local function append_claim_rows(rows, state, status_row, report)
     end
 end
 
-function pickup.claim_reply(fields, state, phase, sequence, status_row)
+function pickup.claim_reply(fields, state, phase, status_row)
     local previous = report
     report = nil
     local accepted, message = pcall(pickup.command, fields, state, phase)
     local outcome = report
     report = previous
-    if accepted and not outcome then
-        accepted, message = false, "authored_pickup_claim_readback_unavailable"
-    end
-    local rows = {
-        "native-pickup-claim-reply\t1",
-        status_row("schema", 1),
-        status_row("seq", sequence),
-        status_row("ack", fields[1], accepted and "accepted" or "error", message),
-        status_row("session", "host", phase, state.map, state.clients, state.server and 1 or 0),
-    }
-    if accepted then
-        append_claim_rows(rows, state, status_row, outcome)
-        if outcome.cash then
-            local wallet_rows = wallet.rows(state, phase, status_row)
-            for _, row in ipairs(wallet_rows) do rows[#rows + 1] = row end
-        end
-    end
-    return table.concat(rows, "\n") .. "\n"
+    if not accepted then return false, message end
+    if not outcome then return false, "authored_pickup_claim_readback_unavailable" end
+    local rows = {}
+    append_claim_rows(rows, state, status_row, outcome)
+    return true, message, rows, outcome.cash ~= nil
 end
 
 function pickup.rows(state, phase, status_row)
