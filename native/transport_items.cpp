@@ -3017,7 +3017,7 @@ namespace
     }
 
     std::optional<std::array<int, 3>> personal_preview_flags(Unreal::FMapProperty* flags, Unreal::UObject* save,
-                                                            Unreal::UObject* scratch)
+                                                            Unreal::UObject* scratch, std::string& reason)
     {
         auto* before = flags->ContainerPtrToValuePtr<Unreal::FScriptMap>(save);
         auto* after = flags->ContainerPtrToValuePtr<Unreal::FScriptMap>(scratch);
@@ -3028,7 +3028,10 @@ namespace
             before->Num() < 0 || before->Num() > before->GetMaxIndex() || before->GetMaxIndex() > inventory_limit ||
             after->Num() < before->Num() || after->Num() > before->Num() + 3 ||
             after->Num() > after->GetMaxIndex() || after->GetMaxIndex() > inventory_limit)
+        {
+            reason = std::format("flag count {} to {}", before->Num(), after->Num());
             return {};
+        }
         const auto layout = Unreal::FScriptMap::GetScriptLayout(
             key->GetSize(), key->GetMinAlignment(), number->GetSize(), number->GetMinAlignment());
         if (number->GetOffset_Internal() != layout.ValueOffset) return {};
@@ -3055,7 +3058,11 @@ namespace
             const int original = previous ? number->GetPropertyValue(previous) : 0;
             if (name == fatigue || name == intox)
             {
-                if (original < 0 || original > 100 || actual < 0 || actual > 100) return {};
+                if (original < 0 || original > 100 || actual < 0 || actual > 100)
+                {
+                    reason = std::format("personal value {} to {}", original, actual);
+                    return {};
+                }
                 differences[name == fatigue ? 0 : 1] = actual - original;
             }
             else if (name == sickness)
@@ -3065,7 +3072,10 @@ namespace
                 differences[2] = static_cast<int>(delta);
             }
             else if (!previous || actual != original)
+            {
+                reason = RC::to_utf8_string(name.ToString());
                 return {};
+            }
         }
         if (preserved != before->Num()) return {};
         return differences;
@@ -3206,8 +3216,11 @@ namespace
         if (canonical_host_save() != save || !drop_argument(address, epoch, false))
             return refuse("personal_preview_restore");
         if (!preview.applied) return refuse("personal_preview_no_effect");
-        const auto flags_delta = personal_preview_flags(flags, save, scratch);
-        if (!flags_delta) return refuse("personal_preview_unhandled_flags");
+        std::string flag_reason;
+        const auto flags_delta = personal_preview_flags(flags, save, scratch, flag_reason);
+        if (!flags_delta)
+            return refuse(flag_reason.empty() ? "personal_preview_unhandled_flags" :
+                std::string("personal_preview_unhandled_flags: ").append(flag_reason));
         for (auto* property : unchanged)
             if (!property->Identical(property->ContainerPtrToValuePtr<void>(save), property->ContainerPtrToValuePtr<void>(scratch)))
                 return refuse("personal_preview_unhandled_effect");

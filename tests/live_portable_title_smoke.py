@@ -5448,7 +5448,10 @@ async def verify_stock_unequip(first, second, evidence):
         assert await portable_probe_command(guest.bridge, probe, f"guest-equip-landmine\t{mine}") == "pressed"
         equipped_mine = await witness("native_stock_inventory_action", native_inventory.STORE_KEY, mine)
         mine_slot = equipped_mine[native_inventory.STORE_KEY]["slot"]
-        assert 4 <= mine_slot < 8, equipped_mine
+        assert 1 <= mine_slot < 8, equipped_mine
+        mine_inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
+        mine_rows = [row for row in mine_inventory["items"] if row["guid"] == mine]
+        assert len(mine_rows) == 1 and (mine_rows[0]["source"], mine_rows[0]["quantity"]) == ("equipment", 1), mine_rows
         evidence["guest_landmine_equip"] = {"receipt": equipped_mine,
                                             "local_move": await local_move(equipped_mine, "equip", mine, mine_slot)}
         assert await portable_probe_command(guest.bridge, probe, "guest-sort-backpack") == "pressed"

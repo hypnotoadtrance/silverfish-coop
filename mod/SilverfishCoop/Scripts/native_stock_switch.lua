@@ -283,9 +283,11 @@ end
 local function project(entry, powered, angles, lights)
     local actor, lever = entry.actor, entry.lever
     if entry.candle then
-        if actor.Lit ~= powered or entry.lantern and
-            (entry.light:IsVisible() ~= powered or entry.flame:IsActive() ~= powered) then
+        if actor.Lit ~= powered or entry.lantern and entry.light:IsVisible() ~= powered then
             actor:SetLitUnlit(powered, false)
+        end
+        if entry.lantern and entry.flame:IsActive() ~= powered then
+            if powered then entry.flame:Activate(true) else entry.flame:Deactivate() end
         end
         suppress_candle_overlap(actor:GetFullName(), entry.box)
         if actor.Lit ~= powered or entry.light:IsVisible() ~= powered then error("stock_switch_candle_unverified", 0) end
