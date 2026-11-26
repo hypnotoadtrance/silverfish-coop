@@ -251,7 +251,8 @@ namespace
         Unreal::UFunction* notify{};
         Unreal::FStructProperty* body_instance{};
         Unreal::FBoolProperty* simulating{};
-        Unreal::FWeakObjectPtr pawn{}, actor{}, root{}, grip{}, world{}, driver{}, server{};
+        Unreal::FBoolProperty* level_visible{};
+        Unreal::FWeakObjectPtr pawn{}, actor{}, root{}, grip{}, level{}, world{}, driver{}, server{};
         std::uint64_t scope_generation{};
         std::string lease;
         Clock::time_point expires{};
@@ -1295,8 +1296,13 @@ namespace
         auto* actor = bound.actor.Get();
         auto* root = bound.root.Get();
         auto* grip = bound.grip.Get();
-        if (!pawn || pawn != scope.pawn.Get() || !standing(pawn) || !live(root) || !live(grip) ||
-            !live_actor(actor, scope.world.Get(), 1)) return false; // ROLE_SimulatedProxy
+        auto* level = bound.level.Get();
+        if (!pawn || pawn != scope.pawn.Get() || !standing(pawn) || !live(root) || !live(grip) || !live(level) ||
+            !live_actor_role(actor, 1)) return false; // ROLE_SimulatedProxy
+        auto* placed = static_cast<Unreal::AActor*>(actor);
+        if (placed->GetLevel() != level ||
+            (bound.level_visible ? !bound.level_visible->GetPropertyValueInContainer(level)
+                                 : placed->GetWorld() != scope.world.Get())) return false;
         auto* movement = field<Unreal::FBoolProperty>(actor, STR("bReplicateMovement"));
         return movement && movement->GetPropertyValueInContainer(actor) &&
             object_field(pawn, STR("HeldObject")) == actor && object_field(pawn, STR("PhysicsHandle")) == grip &&
@@ -1448,10 +1454,14 @@ namespace
         auto* core = find<Unreal::UClass>(STR("/Game/Classes/Actors/MindCore_BP.MindCore_BP_C"));
         auto* mesh = find<Unreal::UClass>(STR("/Script/Engine.StaticMeshComponent"));
         auto* world = scope.world.Get();
-        auto* level = object_field(world, STR("PersistentLevel"));
-        if (!base || !actor->IsA(base) || (core && actor->IsA(core)) || !mesh || !root->IsA(mesh) || !live(level) ||
-            actor->GetOuterPrivate() != level)
+        if (!base || !actor->IsA(base) || (core && actor->IsA(core)) || !mesh || !root->IsA(mesh) ||
+            !silverfish::native_zone::visible_actor_level(static_cast<Unreal::AActor*>(actor),
+                                                          static_cast<Unreal::UWorld*>(world)))
             return report(lua, false, "stock_prop_movement_replica");
+        auto* level = static_cast<Unreal::AActor*>(actor)->GetLevel();
+        const bool streamed = level != object_field(world, STR("PersistentLevel"));
+        auto* visible = streamed ? field<Unreal::FBoolProperty>(level, STR("bIsVisible")) : nullptr;
+        if (streamed && !visible) return report(lua, false, "stock_prop_movement_replica");
 
         auto* owner_type = find<Unreal::UClass>(STR("/Script/Engine.Actor"));
         auto* notify = find<Unreal::UFunction>(STR("/Script/Engine.Actor:OnRep_ReplicatedMovement"));
@@ -1465,8 +1475,9 @@ namespace
             !instance_type || !body || body->GetStruct().Get() != instance_type || !simulating)
             return report(lua, false, "stock_prop_movement_schema");
 
-        PropCarryMovement next{notify, body, simulating, pawn, actor, root, grip, world, scope.driver, scope.server,
-                               scope.generation, lease_id, now + std::chrono::milliseconds(duration)};
+        PropCarryMovement next{notify, body, simulating, visible, pawn, actor, root, grip, level, world,
+                               scope.driver, scope.server, scope.generation, lease_id,
+                               now + std::chrono::milliseconds(duration)};
         if (!current_prop_grip(next, now)) return report(lua, false, "stock_prop_movement_grip");
         prop_movement = std::move(next);
         return report(lua, true, "stock_prop_movement_armed");

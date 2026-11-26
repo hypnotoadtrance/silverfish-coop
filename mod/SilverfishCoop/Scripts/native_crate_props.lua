@@ -1,5 +1,6 @@
 local props = {}
 local carry = require("native_prop_carry")
+local world_path = require("world_path")
 
 local spawner_path = "/Game/Classes/Actors/Lootables/Loot_Spawner.Loot_Spawner_C"
 local container_path = "/Game/Classes/Actors/Lootables/LootContainer_Master_BP.LootContainer_Master_BP_C"
@@ -148,13 +149,14 @@ local function enroll_placed_props(state, phase)
         placed_props = nil
         return
     end
-    if not placed_props or not same(placed_props.world, state.world) then
+    local streams = world_path.visible_streams(state.world)
+    if not placed_props or not same(placed_props.world, state.world) or placed_props.streams ~= streams then
         local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
         local base = StaticFindObject(prop_path)
         if not valid(api) or not valid(base) then return end
         local result = {}
         api:GetAllActorsOfClass(state.world, base, result)
-        placed_props = {world = state.world, actors = {}, pending = result.OutActors or result, index = 1}
+        placed_props = {world = state.world, streams = streams, actors = {}, pending = result.OutActors or result, index = 1}
     end
     local scan = placed_props
     if not scan.pending then return end
@@ -165,9 +167,8 @@ local function enroll_placed_props(state, phase)
         local actor = scan.pending[index]
         if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
         local mesh = valid(actor) and root_mesh(actor)
-        if mesh and (not valid(core) or not actor:IsA(core)) and actor:HasAnyFlags(EObjectFlags.RF_WasLoaded)
-            and actor.bNetLoadOnClient == true and actor:HasAuthority() and not actor:IsActorBeingDestroyed()
-            and same(actor:GetWorld(), state.world) and same(actor:GetOuter(), state.world.PersistentLevel)
+        local level = mesh and carry.placed_level(actor, state.world, streams)
+        if level and (not valid(core) or not actor:IsA(core)) and actor:HasAuthority()
             and mesh:IsSimulatingPhysics(bone) == true and carry.publish_motion(actor) and carry.enroll(actor) then
             if fixtures then
                 local name = actor:GetFullName()
@@ -176,8 +177,9 @@ local function enroll_placed_props(state, phase)
                 local stem = name:match("^(Prop_%w+)_C ")
                 local labels = barrel_types[stem]
                 if mass > 0 and mass <= 10000 then
-                    scan.actors[name] = {actor = actor, class = class, mass = mass,
-                        barrel = labels and authored_index(name, labels) ~= nil}
+                    local streamed = not same(level, state.world.PersistentLevel)
+                    scan.actors[name] = {actor = actor, class = class, mass = mass, streamed = streamed,
+                        barrel = not streamed and labels and authored_index(name, labels) ~= nil}
                 end
             end
         end
@@ -204,9 +206,10 @@ function props.rows(state, phase, row)
     end
     if fixtures and placed_props and same(placed_props.world, state.world) then
         for name, entry in pairs(placed_props.actors) do
-            if valid(entry.actor) and not entry.actor:IsActorBeingDestroyed() then
+            if world_path.visible_actor_level(entry.actor, state.world, placed_props.streams) then
                 if entry.class then
-                    result[#result + 1] = row("native-authored-physics-prop", state.map, name, entry.class, entry.mass)
+                    result[#result + 1] = row("native-authored-physics-prop", state.map,
+                        entry.streamed and "stream:" .. name or name, entry.class, entry.mass)
                 end
                 if entry.barrel then
                     result[#result + 1] = row("native-authored-physics-barrel", state.map, name, entry.mass)

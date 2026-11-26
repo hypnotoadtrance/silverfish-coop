@@ -32,7 +32,7 @@
                         return table.concat({actor:GetFullName(), "world=" .. tostring(same(actor:GetWorld(), state.world)),
                             "authority=" .. tostring(actor:HasAuthority()), "visible=" .. tostring(scope.bIsVisible),
                             "qualified=" .. tostring(qualified(actor, state.world) ~= nil),
-                            "known=" .. tostring(known_streams[scope:GetAddress()] ~= nil),
+                            "visible-in-census=" .. tostring(visible_streams and visible_streams[scope:GetAddress()] ~= nil),
                             "cached=" .. tostring(entries[actor:GetFullName()] ~= nil)}, ";")
                     end
                     return actor:GetFullName()

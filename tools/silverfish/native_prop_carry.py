@@ -12,6 +12,7 @@ import uuid
 from . import native_loot, party
 from .content_paths import item_class_name
 from .link import STATE_INTERVAL
+from .native_map_preflight import valid_campaign_package
 
 ACTION = "native-prop-carry"
 AIM = "native-prop-carry-aim"
@@ -33,6 +34,8 @@ FILTER_READY_ROW = "native-prop-carry-filter-ready"
 FILTER_READY = "native_prop_carry_filter_ready"
 _PLACED_NAME = re.compile(r"[A-Za-z0-9_-]{1,100}\Z")
 _LOCAL_INSTANCE = re.compile(r"[A-Za-z0-9_-]{1,200}\Z")
+_STREAM_PATH = re.compile(r"(/[A-Za-z0-9_/]+)\.[A-Za-z0-9_]+:PersistentLevel\.([A-Za-z0-9_-]+)")
+_STREAM_PREFIX = "stream:"
 _BONE = re.compile(r"[A-Za-z0-9_ .-]{1,64}\Z")
 _EDGES = {"grab", "drop", "throw"}
 _ORDER_LIMIT = 2**53
@@ -87,16 +90,35 @@ def _corpse(fields):
     return dict(corpse=identifier, bone=bone)
 
 
+def _placement(path, area, streamed, instance=_PLACED_NAME):
+    if len(path) > 320:
+        return False
+    if streamed:
+        match = _STREAM_PATH.fullmatch(path)
+        return bool(match and match[1] != area and valid_campaign_package(match[1]) and instance.fullmatch(match[2]))
+    prefix = f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel."
+    return path.startswith(prefix) and instance.fullmatch(path[len(prefix):])
+
+
+def _actor_reference(raw, area, instance=_PLACED_NAME):
+    streamed = raw.startswith(_STREAM_PREFIX)
+    name = raw.removeprefix(_STREAM_PREFIX)
+    kind, _, path = name.partition(" ")
+    if kind.endswith("_C") and _LOCAL_INSTANCE.fullmatch(kind) and _placement(path, area, streamed, instance):
+        return name
+
+
 def _identity(fields, area):
     if len(fields) != 1:
         return _corpse(fields)
     path = fields[0]
     if path.startswith("loot:") and _token(path[5:]):
         return {"loot_id": path[5:]}
-    prefix = f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel."
-    if len(path) > 320 or not path.startswith(prefix) or not _PLACED_NAME.fullmatch(path[len(prefix):]):
+    streamed = path.startswith(_STREAM_PREFIX)
+    path = path.removeprefix(_STREAM_PREFIX)
+    if not _placement(path, area, streamed):
         raise ValueError("Invalid placed physics carry target")
-    return {"placement": path}
+    return {"placement": path, "streamed": True} if streamed else {"placement": path}
 
 
 def parse(fields, phase, area):
@@ -136,12 +158,11 @@ def parse(fields, phase, area):
         if len(fields) != 5 or phase != "hosting" or not area or not _class(fields[3]):
             raise ValueError("Invalid placed stock physics prop")
         name = fields[3].rsplit(".", 1)[-1]
-        level = area.rsplit("/", 1)[-1]
-        prefix = f"{name} {area}.{level}:PersistentLevel."
+        actor = _actor_reference(fields[2], area)
         mass, = _numbers(fields[4:], (10000,))
-        if not fields[2].startswith(prefix) or not _PLACED_NAME.fullmatch(fields[2][len(prefix):]) or mass <= 0:
+        if not actor or not actor.startswith(name + " ") or mass <= 0:
             raise ValueError("Invalid placed stock physics prop identity")
-        return dict(actor=fields[2], class_path=fields[3], mass=mass)
+        return dict(actor=actor, class_path=fields[3], mass=mass)
     if fields[0] == HELD_ROW:
         if len(fields) != 7 or phase != "hosting" or not _token(fields[2]):
             raise ValueError("Invalid host stock grip confirmation")
@@ -179,11 +200,8 @@ def parse(fields, phase, area):
         raise ValueError("Invalid stock physics grip")
     grip = dict(grab=_serial(fields[2]), pose=_numbers(fields[3:9], _POSE_LIMITS))
     if len(fields) == 10:
-        actor = fields[9]
-        kind, _, path = actor.partition(" ")
-        prefix = f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel."
-        if (not kind.endswith("_C") or not _LOCAL_INSTANCE.fullmatch(kind)
-                or not path.startswith(prefix) or not _LOCAL_INSTANCE.fullmatch(path[len(prefix):])):
+        actor = _actor_reference(fields[9], area, _LOCAL_INSTANCE)
+        if not actor:
             raise ValueError("Invalid local stock physics grip actor")
         grip["actor"] = actor
     return grip
@@ -351,7 +369,8 @@ class Guest:
         if edge == "grab" and "corpse" in row:
             suffix += (str(row["corpse"]), row["bone"])
         elif edge == "grab" and "placement" in row:
-            suffix += (row["placement"],)
+            scope = _STREAM_PREFIX if row.get("streamed") else ""
+            suffix += (scope + row["placement"],)
         elif edge == "grab" and "loot_id" in row:
             suffix += ("loot:" + row["loot_id"],)
         elif edge != "grab" and service.gameplay.get(RELEASE_POSE) is True and "release_pose" in row:

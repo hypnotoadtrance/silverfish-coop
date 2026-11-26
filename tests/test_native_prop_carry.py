@@ -123,6 +123,24 @@ class CorpseCarryPayloadTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             carry.parse([*fields[:-1], path.replace("CrossRoads_P", "Observitory_P")], "connected", self.area)
 
+    def test_streamed_placement_and_grip_reference_keep_the_exact_actor(self):
+        path = "/CommunityMaps/WorkshopInstance.Workshop:PersistentLevel.SteelRoller_C_2"
+        kind = "SteelRoller_C"
+        actor = f"{kind} {path}"
+        prop_class = "/CommunityProps/Workshop/SteelRoller.SteelRoller_C"
+        request = [*self.edge, "stream:" + path]
+        request[5] = prop_class
+        grab = carry.parse(request, "connected", self.area)
+        self.assertEqual((grab["placement"], grab["streamed"]), (path, True))
+        grip = ["native-prop-carry-target", self.area, "1", "0", "0", "0", "0", "0", "0", "stream:" + actor]
+        self.assertEqual(carry.parse(grip, "connected", self.area)["actor"], actor)
+        prop = [carry.PLACED_PROP_ROW, self.area, "stream:" + actor, prop_class, "15.5"]
+        self.assertEqual(carry.parse(prop, "hosting", self.area)["actor"], actor)
+        for wrong in (path, "stream:" + path.replace("/WorkshopInstance", "/../WorkshopInstance"),
+                      "stream:" + self.area + ".CrossRoads_P:PersistentLevel.SteelRoller_C_2"):
+            with self.subTest(path=wrong), self.assertRaisesRegex(ValueError, "placed physics"):
+                carry.parse([*request[:-1], wrong], "connected", self.area)
+
     def test_mounted_class_preserves_exact_level_placement(self):
         area = "/CommunityMaps/Workshop"
         path = f"{area}.Workshop:PersistentLevel.SteelRoller_C_2"

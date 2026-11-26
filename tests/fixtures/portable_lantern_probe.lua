@@ -10,7 +10,7 @@ local toolbox_path = map .. ":PersistentLevel.Prop_ToolBox01_C_7"
 local stalker_path = map .. ":PersistentLevel.NPC_LoneStalker_C_0"
 local command, reply = mailbox .. "/portable-lantern-command.tsv", mailbox .. "/portable-lantern-reply.tsv"
 local color = {R = 0, G = 0, B = 0, A = 0}
-local last, watch, dynamic
+local last, watch, dynamic, placed_stream, placed_scope
 
 local function valid(object) return object and object:IsValid() end
 local function same(first, second)
@@ -384,6 +384,64 @@ local function dynamic_probe(action, world, pawn, source_prop)
     return "removed"
 end
 
+local function streamed_probe(action, world, pawn, source_prop)
+    assert(pawn:IsLocallyControlled() and pawn:HasAuthority() == (lane == "first"), "wrong streamed prop seat")
+    if action == "streamload" then
+        local loading = StaticFindObject("/Script/Engine.Default__LevelStreamingDynamic")
+        placed_stream = loading:LoadLevelInstance(world, "/Game/Classes/Maps/Maps_OverWorld/Observitory_P",
+            {X = 65000, Y = 65000, Z = 2500}, {Pitch = 0, Yaw = 0, Roll = 0}, {}, "CoopPhysicsSublevel", nil, false)
+        assert(valid(placed_stream))
+        placed_scope = world
+        return "loading"
+    end
+    assert(valid(placed_stream) and same(placed_scope, world))
+    if action == "streamunload" then
+        placed_stream:SetShouldBeVisible(false)
+        placed_stream:SetShouldBeLoaded(false)
+        return "unloading"
+    end
+    if not placed_stream:IsLevelVisible() then return "absent" end
+    local level = placed_stream:GetLoadedLevel()
+    local level_path = level:GetFullName():match("^%S+ (.+)$")
+    local actor = StaticFindObject(level_path .. ".Prop_ToolBox01_C_7")
+    assert(valid(actor) and same(actor:GetOuter(), level), "the sublevel did not contain the stock toolbox")
+    local root = actor.PropMesh
+    if action == "streamstate" then
+        return table.concat({actor:GetFullName(), tostring(actor:GetLocalRole()),
+            tostring(actor.bReplicateMovement), tostring(holds(pawn, actor, root)),
+            tostring(actor:HasAnyFlags(EObjectFlags.RF_WasLoaded)), position_text(actor:K2_GetActorLocation())}, ";")
+    end
+    if action == "streamplacehost" or action == "streamplaceguest" then
+        assert(lane == "first" and actor:HasAuthority() and actor.bReplicateMovement == true
+            and root:IsSimulatingPhysics(FName("None")), "the placed prop is missing authoritative motion")
+        local other = other_player(world, pawn)
+        local thrower = action == "streamplacehost" and pawn or other
+        local opposite = same(thrower, pawn) and other or pawn
+        local from, to = thrower:K2_GetActorLocation(), opposite:K2_GetActorLocation()
+        local dx, dy = to.X-from.X, to.Y-from.Y
+        local distance = math.sqrt(dx*dx+dy*dy)
+        assert(distance > 250, "the streamed carry lane is too short")
+        local point = {X=from.X+110*dx/distance,Y=from.Y+110*dy/distance,Z=from.Z-25}
+        assert(actor:K2_SetActorLocation(point, false, {}, true))
+        local zero, bone = {X=0,Y=0,Z=0}, FName("None")
+        root:SetPhysicsLinearVelocity(zero, false, bone)
+        root:SetPhysicsAngularVelocityInDegrees(zero, false, bone)
+        actor:ForceNetUpdate()
+        return position_text(point)
+    end
+    if action == "streamlane" then
+        assert(lane == "first")
+        return impact_lane(pawn, other_player(world, pawn), source_prop)
+    end
+    if action == "streamgrab" then return host_grab(pawn, actor, root) end
+    if action == "streamsweep" then
+        return sweep_lantern(world, world.NetDriver, pawn, actor, root, lane == "first" and {} or nil)
+    end
+    assert(action == "streamdrop" and holds(pawn, actor, root))
+    pawn:Grab_Release_Object(false, true, false)
+    return "dropped"
+end
+
 local function verify(action, pawn_name)
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
@@ -404,6 +462,7 @@ local function verify(action, pawn_name)
     assert(valid(pawn) and pawn:GetFullName() == pawn_name and same(pawn:GetWorld(), world) and pawn.Dead == false,
         "unqualified Observatory pawn")
     if action:match("^dynamic") then return dynamic_probe(action, world, pawn, lantern) end
+    if action:match("^stream") then return streamed_probe(action, world, pawn, lantern) end
     if action:match("^impact") then
         assert(pawn:IsLocallyControlled() and pawn:HasAuthority() == (lane == "first"), "wrong impact seat")
         return impact_probe(action, world, pawn, lantern, root)

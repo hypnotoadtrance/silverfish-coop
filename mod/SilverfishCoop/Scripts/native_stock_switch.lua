@@ -29,7 +29,7 @@ local bulb_profiles = {
     ["/Game/Classes/DynamicLights/Dynamic_SpotLight_Master_BP.Dynamic_SpotLight_Master_BP_C"] = "SpotLight",
 }
 local statics_path = "/Script/Engine.Default__GameplayStatics"
-local world, entries, dirty, known_streams, visible_streams, next_stream_check
+local world, entries, dirty, visible_streams
 local candle_overlaps, retired_lamps = {}, {}
 
 local function valid(object) return object and object:IsValid() end
@@ -123,39 +123,13 @@ function switches.start()
             end)
         end
     end
-    if type(RegisterBeginPlayPostHook) == "function" then
-        RegisterBeginPlayPostHook(function(context)
-            if not dirty then return end
-            local actor = context:get()
-            local level = valid(actor) and actor:GetOuter()
-            local address = valid(level) and level:GetAddress()
-            if address and not known_streams[address] and not same(level, world.PersistentLevel) then
-                -- A streamed actor can report its asset world. The census verifies the
-                -- owning level against the campaign's actual streaming instance.
-                known_streams[address] = level
-            end
-        end)
-    end
+    world_path.start_stream_tracking()
 end
 
 local function refresh_streamed_levels()
-    local now = os.clock()
-    if now < next_stream_check then return end
-    next_stream_check = now + .25
-    local current, changed = {}, false
-    for address, level in pairs(known_streams) do
-        if not valid(level) then
-            known_streams[address] = nil
-        elseif world_path.visible_streaming_level(level, world) then
-            current[address] = true
-            if not visible_streams[address] then changed = true end
-        end
-    end
-    for address in pairs(visible_streams) do
-        if not current[address] then changed = true end
-    end
+    local current = world_path.visible_streams(world)
+    if current == visible_streams then return end
     visible_streams = current
-    if not changed then return end
     for name, entry in pairs(entries) do
         if not valid(entry.level) then entries[name] = nil end
     end
@@ -170,7 +144,7 @@ local function census(state, phase)
         return {}
     end
     if not same(world, state.world) then
-        world, entries, dirty, known_streams, visible_streams, next_stream_check = state.world, {}, {}, {}, {}, 0
+        world, entries, dirty, visible_streams = state.world, {}, {}, nil
         for kind in pairs(profiles) do dirty[kind] = true end
     end
     local changed_levels = refresh_streamed_levels()
@@ -187,7 +161,7 @@ local function census(state, phase)
                 if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
                 local level = qualified(actor, world)
                 if level and (phase ~= "hosting" or actor:HasAuthority()) then
-                    if not same(level, world.PersistentLevel) then known_streams[level:GetAddress()] = level end
+                    world_path.remember_level(world, level)
                     local name = actor:GetFullName()
                     local package, path = placed_actor(name)
                     local previous = entries[name]

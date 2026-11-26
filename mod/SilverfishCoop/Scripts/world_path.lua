@@ -1,4 +1,5 @@
 local world_path = {}
+local stream_world, known_levels, visible_levels, next_stream_check
 
 function world_path.leaf(package)
     if type(package) ~= "string" or package == "/Game/Classes/Maps/MainMenu_P" or package:find("//", 1, true) then return end
@@ -32,14 +33,61 @@ function world_path.visible_streaming_level(level, world)
     end
 end
 
-function world_path.visible_actor_level(actor, world)
+function world_path.visible_actor_level(actor, world, streams)
     if not valid(actor) or not valid(world) or actor:IsActorBeingDestroyed() then return end
     local level = actor:GetOuter()
     if same(level, world.PersistentLevel) then
         if same(actor:GetWorld(), world) then return level end
         return
     end
+    if streams then
+        if valid(level) and level.bIsVisible == true and same(level, streams[level:GetAddress()]) then return level end
+        return
+    end
     return world_path.visible_streaming_level(level, world)
+end
+
+function world_path.start_stream_tracking()
+    if type(RegisterBeginPlayPostHook) ~= "function" then return end
+    RegisterBeginPlayPostHook(function(context)
+        if not valid(stream_world) then return end
+        local actor = context:get()
+        local level = valid(actor) and actor:GetOuter()
+        local address = valid(level) and level:GetAddress()
+        if address and not known_levels[address] and not same(level, stream_world.PersistentLevel) then
+            known_levels[address] = level
+        end
+    end)
+end
+
+function world_path.remember_level(world, level)
+    if same(stream_world, world) and valid(level) and not same(level, world.PersistentLevel) then
+        known_levels[level:GetAddress()] = level
+    end
+end
+
+-- Return the same table until stream visibility changes so each census can reuse its results.
+function world_path.visible_streams(world)
+    if not same(stream_world, world) then
+        stream_world, known_levels, visible_levels, next_stream_check = world, {}, {}, 0
+    end
+    local now = os.clock()
+    if now < next_stream_check then return visible_levels end
+    next_stream_check = now + .25
+    local current, changed = {}, false
+    for address, level in pairs(known_levels) do
+        if not valid(level) then
+            known_levels[address] = nil
+        elseif world_path.visible_streaming_level(level, world) then
+            current[address] = level
+            if not same(level, visible_levels[address]) then changed = true end
+        end
+    end
+    for address in pairs(visible_levels) do
+        if not current[address] then changed = true end
+    end
+    if changed then visible_levels = current end
+    return visible_levels
 end
 
 return world_path

@@ -22,6 +22,7 @@ local pawn_channel, ignore_collision, block_collision = 2, 0, 2
 local color = {R = 0, G = 0, B = 0, A = 0}
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local world, state, phase, hook, release_hook, mailbox, sequence, next_read, next_local_pose
+local visible_streams
 local enrolled, holdings, edges, local_hold, latest = {}, {}, {}, nil, nil
 local published_edge = 0
 local host_release
@@ -54,17 +55,26 @@ local function actor_class(actor)
     if content_paths.item_class(path, 200) then return path end
 end
 
+local function active_level(actor)
+    return world_path.visible_actor_level(actor, world, visible_streams)
+end
+
 local function item_box(actor)
-    if not valid(actor) or not same(actor:GetWorld(), world) or actor:IsActorBeingDestroyed() then return end
+    if not active_level(actor) then return end
     local base = StaticFindObject(item_path)
     if not valid(base) or not actor:IsA(base) then return end
     local box = actor.Box
     if same(box, actor.RootComponent) and same(box:GetOwner(), actor) then return box end
 end
 
+function carry.placed_level(actor, scope, streams)
+    if valid(actor) and actor.bNetLoadOnClient == true and actor:HasAnyFlags(EObjectFlags.RF_WasLoaded) then
+        return world_path.visible_actor_level(actor, scope, streams)
+    end
+end
+
 local function placed_item(actor)
-    return actor.Physics == true and actor.bNetLoadOnClient == true and actor:HasAnyFlags(EObjectFlags.RF_WasLoaded)
-        and same(actor:GetOuter(), world.PersistentLevel)
+    return actor.Physics == true and carry.placed_level(actor, world, visible_streams)
 end
 
 local function item_body(actor)
@@ -79,8 +89,7 @@ end
 
 local function prop_mesh(actor)
     local base = StaticFindObject(prop_path)
-    if not valid(base) or not valid(actor) or not actor:IsA(base)
-        or not same(actor:GetWorld(), world) or actor:IsActorBeingDestroyed() then return end
+    if not valid(base) or not active_level(actor) or not actor:IsA(base) then return end
     local core = StaticFindObject(core_path)
     if valid(core) and actor:IsA(core) then return end
     local root = actor.PropMesh
@@ -131,8 +140,7 @@ end
 local function filter_root(entry, grip)
     local actor = entry.actor
     local root = rigid_root(entry, grip, FName("None", EFindName.FNAME_Find))
-    if root and same(root, prop_mesh(actor))
-        and same(actor:GetOuter(), world.PersistentLevel) then return root end
+    if root and same(root, prop_mesh(actor)) then return root end
 end
 
 local function filter_available()
@@ -318,9 +326,14 @@ local function observe(pawn, throwing, dropping)
     local class, pitch, yaw = actor_class(actor), camera_aim(pawn)
     local position = corpse and part:GetSocketLocation(corpse.bone) or actor:K2_GetActorLocation()
     local placement
-    if not corpse and actor:HasAnyFlags(EObjectFlags.RF_WasLoaded) and same(actor:GetOuter(), world.PersistentLevel) then
+    local level = not corpse and carry.placed_level(actor, world, visible_streams)
+    if level then
         local path = actor:GetFullName():match("^%S+ (.+)$")
-        if world_path.actor_package(path) then placement = path end
+        if same(level, world.PersistentLevel) then
+            if world_path.actor_package(path) then placement = path end
+        elseif world_path.level_actor_package(path) then
+            placement = "stream:" .. path
+        end
     end
     local birth = emit(pawn, "grab", class, position, pitch, yaw, corpse, placement, loot_id)
     if birth then local_hold = {actor = actor, pawn = pawn, class = class, serial = birth, corpse = corpse, loot_id = loot_id} end
@@ -406,7 +419,13 @@ local function trace(pawn, pitch, yaw, number, expected_bone, claimed, expected_
         end
     end
     if not number then
-        local selected = placement and StaticFindObject(placement)
+        local streamed = placement and placement:sub(1, 7) == "stream:"
+        local path = streamed and placement:sub(8) or placement
+        local selected = path and StaticFindObject(path)
+        if placement then
+            local level = carry.placed_level(selected, world, visible_streams)
+            if not level or streamed == same(level, world.PersistentLevel) then return nil, "placement scope" end
+        end
         if valid(selected) and same(selected, enrolled[selected:GetAddress()]) and selected:HasAuthority()
             and actor_class(selected) == expected_class and mesh(selected) and point(claimed) then
             local center = selected:K2_GetActorLocation()
@@ -1050,6 +1069,7 @@ function carry.rows(current, seat, row)
     local position, rotation = stock_target(grip)
     if position then
         local actor = filter_available() and filter_root(local_hold, grip) and local_hold.actor:GetFullName()
+        if actor and not same(local_hold.actor:GetOuter(), world.PersistentLevel) then actor = "stream:" .. actor end
         rows[#rows + 1] = row("native-prop-carry-target", current.map, local_hold.serial, position.X, position.Y,
             position.Z, rotation.Pitch, rotation.Yaw, rotation.Roll, actor or nil)
     end
@@ -1070,6 +1090,8 @@ function carry.sync(current, seat, bridge)
         host_release = nil
     end
     if seat ~= "hosting" then host_release = nil end
+    visible_streams = (seat == "hosting" or seat == "connected") and current.listening
+        and valid(world) and world_path.visible_streams(world) or nil
     state, phase, mailbox = current, seat, bridge and bridge .. "/native-prop-carry-poses"
     if not hook and type(RegisterHook) == "function" and valid(StaticFindObject(grab_path)) then
         if valid(StaticFindObject(release_component_path)) then

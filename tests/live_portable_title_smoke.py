@@ -6013,6 +6013,99 @@ async def verify_spawned_prop_carry(host: Seat, guest: Seat, pawn: str, evidence
     return {"spawned_prop_carry": evidence}
 
 
+async def verify_streamed_prop_carry(host: Seat, guest: Seat, pawn: str, evidence: dict) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    checkpoint = campaign_save_hashes(host.campaign)
+    snapshots = await asyncio.gather(*(wait_resident_status(run, lambda frame:
+        frame.get("game", {}).get("map") == OBSERVATORY and frame["game"].get("pawns", {}).get("local", {}).get("name"))
+        for run in (host_run, guest_run)))
+    host_pawn, guest_pawn = (frame["game"]["pawns"]["local"]["name"] for frame in snapshots)
+
+    async def call(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-lantern",
+                                            f"{action}\t{host_pawn if seat is host else guest_pawn}")
+
+    async def state(seat):
+        message = await call(seat, "streamstate")
+        if message == "absent":
+            return None
+        name, role, motion, held, authored, position = message.split(";")
+        return dict(actor=name, role=int(role), motion=motion == "true", held=held == "true",
+                    authored=authored == "true", position=list(map(float, position.split())))
+
+    async def wait_prop(seat, accepts, *, timeout=12):
+        current = None
+        try:
+            async with asyncio.timeout(timeout):
+                while not (current := await state(seat)) or not accepts(current):
+                    await asyncio.sleep(.08)
+        except TimeoutError as error:
+            seat_name = "host" if seat is host else "guest"
+            raise AssertionError(f"Streamed Toolbox did not reach the expected state on {seat_name}: {current}") from error
+        return current
+
+    assert await call(host, "streamload") == "loading"
+    listed = evidence["initial_host"] = await wait_prop(host, lambda row: row["motion"])
+    identity = listed["actor"]
+    assert listed["authored"] and "/CoopPhysicsSublevel." in identity
+    await wait_resident_status(host_run, lambda frame: identity in frame.get("game", {}).get(native_prop_carry.PLACED_PROPS, {}))
+    point = tuple(map(float, (await call(host, "streamlane")).split()))
+    await wait_resident_status(guest_run, lambda frame: (
+        (location := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
+        and math.dist(location, point) < 45))
+    assert await call(host, "streamplaceguest")
+    at_host = await state(host)
+    assert await call(guest, "streamload") == "loading"
+    evidence["late_replica"] = await wait_prop(guest, lambda row: row["actor"] == identity and row["role"] == 1
+        and row["motion"] and math.dist(row["position"], at_host["position"]) < 35)
+
+    for name, carrier in (("guest", guest), ("host", host)):
+        observation = evidence[name] = {}
+        if carrier is host:
+            center = tuple(map(float, (await call(host, "streamplacehost")).split()))
+            await wait_prop(guest, lambda row: math.dist(row["position"], center) < 50)
+        before = observation["before"] = await state(host)
+        assert before and await call(carrier, "streamgrab") == "grabbed"
+        if carrier is guest:
+            grabbed = await wait_resident_status(host_run, lambda frame:
+                (edge := frame.get("game", {}).get(native_prop_carry.PROOF, {}))
+                and (edge["edge"], edge["actor"]) == ("grab", identity))
+            lease = grabbed["game"][native_prop_carry.PROOF]["lease"]
+            filtered = await wait_resident_status(guest_run, lambda frame:
+                (gate := frame.get("game", {}).get(native_prop_carry.FILTER, {}))
+                and gate.get("lease") == lease and gate.get("active") and gate.get("suppressed", 0) > 0)
+            observation["filter"] = filtered["game"][native_prop_carry.FILTER]
+        assert await call(carrier, "streamsweep") == "sweeping"
+        await asyncio.sleep(1.35)
+        observation["during"] = await asyncio.gather(state(host), state(guest))
+        assert all(row and row["actor"] == identity and math.dist(row["position"], before["position"]) > 25
+                   for row in observation["during"]), observation
+        assert await call(carrier, "streamdrop") == "dropped"
+        if carrier is guest:
+            released = await wait_resident_status(host_run, lambda frame:
+                (edge := frame.get("game", {}).get(native_prop_carry.PROOF, {}))
+                and (edge["edge"], edge["actor"], edge["lease"]) == ("drop", identity, lease))
+            assert released["game"][native_prop_carry.PROOF]["release_pose_applied"]
+        async with asyncio.timeout(8):
+            while True:
+                left, right = await asyncio.gather(state(host), state(guest))
+                if left and right and not left["held"] and not right["held"] and math.dist(left["position"], right["position"]) < 20:
+                    observation["released"] = (left, right)
+                    break
+                await asyncio.sleep(.08)
+
+    for seat in (guest, host):
+        assert await call(seat, "streamunload") == "unloading"
+        async with asyncio.timeout(8):
+            while await state(seat) is not None:
+                await asyncio.sleep(.08)
+    await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == OBSERVATORY
+        and identity not in frame["game"].get(native_prop_carry.PLACED_PROPS, {})
+        and not frame["game"].get(native_prop_carry.HELD))
+    assert campaign_save_hashes(host.campaign) == checkpoint, "A streamed carry wrote a campaign checkpoint"
+    return {"streamed_prop_carry": evidence}
+
+
 async def verify_stock_host_prop_observer(host: Seat, guest: Seat, pawn: str, evidence: dict) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_status, guest_status = await asyncio.gather(*(
@@ -7465,6 +7558,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_stock_host_prop_observer(host, guest, pawn, proof.setdefault("host_prop_observer", {}))),
         (stock_host_prop_observer, "spawned_prop_carry", "spawned_prop_carry",
          lambda host, guest, pawn: verify_spawned_prop_carry(host, guest, pawn, proof.setdefault("spawned_prop_carry", {}))),
+        (stock_host_prop_observer, "streamed_prop_carry", "streamed_prop_carry",
+         lambda host, guest, pawn: verify_streamed_prop_carry(host, guest, pawn, proof.setdefault("streamed_prop_carry", {}))),
         (stock_flashlights, "observatory", "stock_flashlights", verify_stock_flashlights),
         (stock_melee_edges, "observatory", "stock_melee_edges", verify_stock_melee_edges_only),
         (stock_avatar_tail, "observatory", "stock_avatar_tail", verify_stock_avatar_tail),
@@ -7802,7 +7897,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["stock_door_overlays"] = [
                 probes.enter_context(stock_door_overlay(game)) for game in games
             ]
-        if stock_warehouse_switch or stock_interaction_feedback:
+        if stock_warehouse_switch or stock_interaction_feedback or streamed_switch_check:
             proof["warehouse_switch_overlays"] = [probes.enter_context(warehouse_switch_overlay(game)) for game in games]
         if stock_interaction_feedback:
             for game in games:
