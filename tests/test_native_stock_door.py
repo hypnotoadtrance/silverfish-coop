@@ -48,6 +48,17 @@ class StockDoorActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(reply[door.RESULT]["open"], False)
         self.assertEqual(reply[door.DELTA]["sequence"], 11)
         self.assertEqual(await self.interact(), reply)
+        self.host.last_game = {"state": "opening", "map": CROSSROADS}
+        self.host.native_recipients = lambda: {}
+        self.assertEqual(await self.interact(), reply)
+        completed = self.operation
+        self.operation = "c" * 32
+        with self.assertRaisesRegex(party.RuleError, "^stock_door_scope_unavailable$"):
+            await self.interact()
+        self.operation = completed
+        self.host.zone_epoch = "d" * 32
+        with self.assertRaisesRegex(party.RuleError, "^stock_door_scope_unavailable$"):
+            await self.interact()
         self.bridge.command.assert_awaited_once_with(door.TAG + "-guest-interact", self.actor, "guest pawn", timeout=4)
         self.bridge.wait_for.assert_not_awaited()
 

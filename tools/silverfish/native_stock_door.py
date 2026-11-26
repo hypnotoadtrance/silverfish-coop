@@ -243,13 +243,10 @@ class Interactions:
 
     async def dispatch(self, host, bridge, character, requested, operation, future):
         epoch, _, actor = requested.partition("@") if isinstance(requested, str) else ("", "", "")
-        game = host.last_game
-        area = game.get("map")
-        member = host.native_recipients().get(character, {})
-        if (not epoch or epoch != host.zone_epoch or not area or actor_map(actor) != area
-                or game.get("state") != "hosting" or host.transitioning or host.stopping or host.native_checkpoint_unsafe
-                or not member.get("connected") or host.party["wipe"] or host.party["players"][character]["downed"]
-                or not party.REQUEST_ID.fullmatch(operation)):
+        area = actor_map(actor)
+        player = host.party["players"].get(character)
+        if (not epoch or epoch != host.zone_epoch or not area or not player
+                or host.transitioning or host.stopping or not party.REQUEST_ID.fullmatch(operation)):
             raise party.RuleError("stock_door_scope_unavailable")
         fingerprint = [ACTION, requested, None]
         receipts = host.party["receipts"].setdefault(character, [])
@@ -258,6 +255,13 @@ class Interactions:
                 if receipt["request"] != fingerprint:
                     raise party.RuleError("operation_id_conflict")
                 return receipt["result"]
+        # A completed receipt needs the same visit and request. A new mutation
+        # also needs a live bound pawn and a stable host snapshot.
+        game = host.last_game
+        member = host.native_recipients().get(character, {})
+        if ((game.get("state"), game.get("map")) != ("hosting", area) or host.native_checkpoint_unsafe
+                or not member.get("connected") or host.party["wipe"] or player["downed"]):
+            raise party.RuleError("stock_door_scope_unavailable")
         for motion in self.pending.values():
             if (motion.character, motion.operation) == (character, operation):
                 if motion.fingerprint != fingerprint:

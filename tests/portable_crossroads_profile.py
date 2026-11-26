@@ -98,6 +98,16 @@ async def read_stock_receipts(seat, probe):
             for name, count, size in (row.split(",") for row in raw.removesuffix("|end").split(";") if row)}
 
 
+async def read_collector_modes(host, guest, probe):
+    replies = await asyncio.gather(*(probe(seat.bridge, "crossroads-profile", "gcstate", reply_end="|end")
+                                     for seat in (host, guest)))
+    modes = {}
+    for role, reply in zip(("host", "guest"), replies, strict=True):
+        original, active = reply.removesuffix("|end").split(",")
+        modes[role] = {"original": original, "active": active}
+    return modes
+
+
 def instrument_kill_volume(source, *, measure=False, recovery_fixture=False):
     if measure:
         anchor = "local geometry = stock_box(state)"
@@ -534,6 +544,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
         run, lambda frame: frame.get("game", {}).get("map") == area
         and frame["game"].get("native_zone_wall", {}).get("state") == "ready"
         and not frame["game"]["native_zone_wall"]["failure"]) for run in runs.values()))
+    collector_modes = await read_collector_modes(host, guest, probe)
     before = await transport()
     await arm()
     idle = await collect()
@@ -563,18 +574,62 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
         assert all(sample["seconds"] >= 5 for sample in samples), samples
         coarse = {"coarse_guest_walking": dict(zip(seats, samples, strict=True)),
                   "coarse_guest_displacement_cm": coarse_displacement}
-        if gc_trial:
+        if gc_trial == "generational":
+            results, switches = {}, {}
+            original, = {entry["active"] for entry in collector_modes.values()}
+            mode = original
+
+            async def switch(label, target):
+                previous = mode
+                changes = await asyncio.gather(*(command(seat, target) for seat in seats.values()))
+                recorded = {}
+                for seat, reply in zip(seats, changes, strict=True):
+                    current, duration, before, after = reply.split(",")
+                    assert current == previous, (seat, target, current, previous)
+                    recorded[seat] = {"previous": current, "switch_ms": float(duration),
+                                      "heap_before_kib": float(before), "heap_after_kib": float(after)}
+                switches[label] = {"target": target, **recorded}
+
+            try:
+                for label, target in (("before", "incremental"), ("generational_first", "generational"),
+                                      ("generational_second", "generational"), ("after", "incremental")):
+                    if target != mode:
+                        await switch(label, target)
+                        mode = target
+                        await walk(2)
+                    before_mode = await transport()
+                    await arm("gcmode")
+                    travelled = await walk(5)
+                    samples = await asyncio.gather(*(read(seat) for seat in seats.values()))
+                    assert all(sample["seconds"] >= 12 for sample in samples), samples
+                    results[label] = {"mode": mode, "displacement_cm": travelled,
+                                      **dict(zip(seats, samples, strict=True)),
+                                      "transport": traffic(before_mode, await transport())}
+                assert mode == "incremental"
+            finally:
+                # The isolated seats may continue into further gameplay checks.
+                await asyncio.gather(*(command(seat, original) for seat in seats.values()))
+            coarse["gc_mode_comparison"] = {"windows": results, "switches": switches}
+        elif gc_trial:
             results = {}
-            for label, action in (("before", "gcbaseline"), ("tuned", "gctuned"), ("after", "gcbaseline")):
-                await arm(action)
-                travelled = await walk(5)
-                samples = await asyncio.gather(*(read(seat) for seat in seats.values()))
-                assert all(sample["seconds"] >= 12 for sample in samples), samples
-                if label == "tuned":
-                    for sample in samples:
-                        applied = sample["lua_heap"]["gc_settings"]
-                        assert (applied["sampled_pause"], applied["sampled_step_multiplier"]) == (120, 160), applied
-                results[label] = {"displacement_cm": travelled, **dict(zip(seats, samples, strict=True))}
+            original, = {entry["active"] for entry in collector_modes.values()}
+            try:
+                if original != "incremental":
+                    await asyncio.gather(*(command(seat, "incremental") for seat in seats.values()))
+                    await walk(2)
+                for label, action in (("before", "gcbaseline"), ("tuned", "gctuned"), ("after", "gcbaseline")):
+                    await arm(action)
+                    travelled = await walk(5)
+                    samples = await asyncio.gather(*(read(seat) for seat in seats.values()))
+                    assert all(sample["seconds"] >= 12 for sample in samples), samples
+                    if label == "tuned":
+                        for sample in samples:
+                            applied = sample["lua_heap"]["gc_settings"]
+                            assert (applied["sampled_pause"], applied["sampled_step_multiplier"]) == (120, 160), applied
+                    results[label] = {"displacement_cm": travelled, **dict(zip(seats, samples, strict=True))}
+            finally:
+                if original != "incremental":
+                    await asyncio.gather(*(command(seat, original) for seat in seats.values()))
             coarse["gc_comparison"] = results
     settled = await wait_resident_status(guest_run, pawns_here)
     comparison = await asyncio.gather(*(compare_vitals(seat) for seat in seats.values()))
@@ -593,7 +648,8 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
         await journal_action("close", "native_host_invite_journal_closed")
         await wait_resident_status(runs["host"], lambda frame: "native_host_invite_journal" not in frame["game"])
         journal = {"journal_open_and_close": view["game"][native_package_handoff_journal.JOURNAL]}
-    return {"idle": idle, "guest_walking": moving, "guest_max_displacement_cm": displacement,
+    return {"collector_modes": collector_modes, "idle": idle, "guest_walking": moving,
+            "guest_max_displacement_cm": displacement,
             "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(after_idle, after_movement),
             "row_format_comparison": dict(zip(seats, rows, strict=True)),
             "lean_reader_comparison": dict(zip(seats, lean, strict=True)),

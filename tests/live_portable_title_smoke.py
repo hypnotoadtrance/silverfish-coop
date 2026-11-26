@@ -6909,7 +6909,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_board_offers: bool = False, stock_quarry_photo: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
                  stock_weather_travel: bool = False, stock_lightning: bool = False, stock_storm_ambience: bool = False,
-                 crossroads_profile: bool = False, crossroads_gc_trial: bool = False,
+                 crossroads_profile: bool = False, crossroads_gc_trial: bool | str = False,
                  stock_crossroads_door: bool = False, stock_dock_gate: bool = False,
                  stock_crossroads_recovery: bool = False,
                  stock_melee_family: bool = False, stock_melee_edges: bool = False,
@@ -7762,6 +7762,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     await asyncio.gather(session, watcher, return_exceptions=True)
 
             host = first
+            if crossroads_profile:
+                from portable_crossroads_profile import read_collector_modes
+
+                proof["initial_title_collector_modes"] = await read_collector_modes(first, second, portable_probe_command)
             for campaign, checks in resident_campaigns.items():
                 if proof["sessions"]:
                     # A fresh loopback port also preserves the stock first-contact trust exercise.
@@ -7770,6 +7774,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     host = replace(first, port=port, campaign=first.campaign.with_name(
                         "title-host-settings-" + uuid.uuid4().hex[:8]))
                 session = await run_resident_campaign(campaign, checks, host)
+                if crossroads_profile:
+                    session["title_collector_modes"] = await read_collector_modes(host, second, portable_probe_command)
                 proof["sessions"].append(dict(session, resident_campaign=campaign))
                 if saved := session.get("loki_saved_load"):
                     async def reopen_loki(host, guest, pawn):
@@ -8053,7 +8059,7 @@ if __name__ == "__main__":
                         help="verify both players recover from the stock Crossroads kill volume")
     parser.add_argument("--crossroads-profile", action="store_true",
                         help="measure co-op frame and subsystem times around the stock weather travel check")
-    parser.add_argument("--crossroads-gc-trial", action="store_true",
+    parser.add_argument("--crossroads-gc-trial", choices=("tuned", "generational"), nargs="?", const="tuned",
                         help="compare the current and earlier Lua collection schedules while walking")
     parser.add_argument("--stock-lightning", action="store_true",
                         help="verify one stock lightning strike and thunder across a private Crossroads pair")

@@ -204,6 +204,11 @@ LoopInGameThreadWithDelay(1, function()
     if previous then
         local duration, used_cycles = (now - previous) / 1000, cycles - previous_cycles
         record(active, "frame", duration, used_cycles)
+        if active.gc_mode_trial then
+            if duration > 1000 / 60 then record(active, "frame_over_16ms", duration, used_cycles) end
+            if duration > 1000 / 30 then record(active, "frame_over_33ms", duration, used_cycles) end
+            if collected >= 1024 then record(active, "frame_with_heap_drop", duration, used_cycles) end
+        end
         if duration > active.peak then
             active.peak, active.peak_cycles, active.peak_calls = duration, used_cycles, active.calls
             active.calls = {}
@@ -233,16 +238,18 @@ LoopInGameThreadWithDelay(50, function()
     local ticket, action = text:match("^(%x+)\t([a-z]+)$")
     if not ticket or #ticket ~= 32 then return end
     local message
-    if (action == "arm" or action == "coarse" or action == "gcbaseline" or action == "gctuned") and not capture then
+    if (action == "arm" or action == "coarse" or action == "gcbaseline"
+        or action == "gctuned" or action == "gcmode") and not capture then
         local now, cycles
         if type(stamp) == "function" then now, cycles = stamp() end
         if type(now) == "number" and type(cycles) == "number" then
             local coarse = action ~= "arm"
-            local gc_trial = action == "gcbaseline" or action == "gctuned"
+            local gc_trial = action == "gcbaseline" or action == "gctuned" or action == "gcmode"
             local heap = collectgarbage("count")
             capture, previous, previous_cycles, complete = {
                 rows = {}, calls = {}, peak = 0, peak_calls = {}, started = now,
                 coarse = coarse, deadline = now + (gc_trial and gc_window_us or coarse and coarse_window_us or window_us),
+                gc_mode_trial = action == "gcmode",
                 status_peaks = {}, heap_calls = {}, tick_sources = {}, snapshot_sources = {},
                 max_status_rows = 0, max_status_bytes = 0,
                 heap_start = heap, heap_previous = heap, heap_peak = heap, heap_max_drop = 0, heap_large_drops = 0,
@@ -258,6 +265,17 @@ LoopInGameThreadWithDelay(50, function()
         else
             message = "native game-thread clock unavailable"
         end
+    elseif action == "gcstate" and not capture then
+        local original = status_publication.original_collection
+        local expected = original and "generational" or "incremental"
+        local actual = collectgarbage(expected)
+        if actual ~= expected then collectgarbage(actual) end
+        message = (original or "unscoped") .. "," .. actual
+    elseif (action == "incremental" or action == "generational") and not capture then
+        local started, before = stamp(), collectgarbage("count")
+        local old = collectgarbage(action)
+        local done, after = stamp(), collectgarbage("count")
+        message = ("%s,%.3f,%.3f,%.3f"):format(old, (done - started) / 1000, before, after)
     elseif action == "read" then
         message = complete and result() or "sampling"
     elseif action == "vitals" and not capture then

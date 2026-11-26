@@ -415,6 +415,17 @@ local function inspect()
     return state
 end
 
+function status_publication.session_collection(current_phase)
+    if not resident_title or not status_publication.installed then return end
+    local original = status_publication.original_collection
+    if not original and (current_phase == "hosting" or current_phase == "connected") then
+        status_publication.original_collection = collectgarbage("generational")
+    elseif original and role == "idle" then
+        collectgarbage(original)
+        status_publication.original_collection = nil
+    end
+end
+
 local function phase(state)
     if leaving then
         if state.controller and state.map == main_menu and not state.listening then
@@ -1748,6 +1759,7 @@ local function observe_session()
             observed = inspect()
             observed_phase = phase(observed)
         end
+        status_publication.session_collection(observed_phase)
         native_guest_sickness.sync(observed, observed_phase)
         native_guest_mre.sync(observed, observed_phase)
         return observed, observed_phase
