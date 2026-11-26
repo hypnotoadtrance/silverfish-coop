@@ -521,16 +521,20 @@ namespace
         return server_prop && (state.host ? !server && role(controller) == 3 : connection(driver, server));
     }
 
-    Scope* select_source(const Lua& lua)
+    Scope* select_source(std::string_view source, bool authored_only = false)
     {
-        if (!lua.is_string()) return nullptr;
-        const auto source = lua.get_string();
         if (source == "crossroads-old-pipe" && !(env("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") &&
             env("SILVERFISH_COOP_NATIVE_FIXTURES") && env("SILVERFISH_COOP_HEADLESS"))) return nullptr;
         const auto match = std::ranges::find_if(profiles, [&source](const Profile& profile) { return profile.source == source; });
         if (match != profiles.end()) return &scopes[static_cast<std::size_t>(match - profiles.begin())];
+        if (authored_only) return nullptr;
         const auto loose = loose_sources.find(source);
         return loose == loose_sources.end() ? nullptr : &loose->second.scope;
+    }
+
+    Scope* select_source(const Lua& lua)
+    {
+        return lua.is_string() ? select_source(lua.get_string()) : nullptr;
     }
 
     bool stock_ammo_matches(U::UObject* actor, const Profile& profile)
@@ -2528,6 +2532,40 @@ namespace
         return 1;
     }
 
+    Scope pickup_seat(Address pointer, bool host)
+    {
+        auto* pawn = local_pickup_pawn(pointer, host);
+        auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
+        return {world, pawn, nullptr, nullptr, object(pawn, STR("Controller")), object(world, STR("NetDriver")), nullptr, host};
+    }
+
+    std::string bind_source(Scope& scope, Scope seat, const Profile& profile, U::AActor* actor)
+    {
+        if (const auto* fault = source_fault(actor, seat.world.Get(), profile))
+        {
+            if (live(actor) && std::string_view(fault) == "authored_pickup_stock_placement_unqualified")
+            {
+                auto point = actor->K2_GetActorLocation();
+                return std::format("{}:{:.1f},{:.1f},{:.1f}", fault, point.GetX(), point.GetY(), point.GetZ());
+            }
+            return fault;
+        }
+        auto* box = source_box(actor);
+        if (!box) return "authored_pickup_stock_root_box_unqualified";
+        if (!interaction(profile.stock_cash)) return "authored_pickup_stock_interaction_unqualified";
+        if (!actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false))
+            return "authored_pickup_stock_visibility_unqualified";
+        seat.profile = &profile;
+        seat.actor = actor;
+        seat.box = box;
+        seat.original_collision = true;
+        seat.original_hidden = false;
+        if (profile.dead_drop && (!present_drop(seat) || !drop_gate(seat)))
+            return "authored_pickup_dead_drop_inactive";
+        scope = seat;
+        return {};
+    }
+
     int set_scope(const Lua& lua)
     {
         if (!ready() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_bool(2))
@@ -2543,34 +2581,17 @@ namespace
         clear(scope);
         const auto& profile = profiles[static_cast<std::size_t>(selected - scopes.data())];
         auto* actor = find<U::AActor>(profile.actor);
-        // Stock permanent actors can be absent on revisits. Skip the pawn scan in that case.
-        if (profile.stock_cash && !live(actor))
+        // An absent stock actor cannot bind. Revisit it when it respawns.
+        if (!live(actor))
             return result(lua, false, "authored_pickup_stock_actor_identity_unqualified");
-        auto* pawn = local_pickup_pawn(ptr, host);
-        auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
+        auto seat = pickup_seat(ptr, host);
+        auto* world = seat.world.Get();
         if (!live(world) || world->GetPathName() != profile.world)
             return result(lua, false, "authored_pickup_source_world_unavailable");
-        if (const auto* fault = source_fault(actor, world, profile))
-        {
-            if (live(actor) && std::string_view(fault) == "authored_pickup_stock_placement_unqualified")
-            {
-                auto point = actor->K2_GetActorLocation();
-                return result(lua, false, std::format("{}:{:.1f},{:.1f},{:.1f}", fault, point.GetX(), point.GetY(), point.GetZ()));
-            }
-            return result(lua, false, fault);
-        }
-        auto* box = source_box(actor);
-        if (!box) return result(lua, false, "authored_pickup_stock_root_box_unqualified");
-        if (!interaction(profile.stock_cash)) return result(lua, false, "authored_pickup_stock_interaction_unqualified");
-        if (!actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false))
-            return result(lua, false, "authored_pickup_stock_visibility_unqualified");
-        Scope next{world, pawn, actor, box, object(pawn, STR("Controller")), object(world, STR("NetDriver")),
-            &profile, host, false, actor->GetActorEnableCollision(), boolean(actor, STR("bHidden"), true)};
-        if (!local_scope(next)) return result(lua, false, "authored_pickup_local_controller_unavailable");
-        if (profile.dead_drop && (!present_drop(next) || !drop_gate(next)))
-            return result(lua, false, "authored_pickup_dead_drop_inactive");
-        scope = next;
-        return result(lua, true, "authored_pickup_scope_bound");
+        seat.profile = &profile;
+        if (!local_scope(seat)) return result(lua, false, "authored_pickup_local_controller_unavailable");
+        const auto fault = bind_source(scope, seat, profile, actor);
+        return result(lua, fault.empty(), fault.empty() ? "authored_pickup_scope_bound" : fault);
     }
 
     int take_press(const Lua& lua)
@@ -2601,10 +2622,9 @@ namespace
         return result(lua, verified, verified ? "authored_pickup_projected" : "authored_pickup_projection_unverified");
     }
 
-    int status(const Lua& lua)
+    void push_status(const Lua& lua, Scope* scope)
     {
-        auto* scope = ready() && lua.get_stack_size() == 1 ? select_source(lua) : nullptr;
-        const bool active = scope && local_scope(*scope) && (scope->claimed || drop_gate(*scope)) &&
+        const bool active = scope && (scope->claimed || drop_gate(*scope)) &&
             exact_source(scope->actor.Get(), scope->world.Get(), *scope->profile, !scope->claimed) &&
             (scope->claimed || !scope->profile->dead_drop || present_drop(*scope));
         const bool emitted = active && Clock::now() < scope->observed.expires;
@@ -2613,7 +2633,59 @@ namespace
         lua.set_integer(emitted ? static_cast<std::int64_t>(scope->observed.sequence) : 0);
         lua.set_bool(emitted && scope->observed.fixture);
         lua.set_integer(active && scope->host && scope->profile->stock_cash ? loose_cash_value(scope->actor.Get()) : 0);
+    }
+
+    int status(const Lua& lua)
+    {
+        auto* scope = ready() && lua.get_stack_size() == 1 ? select_source(lua) : nullptr;
+        push_status(lua, scope && local_scope(*scope) ? scope : nullptr);
         return 5;
+    }
+
+    int sample_authored(const Lua& lua)
+    {
+        const auto count = lua.get_stack_size() - 2;
+        if (!ready() || count <= 0 || static_cast<std::size_t>(count) > scopes.size() ||
+            !lua.is_integer(1) || !lua.is_bool(2) || !lua_checkstack(lua.get_lua_state(), count * 6)) return 0;
+        const auto pointer = static_cast<Address>(lua.get_integer());
+        const bool host = lua.get_bool();
+        std::array<Scope*, profiles.size()> requested{};
+        for (int index = 0; index < count; ++index)
+        {
+            if (!lua.is_string()) return 0;
+            requested[index] = select_source(lua.get_string(), true);
+        }
+        auto seat = pickup_seat(pointer, host);
+        auto* world = seat.world.Get();
+        if (!live(world)) return 0;
+        const auto path = world->GetPathName();
+        const Profile seat_profile{.world = path.c_str()};
+        seat.profile = &seat_profile;
+        if (!local_scope(seat)) return 0;
+        // Every row observes the same verified seat in this game-thread call.
+        for (int index = 0; index < count; ++index)
+        {
+            auto* scope = requested[index];
+            std::string fault;
+            if (!scope)
+                fault = "authored_pickup_source_unknown";
+            else
+            {
+                const auto& profile = profiles[static_cast<std::size_t>(scope - scopes.data())];
+                if (path != profile.world)
+                    fault = "authored_pickup_source_world_unavailable";
+                else if (scope->world.Get() != world || scope->pawn.Get() != seat.pawn.Get() ||
+                    scope->controller.Get() != seat.controller.Get() || scope->driver.Get() != seat.driver.Get() ||
+                    scope->host != host || scope->profile != &profile)
+                {
+                    clear(*scope);
+                    fault = bind_source(*scope, seat, profile, find<U::AActor>(profile.actor));
+                }
+            }
+            lua.set_string(fault);
+            push_status(lua, fault.empty() ? scope : nullptr);
+        }
+        return count * 6;
     }
 
     Scope dead_drop_seat(Address address_value, bool host)
@@ -3086,6 +3158,7 @@ namespace silverfish::native_authored_pickup
     void register_lua(Lua& lua)
     {
         lua.register_function("SilverfishSetNativeAuthoredPickupScope", set_scope);
+        lua.register_function("SilverfishSampleNativeAuthoredPickups", sample_authored);
         lua.register_function("SilverfishDiscoverLoosePickups", discover_loose);
         lua.register_function("SilverfishReadHostLooseRespawnHidden", read_host_respawn_hidden);
         lua.register_function("SilverfishAcknowledgeLooseCarry", acknowledge_loose_carry);

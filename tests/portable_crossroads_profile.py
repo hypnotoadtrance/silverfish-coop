@@ -255,8 +255,17 @@ def instrument_loose_discovery(source):
     anchor = "SilverfishDiscoverLoosePickups(pawn:GetAddress(), current.host)"
     if source.count(anchor) != 1:
         raise ValueError("The loose-item discovery anchor changed")
-    return source.replace(anchor, 'SilverfishProfileCrossroadsCall("loose_discovery", '
-                          'SilverfishDiscoverLoosePickups, pawn:GetAddress(), current.host)')
+    source = source.replace(anchor, 'SilverfishProfileCrossroadsCall("loose_discovery", '
+                            'SilverfishDiscoverLoosePickups, pawn:GetAddress(), current.host)')
+    batch = "sample(current.pawn:GetAddress(), current.host, table.unpack(sources))"
+    if batch in source:
+        source = source.replace(batch, 'SilverfishProfileCrossroadsCall("authored_pickup_batch", '
+                                'sample, current.pawn:GetAddress(), current.host, table.unpack(sources))')
+        fallback = "local qualified = refresh_authored_sources(state, phase)"
+        assert source.count(fallback) == 1
+        source = source.replace(fallback, 'local qualified = SilverfishProfileCrossroadsCall('
+                                '"authored_pickup_scalar_fallback", refresh_authored_sources, state, phase)')
+    return source
 
 
 def instrument_npc_class_discovery(source):

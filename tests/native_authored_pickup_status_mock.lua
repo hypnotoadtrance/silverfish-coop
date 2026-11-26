@@ -64,6 +64,29 @@ for _, shown in ipairs({"hidden", "stock-active"}) do
         and rows["native-authored-pickup-interaction"][6] == "stock")
 end
 
+local batch_calls = 0
+env.SilverfishSampleNativeAuthoredPickups = function(address, host, ...)
+    assert(address == pawn:GetAddress() and host)
+    batch_calls = batch_calls + 1
+    local result = {}
+    for _, id in ipairs({...}) do
+        local values = id == source and {"", true, true, 7, true, 0}
+            or {"authored_pickup_stock_actor_identity_unqualified", false, false, 0, false, 0}
+        for _, field in ipairs(values) do result[#result + 1] = field end
+    end
+    return table.unpack(result)
+end
+local bind_source, read_source = env.SilverfishSetNativeAuthoredPickupScope, env.SilverfishReadNativeAuthoredPickup
+env.SilverfishSetNativeAuthoredPickupScope = function() error("batch should replace scalar binding") end
+env.SilverfishReadNativeAuthoredPickup = function() error("batch should replace scalar read") end
+local batched = hosting()
+assert(batch_calls == 1 and batched["native-authored-pickup"][6] == "claimed")
+assert(batched["native-authored-pickup-interaction"][5] == 7 and batched["native-authored-pickup-interaction"][6] == "fixture")
+env.SilverfishSetNativeAuthoredPickupScope, env.SilverfishReadNativeAuthoredPickup = bind_source, read_source
+env.SilverfishSampleNativeAuthoredPickups = function() return "incomplete" end
+assert(hosting()["native-authored-pickup"][6] == "available", "A refused batch must fall back to live scalar status")
+env.SilverfishSampleNativeAuthoredPickups = nil
+
 local projected_path = crossroads .. ".CrossRoads_P:PersistentLevel.ProjectedLoot_1"
 local actor_name = "Item_Master_BP_C " .. projected_path
 local projected = {

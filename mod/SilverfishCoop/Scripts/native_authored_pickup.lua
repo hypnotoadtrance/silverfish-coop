@@ -909,6 +909,51 @@ function pickup.take_press(pawn)
     end
 end
 
+local function published_cash(profile, amount)
+    if binding.host and cash_amount(profile, amount) then return amount end
+end
+
+local function append_authored_row(rows, state, row, profile, active, claimed, sequence, fixture, amount)
+    if not active then return end
+    if not claimed and profile == gold_bag then
+        local actor = StaticFindObject(profile.path)
+        if not valid(actor) or actor.bHidden ~= false or actor:GetActorEnableCollision() ~= true then return end
+    end
+    rows[#rows + 1] = row("native-authored-pickup", profile.source, state.map,
+        profile.name .. " " .. profile.path, profile.class, claimed and "claimed" or "available",
+        published_cash(profile, amount))
+    if sequence > 0 then
+        rows[#rows + 1] = row("native-authored-pickup-interaction", profile.source, state.map,
+            state.local_pawn.name, sequence, fixture and "fixture" or "stock")
+    end
+end
+
+local function sample_authored_rows(rows, state, phase, row)
+    local sample = SilverfishSampleNativeAuthoredPickups
+    if type(sample) ~= "function" or not bind_pickup_seat(state, phase) then return false end
+    local current = binding
+    local sources, eligible = {}, {}
+    for _, profile in ipairs(current.placements) do
+        if profile ~= gold_bag or not current.host or gold_bag_step(current.pawn.Save) == 1 then
+            sources[#sources + 1], eligible[#eligible + 1] = profile.source, profile
+        end
+    end
+    local result = {sample(current.pawn:GetAddress(), current.host, table.unpack(sources))}
+    if #result ~= #eligible * 6 then return false end
+    local active, unavailable = {}, {}
+    for index, profile in ipairs(eligible) do
+        local start = (index - 1) * 6 + 1
+        if result[start] == "" then
+            active[profile.source] = profile
+            append_authored_row(rows, state, row, profile, table.unpack(result, start + 1, start + 5))
+        else
+            unavailable[profile.source] = result[start]
+        end
+    end
+    current.active, current.unavailable = active, unavailable
+    return true
+end
+
 function pickup.rows(state, phase, status_row)
     local rows = {}
     local host = phase == "hosting" and state.server == false
@@ -937,26 +982,12 @@ function pickup.rows(state, phase, status_row)
             end
         end
     end
-    local qualified = refresh_authored_sources(state, phase)
-    if not qualified or type(SilverfishReadNativeAuthoredPickup) ~= "function" then return rows end
-    for _, profile in ipairs(binding.placements) do
-        if binding.active[profile.source] then
-            local active, claimed, sequence, fixture, amount = SilverfishReadNativeAuthoredPickup(profile.source)
-            if active and not claimed and profile == gold_bag then
-                local actor = StaticFindObject(profile.path)
-                active = valid(actor) and actor.bHidden == false and actor:GetActorEnableCollision() == true
-            end
-            if active then
-                local fields = {"native-authored-pickup", profile.source, state.map,
-                    profile.name .. " " .. profile.path, profile.class, claimed and "claimed" or "available"}
-                if binding.host and cash_amount(profile, amount) then
-                    fields[7] = amount
-                end
-                rows[#rows + 1] = status_row(table.unpack(fields))
-                if sequence > 0 then
-                    rows[#rows + 1] = status_row("native-authored-pickup-interaction", profile.source, state.map,
-                        state.local_pawn.name, sequence, fixture and "fixture" or "stock")
-                end
+    if not sample_authored_rows(rows, state, phase, status_row) then
+        local qualified = refresh_authored_sources(state, phase)
+        if not qualified or type(SilverfishReadNativeAuthoredPickup) ~= "function" then return rows end
+        for _, profile in ipairs(binding.placements) do
+            if binding.active[profile.source] then
+                append_authored_row(rows, state, status_row, profile, SilverfishReadNativeAuthoredPickup(profile.source))
             end
         end
     end
