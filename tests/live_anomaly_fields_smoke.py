@@ -189,6 +189,8 @@ async def verify(work, vanilla, activate, placed, generated, glass_web=False):
 
     async def launch(run, label, *arguments):
         env = dict(os.environ)
+        if glass_web:
+            env["SILVERFISH_COOP_GLASS_GEOMETRY_PROBE"] = "1"
         if (activate or glass_web) and placed != "stone-maze" and label == "guest":
             env["SILVERFISH_COOP_RENDER_CAPTURE"] = "guest"
         with (host / f"{label}.log").open("wb") as log:

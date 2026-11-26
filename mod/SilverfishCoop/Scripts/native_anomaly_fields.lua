@@ -32,6 +32,7 @@ local electrode_overlap = "BndEvt__Electrode_BP_Sphere_K2Node_ComponentBoundEven
 local wandering_overlap = "BndEvt__Wandering_Teleport_BP_Capsule_K2Node_ComponentBoundEvent_1_ComponentBeginOverlapSignature__DelegateSignature"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local glass_geometry_probe = headless and os.getenv("SILVERFISH_COOP_GLASS_GEOMETRY_PROBE") == "1"
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local rook = "/Game/Classes/Maps/Dreams/TheRook_P"
 local pending, active, pending_fires, fires, fixtures = {}, {}, {}, {}, {}
@@ -282,7 +283,7 @@ local function publish_glass(current)
         count = count + 1
         if os.clock() - started >= glass_time_budget then break end
     end
-    if headless then
+    if glass_geometry_probe then
         glass_work.batches = (glass_work.batches or 0) + 1
         glass_work.peak_batch = math.max(glass_work.peak_batch or 0, count)
         glass_work.peak_us = math.max(glass_work.peak_us or 0, math.floor((os.clock() - started) * 1e6))
@@ -819,7 +820,7 @@ function fields.rows(state, phase, row, compact)
             active[address] = nil
         end
     end
-    if headless then
+    if glass_geometry_probe then
         if phase == "hosting" and glass_work.batches then
             rows[#rows + 1] = row("native-glass-thread-work", glass_work.batches, glass_work.peak_batch,
                 glass_work.peak_us, glass_work.deferred or 0, next(glass_pending) and 1 or 0)
