@@ -3,6 +3,7 @@ import os
 import secrets
 import time
 import unittest
+import zlib
 from contextlib import suppress
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -159,7 +160,7 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
     async def test_relay_statistics_count_overflow_and_expiry(self):
         self.assertTrue((await self.connect_guest())["accepted"])
         protocol = self.client._protocol
-        payload = bytes(2 * link._FRAGMENT_SIZE)
+        payload = secrets.token_bytes(2 * link._FRAGMENT_SIZE)
         now = protocol._loop.time()
         with patch.object(protocol, "transmit"), patch.object(protocol._loop, "time", return_value=now):
             for _ in range(link._MAX_QUEUED_FRAMES // 2 + 1):
@@ -203,7 +204,7 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         now = protocol._loop.time()
         with patch.object(protocol, "transmit"), patch.object(protocol._loop, "time", return_value=now) as clock:
             self.assertTrue(self.client.send_prop_pose(b"old"))
-            protocol.forward_game_packet(b"a" * (link._FRAGMENT_SIZE + 1))
+            protocol.forward_game_packet(secrets.token_bytes(link._FRAGMENT_SIZE + 1))
             clock.return_value = now + link._GAME_QUEUE_AGE / 2
             self.assertTrue(self.client.send_prop_pose(b"fresh"))
             packet_id = protocol._next_packet_id
@@ -277,6 +278,30 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats.game_packets_reassembled, 1)
         self.assertEqual(stats.game_fragments_received, 4)
         self.assertEqual(stats.game_fragments_rejected, 1)
+
+    async def test_compressible_unreal_datagrams_cross_the_relay_without_changing_payload(self):
+        self.assertTrue((await self.connect_guest())["accepted"])
+        payload = b"repeated Unreal actor state" * 100 + secrets.token_bytes(1300)
+        self.game_client.sendto(payload, self.client.address)
+        received, address = await self.host_inbox.next()
+        self.assertEqual(received, payload)
+        self.game_host.sendto(payload, address)
+        self.assertEqual((await self.client_inbox.next())[0], payload)
+        for relay in (self.host, self.client):
+            stats = relay.statistics()
+            self.assertEqual(stats["game_packets_compressed"], 1)
+            self.assertEqual(stats["game_payload_bytes_queued"], len(payload))
+            self.assertLess(stats["game_wire_payload_bytes_queued"], len(payload) // 2)
+
+    def test_compressed_game_datagrams_require_one_bounded_complete_stream(self):
+        stats = link._TransportStatistics()
+        receiver = link._Reassembler(stats)
+        compressed = zlib.compress(b"a" * (link._MAX_GAME_PACKET + 1))
+        for data in (compressed, zlib.compress(b"valid") + b"extra", b"not compressed"):
+            frame = link._FRAGMENT_HEADER.pack(1, len(data), link._COMPRESSED_FRAGMENT) + data
+            self.assertIsNone(receiver.receive(frame, time.monotonic()))
+        self.assertEqual(stats.game_packets_reassembled, 0)
+        self.assertEqual(stats.game_fragments_rejected, 3)
 
     @unittest.skipUnless(os.name == "nt", "Windows UDP ownership tables are required")
     async def test_resident_client_refuses_wildcard_game_socket_before_pinning_peer(self):

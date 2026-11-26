@@ -1,7 +1,7 @@
 local form = {}
 local editor = require("native_title_settings_widget")
 local display = require("native_title_display")
-local max_invite, max_reply, max_characters = 32768, 20480, 64
+local max_invite, max_reply, max_characters = 32768, 30720, 64
 local page_size = 5
 local endpoint_screens = {address = true, port = true, password = true}
 local password_errors = {direct_password_required = true, direct_wrong_password = true}
@@ -61,8 +61,8 @@ local function read_response(draft)
     if not data then return end
     local header, body = data:match("^([^\n]+)\n(.*)$")
     if not header then return end
-    local generation, id, status, value, text_count =
-        header:match("^1\t([0-9a-f]+)\t([0-9a-f]+)\t([a-z]+)\t([0-9a-z_]+)\t([0-9]+)$")
+    local version, generation, id, status, value, text_count =
+        header:match("^([12])\t([0-9a-f]+)\t([0-9a-f]+)\t([a-z]+)\t([0-9a-z_]+)\t([0-9]+)$")
     if generation ~= draft.generation or id ~= draft.pending.id then return end
     if status == "error" and messages[value] and text_count == "0" and body == "" then
         return {error = value}
@@ -76,8 +76,15 @@ local function read_response(draft)
     local count = text_count and #text_count <= 2 and tonumber(text_count)
     if status ~= "ok" or not token(value) or not count or count > max_characters
         or tostring(count) ~= text_count or (draft.pending.kind == "create" and value ~= draft.import) then return end
-    local characters, seen = {}, {}
     local offset = 1
+    local creator, photo
+    if version == "2" then
+        creator, photo, offset = body:match("^([^\t\n]+)\t([^\t\n]+)\n()")
+        local length = single_line(creator, 256)
+        if not length or length < 1 or length > 64 or #photo > 8500
+            or (photo ~= "-" and not photo:match("^[0-9a-f]+$")) then return end
+    end
+    local characters, seen = {}, {}
     for _ = 1, count do
         local ending = body:find("\n", offset, true)
         if not ending then return end
@@ -89,7 +96,7 @@ local function read_response(draft)
         offset = ending + 1
     end
     if offset ~= #body + 1 then return end
-    return {import = value, characters = characters}
+    return {import = value, characters = characters, creator = creator, photo = photo}
 end
 
 function form.remove(draft)
@@ -158,7 +165,13 @@ local function render_surface(draft, screen, hint, initial)
         draft.page = math.min(draft.page or 1, last_page)
         local start = (draft.page - 1) * page_size + 1
         for index = start, math.min(#draft.characters, start + page_size - 1) do
-            rows[#rows + 1] = {button("character:" .. index, short_name(draft.characters[index].name))}
+            local row = button("character:" .. index, short_name(draft.characters[index].name))
+            if draft.creator then
+                local ending = utf8.offset(draft.creator, 21)
+                row.detail = "Created by " .. (ending and draft.creator:sub(1, ending - 1) .. "…" or draft.creator)
+                row.photo = draft.photo
+            end
+            rows[#rows + 1] = {row}
         end
         if last_page > 1 then
             local navigation = {}
@@ -284,6 +297,7 @@ function form.poll(draft, state, phase)
     end
     if result and result.characters then
         draft.import, draft.characters, draft.index, draft.page = result.import, result.characters, 1, 1
+        draft.creator, draft.photo = result.creator, result.photo
         draft.retry, draft.failure = nil, nil
         render(draft, state, phase, "catalog")
         return
@@ -294,6 +308,7 @@ function form.poll(draft, state, phase)
         render(draft, state, phase, "name", messages[draft.failure], draft.retry.name)
     else
         draft.import, draft.characters, draft.retry = nil, nil, nil
+        draft.creator, draft.photo = nil, nil
         if draft.direct then
             if password_errors[draft.failure] then
                 draft.use_password = true

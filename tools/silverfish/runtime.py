@@ -80,6 +80,7 @@ from .travel import CROSSROADS, SCIENTIST_SHOP
 from . import udp_ownership
 
 REPO = Path(__file__).resolve().parents[2]
+MOD_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 AUTHORED_PICKUP_TARGETS = frozenset(source.encode("ascii") for source in native_authored_pickup.SOURCES)
 SHIPPING = Path("SilverFish/Binaries/Win64/SilverFish-Win64-Shipping.exe")
 PAKS = Path("SilverFish/Content/Paks")
@@ -414,6 +415,15 @@ def verify_installed_lua(work: Path) -> None:
         _code_fingerprint((stage / SHIPPING).parent / MOD_SCRIPTS, ".lua", metadata["lua_files"])
 
 
+def release_version(metadata: dict) -> str | None:
+    if "mod_version" not in metadata:
+        return None
+    version = metadata["mod_version"]
+    if not isinstance(version, str) or not MOD_VERSION.fullmatch(version):
+        raise ValueError("The installed co-op version is invalid")
+    return version
+
+
 def staged_build(work: Path) -> str:
     stage = content_root(work)
     metadata = read_json(stage_manifest(stage))
@@ -427,6 +437,8 @@ def staged_build(work: Path) -> str:
         raise ValueError("Stage is missing the Silverfish co-op scripts")
     parts = ["silverfish-coop-content-v1", game_build, _code_fingerprint(scripts, ".lua", metadata.get("lua_files")),
              _code_fingerprint(REPO / "tools/silverfish", ".py")]
+    if (version := release_version(metadata)) is not None:
+        parts.extend(("release", version))
     backend = native_death_backend(work, metadata)
     if backend == "overlay":
         parts.append("native-death-lab:1")

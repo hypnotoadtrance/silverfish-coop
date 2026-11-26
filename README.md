@@ -29,7 +29,7 @@ An unofficial UE4SS mod that adds co-op via Steam invites or Direct IP to the Wi
 
 **Join.** Choose **Join by Direct IP** and enter the host’s IP address, port, and password if enabled. Review the trust prompt on the first connection or after a host identity change. Choose a saved character for that campaign or create a new one. Character lists belong to each host campaign.
 
-**Steam networking.** Launch through Steam on both PCs. When hosting via Steam, choose **Invite Only**, **Friends Only**, or **Public**. The host can select **Invite Steam Friends** from the pause menu in any of these modes. Friends can also use Steam’s **Join Game** in Friends Only and Public lobbies. Guests can browse Public lobbies in the **Multiplayer** menu. [Steam setup and playtest coverage](docs/PLAYING-COOP.md#steam-relay-trial)
+**Steam networking.** Launch through Steam on both PCs. When hosting via Steam, choose **Invite Only**, **Friends Only**, or **Public**. The host can select **Invite Steam Friends** from the pause menu in any of these modes. Friends can also use Steam’s **Join Game** in Friends Only and Public lobbies. The public lobby browser shows the host’s mod version and flags incompatible builds. [Steam setup and playtest coverage](docs/PLAYING-COOP.md#steam-relay-trial)
 
 For LAN play, use the host’s LAN address. For internet play, the guest needs a route to the host’s UDP port. This may require a host firewall exception and router port forwarding. Co-op saves default to `%LOCALAPPDATA%\SilverfishCoop\Resident`. The mod can back up host campaigns through Steam Cloud. Keep a local copy of important campaigns before changing builds. [Co-op backups](docs/PLAYING-COOP.md#steam-cloud-backups)
 

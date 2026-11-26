@@ -156,7 +156,7 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
             self.host_game.assert_awaited_once_with(
                 self.work, self.host, "127.0.0.1", PUBLIC_PORT, False, resident_engine=engine.return_value,
                 direct_password="", stock_creator=False, resume_existing=False,
-                max_guests=service.MENU_HOST_GUEST_LIMIT, start_preset="wanderer", **host,
+            max_guests=service.MENU_HOST_GUEST_LIMIT, friendly_fire=False, start_preset="wanderer", **host,
             )
 
     async def test_existing_host_uses_resume_path(self):

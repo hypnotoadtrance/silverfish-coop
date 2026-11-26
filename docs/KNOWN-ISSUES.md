@@ -13,6 +13,8 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 | Guest weapon recoil | The guest's first-person weapon lacks the firing recoil animation. |
 | Blue Mushroom | A guest could buy a Blue Mushroom from a trader and see Eat in the context menu. Selecting Eat had no effect. The same purchase and Eat flow passed on `rc-c78ae67` over Direct IP. Steam playtest confirmation is pending. |
 | Three-guest performance | The four-player playtest reported better responsiveness, with interaction latency still noticeable. |
+| Sustained receive traffic | The recent playtest recorded about 4.8 Mbps receive on the Wi-Fi adapter. The earlier Depot playtest reported more than 8 Mbps on both PCs. These readings cover the entire adapter. A comparable live Steam sample of the mod's own traffic is pending. |
+| Character selection and save management | Older saves were reported with repeated `Kal` names and the generic `Guest` label. Names already stored as `Kal` need the original name to be known before they can be recovered. Fresh name capture and Steam creator attribution need a live Steam retest. |
 
 ## Current playtest checks
 

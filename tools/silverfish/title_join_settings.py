@@ -14,6 +14,7 @@ from tempfile import NamedTemporaryFile
 from uuid import UUID
 
 from . import direct_ip, link
+from .campaign import valid_steam_account
 from .embedded_engine import _assert_no_reparse, _exact_existing
 from .embedded_startup import INVITE_LIMIT, _read_file
 from .native_player_avatar import character_appearance
@@ -27,7 +28,7 @@ MAX_IMPORTS = 4
 MAX_CHARACTERS = 64
 MAX_OPERATIONS = 128
 _REQUEST_LIMIT = INVITE_LIMIT + 512
-_RESPONSE_LIMIT = 20 * 1024
+_RESPONSE_LIMIT = 30 * 1024
 _ENVELOPE = re.compile(rb"1\t([0-9a-f]{32})\t([0-9a-f]{32})\t")
 _COUNT = re.compile(rb"[1-9][0-9]{0,4}")
 Catalog = Callable[[Path, Path, str | None, str | None], Awaitable[dict]]
@@ -191,7 +192,8 @@ class TitleJoinSettings:
 
     def __init__(self, work: Path, bridge: Path, *, catalog: Catalog | None = None, timeout: float = 25,
                  direct_profile: Path | None = None, qualify_connection: Callable[[dict], None] | None = None,
-                 saved: Path | None = None, endpoint_fingerprint: Callable[[str, int], str | None] | None = None):
+                 saved: Path | None = None, endpoint_fingerprint: Callable[[str, int], str | None] | None = None,
+                 profile_avatars=None):
         self._work, self._bridge = _exact_existing(work), _exact_existing(bridge)
         if bridge == work or not bridge.is_relative_to(work):
             raise ValueError("The title Join mailbox must be inside the private co-op workspace")
@@ -207,6 +209,7 @@ class TitleJoinSettings:
         self._catalog, self._timeout = catalog, timeout
         self._direct_profile, self._qualify_connection = direct_profile, qualify_connection
         self._endpoint_fingerprint = endpoint_fingerprint
+        self._profile_avatars = profile_avatars
         self.request_path, self.response_path = bridge / REQUEST_FILE, bridge / RESPONSE_FILE
         self._storage = bridge / "title-join-imports"
         self._generation = self._resolved = None
@@ -313,7 +316,16 @@ class TitleJoinSettings:
             characters = _roster(reply.get("characters"))
             if created is not None and created not in characters:
                 raise _DraftError("catalog_invalid")
-            return characters
+            creator, image = None, "-"
+            owner = reply.get("creator")
+            if isinstance(owner, dict) and owner.keys() == {"name", "steam_account"}:
+                display_name, account = owner["name"], owner["steam_account"]
+                if (isinstance(display_name, str) and 1 <= len(display_name) <= 64 and display_name.isprintable()
+                        and display_name == display_name.strip() and valid_steam_account(account)):
+                    creator = display_name
+                    if self._profile_avatars is not None and characters:
+                        image = (await self._profile_avatars({account})).get(account, "-")
+            return characters, creator, image
 
     async def _connect(self, draft: _Direct, payload: bytes):
         from .service import PROTOCOL, staged_build, validate_invite
@@ -413,8 +425,11 @@ class TitleJoinSettings:
         pending, self._pending = self._pending, None
         identity, operation_id = pending.draft.identity, pending.operation_id
         try:
-            roster = pending.task.result()
-            header = f"1\t{self._generation}\t{operation_id}\tok\t{identity}\t{len(roster)}\n"
+            roster, creator, image = pending.task.result()
+            version = 2 if creator else 1
+            header = f"{version}\t{self._generation}\t{operation_id}\tok\t{identity}\t{len(roster)}\n"
+            if creator:
+                header += f"{creator}\t{image}\n"
             payload = (header + "".join(f"{character}\t{name}\n" for character, name in roster)).encode("utf-8")
             if len(payload) > _RESPONSE_LIMIT:
                 raise _DraftError("catalog_invalid")

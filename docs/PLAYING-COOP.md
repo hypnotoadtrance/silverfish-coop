@@ -39,6 +39,7 @@ Host container pickups take effect immediately. The live campaign writes a check
 Open **Multiplayer → Host Game → Manage Saves** on the host PC. Select a campaign to open its details.
 
 - **Manage Characters** lists the guest characters for that campaign. Confirm **Delete Character** to erase the selected guest's progress and remove that character from their Join list.
+- Steam character rows show the recorded creator’s Steam name and profile picture when Steam can supply the image. A returning guest’s existing characters gain that attribution after a successful Steam connection and the next campaign save. Character names already stored in the campaign keep their saved values.
 - Confirm **Delete Save** to erase the campaign and its characters. The host character belongs to the campaign and is deleted with it.
 - Both confirmations start on **Cancel**. Confirmed deletions are permanent. The mod keeps a deletion record to prevent older Steam Cloud backups from bringing the data back. Singleplayer slots are stored separately.
 
@@ -54,6 +55,8 @@ The game asks you to confirm trust on a first connection or when a known host’
 2. On the host, choose **Steam Networking** in the campaign’s **Network** settings. **Invite Only** requires a Steam invite. **Friends Only** also lets the host’s friends use **Join Game** in Steam. **Public** adds the lobby to **Public Steam Lobbies** on the Multiplayer menu and also supports **Join Game** for friends. [Steam lobby types](https://partner.steamgames.com/doc/api/ISteamMatchmaking#ELobbyType)
 3. Once the campaign is ready, open the pause menu and select **Invite Steam Friends** to open the Steam overlay. If the overlay is disabled, friends can still use **Join Game** for Friends Only and Public lobbies. Enable the overlay to send invites.
 4. On the guest, accept the invite, use **Join Game**, or select a lobby from the public list. Then select **Connect**, enter the host password if set, and select or create a campaign character.
+
+The public list shows the host’s mod version. Incompatible or unknown builds are identified before the character picker opens. Both Steam and Direct IP require the same packaged release and compatible game files and protocol.
 
 Steam relay carries the connection without a publicly reachable UDP port. The host remains the authority for the same campaign and character roster. The lobby ends when the host closes the campaign. Direct IP remains available through the title menu.
 

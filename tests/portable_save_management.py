@@ -3,13 +3,38 @@
 import asyncio
 import uuid
 
-from live_unified_title_smoke import start_pair
+from live_stock_creator_smoke import creator_action
+from live_unified_title_smoke import offered, start_pair
 from tools.silverfish import native_host_save, title_host_campaigns
 from tools.silverfish.campaign import CampaignStore, DELETED
+from tools.silverfish.steam_session import _avatar_hex
+
+
+def with_test_profile_photo(source):
+    """Pass a Steam-sized image through the real title texture importer in isolated runs."""
+    image = _avatar_hex(bytes((250, 180, 30, 255)) * 1024)
+    marker = "    local first = spec.note and 126 or 66\n"
+    assert source.count(marker) == 1
+    source = source.replace(marker, f'''
+    local test_photo = spec.title == "Manage Characters" and spec.rows[1][1].detail and "{image}"
+    if test_photo then spec.rows[1][1].photo = test_photo end
+{marker}''')
+    marker = "        widget:SetVisibility(4)\n"
+    assert source.count(marker) == 1
+    return source.replace(marker, "        assert(not test_photo or valid(view.photos[test_photo]), \"stock_avatar_import_failed\")\n" + marker)
 
 
 async def verify_save_management(host, guest):
-    created = await start_pair(host, guest, "Management scout")
+    async def edit_stock_name(guest, join, name):
+        await join("create-editor", name)
+        await guest.bridge.wait_for(lambda row: row.get("native_guest_stock_creator", {}).get("state") == "creating")
+        await creator_action(guest, "guestkit")
+        assert await creator_action(guest, "guestrename") == "name entered"
+        assert await creator_action(guest, "guestnext") == "page=3"
+        await creator_action(guest, "finish")
+        await offered(guest)
+
+    created = await start_pair(host, guest, "Management scout", create_character=edit_stock_name)
     campaign_id = uuid.UUID(created["campaign_id"]).hex
     character = created["character_id"]
     checkpoint = host.campaign / "save"
@@ -20,6 +45,7 @@ async def verify_save_management(host, guest):
             verify_checkpoint=lambda data: native_host_save.verify_checkpoint(profile, data))
 
     original = read()
+    assert original["characters"][character]["name"] == "Changed in the editor"
     storage = native_host_save.checkpoint_profile(profile, original)
     host_slot = native_host_save.slot_path(storage, original["world"]["native_host_save"]["slot"])
     guest_slot = native_host_save.slot_path(storage, original["characters"][character]["state"]["native_guest_save"]["slot"])

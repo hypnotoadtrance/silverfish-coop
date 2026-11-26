@@ -87,7 +87,7 @@ _TIMED_INTERACTIONS = (frozenset({"native-loot-inspect", "native-loot-open", "na
 _NATIVE_REQUESTS_PER_PASS = 3
 _NATIVE_REQUEST_PASS_SECONDS = .025
 # Cap early refreshes during bursts without changing the ordinary snapshot fallback.
-_GAMEPLAY_CHANGE_INTERVAL = .125
+_GAMEPLAY_CHANGE_INTERVAL = link.STATE_INTERVAL
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
                         native_dialogue.OPEN, native_dialogue.CHOOSE, native_borough_barter.ACTION, native_borough_barter.CRAFT_ACTION,
                         native_borough_barter.CRAFT_PREFLIGHT,
@@ -2130,7 +2130,7 @@ class Host:
             reason = "native_checkpoint_unsafe" if self.native_checkpoint_unsafe else "host_stopping"
             return {"ok": False, "error": reason}
         if request == {"action": "characters"}:
-            return {"ok": True, "characters": self.store.linked_character_catalog(guest_id)}
+            return self.store.linked_character_catalog_reply(guest_id)
         if request.get("action") == "create-character" and set(request) in (
                 {"action", "name", "operation_id"}, {"action", "name", "operation_id", "appearance"},
                 {"action", "name", "operation_id", "appearance", "profile"}):
@@ -4242,6 +4242,7 @@ class Host:
             bridge.directory, self.control.run, self.invite, engine=engine)
                    if self.fixtures and self.native_events and self.native_zones else None)
         heartbeat = asyncio.create_task(self.renew_native_scope(bridge)) if self.native_events else None
+        world_updates = asyncio.create_task(self.relay_gameplay_changes(transport)) if pose_link else None
         footstep_io = (native_footsteps.HostFootsteps(self, bridge, transport)
                        if pose_link and self.native_guest and native_footsteps.enabled(bridge) else None)
         if footstep_io is not None:
@@ -4265,10 +4266,10 @@ class Host:
                 transport.set_prop_pose_handler(None)
             if footstep_io is not None:
                 transport.set_footstep_handler(None)
-            for task in (heartbeat, weapon_shots, loot_motion, lean):
+            for task in (heartbeat, world_updates, weapon_shots, loot_motion, lean):
                 if task:
                     task.cancel()
-            for task in (heartbeat, weapon_shots, loot_motion, lean):
+            for task in (heartbeat, world_updates, weapon_shots, loot_motion, lean):
                 if task:
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
@@ -4558,11 +4559,15 @@ class Host:
                     if snapshot is not self.last_game:
                         self.last_game, self.last_seen = snapshot, time.monotonic()
             self.stock_doors.settle(self, bridge.stock_door_confirmations())
-            self.publish_gameplay_change(transport)
             self.publish_host_status(transport, bridge)
             await bridge.wait_for_interaction(
                 .25, wake_event=None if self.native_checkpoint_unsafe else self.native_request_ready,
             )
+
+    async def relay_gameplay_changes(self, transport) -> None:
+        while not self.stopping:
+            self.publish_gameplay_change(transport)
+            await asyncio.sleep(_GAMEPLAY_CHANGE_INTERVAL)
 
     def publish_gameplay_change(self, transport) -> None:
         game, epoch = self.last_game, self.zone_epoch
@@ -5079,8 +5084,9 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     lambda game: game.get(native_host_dig_live.KEY, {}).get("state") == "ready", timeout=5)
                 controller.last_seen = time.monotonic()
                 await native_host_dig_live.settle(controller, bridge)
-            enrollment = (None if direct_password is None else
-                          direct_ip.Enrollment(store, identity, game_build, PROTOCOL, controller.guest_features(), direct_password))
+            enrollment = (None if direct_password is None else direct_ip.Enrollment(
+                store, identity, game_build, PROTOCOL, controller.guest_features(), direct_password,
+                steam_profile=steam_session.transport.peer_profile if steam_session else None))
 
             async def admit_guest(request):
                 if request.get("catalog") is not True:

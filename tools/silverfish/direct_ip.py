@@ -68,13 +68,14 @@ class Enrollment:
     """Serve public identity separately from password-gated character ownership."""
 
     def __init__(self, store: CampaignStore, identity: link.ServerIdentity, game_build: str, protocol: int,
-                 features: dict, password: str):
+                 features: dict, password: str, *, steam_profile=None):
         self._store = store
         self._campaign = store.status()["campaign_id"]
         self._certificate = identity.certificate_pem
         self._build = game_build
         self._protocol = protocol
         self._features = dict(features)
+        self._steam_profile = steam_profile
         self._key = secrets.token_bytes(32)
         encoded = _password_bytes(password)
         self._proof = hmac.digest(self._key, encoded, "sha256") if encoded else None
@@ -84,7 +85,7 @@ class Enrollment:
     def authorized(self, guest_id: str) -> bool:
         return guest_id in self._authorized
 
-    async def __call__(self, request: dict, peer: str) -> dict:
+    async def __call__(self, request: dict, address: tuple[str, int]) -> dict:
         if request == {"direct": "discover"}:
             return {"accepted": True, "game_access": False, "certificate": self._certificate,
                     "campaign": self._campaign, "password_required": self._proof is not None}
@@ -102,6 +103,7 @@ class Enrollment:
         except (ValueError, UnicodeError):
             return {"accepted": False, "reason": "invalid_request"}
         if self._proof is not None:
+            peer = address[0]
             now = time.monotonic()
             self._attempts = {ip: entry for ip, entry in self._attempts.items() if now - entry[0] < 12}
             started, count = self._attempts.get(peer, (now, 0))
@@ -114,7 +116,8 @@ class Enrollment:
             self._attempts.pop(peer, None)
         await self._store.wait_for_checkpoint()
         try:
-            self._store.register_direct_guest(request["guest_id"], request["credential"])
+            profile = self._steam_profile(address) if self._steam_profile is not None else None
+            self._store.register_direct_guest(request["guest_id"], request["credential"], steam_profile=profile)
         except CampaignError:
             return {"accepted": False, "reason": "guest_unavailable"}
         self._authorized.add(request["guest_id"])

@@ -532,7 +532,8 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
     guest_run = guest.client / "run"
     seats = {"host": host, "guest": guest}
     runs = {"host": host.campaign / "run", "guest": guest_run}
-    counters = ("quic_datagrams_sent", "quic_payload_bytes_sent", "game_packets_queued", "game_packets_delivered",
+    counters = ("quic_datagrams_sent", "quic_payload_bytes_sent", "quic_payload_bytes_received", "game_packets_queued",
+                "game_packets_delivered", "game_payload_bytes_queued", "game_wire_payload_bytes_queued", "game_packets_compressed",
                 "relay_queue_evicted_frames", "relay_queue_expired_frames", "snapshot_responses_encoded", "snapshot_delta_responses",
                 "snapshot_row_delta_responses", "snapshot_rows_changed",
                 "snapshot_encoded_bytes", "snapshot_plaintext_bytes", "snapshot_responses_decoded", "snapshot_received_bytes")
@@ -540,6 +541,15 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
     async def transport():
         frames = await asyncio.gather(*(current_status(run) for run in runs.values()))
         return {seat: frame.get("transport", {}) for seat, frame in zip(runs, frames, strict=True)}
+
+    async with asyncio.timeout(8):
+        while True:
+            game = (await current_status(runs["host"])).get("game", {})
+            pawn_rates = game.get("native_replication_rates", {})
+            if game.get("map") == area and len(pawn_rates) >= 2:
+                break
+            await asyncio.sleep(.1)
+    assert all(0 < entry["cap_hz"] <= 20 for entry in pawn_rates.values()), pawn_rates
 
     def traffic(before, after):
         return {seat: {**{key: after[seat][key] - before[seat][key] for key in counters
@@ -721,6 +731,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
     return {"collector_modes": collector_modes, "idle": idle, "guest_walking": moving,
             "guest_max_displacement_cm": displacement,
             "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(after_idle, after_movement),
+            "pawn_replication_rates": pawn_rates,
             "row_format_comparison": dict(zip(seats, rows, strict=True)),
             "lean_reader_comparison": dict(zip(seats, lean, strict=True)),
             "zone_walls": {seat: frame["game"]["native_zone_wall"]

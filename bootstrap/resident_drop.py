@@ -154,6 +154,7 @@ def assemble(output: Path, *, version: str, revision: str, shipping: Path, cpp_a
                if name.startswith(_SCRIPT_SOURCE)}
     stage = {
         "schema": 1, "game_build": _GAME_BUILD, "stock_files": 1 + len(runtime.STOCK_PACKAGES),
+        "mod_version": version,
         "cpp_death_lab": {"runtime": sha256(loader).hexdigest(), "addon": gameplay_sha},
         "lua_files": {name.as_posix(): sha256(release_bundle._normalized(data)).hexdigest()
                       for name, data in scripts.items()},

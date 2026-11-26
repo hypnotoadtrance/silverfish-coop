@@ -801,7 +801,7 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         client.last_game = {"state": "connected", "map": OBSERVATORY}
         client.gameplay_snapshots.base = "b" * 32
         client.last_snapshot_started, client.next_snapshot = 100.0, 100.5
-        clock = Mock(return_value=100.05)
+        clock = Mock(return_value=100.04)
 
         with patch.object(service, "time", SimpleNamespace(monotonic=clock)):
             await client.refresh_gameplay(project=False, wait=False)

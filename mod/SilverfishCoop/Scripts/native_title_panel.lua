@@ -158,7 +158,7 @@ local function steam_available()
     return available
 end
 
-local function multiplayer(offer, focus)
+local function multiplayer(offer, focus, note)
     session.browser = nil
     local choices, rows = actions[offer.choices], {}
     if choices.host then rows[#rows + 1] = {button("host", "Host Game")} end
@@ -167,7 +167,7 @@ local function multiplayer(offer, focus)
         rows[#rows + 1] = {button("steam-public", "Public Steam Lobbies")}
     end
     rows[#rows + 1] = {button("modes", "Back")}
-    present({title = "Multiplayer", rows = rows, navigation = resident, focus = focus})
+    present({title = "Multiplayer", rows = rows, navigation = resident, focus = focus, note = note})
 end
 
 local function modes(owner, focus, note)
@@ -524,6 +524,10 @@ local function handle_join_form(action, state, phase, context, steam_invite)
     return accepted, failure
 end
 
+local function valid_version(version)
+    return version and #version <= 64 and version:match("^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+end
+
 local function poll_steam_invite(context)
     if not direct_join or session.form or submitted == session.offer.generation
         or not actions[session.offer.choices].join then return end
@@ -532,13 +536,27 @@ local function poll_steam_invite(context)
     steam_polled_at = now
     local file = io.open(steam_join_path, "rb")
     if not file then return end
-    local record = file:read(81)
+    local record = file:read(193)
     file:close()
-    if not record or #record > 80 then return end
-    local nonce, port, stamp = record:match("^1\t([0-9a-f]+)\t([1-9][0-9]*)\t([0-9]+)\n$")
+    if not record or #record > 192 then return end
+    local nonce, local_version, host_version, stamp = record:match("^2\t([0-9a-f]+)\t([^\t]+)\t([^\t]+)\t([0-9]+)\n$")
+    local port
+    if not nonce then nonce, port, stamp = record:match("^1\t([0-9a-f]+)\t([1-9][0-9]*)\t([0-9]+)\n$") end
     local expiry = stamp and #stamp <= 10 and tonumber(stamp)
     if not nonce or #nonce ~= 32 or not nonce:find("[^0]") or nonce == last_steam_invite
-        or #port > 5 or tonumber(port) > 65535 or not expiry or expiry < now or expiry > now + 60 then return end
+        or not expiry or expiry < now or expiry > now + 60 then return end
+    if local_version then
+        if not valid_version(local_version) or host_version ~= "-" and not valid_version(host_version) then return end
+        last_steam_invite = nonce
+        controls.remove(session.solo_back)
+        session.solo_back, singleplayer_title = nil, nil
+        show_stock(session, false)
+        local note = host_version == "-" and "The host's mod version is unknown. Use the same release on both PCs."
+            or "Incompatible builds. Host " .. host_version .. ". Yours " .. local_version .. ". Use the same release."
+        multiplayer(session.offer, "steam-public", note)
+        return
+    end
+    if #port > 5 or tonumber(port) > 65535 then return end
     if handle_join_form("join", current.state, current.phase, context, {nonce = nonce, port = port}) then
         last_steam_invite = nonce
         session.browser = nil
@@ -550,23 +568,26 @@ local function poll_steam_invite(context)
 end
 
 local function show_public_lobbies(browser)
-    local rows, note = {}, nil
+    local rows, note = {}, browser.note
     if browser.state == "joining" then
         note = "Connecting through Steam…"
     elseif browser.state == "searching" then
         note = "Looking for public lobbies…"
     elseif browser.state == "unavailable" then
         note = "Steam lobbies are unavailable. Try again."
-    elseif #browser.names == 0 then
+    elseif #browser.lobbies == 0 then
         note = "No public lobbies found."
     else
         local first = browser.first
-        for index = first, math.min(first + 3, #browser.names) do
-            rows[#rows + 1] = {button("steam-pick:" .. index, browser.names[index])}
+        for index = first, math.min(first + 3, #browser.lobbies) do
+            local lobby = browser.lobbies[index]
+            local detail = lobby.version == "-" and "Version unknown" or lobby.version
+            if not lobby.compatible and lobby.version ~= "-" then detail = detail .. " (incompatible)" end
+            rows[#rows + 1] = {button("steam-pick:" .. index, lobby.name, detail)}
         end
         local pages = {}
         if first > 1 then pages[#pages + 1] = button("steam-prev", "Previous") end
-        if first + 3 < #browser.names then pages[#pages + 1] = button("steam-next", "Next") end
+        if first + 3 < #browser.lobbies then pages[#pages + 1] = button("steam-next", "Next") end
         if #pages > 0 then rows[#rows + 1] = pages end
     end
     if browser.state ~= "joining" then
@@ -597,17 +618,23 @@ local function browser_action(action)
         local token = request_id()
         if not token then return end
         browser = {generation = session.offer.generation, token = token, first = 1,
-            state = "searching", names = {}, expires = os.time() + 15}
+            state = "searching", lobbies = {}, expires = os.time() + 15}
         session.browser = browser
         if not browser_request(browser, "search") then browser.state = "unavailable" end
     elseif browser and browser.state == "ready" then
         local selected = action:match("^steam%-pick:([1-9][0-9]?)$")
-        if selected and session.view.buttons[action] and browser.names[tonumber(selected)] then
-            browser.state = browser_request(browser, selected) and "joining" or "unavailable"
-            browser.expires = os.time() + 15
+        local lobby = selected and session.view.buttons[action] and browser.lobbies[tonumber(selected)]
+        if lobby then
+            if lobby.compatible then
+                browser.note = nil
+                browser.state = browser_request(browser, selected) and "joining" or "unavailable"
+                browser.expires = os.time() + 15
+            else
+                browser.note = "Install the same mod release as the host to join."
+            end
         elseif action == "steam-prev" or action == "steam-next" then
             local first = browser.first + (action == "steam-prev" and -4 or 4)
-            if first >= 1 and first <= #browser.names then browser.first = first end
+            if first >= 1 and first <= #browser.lobbies then browser.first = first end
         end
     end
     if browser then show_public_lobbies(browser) end
@@ -625,21 +652,25 @@ local function poll_public_lobbies(browser)
     browser.polled = now
     local file = io.open(bridge_path .. "/steam-coop-browser-response.tsv", "rb")
     if not file then return end
-    local data = file:read(1501)
+    local data = file:read(2201)
     file:close()
-    if not data or #data > 1500 then return end
-    local generation, token, result, count, start = data:match("^1\t([0-9a-f]+)\t([0-9a-f]+)\t([a-z]+)\t([0-9][0-9]?)\n()")
+    if not data or #data > 2200 or data:sub(-1) ~= "\n" then return end
+    local generation, token, result, count, start = data:match("^2\t([0-9a-f]+)\t([0-9a-f]+)\t([a-z]+)\t([0-9][0-9]?)\n()")
     if generation ~= browser.generation or token ~= browser.token or not count or tonumber(count) > 12 then return end
     if result == "unavailable" then
         browser.state = "unavailable"
+    elseif result == "incompatible" and browser.state == "joining" then
+        browser.state, browser.note = "ready", "Install the same mod release as the host to join."
     elseif result == "ready" and browser.state == "searching" then
-        local names = {}
-        for name in data:sub(start):gmatch("([^\n]+)\n") do
-            if #name > 104 or name:find("[%c]") or not utf8.len(name) then return end
-            names[#names + 1] = name
+        local lobbies = {}
+        for row in data:sub(start):gmatch("([^\n]*)\n") do
+            local name, version, compatible = row:match("^([^\t]+)\t([^\t]+)\t([01])$")
+            if not name or #name > 104 or name:find("[%c]") or not utf8.len(name)
+                or (version == "-" and compatible ~= "0") or (version ~= "-" and not valid_version(version)) then return end
+            lobbies[#lobbies + 1] = {name = name, version = version, compatible = compatible == "1"}
         end
-        if #names ~= tonumber(count) then return end
-        browser.state, browser.names = "ready", names
+        if #lobbies ~= tonumber(count) then return end
+        browser.state, browser.lobbies = "ready", lobbies
     else
         return
     end

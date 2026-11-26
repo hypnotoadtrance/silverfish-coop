@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 import ipaddress
 import re
@@ -11,6 +12,8 @@ import secrets
 import struct
 import time
 from typing import TYPE_CHECKING
+
+from .runtime import MOD_VERSION
 
 if TYPE_CHECKING:
     from .steamworks import Steamworks
@@ -21,6 +24,7 @@ _METADATA_KEY = "silverfishcoop"
 _METADATA_VERSION = "1"
 _PUBLIC_KEY = "silverfishcoop-public"
 _HOST_NAME = "silverfishcoop-host"
+_BUILD_KEY = "silverfishcoop-build"
 _FINGERPRINT = re.compile(r"[0-9a-f]{64}")
 _DISCOVERY_MARKER = re.compile(rf"{_METADATA_VERSION}:([1-9][0-9]{{0,19}}):{_FINGERPRINT.pattern}")
 _HEADER = struct.Struct("!4sQQ")
@@ -44,6 +48,12 @@ _CALLBACK_SESSION_REQUEST = 1251
 
 class SteamTransportError(RuntimeError):
     """A Steam lobby or relay failure safe to show in the game UI."""
+
+
+class SteamBuildMismatch(SteamTransportError):
+    def __init__(self, host_version: str | None):
+        self.host_version = host_version
+        super().__init__("The Steam lobby requires a matching Silverfish Co-op build.")
 
 
 def _steam_id(value: object) -> bool:
@@ -75,6 +85,8 @@ class SteamRoute:
 class PublicLobby:
     lobby: int
     host_name: str
+    version: str | None
+    compatible: bool
 
 
 @dataclass(slots=True)
@@ -111,8 +123,11 @@ class _Udp(asyncio.DatagramProtocol):
 class SteamTransport:
     """Own one lobby and loopback tunnel on the embedded worker's event loop."""
 
-    def __init__(self, api: Steamworks) -> None:
+    def __init__(self, api: Steamworks, *, build: str, version: str) -> None:
+        if not _FINGERPRINT.fullmatch(build) or not MOD_VERSION.fullmatch(version):
+            raise ValueError("A Silverfish Co-op build and version are required")
         self.api = api
+        self._build, self.version = build, version
         self.pending_invites: asyncio.Queue[int] = asyncio.Queue(maxsize=4)
         self.lobby: int | None = None
         self._host: tuple[str, int] | None = None
@@ -180,9 +195,10 @@ class SteamTransport:
         self.lobby = lobby
         try:
             self._owner = self.api.local_id
-            if self.api.lobby_owner(lobby) != self._owner or not self.api.set_lobby_data(
-                lobby, _METADATA_KEY, f"{_METADATA_VERSION}:{self._owner}:{fingerprint}",
-            ):
+            if (self.api.lobby_owner(lobby) != self._owner
+                    or not self.api.set_lobby_data(lobby, _BUILD_KEY, f"{self.version}:{self._build}")
+                    or not self.api.set_lobby_data(lobby, _METADATA_KEY,
+                                                   f"{_METADATA_VERSION}:{self._owner}:{fingerprint}")):
                 raise SteamTransportError("Steam could not publish the co-op lobby.")
             self._host = (str(endpoint), port)
             self._refresh_roster()
@@ -202,6 +218,12 @@ class SteamTransport:
     @staticmethod
     def _display_name(value: str) -> str:
         return "".join(char for char in value if char.isprintable()).strip()[:26] or "Silverfish player"
+
+    def _lobby_build(self, lobby: int) -> tuple[str | None, bool]:
+        version, _, fingerprint = self.api.lobby_data(lobby, _BUILD_KEY).partition(":")
+        if not MOD_VERSION.fullmatch(version) or not _FINGERPRINT.fullmatch(fingerprint):
+            return None, False
+        return version, (version, fingerprint) == (self.version, self._build)
 
     async def public_lobbies(self) -> tuple[PublicLobby, ...]:
         if self._closed or self._search is not None or self._opening or self.lobby is not None:
@@ -228,7 +250,9 @@ class SteamTransport:
             # Steam only exposes GetLobbyOwner to members. join() verifies the owner after entry.
             marker = _DISCOVERY_MARKER.fullmatch(self.api.lobby_data(lobby, _METADATA_KEY))
             if marker and _steam_id(host_id := int(marker[1])) and host_id != self.api.local_id:
-                results.append(PublicLobby(lobby, self._display_name(self.api.lobby_data(lobby, _HOST_NAME))))
+                version, compatible = self._lobby_build(lobby)
+                results.append(PublicLobby(lobby, self._display_name(self.api.lobby_data(lobby, _HOST_NAME)),
+                                           version, compatible))
         return tuple(results)
 
     async def join(self, lobby: int) -> SteamRoute:
@@ -251,6 +275,9 @@ class SteamTransport:
                 or self.api.lobby_owner(lobby) != owner
             ):
                 raise SteamTransportError("The Steam lobby is not a compatible Silverfish co-op session.")
+            host_version, compatible = self._lobby_build(lobby)
+            if not compatible:
+                raise SteamBuildMismatch(host_version)
             self._owner = owner
             self._refresh_roster()
             if not self._allowed(owner):
@@ -275,6 +302,18 @@ class SteamTransport:
         if not opened and not self._join_presence:
             raise SteamTransportError("Steam could not open invites or publish Join Game.")
         return opened
+
+    def peer_profile(self, address: tuple[str, int]) -> tuple[str, str] | None:
+        if self._host is None or address[0] != _LOOPBACK:
+            return None
+        for (peer, _), flow in self._host_flows.items():
+            if flow.transport.get_extra_info("sockname") == address and self._allowed(peer):
+                name = ""
+                with suppress(OSError, RuntimeError):
+                    name = self.api.friend_name(peer)
+                name = "".join(char for char in name if char.isprintable()).strip()[:64].rstrip()
+                return str(peer), name or "Steam player"
+        return None
 
     def leave(self) -> None:
         self._generation += 1

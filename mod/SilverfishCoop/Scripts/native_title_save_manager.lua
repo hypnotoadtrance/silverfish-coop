@@ -50,13 +50,15 @@ local function draw(state, note, focus)
         note = note or clip(save_label(save), 32)
         if #state.characters == 0 then note = "No guest characters in this save." end
         page_rows(rows, state.characters, state.character_first, function(character)
-            return button("character:" .. character.id, clip(character.name, 25), "Guest")
+            local row = button("character:" .. character.id, clip(character.name, 25), "Created by " .. clip(character.creator, 20))
+            row.photo = character.photo
+            return row
         end)
         rows[#rows + 1] = {button("back", "Back")}
     elseif state.screen == "character" then
         local character = state.character
         heading = clip(character.name, 32)
-        note = note or "Guest character"
+        note = note or "Created by " .. clip(character.creator, 40)
         rows[1] = {button("delete-character", "Delete Character")}
         rows[2] = {button("back", "Back")}
     elseif state.screen == "confirm" then
@@ -178,25 +180,37 @@ end
 local function response(state)
     local file = io.open(state.response, "rb")
     if not file then return end
-    local data = file:read(98305)
+    local prefix = file:read(128) or ""
+    local generation, id, status, value, first = prefix:match("^2\t([0-9a-f]+)\t([0-9a-f]+)\t([a-z]+)\t([a-z0-9]+)\n()")
+    if generation ~= state.generation or id ~= state.pending.id then file:close(); return end
+    local limit = 2300000
+    local data = prefix .. (file:read(limit - #prefix + 1) or "")
     file:close()
-    if not data or #data > 98304 then return end
-    local generation, id, status, value, first = data:match("^1\t([0-9a-f]+)\t([0-9a-f]+)\t([a-z]+)\t([a-z0-9]+)\n()")
-    if generation ~= state.generation or id ~= state.pending.id then return end
+    if #data > limit or data:sub(-1) ~= "\n" then return end
     if status == "error" then return nil, value end
     local count = tonumber(value)
     if status ~= "ok" or not count or count > 256 then return end
-    local entries = {}
+    local entries, accounts, photos = {}, {}, {}
     for _ = 1, count do
         local ending = data:find("\n", first, true)
         if not ending then return end
-        local key, name, flag = data:sub(first, ending - 1):match("^([0-9a-f%-]+)\t([^\t]+)\t([a-z]+)$")
-        if not key or #key ~= 36 or not utf8.len(name) or name:find("%c")
-            or (flag ~= "active" and flag ~= "deleted") then return end
-        if flag == "active" then entries[#entries + 1] = {id = key, name = name} end
+        local key, name, creator, account = data:sub(first, ending - 1):match("^([0-9a-f%-]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)$")
+        if not key or #key ~= 36 or not utf8.len(name) or name:find("%c") or not utf8.len(creator) or creator:find("%c")
+            or (account ~= "-" and (#account > 20 or not account:match("^[1-9][0-9]*$"))) then return end
+        entries[#entries + 1] = {id = key, name = name, creator = creator, account = account}
+        accounts[account] = true
         first = ending + 1
     end
-    if first == #data + 1 then return entries end
+    while first <= #data do
+        local ending = data:find("\n", first, true)
+        if not ending then return end
+        local account, hex = data:sub(first, ending - 1):match("^([0-9]+)\t([0-9a-f]+)$")
+        if not account or not accounts[account] or photos[account] or #hex > 8500 then return end
+        photos[account] = hex
+        first = ending + 1
+    end
+    for _, entry in ipairs(entries) do entry.photo = photos[entry.account] end
+    return entries
 end
 
 function manager.poll(state)

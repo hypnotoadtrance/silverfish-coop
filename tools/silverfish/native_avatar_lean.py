@@ -6,12 +6,13 @@ import struct
 import time
 
 from . import native_player_avatar
+from .link import STATE_INTERVAL
 from .party import REQUEST_ID
 
 _UPLOAD = struct.Struct("!16sIh")
 _HEADER = struct.Struct("!16sI")
 _ENTRY = struct.Struct("!Ih")
-_INTERVAL = .05
+_INTERVAL = STATE_INTERVAL
 _REFRESH = .18
 _MAX_AGE = .38
 _MAX_ANGLE = 4000

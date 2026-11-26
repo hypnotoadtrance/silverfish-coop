@@ -6,6 +6,7 @@ import unittest
 
 from tools.silverfish import link
 from tools.silverfish.steam_transport import (
+    SteamBuildMismatch,
     SteamTransport,
     SteamTransportError,
     _CALLBACK_CREATED,
@@ -14,6 +15,7 @@ from tools.silverfish.steam_transport import (
     _CALLBACK_FRIEND_JOIN,
     _CALLBACK_INVITE,
     _CALLBACK_SESSION_REQUEST,
+    _BUILD_KEY,
     _HEADER,
     _MAGIC,
     _METADATA_KEY,
@@ -22,6 +24,8 @@ from tools.silverfish.steam_transport import (
 
 
 FINGERPRINT = "a7" * 32
+BUILD = "b8" * 32
+VERSION = "rc-b8b8b8b"
 HOST = 76561198000000001
 GUEST = 76561198000000002
 OUTSIDER = 76561198000000003
@@ -77,6 +81,12 @@ class FakeSteam:
 
     def persona_name(self):
         return "Fixture Host"
+
+    def friend_name(self, peer):
+        return "Fixture Guest" if peer == GUEST else "Fixture Host"
+
+    def small_avatar_rgba(self, peer):
+        return bytes((255, 192, 96, 255)) * 1024 if peer == GUEST else b""
 
     def request_lobbies(self, key, value, *, limit):
         count = int(self.platform.metadata.get(key) == value)
@@ -153,7 +163,7 @@ class SteamTransportTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(api.presence)
 
     async def start(self, api):
-        transport = SteamTransport(api)
+        transport = SteamTransport(api, build=BUILD, version=VERSION)
         task = asyncio.create_task(transport.run())
 
         async def stop():
@@ -177,6 +187,7 @@ class SteamTransportTests(unittest.IsolatedAsyncioTestCase):
         game, game_inbox, host_address = await self.bind()
         self.assertEqual(await host.host(host_address[1], fingerprint=FINGERPRINT), LOBBY)
         self.assertEqual(platform.metadata[_METADATA_KEY], f"1:{HOST}:{FINGERPRINT}")
+        self.assertEqual(platform.metadata[_BUILD_KEY], f"{VERSION}:{BUILD}")
         self.assertEqual(host_api.presence, LOBBY)
         self.assertTrue(host.show_invites())
         self.assertEqual(host_api.invited, LOBBY)
@@ -287,6 +298,7 @@ class SteamTransportTests(unittest.IsolatedAsyncioTestCase):
         platform = Platform()
         platform.members = {HOST, OUTSIDER}
         platform.metadata[_METADATA_KEY] = f"1:{HOST}:{FINGERPRINT}"
+        platform.metadata[_BUILD_KEY] = f"{VERSION}:{BUILD}"
         guest = await self.start(platform.client(GUEST))
         await guest.join(LOBBY)
         platform.owner = OUTSIDER
@@ -294,6 +306,20 @@ class SteamTransportTests(unittest.IsolatedAsyncioTestCase):
             while guest.lobby is not None:
                 await asyncio.sleep(.01)
         self.assertNotIn(GUEST, platform.members)
+
+    async def test_invite_checks_the_label_and_full_build_before_opening_a_relay(self):
+        platform = Platform()
+        host, guest = await self.start(platform.client(HOST)), await self.start(platform.client(GUEST))
+        await host.host(32124, fingerprint=FINGERPRINT, access="invite")
+        for data, version in (("", None), (f"rc-abc1234:{BUILD}", "rc-abc1234"),
+                              (f"{VERSION}:{'1' * 64}", VERSION)):
+            with self.subTest(data=data):
+                platform.metadata[_BUILD_KEY] = data
+                with self.assertRaises(SteamBuildMismatch) as refused:
+                    await guest.join(LOBBY)
+                self.assertEqual(refused.exception.host_version, version)
+                self.assertIsNone(guest.lobby)
+                self.assertEqual(platform.members, {HOST})
 
     async def test_brief_steam_roster_outage_keeps_the_same_loopback_route(self):
         platform = Platform()
@@ -324,7 +350,7 @@ class SteamTransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_late_success_after_cancel_releases_the_steam_lobby(self):
         platform = Platform()
         api = platform.client(HOST)
-        owner = SteamTransport(api)
+        owner = SteamTransport(api, build=BUILD, version=VERSION)
         self.addCleanup(owner.close)
         pending = asyncio.create_task(owner.host(9123, fingerprint=FINGERPRINT))
         await asyncio.sleep(0)

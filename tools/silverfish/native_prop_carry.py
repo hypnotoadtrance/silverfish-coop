@@ -10,6 +10,7 @@ import time
 import uuid
 
 from . import native_loot, party
+from .link import STATE_INTERVAL
 
 ACTION = "native-prop-carry"
 AIM = "native-prop-carry-aim"
@@ -38,7 +39,7 @@ _ORDER_LIMIT = 2**53
 _POSE_LIMITS = (1e7, 1e7, 1e7, 360, 360, 360)
 _RELEASE_LIMITS = (*_POSE_LIMITS, 6000, 6000, 6000, 7200, 7200, 7200)
 _POSE_FRAME = Struct("!16s16sQiiihhh")
-_LOCAL_POSE_INTERVAL = .05
+_LOCAL_POSE_INTERVAL = STATE_INTERVAL
 
 
 def _serial(value):

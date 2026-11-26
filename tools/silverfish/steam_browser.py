@@ -32,9 +32,10 @@ def _take(path: Path):
 
 
 def _publish(bridge, generation, token, result, rows=()):
-    header = f"1\t{generation.decode()}\t{token.decode()}\t{result}\t{len(rows)}\n"
+    header = f"2\t{generation.decode()}\t{token.decode()}\t{result}\t{len(rows)}\n"
+    listing = "".join(f"{row.host_name}\t{row.version or '-'}\t{int(row.compatible)}\n" for row in rows)
     with suppress(OSError):
-        runtime.write_text(bridge / RESPONSE, header + "".join(f"{row.host_name}\n" for row in rows), newline="\n")
+        runtime.write_text(bridge / RESPONSE, header + listing, newline="\n")
 
 
 async def serve(bridge, transport, open_lobby, pump):
@@ -61,11 +62,16 @@ async def serve(bridge, transport, open_lobby, pump):
                 else:
                     index = int(action) - 1
                     current, lookup = lookup, None
+                    result = "unavailable"
                     if (current and current[:2] == (generation, token) and time.monotonic() < current[2]
-                            and index < len(current[3]) and await open_lobby(current[3][index].lobby)):
-                        _publish(bridge, generation, token, "joined")
-                    else:
-                        _publish(bridge, generation, token, "unavailable")
+                            and index < len(current[3])):
+                        selected = current[3][index]
+                        if not selected.compatible:
+                            result = "incompatible"
+                            lookup = current
+                        elif await open_lobby(selected.lobby):
+                            result = "joined"
+                    _publish(bridge, generation, token, result)
             await asyncio.sleep(.15)
     finally:
         for path in (request_path, response_path):

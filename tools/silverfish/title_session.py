@@ -125,7 +125,7 @@ class TitleSession:
                  startup_timeout: float = 120, stall_timeout: float = 60, control: Control | None = None,
                  join_settings=None, resident: bool = False,
                  host_campaign_scan: Callable[[], tuple[CampaignEntry, ...]] | None = None,
-                 host_defaults: HostDefaults | None = None, host_campaign_manage=None):
+                 host_defaults: HostDefaults | None = None, host_campaign_manage=None, profile_avatars=None):
         self._plans = dict(plans)
         if any(action not in ACTIONS or not isinstance(plan, SessionPlan) for action, plan in self._plans.items()):
             raise ValueError("Expected supervisor plans for the Host and Join actions")
@@ -142,7 +142,7 @@ class TitleSession:
         self._host_defaults = host_defaults
         if host_campaign_manage is not None and host_campaign_scan is None:
             raise ValueError("Campaign management requires the resident campaign list")
-        self._host_campaigns = (TitleHostCampaigns(bridge.directory, host_campaign_scan, host_campaign_manage)
+        self._host_campaigns = (TitleHostCampaigns(bridge.directory, host_campaign_scan, host_campaign_manage, profile_avatars)
                                 if host_campaign_scan else None)
         self._status_path = bridge.directory / STATUS_FILE
         self._retire_title = retire_title or partial(runtime.stop_game, bridge.process)

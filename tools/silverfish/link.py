@@ -102,6 +102,9 @@ _KEEPALIVE_INTERVAL = 3.0
 _MAX_GAME_PACKET = 65507
 _FRAGMENT_SIZE = 1024
 _FRAGMENT_HEADER = struct.Struct("!IHH")
+_COMPRESSED_FRAGMENT = 1 << 15
+_COMPRESS_GAME_MINIMUM = 256
+STATE_INTERVAL = 1 / 20
 # Unreal fragments always declare a nonzero size. The reserved headers carry
 # small application datagrams on the same authenticated connection.
 _WEAPON_SHOT_HEADER = _FRAGMENT_HEADER.pack(0, 0, 1)
@@ -128,7 +131,7 @@ _LOG = logging.getLogger(__name__)
 Address = tuple[str, int]
 Admission = dict[str, Any]
 Admit = Callable[[Admission], Admission | Awaitable[Admission]]
-Enroll = Callable[[Admission, str], Awaitable[Admission]]
+Enroll = Callable[[Admission, tuple[str, int]], Awaitable[Admission]]
 OnDisconnect = Callable[[str], None | Awaitable[None]]
 Action = dict[str, Any]
 OnRequest = Callable[[str, Action], Action | Awaitable[Action]]
@@ -365,6 +368,8 @@ class _TransportStatistics:
     quic_timer_late_max_ns: int = 0
     game_packets_queued: int = 0
     game_payload_bytes_queued: int = 0
+    game_wire_payload_bytes_queued: int = 0
+    game_packets_compressed: int = 0
     game_fragments_queued: int = 0
     game_fragments_received: int = 0
     game_fragments_rejected: int = 0
@@ -467,6 +472,7 @@ class _OutgoingAction:
 class _PartialPacket:
     size: int
     created_at: float
+    compressed: bool
     chunks: dict[int, bytes] = field(default_factory=dict)
 
 
@@ -482,6 +488,8 @@ class _Reassembler:
             stats.game_fragments_rejected += 1
             return None
         packet_id, size, index = _FRAGMENT_HEADER.unpack_from(frame)
+        compressed = bool(index & _COMPRESSED_FRAGMENT)
+        index &= ~_COMPRESSED_FRAGMENT
         chunk = frame[_FRAGMENT_HEADER.size:]
         start = index * _FRAGMENT_SIZE
         if (not 0 < size <= _MAX_GAME_PACKET or start >= size
@@ -498,18 +506,17 @@ class _Reassembler:
             stats.reassembly_expired_packets += 1
 
         if size <= _FRAGMENT_SIZE:
-            stats.game_packets_reassembled += 1
-            return chunk
+            return self._complete(chunk, compressed)
 
         partial = self._pending.get(packet_id)
         if partial is None:
             if len(self._pending) >= _MAX_ASSEMBLIES:
                 stats.game_fragments_rejected += 1
                 return None
-            partial = _PartialPacket(size, now)
+            partial = _PartialPacket(size, now, compressed)
             self._pending[packet_id] = partial
             stats.reassembly_max_pending_packets = max(stats.reassembly_max_pending_packets, len(self._pending))
-        if partial.size != size:
+        if partial.size != size or partial.compressed != compressed:
             stats.game_fragments_rejected += 1
             return None
         partial.chunks.setdefault(index, chunk)
@@ -517,8 +524,20 @@ class _Reassembler:
         if len(partial.chunks) != expected:
             return None
         del self._pending[packet_id]
-        stats.game_packets_reassembled += 1
-        return b"".join(partial.chunks[index] for index in range(expected))
+        return self._complete(b"".join(partial.chunks[index] for index in range(expected)), compressed)
+
+    def _complete(self, data: bytes, compressed: bool) -> bytes | None:
+        if compressed:
+            decoder = zlib.decompressobj()
+            try:
+                data = decoder.decompress(data, _MAX_GAME_PACKET + 1)
+            except zlib.error:
+                data = b""
+            if not 0 < len(data) <= _MAX_GAME_PACKET or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+                self._stats.game_fragments_rejected += 1
+                return None
+        self._stats.game_packets_reassembled += 1
+        return data
 
 
 class _LocalUdp(asyncio.DatagramProtocol):
@@ -586,6 +605,12 @@ class _LinkProtocol(QuicConnectionProtocol):
     def forward_game_packet(self, data: bytes) -> None:
         if not self.authorized or not self.game_access or self.terminated or not 0 < len(data) <= _MAX_GAME_PACKET:
             return
+        original_size = len(data)
+        flag = 0
+        if original_size >= _COMPRESS_GAME_MINIMUM:
+            compressed = zlib.compress(data, level=1)
+            if len(compressed) <= original_size - max(24, original_size // 8):
+                data, flag = compressed, _COMPRESSED_FRAGMENT
         now = self._loop.time()
         self._expire_game_queue(now)
         count = (len(data) + _FRAGMENT_SIZE - 1) // _FRAGMENT_SIZE
@@ -608,11 +633,13 @@ class _LinkProtocol(QuicConnectionProtocol):
         self._next_packet_id = (packet_id + 1) % 2**32
         for index in range(count):
             start = index * _FRAGMENT_SIZE
-            frame = _FRAGMENT_HEADER.pack(packet_id, len(data), index)
+            frame = _FRAGMENT_HEADER.pack(packet_id, len(data), index | flag)
             self._quic.send_datagram_frame(frame + data[start:start + _FRAGMENT_SIZE])
         self._game_enqueued.extend([now] * count)
         stats.game_packets_queued += 1
-        stats.game_payload_bytes_queued += len(data)
+        stats.game_payload_bytes_queued += original_size
+        stats.game_wire_payload_bytes_queued += len(data)
+        stats.game_packets_compressed += bool(flag)
         stats.game_fragments_queued += count
         stats.relay_queue_max_frames = max(stats.relay_queue_max_frames, len(pending))
         self.transmit()
@@ -720,13 +747,13 @@ class _HostProtocol(_LinkProtocol):
         super().__init__(host._stats, *args, **kwargs)
         self.host = host
         self.guest_id: str | None = None
-        self.peer_ip = ""
+        self.peer = ("", 0)
         self._actions: dict[int, _IncomingAction] = {}
         self._end_ack: asyncio.Event | None = None
         self._end_ack_bytes = bytearray()
 
     def datagram_received(self, data: bytes, addr: Any) -> None:
-        self.peer_ip = addr[0]
+        self.peer = (addr[0], addr[1])
         super().datagram_received(data, addr)
 
     def send_session_end(self, body: bytes) -> asyncio.Event:
@@ -741,7 +768,7 @@ class _HostProtocol(_LinkProtocol):
                 payload = self._admission_payload(event)
                 if payload is not None:
                     if len(self.host._tasks) < _MAX_HOST_TASKS:
-                        self.host._spawn(self._respond, payload)
+                        self.host._spawn(self._respond, payload, self.peer)
                     else:
                         self.close(error_code=_APP_ERROR, reason_phrase="host busy")
             elif event.stream_id == _END_SESSION_STREAM and self._end_ack is not None:
@@ -830,14 +857,14 @@ class _HostProtocol(_LinkProtocol):
         finally:
             self._actions.pop(stream_id, None)
 
-    async def _respond(self, payload: bytes) -> None:
+    async def _respond(self, payload: bytes, peer: tuple[str, int]) -> None:
         try:
             request = _decode(payload)
             if "direct" in request:
                 if self.terminated or self.host._closed:
                     return
                 response = (_rejection("direct_join_disabled") if self.host._enroll is None else
-                            await self.host._enroll(request, self.peer_ip))
+                            await self.host._enroll(request, peer))
                 if not self.terminated:
                     self.send_admission(_encode(response))
                 return

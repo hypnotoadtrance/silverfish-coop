@@ -129,6 +129,13 @@ class Steamworks:
         self._lobby_list = _binding(dll, "ISteamMatchmaking_RequestLobbyList", number64, pointer)
         self._lobby_by_index = _binding(dll, "ISteamMatchmaking_GetLobbyByIndex", number64, pointer, integer)
         self._persona = _binding(dll, "ISteamFriends_GetPersonaName", char, pointer)
+        self._friend_name = _binding(dll, "ISteamFriends_GetFriendPersonaName", char, pointer, number64)
+        self._request_user = _binding(dll, "ISteamFriends_RequestUserInformation", boolean, pointer, number64, boolean)
+        self._small_avatar = _binding(dll, "ISteamFriends_GetSmallFriendAvatar", integer, pointer, number64)
+        self._image_size = _binding(dll, "ISteamUtils_GetImageSize", boolean, pointer, integer,
+                                    C.POINTER(C.c_uint32), C.POINTER(C.c_uint32))
+        self._image_rgba = _binding(dll, "ISteamUtils_GetImageRGBA", boolean, pointer, integer, pointer, integer)
+        self._avatars = {}
         self._overlay_enabled = _binding(dll, "ISteamUtils_IsOverlayEnabled", boolean, pointer)
         self._open_invites = _binding(dll, "ISteamFriends_ActivateGameOverlayInviteDialog", None, pointer, number64)
         self._get_presence = _binding(dll, "ISteamFriends_GetFriendRichPresence", char, pointer, number64, char)
@@ -252,6 +259,34 @@ class Steamworks:
     def persona_name(self) -> str:
         self._require_open()
         return (self._persona(self._friends) or b"")[:128].decode("utf-8", errors="ignore")
+
+    def friend_name(self, peer: int) -> str:
+        self._require_open()
+        name = (self._friend_name(self._friends, _steam_id(peer)) or b"")[:256].decode("utf-8", errors="ignore")
+        return "" if name == "[unknown]" else name
+
+    def small_avatar_rgba(self, peer: int) -> bytes | None:
+        """Read Steam's 32px profile image, or None while Steam fetches it."""
+        self._require_open()
+        peer = _steam_id(peer)
+        if peer != self.local_id and self._request_user(self._friends, peer, False):
+            return None
+        image = self._small_avatar(self._friends, peer)
+        if image < 0:
+            return None
+        if image == 0:
+            return b""
+        if image not in self._avatars:
+            width, height = C.c_uint32(), C.c_uint32()
+            if not self._image_size(self._utils, image, C.byref(width), C.byref(height)) or (width.value, height.value) != (32, 32):
+                return b""
+            pixels = C.create_string_buffer(32 * 32 * 4)
+            if not self._image_rgba(self._utils, image, pixels, len(pixels)):
+                return b""
+            if len(self._avatars) >= 256:
+                self._avatars.pop(next(iter(self._avatars)))
+            self._avatars[image] = pixels.raw
+        return self._avatars[image]
 
     def leave_lobby(self, lobby_id: int) -> None:
         self._require_open()

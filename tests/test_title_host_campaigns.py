@@ -90,7 +90,7 @@ class SavedCampaignTests(unittest.TestCase):
 
         original = entry()
         self.assertEqual(manage_campaign(self.campaign, self.saved, original, "characters", None),
-                         ((character, "Courier", False),))
+                         ((character, "Courier", "Scout", "-"),))
         manage_campaign(self.campaign, self.saved, original, "delete-character", character)
         hidden = entry()
         self.assertGreater(hidden.revision, original.revision)

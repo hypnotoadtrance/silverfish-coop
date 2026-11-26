@@ -11,12 +11,12 @@ from unittest.mock import AsyncMock, Mock, patch
 from tools.silverfish import direct_ip, embedded_startup, link, native_title_entry, runtime, service, steam_browser, steam_session
 from tools.silverfish.campaign import CampaignStore
 from tools.silverfish.control import Control, status as control_status
-from tools.silverfish.steam_transport import SteamTransport, _CALLBACK_FRIEND_JOIN, _CALLBACK_INVITE
+from tools.silverfish.steam_transport import SteamTransport, _BUILD_KEY, _CALLBACK_FRIEND_JOIN, _CALLBACK_INVITE
 from tools.silverfish.title_handoff import DESCRIPTOR_FILE, REQUEST_FILE
 from tools.silverfish.title_session import STATUS_FILE, SessionPlan, TitleSession
 from tools.silverfish.travel import OBSERVATORY
 
-from tests.test_steam_transport import GUEST, HOST, LOBBY, Platform
+from tests.test_steam_transport import BUILD, GUEST, HOST, LOBBY, VERSION, Platform
 from tests.test_title_handoff import ready as stock_title
 
 
@@ -27,7 +27,7 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def start(self, peer):
         api = self.platform.client(peer)
-        transport = SteamTransport(api)
+        transport = SteamTransport(api, build=BUILD, version=VERSION)
         bridge = self.directory / str(peer)
         bridge.mkdir()
         pump = asyncio.create_task(transport.run())
@@ -96,6 +96,10 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(direct_ip.Refused) as refusal:
                 await connect("")
             self.assertEqual(refusal.exception.reason, "direct_password_required")
+            with self.assertRaises(direct_ip.Refused) as refusal:
+                await direct_ip.connect(guest_bridge, "127.0.0.1", port, "test only", "other-build", 2,
+                                        verified_fingerprint=fingerprint, require_trust=True)
+            self.assertEqual(refusal.exception.reason, "incompatible_game_or_protocol")
             connection = await connect("test only")
             self.assertTrue(enrollment.authorized(connection.session()["guest_id"]))
             async with guest.playing("127.0.0.1", port, role="guest"):
@@ -116,7 +120,8 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
                                  native_backend=None, native_events=False, native_guest=False)
         authority.last_game = dict(state="hosting", map=OBSERVATORY)
         authority.last_seen = time.monotonic()
-        enrollment = direct_ip.Enrollment(store, identity, build, service.PROTOCOL, {"native_zones": True}, "")
+        enrollment = direct_ip.Enrollment(store, identity, build, service.PROTOCOL, {"native_zones": True}, "",
+                                          steam_profile=host.transport.peer_profile)
 
         def admit(request):
             if not enrollment.authorized(request["guest_id"]):
@@ -149,10 +154,17 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
             connection = await direct_ip.connect(guest_mailbox, address, port, "", build, service.PROTOCOL,
                                                  verified_fingerprint=pin, require_trust=True)
             catalog = await service._character_catalog(connection.session(), None, None)
-            self.assertEqual(catalog, {"ok": True, "characters": []})
+            creator = {"name": "Fixture Guest", "steam_account": str(GUEST)}
+            self.assertEqual(catalog, {"ok": True, "characters": [], "creator": creator})
             created = await service._character_catalog(connection.session(), "Invite Scout", "b" * 32)
             self.assertTrue(created["ok"], created)
             character = created["character"]["character_id"]
+            self.assertEqual(await service._character_catalog(connection.session(), None, None),
+                             {"ok": True, "characters": [created["character"]], "creator": creator})
+            self.assertEqual(CampaignStore.read_existing(self.directory / "campaign")["guests"][connection.details["guest_id"]]
+                             ["steam_account"], str(GUEST))
+            avatar, = (await host.profile_avatars({str(GUEST)})).values()
+            self.assertTrue(avatar.startswith("89504e470d0a1a0a0000000d494844520000002000000020"))
             invite = connection.session(character)
             guest_id = invite["guest_id"]
 
@@ -257,13 +269,33 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         generation, token = "a" * 32, "b" * 32
         runtime.write_text(bridge / DESCRIPTOR_FILE, f"1\t{generation}\thost,join\t{int(time.time()) + 8}\n")
         request, result = bridge / steam_browser.REQUEST, bridge / steam_browser.RESPONSE
-        prefix = f"1\t{generation}\t{token}\t"
-        runtime.write_text(request, prefix + "search\n", newline="\n")
-        await self.ready(result.exists)
-        self.assertEqual(result.read_text(), prefix + "ready\t1\nFixture Host\n")
+        prefix, response = f"1\t{generation}\t{token}\t", f"2\t{generation}\t{token}\t"
+
+        async def exchange(action, expected):
+            runtime.write_text(request, prefix + action + "\n", newline="\n")
+            await self.ready(lambda: result.exists() and result.read_text() == response + expected)
+
+        del self.platform.metadata[_BUILD_KEY]
+        await exchange("search", "ready\t1\nFixture Host\t-\t0\n")
+        await exchange("1", "incompatible\t0\n")
+        self.platform.metadata[_BUILD_KEY] = f"rc-abc1234:{'2' * 64}"
+        await exchange("search", "ready\t1\nFixture Host\trc-abc1234\t0\n")
+        await exchange("1", "incompatible\t0\n")
+        self.platform.metadata[_BUILD_KEY] = f"{VERSION}:{BUILD}"
+        await exchange("search", f"ready\t1\nFixture Host\t{VERSION}\t1\n")
         self.assertEqual(guest_api.lobby_owner(LOBBY), 0)
-        runtime.write_text(request, prefix + "1\n", newline="\n")
         offer = bridge / steam_session.JOIN_OFFER
+        self.platform.metadata[_BUILD_KEY] = f"rc-abc1234:{'2' * 64}"
+        await exchange("1", "unavailable\t0\n")
+        notice, nonce, local, remote, expiry = offer.read_text().split()
+        self.assertEqual((notice, local, remote), ("2", VERSION, "rc-abc1234"))
+        self.assertEqual(len(nonce), 32)
+        self.assertGreater(int(expiry), time.time())
+        self.assertIsNone(guest.transport.lobby)
+
+        self.platform.metadata[_BUILD_KEY] = f"{VERSION}:{BUILD}"
+        await exchange("search", f"ready\t1\nFixture Host\t{VERSION}\t1\n")
+        await exchange("1", "joined\t0\n")
         await self.ready(offer.exists)
         self.assertEqual(guest_api.lobby_owner(LOBBY), HOST)
         _, _, port, _ = offer.read_text().split()

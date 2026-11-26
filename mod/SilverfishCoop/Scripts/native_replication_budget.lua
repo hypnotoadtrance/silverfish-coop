@@ -1,6 +1,6 @@
 local budget = {}
 
-local player_hz = 24
+local player_hz = 20
 local saved = {}
 
 local function valid(object)

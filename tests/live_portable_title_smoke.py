@@ -61,7 +61,7 @@ from portable_personal_consumable import (
     BLUE_MUSHROOM, verify_blue_mushroom, verify_personal_consumable_reconnect, verify_stock_personal_consumable,
 )
 from portable_wipe_chooser import verify_stock_wipe_chooser
-from portable_save_management import verify_save_management
+from portable_save_management import verify_save_management, with_test_profile_photo
 from portable_simmi_jammer import instrument_jammer_sampler, verify_stock_simmi_jammers
 from portable_quarry_photo import verify_quarry_photo
 from portable_weather_travel import verify_weather_travel
@@ -7405,6 +7405,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                        or guest_stash_memory or nonmirrored_startup or stock_unequip or stock_fire_mode_reopen or manage_saves
                        or resident_cabinet_archive is not None)
     try:
+        if manage_saves:
+            for game in games:
+                probes.enter_context(portable_script_overlay(game, "native_title_surface.lua", with_test_profile_photo))
         if crossroads_profile or stock_crossroads_recovery:
             for game in games:
                 probes.enter_context(portable_script_overlay(
@@ -7747,6 +7750,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                      fixture="portable_lantern_probe.lua"))
         if compact_crate_status:
             proof["crate_status_overlay"] = {str(game): probes.enter_context(compact_crate_status_overlay(game)) for game in games}
+        if manage_saves:
+            managed = proof["save_management"] = await verify_save_management(first, second)
+            proof["sessions"].extend((managed["created"], managed["reopened"]))
         if nonmirrored_startup:
             proof["nonmirrored_startup_overlay"] = {
                 str(game): probes.enter_context(nonmirrored_startup_overlay(game)) for game in games
@@ -7772,7 +7778,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             probes.enter_context(installed_probe(second_game, mod="SilverfishPortableCrateProbe",
                                                  fixture="portable_crate_input_probe.lua"))
         if (stock_use or stock_drop or stock_split or stock_equip or stock_nearby or container_nearby
-                or guest_stash_memory or nonmirrored_startup):
+                or guest_stash_memory or nonmirrored_startup or manage_saves):
             for game in games:
                 probes.enter_context(installed_probe(game))
         if not second_legacy_work:
@@ -7858,9 +7864,6 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                       before_join=startup.arm, on_join=startup.joined,
                                                       after_reconnect=check_reconnect,
                                                       wait_status=wait_resident_status, **exit_options))
-        elif manage_saves:
-            managed = proof["save_management"] = await verify_save_management(first, second)
-            proof["sessions"].extend((managed["created"], managed["reopened"]))
         elif stock_fire_mode_reopen:
             proof["sessions"].extend(await verify_fire_mode_reopen(
                 first, second, portable_probe_command, proof.setdefault("stock_fire_mode_reopen", {})))
@@ -8087,7 +8090,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["sessions"].append(await start_pair(first, second, "Cabinet scout", on_join=check_cabinet,
                                                       load_existing=True, wait_status=wait_resident_status,
                                                       after_exit=check_cabinet_saved))
-        else:
+        elif not manage_saves:
             create = create_stock_split_character if stock_split or stock_equip else create_stock_drop_character if stock_drop else None
             proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=check_gameplay,
                                                       create_character=create_stock_bag_character if stock_use else create,

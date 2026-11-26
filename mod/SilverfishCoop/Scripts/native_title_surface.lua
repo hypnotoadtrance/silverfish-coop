@@ -68,6 +68,29 @@ local function text(view, value, size, color, x, y, w, h, wrap, z, justified)
     place(cell(view.canvas, widget), x, y, w, h, z or 0)
 end
 
+local function profile_photo(view, context, hex, x, y)
+    if type(hex) ~= "string" or #hex > 8500 or #hex % 2 ~= 0
+        or not hex:match("^89504e470d0a1a0a0000000d494844520000002000000020[0-9a-f]+$") then return false end
+    local texture = view.photos[hex]
+    if texture == nil then
+        local ok, image = pcall(function()
+            local rendering = StaticFindObject("/Script/Engine.Default__KismetRenderingLibrary")
+            if not valid(rendering) then return end
+            local bytes = {}
+            for pair in hex:gmatch("..") do bytes[#bytes + 1] = tonumber(pair, 16) end
+            return rendering:ImportBufferAsTexture2D(context.world, bytes)
+        end)
+        texture = ok and valid(image) and image or false
+        view.photos[hex] = texture
+    end
+    if not valid(texture) then return false end
+    local photo = child(view.tree, "/Script/UMG.Image")
+    photo:SetBrushFromTexture(texture, false)
+    photo:SetVisibility(3)
+    place(cell(view.canvas, photo), x, y, 30, 30, 2)
+    return true
+end
+
 local function prompt(view, field, y)
     local x = padding + 186
     text(view, field.label, 19, amber, padding, y + 8, x - padding - gap, 30)
@@ -163,7 +186,7 @@ end
 function surface.mount(context, spec, on_action)
     local first = spec.note and 126 or 66
     local height = first + #spec.rows * (control_height + gap) + padding
-    local view = {buttons = {}, inputs = {}, toggles = {}, linked = {}, active = false}
+    local view = {buttons = {}, inputs = {}, toggles = {}, linked = {}, photos = {}, active = false}
     local widget, metrics = display.mount(context, "",
         {width = width, height = height, center = spec.center ~= false, top_level = true,
             navigation = spec.navigation == true, navigation_width = navigation_width})
@@ -224,7 +247,8 @@ function surface.mount(context, spec, on_action)
                     place(button.slot, x, y, w, control_height, 1)
                     if action.detail then
                         button.widget.TextBlock_0:SetRenderOpacity(0)
-                        text(view, caption, 18, amber, x + 14, y + 8, w - 251, 28, false, 2)
+                        local inset = profile_photo(view, context, action.photo, x + 14, y + 5) and 52 or 14
+                        text(view, caption, 18, amber, x + inset, y + 8, w - 237 - inset, 28, false, 2)
                         text(view, action.detail, 16, pale_amber, x + w - 234, y + 10, 220, 26, false, 2, 2)
                     end
                 end

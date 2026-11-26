@@ -129,7 +129,7 @@ def campaign_entries(campaign: Path, saved: Path) -> tuple[CampaignEntry, ...]:
 
 
 def manage_campaign(campaign: Path, saved: Path, entry: CampaignEntry, action: str, character: str | None,
-                    cloud_backups=None) -> tuple[tuple[str, str, bool], ...]:
+                    cloud_backups=None) -> tuple[tuple[str, str, str, str], ...]:
     from .service import _MENU_CHECKPOINT_BYTES, _require_resident_host_checkpoint, verify_travel_checkpoint
 
     selected, checkpoint = _qualified_campaign(campaign, saved, entry.name)
@@ -138,8 +138,11 @@ def manage_campaign(campaign: Path, saved: Path, entry: CampaignEntry, action: s
         raise CampaignError("This co-op save has changed.")
 
     if action == "characters":
-        rows = ((key, value["name"], False) for key, value in checkpoint["characters"].items()
-                if value["state"].get(DELETED) is not True)
+        rows = []
+        for key, value in checkpoint["characters"].items():
+            if value["state"].get(DELETED) is not True:
+                guest = checkpoint["guests"][value["guest_id"]]
+                rows.append((key, value["name"], guest["name"], guest.get("steam_account", "-")))
         return tuple(sorted(rows, key=lambda row: (row[1].casefold(), row[0]))[:MAX_CHARACTERS])
     if action not in {"delete-save", "delete-character"}:
         raise ValueError("Unknown save management operation")
@@ -202,12 +205,13 @@ def _erase_campaign(selected, store, scope):
 class TitleHostCampaigns:
     """Publish and manage saved campaigns for the exact active Host offer."""
 
-    def __init__(self, bridge: Path, scan: Callable[[], tuple[CampaignEntry, ...]], manage=None):
+    def __init__(self, bridge: Path, scan: Callable[[], tuple[CampaignEntry, ...]], manage=None, profile_avatars=None):
         self.path = bridge / FILE
         self.request = bridge / REQUEST
         self.response = bridge / RESPONSE
         self._scan = scan
         self._manage = manage
+        self._profile_avatars = profile_avatars
         if manage:
             _unlink(self.request)
             _unlink(self.response)
@@ -282,7 +286,10 @@ class TitleHostCampaigns:
             if entry and self._published and action in _OPERATIONS and valid_character:
                 rows = await asyncio.to_thread(self._manage, entry, action, None if character == "-" else character)
                 status, data = "ok", str(len(rows))
-                data += "".join(f"\n{key}\t{name}\t{'deleted' if deleted else 'active'}" for key, name, deleted in rows)
+                data += "".join(f"\n{key}\t{name}\t{creator}\t{account}" for key, name, creator, account in rows)
+                if self._profile_avatars is not None and rows:
+                    images = await self._profile_avatars({row[3] for row in rows})
+                    data += "".join(f"\n{account}\t{image}" for account, image in images.items())
         except StoreBusyError:
             data = "busy"
         except (OSError, CampaignError, ValueError, RuntimeError):
@@ -292,7 +299,7 @@ class TitleHostCampaigns:
             self._entries = None
             _unlink(self.path)
         try:
-            runtime.write_text(self.response, f"1\t{generation}\t{request_id}\t{status}\t{data}\n", newline="\n")
+            runtime.write_text(self.response, f"2\t{generation}\t{request_id}\t{status}\t{data}\n", newline="\n")
         except OSError:
             return
 

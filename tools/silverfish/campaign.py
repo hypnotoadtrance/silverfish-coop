@@ -84,6 +84,10 @@ def _name(value: object) -> str:
     return value
 
 
+def valid_steam_account(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[1-9][0-9]{0,19}", value) is not None and int(value) < 2**64
+
+
 def _validate_json_value(value):
     value_type = type(value)
     if value_type is dict:
@@ -336,8 +340,11 @@ class CampaignStore:
         if type(guests) is not dict or type(characters) is not dict:
             raise CampaignFormatError("Campaign guests and characters must be maps.")
         for guest_id, guest in guests.items():
-            if (not _is_uuid(guest_id) or type(guest) is not dict or set(guest) - {"direct"} != {"name", "credential_sha256"}
-                    or ("direct" in guest and guest["direct"] is not True)):
+            if (not _is_uuid(guest_id) or type(guest) is not dict
+                    or set(guest) - {"direct", "steam_account"} != {"name", "credential_sha256"}
+                    or ("direct" in guest and guest["direct"] is not True)
+                    or ("steam_account" in guest and (guest.get("direct") is not True
+                                                      or not valid_steam_account(guest["steam_account"])))):
                 raise CampaignFormatError("The campaign contains an invalid guest record.")
             if _name(guest["name"]) != guest["name"]:
                 raise CampaignFormatError("A guest display name is not in canonical form.")
@@ -449,14 +456,28 @@ class CampaignStore:
             self._commit(candidate, verify_content=False)
             return identity
 
-    def register_direct_guest(self, guest_id: str, credential: str) -> None:
+    def register_direct_guest(self, guest_id: str, credential: str, *, steam_profile: tuple[str, str] | None = None) -> None:
         """Enroll the same local guest across retries without replacing an existing owner."""
         with self._writer, self._mutex:
             self._require_open()
             if not _is_uuid(guest_id) or type(credential) is not str or not _CREDENTIAL_RE.fullmatch(credential):
                 raise AuthenticationError("Campaign guest authentication failed.")
+            profile = {}
+            if steam_profile is not None:
+                account, name = steam_profile
+                if not valid_steam_account(account):
+                    raise AuthenticationError("Invalid Steam account.")
+                profile = {"steam_account": account, "name": _name(name)}
             if guest_id in self._data["guests"]:
                 self._authenticate(guest_id, credential)
+                guest = self._data["guests"][guest_id]
+                if profile and guest.get("direct") is True:
+                    if guest.get("steam_account", account) != account:
+                        raise AuthenticationError("This guest belongs to another Steam account.")
+                    if profile["name"] == "Steam player" and "steam_account" in guest:
+                        profile.pop("name")
+                    # Reconnect attribution is saved with the next campaign checkpoint.
+                    guest.update(profile)
                 return
             if len(credential) != 43:
                 raise AuthenticationError("Invalid Direct IP guest credential.")
@@ -465,6 +486,7 @@ class CampaignStore:
                 "name": "Direct IP guest",
                 "credential_sha256": hashlib.sha256(credential.encode("ascii")).hexdigest(),
                 "direct": True,
+                **profile,
             }
             self._commit(candidate, verify_content=False)
 
@@ -517,6 +539,15 @@ class CampaignStore:
                 for character_id, character in self._data["characters"].items()
                 if character["guest_id"] == guest_id and character["state"].get(DELETED) is not True
             ]
+
+    def linked_character_catalog_reply(self, guest_id):
+        with self._mutex:
+            roster = self.linked_character_catalog(guest_id)
+            guest = self._data["guests"][guest_id]
+            result = {"ok": True, "characters": roster}
+            if "steam_account" in guest:
+                result["creator"] = {"name": guest["name"], "steam_account": guest["steam_account"]}
+            return result
 
     def create_linked_character(self, guest_id, name, operation_id, *, appearance=None, profile=None):
         """Create once for the owner of an authenticated application session."""

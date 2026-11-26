@@ -6,11 +6,15 @@ from hashlib import sha256
 from ipaddress import ip_address
 from pathlib import Path
 import shlex
+import struct
 import time
 import uuid
+import zlib
 
 from . import runtime, steam_browser
+from .campaign import valid_steam_account
 from .embedded_engine import _exact_existing
+from .steam_transport import SteamBuildMismatch
 
 
 APP_ID = 2941710
@@ -50,6 +54,15 @@ def _remove(bridge: Path, *names: str):
             (bridge / name).unlink(missing_ok=True)
 
 
+def _avatar_hex(pixels: bytes) -> str:
+    def chunk(kind, data):
+        return struct.pack("!I", len(data)) + kind + data + struct.pack("!I", zlib.crc32(kind + data))
+
+    scanlines = b"".join(b"\0" + pixels[i:i + 128] for i in range(0, 4096, 128))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack("!IIBBBBB", 32, 32, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(scanlines, level=1)) + chunk(b"IEND", b"")).hex()
+
+
 class SteamSession:
     """Own at most one Steam lobby for this resident game's lifetime."""
 
@@ -66,6 +79,25 @@ class SteamSession:
         if route is not None and (route.host, route.port) == (address, port):
             return route.fingerprint
         return None
+
+    async def profile_avatars(self, accounts) -> dict[str, str]:
+        pending = {account for account in accounts if valid_steam_account(account)}
+        avatars = {}
+        deadline = time.monotonic() + .6
+        while pending and not self.pump.done():
+            for account in tuple(pending):
+                try:
+                    pixels = self.transport.api.small_avatar_rgba(int(account))
+                except (OSError, RuntimeError, ValueError):
+                    pixels = b""
+                if pixels is not None:
+                    pending.remove(account)
+                    if len(pixels) == 4096:
+                        avatars[account] = _avatar_hex(pixels)
+            if not pending or time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(.1)
+        return avatars
 
     def _leave(self):
         self._route = self._nonce = None
@@ -112,6 +144,16 @@ class SteamSession:
                                    f"1\t{self._nonce}\t{route.port}\t{self._expires}\n", newline="\n")
                 _status(self.title_bridge, "invite_ready")
                 return True
+            except SteamBuildMismatch as error:
+                self._leave()
+                nonce, expires = uuid.uuid4().hex, int(time.time()) + 60
+                with suppress(OSError):
+                    runtime.write_text(self.title_bridge / JOIN_OFFER,
+                                       f"2\t{nonce}\t{self.transport.version}\t{error.host_version or '-'}\t{expires}\n",
+                                       newline="\n")
+                _status(self.title_bridge, "incompatible_build", mod_version=self.transport.version,
+                        host_version=error.host_version)
+                return False
             except (OSError, ValueError, RuntimeError):
                 self._leave()
                 _status(self.title_bridge, "invite_unavailable")
@@ -213,13 +255,16 @@ async def installed_steam(work: Path, bridge: Path, argv, *, enabled: bool):
             raise ValueError("Unexpected Steamworks redistributable")
         if sha256(path.read_bytes()).hexdigest() != STEAM_DLL_SHA256:
             raise ValueError("Unverified Steamworks redistributable")
+        build = runtime.staged_build(work)
+        metadata = runtime.read_json(runtime.stage_manifest(runtime.content_root(work)))
+        version = runtime.release_version(metadata) or f"dev-{build[:7]}"
         api = Steamworks.open(path)
     except (OSError, ValueError, RuntimeError):
         _status(bridge, "unavailable", reason="steam_initialization")
         yield None
         return
 
-    transport = SteamTransport(api)
+    transport = SteamTransport(api, build=build, version=version)
     pump = asyncio.create_task(transport.run())
     session = SteamSession(transport, bridge, pump)
     try:

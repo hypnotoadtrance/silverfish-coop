@@ -591,7 +591,8 @@ def _resident_direct_join_plan(work, directory, mailbox, saved, headless, *, ava
 
     settings = TitleJoinSettings(work, mailbox, direct_profile=directory, qualify_connection=qualify,
                                  timeout=18, saved=saved,
-                                 endpoint_fingerprint=steam.fingerprint_for if steam is not None else None)
+                                 endpoint_fingerprint=steam.fingerprint_for if steam is not None else None,
+                                 profile_avatars=steam.profile_avatars if steam is not None else None)
 
     def resolve(claim):
         if claim.join_settings is None:
@@ -658,13 +659,14 @@ async def _resident_unified(work: Path, seat: Path, mailbox: Path, saved: Path, 
         join, join_settings = _resident_direct_join_plan(work, guest, mailbox, saved, headless, available=options, steam=steam)
         try:
             await _resident_title(mailbox, saved, seat, {"host": host, "join": join}, join_settings=join_settings,
-                                  host_campaign=campaign, host_defaults=defaults, cloud_backups=cloud)
+                                  host_campaign=campaign, host_defaults=defaults, cloud_backups=cloud,
+                                  profile_avatars=steam.profile_avatars if steam is not None else None)
         finally:
             await join_settings.close()
 
 
 async def _resident_title(mailbox, saved, directory, plans, *, join_settings=None, host_campaign=None,
-                          host_defaults=None, cloud_backups=None):
+                          host_defaults=None, cloud_backups=None, profile_avatars=None):
     from .title_host_campaigns import campaign_entries, manage_campaign
     from .title_session import TitleSession
 
@@ -681,7 +683,8 @@ async def _resident_title(mailbox, saved, directory, plans, *, join_settings=Non
     await TitleSession(title.bridge, plans, resident=True, title_saved_directory=saved,
                        on_title_ready=lambda: None, join_settings=join_settings,
                        host_campaign_scan=host_campaign_scan, host_defaults=host_defaults,
-                       host_campaign_manage=manage if host_campaign is not None else None).run()
+                       host_campaign_manage=manage if host_campaign is not None else None,
+                       profile_avatars=profile_avatars).run()
 
 
 def run() -> None:
