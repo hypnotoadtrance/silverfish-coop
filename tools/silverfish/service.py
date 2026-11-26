@@ -7131,9 +7131,8 @@ class Client:
                 self.last_game = await self.loot_view.sync(self.last_game, rolls, claim_crate)
             await self.service_broker_input(active)
             if self.wire_board:
-                current = (active and not self.stopping and self.host_session and self.zone_epoch
-                           and time.monotonic() - self.gameplay_seen < 2)
-                epoch = f"{self.host_session}:{self.zone_epoch}"
+                epoch = f"{self.host_session}:{self.zone_epoch}" if self.host_session and self.zone_epoch else None
+                current = active and not self.stopping and epoch and time.monotonic() - self.gameplay_seen < 2
                 self.last_game = await self.wire_board.sync(
                     self.last_game, epoch, current, self.gameplay_action, visit=self.zone_epoch,
                 )

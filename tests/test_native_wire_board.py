@@ -4,7 +4,7 @@ import unittest
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish.authored_routes import MAPS as EXPANDED_MAPS
 
@@ -296,6 +296,40 @@ class WireBoardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(bridge.interactions(), [])
                 bridge.local_bridge.read_input.assert_called_once()
                 self.assertEqual(list(Path(directory).iterdir()), [])
+
+    async def test_first_open_waits_for_the_current_visit_to_be_active(self):
+        area = wire.BLACK_MARKET
+        board = wire.BOARDS[area]
+        pawn = "Player_FP_C Black Market guest"
+        row = {"map": area, "pawn": pawn, "board": board, "quest": "-", "state": "loading", "sequence": 6, "open": 6}
+        snapshot = {"map": area, "pawns": {"local": {"name": pawn}}, "native_wire_board_stock": row}
+        visible = {**snapshot, "native_wire_board_stock": {**row, "state": "visible"}}
+        event = (6, 6, "stock-view", area, pawn, board, "-")
+        catalog = {native_board_contract.CATALOG_KEY: {
+            "map": area, "pawn": "Player_FP_C AuthorityGuest", "board": board, "offers": [], "turnins": [],
+        }}
+        for resume_epoch, elapsed, resume_pawn, expected in [
+            ("visit", 0.4, pawn, True),
+            ("other visit", 0.4, pawn, False),
+            ("visit", 2.1, pawn, False),
+            ("visit", 0.4, "Player_FP_C Replacement", False),
+        ]:
+            with self.subTest(resume_epoch=resume_epoch, elapsed=elapsed, resume_pawn=resume_pawn):
+                bridge = SimpleNamespace(input_namespace=uuid.uuid4(),
+                    native_wire_board_requests=Mock(side_effect=[[event], [], []]), command=AsyncMock(return_value=visible))
+                view = wire.WireBoardView(bridge, Mock())
+                action = AsyncMock(return_value=catalog)
+                clock = Mock(side_effect=[10.0, 10.0 + elapsed, 10.1 + elapsed])
+                resumed = {**snapshot, "pawns": {"local": {"name": resume_pawn}}}
+                with patch.object(wire, "time", SimpleNamespace(monotonic=clock)):
+                    await view.sync(snapshot, "visit", False, action)
+                    action.assert_not_awaited()
+                    result = await view.sync(resumed, resume_epoch, True, action)
+                    await view.sync(resumed, resume_epoch, True, action)
+                self.assertEqual(action.await_count, int(expected))
+                if expected:
+                    self.assertEqual(result, visible)
+                    self.assertEqual(action.await_args.args[0::2], (native_board_contract.CATALOG, board))
 
     async def test_board_requires_current_rendered_offer_before_accepting(self):
         pawn = "Player_FP_C test-owner"

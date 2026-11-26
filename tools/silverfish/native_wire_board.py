@@ -129,17 +129,24 @@ class WireBoardView:
     async def sync(self, snapshot, epoch, active, action, *, visit=None):
         events = self.bridge.native_wire_board_requests()
         now = time.monotonic()
-        if not active or not epoch:
+        if not epoch:
             self.opened = self.stock_open = self.pending = None
             return snapshot
         if events:
             self.pending = (epoch, now, events[-1])
         if self.pending and (self.pending[0] != epoch or now - self.pending[1] > 2):
             self.pending = None
+        if not active:
+            self.opened = self.stock_open = None
         if not self.pending:
             return snapshot
         pawn = snapshot.get("pawns", {}).get("local", {}).get("name")
         sequence, opened, kind, area, actor, board, quest = self.pending[2]
+        if not active:
+            # The guest can reach a board before fresh party state arrives for the visit.
+            if kind != "stock-view" or (area, actor) != (snapshot.get("map"), pawn):
+                self.pending = None
+            return snapshot
         stock_menu = kind.startswith("stock-")
         shown = snapshot.get("native_wire_board_stock" if stock_menu else "native_wire_board", {})
         expected_quest = (quest == "-" and opened == sequence if kind == "stock-view" else

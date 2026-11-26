@@ -53,7 +53,7 @@ async def verify_dead_drop(host, guest, contract, drop):
             and not frame.get("awaiting_zone_guest") and frame["game"].get("native_zone", {}).get("state") == "ready"
             and frame["game"].get("native_guest_save", {}).get("state") == "bound", timeout=55)
         visitor = await wait_resident_status(guest_run, lambda frame: frame["game"]["map"] == area
-            and frame.get("state") == "connected" and frame.get("gameplay_fresh") is True
+            and frame.get("state") == "connected"
             and frame.get("zone_epoch") == authority["zone_epoch"])
         return authority, visitor
 
@@ -75,11 +75,11 @@ async def verify_dead_drop(host, guest, contract, drop):
         authority, _ = await seats(area)
         pawn = authority["game"]["native_guest_save"]["pawn"]
         await host.bridge.command(contract.command("approach"), pawn)
-        preflight = (await action(guest_run, contract.command("preflight")))[contract.key]
-        assert preflight["board"] == BOARDS[area]
         await action(guest_run, native_wire_board.STOCK_F_FIXTURE, target=BOARDS[area])
         await wait_resident_status(guest_run, lambda frame:
             frame["game"].get("native_wire_board_stock", {}).get("state") == "visible", timeout=14)
+        preflight = (await action(guest_run, contract.command("preflight")))[contract.key]
+        assert preflight["board"] == BOARDS[area]
         await action(guest_run, native_wire_board.STOCK_FIXTURE, target=f"{drop.quest}|{verb}")
 
     paths = (OBSERVATORY, CROSSROADS, LAKE, BLACK_MARKET)
