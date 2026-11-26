@@ -1277,7 +1277,7 @@ local function run_command(fields, state, current_phase)
 end
 
 local pending_local
-local function read_command(periodic)
+local function read_command(periodic, memory_only)
     local content, ticket
     if type(SilverfishTakeLocalBridgeCommand) == "function" then
         local active
@@ -1291,6 +1291,7 @@ local function read_command(periodic)
             and not status_publication.mirror) then return end
     end
     if not content then
+        if memory_only then return end
         ticket = nil
         local file = io.open(command_path, "rb")
         if not file then return end
@@ -2110,6 +2111,29 @@ native_guest_smg_hold.start_fast(bridge, status_row, function(state)
     return phase(state) == "hosting" and same_object(state.world, current_world())
 end)
 status_publication.next_snapshot = 0
+
+function status_publication.dispatch(now, fields, pending, periodic)
+    if not fields and not periodic then return end
+    local ok, result = pcall(tick, fields, pending, periodic)
+    if not ok or result ~= true then status_publication.next_snapshot = now + 0.25 end
+    if not ok then print("[SilverfishCoop] " .. tostring(result) .. "\n") end
+end
+
+-- Check the resident ticket between maintenance ticks. A queued ordinary
+-- command remains with the main loop and keeps its place in the bridge.
+if resident_title and status_publication.installed then
+    LoopInGameThreadWithDelay(8, function()
+        if leaving or not status_publication.memory_live or (role ~= "host" and role ~= "client") then return end
+        local fields, pending = read_command(false, true)
+        if not fields or not pending then return end
+        local action = fields[2]
+        if action == "native-world-loot-frame" or action == "native-loot-open" or action == "native-loot-inspect"
+            or status_publication.stock_interactions[action] or status_publication.pickup_presentation[action] then
+            status_publication.dispatch(os.clock(), fields, pending, false)
+        end
+    end)
+end
+
 LoopInGameThreadWithDelay(25, function()
     pcall(native_zone_loading.refresh, current_world)
     if not leaving and role == "host" then pcall(native_mushrooms.update, current_world) end
@@ -2136,8 +2160,5 @@ LoopInGameThreadWithDelay(25, function()
     local now = os.clock()
     local periodic = now >= status_publication.next_snapshot or now >= status_publication.next_frame
     local fields, pending = read_command(periodic)
-    if not fields and not periodic then return end
-    local ok, result = pcall(tick, fields, pending, periodic)
-    if not ok or result ~= true then status_publication.next_snapshot = now + 0.25 end
-    if not ok then print("[SilverfishCoop] " .. tostring(result) .. "\n") end
+    status_publication.dispatch(now, fields, pending, periodic)
 end)

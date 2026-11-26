@@ -47,6 +47,10 @@ def instrument_profile(source, *, stock_receipts=False):
             status_code = status_code.replace(needle, call + needle)
     rest = status_code + boundary + after_status
     if stock_receipts:
+        fast_dispatch = "            status_publication.dispatch(os.clock(), fields, pending, false)\n"
+        if fast_dispatch in rest:
+            rest = rest.replace(fast_dispatch, '            status_publication.profile.stock_receipt("fast/" .. action, 0)\n'
+                                + fast_dispatch, 1)
         # Keep the private status mirror available to the runner while exercising the
         # installed compact interaction branch. Scope validation still runs normally.
         scope = "if resident_title and status_publication.installed and status_publication.memory_live and not status_publication.mirror then"
