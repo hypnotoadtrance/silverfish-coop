@@ -1319,7 +1319,15 @@ local function set_garage_aim(pawn, world, host, specification)
     shooter.Camera:K2_SetWorldLocation(from, false, {}, true)
     shooter.Camera:K2_SetWorldRotation(aim, false, {}, true)
     weapon.Arrow_Muzzle:K2_SetWorldLocation(from, false, {}, true)
-    local hit = line_hit(shooter, from, to, {shooter, weapon})
+    local endpoint = to
+    if kind == "turret" then
+        local x, y, z = to.X-from.X, to.Y-from.Y, to.Z-from.Z
+        local span = math.sqrt(x*x + y*y + z*z)
+        assert(span > 1)
+        -- The visual gun bounds can end before stock collision on a turned turret.
+        endpoint = {X=to.X+x*100/span, Y=to.Y+y*100/span, Z=to.Z+z*100/span}
+    end
+    local hit = line_hit(shooter, from, endpoint, {shooter, weapon})
     local component = hit and hit.Component and hit.Component:Get()
     if same(component, mesh) then return "blocked" end
     if valid(component) and same(component:GetOwner(), worker) then return "worker" end
@@ -1762,7 +1770,8 @@ local function solo_combat(world, action, slot)
     local total, lethal = {}, {}
     actor:DealDamage({[damage_key]=1000}, {}, pawn, {X=0,Y=0,Z=0}, false, total, lethal)
     assert(total.TotalDamage > 0 and lethal.IsLethal == true and actor.Alive == false,
-        "Singleplayer drone damage did not resolve through the stock function")
+        ("Singleplayer drone damage did not resolve through the stock function (damage=%s, lethal=%s, alive=%s, health=%s)")
+            :format(tostring(total.TotalDamage), tostring(lethal.IsLethal), tostring(actor.Alive), tostring(actor.Health)))
     return ("stock inventory and lethal drone damage %.3f"):format(total.TotalDamage)
 end
 
