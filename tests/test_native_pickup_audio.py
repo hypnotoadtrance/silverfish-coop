@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, Mock, call, patch
 
@@ -7,6 +8,31 @@ from tools.silverfish.travel import OBSERVATORY
 
 
 class NativePickupAudioTests(unittest.IsolatedAsyncioTestCase):
+    async def test_claim_reply_and_snapshot_share_one_in_flight_cash_notice(self):
+        from tools.silverfish.authored_cash import SMALL_STACK
+
+        epoch, operation = "a" * 32, "b" * 32
+        path = SMALL_STACK.class_path
+        game = {"state": "connected", "map": OBSERVATORY}
+        frame = {"map": OBSERVATORY, "epoch": epoch, "cues": [[operation, path, None]], "cash": {operation: 45}}
+        dispatched, accepted = asyncio.Event(), asyncio.Event()
+
+        async def local_command(*args, **kwargs):
+            dispatched.set()
+            await accepted.wait()
+            return {"ack": {"message": operation}}
+
+        bridge, control, playback = Mock(command=AsyncMock(side_effect=local_command)), Mock(), Playback()
+        async with asyncio.TaskGroup() as tasks:
+            tasks.create_task(playback.sync(bridge, control, game, frame, epoch, "host"))
+            await dispatched.wait()
+            duplicate = tasks.create_task(playback.sync(bridge, control, game, frame, epoch, "host"))
+            await asyncio.sleep(0)
+            accepted.set()
+        self.assertIs(duplicate.result(), game)
+        bridge.command.assert_awaited_once_with(COMMAND, OBSERVATORY, epoch, f"{operation}|{path}|cash|45", timeout=1.5)
+        control.event.assert_called_once_with("native_cash_popup_queued", operation_id=operation, map=OBSERVATORY, amount=45)
+
     async def test_committed_cash_reuses_the_stock_widget_at_any_distance_on_the_guest(self):
         from tools.silverfish.authored_cash import SMALL_STACK
 

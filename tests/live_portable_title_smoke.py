@@ -84,7 +84,7 @@ INDEPENDENT_RESIDENT_MAPS = {
     "stock_footsteps": {OBSERVATORY}, "stock_impact_cues": {OBSERVATORY},
     "stock_lockpicks": {OBSERVATORY}, "stock_observatory_tv": {OBSERVATORY},
     "stock_critters": {CROSSROADS}, "stock_lingering_teleport": {CROSSROADS}, "stock_mushrooms": {CROSSROADS},
-    "stock_crossroads_recovery": {CROSSROADS},
+    "stock_crossroads_recovery": {CROSSROADS}, "stock_crossroads_door": {CROSSROADS},
     "stock_placed_item": {CROSSROADS}, "stock_cash_popup": {CROSSROADS}, "stock_weather_travel": {OBSERVATORY},
     "stock_canister": {CROSSROADS},
     "stock_warehouse_switch": {OBSERVATORY, WAREHOUSE_DOCK}, "stock_warehouse_radio": {OBSERVATORY, WAREHOUSE_DOCK},

@@ -67,6 +67,7 @@ class Playback:
     def __init__(self):
         self.scope = None
         self.seen = deque(maxlen=2 * MAX_CUES)
+        self.pending = set()
 
     def prepare(self, game, frame, epoch, generation):
         if not isinstance(frame, dict) or game.get("state") not in {"hosting", "connected"}:
@@ -74,10 +75,11 @@ class Playback:
         area = game.get("map")
         if (frame.get("map"), frame.get("epoch")) != (area, epoch) or not valid_id(epoch):
             return [], {}
-        scope = generation, epoch
+        scope = generation, area, epoch
         if scope != self.scope:
             self.scope = scope
             self.seen.clear()
+            self.pending = set()
         origin = game.get("pawns", {}).get("local", {}).get("location")
         listener_position_available = valid_position(origin)
         cues = frame.get("cues")
@@ -91,7 +93,8 @@ class Playback:
             if not isinstance(cue, list) or len(cue) != 3:
                 continue
             operation, class_path, location = cue
-            if not valid_id(operation) or operation in self.seen or operation in asked or not valid_class(class_path):
+            if (not valid_id(operation) or operation in self.seen or operation in self.pending
+                    or operation in asked or not valid_class(class_path)):
                 continue
             amount = cash.get(operation)
             if amount is not None and not stock_cash_amount(class_path, amount):
@@ -110,6 +113,8 @@ class Playback:
 
     def acknowledge(self, control, area, asked, message):
         for operation in sorted(asked.keys() & set(message.split(","))):
+            if operation in self.seen:
+                continue
             self.seen.append(operation)
             if asked[operation] is None:
                 control.event("native_pickup_sound_played", operation_id=operation, map=area)
@@ -121,10 +126,18 @@ class Playback:
         if not args:
             return game
         area = game["map"]
+        # A claim reply and a world snapshot can carry the same cue while the
+        # first local command is still awaiting its game-thread receipt.
+        pending = self.pending
+        pending.update(asked)
         try:
             snapshot = await bridge.command(COMMAND, area, epoch, *args, timeout=1.5)
         except (OSError, RuntimeError, TimeoutError) as error:
             control.event("native_pickup_sound_unavailable", reason=str(error))
+            return game
+        finally:
+            pending.difference_update(asked)
+        if pending is not self.pending:
             return game
         self.acknowledge(control, area, asked, snapshot.get("ack", {}).get("message", ""))
         return snapshot if "state" in snapshot else game
