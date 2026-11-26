@@ -449,9 +449,11 @@ local function bind_quarry_target(world, source)
     local handle = component.TrackedQuest
     local targets = component.Targets
     if not handle or not same(handle.DataTable, source) or handle.RowName:ToString() ~= "Photo_BrnzQuarry"
-        or count(targets) ~= 0 or count(component.TargetPoints) ~= 1 or component.SumOfWeights ~= 1 then return end
+        or count(targets) ~= 1 or valid(targets[1]) or count(component.TargetPoints) ~= 1 or component.SumOfWeights ~= 1 then return end
     local point = component.TargetPoints[1]
-    if point.Primitive_6_8BEB66464DF62A10BABD8A9ECF81CFDE:ToString() ~= "SM_Prop_Whale_Skeleton_01_Head_01"
+    local primitive = point.Primitive_6_8BEB66464DF62A10BABD8A9ECF81CFDE
+    if type(primitive) == "userdata" then primitive = primitive:ToString() end
+    if primitive ~= "SM_Prop_Whale_Skeleton_01_Head_01"
         or point.Bone_5_72242274417DBE90A274A88BB32BC0A1:ToString() ~= "None"
         or point.Weight_9_10321D2441683E2EC000A9BBFCDFAB5E ~= 1 then return end
     local mesh = actor.StaticMeshComponent
