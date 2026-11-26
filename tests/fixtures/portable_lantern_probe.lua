@@ -419,9 +419,35 @@ local function streamed_probe(action, world, pawn, source_prop)
     if not placed_stream:IsLevelVisible() then return "absent" end
     local level = placed_stream:GetLoadedLevel()
     local level_path = level:GetFullName():match("^%S+ (.+)$")
-    if action == "streamloot" then
+    if action == "streamloot" or action == "streamapproachguest" then
         local path = level_path .. ".Eqp_Bolt_C_1"
         local item = StaticFindObject(path)
+        if action == "streamapproachguest" then
+            assert(lane == "first" and valid(item) and same(item:GetOuter(), level))
+            local guest = other_player(world, pawn)
+            local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+            local at = item.Box:K2_GetComponentLocation()
+            local height = guest.CapsuleComponent:GetScaledCapsuleHalfHeight()
+            for _, distance in ipairs({65, 95, 125}) do
+                for _, axis in ipairs({{0,-1}, {0,1}, {1,0}, {-1,0}, {1,1}, {-1,-1}}) do
+                    local x, y = at.X + axis[1] * distance, at.Y + axis[2] * distance
+                    local floor = {}
+                    if trace:LineTraceSingle(guest, {X=x,Y=y,Z=at.Z+140}, {X=x,Y=y,Z=at.Z-120}, 0, false,
+                        {guest, item}, 0, floor, true, color, color, 0) then
+                        floor = floor.OutHit or floor
+                        local target = {X=x,Y=y,Z=floor.ImpactPoint.Z+height+2}
+                        local eye = {X=x,Y=y,Z=target.Z+50}
+                        if floor.ImpactNormal.Z > .7 and trace:LineTraceSingle(guest, eye, at, 0, false,
+                            {guest, item}, 0, {}, true, color, color, 0) == false
+                            and guest:K2_TeleportTo(target, guest:K2_GetActorRotation()) then
+                            guest:ForceNetUpdate()
+                            return "approached"
+                        end
+                    end
+                end
+            end
+            error("no clear floor near the sublevel item", 0)
+        end
         local visible = valid(item) and same(item:GetOuter(), level) and item.bHidden == false and item:GetActorEnableCollision()
         local original = StaticFindObject(map .. ":PersistentLevel.Eqp_Bolt_C_1")
         local untouched = valid(original) and original.bHidden == false and original:GetActorEnableCollision()

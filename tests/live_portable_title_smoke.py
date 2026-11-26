@@ -6231,7 +6231,7 @@ async def verify_streamed_loose_pickup(host: Seat, guest: Seat, pawn: str) -> di
     source = f"{OBSERVATORY}|{host_item[0]}"
     target = f"loose:{source}"
     assert loose.target_path(target) == source
-    await host.bridge.command(loose.APPROACH, source, pawn, timeout=6)
+    assert await call(host, "streamapproachguest") == "approached"
     await wait_resident_status(guest_run, lambda frame:
         frame.get("game", {}).get(loose.KEY, {}).get(source, {}).get("state") == "available")
     taken = await submit(guest_run, loose.FIXTURE, target=target)
