@@ -135,10 +135,10 @@ end
 local function append_quests(canonical, rows)
     local address = canonical:GetAddress()
     if not journal_view or journal_view.address ~= address then
-        journal_view = {address = address, sequence = 0, active = {}, completed = {}}
+        journal_view = {address = address, sequence = 0, steps = {}, completed = {}}
     end
     journal_view.sequence = journal_view.sequence + 1
-    local active, completed, quests = {}, {}, {}
+    local steps, completed, quests = {}, {}, {}
     canonical.ActiveQuests:ForEach(function(raw_key, raw_value)
         local id, entry = raw_key:get():ToString(), raw_value:get()
         if not content_paths.quest_id(id) then return end
@@ -146,14 +146,14 @@ local function append_quests(canonical, rows)
             return integer(quest_catalog.tracked_step(canonical, entry), min_int32, max_int32)
         end)
         if not ok then return end
-        if step > 0 then
-            active[id] = true
-        elseif step == completed_step then
-            completed[id] = journal_view.active[id] and journal_view.sequence or journal_view.completed[id]
+        if step == completed_step then
+            -- A quest can start and complete between two guest journal captures.
+            completed[id] = journal_view.steps[id] ~= completed_step and journal_view.sequence or journal_view.completed[id]
         end
+        steps[id] = step
         quests[#quests + 1] = {id = id, step = step, finished = completed[id] or 0}
     end)
-    journal_view.active, journal_view.completed = active, completed
+    journal_view.steps, journal_view.completed = steps, completed
     table.sort(quests, function(first, second)
         if (first.step > 0) ~= (second.step > 0) then return first.step > 0 end
         if first.finished ~= second.finished then return first.finished > second.finished end

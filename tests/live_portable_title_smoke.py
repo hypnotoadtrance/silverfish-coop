@@ -8811,6 +8811,8 @@ if __name__ == "__main__":
                         help="Verify the Crossroads and Metro Dead Drops in one resident pair")
     parser.add_argument("--stock-board-offers", action="store_true",
                         help="compare stock board offers and complete a Forest fuel tank bounty through guest gunfire")
+    parser.add_argument("--stock-streamed-board", action="store_true",
+                        help="accept and redeem a live custom quest at a streamed stock board with a large host journal")
     parser.add_argument("--stock-simmi-jammers", action="store_true",
                         help="Complete both stock Simmi jammer bounties through the installed title")
     parser.add_argument("--stock-eye-stacks", action="store_true",
@@ -9037,7 +9039,8 @@ if __name__ == "__main__":
     resident_check_options = {"guest_shop_lease", "stock_unequip", "stock_split", "stock_food", "stock_personal_consumable", "stock_wipe_chooser",
                               "stock_campfire", "stock_npc_override", "stock_dock_population", "stock_streamed_npc",
                               "stock_dead_drops",
-                              "stock_board_offers", "stock_quarry_photo", "resident_weapon_cues", "resident_held_queue", "resident_stale_quick_slot",
+                              "stock_board_offers", "stock_streamed_board", "stock_quarry_photo",
+                              "resident_weapon_cues", "resident_held_queue", "resident_stale_quick_slot",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "tutorial_dock_pursuit",
                               "tutorial_dock_held_mask", "tutorial_dock_gait",
                               "tutorial_dock_shot_view",
@@ -9095,7 +9098,7 @@ if __name__ == "__main__":
     if any((args.stock_food, args.stock_cooked_meal, args.stock_personal_consumable, args.stock_wipe_chooser,
             args.stock_campfire, args.stock_npc_override, args.stock_dock_population, args.stock_streamed_npc,
             args.stock_dead_drops,
-            args.stock_board_offers, args.stock_quarry_photo, args.tutorial_dock_melee,
+            args.stock_board_offers, args.stock_streamed_board, args.stock_quarry_photo, args.tutorial_dock_melee,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_buried_placements,
             args.stock_take_ammo, args.stock_shotguns,
             args.stock_impact_cues, args.stock_avatar_tail, args.stock_avatar_binoculars, args.stock_interaction_feedback,
@@ -9156,6 +9159,7 @@ if __name__ == "__main__":
                        manage_saves=args.manage_saves,
                        stock_dead_drops=args.stock_dead_drops,
                        stock_board_offers=args.stock_board_offers,
+                       stock_streamed_board=args.stock_streamed_board,
                        stock_quarry_photo=args.stock_quarry_photo,
                        stock_npc_rivalry=args.stock_npc_rivalry,
                        stock_host_corpse_carry=args.stock_host_corpse_carry,
