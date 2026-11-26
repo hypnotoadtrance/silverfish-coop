@@ -616,19 +616,29 @@ async def settle_lockpick(host, bridge, character, target, operation):
             raise party.RuleError(str(error)) from error
         raise
     message = frame.get("ack", {}).get("message")
-    locked, _, accounting = message.partition(":") if isinstance(message, str) else ("", "", "")
+    locked, separator, accounting = message.partition(":") if isinstance(message, str) else ("", "", "")
+    reported_remaining = int(quantity) - int(spent)
+    stale_stack = accounting == "pick-stack-stale"
+    remaining = reported_remaining
+    if separator and not stale_stack:
+        if not (1 <= len(accounting) <= 10 and accounting.isascii() and accounting.isdecimal()):
+            raise RuntimeError("The stock lockpick count could not be verified")
+        remaining = int(accounting)
     if ((frame.get("state"), frame.get("map")) != ("hosting", area) or locked not in ("locked", "unlocked")
-            or accounting not in ("", "pick-stack-stale") or unlocked == "1" and locked != "unlocked"):
+            or remaining > 2**31 - 1 or unlocked == "1" and locked != "unlocked"):
         raise RuntimeError("The stock lockpick result could not be verified")
     host.last_game, host.last_seen = frame, time.monotonic()
-    remaining = int(quantity) - int(spent)
-    if remaining == 0 and not accounting:
+    if remaining == 0 and not stale_stack:
         host.party["players"][character].get("native_inventory", {}).pop(guid, None)
         host.native_pickup.forget_committed_row(character, guid)
     proof = {"map": area, "crate": crate, "guid": guid, "locked": locked == "locked", "remaining": remaining}
-    if accounting:
+    if stale_stack:
         proof["inventory_reconciled"] = False
         host.control.event("native_guest_lockpick_stack_stale", actor=crate, character=character, operation_id=operation)
+    elif remaining != reported_remaining:
+        proof["reported_remaining"] = reported_remaining
+        host.control.event("native_guest_lockpick_stack_reconciled", actor=crate, character=character,
+                           operation_id=operation, reported_remaining=reported_remaining, remaining=remaining)
     result = {LOCKPICK_RESULT: proof}
     if lockpick_door(crate, area):
         delta = native_stock_door.frame(frame, epoch, crate)

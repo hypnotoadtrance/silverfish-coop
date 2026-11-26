@@ -3289,6 +3289,7 @@ namespace
     {
         Context context;
         int requested_slot = -1;
+        bool reported = false;
         if constexpr (local)
         {
             const auto count = lua.get_stack_size();
@@ -3302,10 +3303,16 @@ namespace
             if (slot < -1 || slot >= quick_slots) return result(lua, false, "native_inventory_equip_refused_slot");
             requested_slot = static_cast<int>(slot);
         }
-        else if (!resolve(lua, context, nullptr, nullptr, nullptr, false, &requested_slot).empty())
-            return result(lua, false, "native_inventory_equip_refused_owner");
+        else
+        {
+            reported = lua.get_stack_size() == 5 && lua.is_bool(5) && lua.get_bool(5);
+            if (!resolve(lua, context, nullptr, nullptr, nullptr, false, &requested_slot).empty())
+                return result(lua, false, "native_inventory_equip_refused_owner");
+        }
 
-        if (!ready_pawn(context) || std::ranges::any_of(smg_holds, [&](const SmgHold& hold) {
+        // The stock menu already applied a reported layout on the owning PC.
+        // Keep the fence for an active native weapon mutation separate from the pawn's animation flags.
+        if ((!reported && !ready_pawn(context)) || std::ranges::any_of(smg_holds, [&](const SmgHold& hold) {
                 return hold.fenced && hold.pawn.Get() == context.pawn;
             })) return result(lua, false, "native_inventory_equip_refused_owner");
         Inventory inventory;
@@ -3569,17 +3576,27 @@ namespace
         Context context;
         if (pawn <= 0 || save <= 0 || !parse_guid(lua.get_string(), context.guid) ||
             !resolve_owner(context, pawn, save).empty() || !ready_pawn(context)) return refuse("stock_lockpick_refused_owner");
-        const auto units = lua.get_integer();
+        const auto reported_units = lua.get_integer();
         const bool spent = lua.get_bool();
         Inventory inventory;
-        if (units < 1 || units > INT32_MAX || !locate(context, inventory).empty() || !inventory.item || inventory.equipment_index < 0 ||
-            inventory.ammo->GetPropertyValueInContainer(inventory.item) != units) return refuse("stock_lockpick_refused_stack");
+        if (reported_units < 1 || reported_units > INT32_MAX) return refuse("stock_lockpick_refused_arguments");
+        if (!locate(context, inventory).empty() || !inventory.item || inventory.equipment_index < 0)
+            return refuse("stock_lockpick_refused_stack");
+        const auto units = inventory.ammo->GetPropertyValueInContainer(inventory.item);
+        if (units < 1) return refuse("stock_lockpick_refused_stack");
         context.weapon = Unreal::Cast<Unreal::UClass>(inventory.row_class(inventory.item));
         if (!live(context.weapon)) return refuse("stock_lockpick_refused_class");
         const auto path = context.weapon->GetPathName();
         if (path != STR("/Game/Classes/Equipment/Eqp_LockPick.Eqp_LockPick_C") &&
             path != STR("/Game/Classes/Equipment/Eqp_LockPick_Hev.Eqp_LockPick_Hev_C")) return refuse("stock_lockpick_refused_class");
-        if (!spent) return result(lua, true, "retained");
+        if (!spent)
+        {
+            result(lua, true, "retained");
+            lua.set_integer(units);
+            return 3;
+        }
+        // The owning client reports one spent pick. Apply it once to the exact current stack.
+        const auto remaining = units - 1;
         const auto slot = inventory.equipment_index;
         auto* held = inventory.selected->GetPropertyValueInContainer(context.save) == slot
             ? object(context.pawn, STR("EquipedItem")) : nullptr;
@@ -3604,7 +3621,6 @@ namespace
             auto* defaults = context.weapon->GetClassDefaultObject().Get();
             if (held && (!ammo || !weight || !defaults || !std::isfinite(weight->GetPropertyValueInContainer(defaults))))
                 return refuse("stock_lockpick_refused_held_schema");
-            const auto remaining = static_cast<std::int32_t>(units - 1);
             inventory.ammo->SetPropertyValueInContainer(inventory.item, remaining);
             if (held)
             {
@@ -3612,13 +3628,16 @@ namespace
                 weight->SetPropertyValueInContainer(held, weight->GetPropertyValueInContainer(defaults) * remaining);
             }
         }
-        return result(lua, true, "spent");
+        result(lua, true, "spent");
+        lua.set_integer(remaining);
+        return 3;
     }
 
     template <bool drop>
     int unequip_stock_equipment(const Lua& lua)
     {
         int expected_ammo = -1;
+        bool reported = false;
         if constexpr (drop)
         {
             if (lua.get_stack_size() != 5 || !lua.is_integer(5))
@@ -3628,9 +3647,14 @@ namespace
                 return result(lua, false, "native_inventory_unequip_refused_ammo");
             expected_ammo = static_cast<int>(expected);
         }
+        else
+        {
+            reported = lua.get_stack_size() == 5 && lua.is_bool(5) && lua.get_bool(5);
+        }
         Context context;
         int slot = -1;
-        if (!resolve(lua, context, nullptr, nullptr, nullptr, false, &slot).empty() || slot < 0 || !ready_pawn(context) ||
+        if (!resolve(lua, context, nullptr, nullptr, nullptr, false, &slot).empty() || slot < 0 ||
+            (!reported && !ready_pawn(context)) ||
             std::ranges::any_of(smg_holds, [&](const SmgHold& hold) {
                 return hold.fenced && hold.pawn.Get() == context.pawn;
             })) return result(lua, false, "native_inventory_unequip_refused_owner");

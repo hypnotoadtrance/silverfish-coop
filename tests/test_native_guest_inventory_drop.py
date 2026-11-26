@@ -193,6 +193,8 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
         client.gameplay_action.side_effect = None
         client.gameplay_action.return_value = {native_inventory.STORE_KEY: receipt}
         await drop.settle_stock_action(*args)
+        client.gameplay_action.assert_awaited_once_with(native_inventory.STORE_EQUIPMENT, operation,
+                                                        f"{GUID}|7|{client.zone_epoch}")
         client.guest_ui.close.assert_awaited_once()
         client.guest_ui.refresh.assert_not_awaited()
 

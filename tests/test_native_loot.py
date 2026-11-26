@@ -28,6 +28,15 @@ OPERATION = "f" * 32
 
 class GuestLockpickTests(unittest.IsolatedAsyncioTestCase):
     async def test_reported_unlock_can_settle_once_without_discarding_stale_stack(self):
+        await self.check_reported_unlock("unlocked:pick-stack-stale",
+                                         {"remaining": 0, "inventory_reconciled": False},
+                                         "native_guest_lockpick_stack_stale")
+
+    async def test_reported_unlock_retains_the_newer_count_of_the_exact_pick_stack(self):
+        await self.check_reported_unlock("unlocked:1", {"remaining": 1, "reported_remaining": 0},
+                                         "native_guest_lockpick_stack_reconciled", reported_remaining=0, remaining=1)
+
+    async def check_reported_unlock(self, ack, outcome, event, **details):
         crate = next(name for name in CRATES if name.startswith("LootLocker_Small_BP_C ")
                      and CRATES[name] == OBSERVATORY)
         character, pawn, guid, epoch = "guest", "Player_FP_C exact guest", "A" * 32, "e" * 32
@@ -40,7 +49,7 @@ class GuestLockpickTests(unittest.IsolatedAsyncioTestCase):
             party={"players": {character: {"downed": False, "native_inventory": inventory}},
                    "pending_spawns": {}, "receipts": {}},
         )
-        frame = {"state": "hosting", "map": OBSERVATORY, "ack": {"message": "unlocked:pick-stack-stale"}}
+        frame = {"state": "hosting", "map": OBSERVATORY, "ack": {"message": ack}}
         bridge = SimpleNamespace(command=AsyncMock(return_value=frame))
         target = "@".join((epoch, crate, guid, "1", "1", "1"))
         with patch("tools.silverfish.native_inventory.retain_guest_save", AsyncMock(return_value=True)):
@@ -48,14 +57,13 @@ class GuestLockpickTests(unittest.IsolatedAsyncioTestCase):
             repeated = await native_loot.settle_lockpick(host, bridge, character, target, OPERATION)
         self.assertIs(repeated, first)
         self.assertEqual(first[native_loot.LOCKPICK_RESULT], {
-            "map": OBSERVATORY, "crate": crate, "guid": guid, "locked": False, "remaining": 0,
-            "inventory_reconciled": False,
+            "map": OBSERVATORY, "crate": crate, "guid": guid, "locked": False, **outcome,
         })
         bridge.command.assert_awaited_once_with(native_loot.LOCKPICK, crate, pawn, guid, "1", "1", "1", timeout=3)
         self.assertIn(guid, inventory)
         host.native_pickup.forget_committed_row.assert_not_called()
-        host.control.event.assert_called_once_with("native_guest_lockpick_stack_stale", actor=crate,
-                                                   character=character, operation_id=OPERATION)
+        host.control.event.assert_called_once_with(event, actor=crate, character=character,
+                                                   operation_id=OPERATION, **details)
 
 
 class AuthoredCrateRegistryTests(unittest.TestCase):

@@ -24,7 +24,7 @@ local worn_classes = {
 local melee_class = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
 local stored_rounds, live_rounds = 5, 3
 local seed, remote_seed, last
-local stale_worn_hooks
+local stale_equipment_hooks
 
 local function valid(o) return o and o:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -317,7 +317,8 @@ local function run(action, argument)
             pawn.CapsuleComponent:GetCollisionResponseToChannel(18))
     end
     if action == "remote-seed" or action == "remote-ready" or action == "remote-ammo" or action == "remote-read"
-        or action == "remote-worn-seed" or action == "remote-worn-stale-busy" or action == "remote-worn-clear-busy"
+        or action == "remote-worn-seed" or action == "remote-worn-stale-busy"
+        or action == "remote-quick-stale-busy" or action == "remote-equipment-clear-busy"
         or action == "remote-melee-seed" or action == "remote-melee-held"
         or action == "remote-quick-ammo" or action == "remote-quick-retired" or action == "remote-landmine-seed" then
         assert(not guest and #driver.ClientConnections == 1, "one enrolled guest required")
@@ -333,13 +334,15 @@ local function run(action, argument)
         end
         assert(remote_seed and same(remote_seed.pawn, remote) and same(remote_seed.save, remote.Save),
             "fixture authoritative detached owner changed")
-        if action == "remote-worn-stale-busy" then
-            assert(not stale_worn_hooks and remote_seed.worn, "fixture worn rows required")
-            local busy = {count = 0, functions = {}}
-            local address = remote:GetAddress()
-            for _, name in ipairs({
+        if action == "remote-worn-stale-busy" or action == "remote-quick-stale-busy" then
+            assert(not stale_equipment_hooks, "fixture stale equipment state already armed")
+            local worn = action == "remote-worn-stale-busy"
+            local names = worn and {
                 "SilverfishEquipNativeGuestArmor", "SilverfishEquipNativeGuestHelmet", "SilverfishUnequipNativeGuestArmor"
-            }) do
+            } or {"SilverfishStoreNativeGuestEquipment", "SilverfishUnequipNativeGuestEquipment"}
+            local busy = {count = 0, functions = {}}
+            local address, save = remote:GetAddress(), remote.Save:GetAddress()
+            for _, name in ipairs(names) do
                 local invoke = assert(_G[name])
                 busy.functions[name] = invoke
                 _G[name] = function(owner, ...)
@@ -353,15 +356,21 @@ local function run(action, argument)
                     return table.unpack(result, 2, result.n)
                 end
             end
-            stale_worn_hooks = busy
-            local ok, status = SilverfishEquipNativeGuestHelmet(address, remote.Save:GetAddress(), remote_seed.worn[1])
-            assert(not ok and status == "native_guest_armor_pawn_ineligible", status)
+            stale_equipment_hooks = busy
+            local ok, status
+            if worn then
+                ok, status = SilverfishEquipNativeGuestHelmet(address, save, remote_seed.worn[1])
+                assert(not ok and status == "native_guest_armor_pawn_ineligible", status)
+            else
+                ok, status = SilverfishStoreNativeGuestEquipment(address, save, remote_seed.melee, 0)
+                assert(not ok and status == "native_inventory_equip_refused_owner", status)
+            end
             busy.count = 0
             return status
-        elseif action == "remote-worn-clear-busy" then
-            assert(stale_worn_hooks, "fixture stale worn state was not armed")
-            local busy = stale_worn_hooks
-            stale_worn_hooks = nil
+        elseif action == "remote-equipment-clear-busy" then
+            assert(stale_equipment_hooks, "fixture stale equipment state was not armed")
+            local busy = stale_equipment_hooks
+            stale_equipment_hooks = nil
             for name, invoke in pairs(busy.functions) do _G[name] = invoke end
             return tostring(busy.count)
         elseif action == "remote-landmine-seed" then

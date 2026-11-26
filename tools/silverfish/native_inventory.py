@@ -42,7 +42,7 @@ UNEQUIP = "native-inventory-unequip"
 UNEQUIP_CAPABILITY = "native_inventory_unequip_capability"
 UNEQUIP_WORN_CAPABILITY = "native_inventory_unequip_worn_capability"
 UNEQUIP_KEY = "native_inventory_unequip"
-_STORE_TARGET = re.compile(r"([0-9A-F]{32})(?:\|([0-7]))?\Z")
+_STORE_TARGET = re.compile(r"([0-9A-F]{32})(?:\|([0-7])(?:\|([0-9a-f]{32}))?)?\Z")
 _UNEQUIP_TARGET = re.compile(r"([0-9A-F]{32})\|([0-9])(?:\|([0-9a-f]{32}))?\Z")
 _STOCK_CLASS = re.compile(r"/Game/Classes/[A-Za-z0-9_./-]+_C\Z")
 
@@ -290,13 +290,11 @@ async def store_equipment(host, bridge, character: str, target, operation: str, 
             or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation)):
         raise party.RuleError(f"native_inventory_{suffix}_requires_item_and_operation")
     item, requested_slot = selection.group(1, 2)
-    reported = unequip and selection[3] is not None
+    reported = selection[3] is not None
     if unequip and int(requested_slot) >= 8:
         capability = UNEQUIP_WORN_CAPABILITY
-    elif reported:
-        raise party.RuleError("native_inventory_unequip_requires_item_and_operation")
     if reported and selection[3] != host.zone_epoch:
-        raise party.RuleError("native_inventory_unequip_visit_expired")
+        raise party.RuleError(f"native_inventory_{suffix}_visit_expired")
     game = host.last_game
     if (not host.native_guest or not host.native_profile or host.stopping or host.transitioning
             or host.native_checkpoint_unsafe or game.get("state") != "hosting" or game.get(capability) != 1

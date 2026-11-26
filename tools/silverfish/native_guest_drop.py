@@ -192,6 +192,8 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                 slot, displaced = requested_slot, receipt.get("replaced_guid") or "-"
             else:
                 key = native_inventory.STORE_KEY
+                if layout_preview is not None:
+                    target += f"|{epoch}"
                 receipt = (await client.gameplay_action(native_inventory.STORE_EQUIPMENT, operation, target)).get(key)
                 if (not isinstance(receipt, dict)
                         or (receipt.get("owner"), receipt.get("map"), receipt.get("guid")) != (client.invite["character_id"], area, guid)
@@ -210,7 +212,7 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                 raise ValueError("The selected stock slot has no host-authoritative Unequip action")
             key = native_inventory.UNEQUIP_KEY
             target = f"{guid}|{slot}"
-            if slot >= 8 and layout_preview is not None:
+            if layout_preview is not None:
                 target += f"|{epoch}"
             receipt = (await client.gameplay_action(native_inventory.UNEQUIP, operation, target)).get(key)
             if (not isinstance(receipt, dict) or type(receipt.get("slot")) is not int

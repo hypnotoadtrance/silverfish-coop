@@ -85,7 +85,7 @@ function inventory.command(fields, state, phase)
         removed = nil
         local name, item = fields[3], fields[4]
         local slot = math.tointeger(tonumber(fields[5]))
-        local reported = #fields == 6 and fields[6] == "reported" and slot and slot >= 8
+        local reported = #fields == 6 and fields[6] == "reported"
         if (#fields ~= 5 and not reported) or not slot or slot < 0 or slot > 9 or phase ~= "hosting"
             or not state.listening or state.server ~= false or not guid(item) then
             error("native_inventory_unequip_refused_scope", 0)
@@ -113,7 +113,8 @@ function inventory.command(fields, state, phase)
         stored = nil
         local name, item = fields[3], fields[4]
         local requested = math.tointeger(tonumber(fields[5]))
-        if (#fields ~= 4 and (#fields ~= 5 or not requested or requested < 0 or requested > 7))
+        local reported = #fields == 6 and fields[6] == "reported"
+        if (#fields ~= 4 and ((#fields ~= 5 and not reported) or not requested or requested < 0 or requested > 7))
             or phase ~= "hosting" or not state.listening or state.server ~= false
             or not guid(item) or type(SilverfishStoreNativeGuestEquipment) ~= "function" then
             error("native_inventory_equip_refused_scope", 0)
@@ -123,6 +124,7 @@ function inventory.command(fields, state, phase)
         local screen = StaticFindObject(stock_backpack)
         if not screen or not screen:IsValid() then LoadAsset(stock_backpack) end
         local arguments = {pawn:GetAddress(), save:GetAddress(), item, requested}
+        if reported then arguments[5] = true end
         local ok, status, slot, class, displaced = SilverfishStoreNativeGuestEquipment(table.unpack(arguments))
         if ok ~= true then error(tostring(status), 0) end
         if status ~= "stored" or math.type(slot) ~= "integer" or slot < 0 or slot > 7 or requested and slot ~= requested

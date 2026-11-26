@@ -1,14 +1,30 @@
-    if fields[2] == "fixture-stock-lockpick-stale-stack" and headless
+    if fields[2] == "fixture-stock-lockpick-stack-offset" and headless
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
-        assert(phase == "hosting" and #fields == 3)
+        assert(phase == "hosting" and #fields == 4)
+        local pawn, save = guest_save.exact_item_context(state, phase, fields[3])
         local settle = SilverfishSettleNativeGuestLockpick
+        local pawn_address, save_address = pawn:GetAddress(), save:GetAddress()
         assert(type(settle) == "function")
-        SilverfishSettleNativeGuestLockpick = function(pawn, save, guid, before, spent)
-            if guid ~= fields[3] then return settle(pawn, save, guid, before, spent) end
-            SilverfishSettleNativeGuestLockpick = settle
-            return false, "stock_lockpick_refused_stack"
+        SilverfishSettleNativeGuestLockpick = function(owner, stored, guid, before, spent)
+            if owner == pawn_address and stored == save_address and guid == fields[4] then
+                SilverfishSettleNativeGuestLockpick = settle
+                local row = save.PlayerEquipment[save.PlayerEquipIndex + 1]
+                assert(item_identity(row) == guid and row[ammo_field] == before and spent)
+                row[ammo_field] = before + 1
+            end
+            return settle(owner, stored, guid, before, spent)
         end
         return "armed"
+    end
+    if fields[2] == "fixture-stock-lockpick-equipped-count" and headless
+        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
+        assert(phase == "connected" and #fields == 3)
+        local save = state.local_pawn.pawn.Save
+        for index = 1, save.PlayerEquipment:GetArrayNum() do
+            local row = save.PlayerEquipment[index]
+            if item_identity(row) == fields[3] then return tostring(row[ammo_field]) end
+        end
+        return "missing"
     end
     if fields[2] == "fixture-stock-lockpick-locker" and headless
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then

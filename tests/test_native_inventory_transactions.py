@@ -67,6 +67,32 @@ class NativeInventoryTransactionTests(unittest.IsolatedAsyncioTestCase):
         host.checkpoint_native.assert_not_awaited()
         self.assertFalse(host.native_checkpoint_unsafe)
 
+    async def test_reported_quick_slot_move_accepts_stale_downed_state_for_current_visit_only(self):
+        routes = ((native_inventory.STORE_EQUIPMENT, native_inventory.STORE_CAPABILITY, native_inventory.STORE_KEY),
+                  (native_inventory.UNEQUIP, native_inventory.UNEQUIP_CAPABILITY, native_inventory.UNEQUIP_KEY))
+        for action, capability, key in routes:
+            with self.subTest(action=action):
+                host = self.host_without_fresh_guest_frame(OBSERVATORY)
+                host.zone_epoch = "e" * 32
+                host.last_game.update({capability: 1, "native_guest_save_retention": True})
+                host.pending_guest_saves = {GUEST: (PAWN,)}
+                host.party["players"][GUEST]["downed"] = True
+                unequip = action == native_inventory.UNEQUIP
+                proof = {"map": OBSERVATORY, "pawn": PAWN, "guid": GUID, "slot": 1}
+                if unequip:
+                    proof.update(state="unequipped", ammo=3)
+                bridge = SimpleNamespace(command=AsyncMock(return_value={**host.last_game, key: proof}))
+                target = f"{GUID}|1"
+                for invalid, reason in ((target, "refused_downed_or_respawning"), (f"{target}|{'d' * 32}", "visit_expired")):
+                    with self.assertRaisesRegex(party.RuleError, reason):
+                        await native_inventory.store_equipment(host, bridge, GUEST, invalid, OPERATION_ID, unequip=unequip)
+                args = (host, bridge, GUEST, f"{target}|{host.zone_epoch}", OPERATION_ID)
+                settled = await native_inventory.store_equipment(*args, unequip=unequip)
+                self.assertEqual(settled[key], dict(proof, owner=GUEST, reported=True))
+                self.assertEqual(await native_inventory.store_equipment(*args, unequip=unequip), settled)
+                bridge.command.assert_awaited_once_with(action, PAWN, GUID, "1", "reported", timeout=6)
+                host.checkpoint_native.assert_not_awaited()
+
     async def test_guest_shop_buy_and_sale_require_the_inventory_frame_with_wallet_and_receipt(self):
         for action, before, after, delta in (("buy", "listed", "purchased", -125), ("sell", "sale-quote", "sold", 125)):
             with self.subTest(action=action):

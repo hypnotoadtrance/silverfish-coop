@@ -5985,6 +5985,8 @@ class Client:
                 elapsed = round(1000 * (time.monotonic() - started))
                 proof = result.get(native_loot.LOCKPICK_RESULT, {})
                 if (proof.get("map"), proof.get("crate"), proof.get("guid")) == (area, crate, row["guid"]):
+                    if "reported_remaining" in proof and self.stock_interaction_scope() == scope:
+                        self.guest_ui.queue_stock_inventory(self)
                     if not hinged and proof.get("locked") is False:
                         await self.cancel_gameplay_snapshot()
                         if self.stock_interaction_scope() == scope:

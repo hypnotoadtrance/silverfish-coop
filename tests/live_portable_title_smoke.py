@@ -3675,7 +3675,7 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str, hinged=None
     proofs = []
     cases = (("heavy-lockpick", 1, True),) if hinged else (
         ("lockpick", 2, False), ("heavy-lockpick", 1, False))
-    for kind, units, stale_stack in cases:
+    for kind, units, stack_offset in cases:
         seeded = await host.bridge.command("fixture-stock-take-ammo-seed", pawn, kind, str(units))
         guid = seeded["ack"]["message"]
         frame = await wait_resident_status(guest_run, lambda f: f.get("state") == "connected")
@@ -3716,8 +3716,8 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str, hinged=None
         assert held["actor_ammo"] == held["stored_ammo"] == units, held
         started = time.monotonic()
         started_at = time.time()
-        if stale_stack:
-            skew = await host.bridge.command("fixture-stock-lockpick-stale-stack", guid)
+        if stack_offset:
+            skew = await host.bridge.command("fixture-stock-lockpick-stack-offset", pawn, guid)
             assert skew["ack"]["message"] == "armed", skew
         if hinged:
             for seat in (host, guest):
@@ -3764,7 +3764,8 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str, hinged=None
         result = receipt[native_loot.LOCKPICK_RESULT]
         assert result["guid"] == guid and result["locked"] is False, receipt
         assert result["remaining"] in (units, units - 1), receipt
-        assert kind != "heavy-lockpick" or result["remaining"] == units - 1, receipt
+        if kind == "heavy-lockpick":
+            assert result["remaining"] == units - 1 + int(stack_offset), receipt
         if hinged:
             for run in (host_run, guest_run):
                 await wait_resident_status(run, lambda f:
@@ -3777,15 +3778,20 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str, hinged=None
                 lock = await seat.bridge.command("fixture-stock-lockpick-locker", "read")
                 assert lock["ack"]["message"] == "unlocked", lock["ack"]
         rows = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
-        if stale_stack:
-            assert result["inventory_reconciled"] is False, result
+        expected = [result["remaining"]] if result["remaining"] else []
+        assert [row["quantity"] for row in rows if row["guid"] == guid] == expected, rows
+        if stack_offset:
+            assert result["reported_remaining"] == units - 1, result
             event = next((row for row in await resident_events(host_run, await current_status(host_run))
-                          if row.get("event") == "native_guest_lockpick_stack_stale" and row.get("actor") == crate), None)
-            assert event is not None, result
-        else:
-            expected = [result["remaining"]] if result["remaining"] else []
-            assert [row["quantity"] for row in rows if row["guid"] == guid] == expected, rows
-        proofs.append({"class_path": item["class_path"], "slot": slot, "units": units, "stale_stack": stale_stack,
+                          if row.get("event") == "native_guest_lockpick_stack_reconciled" and row.get("actor") == crate), None)
+            assert event is not None and event["remaining"] == result["remaining"], result
+            async with asyncio.timeout(8):
+                while True:
+                    equipped = await guest.bridge.command("fixture-stock-lockpick-equipped-count", guid, update_status=False)
+                    if equipped["ack"]["message"] == str(result["remaining"]):
+                        break
+                    await asyncio.sleep(.12)
+        proofs.append({"class_path": item["class_path"], "slot": slot, "units": units, "stack_offset": int(stack_offset),
                        "remaining": result["remaining"], "result_roundtrip_ms": receipt["milliseconds"],
                        "press_to_ack_ms": round((time.monotonic() - started) * 1000)})
     if not hinged:
@@ -5402,9 +5408,12 @@ async def verify_stock_unequip(first, second, evidence):
                 await asyncio.sleep(.25)
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
         await leaves_stock_open()
+        quick_refusal = await portable_probe_command(host.bridge, probe, f"remote-quick-stale-busy\t{pawn}")
+        assert quick_refusal == "native_inventory_equip_refused_owner", quick_refusal
         assert await portable_probe_command(guest.bridge, probe, f"guest-equip-melee\t{melee}") == "pressed"
         stored = await witness("native_stock_inventory_action", native_inventory.STORE_KEY, melee)
-        assert stored[native_inventory.STORE_KEY]["slot"] == 0, stored
+        equip = stored[native_inventory.STORE_KEY]
+        assert equip["slot"] == 0 and equip["reported"] is True, stored
         evidence["guest_melee_equip"] = {"receipt": stored, "local_move": await local_move(stored, "equip", melee, 0)}
         assert await portable_probe_command(guest.bridge, probe, f"guest-melee-held\t{melee}") == "held"
         assert await portable_probe_command(host.bridge, probe, f"remote-melee-held\t{pawn}") == "held"
@@ -5472,6 +5481,9 @@ async def verify_stock_unequip(first, second, evidence):
                                       "local_move": await local_move(inactive, "unequip", ids[2], 5)}
         await leaves_stock_open()
 
+        quick_mirrored = int(await portable_probe_command(host.bridge, probe, f"remote-equipment-clear-busy\t{pawn}"))
+        assert quick_mirrored == 2 and inactive[native_inventory.UNEQUIP_KEY]["reported"] is True, inactive
+        evidence["quick_slot_stale_host"] = {"legacy_refusal": quick_refusal, "reported_moves": quick_mirrored}
         changed = unequip_seat(await portable_probe_command(host.bridge, probe, f"remote-ammo\t{pawn}"))
         assert changed == dict(host_inactive, ammo=3), changed
         stock_press = await portable_probe_command(guest.bridge, probe, "guest-press-selected")
@@ -5571,7 +5583,7 @@ async def verify_stock_unequip(first, second, evidence):
             evidence["guest_worn"].append({"receipt": receipt, "backpack_row": rows[0],
                                            "local_move": await local_move(receipt, "unequip", guid, slot)})
 
-        mirrored = int(await portable_probe_command(host.bridge, probe, f"remote-worn-clear-busy\t{pawn}"))
+        mirrored = int(await portable_probe_command(host.bridge, probe, f"remote-equipment-clear-busy\t{pawn}"))
         assert mirrored == 6, mirrored
         evidence["guest_worn_stale_busy"] = {"legacy_refusal": legacy_refusal, "mirrored_actions": mirrored}
 
