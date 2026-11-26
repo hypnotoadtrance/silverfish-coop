@@ -1266,9 +1266,16 @@ class Host:
                 departure_proof = (current, step, driver, observed_host["name"], observed_host["controller"], *exact_guests)
             if exit_crossing is not None and not departure_proof:
                 return {"ok": False, "error": "exit_crossing_unavailable"}
+        recovery_pending = bool(gold_guid or blue_plan or dream_plan or random_plan or matrix_plan or respawn_plan)
         stock_loading = (departure_proof is not None and (authored_plan is not None or entrance is not None)
-                         and source_frame.get("native_zone_loading_support") is True
-                         and not (gold_guid or blue_plan or dream_plan or random_plan or matrix_plan or respawn_plan))
+                         and source_frame.get("native_zone_loading_support") is True and not recovery_pending)
+
+        def defer_departure(reason: str) -> dict:
+            # Item travel and party respawns can already have a committed source checkpoint.
+            if recovery_pending:
+                raise RuntimeError(reason)
+            return {"ok": False, "error": reason}
+
         stage = "loading_cue"
         try:
             if stock_loading:
@@ -1307,7 +1314,7 @@ class Host:
                     if message in ("travel_source_changed", "native_roster_unavailable", "game_snapshot_unavailable",
                                    "exit_crossing_unavailable", native_kill_volume.PENDING,
                                    "stock_live_dig_checkpoint_pending"):
-                        return {"ok": False, "error": message}
+                        return defer_departure(message)
                     if departure_proof:
                         moving = {f"travel_blocked:{index}": character for index, character in enumerate(characters, 1)}
                         if message in moving:
@@ -1319,7 +1326,7 @@ class Host:
                             raise RuntimeError("The game did not verify the checked party departure")
                         break
                 if attempt == pending_capacity:
-                    return {"ok": False, "error": native_enemy_loot.PENDING}
+                    return defer_departure(native_enemy_loot.PENDING)
                 pending_frame = departure
                 if departure.get("map") != current:
                     try:
@@ -1327,10 +1334,10 @@ class Host:
                             lambda game: game["sequence"] > departure["sequence"] and game.get("map") == current
                             and game.get("state") == "hosting", timeout=POSITION_MAX_AGE)
                     except TimeoutError:
-                        return {"ok": False, "error": native_enemy_loot.PENDING}
+                        return defer_departure(native_enemy_loot.PENDING)
                 self.last_game, self.last_seen = pending_frame, time.monotonic()
                 if not native_enemy_loot.pending(self) or await native_enemy_loot.observe(self, bridge):
-                    return {"ok": False, "error": native_enemy_loot.PENDING}
+                    return defer_departure(native_enemy_loot.PENDING)
             stage = "destination_listener"
             observed = await bridge.wait_for(
                 lambda game: game.get("state") == "hosting" and game.get("map") == destination,

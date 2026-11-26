@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import nullcontext
 import tempfile
 import time
 import unittest
@@ -26,12 +27,16 @@ class InterruptedTravelBridge:
         self.map = CROSSROADS
         self.process = SimpleNamespace(pid=1)
         self.interrupted = False
+        self.departure_refusal = None
         self.debit_state = "absent"
         self.native_profile = None
         self.operations = []
 
     def game(self):
         return {"state": "hosting", "map": self.map, "pawns": {"local": PLAYER}}
+
+    snapshot = game
+    status_error = None
 
     async def command(self, action, *arguments, timeout=8):
         self.operations.append(action)
@@ -44,8 +49,10 @@ class InterruptedTravelBridge:
         if action == "travel":
             assert arguments == (GOLD_NEXUS, CUBE)
             assert native_gold.ledger(self.store.status()["world"]["party"])["pending"]["guid"] == CUBE
+            if self.departure_refusal:
+                return {"ack": {"message": self.departure_refusal}}
             self.map = GOLD_NEXUS
-            return self.game()
+            return {"ack": {"message": "zone travel requested"}}
         if action == "native-exit-arrival":
             assert arguments == (native_gold.ARRIVAL,)
             return self.game()
@@ -126,6 +133,21 @@ class GoldenCubeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result, {"ok": False, "error": "gold_already_spent"})
             self.assertEqual(len(recovered.operations), 3)
 
+    async def test_a_departure_hold_preserves_a_committed_cube_for_recovery(self):
+        with CampaignStore(self.directory / "save") as store:
+            bridge = InterruptedTravelBridge(self.directory, store)
+            bridge.debit_state = "removed"
+            bridge.departure_refusal = "stock_live_dig_checkpoint_pending"
+            host = self.host(store, bridge)
+
+            with self.assertRaisesRegex(RuntimeError, "stock_live_dig_checkpoint_pending"):
+                await host.activate_gold(bridge, None, REQUEST)
+
+            world = store.status()["world"]
+            self.assertEqual(world["map"], CROSSROADS)
+            self.assertEqual(native_gold.ledger(world["party"])["pending"]["guid"], CUBE)
+            self.assertTrue(host.stopping)
+
     async def test_distant_party_and_direct_route_cannot_consume_the_item(self):
         with CampaignStore(self.directory / "save") as store:
             bridge = InterruptedTravelBridge(self.directory, store)
@@ -161,7 +183,7 @@ class GoldenCubeTests(unittest.IsolatedAsyncioTestCase):
             host = self.host(store, bridge)
             bridge.native_profile = host.native_profile = profile
             bridge.debit_state = "removed"
-            transport = SimpleNamespace(refresh_game_routes=wait_to_reopen_routes)
+            transport = SimpleNamespace(refresh_game_routes=wait_to_reopen_routes, hold_game_routes=nullcontext)
             with patch("tools.silverfish.service.verify_loopback_socket"):
                 departure = asyncio.create_task(host.activate_gold(bridge, transport, REQUEST))
                 try:
