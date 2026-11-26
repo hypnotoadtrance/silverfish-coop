@@ -3808,6 +3808,9 @@ async def verify_stock_avatar_tail(host: Seat, guest: Seat, _pawn: str) -> dict:
     await command(host, "jump")
     airborne = await observe(guest, lambda row: row[10] == 1)
     landed = await observe(guest, lambda row: row[10] == 0)
+    samples = [initial, docked, turned, airborne, landed]
+    assert all(sample["native_aim_matches_stock"] for sample in samples), samples
+    assert abs(turned["stock_pitch_deg"]) > 5, turned
     return {"stock_avatar_tail": {"armored": initial, "docked": docked, "turned": turned,
                                   "airborne": airborne, "landed": landed}}
 
@@ -7451,7 +7454,14 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(portable_script_overlay(game, "native_guest_ui.lua", add_stale_quick_slot_witness))
                 for game in games
             ]
-        if resident_weapon_cues or stock_avatar_tail or stock_avatar_binoculars or stock_quarry_photo:
+        if stock_avatar_tail:
+            fixture = (Path(__file__).with_name("fixtures") / "avatar_presentation_probe.lua").read_text(encoding="utf-8")
+            proof["stock_avatar_pose_overlays"] = [
+                probes.enter_context(portable_main_overlay(game, lambda script:
+                    script + "\n;(function()\n" + fixture + "\nend)()\n"))
+                for game in games
+            ]
+        elif resident_weapon_cues or stock_avatar_binoculars or stock_quarry_photo:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableWeaponCueProbe",
                                                      fixture="avatar_presentation_probe.lua"))
