@@ -3937,6 +3937,17 @@ class Bridge:
             raise RuntimeError("The stock board receipt did not verify the requested menu")
         row = rows[1]
         reply = {"state": phase, "map": area, tag: True, "ack": {"id": nonce, "result": result, "message": message}}
+        if fields[1] == native_board_contract.COMMAND and len(fields) in (7, 10, 11):
+            verb, mode, pawn, board, quest = fields[2:7]
+            if (phase != "hosting" or not native_board_contract.board_matches_map(board, area)
+                    or row[:7] != [fields[1], verb, mode, area, pawn, board, quest]):
+                raise RuntimeError("The stock board action receipt did not match the request")
+            try:
+                proof = native_board_contract.parse(row)
+            except ValueError as error:
+                raise RuntimeError("The stock board action receipt was malformed") from error
+            reply[native_board_contract.KEY] = {**proof, "bridge_reply_bytes": len(raw.encode("utf-8"))}
+            return reply
         if fields[1] == native_board_contract.CATALOG and len(fields) in (4, 5, 6):
             if (phase != "hosting" or not native_board_contract.board_matches_map(fields[3], area)
                     or row[:4] != [fields[1], area, *fields[2:4]]):
@@ -4110,7 +4121,7 @@ class Bridge:
             if (action in (native_stock_door.DISPATCH, native_stock_switch.PROJECT, *native_stock_switch.ACTIONS)
                     and raw.startswith("native-stock-interaction-reply\t")):
                 return self._local_stock_interaction_reply(raw, fields)
-            if (action in (native_board_contract.CATALOG, native_board_contract.MENU_OPEN)
+            if (action in (native_board_contract.COMMAND, native_board_contract.CATALOG, native_board_contract.MENU_OPEN)
                     and raw.startswith(native_board_contract.MENU_REPLY + "\t")):
                 return self._local_board_menu_reply(raw, fields)
             if (action in (native_dead_drop.PROJECT, native_dead_drop.CLEAR)

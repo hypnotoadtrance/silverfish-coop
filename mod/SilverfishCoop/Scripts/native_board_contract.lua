@@ -580,4 +580,9 @@ function board_contract.rows(state, phase, status_row)
         last.followups)}
 end
 
+function board_contract.action_reply(fields, state, phase, status_row)
+    local message = board_contract.command(fields, state, phase)
+    return message, board_contract.rows(state, phase, status_row)[1]
+end
+
 return board_contract

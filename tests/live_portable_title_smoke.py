@@ -4510,6 +4510,7 @@ async def verify_stock_castaway_dialogue(host: Seat, guest: Seat, pawn: str) -> 
 
 
 async def verify_streamed_stock_board(host: Seat, guest: Seat, pawn: str) -> dict:
+    from live_guest_held_fire_smoke import events
     from tools.silverfish import native_board_contract
 
     host_run, guest_run = host.campaign / "run", guest.client / "run"
@@ -4622,9 +4623,13 @@ async def verify_streamed_stock_board(host: Seat, guest: Seat, pawn: str) -> dic
     for seat in (host, guest):
         assert await command(seat, "stream-unload") == "stream-unload"
     assert campaign_save_hashes(host.campaign) == checkpoint, "Ordinary quest actions wrote the campaign save"
+    receipts = [entry["bridge_reply_bytes"] for entry in events(host_run, "native_board_contract_applied")
+                if entry["board"] == board]
+    assert len(receipts) == 4 and all(0 < size < 1024 for size in receipts), receipts
     return {"board": board, "offers": sorted(offers), "accepted": accepted, "journal_step": started,
             "turnin": payout, "off_table_quest": dynamic, "off_table_cash": 137, "off_table_bandages": 1,
             "omitted_oversized_and_unsupported_journal_rows": True,
+            "compact_apply_receipt_bytes": receipts,
             "hidden_board_refused": True, "hidden_guest_menu_closed": True, "saved_early": False}
 
 

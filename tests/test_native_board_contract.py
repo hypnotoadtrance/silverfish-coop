@@ -436,6 +436,34 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "did not match the current world"):
             await bridge.command(board.CATALOG, "Player_FP_C Other", BOARD, "-", "-")
 
+    async def test_compact_turnin_receipt_preserves_world_status_and_rejects_wrong_quest(self):
+        host = self.host()
+        original = host.last_game, host.last_seen
+        bridge = runtime.Bridge(Path("unused"), None)
+        bridge._local_status = host.last_game
+
+        async def reply(request, timeout):
+            nonce, command, verb, mode, pawn, actor, *_ = request.decode().rstrip("\n").split("\t")
+            self.assertEqual((command, verb, pawn, actor), (board.COMMAND, "turnin", PAWN, BOARD))
+            advance = mode == "apply"
+            values = [command, verb, mode, SHOPKEEP, pawn, actor, "Workshop.Supply-Run",
+                      "applied" if advance else "qualified", "1", "-10" if advance else "1", "-10",
+                      "17", "154" if advance else "17", "3", "4" if advance else "3", "137", "1",
+                      "-", "-", "-", "-", "-", "-", "-"]
+            return (f"{board.MENU_REPLY}\t1\t{nonce}\thosting\t{SHOPKEEP}\taccepted\tverified\n"
+                    + "\t".join(values) + "\n")
+
+        bridge.local_bridge = SimpleNamespace(command=reply)
+        answer = await board.perform(host, bridge, "guest", "turnin", "Workshop.Supply-Run", board=BOARD)
+        self.assertEqual((answer["step"], answer["cash"], answer["wallet"]), (-10, 137, 154))
+        self.assertLess(host.control.event.call_args.kwargs["bridge_reply_bytes"], 1024)
+        self.assertIs(bridge._local_status, original[0])
+        self.assertIs(host.last_game, original[0])
+        self.assertEqual(host.last_seen, original[1])
+        self.assertFalse(host.native_checkpoint_unsafe)
+        with self.assertRaisesRegex(RuntimeError, "action receipt did not match"):
+            await bridge.command(board.COMMAND, "turnin", "inspect", PAWN, BOARD, EYE)
+
     def test_streamed_board_identity_is_explicit_and_current_map_remains_separate(self):
         area = SHOPKEEP
         raw = "BountyBoard_BP_C /ContentPack/Maps/MarketInstance.Market:PersistentLevel.BountyBoard_BP_C_3"

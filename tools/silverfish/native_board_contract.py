@@ -196,7 +196,8 @@ async def _command(host, bridge, verb, mode, area, pawn, board, quest, *argument
     if (snapshot.get("state"), snapshot.get("map"), *(proof.get(key) for key in
             ("verb", "mode", "map", "pawn", "board", "quest"))) != ("hosting", area, verb, mode, area, pawn, board, quest):
         raise RuntimeError("The stock board receipt did not identify the current actor and board")
-    host.last_game, host.last_seen = snapshot, time.monotonic()
+    if not snapshot.get(MENU_REPLY):
+        host.last_game, host.last_seen = snapshot, time.monotonic()
     return proof
 
 
@@ -345,7 +346,8 @@ async def perform(host, bridge, actor, verb, quest, *, board=None, visit=None):
         host.pending_host_save = bool(host.pending_host_save or
                                       (actor == "host" and ("objective_guid" in record or "item_rewards" in record)))
         host.native_checkpoint_unsafe = False
-        host.control.event("native_board_contract_applied", board=board, **record)
+        host.control.event("native_board_contract_applied", board=board, **record,
+                           bridge_reply_bytes=result.get("bridge_reply_bytes"))
         return {"effect": "native_quest_changed", **record}
     except (OSError, RuntimeError, ValueError, KeyError):
         if host.native_checkpoint_unsafe:
