@@ -5304,7 +5304,7 @@ async def verify_stock_unequip(first, second, evidence):
         assert after_host[0] == untouched[0], after_host
         await guest_swing(1)
         after_guest = await melee_health()
-        assert after_guest[0] < untouched[0] and after_guest[1] <= after_host[1], (untouched, after_host, after_guest)
+        assert after_guest[0] < untouched[0] and after_guest[1] >= after_host[1] - .5, (untouched, after_host, after_guest)
         await host.bridge.command("native-friendly-fire-rule", "0")
         evidence["melee_friendly_fire"] = {"before": untouched, "host_hit": after_host, "guest_hit": after_guest}
 

@@ -128,7 +128,7 @@ local function census(state, phase)
                         if not entries[name] or not same(entries[name].actor, actor) then
                             entries[name] = {actor = actor, class = class, power = entry.power,
                                 path = name:match("^%S+ (.+)$"), candle = entry.candle, lantern = entry.lantern,
-                                light = entry.light, flame = entry.flame}
+                                light = entry.light}
                         end
                     elseif not entries[name] or not same(entries[name].actor, actor) then
                         entry.lights = light_links(actor, world)
@@ -199,8 +199,9 @@ function switches.read_row(entry, name, state, phase, row)
             local panel = "-"
             if entry.lantern then
                 lamp_state = entry.retired and "removed" or actor.Broken_0 == true and "broken" or "intact"
-                if phase == "connected" and lamp_state == "intact" and valid(entry.light) and valid(entry.flame)
-                    and (entry.light:IsVisible() ~= powered or entry.flame:IsActive() ~= powered) then
+                if lamp_state ~= "intact" then powered = false end
+                if phase == "connected" and lamp_state == "intact" and valid(entry.light)
+                    and entry.light:IsVisible() ~= powered then
                     panel = "lamp-visual-mismatch"
                 end
             end
@@ -265,6 +266,7 @@ local function project_lamp(entry, cached, state)
         actor.Broken_0 = not intact
         glass:SetVisibility(intact, true)
     end
+    if not intact then entry.box:SetCollisionEnabled(0) end
     if state == "removed" and not cached.retired then
         cached.hidden, cached.collision = actor.bHidden == true, actor:GetActorEnableCollision()
         actor:SetActorHiddenInGame(true)
@@ -285,9 +287,6 @@ local function project(entry, powered, angles, lights)
     if entry.candle then
         if actor.Lit ~= powered or entry.lantern and entry.light:IsVisible() ~= powered then
             actor:SetLitUnlit(powered, false)
-        end
-        if entry.lantern and entry.flame:IsActive() ~= powered then
-            if powered then entry.flame:Activate(true) else entry.flame:Deactivate() end
         end
         suppress_candle_overlap(actor:GetFullName(), entry.box)
         if actor.Lit ~= powered or entry.light:IsVisible() ~= powered then error("stock_switch_candle_unverified", 0) end
@@ -352,8 +351,11 @@ function switches.command(fields, state, phase)
             if #fields ~= 9 or (lamp ~= "intact" and lamp ~= "broken" and lamp ~= "removed") then
                 error("stock_switch_lamp_state_unavailable", 0)
             end
-            project(entry, power == "1", {Pitch = pitch, Yaw = yaw, Roll = roll}, lights)
-            project_lamp(entry, entries[fields[3]], lamp)
+            local intact = lamp == "intact"
+            local cached = entries[fields[3]]
+            if intact then project_lamp(entry, cached, lamp) end
+            project(entry, intact and power == "1", {Pitch = pitch, Yaw = yaw, Roll = roll}, lights)
+            if not intact then project_lamp(entry, cached, lamp) end
             return "stock switch state projected", entry
         end
         for index = 9, #fields do

@@ -3026,7 +3026,7 @@ namespace
         auto* number = Unreal::CastField<Unreal::FIntProperty>(flags->GetValueProp());
         if (!key || !number || key->GetOffset_Internal() != 0 || !key->HasAnyPropertyFlags(Unreal::CPF_HasGetValueTypeHash) ||
             before->Num() < 0 || before->Num() > before->GetMaxIndex() || before->GetMaxIndex() > inventory_limit ||
-            after->Num() < before->Num() || after->Num() > before->Num() + 3 ||
+            after->Num() < before->Num() || after->Num() > before->Num() + 5 ||
             after->Num() > after->GetMaxIndex() || after->GetMaxIndex() > inventory_limit)
         {
             reason = std::format("flag count {} to {}", before->Num(), after->Num());
@@ -3037,6 +3037,7 @@ namespace
         if (number->GetOffset_Internal() != layout.ValueOffset) return {};
 
         const Unreal::FName fatigue{STR("Player_Fatigue")}, intox{STR("Player_Intox")}, sickness{STR("Sickness")};
+        const Unreal::FName artifact_value{STR("Artifact_Value")}, gear_level{STR("Gear_Level")};
         const auto find = [&](Unreal::FScriptMap* entries, const Unreal::FName& name) {
             return entries->FindValue(&name, layout,
                 [&](const void* value) { return key->GetValueTypeHash(value); },
@@ -3071,6 +3072,10 @@ namespace
                 if (delta < -120 || delta > 120) return {};
                 differences[2] = static_cast<int>(delta);
             }
+            // Stock inventory compilation recalculates these two values from
+            // the scratch inventory. They are not consumable effects to replay.
+            else if (name == artifact_value || name == gear_level)
+                continue;
             else if (!previous || actual != original)
             {
                 reason = RC::to_utf8_string(name.ToString());

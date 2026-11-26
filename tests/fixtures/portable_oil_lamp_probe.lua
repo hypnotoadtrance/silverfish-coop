@@ -165,7 +165,8 @@ local function run(action,id)
     if action == "break-state" then
         local lamp = scene(id, true)
         if not valid(lamp) or lamp.bHidden and not lamp:GetActorEnableCollision() then return "removed" end
-        return lamp.Broken_0 and not lamp.SM_Prop_Lantern_01_Glass:IsVisible() and "broken" or "intact"
+        local glass = lamp.SM_Prop_Lantern_01_Glass
+        return lamp.Broken_0 and (not valid(glass) or not glass:IsVisible()) and "broken" or "intact"
     end
     local lamp,pawn,world = scene(id)
     if action == "break" then
@@ -177,7 +178,6 @@ local function run(action,id)
         assert(not pawn:HasAuthority() and lamp.Lit == true and lamp.PointLight:IsVisible(),
             "fixture requires a lit guest oil lamp")
         lamp.PointLight:SetVisibility(false, false)
-        lamp.FX_CandleFlame_01_Converted:Deactivate()
         assert(lamp.Lit == true and not lamp.PointLight:IsVisible(), "fixture did not isolate the lamp visuals")
         return "visual drift"
     end

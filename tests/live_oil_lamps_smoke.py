@@ -54,7 +54,7 @@ async def verify_oil_lamps(host, guest, pawn):
             assert await probe(host, "lower-lighter", actor) == "true;false"
         assert await probe(guest, "visual-drift", actor) == "visual drift"
         async with asyncio.timeout(5):
-            while (repaired := await probe(guest, "state", actor)).split(";")[:3] != ["true"] * 3:
+            while (repaired := await probe(guest, "state", actor)).split(";")[:2] != ["true", "true"]:
                 await asyncio.sleep(.05)
         place = tuple(map(float, (await probe(host, "stage", actor)).split(",")))
         await suite.wait_resident_status(guest_run, lambda frame:
