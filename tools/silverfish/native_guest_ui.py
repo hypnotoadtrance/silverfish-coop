@@ -284,7 +284,7 @@ class GuestView:
             self.digest = digest
         return projected
 
-    async def refresh(self, client, *, layout_sequence=None):
+    async def refresh(self, client, *, layout_sequence=None, allow_local_pending=False):
         """Project a newly committed inventory while the requesting screen is still mounted."""
         await self.close(preserve_stock=layout_sequence is not None)
         if layout_sequence is not None:
@@ -296,7 +296,7 @@ class GuestView:
             if not await self.receive(client, reply["native_guest_ui"], area, epoch, character,
                                       layout_sequence=layout_sequence):
                 self.queue_stock_inventory(client)
-                if layout_sequence is not None:
+                if layout_sequence is not None or allow_local_pending:
                     return
                 raise RuntimeError("The local inventory changed before reconciliation")
             if layout_sequence is not None and self.stock_view(client) is not None:

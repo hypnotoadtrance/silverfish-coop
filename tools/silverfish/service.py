@@ -6072,9 +6072,15 @@ class Client:
                     native_inventory.SORT_CAPABILITY, native_inventory.SPLIT_CAPABILITY,
                 ))):
             try:
-                if (self.guest_ui.identity != (self.host_session, self.zone_epoch, area)
-                        or self.guest_ui.digest == "-" or self.guest_ui.inventory_needs_refresh(self)):
-                    await self.guest_ui.refresh(self)
+                grant_pending = (type(self.last_game.get(native_inventory_grant.READY)) is int
+                                 or self.guest_grants.request is not None)
+                if grant_pending:
+                    self.guest_ui.queue_stock_inventory(self)
+                elif (self.guest_ui.identity != (self.host_session, self.zone_epoch, area)
+                      or self.guest_ui.digest == "-" or self.guest_ui.inventory_needs_refresh(self)):
+                    # A local grant may arrive while the fresh stock view is being read.
+                    # Show the guest's current stock backpack while that projection waits.
+                    await self.guest_ui.refresh(self, allow_local_pending=True)
                 split_preview = ("1",) if self.gameplay.get(native_inventory.SPLIT_PREVIEW_CAPABILITY) == 1 else ()
                 snapshot = await self.bridge.command("native-inventory-stock-open", str(sequence), self.zone_epoch,
                                                      *split_preview, timeout=5)

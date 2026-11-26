@@ -666,6 +666,31 @@ class NativeGuestInventoryUseTests(unittest.IsolatedAsyncioTestCase):
         self.client.gameplay_action.assert_not_awaited()
         self.bridge.command.assert_awaited_once_with("native-inventory-view-unavailable", "3", self.area, "48", timeout=2)
 
+    async def test_pending_grant_keeps_stock_backpack_open_on_current_local_inventory(self):
+        character = uuid.uuid4()
+        self.client.invite["character_id"] = str(character)
+        self.client.expected_zone = self.area
+        self.client.gameplay = dict.fromkeys((
+            service.native_guest_drop_record.CAPABILITY, service.native_inventory.STORE_CAPABILITY,
+            service.native_inventory.SORT_CAPABILITY, service.native_inventory.SPLIT_CAPABILITY,
+        ), 1)
+        self.bridge.native_inventory_view_requests = Mock(return_value=[(3, "open", self.area, self.pawn, 0)])
+        base = self.game | {"save_scope": character.hex, "native_inventory_view": self.displayed | {"state": "stock"}}
+        for already_pending in (True, False):
+            with self.subTest(already_pending=already_pending):
+                self.client.last_game = base.copy()
+                self.client.guest_ui.pending_stock_refresh = None
+                if already_pending:
+                    self.client.last_game[service.native_inventory_grant.READY] = 7
+                self.client.gameplay_action = AsyncMock(return_value={"native_guest_ui": {}})
+                self.client.guest_ui.receive = AsyncMock(return_value=False)
+                self.bridge.command.reset_mock(return_value=True)
+                self.bridge.command.return_value = base
+                await self.client.service_inventory_view(True)
+                self.bridge.command.assert_awaited_once_with("native-inventory-stock-open", "3", "zone", timeout=5)
+                self.assertEqual(self.client.gameplay_action.await_count, 0 if already_pending else 1)
+                self.assertTrue(self.client.guest_ui.inventory_needs_refresh(self.client))
+
     async def test_qualified_item_can_be_used_on_second_page_only_while_still_displayed(self):
         self.displayed.update(offset=16, total=17)
         self.page.update(offset=16, total=17)
