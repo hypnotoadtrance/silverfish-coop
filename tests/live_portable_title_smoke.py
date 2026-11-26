@@ -7412,13 +7412,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     script + "\n;(function()\n" + fixture + "\nend)()\n"))
                 for game in games
             ]
-        if resident_weapon_cues or stock_footsteps or tutorial_dock_combat:
+        if resident_weapon_cues or stock_footsteps:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableFootstepProbe",
                                                      fixture="portable_footstep_probe.lua"))
         if stock_alternate_ammo:
             proof["stock_ammo_selector_overlays"] = [probes.enter_context(stock_ammo_selector_overlay(game)) for game in games]
-        if resident_weapon_cues or stock_light_ar or stock_fire_mode_reopen or stock_alternate_ammo or tutorial_dock_combat:
+        if resident_weapon_cues or stock_light_ar or stock_fire_mode_reopen or stock_alternate_ammo:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableDryFireProbe",
                                                      fixture="portable_dry_fire_probe.lua"))
