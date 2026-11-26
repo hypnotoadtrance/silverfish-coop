@@ -3706,43 +3706,49 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str, hinged=None
 
 
 async def verify_stock_avatar_binoculars(host: Seat, guest: Seat, _pawn: str) -> dict:
-    async def command(seat, action):
-        return (await portable_probe_command(seat.bridge, "avatar-probe", action + "binoculars\n")).strip()
-
-    async def view(seat, phase):
-        async with asyncio.timeout(8):
-            while True:
-                reply = await command(seat, "observe")
-                if reply.split("\t")[0] == phase:
-                    return reply.split("\t")
-                await asyncio.sleep(.12)
-
     checkpoint = campaign_save_hashes(host.campaign)
-    assert await command(host, "seed") == "seeded"
-    outcomes = {}
-    for label, owner, observer in (("host", host, guest), ("guest", guest, host)):
-        async with asyncio.timeout(10):
-            while True:
-                try:
-                    assert await command(owner, "select") == "selected"
-                    break
-                except AssertionError as error:
-                    if str(error).strip() != "avatar_probe_rig_pending":
-                        raise
-                    await asyncio.sleep(.25)
-        lowered = await view(observer, "lowered")
-        assert await command(owner, "raise") == "input"
-        raised = await view(observer, "raised")
-        assert await command(owner, "lower") == "input"
-        returned = await view(observer, "lowered")
-        assert lowered[1] == raised[1] == returned[1], (lowered, raised, returned)
-        assert lowered[2] == returned[2] == "Weapon_Socket01"
-        assert 30 <= float(raised[3]) <= 40 and raised[2] == "None", raised
-        before, up, after = (tuple(map(int, report[4:6])) for report in (lowered, raised, returned))
-        assert up == (before[0] + 1, before[1]) and after == (up[0], up[1] + 1), (before, up, after)
-        outcomes[label] = {"retained_mesh": raised[1], "raised_offset_cm": float(raised[3]), "scope_cues": 2}
+
+    async def verify_optic(name, expected_offset):
+        async def command(seat, action):
+            return (await portable_probe_command(seat.bridge, "avatar-probe", action + name + "\n")).strip()
+
+        async def view(seat, phase):
+            async with asyncio.timeout(8):
+                while True:
+                    reply = await command(seat, "observe")
+                    if reply.split("\t")[0] == phase:
+                        return reply.split("\t")
+                    await asyncio.sleep(.12)
+
+        assert await command(host, "seed") == "seeded"
+        outcomes = {}
+        for label, owner, observer in (("host", host, guest), ("guest", guest, host)):
+            async with asyncio.timeout(10):
+                while True:
+                    try:
+                        assert await command(owner, "select") == "selected"
+                        break
+                    except AssertionError as error:
+                        if str(error).strip() != "avatar_probe_rig_pending":
+                            raise
+                        await asyncio.sleep(.25)
+            lowered = await view(observer, "lowered")
+            assert await command(owner, "raise") == "input"
+            raised = await view(observer, "raised")
+            assert await command(owner, "lower") == "input"
+            returned = await view(observer, "lowered")
+            assert lowered[1] == raised[1] == returned[1], (lowered, raised, returned)
+            assert lowered[2] == returned[2] == "Weapon_Socket01"
+            assert abs(float(raised[3]) - expected_offset) < 1 and raised[2] == "None", raised
+            before, up, after = (tuple(map(int, report[4:6])) for report in (lowered, raised, returned))
+            assert up == (before[0] + 1, before[1]) and after == (up[0], up[1] + 1), (before, up, after)
+            outcomes[label] = {"retained_mesh": raised[1], "raised_offset_cm": float(raised[3]), "scope_cues": 2}
+        return outcomes
+
+    binoculars = await verify_optic("binoculars", 35.21)
+    camera = await verify_optic("viewfinder", 25.49)
     assert campaign_save_hashes(host.campaign) == checkpoint
-    return {"stock_avatar_binoculars": outcomes}
+    return {"stock_avatar_binoculars": binoculars, "stock_avatar_camera": camera}
 
 
 async def verify_stock_avatar_tail(host: Seat, guest: Seat, _pawn: str) -> dict:
@@ -7950,7 +7956,7 @@ if __name__ == "__main__":
     parser.add_argument("--stock-impact-cues", action="store_true",
                         help="verify the guest's suppressed shotgun receives the host's individual stock impact decals")
     parser.add_argument("--stock-avatar-binoculars", action="store_true",
-                        help="verify both peers see and hear the stock binoculars raise and lower")
+                        help="verify both peers see and hear the stock binoculars and camera raise and lower")
     parser.add_argument("--stock-avatar-tail", action="store_true",
                         help="verify the armored stock tail seam through turning and jumping")
     parser.add_argument("--stock-avatar-lean", action="store_true",

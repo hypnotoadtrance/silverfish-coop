@@ -14,6 +14,16 @@ local statics_type = "/Script/Engine.Default__GameplayStatics"
 local math_library = "/Script/Engine.Default__KismetMathLibrary"
 local sound_attenuation = "/Game/Assets/Sounds/SoundClasses/SmallSound_Attenuation.SmallSound_Attenuation"
 local binocular_mesh = "/Game/Classes/Equipment/Equipment_Assets/Equipment_Meshs/SM_Item_Binoculars_01.SM_Item_Binoculars_01"
+local camera_mesh = "/Game/Classes/Equipment/Equipment_Assets/Equipment_Meshs/SM_Camera_01.SM_Camera_01"
+local optics = {
+    ["BlueprintGeneratedClass /Game/Classes/Equipment/Eqp_Binoculars.Eqp_Binoculars_C"] = binocular_mesh,
+    ["BlueprintGeneratedClass /Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"] = camera_mesh,
+}
+-- Offsets from each stock optic's Aim_Arrow to its mesh origin.
+local optic_mount = {
+    [binocular_mesh] = {X = 34.76, Y = 0, Z = -5.63},
+    [camera_mesh] = {X = 25.49, Y = 0, Z = 0},
+}
 local scope_in = "/Game/Assets/Sounds/CUEs/Weapon_Cues/Scope_In_Cue.Scope_In_Cue"
 local scope_out = "/Game/Assets/Sounds/CUEs/Weapon_Cues/Scope_Out_Cue.Scope_Out_Cue"
 local bat_mesh = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Assets/MeleeWep_Models/SM_Wep_Bat_01.SM_Wep_Bat_01"
@@ -180,6 +190,10 @@ function view.local_lighter(pawn)
     if equipment and lighter.parts(equipment) then return lighter.state(equipment) end
 end
 
+function view.is_optic(equipment)
+    return valid(equipment) and optics[equipment:GetClass():GetFullName()] ~= nil
+end
+
 function view.observe(pawn, save, cached)
     local equipment = equipped(pawn, save)
     if not equipment then return "-", nil end
@@ -202,6 +216,7 @@ function view.observe(pawn, save, cached)
     end
     local rig, rig_description = cycle_rig(equipment, root)
     if rig then parts[1] = rig_description end
+    local lens_mesh = optics[equipment:GetClass():GetFullName()]
     for _, kind in ipairs({"s", "k"}) do
         local profile = kinds[kind]
         local class = StaticFindObject(profile[1])
@@ -209,12 +224,14 @@ function view.observe(pawn, save, cached)
         local components = equipment:K2_GetComponentsByClass(class)
         for index = 1, #components do
             local component = unwrap(components[index])
-            local stock_binocular = kind == "s" and same(component, equipment.SM_Item_Binoculars_01)
             if valid(component) and not same(component, rig) and same(component:GetOwner(), equipment)
-                and (stock_binocular or component:IsVisible() and component.bHiddenInGame == false) then
+                and (lens_mesh or component:IsVisible() and component.bHiddenInGame == false) then
                 local asset = component[profile[2]]
                 local path = valid(asset) and asset:GetFullName():match("^%S+ (%S+)$")
-                if path and stock_asset(path) and #parts < maximum_parts then
+                -- The stock viewfinder hides the first-person optic. The observer
+                -- still needs the body mesh and can omit other transient parts.
+                if path and (not lens_mesh or kind == "s" and path == lens_mesh)
+                    and stock_asset(path) and #parts < maximum_parts then
                     local socket
                     if rig and same(component:GetAttachParent(), rig) then
                         local attachment = component:GetAttachSocketName()
@@ -363,7 +380,7 @@ function view.clear(entry)
     entry.rifle_pivot, entry.rifle_grip, entry.rifle_rotated = nil, nil, nil
     entry.weapon_shape, entry.weapon_meshes = nil, nil
     entry.weapon_stance = nil
-    entry.weapon_slide, entry.binocular = nil, nil
+    entry.weapon_slide, entry.optic = nil, nil
 end
 
 local function align_bat_grip(component, body, socket)
@@ -429,8 +446,8 @@ local function attach(entry, parts, lighter_mode)
         if lighter_mode and part.path == lighter.body_path then body = component end
         if lighter_mode and part.path == lighter.lid_path then lid = component end
         if part.path == bat_mesh and part.kind == "s" then align_bat_grip(component, entry.body, socket) end
-        if part.path == binocular_mesh and part.kind == "s" then
-            entry.binocular = {component = component, idle = part.pose, raised = false}
+        if part.kind == "s" and optic_mount[part.path] then
+            entry.optic = {component = component, idle = part.pose, raised_offset = optic_mount[part.path], raised = false}
         end
         local visible = part.kind ~= "h"
         component:SetHiddenInGame(not visible, false)
@@ -490,17 +507,15 @@ function view.apply(entry, model, firearm)
     entry.weapon_model, entry.weapon_shape = model, shape
 end
 
-function view.raise_binocular(entry, raised)
-    local optic = entry.binocular
+function view.raise_optic(entry, raised)
+    local optic = entry.optic
     if not optic or optic.raised == raised or not valid(optic.component) or not valid(entry.head_pivot) then return end
     local component = optic.component
     local parent = raised and entry.head_pivot or entry.body
     local socket = FName(raised and "None" or "Weapon_Socket01", EFindName.FNAME_Find)
     if not component:K2_AttachToComponent(parent, socket, 2, 2, 0, false) then return end
     if raised then
-        -- The stock mesh and Aim_Arrow share their optical orientation. In the arrow's frame the
-        -- mesh center sits 34.76 cm forward and 5.63 cm below it, with the eyepiece facing the player.
-        component:K2_SetRelativeLocationAndRotation({X = 34.76, Y = 0, Z = -5.63}, zero_rotation, false, {}, true)
+        component:K2_SetRelativeLocationAndRotation(optic.raised_offset, zero_rotation, false, {}, true)
     else
         local idle = optic.idle
         component:K2_SetRelativeLocationAndRotation({X = idle[1], Y = idle[2], Z = idle[3]},

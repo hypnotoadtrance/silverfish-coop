@@ -435,21 +435,25 @@ local function held_equipment_row(pawn)
         valid(selected) and selected:GetFullName() or "-"}, "\t")
 end
 
-local binocular_path = "/Game/Classes/Equipment/Eqp_Binoculars.Eqp_Binoculars_C"
-local binocular_mesh = "StaticMesh /Game/Classes/Equipment/Equipment_Assets/Equipment_Meshs/SM_Item_Binoculars_01.SM_Item_Binoculars_01"
-local binocular_cues = {in_count = 0, out_count = 0}
+local optic_profiles = {
+    binoculars = {item = "/Game/Classes/Equipment/Eqp_Binoculars.Eqp_Binoculars_C", slot = 5,
+        mesh = "StaticMesh /Game/Classes/Equipment/Equipment_Assets/Equipment_Meshs/SM_Item_Binoculars_01.SM_Item_Binoculars_01"},
+    viewfinder = {item = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C", slot = 6,
+        mesh = "StaticMesh /Game/Classes/Equipment/Equipment_Assets/Equipment_Meshs/SM_Camera_01.SM_Camera_01"},
+}
+local optic_cues = {in_count = 0, out_count = 0}
 if portable_fixture or portable_guest then
     RegisterHook("/Script/Engine.GameplayStatics:PlaySoundAtLocation", function(_, source, sound)
         local pawn, cue = source:get(), sound:get()
         if not valid(pawn) or not valid(cue) or pawn:GetClass():GetFName():ToString() ~= "Player_FP_C"
             or pawn:IsLocallyControlled() then return end
         local name = cue:GetFName():ToString()
-        if name == "Scope_In_Cue" then binocular_cues.in_count = binocular_cues.in_count + 1 end
-        if name == "Scope_Out_Cue" then binocular_cues.out_count = binocular_cues.out_count + 1 end
+        if name == "Scope_In_Cue" then optic_cues.in_count = optic_cues.in_count + 1 end
+        if name == "Scope_Out_Cue" then optic_cues.out_count = optic_cues.out_count + 1 end
     end)
 end
 
-local function binocular_operation(operation)
+local function optic_operation(operation, profile)
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
     assert(valid(world) and world:GetFullName() == "World " .. map, "avatar_probe_world_unavailable")
@@ -461,22 +465,22 @@ local function binocular_operation(operation)
         end
     end
     assert(valid(local_pawn) and valid(remote_pawn), "avatar_probe_rig_pending")
-    local item = asset(binocular_path)
-    local index = 5
-    if operation == "seedbinoculars" then
+    local item = asset(profile.item)
+    local index = profile.slot
+    if operation == "seed" then
         local host, guest = player_pair()
         for _, pawn in ipairs({host, guest}) do
             local rows = pawn.Save.PlayerEquipment
-            assert(rows:GetArrayNum() >= index and not valid(rows[index][item_class]), "binocular fixture slot occupied")
+            assert(rows:GetArrayNum() >= index and not valid(rows[index][item_class]), "optic fixture slot occupied")
             local out = {}
             asset(inventory):MakeDefaultItem(item, pawn, out)
             local row = out.Item or out
-            assert(same(row[item_class], item), "stock binoculars could not be created")
+            assert(same(row[item_class], item), "stock optic could not be created")
             rows[index] = row
         end
         return "seeded"
     end
-    if operation == "selectbinoculars" then
+    if operation == "select" then
         local rows = local_pawn.Save.PlayerEquipment
         if not rows or rows:GetArrayNum() < index or not same(rows[index][item_class], item) then
             error("avatar_probe_rig_pending", 0)
@@ -484,13 +488,12 @@ local function binocular_operation(operation)
         local_pawn:Equip_NextItem(index - 1, false)
         local equipped = local_pawn.EquipedItem
         assert(valid(equipped) and same(equipped:GetClass(), item) and same(equipped.User, local_pawn),
-            "stock binoculars did not equip")
+            "stock optic did not equip")
         return "selected"
-    elseif operation == "raisebinoculars" or operation == "lowerbinoculars" then
+    elseif operation == "raise" or operation == "lower" then
         local held = local_pawn.EquipedItem
-        assert(valid(held) and same(held:GetClass(), item) and same(held.User, local_pawn), "stock binoculars not held")
-        local raised = operation == "raisebinoculars"
-        held:Use_Item_Secondary(raised)
+        assert(valid(held) and same(held:GetClass(), item) and same(held.User, local_pawn), "stock optic not held")
+        held:Use_Item_Secondary(operation == "raise")
         return "input"
     end
 
@@ -500,17 +503,17 @@ local function binocular_operation(operation)
     for i = 1, #meshes do
         local part = unwrap(meshes[i])
         if valid(part) and same(part:GetOwner(), remote_pawn) and valid(part.StaticMesh)
-            and part.StaticMesh:GetFullName() == binocular_mesh and part:IsVisible() and not part.bHiddenInGame then
+            and part.StaticMesh:GetFullName() == profile.mesh and part:IsVisible() and not part.bHiddenInGame then
             optic, count = part, count + 1
         end
     end
     if count == 0 then return "pending" end
-    assert(count == 1 and valid(optic:GetAttachParent()), "the observer saw duplicate binoculars")
+    assert(count == 1 and valid(optic:GetAttachParent()), "the observer saw duplicate optics")
     local raised = optic:GetAttachSocketName():ToString() == "None"
     local at = optic.RelativeLocation
     local distance = math.sqrt(at.X^2 + at.Y^2 + at.Z^2)
     return table.concat({raised and "raised" or "lowered", optic:GetFullName(), optic:GetAttachSocketName():ToString(),
-        ("%.3f"):format(distance), binocular_cues.in_count, binocular_cues.out_count}, "\t")
+        ("%.3f"):format(distance), optic_cues.in_count, optic_cues.out_count}, "\t")
 end
 
 local function run(operation)
@@ -519,8 +522,12 @@ local function run(operation)
         return "cleared"
     end
     if portable_guest and operation == "soundread" then return table.concat(bandage_audio, "|") end
-    if (portable_fixture or portable_guest) and operation:match("binoculars$") then
-        return binocular_operation(operation)
+    if portable_fixture or portable_guest then
+        for name, profile in pairs(optic_profiles) do
+            if operation:sub(-#name) == name then
+                return optic_operation(operation:sub(1, -#name - 1), profile)
+            end
+        end
     end
     if wipe_host then
         assert(operation == "heldstate", "avatar_probe_unknown_wipe_operation")

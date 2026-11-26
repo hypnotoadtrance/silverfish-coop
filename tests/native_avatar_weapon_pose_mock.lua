@@ -22,7 +22,7 @@ end
 local rig_asset, rig_path = asset("SK_Nagant_Obrez_Fixture")
 local sight_asset, sight_path = asset("SK_Nagant_Sights")
 local root = object({K2_GetComponentToWorld = fixed("root")})
-local class = object({})
+local class = object({GetFullName = fixed("BlueprintGeneratedClass /Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C")})
 local scope = object({})
 local pawn = object({GetWorld = fixed(scope)})
 local weapon = object({

@@ -16,7 +16,6 @@ local animation_root = "/Game/Classes/NPCs/NPC_Assets/Animations/"
 local crouched_idle = "Crouching_Idle"
 local crouched_walk = "Crouched_Walking"
 local firearm_class = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
-local binocular_class = "BlueprintGeneratedClass /Game/Classes/Equipment/Eqp_Binoculars.Eqp_Binoculars_C"
 local health_item_class = "/Game/Classes/Items/HealthItem_Master_BP.HealthItem_Master_BP_C"
 local gameplay_statics = "/Script/Engine.Default__GameplayStatics"
 local math_library = "/Script/Engine.Default__KismetMathLibrary"
@@ -131,7 +130,7 @@ local function aim_kind(weapon)
     if not valid(weapon) then return "-" end
     local base = StaticFindObject(firearm_class)
     if not valid(base) or not weapon:IsA(base) then
-        return weapon:GetClass():GetFullName() == binocular_class and "optic" or "-"
+        return weapon_view.is_optic(weapon) and "optic" or "-"
     end
     -- The stock player animation graph identifies handguns by ItemType 3.
     return weapon.ItemType == 3 and "pistol" or "rifle"
@@ -898,9 +897,9 @@ function avatar.sync(state, phase)
                             if phase == "hosting" then
                                 aim = outfit and host_aims[entry.id] == outfit.gun and outfit.gun or "-"
                             end
-                            if aim == "optic" and not entry.binocular then aim = "-" end
+                            if aim == "optic" and not entry.optic then aim = "-" end
                             local raised = aim == "optic" and not pawn.Dead and not uses[entry]
-                            weapon_view.raise_binocular(entry, raised)
+                            weapon_view.raise_optic(entry, raised)
                             apply_locomotion(entry, aim, outfit)
                             entry.rifle_idle = aim == "-" and entry.weapon_stance == "rifle"
                                 and entry.gait_blend ~= nil and entry.gait_blend.target == 0
