@@ -4561,16 +4561,33 @@ async def verify_streamed_stock_board(host: Seat, guest: Seat, pawn: str) -> dic
                     return int(values[0])
                 await asyncio.sleep(.1)
 
+    dynamic = "CoopProbe_SupplyRun"
+    assert await command(host, "stream-modded-offers") == "off-table offers armed"
+    assert await command(guest, "stream-modded-offers") == "off-table offers armed"
     result = await catalog()
     assert result["ok"], result
     offers = set(result[native_board_contract.CATALOG_KEY]["offers"])
     photo = "Photo_BrnzQuarry"
-    accepted = min(offers - {photo})
+    assert dynamic in offers and "CoopProbe_LocalOnly" not in offers, offers
+    accepted = min(offers - {photo, dynamic})
     frame = await open_board()
     assert set(filter(None, (await command(guest, "stream-menu")).split(","))) == offers
     await choose(accepted, "start")
     started = await journals(accepted)
     assert started > 0
+
+    await open_board()
+    await choose(dynamic, "start")
+    await journals(dynamic, 1)
+    assert await command(host, "complete-modded-objective") == "2"
+    ready = await catalog()
+    assert ready["ok"] and dynamic in ready[native_board_contract.CATALOG_KEY]["turnins"], ready
+    wallet = await wait_resident_status(host_run, lambda view: type(view["game"].get("native_wallet")) is int)
+    before = wallet["game"]["native_wallet"]
+    await open_board()
+    await choose(dynamic, "turnin")
+    await journals(dynamic, -10)
+    await wait_resident_status(guest_run, lambda view: view["game"].get("native_wallet") == before + 137)
 
     assert await command(host, "add-photo-contract") == "1"
     assert await command(host, "complete-photo-objective") == "2"
@@ -4601,7 +4618,8 @@ async def verify_streamed_stock_board(host: Seat, guest: Seat, pawn: str) -> dic
         assert await command(seat, "stream-unload") == "stream-unload"
     assert campaign_save_hashes(host.campaign) == checkpoint, "Ordinary quest actions wrote the campaign save"
     return {"board": board, "offers": sorted(offers), "accepted": accepted, "journal_step": started,
-            "turnin": payout, "hidden_board_refused": True, "hidden_guest_menu_closed": True, "saved_early": False}
+            "turnin": payout, "off_table_quest": dynamic, "off_table_cash": 137,
+            "hidden_board_refused": True, "hidden_guest_menu_closed": True, "saved_early": False}
 
 
 async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str, *, world_objectives: bool = True) -> dict:

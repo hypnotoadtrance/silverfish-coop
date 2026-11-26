@@ -480,9 +480,9 @@ end
 
 local function show_stock_menu(current, sequence, offers_arg, ready_arg, existing_menu)
     local offered, redeemable = stock_ids(offers_arg), stock_ids(ready_arg)
-    local offer_names, offers, ready_names, ready = {}, {}, {}, {}
+    local offers, ready_names, ready = {}, {}, {}
     local table_data = stock.stock_quest_table()
-    local templates, missing = {}, {}
+    local missing = {}
     for _, id in ipairs(redeemable) do
         local key = stock.stock_quest_key(id)
         if key then
@@ -491,21 +491,6 @@ local function show_stock_menu(current, sequence, offers_arg, ready_arg, existin
             missing[#missing + 1] = id
         end
     end
-    for _, id in ipairs(offered) do
-        if ready[id] then error("wire_board_catalog_invalid", 0) end
-        local key = stock.stock_quest_key(id)
-        local row = key and table_data:FindRow(key:ToString())
-        if row then
-            offer_names[#offer_names + 1], offers[id] = key, true
-            templates[#templates + 1] = row
-        else
-            missing[#missing + 1] = id
-        end
-    end
-    if #missing > 0 then
-        print("[SilverfishCoop] Board quests missing from local game data: " .. table.concat(missing, ", "))
-    end
-
     if not existing_menu then current.board:Send_PowerSignal(true, current.pawn) end
     local menu = current_stock_menu(current)
     if not menu or existing_menu and not same(menu, existing_menu) then error("wire_board_stock_menu_missing", 0) end
@@ -514,18 +499,42 @@ local function show_stock_menu(current, sequence, offers_arg, ready_arg, existin
     local drawn, reason
     if started == true then
         drawn, reason = pcall(function()
-            local contracts, previous = current.board.Contracts, {}
+            local contracts, additions, removals = current.board.Contracts, {}, {}
             if #contracts > 128 then error("wire_board_stock_offers_extent", 0) end
-            contracts:ForEach(function(key) previous[#previous + 1] = key:get() end)
-            for _, key in ipairs(previous) do contracts:Remove(key) end
-            for index, key in ipairs(offer_names) do contracts:Add(key, templates[index]) end
-            if #contracts ~= #offer_names then error("wire_board_stock_offers_unverified", 0) end
+            local offer_count = 0
+            for _, id in ipairs(offered) do
+                if ready[id] then error("wire_board_catalog_invalid", 0) end
+                local key = stock.stock_quest_key(id)
+                -- Keep matching live rows in place. A mod can supply them as
+                -- part of the board's stock interaction, outside the base table.
+                if key and contracts:Contains(key) then
+                    offers[id], offer_count = true, offer_count + 1
+                else
+                    local row = key and table_data:FindRow(key:ToString())
+                    if row then
+                        additions[#additions + 1] = {key = key, row = row}
+                        offers[id], offer_count = true, offer_count + 1
+                    else
+                        missing[#missing + 1] = id
+                    end
+                end
+            end
+            contracts:ForEach(function(raw_key)
+                local key = raw_key:get()
+                if not offers[stock.stock_quest_id(key:ToString())] then removals[#removals + 1] = key end
+            end)
+            for _, key in ipairs(removals) do contracts:Remove(key) end
+            for _, entry in ipairs(additions) do contracts:Add(entry.key, entry.row) end
+            if #contracts ~= offer_count then error("wire_board_stock_offers_unverified", 0) end
+            if #missing > 0 then
+                print("[SilverfishCoop] Board quests missing from local game data: " .. table.concat(missing, ", "))
+            end
             current.board["Validated Quests"] = ready_names
 
             -- Stock Add_Contracts also calls FillInCompletedQuests. During this repaint
             -- the native guard keeps the authority's redemption set in place.
             menu:Add_Contracts()
-            if not read_menu_rows(menu, menu.VerticalBox_ContractsList, quest_listed_path, offers, #offer_names)
+            if not read_menu_rows(menu, menu.VerticalBox_ContractsList, quest_listed_path, offers, offer_count)
                 or not read_menu_rows(menu, menu.VerticalBox_CompletedList, quest_turnin_path, ready, #ready_names) then
                 error("wire_board_stock_rows_unverified", 0)
             end

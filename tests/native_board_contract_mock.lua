@@ -43,6 +43,7 @@ local eye = "Clt_Eye_02"
 local kill = "Asn_EggHead"
 local followup = "Workshop_SecondDelivery"
 local multi_reward = "MultiReward"
+local mounted_quest = "Frontier_SupplyRun"
 local item_path = "/FrontierPack/Items/ScrapEye.ScrapEye_C"
 local class = object({GetFullName = function() return "BlueprintGeneratedClass " .. item_path end})
 class.GetCDO = function() return object({Stacks = true, GetClass = function() return class end}) end
@@ -68,6 +69,8 @@ local complex_recipe = quest(2, class, 100)
 complex_recipe[items] = array({class})
 complex_recipe[chained] = array({followup})
 local store = object({ActiveQuests = map({}), PlayerBackpack = array({}), PlayerEquipment = array({})})
+local mounted_recipe = quest(2, nil, 70)
+local stock_templates = {[eye] = eye_recipe, [kill] = kill_recipe, [multi_reward] = complex_recipe, [followup] = followup_recipe}
 local player = object({Save = store})
 local bag = object({PlayerBackpack = array({}), PlayerEquipment = array({})})
 local guest = object({Save = bag})
@@ -81,7 +84,7 @@ store.Flags = {
 local game_instance = object({SaveSlot_Ref = store})
 game_instance.FindPassiveEffect = function(_, _, _, out) out.EffectActive, out.Instances = true, 1 end
 game_instance.AddQuest_ByName = function(_, key)
-    store.ActiveQuests[key] = assert(({[eye] = eye_recipe, [kill] = kill_recipe, [multi_reward] = complex_recipe})[key])
+    store.ActiveQuests[key] = assert(stock_templates[key])
 end
 local board = object({TurnIn_ID = 2, RedeemableQuests = array({}), BountyBoard_RedeemableHere = true,
     AcceptAllGlobalContracts = false})
@@ -97,7 +100,7 @@ package.loaded.native_wire_quest = {
     stock_quest_id = stock_keys.stock_quest_id,
     stock_quest_key = function(key) return key end,
     stock_quest_table = function()
-        return {FindRow = function(_, key) if key == followup then return followup_recipe end end}
+        return {FindRow = function(_, key) return stock_templates[key] end}
     end,
     live_stock_board_context = function(state, phase, pawn, board_name, key)
         assert(state.world == world and phase == "hosting" and pawn == "Guest" and board_name == "Board")
@@ -345,6 +348,28 @@ function FName(text)
 end
 assert(stock_keys.stock_quest_key(missing):ToString() == display)
 assert(stock_keys.stock_quest_id("Other_Quest") == "Other_Quest")
+
+local previous_configure = board.Configure_Stock
+board.Configure_Stock = function(self)
+    previous_configure(self)
+    if not store.ActiveQuests[mounted_quest] then self.Contracts[mounted_quest] = mounted_recipe end
+end
+getmetatable(store.ActiveQuests).__index.Add = function(self, key, row)
+    assert(not self[key] and key == mounted_quest and row == mounted_recipe)
+    local copy = {}
+    for field, value in pairs(row) do copy[field] = value end
+    self[key] = copy
+end
+assert(catalog()[7]:find(mounted_quest, 1, true))
+action("start", "inspect", mounted_quest)
+assert(proof()[8] == "qualified" and not store.ActiveQuests[mounted_quest])
+action("start", "apply", mounted_quest, "-")
+local mounted_active = store.ActiveQuests[mounted_quest]
+assert(proof()[8] == "applied" and mounted_active and mounted_active ~= mounted_recipe)
+assert(mounted_active[step] == 1 and mounted_active[cash] == 70)
+action("start", "inspect", mounted_quest)
+assert(proof()[8] == "already" and not board.Contracts[mounted_quest])
+board.Configure_Stock = previous_configure
 
 local mod_offer = {
     ForEach = function(_, visit) visit(ref(FName(multi_reward)), ref(complex_recipe)) end,

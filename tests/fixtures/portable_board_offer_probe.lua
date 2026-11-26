@@ -9,6 +9,7 @@ local board_path = map .. ":PersistentLevel.BountyBoard_BP_C_2"
 local menu_class = "/Game/Classes/GUI/Menu_QuestLog_Widget.Menu_QuestLog_Widget_C"
 local step = "Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A"
 local final = "Objective_FinalStep_57_F5A16DBF4E231A030BBD9F864F62A14B"
+local cash = "Reward_Cash_24_CDC8F5D24E1EBE65914E3B88621E50D0"
 local items = "Reward_Items_32_2B334D5F4DBA7AA760BF33A8E93A4C0A"
 local objective_items = "Objective_Items_56_9FD46BE9431873A188AED4B08F0AF083"
 local consumes_items = "ObjectiveItemsAreConsumed_61_4669760345DABF3B531CBF8AFABA6333"
@@ -16,6 +17,7 @@ local chained = "Add_Quests_OnComplete_66_06ACA8C44193595C2DFAD8A85B7FC8B9"
 local track = "TrackFlag_ForStep_111_31112EA54B887C1D869E1291BC819774"
 local ping = "GlobalPing_OnTurnIn_108_68CA1968452BFC635A107EBB1EE3AA7F"
 local photo_key = "Photo_BrnzQuarry"
+local dynamic_key, local_only_key = "CoopProbe_SupplyRun", "CoopProbe_LocalOnly"
 local tracked = {
     Sab_Fuel_01 = {flag = "Kill_ForestTank", threshold = 7, progress = 6},
     Sab_Factory = {flag = "PB_Factory_Kill", threshold = 5, progress = 4},
@@ -121,6 +123,33 @@ local function run(action, quest)
         return "stream:" .. selected:GetFullName()
     elseif action == "stream-visible" then
         return tostring(valid(streamed.level) and streamed.level:IsLevelVisible())
+    elseif action == "stream-modded-offers" then
+        assert(streamed and same(streamed.world, world) and valid(streamed.board))
+        local quest_table = StaticFindObject("/Game/Classes/Libraries/DataTables/Quests_DT.Quests_DT")
+        local seed = assert(quest_table:FindRow(photo_key))
+        local dynamic, local_only = FName(dynamic_key), FName(local_only_key)
+        assert(not quest_table:FindRow(dynamic_key) and not quest_table:FindRow(local_only_key))
+        RegisterHook("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C:Configure_Stock", function(raw)
+            local actor = raw:get()
+            if not streamed or not same(actor, streamed.board) then return end
+            local save = world.OwningGameInstance.SaveSlot_Ref
+            local contracts = actor.Contracts
+            if not save.ActiveQuests:Contains(dynamic) and not contracts:Contains(dynamic) then
+                contracts:Add(dynamic, seed)
+                contracts:Find(dynamic):get()[cash] = 137
+            end
+            if not pawn:HasAuthority() and not contracts:Contains(local_only) then
+                contracts:Add(local_only, seed)
+            end
+        end)
+        return "off-table offers armed"
+    elseif action == "complete-modded-objective" then
+        local save = world.OwningGameInstance.SaveSlot_Ref
+        assert(pawn:HasAuthority() and same(pawn.Save, save))
+        local row = save.ActiveQuests:Find(FName(dynamic_key, EFindName.FNAME_Find)):get()
+        assert(row[step] == 1 and row[cash] == 137)
+        row[step] = row[final]
+        return tostring(row[step])
     end
     if action == "approach" then
         local connections = world.NetDriver.ClientConnections

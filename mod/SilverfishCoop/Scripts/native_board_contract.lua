@@ -410,13 +410,16 @@ function board_contract.command(fields, state, phase)
     end
 
     local contract, effects, library, objective_before, rewards_before
-    local starting_step
+    local starting_step, live_offer
     if verb == "start" then
         context.board:Configure_Stock()
         local offer = wire.stock_row(context.board.Contracts, context.key)
         if not offer then refuse("not_offered") end
         starting_step = offer_step(offer)
         if not starting_step then refuse("offer_step_unqualified") end
+        -- Stock AddQuest_ByName looks up only the base table. A board supplied by
+        -- another content pack can expose a complete quest row in Contracts.
+        if not wire.stock_quest_table():FindRow(name(context.key)) then live_offer = offer end
     else
         if not active or step <= 0 or not board_accepts(context.board, context.key, active) then refuse("wrong_turnin") end
         contract = shape(context, active, quest)
@@ -502,7 +505,11 @@ function board_contract.command(fields, state, phase)
 
     local applied = pcall(function()
         if verb == "start" then
-            context.instance:AddQuest_ByName(context.key)
+            if live_offer then
+                context.save.ActiveQuests:Add(context.key, live_offer)
+            else
+                context.instance:AddQuest_ByName(context.key)
+            end
             context.board:Configure_Stock()
         else
             if not native_redemption and not stock_payout(context, active, contract.empty_consumption, function()
