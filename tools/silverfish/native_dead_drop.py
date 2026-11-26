@@ -43,6 +43,10 @@ BY_SOURCE = {drop.source: drop for drop in BY_MAP.values()}
 MAP, QUEST, SOURCE = CROSSROADS_DROP.map, CROSSROADS_DROP.quest, CROSSROADS_DROP.source
 CLASS, WORLD, ACTOR = CROSSROADS_DROP.class_path, CROSSROADS_DROP.world, CROSSROADS_DROP.actor
 TAG = "native-dead-drop"
+PROJECT = "native-dead-drop-project"
+CLEAR = "native-dead-drop-clear"
+REPLY = "native-dead-drop-reply"
+REPLY_BYTES = "native_dead_drop_reply_bytes"
 KEY = "native_dead_drop"
 FRAME = "native_dead_drop_frame"
 PICKUPS = "native_authored_pickups"
@@ -77,6 +81,29 @@ def parse(fields: list[str], phase: str | None, area: str | None) -> dict:
     elif axes:
         raise ValueError("Unexpected inactive Dead Drop transform")
     return report
+
+
+def parse_projection_reply(raw: str, request: tuple[str, ...]) -> dict:
+    rows = [line.split("\t") for line in raw.splitlines()] if len(raw) <= 2048 and raw.endswith("\n") else []
+    if (not rows or len(rows[0]) != 7 or rows[0][:4] != [REPLY, "1", request[0], "connected"]
+            or rows[0][4] not in BY_MAP):
+        raise RuntimeError("The Dead Drop reply did not match the guest command")
+    _, _, nonce, phase, area, result, message = rows[0]
+    if result != "accepted":
+        raise RuntimeError(message or "The Dead Drop command was refused")
+    try:
+        if len(rows) != 2:
+            raise ValueError("Missing or repeated Dead Drop actor")
+        proof = parse(rows[1], phase, area)
+        if request[1] == PROJECT:
+            if (proof["state"], proof["epoch"], proof["pawn"]) != ("projected", request[2], request[3]):
+                raise ValueError("Unexpected Dead Drop projection")
+        elif proof["state"] not in ("hidden", "absent"):
+            raise ValueError("Unexpected Dead Drop retirement")
+    except (IndexError, ValueError) as error:
+        raise RuntimeError("The Dead Drop command did not verify its actor") from error
+    return {"state": phase, "map": area, "pawns": {"local": {"name": proof["pawn"]}}, KEY: proof,
+            "ack": {"id": nonce, "result": result, "message": message}, REPLY_BYTES: len(raw.encode("utf-8"))}
 
 
 def observed(game: dict, state: str) -> dict:
@@ -123,10 +150,12 @@ async def project_client(client) -> None:
                and frame == drop.frame(epoch, transform))
     if not allowed:
         if projected:
-            snapshot = await client.bridge.command("native-dead-drop-clear", timeout=3)
-            if not observed(snapshot, "hidden") and not observed(snapshot, "absent"):
+            snapshot = await client.bridge.command(CLEAR, timeout=3)
+            proof = observed(snapshot, "hidden") or observed(snapshot, "absent")
+            if not proof or proof["pawn"] != projected["pawn"]:
                 raise RuntimeError("Dead Drop did not retire to its stock hidden pose")
-            client.last_game = snapshot
+            if client.last_game is game:
+                client.last_game = {**game, KEY: proof}
         return
     current = projected or observed(game, "hidden")
     if not current:
@@ -137,11 +166,12 @@ async def project_client(client) -> None:
         if identity == prior_identity and now - prior_time < REFRESH_SECONDS:
             return
     axes = (*transform["position"], *transform["rotation"], *transform["scale"])
-    snapshot = await client.bridge.command("native-dead-drop-project", epoch, current["pawn"],
+    snapshot = await client.bridge.command(PROJECT, epoch, current["pawn"],
                                            *(str(axis) for axis in axes), timeout=3)
     proof = observed(snapshot, "projected")
     if (not proof or (proof["epoch"], proof["pawn"]) != (epoch, current["pawn"])
             or not same_pose(proof["transform"], transform)):
         raise RuntimeError("Dead Drop did not verify the local stock actor and epoch")
-    client.last_game = snapshot
+    if client.last_game is game:
+        client.last_game = {**game, KEY: proof}
     client.dead_drop_projection = (identity, now)

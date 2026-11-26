@@ -1828,6 +1828,11 @@ status_publication.stock_interactions = {
     ["native-stock-switch-project"] = {phase = "connected", command = native_stock_switch.command},
 }
 
+status_publication.dead_drop_actions = {
+    ["native-dead-drop-project"] = true,
+    ["native-dead-drop-clear"] = true,
+}
+
 status_publication.board_menu = {
     ["native-board-contract-catalog"] = native_board_contract.catalog_reply,
     ["native-wire-board-stock-open"] = native_wire_board.open_reply,
@@ -1847,6 +1852,15 @@ local function tick(fields, pending, periodic)
         pending.dispatched = true
         SilverfishPublishLocalBridgeReply(pending.ticket,
             native_guest_drop_projection.frame_reply(fields, state, current_phase, status_row))
+        if not periodic then return true end
+        fields, pending = nil, nil
+    end
+    if fields and pending and status_publication.dead_drop_actions[fields[2]]
+        and current_phase == "connected" and status_publication.steady(state, current_phase) then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        SilverfishPublishLocalBridgeReply(pending.ticket,
+            native_authored_pickup.dead_drop_reply(fields, state, current_phase, status_row))
         if not periodic then return true end
         fields, pending = nil, nil
     end
@@ -2207,7 +2221,8 @@ if resident_title and status_publication.installed then
         local action = fields[2]
         if action == "native-world-loot-frame" or action == "native-loot-open" or action == "native-loot-inspect"
             or status_publication.stock_interactions[action] or status_publication.pickup_presentation[action]
-            or status_publication.pickup_claims[action] or status_publication.guest_combat_actions[action] then
+            or status_publication.pickup_claims[action] or status_publication.guest_combat_actions[action]
+            or status_publication.dead_drop_actions[action] then
             status_publication.dispatch(os.clock(), fields, pending, false)
         end
     end)

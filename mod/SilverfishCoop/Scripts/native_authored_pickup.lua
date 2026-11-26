@@ -999,33 +999,49 @@ function pickup.claim_reply(fields, state, phase, status_row)
     return true, message, rows, outcome.cash ~= nil
 end
 
-function pickup.rows(state, phase, status_row)
-    local rows = {}
-    local host = phase == "hosting" and state.server == false
-    local client = phase == "connected" and state.server == true
-    if host and type(SilverfishVerifyNativeStashSave) == "function" then
-        rows[#rows + 1] = status_row("native-authored-pickup-memory", 1)
-    end
+local function dead_drop_row(state, phase, status_row)
     local detail = state.local_pawn
     local dead_drop = dead_drops[state.map]
-    if dead_drop and state.listening and (host or client) and detail and valid(detail.pawn) then
-        local observe = SilverfishObserveNativeDeadDrop
-        if type(observe) ~= "function" then
-            rows[#rows + 1] = status_row("native-dead-drop-diagnostic", state.map, "native_observer_unavailable")
-        else
-            local shown, epoch, x, y, z, pitch, yaw, roll, sx, sy, sz = observe(detail.pawn:GetAddress(), host)
-            if shown == "diagnostic" then
-                rows[#rows + 1] = status_row("native-dead-drop-diagnostic", state.map, x)
-            elseif shown then
-                local name = dead_drop.name .. " " .. dead_drop.path
-                if shown == "stock-active" or shown == "projected" then
-                    rows[#rows + 1] = status_row("native-dead-drop", shown, state.map, name, detail.name, epoch,
-                        x, y, z, pitch, yaw, roll, sx, sy, sz)
-                else
-                    rows[#rows + 1] = status_row("native-dead-drop", shown, state.map, name, detail.name, epoch)
-                end
-            end
-        end
+    local host = phase == "hosting" and state.server == false
+    local client = phase == "connected" and state.server == true
+    if not (dead_drop and state.listening and (host or client) and detail and valid(detail.pawn)) then return end
+    local observe = SilverfishObserveNativeDeadDrop
+    if type(observe) ~= "function" then
+        return nil, "native_observer_unavailable"
+    end
+    local shown, epoch, x, y, z, pitch, yaw, roll, sx, sy, sz = observe(detail.pawn:GetAddress(), host)
+    if shown == "diagnostic" then return nil, x end
+    if not shown then return end
+    local name = dead_drop.name .. " " .. dead_drop.path
+    if shown == "stock-active" or shown == "projected" then
+        return status_row("native-dead-drop", shown, state.map, name, detail.name, epoch,
+            x, y, z, pitch, yaw, roll, sx, sy, sz)
+    end
+    return status_row("native-dead-drop", shown, state.map, name, detail.name, epoch)
+end
+
+function pickup.dead_drop_reply(fields, state, phase, status_row)
+    local accepted, message, row = pcall(function()
+        local result = pickup.command(fields, state, phase)
+        local readback, diagnostic = dead_drop_row(state, phase, status_row)
+        if not readback then error(diagnostic or "dead_drop_readback_unavailable", 0) end
+        return result, readback
+    end)
+    local header = status_row("native-dead-drop-reply", 1, fields[1], phase, state.map,
+        accepted and "accepted" or "error", message) .. "\n"
+    return row and header .. row .. "\n" or header
+end
+
+function pickup.rows(state, phase, status_row)
+    local rows = {}
+    if phase == "hosting" and state.server == false and type(SilverfishVerifyNativeStashSave) == "function" then
+        rows[#rows + 1] = status_row("native-authored-pickup-memory", 1)
+    end
+    local dead_drop, diagnostic = dead_drop_row(state, phase, status_row)
+    if dead_drop then
+        rows[#rows + 1] = dead_drop
+    elseif diagnostic then
+        rows[#rows + 1] = status_row("native-dead-drop-diagnostic", state.map, diagnostic)
     end
     if not sample_authored_rows(rows, state, phase, status_row) then
         local qualified = refresh_authored_sources(state, phase)

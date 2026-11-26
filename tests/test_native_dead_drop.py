@@ -49,6 +49,30 @@ class DeadDropFrameTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "identity"):
                 drop.parse(row, phase, area)
 
+    def test_compact_reply_rejects_wrong_request_pawn_and_unexpected_state(self):
+        request = ("request", drop.PROJECT, EPOCH, PAWN, *axes(POSE))
+        header = [drop.REPLY, "1", request[0], "connected", drop.MAP, "accepted", "verified"]
+        row = [drop.TAG, "projected", drop.MAP, drop.ACTOR, PAWN, EPOCH, *axes(POSE)]
+
+        def receipt(data):
+            return "\n".join("\t".join(line) for line in data) + "\n"
+
+        raw = receipt([header, row])
+        parsed = drop.parse_projection_reply(raw, request)
+        self.assertEqual(drop.observed(parsed, "projected")["transform"], POSE)
+        self.assertEqual(parsed[drop.REPLY_BYTES], len(raw.encode("utf-8")))
+        with self.assertRaisesRegex(RuntimeError, "did not match"):
+            drop.parse_projection_reply(raw, ("other", *request[1:]))
+        with self.assertRaisesRegex(RuntimeError, "did not verify"):
+            drop.parse_projection_reply(raw, (request[0], drop.CLEAR))
+        with self.assertRaisesRegex(RuntimeError, "did not verify"):
+            drop.parse_projection_reply(raw, (*request[:3], PAWN + "0", *request[4:]))
+        with self.assertRaisesRegex(RuntimeError, "did not verify"):
+            drop.parse_projection_reply(receipt([header, row, row]), request)
+        hidden = [drop.TAG, "hidden", drop.MAP, drop.ACTOR, PAWN, "-"]
+        cleared = drop.parse_projection_reply(receipt([header, hidden]), (request[0], drop.CLEAR))
+        self.assertEqual(drop.observed(cleared, "hidden")["pawn"], PAWN)
+
     def test_metro_uses_its_own_stock_actor_and_active_quest(self):
         metro = drop.METRO_DROP
         pawn = f"Player_FP_C {metro.world}:PersistentLevel.Player_FP_C_41"
@@ -92,12 +116,13 @@ class DeadDropFrameTests(unittest.TestCase):
 class DeadDropProjectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_renew_only_fresh_exact_epoch_then_retire_when_claimed(self):
         hidden = stock_game("connected", "hidden")
+        game = {**hidden, "native_wallet": 300, "sequence": 42}
         projected = stock_game("connected", "projected", epoch=EPOCH)
         published = accepted()
         published[drop.FRAME] = drop.frame(host())
         moved = stock_game("connected", "projected", epoch=EPOCH, transform=NEW_POSE)
         bridge = SimpleNamespace(command=AsyncMock(side_effect=[projected, moved, moved, hidden]))
-        client = SimpleNamespace(last_game=hidden, zone_epoch=EPOCH, host_session="session", needs_travel=False,
+        client = SimpleNamespace(last_game=game, zone_epoch=EPOCH, host_session="session", needs_travel=False,
                                  server_transitioning=False, gameplay_seen=time.monotonic(), gameplay=published,
                                  dead_drop_projection=(None, 0.0), bridge=bridge)
 
@@ -115,7 +140,7 @@ class DeadDropProjectionTests(unittest.IsolatedAsyncioTestCase):
         published[drop.PICKUPS] = {drop.SOURCE: {"guid": "B" * 32}}
         await drop.project_client(client)
         bridge.command.assert_awaited_with("native-dead-drop-clear", timeout=3)
-        self.assertEqual(client.last_game, hidden)
+        self.assertEqual(client.last_game, game)
         await drop.project_client(client)
         self.assertEqual(bridge.command.await_count, 4)
 
