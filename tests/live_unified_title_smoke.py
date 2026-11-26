@@ -41,6 +41,20 @@ async def offered(seat):
                                       and game[native_title_entry.PANEL_KEY]["actions"] == ["host", "join"])
 
 
+def bound_pawn(frame, character):
+    game = frame.get("game", {})
+    exact = game.get("native_guest_save_members", {})
+    if not exact:
+        legacy = game.get("native_guest_save", {})
+        return legacy.get("pawn") if legacy.get("state") == "bound" else None
+    gameplay = frame.get("gameplay", {})
+    for role, player in gameplay.get("players", {}).items():
+        if player.get("character_id") == character:
+            pawn = gameplay.get("native_pawns", {}).get(role)
+            return pawn if exact.get(pawn, {}).get("state") == "bound" else None
+    return None
+
+
 async def start_pair(host, guest, character_name, *, on_join=None, create_character=None,
                      before_join=None, after_reconnect=None, wait_status=wait,
                      host_exit_actions=("save_and_quit",), after_exit=None, load_existing=False,
@@ -115,12 +129,12 @@ async def start_pair(host, guest, character_name, *, on_join=None, create_charac
     assert joined["game"]["save_scope"] == uuid.UUID(character).hex
     verify_loopback_socket(guest_pid, joined["unreal_local_port"])
 
-    paired = await wait_status(host_run, lambda frame: frame.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
-    pawn = paired["game"]["native_guest_save"]["pawn"]
+    paired = await wait_status(host_run, lambda frame: bound_pawn(frame, character))
+    pawn = bound_pawn(paired, character)
     gameplay = await on_join(host, guest, pawn) if on_join else {}
     # A scenario can cross a zone boundary and bind the guest to a new pawn.
-    current = await wait_status(host_run, lambda frame: frame.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
-    pawn = current["game"]["native_guest_save"]["pawn"]
+    current = await wait_status(host_run, lambda frame: bound_pawn(frame, character))
+    pawn = bound_pawn(current, character)
     if guest_stock_exit:
         await guest.bridge.wait_for(lambda game: game.get("stock_pause_exit", {}).get("state") == "armed")
         for action in ("open", "running", "prompt", "cancel"):
@@ -155,10 +169,10 @@ async def start_pair(host, guest, character_name, *, on_join=None, create_charac
                                                     for row in frame.get("campaign", {}).get("leases", ())))
         reconnect_started = time.time()
         assert (await submit(guest_run, "reconnect"))["resumed"]
-    recovered = await wait_status(host_run, lambda frame: any(row["character_id"] == character and row["state"] == "active"
-                                                             for row in frame.get("campaign", {}).get("leases", ())))
+    recovered = await wait_status(host_run, lambda frame: bound_pawn(frame, character) and any(
+        row["character_id"] == character and row["state"] == "active" for row in frame.get("campaign", {}).get("leases", ())))
     if not guest_stock_exit:
-        assert recovered["game"]["native_guest_save"]["pawn"] == pawn
+        assert bound_pawn(recovered, character) == pawn
     if after_reconnect:
         await after_reconnect(guest, reconnect_started)
 
