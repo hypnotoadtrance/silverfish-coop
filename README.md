@@ -13,9 +13,9 @@ An unofficial UE4SS mod that adds co-op via Steam invites or Direct IP to the Wi
 
 [Download a release candidate](docs/RELEASES.md) · [Known Issues](docs/KNOWN-ISSUES.md) · [Player guide](docs/PLAYING-COOP.md) · [18-rule design](docs/DESIGN.md) · [Contribute with a coding agent](CONTRIBUTING.md) · [Build and publish a release](docs/RELEASING.md)
 
-![Earlier co-op title screen showing the Singleplayer and Multiplayer choices](docs/screenshots/title-menu.png)
+![Four co-op guests gathered in front of the Observatory gate](docs/screenshots/observatory-party.png)
 
-*Earlier development screenshot. Current candidates use the stock title's amber styling.*
+*Four guests with stock characters in a staged Direct IP session, photographed by the host.*
 
 ## Install or update
 
@@ -37,11 +37,19 @@ Development builds can break compatibility with older co-op campaigns. When a re
 
 ## Screenshots
 
-| Join by Direct IP | A teammate as seen by the other player |
-| --- | --- |
-| ![In-game Direct IP form with host address, UDP port, and optional password](docs/screenshots/direct-ip.png) | ![A remote player avatar wearing armor and holding a pistol during a co-op playtest](docs/screenshots/teammate.png) |
+Captured in-game from [release candidate rc-9ce343b](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-9ce343b). The menus show a local test address and port.
 
-Captured in development builds. The Direct IP form shows a test port.
+![The same four co-op guests at the Observatory, viewed from the side](docs/screenshots/observatory-party-angle.png)
+
+![Project Silverfish title screen with Singleplayer, Multiplayer, and Quit options](docs/screenshots/title-menu.png)
+
+| Multiplayer menu | Join by Direct IP |
+| --- | --- |
+| ![Multiplayer menu with Host Game and Join by Direct IP options](docs/screenshots/multiplayer-menu.png) | ![Direct IP form with fields for the host address, UDP port, and optional password](docs/screenshots/direct-ip.png) |
+
+| New co-op campaign | Host networking |
+| --- | --- |
+| ![New Game form for choosing campaign settings](docs/screenshots/host-campaign.png) | ![Host networking menu offering Direct IP and Steam Networking](docs/screenshots/host-network.png) |
 
 ## What the mod covers
 
