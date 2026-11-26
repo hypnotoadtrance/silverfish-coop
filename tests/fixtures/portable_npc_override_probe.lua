@@ -2086,7 +2086,8 @@ local function run(action, actor_path)
     elseif action == "dock-strike" then
         return dock_strike(pawn, world, host)
     elseif action == "dock-stage" or action == "dock-worker" then
-        return dock_combat(pawn, world, host, action)
+        assert(actor_path == "" or actor_path == live_worker, "expected the original warehouse loot worker")
+        return dock_combat(pawn, world, host, action, actor_path ~= "" and actor_path or nil)
     end
     if action == "fire-npc" then
         assert(host, "NPC shots must start on the host")

@@ -2900,13 +2900,15 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
         return {**presentation, "tutorial_dock_pursuit": combat, "stock_enemy_pickup": stock_pickup}
     if retaliation:
         return {**presentation, "tutorial_dock_retaliation": await verify_tutorial_dock_retaliation(host, guest, frame)}
-    seen = await asyncio.gather(*(command(seat, "dock-worker") for seat in (host, guest)))
+    loot_worker = "NPC_Survivor_Worker_C_2"
+    observe_worker = f"dock-worker\t{loot_worker}"
+    seen = await asyncio.gather(*(command(seat, observe_worker) for seat in (host, guest)))
     assert all(row.startswith("true;false;0;") for row in seen), seen
-    target = await command(host, "dock-stage")
+    target = await command(host, f"dock-stage\t{loot_worker}")
     point = tuple(map(float, target.split(",")))
     async with asyncio.timeout(8):
         while True:
-            view = await command(guest, "dock-worker")
+            view = await command(guest, observe_worker)
             if view != "absent" and math.dist(point, tuple(map(float, view.split(";")[3].split(",")))) <= 5:
                 break
             await asyncio.sleep(.05)
@@ -2930,10 +2932,11 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
     assert (shot["map"], shot["before"], shot["after"], shot["projectiles"]) == (dock, 7, 6, 1), event
     async with asyncio.timeout(10):
         while True:
-            result = await asyncio.gather(*(command(seat, "dock-worker") for seat in (host, guest)))
+            result = await asyncio.gather(*(command(seat, observe_worker) for seat in (host, guest)))
             if all(row.startswith("false;true;1;") for row in result):
                 break
             await asyncio.sleep(.05)
+    stock_pickup = await verify_dock_enemy_drop(host, guest, frame)
     assert await command(guest, "dock-strike") == "0", "the simulated worker executed its own strike"
     started = time.time()
     host_hp, before, after, attacker = (await command(host, "dock-strike")).split(";")
@@ -2969,7 +2972,8 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
     finally:
         for seat in (host, guest):
             assert await command(seat, "dock-disarm-swing") == "disarmed"
-    return {"tutorial_dock_combat": {"before": seen, "native_shot": shot, "both_peers_dead_and_ragdolled": result,
+    return {"stock_enemy_pickup": stock_pickup,
+            "tutorial_dock_combat": {"before": seen, "native_shot": shot, "both_peers_dead_and_ragdolled": result,
                                      "stock_melee": {"attacker": attacker, "host_health": float(host_hp),
                                                      "guest_before": float(before), "guest_after": float(after),
                                                      "guest_hurt_cue": hurt, "replica_strike_denied": True,
@@ -7350,7 +7354,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["roaming_barter_overlays"] = [probes.enter_context(roaming_barter_overlay(game)) for game in games]
         if stock_critters:
             proof["stock_critter_overlays"] = [probes.enter_context(stock_critter_overlay(game)) for game in games]
-        projected_drops = stock_shovel_host_quest or tutorial_dock_pursuit
+        projected_drops = stock_shovel_host_quest or tutorial_dock_combat
         if stock_placed_item or projected_drops:
             for game in games:
                 probes.enter_context(pickup_preview_overlay(game, portable_script_overlay,
@@ -7386,10 +7390,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableBoardOfferProbe",
                                                      fixture="portable_board_offer_probe.lua"))
         if ((stock_npc_override and resident_weapon_cues) or stock_melee_family or tutorial_dock_melee
-                or tutorial_dock_pursuit or stock_host_corpse_carry):
+                or tutorial_dock_combat or stock_host_corpse_carry):
             proof["npc_combat_overlays"] = [probes.enter_context(host_npc_combat_overlay(game)) for game in games]
-        elif (stock_npc_rivalry or stock_npc_override or stock_melee_edges
-              or tutorial_dock_combat or stock_dock_population):
+        elif stock_npc_rivalry or stock_npc_override or stock_melee_edges or stock_dock_population:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
                                                      fixture="portable_npc_override_probe.lua"))
