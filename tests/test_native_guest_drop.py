@@ -33,7 +33,8 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
         for owner in ("host", OWNER, OTHER):
             party.add_player(state, owner)
         frozen = {"revision": 42, "characters": [{"character_id": OWNER, "state": {"native_guest_save": source}}]}
-        prefix = f"Player_FP_C {area}.{record.MAPS[area]}:PersistentLevel.Player_FP_C_"
+        leaf = area.rsplit("/", 1)[-1]
+        prefix = f"Player_FP_C {area}.{leaf}:PersistentLevel.Player_FP_C_"
         pawns = {"host": prefix + "1", OWNER: prefix + "82", OTHER: prefix + "83"}
         host = SimpleNamespace(zone_epoch="f" * 32, fixtures=True, native_guest=True, native_zones=True, native_profile=profile, party=state,
                                stopping=False, transitioning=False, native_checkpoint_unsafe=False, smg_holds=None,
@@ -78,7 +79,8 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.assert_awaited_once()
 
     async def test_live_drop_and_claim_keep_exact_pending_escrow_without_save_io(self):
-        host, _, _, _, _, _ = self.make_world()
+        area = "/CommunityWorld/Maps/Outpost"
+        host, _, _, _, _, _ = self.make_world(area)
         host.last_game[probe.MEMORY_CAPABILITY] = True
         bridge = SimpleNamespace(command=AsyncMock())
         retain = AsyncMock(return_value=True)
@@ -88,7 +90,7 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
               patch.object(native_host_save, "verify_record", Mock()) as verify):
             dropped = await drop.perform(host, bridge, OWNER, drop.DROP, GUID + "|9", DROP)
             pending = host.party[record.STATE][DROP]["escrow"]
-            self.assertEqual(pending, {"slot": perform_birth.await_args.kwargs["memory_slot"], "map": MAP, "pending": True})
+            self.assertEqual(pending, {"slot": perform_birth.await_args.kwargs["memory_slot"], "map": area, "pending": True})
             self.assertEqual(dropped[drop.RESULT]["guid"], GUID)
             bridge.command.return_value = self.reply(host, "reclaim", pending, recipient=OTHER)
             claimed = await drop.perform(host, bridge, OTHER, drop.RECLAIM, DROP, CLAIM)
@@ -130,7 +132,7 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
         host.authoritative_pawns.return_value[OWNER] = {"map": MAP, "location": [300., 20., 30.]}
         with self.assertRaisesRegex(party.RuleError, "out_of_range"):
             await drop.perform(host, bridge, OWNER, drop.RECLAIM, DROP, CLAIM)
-        host.last_game["map"] = "/Game/Classes/Maps/Other"
+        host.last_game["map"] = "/Game/Classes/Maps/MainMenu_P"
         with self.assertRaisesRegex(party.RuleError, "fixture_unavailable"):
             await drop.perform(host, bridge, OWNER, drop.RECLAIM, DROP, CLAIM)
         bridge.command.assert_not_awaited()

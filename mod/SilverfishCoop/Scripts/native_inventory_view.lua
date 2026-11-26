@@ -3,7 +3,7 @@ local world_path = require("world_path")
 local weapon_profiles = require("guest_weapon_registry")
 local guest_weapon = require("native_guest_weapon")
 local throwables = require("native_flare").equipment
-local drop_maps = require("native_guest_drop_maps")
+local drop_map_leaf = require("native_guest_drop_maps")
 local drop_items = require("native_guest_drop_items")
 local save_scope = require("native_save_scope")
 
@@ -231,7 +231,7 @@ local function page(fields)
         end
         local droppable = options == "drop" or options == "split,drop"
         local drop_profile = drop_items.profiles[class]
-        if droppable and (not drop_maps[fields[4]] or source ~= "backpack" or not drop_items.stock_actor_class(class)
+        if droppable and (not drop_map_leaf(fields[4]) or source ~= "backpack" or not drop_items.stock_actor_class(class)
             or quantity > (drop_profile and drop_profile.maximum or 200)) then
             error("The authenticated inventory drop row did not qualify", 0)
         end

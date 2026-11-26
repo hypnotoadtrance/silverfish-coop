@@ -306,7 +306,7 @@ namespace
         if (!matches(result.live_save, save_id) || !live(result.live_save) || !live(result.stock) ||
             result.live_save->GetClassPrivate() != inventory.save_class || result.stock->GetClassPrivate() != inventory.save_class ||
             !live(result.game) || result.game->GetClassPrivate() != game_class ||
-            !silverfish::native_guest_drop_maps::contains(result.world) || !result.current()) return {};
+            !silverfish::native_guest_drop_maps::stock_map(result.world, false) || !result.current()) return {};
         return result;
     }
 

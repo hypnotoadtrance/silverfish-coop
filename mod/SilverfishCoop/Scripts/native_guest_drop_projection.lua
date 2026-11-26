@@ -1,5 +1,5 @@
 local projection = {}
-local maps = require("native_guest_drop_maps")
+local world_path = require("world_path")
 local drop_items = require("native_guest_drop_items")
 local pickup_fixture = require("native_authored_pickup_input_fixture")
 local pickup_audio = require("native_pickup_audio")
@@ -40,7 +40,7 @@ local function coordinate(value)
 end
 
 local function local_pawn(state, phase)
-    local leaf = type(state.map) == "string" and state.map:match("^/Game/Classes/Maps/[%w_/%-]*/([%w_%-]+)$")
+    local leaf = world_path.leaf(state.map)
     local active = (phase == "connected" and state.server == true) or (phase == "hosting" and state.server == false)
     if not enabled or not active or not leaf or state.listening ~= true then return end
     local pawn = state.local_pawn and state.local_pawn.pawn
@@ -86,7 +86,7 @@ local function proof()
     if not current or type(SilverfishReadNativeGuestDropProjection) ~= "function" then return end
     local active, epoch, id, actor, sequence = SilverfishReadNativeGuestDropProjection()
     if active == true and current.epoch == epoch and current.id == id
-        and drop_items.actor_path(current.class, current.map, maps[current.map], actor) then
+        and drop_items.actor_path(current.class, current.map, world_path.leaf(current.map), actor) then
         return actor, sequence
     end
 end
@@ -99,7 +99,7 @@ function projection.take_press(pawn)
     if item and item.epoch == epoch and same(item.pawn, pawn) then
         local active, observed_epoch, observed_id, actor, sequence = SilverfishReadNativeGuestDropProjection(item.slot)
         if active and observed_epoch == epoch and observed_id == id and math.type(sequence) == "integer" and sequence > 0 then
-            local qualified = drop_items.actor_path(item.class, item.map, maps[item.map], actor)
+            local qualified = drop_items.actor_path(item.class, item.map, world_path.leaf(item.map), actor)
             return "world-loot:" .. epoch .. ":" .. id .. ":" .. tostring(sequence), qualified and actor or nil
         end
         return
@@ -116,7 +116,7 @@ function projection.authority_sight(state, phase, pawn, id, position)
     if not item or not same(viewer, item.pawn) or not same(state.world, item.world)
         or type(SilverfishReadNativeGuestDropProjection) ~= "function" then return false end
     local active, epoch, exact, name = SilverfishReadNativeGuestDropProjection(item.slot)
-    if active ~= true or epoch ~= item.epoch or exact ~= id or not drop_items.actor_path(item.class, item.map, maps[item.map], name) then
+    if active ~= true or epoch ~= item.epoch or exact ~= id or not drop_items.actor_path(item.class, item.map, world_path.leaf(item.map), name) then
         return false
     end
     local path = name:match("^%S+ (.+)$")
@@ -361,7 +361,7 @@ local function fixture(pawn, proof_for)
     local displayed, before = proof_for()
     if not headless or not displayed or type(before) ~= "number"
         or type(SilverfishProbeNativeInteractInput) ~= "function" then error("stock_drop_projection_fixture_scope_unavailable", 0) end
-    local path = displayed:match("^%S+ (/Game/[%w_./:%-]+)$")
+    local path = displayed:match("^%S+ (/[A-Za-z0-9_./:%-]+)$")
     local actor = path and StaticFindObject(path)
     local box = valid(actor) and actor.Box
     local camera = pawn.Camera
@@ -479,7 +479,7 @@ function projection.command(fields, state, phase)
             local active, epoch, exact, actor = SilverfishReadNativeGuestDropProjection(item.slot)
             name = active and epoch == item.epoch and exact == id and actor or nil
         end
-        local path = name and name:match("^%S+ (/Game/[%w_./:%-]+)$")
+        local path = name and name:match("^%S+ (/[A-Za-z0-9_./:%-]+)$")
         local actor = path and StaticFindObject(path)
         if not valid(pawn) or not valid(actor) or actor:GetFullName() ~= name then
             error("world_loot_fixture_scope_unavailable", 0)
@@ -493,7 +493,7 @@ function projection.command(fields, state, phase)
             error("world_loot_fixture_scope_unavailable", 0)
         end
         local active, epoch, exact, name, before = SilverfishReadNativeGuestDropProjection(item.slot)
-        local path = active and epoch == item.epoch and exact == id and name:match("^%S+ (/Game/[%w_./:%-]+)$")
+        local path = active and epoch == item.epoch and exact == id and name:match("^%S+ (/[A-Za-z0-9_./:%-]+)$")
         local actor = path and StaticFindObject(path)
         if not valid(actor) or actor:GetFullName() ~= name or type(before) ~= "number"
             or type(SilverfishProbeNativeInteractInput) ~= "function" then

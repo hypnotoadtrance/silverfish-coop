@@ -1194,7 +1194,7 @@ namespace
     {
         return (!host || host_drop_enabled()) && scope.host == host &&
                scope.generation == generation.load(std::memory_order_acquire) && current_player(scope) &&
-               silverfish::native_guest_drop_maps::contains(static_cast<Unreal::UWorld*>(scope.world.Get()));
+               silverfish::native_guest_drop_maps::stock_map(static_cast<Unreal::UWorld*>(scope.world.Get()), false);
     }
 
     [[nodiscard]] bool host_drop_scope_matches(Unreal::UObject* save)

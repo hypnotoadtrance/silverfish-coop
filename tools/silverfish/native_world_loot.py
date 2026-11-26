@@ -11,7 +11,7 @@ from itertools import chain
 from . import (native_enemy_shells, native_guest_drop_record, native_host_dig_live, native_loot,
                native_mushrooms, native_stock_enemy_drops, party)
 from .authored_loot import valid_item_transform
-from .content_paths import item_class_name
+from .content_paths import item_class_name, named_actor
 from .native_gold import valid_guid
 from .native_guest_drop_record import valid_position
 
@@ -35,7 +35,6 @@ SHARED_PICKUPS_VERSION = 2
 CRATE_CLAIM = "native-loot-claim"
 ENEMY_CLAIM = "native-enemy-loot-claim"
 _TARGET = re.compile(r"world-loot:([0-9a-f]{32}):([0-9a-f]{32})(?::([1-9][0-9]{0,15}))?\Z")
-_AREA = re.compile(r"/Game/Classes/Maps/[A-Za-z0-9_/]+/([A-Za-z0-9_-]+)\Z")
 _MAX_VISIBLE = 64
 _VISIBILITY_RADIUS = 1800
 
@@ -53,11 +52,7 @@ def target_parts(target):
 
 
 def pawn_matches(area, pawn):
-    match = _AREA.fullmatch(area) if isinstance(area, str) else None
-    if not match or not isinstance(pawn, str):
-        return False
-    prefix = f"Player_FP_C {area}.{match[1]}:PersistentLevel.Player_FP_C_"
-    return pawn.startswith(prefix) and re.fullmatch(r"[0-9]{1,10}", pawn[len(prefix):]) is not None
+    return named_actor(area, pawn, "Player_FP_C")
 
 
 def parse(fields, phase, area):
@@ -70,8 +65,7 @@ def parse(fields, phase, area):
             or not party.REQUEST_ID.fullmatch(epoch) or not party.REQUEST_ID.fullmatch(identity)
             or not re.fullmatch(r"(?:0|[1-9][0-9]{0,15})", press) or int(press) >= 2**53):
         raise ValueError("Invalid stock world loot report")
-    prefix = f"{class_name} {area}.{area.rsplit('/', 1)[-1]}:PersistentLevel.{class_name}_"
-    if not actor.startswith(prefix) or not re.fullmatch(r"[0-9]{1,10}", actor[len(prefix):]):
+    if not named_actor(area, actor, class_name):
         raise ValueError("Invalid projected stock loot actor")
     report = dict(map=area, epoch=epoch, id=identity, pawn=pawn, actor=actor, class_path=item_class, sequence=int(press))
     if len(fields) == 9:

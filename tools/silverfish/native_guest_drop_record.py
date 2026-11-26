@@ -4,13 +4,13 @@ import math
 import re
 
 from .authored_loot import valid_item_transform
-from .authored_routes import MAPS as NORMAL_CAMPAIGN_MAPS
-from .content_paths import item_class_name
+from .content_paths import item_class_name, named_actor
 from .guest_weapon_profiles import MAX_TAKE_AMMO_ROUNDS, NINE_MM_BALL, STOCK_AMMO
 from .native_guest_consumable import MEALS, MISSING_CONTACT_ENTRY, RESULT as CONSUMABLE_RESULTS
 from .native_gold import valid_guid
+from .native_map_preflight import valid_campaign_package
 from .party import REQUEST_ID
-from .travel import AUTHORED_MAPS, CROSSROADS, OBSERVATORY
+from .travel import CROSSROADS, OBSERVATORY
 
 
 STATE = "native_guest_stack_drops"
@@ -29,7 +29,7 @@ STACKABLE = {
     **dict.fromkeys((food.class_path for food in MEALS.values()), True),
     LIGHT_PISTOL: False,
 }
-MAPS = {area: area.rsplit("/", 1)[1] for area in NORMAL_CAMPAIGN_MAPS | AUTHORED_MAPS}
+_LEGACY_ITEMS = {path.rsplit(".", 1)[1]: path for path in STACKABLE}
 MAX_DROPS = 128
 MAX_ACTIVE = 4
 MAX_QUANTITY = 200
@@ -93,35 +93,26 @@ def valid_position(value) -> bool:
 
 
 def supported_map(area) -> bool:
-    return isinstance(area, str) and area in MAPS
-
-
-def _paths(actor_class: str) -> dict:
-    return {area: re.compile(re.escape(f"{actor_class} {area}.{leaf}:PersistentLevel.{actor_class}_")
-                             + r"[0-9]{1,10}\Z") for area, leaf in MAPS.items()}
-
-
-_PAWN_PATHS = _paths("Player_FP_C")
-_ACTOR_PATHS = {path: _paths(path.rsplit(".", 1)[1]) for path in STACKABLE}
+    return valid_campaign_package(area) and not area.startswith("/Game/Classes/Maps/PlaytestMap_")
 
 
 def pawn_matches(area, name) -> bool:
-    return supported_map(area) and isinstance(name, str) and _PAWN_PATHS[area].fullmatch(name) is not None
+    return supported_map(area) and named_actor(area, name, "Player_FP_C")
 
 
 def actor_class_path(area, name) -> str | None:
-    if supported_map(area) and isinstance(name, str):
-        return next((path for path, names in _ACTOR_PATHS.items() if names[area].fullmatch(name)), None)
+    if isinstance(name, str):
+        actor_class = name.partition(" ")[0]
+        if (path := _LEGACY_ITEMS.get(actor_class)) and supported_map(area) and named_actor(area, name, actor_class):
+            return path
+    return None
 
 
 def actor_matches(area, name, class_path=None) -> bool:
     if class_path is None:
         return actor_class_path(area, name) is not None
-    if not supported_map(area) or not isinstance(name, str) or not valid_class(class_path):
-        return False
-    actor = class_path.rsplit(".", 1)[1]
-    prefix = f"{actor} {area}.{MAPS[area]}:PersistentLevel.{actor}_"
-    return name.startswith(prefix) and re.fullmatch(r"[0-9]{1,10}", name[len(prefix):]) is not None
+    actor = item_class_name(class_path)
+    return bool(actor and supported_map(area) and named_actor(area, name, actor))
 
 
 def valid_class(path) -> bool:

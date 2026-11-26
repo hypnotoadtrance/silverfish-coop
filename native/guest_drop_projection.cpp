@@ -906,8 +906,7 @@ namespace
         auto* driver = object(world, STR("NetDriver"));
         auto* connection = object(driver, STR("ServerConnection"));
         if (!pawn || !live(world) || !live(driver) ||
-            !(stock_loot ? silverfish::native_guest_drop_maps::stock_map(world) :
-                silverfish::native_guest_drop_maps::contains(world)) ||
+            !silverfish::native_guest_drop_maps::stock_map(world, stock_loot) ||
             (connection && !live(connection)) ||
             !id_valid(epoch) || !id_valid(id) || !std::ranges::all_of(source, coordinate) ||
             !coordinate(visual) || visual > source[2] + 18 || visual < source[2] - 145)

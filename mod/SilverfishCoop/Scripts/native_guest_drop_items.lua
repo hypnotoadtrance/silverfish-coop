@@ -38,7 +38,7 @@ end
 
 function drop_items.actor_path(class, area, leaf, name)
     local actor = drop_items.stock_actor_class(class)
-    if not actor or type(name) ~= "string" then return end
+    if not actor or not leaf or type(name) ~= "string" then return end
     local prefix = actor .. " " .. area .. "." .. leaf .. ":PersistentLevel." .. actor .. "_"
     if name:sub(1, #prefix) == prefix and name:sub(#prefix + 1):match("^%d+$") then
         return name:sub(#actor + 2)

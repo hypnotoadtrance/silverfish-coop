@@ -1,7 +1,7 @@
 local fixture = {}
 local host_save = require("native_host_save")
 local players = require("players")
-local maps = require("native_guest_drop_maps")
+local drop_map_leaf = require("native_guest_drop_maps")
 local drop_items = require("native_guest_drop_items")
 
 local menu_command = "native-host-stack-drop-menu-fixture"
@@ -216,7 +216,7 @@ function fixture.command(fields, state, phase)
     if command ~= menu_command and command ~= close_command then return end
     local testing = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
         or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
-    if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not testing or not maps[state.map] or phase ~= "hosting" or state.server ~= false or not state.listening
+    if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not testing or not drop_map_leaf(state.map) or phase ~= "hosting" or state.server ~= false or not state.listening
         or type(guid) ~= "string" or #guid ~= 32 or not guid:match("^[0-9A-F]+$") or not guid:find("[^0]") then
         error("host_stack_drop_menu_fixture_unavailable", 0)
     end

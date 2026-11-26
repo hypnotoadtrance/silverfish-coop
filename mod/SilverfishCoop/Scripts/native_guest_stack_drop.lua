@@ -2,7 +2,7 @@ local stack_drop = {}
 local guest_save = require("guest_save")
 local host_save = require("native_host_save")
 local players = require("players")
-local maps = require("native_guest_drop_maps")
+local drop_map_leaf = require("native_guest_drop_maps")
 local drop_items = require("native_guest_drop_items")
 local ground_stack = require("native_ground_stack")
 local escrow = require("native_loot_actions")
@@ -35,7 +35,7 @@ local function coordinate(value)
 end
 
 local function hosting_map(state, phase)
-    local leaf = maps[state.map]
+    local leaf = drop_map_leaf(state.map)
     return enabled and phase == "hosting" and state.listening == true and state.server == false and leaf
         and valid(state.world) and state.world:GetFullName() == "World " .. state.map .. "." .. leaf
 end
@@ -254,10 +254,10 @@ function stack_drop.command(fields, state, phase)
         error("mutation_unverified_native_guest_stack_drop_receipt", 0)
     end
     if ok then
-        local qualified = class and drop_items.actor_path(class, state.map, maps[state.map], actor)
+        local qualified = class and drop_items.actor_path(class, state.map, drop_map_leaf(state.map), actor)
         if not class then
             for known_class, profile in pairs(drop_items.profiles) do
-                if count <= profile.maximum and drop_items.actor_path(known_class, state.map, maps[state.map], actor) then
+                if count <= profile.maximum and drop_items.actor_path(known_class, state.map, drop_map_leaf(state.map), actor) then
                     qualified = true
                     break
                 end

@@ -1,5 +1,6 @@
 #include "authored_pickup.hpp"
 #include "content_paths.hpp"
+#include "world_path.hpp"
 #include "guest_drop_projection.hpp"
 #include "guest_regen.hpp"
 #include "guest_weapon_registry.hpp"
@@ -2125,7 +2126,7 @@ namespace
         respawn_world.Reset();
         pending_host_respawns.clear();
         host_respawn_hidden.clear();
-        if (url.Map.IsEmpty() || !std::wstring_view{*url.Map}.starts_with(STR("/Game/Classes/Maps/"))) return;
+        if (url.Map.IsEmpty() || !silverfish::world_path::package(RC::StringViewType{*url.Map})) return;
         if (pending)
         {
             auto* request = reinterpret_cast<U::UObject*>(pending);
@@ -2174,7 +2175,7 @@ namespace
         if (!live(world) || !exact(object(world, STR("OwningGameInstance")), instance_path) ||
             actor->GetOuterPrivate() != object(world, STR("PersistentLevel"))) return;
         const auto world_path = world->GetPathName();
-        if (!world_path.starts_with(STR("/Game/Classes/Maps/"))) return;
+        if (!silverfish::world_path::object(RC::StringViewType{world_path})) return;
         const auto seat = respawn_seat(world, world_path);
         if (seat == RespawnSeat::Inactive) return;
         const auto path = actor->GetPathName();
@@ -2371,7 +2372,7 @@ namespace
         auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
         if (!live(world)) return 0;
         const auto world_path = world->GetPathName();
-        if (!world_path.starts_with(STR("/Game/Classes/Maps/"))) return 0;
+        if (!silverfish::world_path::object(RC::StringViewType{world_path})) return 0;
         const Profile seat_profile{.world = world_path.c_str()};
         Scope seat{world, pawn, nullptr, nullptr, object(pawn, STR("Controller")),
             object(world, STR("NetDriver")), &seat_profile, host};
@@ -2444,7 +2445,7 @@ namespace
     {
         if (!ready() || lua.get_stack_size() != 1 || !lua.is_string()) return 0;
         const auto requested = lua.get_string();
-        if (!requested.starts_with("/Game/Classes/Maps/") || requested.size() > 384) return 0;
+        if (requested.size() > 384 || !silverfish::world_path::object(requested.substr(0, requested.find(':')))) return 0;
         const auto found = loose_sources.find(requested);
         auto* scope = found != loose_sources.end() ? &found->second.scope : nullptr;
         if (!scope || !live(scope->actor.Get()))
@@ -2467,7 +2468,8 @@ namespace
     {
         if (!ready() || !headless() || lua.get_stack_size() != 1 || !lua.is_string()) return 0;
         const auto path = RC::to_wstring(lua.get_string());
-        if (!path.starts_with(STR("/Game/Classes/Maps/")) || path.size() > 384) return 0;
+        if (path.size() > 384 ||
+            !silverfish::world_path::object(RC::StringViewType{path}.substr(0, path.find(':')))) return 0;
         auto* source = find<U::UObject>(path.c_str());
         auto* actor_type = find<U::UClass>(STR("/Script/Engine.Actor"));
         const auto report = [&](const char* fault) { lua.set_string(fault); return 1; };

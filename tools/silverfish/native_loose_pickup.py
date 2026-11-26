@@ -7,6 +7,7 @@ import time
 from . import native_inventory, native_loot, native_pickup_audio, party
 from .content_paths import item_class_name
 from .native_gold import valid_guid
+from .native_map_preflight import valid_campaign_package
 from .native_guest_drop_record import valid_position
 
 STATE = "native_loose_pickup_claims"
@@ -28,13 +29,13 @@ CHECK_KEY = "native_loose_pickup_check"
 RESPAWN_HIDDEN_ROW = "native-loose-pickup-respawn-hidden"
 RESPAWN_HIDDEN = "native_loose_pickup_respawn_hidden"
 _PREFIX = "loose:"
-_PATH = re.compile(r"(/Game/Classes/Maps/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):PersistentLevel\.[A-Za-z0-9_]+")
+_PATH = re.compile(r"(/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):PersistentLevel\.[A-Za-z0-9_-]+")
 _SLOT = re.compile(r"SFCoop_[0-9a-f]{32}")
 
 
 def actor_map(path):
     match = _PATH.fullmatch(path) if isinstance(path, str) and len(path) <= 384 else None
-    if match and match[1].rsplit("/", 1)[-1] == match[2]:
+    if match and valid_campaign_package(match[1]) and match[1].rsplit("/", 1)[-1] == match[2]:
         return match[1]
     return None
 

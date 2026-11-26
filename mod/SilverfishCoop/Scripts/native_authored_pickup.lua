@@ -1,4 +1,5 @@
 local pickup = {}
+local world_path = require("world_path")
 local guest_save = require("guest_save")
 local stock_input_fixture = require("native_authored_pickup_input_fixture")
 local drill_head = require("native_prototype_drill_pickup")
@@ -399,7 +400,7 @@ local function loose_profile(path, state)
     local class, mode, claimed, cash = SilverfishDescribeLoosePickup(path)
     local actor = class and StaticFindObject(path)
     local name = valid(actor) and actor:GetFullName():match("^(%S+) ")
-    local leaf = path:match(":PersistentLevel%.([%w_]+)$")
+    local leaf = path:match(":PersistentLevel%.([%w_%-]+)$")
     local area_name = state.map:match("([^/]+)$")
     local limits = class and cash_limits[class]
     if not name or not leaf or not area_name or (cash and not limits)
@@ -862,9 +863,9 @@ function pickup.preview_input(pawn, target, projected_actor)
     if not binding or not same(binding.pawn, pawn) or type(target) ~= "string" or previews[target] then return end
     if binding.host and (not projected_actor or not target:match("^world%-loot:%x+:%x+:")) then return end
     local profile = binding.active and binding.active[target]
-    local path = profile and profile.path
-        or target:match("^loose:(/Game/Classes/Maps/[%w_/]+%.[%w_]+:PersistentLevel%.[%w_]+)$")
-        or projected_actor and projected_actor:match("^%S+ (/Game/[%w_./:%-]+)$")
+    local loose = target:match("^loose:(.+)$")
+    local path = profile and profile.path or world_path.actor_package(loose) and loose
+        or projected_actor and projected_actor:match("^%S+ (/[A-Za-z0-9_./:%-]+)$")
     local actor = path and StaticFindObject(path)
     if not valid(actor) or (projected_actor and actor:GetFullName() ~= projected_actor)
         or (binding.host and actor.bReplicates ~= false) or actor.bHidden or actor:IsActorBeingDestroyed()
@@ -904,7 +905,7 @@ function pickup.take_press(pawn)
     if not binding or not same(pawn, binding.pawn) or type(SilverfishTakeNativeAuthoredPickupPress) ~= "function" then return end
     local source = SilverfishTakeNativeAuthoredPickupPress(pawn:GetAddress())
     if binding.active[source] then return source end
-    if type(source) == "string" and source:match("^/Game/Classes/Maps/[%w_/]+%.[%w_]+:PersistentLevel%.[%w_]+$") then
+    if world_path.actor_package(source) then
         return "loose:" .. source
     end
 end

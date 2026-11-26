@@ -1,6 +1,6 @@
 local menu_drop = {}
 local host_save = require("native_host_save")
-local maps = require("native_guest_drop_maps")
+local drop_map_leaf = require("native_guest_drop_maps")
 local players = require("players")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
@@ -19,7 +19,7 @@ local function token(value, characters)
 end
 
 local function standing_host(state, phase)
-    if not enabled or not maps[state.map] or phase ~= "hosting" or not state.listening or state.server
+    if not enabled or not drop_map_leaf(state.map) or phase ~= "hosting" or not state.listening or state.server
         or type(SilverfishSetNativeHostDropScope) ~= "function"
         or type(SilverfishClearNativeHostDropScope) ~= "function"
         or type(SilverfishTakeNativeHostDropRequest) ~= "function"

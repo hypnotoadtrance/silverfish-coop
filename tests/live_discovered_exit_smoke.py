@@ -8,6 +8,9 @@ from pathlib import Path
 
 import live_portable_title_smoke as suite
 from live_unified_title_smoke import start_pair
+from portable_stock_shovel import stock_inventory
+from tools.silverfish import native_guest_drop as drop, native_host_stack_drop as host_drop, native_world_loot as loot
+from tools.silverfish.control import submit
 from tools.silverfish.authored_routes import AUTHORED_ROUTES, MAPS
 from tools.silverfish.travel import AUTHORED_MAPS
 from tools.silverfish.travel import CISTERN, CROSSROADS, OBSERVATORY
@@ -33,7 +36,7 @@ async def wait_for_party(host_run, guest_run, destination):
 
 
 async def live_exit(host, guest, pawn, probe, *, unlisted_only=False, save_in_shop=False, with_door=False,
-                    unlisted_map=UNLISTED_SHOP, **options):
+                    unlisted_map=UNLISTED_SHOP, mounted_items=False, **options):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     unlisted_world = "/Game/Classes/Maps/Maps_OverWorld/Campus_04_P"
     shop = unlisted_map
@@ -86,10 +89,64 @@ async def live_exit(host, guest, pawn, probe, *, unlisted_only=False, save_in_sh
     for participant in (reached["game"]["native_guest_save"]["pawn"], "local"):
         await host.bridge.command("native-exit-position", participant, "near", route.entrance, route.actor)
     outbound = await cross_unlisted(host, guest, probe, "demo" if shop == UNLISTED_DEMO else "shop", CROSSROADS, shop)
+    if mounted_items:
+        evidence["mounted_items"] = await live_mounted_items(host, guest, shop)
     if save_in_shop:
         return dict(evidence, entered_unlisted_map=outbound)
     returned = await cross_unlisted(host, guest, probe, "return", shop, CROSSROADS)
     return dict(evidence, unlisted_map_round_trip=[outbound, returned])
+
+
+async def live_mounted_items(host, guest, area):
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    before = suite.campaign_save_hashes(host.campaign), suite.stock_save_hashes(host.profile)
+    await guest.bridge.wait_for(lambda frame: frame.get("map") == area
+                                and frame.get("native_inventory_view_binding") == "ready")
+    items = await stock_inventory(guest_run, guest=True)
+    item = next(row for row in items if not row["stackable"] and drop.droppable(row, generic=True))
+    guid = item["guid"]
+    debit = await submit(guest_run, drop.STOCK_DROP_FIXTURE, target=guid)
+    assert debit["ok"], debit
+    dropped = debit[drop.RESULT]
+    assert (dropped["guid"], dropped["class_path"], dropped["quantity"]) == (guid, item["class_path"], 1)
+    assert guid not in {row["guid"] for row in await stock_inventory(guest_run, guest=True)}
+
+    async def collect(seat, run, dropped):
+        identity = loot.player_drop_identity(dropped["drop_id"])
+        visible = []
+        for viewer in (host, guest):
+            frame = await viewer.bridge.wait_for(lambda frame: identity in frame.get(loot.KEY, {}), timeout=12)
+            assert frame[loot.KEY][identity]["map"] == area
+            visible.append(frame[loot.KEY][identity]["actor"])
+        local = await seat.bridge.wait_for(lambda frame: frame.get("map") == area)
+        await host.bridge.command(loot.APPROACH, identity, local["pawns"]["local"]["name"])
+        pressed = await seat.bridge.command(loot.FIXTURE, identity)
+        assert pressed["ack"]["message"] == "stock world loot interaction intercepted", pressed["ack"]
+        for viewer in (host, guest):
+            await viewer.bridge.wait_for(lambda frame: frame.get("map") == area
+                                         and identity not in frame.get(loot.KEY, {}), timeout=12)
+        recovered, = (row for row in await stock_inventory(run, guest=seat is guest) if row["guid"] == guid)
+        assert (recovered["source"], recovered["class_path"], recovered["quantity"]) == ("backpack", item["class_path"], 1)
+        return {"item": recovered, "both_actor_paths": visible}
+
+    host_pickup = await collect(host, host_run, dropped)
+    await host.bridge.wait_for(lambda frame: frame.get(host_drop.SCOPE))
+    await host.bridge.command(host_drop.FIXTURE, guid, "1", "context_menu")
+    host_frame = await suite.wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == area)
+    async with asyncio.timeout(8):
+        while True:
+            matches = [row for row in await suite.resident_events(host_run, host_frame)
+                       if row["event"] == "native_host_stock_drop" and row.get(drop.RESULT, {}).get("guid") == guid]
+            if matches:
+                host_dropped, = matches
+                break
+            await asyncio.sleep(.1)
+    assert host_dropped["entry"] == "context_menu" and not host_dropped["error"], host_dropped
+    await host.bridge.command(host_drop.CLOSE_FIXTURE, guid)
+    guest_pickup = await collect(guest, guest_run, host_dropped[drop.RESULT])
+    assert before == (suite.campaign_save_hashes(host.campaign), suite.stock_save_hashes(host.profile))
+    return {"guest_drop": dropped, "host_pickup": host_pickup, "host_drop": host_dropped[drop.RESULT],
+            "guest_pickup": guest_pickup, "checkpoint_unchanged": True}
 
 
 async def live_discovered_door(host, guest, crossed, probe):
@@ -251,15 +308,24 @@ if __name__ == "__main__":
     parser.add_argument("--resume-unlisted", action="store_true")
     parser.add_argument("--discovered-door", action="store_true")
     parser.add_argument("--outside-tree", action="store_true")
+    parser.add_argument("--mounted-items", action="store_true")
     args = parser.parse_args()
     work, first, second, saves = (path.resolve() for path in (args.work, args.first_game, args.second_game, args.vanilla_saved))
     work.mkdir(parents=True, exist_ok=True)
     unlisted = UNLISTED_DEMO if args.outside_tree else UNLISTED_SHOP
     suite.verify_weather_travel = partial(live_exit, unlisted_only=args.unlisted_only or args.resume_unlisted,
                                         save_in_shop=args.resume_unlisted, with_door=args.discovered_door,
-                                        unlisted_map=unlisted)
+                                        unlisted_map=unlisted, mounted_items=args.mounted_items)
     if args.resume_unlisted:
         suite.start_pair = partial(check_unlisted_resume, unlisted_map=unlisted)
+    if args.mounted_items:
+        previous = suite.start_pair
+
+        async def with_stock_kit(*arguments, **options):
+            options["create_character"] = suite.create_stock_drop_character
+            return await previous(*arguments, **options)
+
+        suite.start_pair = with_stock_kit
     with suite.installed_probe(first, mod="SilverfishPortableExitDiscoveryProbe", fixture="portable_discovered_exit_probe.lua"):
         asyncio.run(suite.verify(work, first, second, saves, stock_weather_travel=True,
                                  stock_placed_item=not args.resume_unlisted))

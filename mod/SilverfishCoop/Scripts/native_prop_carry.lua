@@ -1,4 +1,5 @@
 local carry = {}
+local world_path = require("world_path")
 local corpses = require("native_corpse_view")
 local guest_save = require("guest_save")
 local observers = require("native_observer_target")
@@ -293,7 +294,8 @@ local function observe(pawn, throwing, dropping)
     local position = corpse and part:GetSocketLocation(corpse.bone) or actor:K2_GetActorLocation()
     local placement
     if not corpse and actor:HasAnyFlags(EObjectFlags.RF_WasLoaded) and same(actor:GetOuter(), world.PersistentLevel) then
-        placement = actor:GetFullName():match("^%S+ (/Game/Classes/Maps/[%w_/]+%.[%w_]+:PersistentLevel%.[%w_%-]+)$")
+        local path = actor:GetFullName():match("^%S+ (.+)$")
+        if world_path.actor_package(path) then placement = path end
     end
     local birth = emit(pawn, "grab", class, position, pitch, yaw, corpse, placement, loot_id)
     if birth then local_hold = {actor = actor, pawn = pawn, class = class, serial = birth, corpse = corpse, loot_id = loot_id} end
