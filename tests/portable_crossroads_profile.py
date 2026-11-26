@@ -761,4 +761,4 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
             "zone_walls": {seat: frame["game"]["native_zone_wall"]
                            for seat, frame in zip(seats, wall_status, strict=True)},
             "guest_roster": {slot: row["name"] for slot, row in settled["game"]["pawns"].items()},
-            "vitals_comparison": dict(zip(seats, comparison, strict=True)), **guest_binding, **coarse, **journal}
+            "vitals_comparison": dict(zip(seats, comparison, strict=True)), **heartbeat, **guest_binding, **coarse, **journal}

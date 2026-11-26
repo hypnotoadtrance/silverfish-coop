@@ -154,7 +154,7 @@ async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=Fals
         if check_network_budget:
             rated = await wait(run, lambda frame: len(frame.get("game", {}).get("native_replication_rates", {})) == 2)
             rates = rated["game"]["native_replication_rates"]
-            assert all(row["cap_hz"] == min(row["stock_hz"], 24) for row in rates.values()), rates
+            assert all(row["cap_hz"] == min(row["stock_hz"], 20) for row in rates.values()), rates
             evidence["native_replication_rates"] = rates
         if sleep_and_wipe:
             _, bed, actor = site(routes[0].source)

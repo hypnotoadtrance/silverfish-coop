@@ -160,7 +160,7 @@ async def verify_lean(host, guest, pawn, *, projected=True, drive="combined"):
     host_pawns, guest_pawns = ready(host_status), ready(guest_status)
     assert host_pawns[1] == pawn, host_pawns
     replication_rates = host_status["game"].get("native_replication_rates", {})
-    assert all(rate["cap_hz"] == 24 for rate in replication_rates.values()), replication_rates
+    assert all(rate["cap_hz"] == min(rate["stock_hz"], 20) for rate in replication_rates.values()), replication_rates
     input_result = {"exercised": False}
     input_verified = False
     if drive == "combined":
