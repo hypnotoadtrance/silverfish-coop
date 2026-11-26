@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import math
 import os
+import re
 import secrets
 import time
 import uuid
@@ -1414,13 +1415,20 @@ class Host:
 
     async def authored_arrival(self, bridge: Bridge, route: AuthoredRoute) -> dict:
         tag = getattr(route, "arrival_entrance", None) or route.entrance
-        snapshot = await bridge.command("native-authored-arrival", tag, route.kind, route.arrival_actor, timeout=7)
+        door = route.kind == "door"
+        snapshot = await bridge.command("native-authored-arrival", tag, route.kind,
+                                        route.arrival_actor if door else "-", timeout=7)
         proof = snapshot.get("native_authored_arrival", {})
-        actor_class = "Dungeon_TransitionDoor_BP_C" if route.kind == "door" else "LevelExit_Spawn_BP_C"
         basename = route.destination.rsplit("/", 1)[-1]
-        expected = f"{actor_class} {route.destination}.{basename}:PersistentLevel.{route.arrival_actor}"
+        level = f"{route.destination}.{basename}:PersistentLevel."
+        actor = proof.get("actor")
+        if door:
+            matches = actor == f"Dungeon_TransitionDoor_BP_C {level}{route.arrival_actor}"
+        else:
+            matches = isinstance(actor, str) and re.fullmatch(
+                r"[A-Za-z0-9_-]+_C " + re.escape(level) + r"[A-Za-z0-9_-]+", actor)
         if (snapshot.get("state") != "hosting" or snapshot.get("map") != route.destination
-                or proof.get("destination") != route.destination or proof.get("actor") != expected
+                or proof.get("destination") != route.destination or not matches
                 or proof.get("placement") != "arrow" or None in proof.get("location", [None])):
             raise RuntimeError("The stock authored arrival could not be verified")
         return snapshot

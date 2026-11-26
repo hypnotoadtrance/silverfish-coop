@@ -2,6 +2,7 @@ local arrival = {}
 local bed = require("native_bed")
 
 local spawn_class = "LevelExit_Spawn_BP_C"
+local spawn_type = "/Game/Classes/ScriptingActors/LevelExit_Spawn_BP.LevelExit_Spawn_BP_C"
 local door_class = "Dungeon_TransitionDoor_BP_C"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local main_menu = "/Game/Classes/Maps/MainMenu_P"
@@ -90,8 +91,12 @@ end
 
 local function marker_for_tag(world, tag)
     local match
-    for _, marker in ipairs(FindAllOf(spawn_class) or {}) do
-        if same_world_actor(marker, world) and marker:GetFullName():match("^LevelExit_Spawn_BP_C ") then
+    local statics, class = StaticFindObject(statics_path), StaticFindObject(spawn_type)
+    if not valid(statics) or not valid(class) then error("The stock entrance marker class is unavailable", 0) end
+    local found = {}
+    statics:GetAllActorsOfClass(world, class, found)
+    for _, marker in ipairs(found.OutActors or found) do
+        if same_world_actor(marker, world) and marker:IsA(class) then
             local name = marker.EntranceTag
             if type(name) ~= "string" and name then name = name:ToString() end
             if name == tag and name ~= "None" then
@@ -130,8 +135,10 @@ function arrival.place(state, phase, tag, kind, actor_name)
     local basename = type(map) == "string" and map:match("^/Game/Classes/Maps/Maps_[%w_]+/([%w_]+)$")
     local class = kind == "overlap" and spawn_class or kind == "door" and door_class
     if not basename or type(tag) ~= "string" or #tag > 64 or not tag:match("^[%w_]+$")
-        or not class or type(actor_name) ~= "string" or not actor_name:match("^" .. class .. "_%d+$") then
-        error("Expected an authored entrance tag, arrival kind and placed actor name", 0)
+        or not class or type(actor_name) ~= "string"
+        or (kind == "door" and not actor_name:match("^" .. door_class .. "_%d+$"))
+        or (kind == "overlap" and actor_name ~= "-" and not actor_name:match("^" .. spawn_class .. "_%d+$")) then
+        error("Expected a stock entrance tag and a qualified arrival kind", 0)
     end
 
     local destination = map .. "." .. basename
@@ -141,11 +148,12 @@ function arrival.place(state, phase, tag, kind, actor_name)
     local actor = marker
     if kind == "door" then
         actor = door_for_marker(world, expected, marker, tag)
-    elseif marker:GetFullName() ~= expected then
-        error("The stock entrance marker is not the authored persistent actor", 0)
+    elseif not same(marker:GetOuter(), world.PersistentLevel) or valid(marker:GetParentComponent()) then
+        error("The stock overlap entrance is not a standalone persistent marker", 0)
     end
     local arrow = marker.Arrow
-    if not valid(arrow) or not same(arrow:GetOwner(), marker) then
+    if not valid(arrow) or not same(arrow:GetClass(), StaticFindObject("/Script/Engine.ArrowComponent"))
+        or not same(arrow:GetOwner(), marker) then
         error("The exact authored entrance has no stock Arrow component", 0)
     end
 

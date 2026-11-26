@@ -176,6 +176,26 @@ class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
         return Mock(command=AsyncMock(side_effect=AssertionError("Denied travel reached the game bridge")),
                     wait_for=AsyncMock(side_effect=wait_for))
 
+    async def test_overlap_arrival_uses_live_tag_while_door_keeps_its_placed_identity(self):
+        overlap = next(route for route in AUTHORED_ROUTES if route.kind == "overlap")
+        door = next(route for route in AUTHORED_ROUTES if route.kind == "door")
+        for route in (overlap, door):
+            host = self.host(route.source, route.destination)
+            basename = route.destination.rsplit("/", 1)[-1]
+            level = f"{route.destination}.{basename}:PersistentLevel."
+            actor = (f"CommunityArrival_C {level}RenamedMarker_5" if route is overlap
+                     else f"Dungeon_TransitionDoor_BP_C {level}{route.arrival_actor}")
+            proof = {"destination": route.destination, "actor": actor, "placement": "arrow", "location": [1, 2, 3]}
+            snapshot = {"state": "hosting", "map": route.destination, "native_authored_arrival": proof}
+            bridge = Mock(command=AsyncMock(return_value=snapshot))
+            self.assertIs(await host.authored_arrival(bridge, route), snapshot)
+            bridge.command.assert_awaited_once_with(
+                "native-authored-arrival", route.arrival_entrance or route.entrance, route.kind,
+                route.arrival_actor if route is door else "-", timeout=7)
+            proof["actor"] = actor.replace(level, "/Game/Other.Other:PersistentLevel.")
+            with self.assertRaisesRegex(RuntimeError, "arrival could not be verified"):
+                await host.authored_arrival(bridge, route)
+
     async def test_ordinary_and_authored_travel_recheck_positions_after_checkpoint(self):
         route = AUTHORED_ROUTES[0]
         for source, destination, plan in ((SOURCE, DESTINATION, None), (route.source, route.destination, route)):
