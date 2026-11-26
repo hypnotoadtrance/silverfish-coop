@@ -1,8 +1,10 @@
 """Share stock switch positions, linked lights, and world prop power."""
 
+import re
 import time
 
 from . import native_stock_door, party
+from .native_map_preflight import valid_campaign_package
 
 
 TAG = "native-stock-switch"
@@ -13,15 +15,14 @@ PROJECT = TAG + "-project"
 ACTIONS = (ACTION, IGNITE)
 TARGET = "stock-switch:"
 IGNITION_TARGET = "stock-switch-ignite:"
-_LANTERN = "Prop_Lantern_01_C"
-_CLASSES = {"CircutBox_BP_C", "LightSwitch_BP_C", "LightSwitch_02_BP_C", "Prop_Radio01_C",
-            "Prop_TV_01_C", "Prop_TV_02_C", "Prop_TV_03_C",
-            "Prop_Candle_01_C", "Prop_Candle_02_C", "Prop_Candle_03_C", _LANTERN}
+_ACTOR = re.compile(r"[A-Za-z0-9_-]+_C (/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):PersistentLevel\.[A-Za-z0-9_-]+")
+_LAMP_STATES = {"intact", "broken", "removed"}
 
 
 def actor_map(actor):
-    if isinstance(actor, str) and actor.partition(" ")[0] in _CLASSES:
-        return native_stock_door.actor_map(actor)
+    match = _ACTOR.fullmatch(actor) if isinstance(actor, str) and len(actor) <= 384 else None
+    if match and valid_campaign_package(match[1]) and match[1].rsplit("/", 1)[-1] == match[2]:
+        return match[1]
     return None
 
 
@@ -34,7 +35,7 @@ def target_actor(value):
 def input_target(value):
     if isinstance(value, str) and value.startswith(IGNITION_TARGET):
         actor = value[len(IGNITION_TARGET):]
-        if actor.partition(" ")[0] == _LANTERN and actor_map(actor):
+        if actor_map(actor):
             return IGNITE, actor
     if actor := target_actor(value):
         return ACTION, actor
@@ -51,13 +52,13 @@ def parse(fields, phase, area):
     lights = {}
     for link in fields[8].split(";") if fields[8] != "-" else ():
         name, power, visible = link.split("|")
-        if (native_stock_door.actor_map(name) != area or name in lights
+        if (actor_map(name) != area or name in lights
                 or power not in ("0", "1") or visible not in ("0", "1")):
             raise ValueError("Invalid linked light state")
         lights[name] = [power == "1", visible == "1"]
     state = {"powered": fields[3] == "1", "angles": angles, "panel": fields[7], "lights": lights}
     if len(fields) == 10:
-        if fields[2].partition(" ")[0] != _LANTERN or fields[9] not in ("intact", "broken", "removed"):
+        if fields[9] not in _LAMP_STATES:
             raise ValueError("Invalid stock oil lamp state")
         state["lamp"] = fields[9]
     return state
@@ -68,9 +69,10 @@ async def interact(host, bridge, character, requested, operation, action=ACTION)
     game = host.last_game
     member = host.native_recipients().get(character, {})
     player = host.party["players"].get(character)
-    if (action not in ACTIONS or action == IGNITE and actor.partition(" ")[0] != _LANTERN
+    row = game.get(KEY, {}).get(actor)
+    if (action not in ACTIONS or action == IGNITE and (not row or row.get("lamp") != "intact")
             or not epoch or epoch != host.zone_epoch or actor_map(actor) != game.get("map")
-            or actor not in game.get(KEY, {}) or game.get("state") != "hosting" or host.transitioning
+            or row is None or game.get("state") != "hosting" or host.transitioning
             or host.stopping or host.native_checkpoint_unsafe or not member.get("connected")
             or not player or player["downed"] or host.party["wipe"]
             or character in host.party["pending_spawns"] or not party.REQUEST_ID.fullmatch(operation)):
@@ -142,9 +144,9 @@ async def project(bridge, game, frame, epoch):
         known = local[actor]["lights"]
         bulbs = [f"{name}|{int(state[0])}|{int(state[1])}" for name, state in lights.items()
                  if name in known and isinstance(state, list) and len(state) == 2 and all(type(bit) is bool for bit in state)]
-        if actor.partition(" ")[0] == _LANTERN:
-            lamp = target.get("lamp", "intact")
-            if lamp not in ("intact", "broken", "removed"):
+        if "lamp" in target or "lamp" in local[actor]:
+            lamp = target.get("lamp")
+            if not isinstance(lamp, str) or lamp not in _LAMP_STATES or "lamp" not in local[actor]:
                 continue
             bulbs = [lamp]
         updated = await bridge.command(PROJECT, actor, area, str(int(target["powered"])),

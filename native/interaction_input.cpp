@@ -78,6 +78,15 @@ namespace
         STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_03.Prop_Candle_03_C"),
     };
     constexpr auto radio_class = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Radio01.Prop_Radio01_C");
+    constexpr std::array power_switches{
+        STR("/Game/Classes/ScriptingActors/CircutBox_BP.CircutBox_BP_C"),
+        STR("/Game/Classes/ScriptingActors/LightSwitch_BP.LightSwitch_BP_C"),
+        STR("/Game/Classes/ScriptingActors/LightSwitch_02_BP.LightSwitch_02_BP_C"),
+        radio_class,
+        STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_TV_01.Prop_TV_01_C"),
+        STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_TV_02.Prop_TV_02_C"),
+        STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_TV_03.Prop_TV_03_C"),
+    };
 
     constexpr auto sewer_screen_class = STR("/Game/Classes/GUI/Menu_Trade_Widget.Menu_Trade_Widget_C");
     constexpr auto sewer_card_class = STR("/Game/Classes/GUI/SubWidgets/TradeOffer_Widget.TradeOffer_Widget_C");
@@ -1055,9 +1064,10 @@ namespace
     bool stock_lantern(Unreal::UObject* actor)
     {
         auto* world = scope.world.Get();
-        return live(world) && live(actor) && actor->HasAnyFlags(Unreal::RF_WasLoaded) &&
-            actor->GetClassPrivate() == find<Unreal::UClass>(lantern_class) &&
-            actor->GetOuterPrivate() == object_field(world, STR("PersistentLevel")) &&
+        if (!live(world) || !live(actor) || !actor->HasAnyFlags(Unreal::RF_WasLoaded) ||
+            actor->GetOuterPrivate() != object_field(world, STR("PersistentLevel"))) return false;
+        auto* base = find<Unreal::UClass>(lantern_class);
+        return base && actor->GetClassPrivate()->IsChildOf(base) &&
             (live_actor(actor, world, 1) || live_actor(actor, world, 3));
     }
 
@@ -1139,6 +1149,20 @@ namespace
 
     void intercept_npc_barter(Iteration&, Unreal::UObject*, Unreal::UFunction*);
 
+    enum class SwitchKind { Unsupported, Lantern, Candle, Power };
+
+    SwitchKind stock_switch_kind(const Unreal::UClass* klass)
+    {
+        for (; klass; klass = klass->GetSuperClass())
+        {
+            const auto path = klass->GetPathName();
+            if (path == lantern_class) return SwitchKind::Lantern;
+            if (std::ranges::find(candles, path) != candles.end()) return SwitchKind::Candle;
+            if (std::ranges::find(power_switches, path) != power_switches.end()) return SwitchKind::Power;
+        }
+        return SwitchKind::Unsupported;
+    }
+
     void intercept_stock_switch(Iteration& call, Unreal::UObject* actor, Unreal::UFunction* function, const void* args)
     {
         static const Unreal::FName interaction{STR("SendInteractionToActor")};
@@ -1153,15 +1177,9 @@ namespace
         if (!pawn || Clock::now() >= scope.expires || !live_scope(scope) ||
             actor->GetOuterPrivate() != object_field(world, STR("PersistentLevel"))) return;
         auto* klass = actor->GetClassPrivate();
-        const auto path = klass->GetPathName();
-        const bool candle = std::ranges::find(candles, path) != candles.end();
-        if (!candle && path != STR("/Game/Classes/ScriptingActors/CircutBox_BP.CircutBox_BP_C") &&
-            path != STR("/Game/Classes/ScriptingActors/LightSwitch_BP.LightSwitch_BP_C") &&
-            path != STR("/Game/Classes/ScriptingActors/LightSwitch_02_BP.LightSwitch_02_BP_C") &&
-            path != radio_class &&
-            path != STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_TV_01.Prop_TV_01_C") &&
-            path != STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_TV_02.Prop_TV_02_C") &&
-            path != STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_TV_03.Prop_TV_03_C")) return;
+        const auto kind = stock_switch_kind(klass);
+        if (kind == SwitchKind::Unsupported || kind == SwitchKind::Lantern) return;
+        const bool candle = kind == SwitchKind::Candle;
         if (!live_actor(actor, world, 3) && !live_actor(actor, world, 1)) return;
         if (name != interaction)
         {

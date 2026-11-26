@@ -17,10 +17,11 @@ function StaticFindObject(path)
     return paths[path]
 end
 
-local function stock_class(path, kind)
+local function stock_class(path, kind, parent)
     return object({
         GetFName = function() return {ToString = function() return kind end} end,
         GetFullName = function() return "BlueprintGeneratedClass " .. path end,
+        GetSuperStruct = function() return parent end,
     })
 end
 
@@ -98,3 +99,34 @@ assert(replacement[4] == "0" and radio_readback() == replacement and actor_looku
 state.world = object({PersistentLevel = object({}), actors = {}})
 assert(#switches.rows(state, "hosting", row) == 0, "A previous world's devices must not leak across travel")
 print("Stock switch discovery enrolls both wall switch profiles and refreshes only the late class")
+
+state.map = "/CommunityMaps/Depot"
+local radio_child = stock_class("/CommunityProps/SolarRadio.SolarRadio_C", "SolarRadio_C", radio_class)
+local fake = stock_class("/CommunityProps/Prop_Radio01.Prop_Radio01_C", "Prop_Radio01_C")
+local child_path = state.map .. ".Depot:PersistentLevel.SolarRadio_C_2"
+local child_name = "SolarRadio_C " .. child_path
+local custom = device(state.world, radio_child, child_name)
+paths[child_path], paths[child_path .. ".Box"] = custom, custom.Box
+state.world.actors[radio_class] = {
+    custom, device(state.world, fake, "Prop_Radio01_C " .. state.map .. ".Depot:PersistentLevel.Prop_Radio01_C_1"),
+}
+callbacks[radio]()
+local target_rows = switches.rows(state, "hosting", row)
+assert(#target_rows == 1 and target_rows[1][3] == child_name, "Only the inherited stock class qualifies")
+local pawn = object({Dead = false, HasAuthority = function() return false end, GetWorld = function() return state.world end})
+assert(switches.focused_target(pawn, child_path .. ".Box") == "stock-switch:" .. child_name)
+package.loaded.guest_save.exact_item_context = function(_, _, name)
+    assert(name == "qualified guest")
+    return pawn
+end
+custom.SendInteractionToActor = function(self, source, box)
+    assert(source == pawn and box == self.Box)
+    self.Powered = not self.Powered
+end
+custom.Toggle_Power = function(self, powered) self.Powered = powered end
+assert(switches.command({"nonce", "native-stock-switch-interact", child_name, "qualified guest"}, state, "hosting")
+    == "stock switch interaction dispatched" and custom.Powered)
+state.server = true
+assert(switches.command({"nonce", "native-stock-switch-project", child_name, state.map, "0", "0", "0", "0"},
+    state, "connected") == "stock switch state projected" and not custom.Powered)
+print("Inherited radio on a mounted map passed stock focus, host dispatch, and guest projection")

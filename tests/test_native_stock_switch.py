@@ -25,12 +25,11 @@ class StockSwitchResponseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(switches.input_target(switches.TARGET + actor), (switches.ACTION, actor))
         self.assertTrue(switches.parse([switches.TAG, area, actor, "1", "0", "0", "0", "-", "-"],
                                        "connected", area)["powered"])
-        candle = "Prop_Candle_01_C " + prefix + "Prop_Candle_01_C_1"
-        self.assertIsNone(switches.input_target(switches.IGNITION_TARGET + candle))
+        self.assertIsNone(switches.input_target(switches.IGNITION_TARGET + "../Prop_Candle_01_C_1"))
 
-    async def test_late_join_projects_removed_oil_lamp_in_the_current_visit(self):
-        area = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
-        actor = f"Prop_Lantern_01_C {area}.Observitory_P:PersistentLevel.Prop_Lantern_01_C_1"
+    async def test_late_join_projects_removed_derived_lamp_on_a_mounted_map(self):
+        area = "/CommunityMaps/Shelter/Shelter"
+        actor = f"Red-Lamp_C {area}.Shelter:PersistentLevel.Red-Lamp_C_1"
         fields = [switches.TAG, area, actor, "0", "0", "0", "0", "-", "-"]
         intact = switches.parse([*fields, "intact"], "connected", area)
         removed = switches.parse([*fields, "removed"], "hosting", area)
@@ -43,6 +42,26 @@ class StockSwitchResponseTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.assert_not_awaited()
         self.assertIs(await switches.project(bridge, game, frame, epoch), updated)
         bridge.command.assert_awaited_once_with(switches.PROJECT, actor, area, "0", "0.0", "0.0", "0.0", "removed", timeout=2)
+
+    async def test_ignition_is_qualified_by_the_host_lamp_state(self):
+        area = "/CommunityMaps/Shelter"
+        actor = f"CustomFixture_C {area}.Shelter:PersistentLevel.CustomFixture_C_1"
+        epoch, nonce = "e" * 32, "a" * 32
+        game = {"map": area, "state": "hosting", switches.KEY: {actor: {"powered": False}}}
+        host = SimpleNamespace(zone_epoch=epoch, last_game=game, native_recipients=lambda: {"guest": {
+            "connected": True, "pawn": "qualified guest"}}, transitioning=False, stopping=False,
+            native_checkpoint_unsafe=False, party={"players": {"guest": {"downed": False}}, "wipe": None,
+                                                   "pending_spawns": {}, "receipts": {}})
+        reply = dict(game, ack={"message": "stock switch interaction dispatched"},
+                     **{switches.KEY: {actor: {"powered": True, "lamp": "intact"}}})
+        bridge = SimpleNamespace(command=AsyncMock(return_value=reply))
+        with self.assertRaisesRegex(switches.party.RuleError, "stock_switch_scope_unavailable"):
+            await switches.interact(host, bridge, "guest", epoch + "@" + actor, nonce, switches.IGNITE)
+        bridge.command.assert_not_awaited()
+        game[switches.KEY][actor]["lamp"] = "intact"
+        result = await switches.interact(host, bridge, "guest", epoch + "@" + actor, nonce, switches.IGNITE)
+        bridge.command.assert_awaited_once_with(switches.IGNITE, actor, "qualified guest", timeout=3)
+        self.assertTrue(result["native_stock_switch_interaction"]["powered"])
 
     async def test_reply_applies_exact_switch_before_another_world_snapshot(self):
         area = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"

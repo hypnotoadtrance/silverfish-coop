@@ -1,5 +1,6 @@
 local switches = {}
 local guest_save = require("guest_save")
+local world_path = require("world_path")
 
 local root = "/Game/Classes/ScriptingActors/"
 local profiles = {
@@ -18,8 +19,10 @@ end
 profiles.Prop_Lantern_01_C = {
     path = props .. "Prop_Lantern_01.Prop_Lantern_01_C", power = "Lit", candle = true, lantern = true,
 }
+local profiles_by_class = {}
 for kind, profile in pairs(profiles) do
     profile.path = profile.path or root .. kind:sub(1, -3) .. "." .. kind
+    profiles_by_class["BlueprintGeneratedClass " .. profile.path] = profile
 end
 local bulb_profiles = {
     ["/Game/Classes/DynamicLights/DynamicLight_Master_BP.DynamicLight_Master_BP_C"] = "PointLight",
@@ -38,13 +41,25 @@ local function qualified(actor, scope)
         and not actor:IsActorBeingDestroyed()
 end
 
+local function placed_actor(name)
+    if type(name) ~= "string" or #name > 384 then return end
+    local path = name:match("^[A-Za-z0-9_%-]+_C (.+)$")
+    return world_path.actor_package(path), path
+end
+
+local function inherited_profile(class)
+    while valid(class) do
+        local profile = profiles_by_class[class:GetFullName()]
+        if profile then return profile end
+        class = class:GetSuperStruct()
+    end
+end
+
 local function parts(actor, scope)
-    if not valid(actor) then return end
+    if not qualified(actor, scope) then return end
     local class = actor:GetClass()
-    if not valid(class) then return end
-    local profile = profiles[class:GetFName():ToString()]
-    if not profile or class:GetFullName() ~= "BlueprintGeneratedClass " .. profile.path
-        or not qualified(actor, scope) or type(actor[profile.power or "Powered"]) ~= "boolean" then return end
+    local profile = inherited_profile(class)
+    if not profile or type(actor[profile.power or "Powered"]) ~= "boolean" then return end
     local box = profile.candle and actor.Sphere or actor.Box
     if not valid(box) or not same(box:GetOwner(), actor) then return end
     if profile.candle then
@@ -121,18 +136,21 @@ local function census(state, phase)
             statics:GetAllActorsOfClass(world, class, output)
             for _, actor in ipairs(output.OutActors or output) do
                 if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
-                local entry = valid(actor) and same(actor:GetClass(), class) and parts(actor, world)
-                if entry and (phase ~= "hosting" or actor:HasAuthority()) then
+                if qualified(actor, world) and (phase ~= "hosting" or actor:HasAuthority()) then
                     local name = actor:GetFullName()
-                    if entry.power then
-                        if not entries[name] or not same(entries[name].actor, actor) then
-                            entries[name] = {actor = actor, class = class, power = entry.power,
-                                path = name:match("^%S+ (.+)$"), candle = entry.candle, lantern = entry.lantern,
-                                light = entry.light}
+                    local package, path = placed_actor(name)
+                    if package and package == state.map
+                        and (not entries[name] or not same(entries[name].actor, actor)) then
+                        local entry = parts(actor, world)
+                        if entry then
+                            if entry.power then
+                                entries[name] = {actor = actor, class = actor:GetClass(), power = entry.power,
+                                    path = path, candle = entry.candle, lantern = entry.lantern, light = entry.light}
+                            else
+                                entry.lights = light_links(actor, world)
+                                entries[name] = entry
+                            end
                         end
-                    elseif not entries[name] or not same(entries[name].actor, actor) then
-                        entry.lights = light_links(actor, world)
-                        entries[name] = entry
                     end
                 end
             end
@@ -145,8 +163,9 @@ local function find_switch(state, phase, name)
     local entry = census(state, phase)[name]
     if not entry or not entry.power then return entry end
     local actor = StaticFindObject(entry.path)
+    if not valid(actor) or not same(actor:GetClass(), entry.class) then return end
     local resolved = parts(actor, state.world)
-    if resolved and resolved.power == entry.power then return resolved end
+    if resolved and resolved.power == entry.power and (phase ~= "hosting" or actor:HasAuthority()) then return resolved end
 end
 
 function switches.release_candles(state, phase)
@@ -181,13 +200,16 @@ function switches.read_row(entry, name, state, phase, row)
         if not qualified(actor, state.world) then
             if not entry.path then return end
             actor = StaticFindObject(entry.path)
-            if not qualified(actor, state.world) or not same(actor:GetClass(), entry.class) then
+            if not qualified(actor, state.world) or not same(actor:GetClass(), entry.class)
+                or phase == "hosting" and not actor:HasAuthority() then
                 if entry.lantern and phase == "hosting" then
                     return row("native-stock-switch", state.map, name, 0, 0, 0, 0, "-", "-", "removed")
                 end
                 return
             end
-            entry.actor = actor
+            local replacement = parts(actor, state.world)
+            if not replacement then return end
+            entry.actor, entry.light = actor, replacement.light
         end
         local powered = actor[entry.power]
         if type(powered) == "boolean" then
@@ -254,7 +276,8 @@ function switches.focused_target(pawn, pressed_component)
     local entry = parts(actor, pawn:GetWorld())
     if entry and not (entry.lantern and actor.Broken_0 == true)
         and (same(box, entry.box) or entry.candle and same(box, entry.mesh)) then
-        return "stock-switch:" .. actor:GetFullName()
+        local name = actor:GetFullName()
+        if placed_actor(name) then return "stock-switch:" .. name end
     end
 end
 
