@@ -196,6 +196,21 @@ class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "arrival could not be verified"):
                 await host.authored_arrival(bridge, route)
 
+    async def test_overlap_arrival_can_keep_verified_stock_spawn_when_tag_is_ambiguous(self):
+        route = next(route for route in AUTHORED_ROUTES if route.kind == "overlap")
+        host = self.host(route.source, route.destination)
+        proof = {"destination": route.destination, "actor": "host-pawn",
+                 "placement": "stock-spawn:duplicate-entrance-tag", "location": [1, 2, 3]}
+        snapshot = self.frame(route.destination, 4, 0)
+        snapshot["native_authored_arrival"] = proof
+        bridge = Mock(command=AsyncMock(return_value=snapshot))
+        self.assertIs(await host.authored_arrival(bridge, route), snapshot)
+        host.control.event.assert_called_once_with("native_authored_arrival_fallback", map=route.destination,
+                                                  entrance=route.entrance, reason="duplicate-entrance-tag")
+        proof["actor"] = "some-other-pawn"
+        with self.assertRaisesRegex(RuntimeError, "arrival could not be verified"):
+            await host.authored_arrival(bridge, route)
+
     async def test_ordinary_and_authored_travel_recheck_positions_after_checkpoint(self):
         route = AUTHORED_ROUTES[0]
         for source, destination, plan in ((SOURCE, DESTINATION, None), (route.source, route.destination, route)):

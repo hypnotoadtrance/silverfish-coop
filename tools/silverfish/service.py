@@ -1416,21 +1416,34 @@ class Host:
     async def authored_arrival(self, bridge: Bridge, route: AuthoredRoute) -> dict:
         tag = getattr(route, "arrival_entrance", None) or route.entrance
         door = route.kind == "door"
-        snapshot = await bridge.command("native-authored-arrival", tag, route.kind,
-                                        route.arrival_actor if door else "-", timeout=7)
+        try:
+            snapshot = await bridge.command("native-authored-arrival", tag, route.kind,
+                                            route.arrival_actor if door else "-", timeout=7)
+        except (OSError, RuntimeError, ValueError) as error:
+            self.control.event("native_authored_arrival_failed", map=route.destination, entrance=tag, reason=str(error)[:256])
+            raise
         proof = snapshot.get("native_authored_arrival", {})
         basename = route.destination.rsplit("/", 1)[-1]
         level = f"{route.destination}.{basename}:PersistentLevel."
-        actor = proof.get("actor")
-        if door:
+        actor, placement = proof.get("actor"), proof.get("placement")
+        fallback = not door and placement in (
+            "stock-spawn:duplicate-entrance-tag", "stock-spawn:entrance-unavailable",
+            "stock-spawn:entrance-not-standalone", "stock-spawn:arrival-arrow-unavailable",
+        )
+        if fallback:
+            matches = actor and actor == snapshot.get("pawns", {}).get("local", {}).get("name")
+        elif door:
             matches = actor == f"Dungeon_TransitionDoor_BP_C {level}{route.arrival_actor}"
         else:
             matches = isinstance(actor, str) and re.fullmatch(
                 r"[A-Za-z0-9_-]+_C " + re.escape(level) + r"[A-Za-z0-9_-]+", actor)
         if (snapshot.get("state") != "hosting" or snapshot.get("map") != route.destination
                 or proof.get("destination") != route.destination or not matches
-                or proof.get("placement") != "arrow" or None in proof.get("location", [None])):
+                or (not fallback and placement != "arrow") or None in proof.get("location", [None])):
             raise RuntimeError("The stock authored arrival could not be verified")
+        if fallback:
+            self.control.event("native_authored_arrival_fallback", map=route.destination, entrance=tag,
+                               reason=placement.split(":", 1)[1])
         return snapshot
 
     async def travel_authored(self, bridge: Bridge, transport, route: AuthoredRoute,

@@ -95,19 +95,19 @@ local function marker_for_tag(world, tag)
     if not valid(statics) or not valid(class) then error("The stock entrance marker class is unavailable", 0) end
     local found = {}
     statics:GetAllActorsOfClass(world, class, found)
-    for _, marker in ipairs(found.OutActors or found) do
+    for _, candidate in ipairs(found.OutActors or found) do
+        local marker = candidate
+        if type(marker.type) == "function" and marker:type() == "RemoteUnrealParam" then marker = marker:get() end
         if same_world_actor(marker, world) and marker:IsA(class) then
             local name = marker.EntranceTag
             if type(name) ~= "string" and name then name = name:ToString() end
             if name == tag and name ~= "None" then
-                if match then error("The authored destination contains duplicate entrance tags", 0) end
+                if match then return nil, "duplicate-entrance-tag" end
                 match = marker
             end
         end
     end
-    if not match or not match:HasAuthority() then
-        error("The exact stock entrance marker is unavailable under host authority", 0)
-    end
+    if not match or not match:HasAuthority() then return nil, "entrance-unavailable" end
     return match
 end
 
@@ -130,6 +130,19 @@ local function door_for_marker(world, expected, marker, tag)
     return match
 end
 
+local function keep_stock_spawn(map, pawn, reason)
+    local location = pawn:K2_GetActorLocation()
+    local axes = {location.X, location.Y, location.Z}
+    for index = 1, 3 do
+        local value = axes[index]
+        if type(value) ~= "number" or value ~= value or math.abs(value) > 100000000 then
+            error("The stock spawn has no valid host position", 0)
+        end
+    end
+    return {destination = map, actor = pawn:GetFullName(), placement = "stock-spawn:" .. reason,
+        x = location.X, y = location.Y, z = location.Z}
+end
+
 function arrival.place(state, phase, tag, kind, actor_name)
     local map = state.map
     local basename = type(map) == "string" and map:match("^/Game/Classes/Maps/Maps_[%w_]+/([%w_]+)$")
@@ -144,16 +157,21 @@ function arrival.place(state, phase, tag, kind, actor_name)
     local destination = map .. "." .. basename
     local pawn, controller, world = host_context(state, phase, destination)
     local expected = class .. " " .. destination .. ":PersistentLevel." .. actor_name
-    local marker = marker_for_tag(world, tag)
+    local marker, reason = marker_for_tag(world, tag)
+    if not marker then
+        if kind == "overlap" then return keep_stock_spawn(map, pawn, reason) end
+        error("The door arrival marker is unavailable or ambiguous", 0)
+    end
     local actor = marker
     if kind == "door" then
         actor = door_for_marker(world, expected, marker, tag)
     elseif not same(marker:GetOuter(), world.PersistentLevel) or valid(marker:GetParentComponent()) then
-        error("The stock overlap entrance is not a standalone persistent marker", 0)
+        return keep_stock_spawn(map, pawn, "entrance-not-standalone")
     end
     local arrow = marker.Arrow
     if not valid(arrow) or not same(arrow:GetClass(), StaticFindObject("/Script/Engine.ArrowComponent"))
         or not same(arrow:GetOwner(), marker) then
+        if kind == "overlap" then return keep_stock_spawn(map, pawn, "arrival-arrow-unavailable") end
         error("The exact authored entrance has no stock Arrow component", 0)
     end
 
