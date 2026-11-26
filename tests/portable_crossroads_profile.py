@@ -47,6 +47,12 @@ def instrument_profile(source, *, stock_receipts=False):
             status_code = status_code.replace(needle, call + needle)
     rest = status_code + boundary + after_status
     if stock_receipts:
+        native_publish = "        status_publication.memory_live = SilverfishPublishLocalBridgeStatusRows(rows)\n"
+        if native_publish in rest:
+            rest = rest.replace(native_publish, native_publish
+                                + '        if status_publication.memory_live then\n'
+                                '            status_publication.profile.stock_receipt("native-status-publication", 0)\n'
+                                '        end\n', 1)
         fast_dispatch = "            status_publication.dispatch(os.clock(), fields, pending, false)\n"
         if fast_dispatch in rest:
             rest = rest.replace(fast_dispatch, '            status_publication.profile.stock_receipt("fast/" .. action, 0)\n'
