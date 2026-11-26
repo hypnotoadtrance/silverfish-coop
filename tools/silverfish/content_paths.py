@@ -6,6 +6,11 @@ from .native_map_preflight import valid_campaign_package
 
 
 _ITEM = re.compile(r"/(?:[A-Za-z0-9_-]+/)+([A-Za-z0-9_-]+)\.\1_C")
+_QUEST = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,95}")
+
+
+def quest_id(value: object) -> bool:
+    return isinstance(value, str) and _QUEST.fullmatch(value) is not None and value.lower() != "none"
 
 
 def item_class_name(path: object, limit: int = 256) -> str | None:

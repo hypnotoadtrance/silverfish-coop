@@ -41,9 +41,9 @@ local item_units = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local eye = "Clt_Eye_02"
 local kill = "Asn_EggHead"
-local followup = "Workshop_SecondDelivery"
+local followup = "Workshop.Second-Delivery"
 local multi_reward = "MultiReward"
-local mounted_quest = "Frontier_SupplyRun"
+local mounted_quest = "Frontier.Supply-Run"
 local item_path = "/FrontierPack/Items/ScrapEye.ScrapEye_C"
 local class = object({GetFullName = function() return "BlueprintGeneratedClass " .. item_path end})
 class.GetCDO = function() return object({Stacks = true, GetClass = function() return class end}) end

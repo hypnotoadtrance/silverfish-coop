@@ -65,10 +65,10 @@ local function followups(context, row, parent)
     local available, templates = pcall(wire.stock_quest_table)
     if not available then refuse("followup_table_unavailable") end
     local active = context.save.ActiveQuests
-    local seen = {[parent] = true}
+    local seen = {[parent:lower()] = true}
     for index = 1, count do
         local id = wire.stock_quest_id(name(list[index]))
-        if type(id) ~= "string" or #id > 96 or not id:match("^[A-Za-z0-9_]+$") or id == "None" or seen[id] then
+        if not content_paths.quest_id(id) or seen[id:lower()] then
             refuse("followup_identity_unqualified")
         end
         local key = wire.stock_quest_key(id)
@@ -81,7 +81,7 @@ local function followups(context, row, parent)
         local expected = current and current[keys.step] or starting
         if not int(expected) then refuse("followup_step_unqualified") end
         result[index] = {key = key, id = id, step = expected, present = current ~= nil}
-        seen[id] = true
+        seen[id:lower()] = true
     end
     return result
 end
@@ -321,7 +321,7 @@ local function catalog(fields, state, phase)
         if raw == nil or raw == "-" then return ids end
         if #raw > 2048 then refuse("arguments") end
         for id in (raw .. ","):gmatch("([^,]*),") do
-            if #id > 96 or not id:match("^[A-Za-z0-9_]+$") or ids[id] then refuse("arguments") end
+            if not content_paths.quest_id(id) or ids[id] then refuse("arguments") end
             ids[id] = true
         end
         return ids
@@ -335,7 +335,7 @@ local function catalog(fields, state, phase)
     local function descriptor(raw_key, raw_row, target, accepting)
         local key, row = raw_key:get(), raw_row:get()
         local id = wire.stock_quest_id(name(key))
-        if type(id) ~= "string" or #id > 96 or not id:match("^[A-Za-z0-9_]+$") then return end
+        if not content_paths.quest_id(id) then return end
         if accepting then
             -- Configure_Stock has already checked the board's eligibility rules.
             -- Accepting a quest only needs its starting step, not a payout recipe.
@@ -387,7 +387,7 @@ function board_contract.command(fields, state, phase)
     last = nil
     local verb, mode, pawn, board, quest = fields[3], fields[4], fields[5], fields[6], fields[7]
     if (verb ~= "start" and verb ~= "turnin") or (mode ~= "inspect" and mode ~= "apply")
-        or type(quest) ~= "string" or #quest > 96 or not quest:match("^[A-Za-z0-9_]+$")
+        or not content_paths.quest_id(quest)
         or type(board) ~= "string" or #board > 512 or
         (mode == "apply" and #fields ~= 10 and #fields ~= 11) or (mode == "inspect" and #fields ~= 7) then
         refuse("arguments")

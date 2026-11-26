@@ -34,6 +34,17 @@ def result(quest, verb, mode, before, expected, *, cash=0, xp=0, guid="-", board
 
 
 class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
+    def test_namespaced_id_preserves_selection_and_followup_delimiters(self):
+        quest = "Workshop.Supply-Run"
+        self.assertEqual(board.menu_selection(board.menu_target(VISIT, BOARD, quest)), (VISIT, BOARD, quest))
+        proof = result(quest, "turnin", "inspect", 1, -10, followups="Workshop.Second-Run:1:0")
+        self.assertEqual(proof[board.KEY]["followups"], [
+            {"quest_id": "Workshop.Second-Run", "step": 1, "present": False},
+        ])
+        for invalid in ("None", "-", "Workshop|Other", "Workshop:Other", "Workshop,Other", "A" * 97):
+            with self.subTest(invalid=invalid):
+                self.assertFalse(board.quest_id(invalid))
+
     def host(self):
         saved = party.new_party()
         for character in ("host", "guest", "offline"):

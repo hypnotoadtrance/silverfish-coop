@@ -6,6 +6,20 @@
 namespace silverfish::content_paths
 {
     template <typename Char>
+    [[nodiscard]] constexpr bool quest_id(std::basic_string_view<Char> name)
+    {
+        const auto word = [](Char c) {
+            return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                (c >= '0' && c <= '9') || c == '_';
+        };
+        if (name.empty() || name.size() > 96 || !word(name.front())) return false;
+        if (std::ranges::equal(name, std::string_view{"none"}, [](Char c, char lower) {
+            return c == lower || c == lower - ('a' - 'A');
+        })) return false;
+        return std::ranges::all_of(name, [&](Char c) { return word(c) || c == '-' || c == '.'; });
+    }
+
+    template <typename Char>
     [[nodiscard]] constexpr bool item_class(std::basic_string_view<Char> path, std::size_t limit = 256)
     {
         constexpr std::string_view suffix = "_C";

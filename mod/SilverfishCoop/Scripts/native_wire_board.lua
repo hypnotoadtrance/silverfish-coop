@@ -1,5 +1,6 @@
 local board_view = {}
 local stock = require("native_wire_quest")
+local content_paths = require("content_paths")
 local board_world = require("world_path")
 local world_leaf = board_world.leaf
 
@@ -457,10 +458,10 @@ local function stock_ids(raw)
     if type(raw) ~= "string" or #raw > 8192 then error("wire_board_catalog_invalid", 0) end
     local ids, seen = {}, {}
     for id in (raw .. ","):gmatch("([^,]*),") do
-        if #id > 96 or not id:match("^[A-Za-z0-9_]+$") or seen[id] or #ids >= 128 then
+        if not content_paths.quest_id(id) or seen[id:lower()] or #ids >= 128 then
             error("wire_board_catalog_invalid", 0)
         end
-        ids[#ids + 1], seen[id] = id, true
+        ids[#ids + 1], seen[id:lower()] = id, true
     end
     return ids
 end

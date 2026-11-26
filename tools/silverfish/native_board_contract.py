@@ -3,7 +3,7 @@
 import re
 import time
 
-from .content_paths import item_class_name
+from .content_paths import item_class_name, quest_id
 from . import native_computer_board, native_inventory, native_loot, native_rewards, party
 from .native_gold import valid_guid
 from .native_map_preflight import valid_campaign_package
@@ -17,7 +17,6 @@ MENU_OPEN = "native-wire-board-stock-open"
 MENU_KEY = "native_wire_board_stock"
 MENU_REPLY = "native-board-menu-reply"
 REFUSAL = "stock_board_contract_"
-QUEST_ID = re.compile(r"[A-Za-z0-9_]{1,96}")
 VISIT_ID = re.compile(r"[0-9a-f]{32}")
 BOARD_PATH = re.compile(
     r"[A-Za-z0-9_-]+_C (?P<map>/[A-Za-z0-9_/]+)\.(?P<level>[A-Za-z0-9_]+)"
@@ -28,10 +27,6 @@ COMPLETE = -10
 MAX_OBJECTIVES = 16
 MAX_FOLLOWUPS = 16
 _INSPECTED_FIELDS = ("step_before", "expected_step", "cash", "xp", "remaining")
-
-
-def quest_id(value):
-    return isinstance(value, str) and QUEST_ID.fullmatch(value) is not None
 
 
 def board_map(name):

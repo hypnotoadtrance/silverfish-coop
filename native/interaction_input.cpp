@@ -1,4 +1,5 @@
 #include "interaction_input.hpp"
+#include "content_paths.hpp"
 #include "mosby_station_input.hpp"
 #include "mindcore_input.hpp"
 #include "npc_barter.hpp"
@@ -694,13 +695,8 @@ namespace
         if (projected)
         {
             const auto text = key.ToString();
-            if (key.IsNone() || text.empty() || text.size() > 96) return;
-            for (const auto ch : text)
-            {
-                if (!((ch >= L'A' && ch <= L'Z') || (ch >= L'a' && ch <= L'z') ||
-                      (ch >= L'0' && ch <= L'9') || ch == L'_')) return;
-                id.push_back(static_cast<char>(ch));
-            }
+            if (key.IsNone() || !silverfish::content_paths::quest_id(std::wstring_view{text})) return;
+            for (const auto ch : text) id.push_back(static_cast<char>(ch));
         }
         else id = key == lake ? "Jmr_Lake" : "Jmr_CrossRoads";
         stock_board_action = {{++wire_sequence, now + receipt_lifetime}, log, std::move(id), redeem};

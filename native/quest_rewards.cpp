@@ -1034,11 +1034,7 @@ namespace
         const std::string selection{lua.get_string()};
         const std::string reward_paths = has_rewards ? std::string{lua.get_string()} : std::string{};
         constexpr auto max_value = 2147483647;
-        const auto word = [](char value) {
-            return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z') ||
-                (value >= '0' && value <= '9') || value == '_';
-        };
-        if (quest.empty() || quest.size() > 96 || !std::ranges::all_of(quest, word) ||
+        if (!silverfish::content_paths::quest_id(std::string_view{quest}) ||
             final_step < 1 || final_step > max_value || cash < 0 || cash > max_value || xp < 0 || xp > max_value)
             return fail("board_objective_arguments_unqualified");
 

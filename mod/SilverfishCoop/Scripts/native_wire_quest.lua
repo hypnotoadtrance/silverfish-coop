@@ -1,4 +1,5 @@
 local guest_save = require("guest_save")
+local content_paths = require("content_paths")
 local players = require("players")
 local board_world = require("world_path")
 local world_leaf = board_world.leaf
@@ -71,6 +72,7 @@ function meet.stock_quest_id(display)
 end
 
 function meet.stock_quest_key(id)
+    if not content_paths.quest_id(id) then return end
     local key = FName(id, EFindName.FNAME_Find)
     if key:GetComparisonIndex() ~= 0 and meet.stock_quest_id(key:ToString()) == id then return key end
 end

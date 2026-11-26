@@ -45,6 +45,7 @@ local slots = { backpack = "PlayerBackpack", equipment = "PlayerEquipment",
 local axes = {"A", "B", "C", "D"}
 local max_size, max_rows = 20000, 128
 local min_int32, max_int32, completed_step = -2147483648, 2147483647, -10
+local quest_warning
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -189,22 +190,43 @@ local function capture(state, phase, pawn_name)
     local quests = {}
     canonical.ActiveQuests:ForEach(function(key, value)
         local id, entry = key:get():ToString(), value:get()
-        if not id:match("^[A-Za-z0-9_]+$") or #id > 96 then error("Invalid co-op quest identifier", 0) end
-        local images = fields(entry[quest.images], photo_name)
-        local objectives = {}
-        for index = 1, count(entry[quest.objectives]) do
-            local path = item_path(entry[quest.objectives][index])
-            if path then objectives[#objectives + 1] = path end
-        end
-        local row = {#objectives > 0 and "quest-objectives" or "quest", id, entry[quest.kind],
-            quest_catalog.tracked_step(canonical, entry), entry[quest.final], encode(entry[quest.name]),
-            encode(entry[quest.giver]), photo_name(entry[quest.icon]), table.concat(images, ",")}
-        if #objectives > 0 then row[#row + 1] = table.concat(objectives, ",") end
-        for _, description in ipairs(fields(entry[quest.descriptions], encode)) do row[#row + 1] = description end
-        quests[#quests+1] = {id = id, row = table.concat(row, "\t")}
+        if not content_paths.quest_id(id) then return end
+        local ok, frame = pcall(function()
+            local images = fields(entry[quest.images], photo_name)
+            local objectives = {}
+            for index = 1, count(entry[quest.objectives]) do
+                local path = item_path(entry[quest.objectives][index])
+                if path then objectives[#objectives + 1] = path end
+            end
+            local step = integer(quest_catalog.tracked_step(canonical, entry), min_int32, max_int32)
+            local row = {#objectives > 0 and "quest-objectives" or "quest", id, integer(entry[quest.kind], 0, 255),
+                step, integer(entry[quest.final], 0, max_int32), encode(entry[quest.name]),
+                encode(entry[quest.giver]), photo_name(entry[quest.icon]), table.concat(images, ",")}
+            if #objectives > 0 then row[#row + 1] = table.concat(objectives, ",") end
+            for _, description in ipairs(fields(entry[quest.descriptions], encode)) do row[#row + 1] = description end
+            return {id = id, active = step > 0, row = table.concat(row, "\t")}
+        end)
+        if ok then quests[#quests + 1] = frame end
     end)
-    table.sort(quests, function(first, second) return first.id < second.id end)
-    for _, quest_frame in ipairs(quests) do rows[#rows+1] = quest_frame.row end
+    table.sort(quests, function(first, second)
+        if first.active ~= second.active then return first.active end
+        return first.id < second.id
+    end)
+    local size, included = 0, 0
+    for _, row in ipairs(rows) do size = size + #row + 1 end
+    for _, frame in ipairs(quests) do
+        local row_size = #frame.row + 1
+        if #rows < max_rows and size + row_size <= max_size then
+            rows[#rows + 1], size = frame.row, size + row_size
+            included = included + 1
+        end
+    end
+    local omitted = #canonical.ActiveQuests - included
+    local warning = omitted > 0 and (state.map .. ":" .. omitted) or nil
+    if warning and warning ~= quest_warning then
+        print(("[SilverfishCoop] Guest Journal omitted %d quest rows due to unsupported data or view limits\n"):format(omitted))
+    end
+    quest_warning = warning
     local contents = table.concat(rows, "\n") .. "\n"
     if #rows > max_rows or #contents > max_size then error("The co-op view exceeds its transfer bounds", 0) end
     return contents
@@ -301,7 +323,7 @@ local function project(state, phase, character, path, raw, sequence)
             local body = journal[note_count][notes.body]
             for i = 4, #row do body[i - 3] = decode(row[i]) end
         elseif (row[1] == "quest" and #row >= 9 or row[1] == "quest-objectives" and #row >= 10)
-            and #row[2] <= 96 and row[2]:match("^[A-Za-z0-9_]+$") then
+            and content_paths.quest_id(row[2]) then
             local key, quests = FName(row[2]), view.ActiveQuests
             local step = integer(row[4], min_int32, max_int32)
             local icon = photo(row[8])
