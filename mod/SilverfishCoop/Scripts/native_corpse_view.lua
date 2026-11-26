@@ -2,6 +2,7 @@ local corpses = {}
 local effects = require("native_anomaly_effects")
 local actor_reference = require("replicated_actor_reference")
 local turret_fire = require("native_turret_fire_view")
+local corpse_level = require("world_path").owned_actor_level
 
 local npc_path = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local drone_path = "/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C"
@@ -54,16 +55,6 @@ end
 
 local function supported_turret(actor)
     return valid(actor) and valid(turret_class) and actor:IsA(turret_class)
-end
-
-local function corpse_level(actor, world)
-    if not valid(actor) or not valid(world) then return end
-    local level = actor:GetOuter()
-    if same(level, world.PersistentLevel) then
-        if same(actor:GetWorld(), world) then return level end
-    elseif valid(level) and same(level.OwningWorld, world) then
-        return level
-    end
 end
 
 local function corpse_visible(actor, world)

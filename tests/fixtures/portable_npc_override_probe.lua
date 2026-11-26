@@ -1856,18 +1856,35 @@ local function streamed_npc(world, pawn, host, action)
     end
     if action == "stream-npc-stage" then
         assert(host and actor.Alive and actor:HasAuthority())
-        local origin = pawn:K2_GetActorLocation()
-        assert(actor:K2_SetActorLocation({X=origin.X+180,Y=origin.Y,Z=origin.Z+18}, false, {}, true))
+        local point = gun_target(pawn, world)
+        assert(actor:K2_SetActorLocation(point, false, {}, true))
         actor.CharacterMovement:DisableMovement()
         actor:SetActorTickEnabled(false)
         actor.bAlwaysRelevant = true
         actor:SetReplicates(true)
+        actor:SetReplicateMovement(true)
+        actor.Health = 1
         actor:ForceNetUpdate()
         return actor:GetFullName()
     end
     if action == "stream-npc-status" then
         return ("%d,%s,%.6f,%s"):format(actor:GetLocalRole(), tostring(actor.Alive),
             actor.Health, tostring(actor.Mesh:IsAnySimulatingPhysics()))
+    end
+    if action == "stream-npc-position" then
+        local point = actor:K2_GetActorLocation()
+        return ("%.3f,%.3f,%.3f"):format(point.X, point.Y, point.Z)
+    end
+    if action == "stream-npc-aim" then
+        assert(not host and actor:GetLocalRole() == 1 and valid(pawn.EquipedItem))
+        local target = actor.CapsuleComponent:K2_GetComponentLocation()
+        local eye = pawn.Camera:K2_GetComponentLocation()
+        pawn.Controller:SetControlRotation(heading(eye, target))
+        return "aimed"
+    end
+    if action == "stream-npc-contact" then
+        assert(host and type(SilverfishReadFixtureShotContact) == "function")
+        return SilverfishReadFixtureShotContact()
     end
     if action == "stream-npc-damage" then
         assert(actor.Alive and actor.Health > 0 and actor.bReplicates

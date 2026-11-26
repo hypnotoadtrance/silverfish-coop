@@ -26,7 +26,10 @@ local function placed(npc)
 end
 
 local function actor_in_world(actor)
-    return active and valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed()
+    if not active or not valid(actor) or actor:IsActorBeingDestroyed() then return false end
+    if same(actor:GetWorld(), world) then return true end
+    local level = world_path.owned_actor_level(actor, world)
+    return valid(level) and level.bIsVisible == true
 end
 
 local function exact_npc(actor)

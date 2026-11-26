@@ -18,6 +18,20 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
         for reference in ("npc:0", "npc:01", "npc:65536", "npc:-1", "npc:2.5"):
             self.assertFalse(native_guest_weapon.valid_shot_view(f"{geometry}|{reference}|1.000,0.000,0.000"))
 
+    def test_shot_contact_accepts_placed_actors_in_mounted_and_streamed_worlds(self):
+        geometry = "1.000000,0.000000,0.000000;0.000,0.000,0.000;1.000,0.000,0.000;0.000,0.000,0.000"
+        for path in (
+            "/FrontierPack/Maps/Canyon.Canyon:PersistentLevel.Worker_1",
+            "/Game/Classes/Maps/Maps_Dungeons/CoopNpcSublevel.Tut_Dock_P:PersistentLevel.NPC_Survivor_Worker_C_1",
+        ):
+            self.assertTrue(native_guest_weapon.valid_shot_view(f"{geometry}|{path}|1.000,0.000,0.000"), path)
+        for path in (
+            "/FrontierPack/Maps/Canyon.Canyon:OtherLevel.Worker_1",
+            "FrontierPack/Maps/Canyon.Canyon:PersistentLevel.Worker_1",
+            "/FrontierPack/Maps/Canyon.Canyon:PersistentLevel.",
+        ):
+            self.assertFalse(native_guest_weapon.valid_shot_view(f"{geometry}|{path}|1.000,0.000,0.000"), path)
+
     def test_game_adapters_match_launcher_profiles(self):
         repo = Path(__file__).resolve().parents[1]
         for filename, expected in generate_guest_weapon_registry.outputs().items():

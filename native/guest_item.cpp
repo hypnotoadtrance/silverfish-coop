@@ -392,14 +392,16 @@ namespace
     bool valid_contact_path(std::string_view path)
     {
         if (contact_number(path)) return true;
-        constexpr std::string_view prefix = "/Game/Classes/Maps/";
         constexpr std::string_view level = ":PersistentLevel.";
-        if (!path.starts_with(prefix) || path.size() > 256) return false;
-        const auto separator = path.find(level, prefix.size());
-        if (separator == std::string_view::npos || separator == prefix.size() ||
-            separator + level.size() == path.size()) return false;
+        if (!path.starts_with('/') || path.size() > 256) return false;
+        const auto root = path.find('/', 1);
+        const auto separator = path.find(level);
+        if (root == std::string_view::npos || root == 1 || separator == std::string_view::npos ||
+            separator <= root + 1 || separator + level.size() == path.size()) return false;
+        constexpr auto name_characters = "_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
         constexpr auto path_characters = "._ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-        return path.substr(prefix.size(), separator - prefix.size()).find_first_not_of(
+        return path.substr(1, root - 1).find_first_not_of(name_characters) == std::string_view::npos &&
+            path.substr(root + 1, separator - root - 1).find_first_not_of(
                 "/._ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789") == std::string_view::npos &&
             path.substr(separator + level.size()).find_first_not_of(path_characters) == std::string_view::npos;
     }
@@ -1545,7 +1547,7 @@ namespace
     bool available_projectile_target(Unreal::UObject* actor, Unreal::UWorld* world)
     {
         auto* target = live(actor) ? Unreal::Cast<Unreal::AActor>(actor) : nullptr;
-        if (!target || target->GetWorld() != world) return false;
+        if (!target || !silverfish::campaign_npc::is_actor_in_visible_world(target, world)) return false;
         // Characters expose Alive. Stock destructible props only expose Health.
         auto* alive = field<Unreal::FBoolProperty>(target, STR("Alive"));
         if (alive && !alive->GetPropertyValueInContainer(target)) return false;

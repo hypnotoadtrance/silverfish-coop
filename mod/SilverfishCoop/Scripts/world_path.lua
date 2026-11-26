@@ -21,6 +21,16 @@ end
 local function valid(object) return object and object:IsValid() end
 local function same(left, right) return valid(left) and valid(right) and left:GetAddress() == right:GetAddress() end
 
+function world_path.owned_actor_level(actor, world)
+    if not valid(actor) or not valid(world) then return end
+    local level = actor:GetOuter()
+    if same(level, world.PersistentLevel) then
+        if same(actor:GetWorld(), world) then return level end
+    elseif valid(level) and same(level.OwningWorld, world) then
+        return level
+    end
+end
+
 function world_path.actor_paths(world, kind)
     if not valid(world) or type(SilverfishSnapshotNativeWorldActorPaths) ~= "function" then return end
     local name = world:GetFullName():match("^World (.+)$")

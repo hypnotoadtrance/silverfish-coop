@@ -5030,22 +5030,61 @@ async def verify_stock_streamed_npc(host: Seat, guest: Seat, _pawn: str) -> dict
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-npc-override", f"stream-npc-{action}")
 
+    async def weapon(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-dry-fire", action)
+
     checkpoint = campaign_save_hashes(host.campaign)
     for seat in (host, guest):
+        assert await weapon(seat, "arm-rusty") == "armed"
         assert await command(seat, "load") == "loading"
         async with asyncio.timeout(8):
             while await command(seat, "status") == "waiting":
                 await asyncio.sleep(.1)
+    guid = await weapon(host, "seed-peer")
+    async with asyncio.timeout(8):
+        while await weapon(guest, "projected") != guid:
+            await asyncio.sleep(.1)
+    assert await weapon(guest, "equip") == "selected"
+    async with asyncio.timeout(8):
+        while await weapon(host, "peer-ready") != f"{guid},1,1":
+            await asyncio.sleep(.1)
+
+    guest_run = guest.client / "run"
+    frame = await wait_resident_status(guest_run, lambda status:
+        status["game"].get("native_guest_primary_scope", {}).get("guid") == guid, timeout=10)
     ownership = [await command(seat, "world") for seat in (host, guest)]
     actor = await command(host, "stage")
     assert "CoopNpcSublevel" in actor, actor
+    path = actor.partition(" ")[2]
+    host_pos = tuple(map(float, (await command(host, "position")).split(",")))
     async with asyncio.timeout(8):
-        while not (observed := await command(guest, "status")).startswith("1,true,"):
+        while True:
+            observed = await command(guest, "status")
+            guest_pos = tuple(map(float, (await command(guest, "position")).split(",")))
+            if observed.startswith("1,true,") and math.dist(host_pos, guest_pos) < 5:
+                break
             await asyncio.sleep(.1)
     host_before = await command(host, "status")
     assert await command(guest, "damage") == "damage denied", ownership
     assert await command(host, "status") == host_before, ownership
-    assert await command(host, "damage") == "killed"
+
+    assert await command(guest, "aim") == "aimed"
+    press = await submit(guest_run, "native-guest-primary-input-fixture")
+    assert press["ok"], press
+    sequence = press["native_guest_primary_fixture"]["sequence"]
+    async with asyncio.timeout(8):
+        while not (shots := [event for event in await resident_events(guest_run, frame)
+                             if event.get("sequence") == sequence and event["event"] in
+                             ("native_guest_primary_input", "native_guest_primary_input_rejected")]):
+            await asyncio.sleep(.05)
+    shot, = shots
+    assert shot["event"] == "native_guest_primary_input", shot
+    contact = shot.get("native_guest_trigger_view", {}).get("contact", {})
+    assert contact.get("actor") == path, shot
+    receipt = shot["native_guest_weapon"]
+    assert (receipt["guid"], receipt["before"], receipt["after"], receipt["projectiles"]) == (guid, 1, 0, 1), receipt
+    assert await command(host, "contact") == "committed_guest_npc_contact", shot
+
     observed_after = "unavailable"
     try:
         async with asyncio.timeout(8):
@@ -5057,7 +5096,8 @@ async def verify_stock_streamed_npc(host: Seat, guest: Seat, _pawn: str) -> dict
     assert all(row.split(",")[1] == "false" and row.endswith(",true") for row in after), after
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"actor": actor, "world_lookup": ownership, "guest_before": observed, "final_states": after,
-            "guest_local_damage_denied": True, "campaign_checkpoint_unchanged": True}
+            "guest_local_damage_denied": True, "guest_contact": contact, "stock_shot": receipt,
+            "campaign_checkpoint_unchanged": True}
 
 
 async def verify_stock_host_corpse_carry(host: Seat, guest: Seat, _pawn: str) -> dict:
@@ -8299,7 +8339,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if stock_alternate_ammo:
             proof["stock_ammo_selector_overlays"] = [probes.enter_context(stock_ammo_selector_overlay(game)) for game in games]
         if (resident_weapon_cues or stock_light_ar or stock_fire_mode_reopen or stock_alternate_ammo
-                or tutorial_dock_combat or tutorial_dock_shot_view):
+                or tutorial_dock_combat or tutorial_dock_shot_view or stock_streamed_npc):
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableDryFireProbe",
                                                      fixture="portable_dry_fire_probe.lua"))

@@ -2963,6 +2963,11 @@ namespace silverfish::campaign_npc
         }
     }
 
+    bool is_actor_in_visible_world(U::AActor* actor, U::UWorld* world)
+    {
+        return in_level(actor, world, true);
+    }
+
     bool is_spawned_stock_npc(U::UObject* actor)
     {
         if (!live(actor) || actor->HasAnyFlags(U::RF_WasLoaded)) return false;

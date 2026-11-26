@@ -15,14 +15,19 @@ local function object(fields)
     return fields
 end
 
-local world = object({})
+local world = object({GetFullName = function() return "World /Example/Canyon.Canyon" end})
+local asset_world = object({})
+local streamed_level = object({OwningWorld = world, bIsVisible = true})
 local marker_class = object({})
-local statics = object({})
-local class_lookups = 0
+local class_lookups, census_kinds = 0, {}
 function StaticFindObject(path)
     if path == "target-point" then return marker_class end
-    if path == "/Script/Engine.Default__GameplayStatics" then return statics end
     class_lookups = class_lookups + 1
+end
+function SilverfishSnapshotNativeWorldActorPaths(address, path, kind)
+    assert(address == world and path == "/Example/Canyon.Canyon")
+    census_kinds[#census_kinds + 1] = kind
+    return ""
 end
 
 local function actor_class(name, parent)
@@ -34,7 +39,8 @@ local drone_class = actor_class("BlueprintGeneratedClass /Example/LateDrone.Late
 local late_drone = object({
     Alive = true, bReplicates = true,
     GetClass = function() return drone_class end,
-    GetWorld = function() return world end,
+    GetWorld = function() return asset_world end,
+    GetOuter = function() return streamed_level end,
     HasAuthority = function() return true end,
     HasAnyFlags = function() return false end,
     IsActorBeingDestroyed = function() return false end,
@@ -55,13 +61,19 @@ end
 
 local state = {world = world}
 identity.sync(state, "hosting")
-assert(class_lookups == 3 and spawned == 0)
+assert(class_lookups == 0 and spawned == 0 and table.concat(census_kinds, ",") == "npc,npc-drone,npc-turret")
 local function notify(actor)
     begin_play({get = function() return actor end})
 end
 notify(unrelated)
 notify(late_drone)
 identity.sync(state, "hosting")
-assert(class_lookups == 3 and spawned == 1)
+assert(class_lookups == 0 and spawned == 1 and #census_kinds == 3)
 assert(identity.key(late_drone) == "5346434F4F5042415254455200000001")
 assert(identity.key(unrelated) == nil)
+streamed_level.bIsVisible = false
+assert(identity.key(late_drone) == nil)
+streamed_level.bIsVisible = true
+assert(identity.key(late_drone) == "5346434F4F5042415254455200000001")
+streamed_level.OwningWorld = asset_world
+assert(identity.key(late_drone) == nil)

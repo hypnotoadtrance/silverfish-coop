@@ -28,7 +28,8 @@ function shot_view.parse(view)
         local x, y, z = contact:match(vector_pattern)
         local number = actor:match("^npc:([1-9]%d*)$")
         local dynamic = number and #number <= 5 and tonumber(number) <= 65535
-        local placed = #actor <= 256 and actor:match("^/Game/Classes/Maps/[%w_/.]+:PersistentLevel%.[%w_.]+$")
+        local placed = #actor <= 256
+            and actor:match("^/[A-Za-z0-9_]+/[A-Za-z0-9_/.]+:PersistentLevel%.[A-Za-z0-9_.]+$")
         if #vectors ~= 4 or not x or not (placed or dynamic) then return end
         values[13], values[14], values[15], values[16] = actor, tonumber(x), tonumber(y), tonumber(z)
     end
