@@ -4487,6 +4487,10 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
             await asyncio.sleep(.1)
     entries = await resident_events(guest_run, guest_frame)
     assert any(entry.get("quest") == quest and entry.get("state") == "accepted" for entry in entries), entries
+    sequence = guest_frame["game"]["native_wire_board_stock"]["sequence"]
+    menu_receipt, = (entry for entry in entries if entry["event"] == "native_wire_board_stock_opened"
+                     and entry.get("sequence") == sequence and entry.get("board") == OBSERVATORY_BOUNTY_BOARD)
+    assert menu_receipt.get("compact") and menu_receipt["offers"] == len(visible), menu_receipt
 
     assert await command(host, "qualify-tracked") == "10"
     assert campaign_save_hashes(host.campaign) == checkpoint, "Accepting a stock board offer caused an early save"
@@ -4574,6 +4578,7 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
         receipt = await settle(tracked, cash)
         tracked_quests.append({"quest_id": tracked, "world_flag_progress": progress, "receipt": receipt, **objective})
     return {"resident_board_offers": {"stock_offers": sorted(offered), "guest_offers": sorted(visible),
+                                      "stock_menu_receipt": menu_receipt,
                                       "previously_filtered_offers": sorted(previously_filtered),
                                       "accepted": quest, "journal_step": int(observed[0]),
                                       "tracked_turnins": tracked_quests, "followup_turnin": followup_receipt,
