@@ -305,11 +305,17 @@ def instrument_loose_discovery(source):
 
 
 def instrument_npc_class_discovery(source):
-    anchor = "local class = StaticFindObject(path)"
+    anchor = ("local base = class\n"
+              "        while valid(base) and not npc_families[base:GetFullName()] do base = base:GetSuperStruct() end")
     if source.count(anchor) != 1:
-        raise ValueError("The NPC marker class lookup anchor changed")
-    return source.replace(anchor, 'local class = SilverfishProfileCrossroadsCall('
-                          '"npc_marker_class_lookup", StaticFindObject, path)')
+        raise ValueError("The NPC marker class discovery anchor changed")
+    return source.replace(anchor, 'local base = SilverfishProfileCrossroadsCall("npc_marker_class_discovery", function()\n'
+                          '            local ancestor = class\n'
+                          '            while valid(ancestor) and not npc_families[ancestor:GetFullName()] do\n'
+                          '                ancestor = ancestor:GetSuperStruct()\n'
+                          '            end\n'
+                          '            return ancestor\n'
+                          '        end)')
 
 
 def instrument_shop_discovery(source):
@@ -535,7 +541,8 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
     counters = ("quic_datagrams_sent", "quic_payload_bytes_sent", "quic_payload_bytes_received", "game_packets_queued",
                 "game_packets_delivered", "game_payload_bytes_queued", "game_wire_payload_bytes_queued", "game_packets_compressed",
                 "keepalive_probes_queued", "keepalive_probes_acked", "keepalive_ticks_congested",
-                "relay_queue_evicted_frames", "relay_queue_expired_frames", "snapshot_responses_encoded", "snapshot_delta_responses",
+                "relay_queue_evicted_frames", "relay_queue_expired_frames", "interaction_priority_passes",
+                "snapshot_responses_encoded", "snapshot_delta_responses",
                 "snapshot_row_delta_responses", "snapshot_rows_changed",
                 "snapshot_encoded_bytes", "snapshot_plaintext_bytes", "snapshot_responses_decoded", "snapshot_received_bytes")
 
@@ -576,7 +583,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
         profiles = await asyncio.gather(*(read(seat) for seat in seats.values()))
         for seat, profile in zip(seats, profiles, strict=True):
             timings = profile["timings"]
-            for operation in ("command_mailbox", "crate_inline_scan", "npc_marker_class_lookup", "journal_host_context",
+            for operation in ("command_mailbox", "crate_inline_scan", "journal_host_context",
                               "death_pawn_receipt", "roster_spawn_qualify",
                               "player_actor_fallback", "stash_ui_binding"):
                 assert operation not in timings, (operation, timings.get(operation))
