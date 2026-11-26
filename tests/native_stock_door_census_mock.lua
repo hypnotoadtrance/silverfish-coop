@@ -40,8 +40,8 @@ function StaticFindObject(path)
     return paths[path]
 end
 
-local function make_state(name, count)
-    local map = "/Game/Classes/Maps/Maps_OverWorld/" .. name
+local function make_state(name, count, mount)
+    local map = (mount or "/Game/Classes/Maps/Maps_OverWorld/") .. name
     local world = object({PersistentLevel = object(), doors = {}})
     function world:GetFullName() return "World " .. map .. "." .. name end
     catalog[world] = {}
@@ -171,3 +171,44 @@ assert(doors.command(close, authority, "hosting") == "stock hinged door interact
 opened.Locked = true
 local ok, reason = pcall(doors.command, close, authority, "hosting")
 assert(not ok and reason == "stock_door_locked" and opened.Open, "the host's live lock still prevents the toggle")
+
+local mounted = make_state("Campaign", 1, "/WorkshopPack/Maps/")
+local stock = mounted.world.doors[1]
+assert(#current_rows(doors, mounted) == 1, "a stock-style door on a mounted map should be discovered")
+local sublevel = make_state("Workshop", 1, "/WorkshopPack/Rooms/")
+local streamed_level = sublevel.world.PersistentLevel
+streamed_level.bIsVisible = true
+local stream = object({GetLoadedLevel = function() return streamed_level end,
+    IsLevelVisible = function() return streamed_level.bIsVisible end})
+local package_name = sublevel.map
+local package = object({GetFullName = function() return "Package " .. package_name end})
+streamed_level.GetOuter = function() return object({GetOuter = function() return package end}) end
+function FName(name) return name end
+function statics:GetStreamingLevel(world, name)
+    assert(name == package_name)
+    if world == mounted.world then return stream end
+end
+local streamed_path = catalog[sublevel.world][1]
+local streamed = sublevel.world.doors[1]
+catalog[mounted.world][2] = streamed_path
+require("world_path").remember_level(mounted.world, streamed_level)
+frames, work = frames + 1, work + 1
+local function streamed_row(rows)
+    for _, reading in ipairs(rows) do
+        if reading[3] == "stream:" .. streamed.name then return reading end
+    end
+end
+assert(streamed_row(current_rows(doors, mounted)), "a visible loaded sublevel must use the full door path")
+local other = make_state("Other", 0, "/WorkshopPack/Maps/")
+catalog[other.world][1] = streamed_path
+assert(#current_rows(doors, other) == 0, "a visible level elsewhere must never be interpreted as part of this world")
+current_rows(doors, mounted)
+require("world_path").remember_level(mounted.world, streamed_level)
+frames, work = frames + 1, work + 1
+assert(streamed_row(current_rows(doors, mounted)))
+
+local command = {"request", "native-stock-door-project", mounted.map, "stream:" .. streamed.name .. "|0|0|1|0|90|0|0|5|0"}
+assert(doors.command(command, mounted, "connected") and streamed.Open and not stock.Open)
+streamed_level.bIsVisible = false
+assert(not pcall(doors.command, command, mounted, "connected"), "stale cached actors must refuse mutations immediately")
+assert(not streamed_row(current_rows(doors, mounted)), "the hidden level's door must stop publishing")

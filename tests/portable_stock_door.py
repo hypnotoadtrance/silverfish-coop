@@ -240,3 +240,47 @@ async def verify_stock_dock_gate(host, guest):
                       "confirmation_ms": receipt["elapsed_ms"]})
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"stock_dock_gate": {"actor": DOCK_GATE, "poses": poses, "campaign_unchanged": True}}
+
+
+
+async def verify_streamed_door(host, guest, pawn, probe):
+    """Use the actual stock dock gate in an instance loaded under Crossroads."""
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    checkpoint = campaign_save_hashes(host.campaign)
+
+    async def call(seat, action):
+        return await probe(seat.bridge, "portable-streamed-door", action)
+
+    async def loaded(seat):
+        assert await call(seat, "load") == "loading"
+        async with asyncio.timeout(12):
+            while (identity := await call(seat, "identify")) == "waiting":
+                await asyncio.sleep(.15)
+        return identity
+
+    actor = await loaded(host)
+    assert actor == await loaded(guest) and "/CoopDoorSublevel." in actor
+
+    def observed(frame):
+        return frame.get("game", {}).get(door.KEY, {}).get(actor, {})
+
+    initial = observed(await wait_resident_status(host_run, lambda frame:
+        observed(frame).get("locked") is False))
+    await wait_resident_status(guest_run, lambda frame: door.matches(observed(frame), initial))
+    poses = []
+    for opens in (not initial["open"], initial["open"]):
+        receipt, motion, preview = await toggle_door(host, guest, actor, pawn, opens)
+        poses.append({"open": opens, "motion_ms": motion, "preview_ms": preview,
+                      "settlement_ms": receipt["elapsed_ms"]})
+
+    assert await call(guest, "hide") == "hide"
+    await wait_resident_status(guest_run, lambda frame: not observed(frame))
+    assert await call(guest, "show") == "show"
+    await wait_resident_status(guest_run, lambda frame: door.matches(observed(frame), initial))
+    for seat in (guest, host):
+        assert await call(seat, "unload") == "unload"
+    for run in (guest_run, host_run):
+        await wait_resident_status(run, lambda frame: not observed(frame))
+    assert campaign_save_hashes(host.campaign) == checkpoint
+    return {"actor": actor, "poses": poses, "hidden_guest_retired": True, "unloaded_both": True,
+            "campaign_unchanged": True}

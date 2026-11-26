@@ -5,6 +5,7 @@
 #include "guest_item.hpp"
 #include "interaction_input.hpp"
 #include "shared_loot.hpp"
+#include "zone_exit.hpp"
 
 #include <algorithm>
 #include <array>
@@ -288,10 +289,13 @@ namespace
             !boolean(pawn, STR("Dead"), false) || object(pawn, STR("EquipedItem")) != tool) return;
         auto* crate = object(tool, STR("LockRef"));
         if (!crate || crate != object(tool, STR("TargetActor"))) return;
-        if (!boolean(crate, STR("Locked"), true) ||
-            !actor_in_world(crate, static_cast<U::AActor*>(pawn)->GetWorld())) return;
+        if (!live(crate) || !boolean(crate, STR("bActorIsBeingDestroyed"), false) ||
+            !boolean(crate, STR("Locked"), true)) return;
+        auto* world = static_cast<U::AActor*>(pawn)->GetWorld();
         const auto* profile = silverfish::shared_loot::authored_profile(crate);
-        const bool hinged = !profile && silverfish::native_datasilo_door::guest_hinged_lock(crate);
+        const bool hinged = !profile && silverfish::native_datasilo_door::guest_hinged_lock(crate) &&
+            silverfish::native_zone::visible_actor_level(static_cast<U::AActor*>(crate), world);
+        if (!hinged && !actor_in_world(crate, world)) return;
         if (hinged ? !boolean(crate, STR("LockBroken"), false) :
             !profile || !profile->stock_class->pry_entry || !boolean(crate, STR("Looted"), false)) return;
         auto* ammo = field<U::FIntProperty>(tool, STR("Ammo"));
@@ -342,8 +346,13 @@ namespace
             auto* target = result.crate.Get();
             if (result.hinged)
             {
-                if (!actor_in_world(target, static_cast<U::AActor*>(pawn)->GetWorld())) continue;
-                lua.set_string(RC::to_utf8_string(target->GetFullName()));
+                auto* world = static_cast<U::AActor*>(pawn)->GetWorld();
+                auto* actor = static_cast<U::AActor*>(target);
+                if (!live(actor) || !boolean(actor, STR("bActorIsBeingDestroyed"), false) ||
+                    !silverfish::native_zone::visible_actor_level(actor, world)) continue;
+                auto name = RC::to_utf8_string(actor->GetFullName());
+                if (actor->GetLevel() != object(world, STR("PersistentLevel"))) name.insert(0, "stream:");
+                lua.set_string(name);
             }
             else
             {

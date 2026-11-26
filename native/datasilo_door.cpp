@@ -1,6 +1,7 @@
 #include "datasilo_door.hpp"
 #include "loot_crate_input.hpp"
 #include "shared_loot.hpp"
+#include "zone_exit.hpp"
 
 #include <algorithm>
 #include <array>
@@ -121,16 +122,27 @@ namespace
             object(knob, STR("AttachParent")) == panel;
     }
 
+    U::UWorld* door_world(U::AActor* actor)
+    {
+        auto* world = actor->GetWorld();
+        if (live(world) && actor->GetLevel() == object(world, STR("PersistentLevel"))) return world;
+        auto* level = actor->GetLevel();
+        auto* assigned = live(level) ? object(level, STR("OwningWorld")) : nullptr;
+        if (live(assigned) && assigned->GetClassPrivate() == find<U::UClass>(STR("/Script/Engine.World")))
+            world = static_cast<U::UWorld*>(assigned);
+        return silverfish::native_zone::visible_actor_level(actor, world) ? world : nullptr;
+    }
+
     Seat seat(U::UObject* door, bool allow_ordinary = false)
     {
         if (!live(door)) return Seat::unavailable;
         const bool special = door->GetClassPrivate() == find<U::UClass>(door_type) && door->GetPathName() == door_path;
         if (!special && !(allow_ordinary && ordinary_door(door))) return Seat::unavailable;
         auto* actor = static_cast<U::AActor*>(door);
-        auto* world = actor->GetWorld();
+        auto* world = special ? actor->GetWorld() : door_world(actor);
         auto* ending = field<U::FBoolProperty>(door, STR("bActorIsBeingDestroyed"));
         if (!live(world) || (special && world->GetPathName() != world_path) || !ending || ending->GetPropertyValueInContainer(door) ||
-            actor->GetLevel() != object(world, STR("PersistentLevel"))) return Seat::unavailable;
+            (special && actor->GetLevel() != object(world, STR("PersistentLevel")))) return Seat::unavailable;
         auto* instance = object(world, STR("OwningGameInstance"));
         auto* driver = object(world, STR("NetDriver"));
         if (!live(instance) || instance->GetClassPrivate() != find<U::UClass>(instance_type) || !live(driver) ||
@@ -201,7 +213,7 @@ namespace
         if (!pryable || !pryable->GetPropertyValueInContainer(door) || !locked || !broken ||
             !locked->GetPropertyValueInContainer(door) || broken->GetPropertyValueInContainer(door))
             return fail();
-        auto* world = static_cast<U::AActor*>(door)->GetWorld();
+        auto* world = door_world(static_cast<U::AActor*>(door));
         auto* stock = object(object(world, STR("OwningGameInstance")), STR("SaveSlot_Ref"));
         silverfish::shared_loot::EscrowOwner owner{};
         if (!silverfish::shared_loot::qualify_escrow_owner_in_world(world, pawn, save, address(stock), owner) ||

@@ -37,15 +37,24 @@ local function finite(value, limit)
     return type(value) == "number" and value == value and math.abs(value) <= limit
 end
 
-local function identity(actor, world)
+local stream_prefix = "stream:"
+
+local function actor_path(name)
+    if type(name) ~= "string" or #name > 384 then return end
+    if name:sub(1, #stream_prefix) == stream_prefix then name = name:sub(#stream_prefix + 1) end
+    local path = name:match("^[%w_-]+ (/.+)$")
+    if world_path.level_actor_package(path) then return path end
+end
+
+local function identity(actor, world, streams)
     local base = stock_class(base_path)
-    if not valid(base) or not valid(actor) or not actor:IsA(base)
-        or actor:IsActorBeingDestroyed() or not same(actor:GetWorld(), world)
-        or not same(actor:GetOuter(), world.PersistentLevel) then return end
+    if not valid(base) or not valid(actor) or not actor:IsA(base) then return end
+    local level = world_path.visible_actor_level(actor, world, streams)
+    if not level then return end
     local name = actor:GetFullName()
-    if #name <= 384 and name:match("^[%w_]+ /Game/[%w_/]+%.[%w_]+:PersistentLevel%.[%w_]+$") then
-        return name
-    end
+    if not same(level, world.PersistentLevel) then name = stream_prefix .. name end
+    local path = actor_path(name)
+    if path and (not same(level, world.PersistentLevel) or world_path.actor_package(path)) then return name end
 end
 
 local function components(actor)
@@ -64,7 +73,7 @@ local function census_slice(scan, deadline)
         if not candidate then break end
         scan.next = scan.next + 1
         local actor = StaticFindObject(candidate)
-        local name = identity(actor, scan.world)
+        local name = identity(actor, scan.world, scan.streams)
         if name and (scan.phase ~= "hosting" or actor:HasAuthority()) then
             local arrow, panel, knob = components(actor)
             if arrow then
@@ -94,7 +103,8 @@ local function census(state, phase)
         scanned_at = now
         local candidates = world_path.actor_paths(state.world, "hinged-door")
         if not candidates then return actors end
-        local scan = {candidates = candidates, next = 1, world = state.world, phase = phase, actors = {}, parts = {}}
+        local scan = {candidates = candidates, next = 1, world = state.world, phase = phase, actors = {}, parts = {},
+            streams = world_path.visible_streams(state.world)}
         pending_census = scan
         if not periodic_sampling or #candidates <= 12 then
             while pending_census do census_slice(scan, math.huge) end
@@ -107,12 +117,12 @@ local function target_door(state, phase, name, known)
     known = known or census(state, phase)
     local actor = known[name]
     if actor ~= nil then
-        if valid(actor) and not actor:IsActorBeingDestroyed() and same(actor:GetWorld(), state.world) then return actor end
+        if world_path.visible_actor_level(actor, state.world) then return actor end
         return
     end
     if not pending_census or type(name) ~= "string" or #name > 384 then return end
     -- Exact commands can still resolve a door while the background census is in progress.
-    local path = name:match("^[%w_]+ (/Game/[%w_/]+%.[%w_]+:PersistentLevel%.[%w_]+)$")
+    local path = actor_path(name)
     actor = path and StaticFindObject(path)
     if identity(actor, state.world) ~= name or (phase == "hosting" and not actor:HasAuthority()) then return end
     local arrow, panel, knob = components(actor)
@@ -165,8 +175,7 @@ local function clear_preview()
 end
 
 local function animate(name, motion, now)
-    if not valid(motion.arrow) or not valid(motion.actor) or motion.actor:IsActorBeingDestroyed()
-        or not same(motion.actor:GetWorld(), active_world) then
+    if not valid(motion.arrow) or not world_path.visible_actor_level(motion.actor, active_world) then
         motions[name] = nil
         return
     end
@@ -207,7 +216,7 @@ end
 local function start_preview(name)
     local actor = actors and actors[name]
     if not valid(actor) then
-        local path = name:match("^[%w_]+ (/Game/[%w_/]+%.[%w_]+:PersistentLevel%.[%w_]+)$")
+        local path = actor_path(name)
         actor = path and StaticFindObject(path)
     end
     if identity(actor, active_world) ~= name or actor.Locked ~= false or motions[name] then return end
@@ -338,7 +347,7 @@ end
 
 local function sample_door(scan, name, ready_pose)
     local actor, parts = scan.actors[name], door_parts[name]
-    if not valid(actor) or actor:IsActorBeingDestroyed() or not parts
+    if not world_path.visible_actor_level(actor, scan.world, scan.streams) or not parts
         or not valid(parts[1]) or not valid(parts[2]) or not valid(parts[3]) then return end
     local arrow, panel, knob = table.unpack(parts)
     local value = ready_pose or pose(actor, arrow)
@@ -357,7 +366,7 @@ local function sample_door(scan, name, ready_pose)
         end
         local kind, object = name:match("^([%w_]+) .+:PersistentLevel%.([%w_]+)$")
         local tag, scope, id = "native-stock-door", scan.map, name
-        if not scan.confirmation and kind then
+        if not scan.confirmation and kind and name:sub(1, #stream_prefix) ~= stream_prefix then
             tag, scope, id = "native-stock-door-state", kind, object
         end
         local encoded = scan.row(tag, scope, id,
@@ -393,15 +402,16 @@ local function send_confirmations()
     local now = os.clock()
     for name, pending in pairs(confirmations) do
         local actor = pending.actor
-        if now >= pending.expires or not valid(actor) or actor:IsActorBeingDestroyed()
-            or not same(pending.world, active_world) or not same(actor:GetWorld(), active_world) then
+        if now >= pending.expires or not same(pending.world, active_world)
+            or not world_path.visible_actor_level(actor, active_world) then
             confirmations[name] = nil
         elseif pending.goal and actor.Locked == false and actor.Open == pending.opens and same(actor, actors[name]) then
             local parts = door_parts[name]
             local actual = parts and valid(parts[1]) and pose(actor, parts[1])
             local expected = actual and {false, actual[2], pending.opens, table.unpack(pending.goal)}
             local record = actual and matches(actual, expected)
-                and sample_door({actors = actors, map = pending.map, row = confirmation_row, confirmation = true}, name, actual)
+                and sample_door({actors = actors, world = active_world, map = pending.map, row = confirmation_row,
+                    confirmation = true}, name, actual)
             if record and SilverfishEnqueueLocalBridgeInput(
                 confirmation_row("stock-door-settled", pending.id, confirmation_sequence(),
                     string.format("%.1f", (now - pending.start) * 1000)) .. "\t" .. record .. "\n") then
@@ -448,8 +458,7 @@ function doors.start(report_motion, next_sequence, status_row)
         if preview then
             local ok, alive = pcall(function()
                 if active_phase ~= "connected" or not valid(active_world) or not valid(preview.pivot)
-                    or not valid(preview.actor) or preview.actor:IsActorBeingDestroyed()
-                    or not same(active_world, preview.actor:GetWorld()) then return false end
+                    or not world_path.visible_actor_level(preview.actor, active_world) then return false end
                 local now = clock:GetRealTimeSeconds(active_world)
                 if now >= preview.deadline then return false end
                 if now <= preview.start + preview.duration + .05 then animate(preview.name, preview, now) end
@@ -514,6 +523,15 @@ function doors.rows(state, phase, status_row, fields)
         end
     end
     local scan = sampler
+    local streams = world_path.visible_streams(state.world)
+    if scan.streams ~= streams then
+        scan.streams = streams
+        for _, name in ipairs(scan.names) do
+            if name:sub(1, #stream_prefix) == stream_prefix and not world_path.visible_actor_level(known[name], state.world, streams) then
+                scan.readings[name], scan.samples[name] = nil, nil
+            end
+        end
+    end
     if #scan.names <= 12 then
         for _, name in ipairs(scan.names) do scan.readings[name] = sample_door(scan, name) end
     else

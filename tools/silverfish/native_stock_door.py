@@ -28,7 +28,8 @@ SETTLEMENT = "native_stock_door_settlement"
 PRY_RESULT = "native_stock_door_pry"
 PRY_ACTIONS = {"blowtorch": "native-guest-door-blowtorch", "crowbar": "native-guest-door-crowbar"}
 TARGET_PREFIX = "stock-door:"
-_ACTOR = re.compile(r"[A-Za-z0-9_]+ (/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):PersistentLevel\.[A-Za-z0-9_]+")
+STREAM_PREFIX = "stream:"
+_ACTOR = re.compile(r"[A-Za-z0-9_-]+ (/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):PersistentLevel\.[A-Za-z0-9_-]+")
 _FLAGS = ("locked", "broken", "open")
 _ANGLES = ("pitch", "yaw", "roll")
 _OFFSET = ("x", "y", "z")
@@ -41,10 +42,26 @@ def actor_map(actor):
     return None
 
 
+def streamed_package(actor):
+    if isinstance(actor, str) and len(actor) <= 384 and actor.startswith(STREAM_PREFIX):
+        match = _ACTOR.fullmatch(actor.removeprefix(STREAM_PREFIX))
+        if match and valid_campaign_package(match[1]):
+            return match[1]
+    return None
+
+
+def matches_area(actor, area):
+    if not valid_campaign_package(area):
+        return False
+    sublevel = streamed_package(actor)
+    # The game thread verifies that the exact streamed actor is visible on this seat.
+    return sublevel != area if sublevel else actor_map(actor) == area
+
+
 def target_actor(target):
     if isinstance(target, str) and target.startswith(TARGET_PREFIX):
         actor = target[len(TARGET_PREFIX):]
-        if actor_map(actor):
+        if actor_map(actor) or streamed_package(actor):
             return actor
     return None
 
@@ -55,7 +72,7 @@ def matches_local_scope(game, receipt):
 
 
 def parse(fields, phase, area):
-    if (len(fields) != 19 or fields[:2] != [TAG, area] or actor_map(fields[2]) != area
+    if (len(fields) != 19 or fields[:2] != [TAG, area] or not matches_area(fields[2], area)
             or phase not in ("hosting", "connected") or any(flag not in ("0", "1") for flag in fields[3:6])
             or fields[18] not in ("0", "1", "2", "3", "4", "5")):
         raise ValueError("Invalid stock hinged door frame")
@@ -85,7 +102,7 @@ def parse_pry(fields, phase, area):
     if len(fields) != 8 or fields[1] != area or phase != "hosting":
         raise ValueError("Invalid stock door pry scope")
     _, _, actor, pawn, guid, kind, before, after = fields
-    if (actor_map(actor) != area or not pawn.startswith(f"Player_FP_C {area}.") or not valid_guid(guid)
+    if (not matches_area(actor, area) or not pawn.startswith(f"Player_FP_C {area}.") or not valid_guid(guid)
             or kind not in PRY_ACTIONS):
         raise ValueError("Invalid stock door pry receipt")
     before, after = int(before), int(after)
@@ -109,7 +126,7 @@ def frame(game, epoch, actor=None):
 def accept_delta(gameplay, delta, area, epoch, actor):
     if (not isinstance(delta, dict) or (delta.get("map"), delta.get("epoch")) != (area, epoch)
             or not isinstance(doors := delta.get("doors"), dict) or set(doors) != {actor}
-            or actor_map(actor) != area or type(sequence := delta.get("sequence")) is not int or sequence <= 0):
+            or not matches_area(actor, area) or type(sequence := delta.get("sequence")) is not int or sequence <= 0):
         return
     previous = gameplay.get(KEY, {})
     if (previous.get("map"), previous.get("epoch")) != (area, epoch):
@@ -149,7 +166,7 @@ async def project(bridge, game, frame, epoch):
         return game
     batch = []
     for name, expected in doors.items():
-        if (name not in local or actor_map(name) != area or not isinstance(expected, dict)
+        if (name not in local or not matches_area(name, area) or not isinstance(expected, dict)
                 or any(type(expected.get(flag)) is not bool for flag in _FLAGS)
                 or any(type(expected.get(axis)) not in (float, int) or not -360 <= expected[axis] <= 360 for axis in _ANGLES)
                 or any(type(expected.get(axis)) not in (float, int) or not -10000 <= expected[axis] <= 10000 for axis in _OFFSET)
@@ -244,9 +261,10 @@ class Interactions:
 
     async def dispatch(self, host, bridge, character, requested, operation, future):
         epoch, _, actor = requested.partition("@") if isinstance(requested, str) else ("", "", "")
-        area = actor_map(actor)
+        game = host.last_game
+        area = game.get("map")
         player = host.party["players"].get(character)
-        if (not epoch or epoch != host.zone_epoch or not area or not player
+        if (not epoch or epoch != host.zone_epoch or not matches_area(actor, area) or not player
                 or host.transitioning or host.stopping or not party.REQUEST_ID.fullmatch(operation)):
             raise party.RuleError("stock_door_scope_unavailable")
         fingerprint = [ACTION, requested, None]
@@ -258,7 +276,6 @@ class Interactions:
                 return receipt["result"]
         # A completed receipt needs the same visit and request. A new mutation
         # also needs a live bound pawn and a stable host snapshot.
-        game = host.last_game
         member = host.native_recipients().get(character, {})
         if ((game.get("state"), game.get("map")) != ("hosting", area) or host.native_checkpoint_unsafe
                 or not member.get("connected") or host.party["wipe"] or player["downed"]):
@@ -375,7 +392,7 @@ async def pry(host, bridge, character, requested, operation, kind):
     area = game.get("map")
     member = host.native_recipients().get(character, {})
     row = game.get(KEY, {}).get(actor)
-    if (kind not in PRY_ACTIONS or not epoch or epoch != host.zone_epoch or not valid_guid(guid) or actor_map(actor) != area
+    if (kind not in PRY_ACTIONS or not epoch or epoch != host.zone_epoch or not valid_guid(guid) or not matches_area(actor, area)
             or not row or not host.native_loot_input or game.get("state") != "hosting" or host.transitioning
             or host.stopping or host.native_checkpoint_unsafe or not member.get("connected") or host.party["wipe"]
             or character in host.party["pending_spawns"] or host.party["players"][character]["downed"]

@@ -7,7 +7,7 @@ import re
 import time
 
 from .native_guest_drop_record import valid_id, valid_position
-from .native_stock_door import actor_map as door_map
+from .native_stock_door import matches_area as door_matches_area
 
 
 LIMIT = 36
@@ -101,7 +101,7 @@ def valid_bullet_decal(cue):
 
 def valid_door_motion(cue, area):
     return (type(cue) is list and len(cue) == 13 and type(cue[0]) is int and 0 < cue[0] < 10**15
-            and cue[1] == "door-motion" and isinstance(area, str) and door_map(cue[2]) == area
+            and cue[1] == "door-motion" and door_matches_area(cue[2], area)
             and all(type(value) is int and 0 <= value <= limit
                     for value, limit in zip((cue[3], cue[5], cue[6]), (1, 3, 1), strict=True))
             and type(cue[4]) in (float, int) and .06 <= cue[4] <= 3

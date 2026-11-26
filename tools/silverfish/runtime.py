@@ -1161,7 +1161,7 @@ class Bridge:
                 continue
             target = fields[6] if len(fields) == 7 else None
             if fields[5] in native_loot.PRY_TOOL_ACTIONS:
-                if not target or not (lockable_container(target, fields[2]) or native_stock_door.actor_map(target) == fields[2]):
+                if not target or not (lockable_container(target, fields[2]) or native_stock_door.matches_area(target, fields[2])):
                     continue
             elif fields[5] == "camera":
                 if target is not None and (len(target) > 180 or not target.startswith("camera:")):
@@ -1998,7 +1998,7 @@ class Bridge:
                 elif fields[0] == "native-stock-door-pry":
                     data[native_stock_door.PRY_RESULT] = native_stock_door.parse_pry(fields, data.get("state"), data.get("map"))
                 elif (fields[0] == native_stock_door.TRACE_FIXTURE and len(fields) == 5
-                      and native_stock_door.actor_map(fields[2]) == fields[1] == data.get("map")
+                      and fields[1] == data.get("map") and native_stock_door.matches_area(fields[2], fields[1])
                       and fields[3] in ("0", "2") and fields[4] in ("0", "1")):
                     data[native_stock_door.TRACE_RESULT] = {"actor": fields[2], "query": int(fields[3]), "panel": fields[4] == "1"}
                 elif fields[0] == native_datasilo_lift.RIDER_TAG:
@@ -3957,7 +3957,9 @@ class Bridge:
             raise RuntimeError("The stock interaction receipt did not match the request")
         _, _, nonce, phase, area, sequence, pawn, status, message = rows[0]
         expected_phase = "connected" if fields[1] == native_stock_switch.PROJECT else "hosting"
-        if (phase != expected_phase or native_stock_door.actor_map(fields[2]) != area
+        target_in_area = (native_stock_door.matches_area(fields[2], area) if fields[1] == native_stock_door.DISPATCH
+                          else native_stock_door.actor_map(fields[2]) == area)
+        if (phase != expected_phase or not target_in_area
                 or not (local_sequence := _held_input_sequence(sequence)) or not 0 < len(pawn) <= 512):
             raise RuntimeError("The stock interaction receipt did not match the current world")
         if status != "accepted":

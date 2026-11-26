@@ -39,6 +39,22 @@ class StockDoorActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(bridge._parse_status(header + full + compact))
         self.assertIsNone(bridge._parse_status(header + compact.replace("1719", "../1719")))
 
+    async def test_streamed_identity_routes_in_active_visit(self):
+        actor = "stream:Door_C /WorkshopPack/Rooms/Lab_copy.Lab:PersistentLevel.Door_C_11"
+        self.actor = actor
+        game = self.host.last_game
+        game[door.KEY] = {actor: self.closed}
+        self.bridge.command.return_value = {
+            **game, "sequence": 11, "ack": {"message": "stock hinged door interaction dispatched open"},
+        }
+        self.assertEqual((await self.interact())[door.RESULT]["actor"], actor)
+        self.assertEqual(door.target_actor("stock-door:" + actor), actor)
+        self.assertFalse(door.matches_area(actor.removeprefix("stream:"), CROSSROADS))
+        self.assertFalse(door.matches_area(actor, "/WorkshopPack/Rooms/Lab_copy"))
+        self.assertFalse(door.matches_area(actor.replace("Lab:Persistent", "../Lab:Persistent"), CROSSROADS))
+        self.assertEqual(door.actor_map(
+            "Door_C /WorkshopPack/Maps/Lab.Lab:PersistentLevel.Door_C_11"), "/WorkshopPack/Maps/Lab")
+
     async def test_close_is_acknowledged_even_when_periodic_sample_already_says_closed(self):
         self.bridge.command.return_value = {
             **self.host.last_game, "sequence": 11,

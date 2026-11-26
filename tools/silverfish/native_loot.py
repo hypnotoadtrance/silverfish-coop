@@ -572,7 +572,7 @@ async def restore_key_unlocks(host, bridge):
 
 
 def lockpick_door(actor, area):
-    return actor not in CRATES and bool(area) and native_stock_door.actor_map(actor) == area
+    return actor not in CRATES and native_stock_door.matches_area(actor, area)
 
 
 def parse_lockpick(fields):
