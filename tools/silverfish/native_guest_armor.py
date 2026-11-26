@@ -216,8 +216,14 @@ async def perform(host, bridge, character, operation_id, action, guid, *, seed_k
             or (seed and not host.fixtures) or host.stopping or host.transitioning or host.native_checkpoint_unsafe
             or host.last_game.get("state") != "hosting" or time.monotonic() - host.last_seen > 3):
         raise party.RuleError("native_guest_armor_unavailable")
-    if not valid_guid(guid):
+    if not isinstance(guid, str):
         raise party.RuleError("native_guest_armor_guid_required")
+    guid, separator, visit = guid.partition("|")
+    reported = bool(separator)
+    if not valid_guid(guid) or (reported and (seed or not party.REQUEST_ID.fullmatch(visit))):
+        raise party.RuleError("native_guest_armor_guid_required")
+    if reported and visit != host.zone_epoch:
+        raise party.RuleError("native_guest_armor_visit_expired")
     if seed_kind is not None and (not seed or not isinstance(seed_kind, str) or seed_kind not in SEED_PROFILES):
         raise party.RuleError("native_guest_armor_fixture_profile_unavailable")
     if not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
@@ -225,14 +231,14 @@ async def perform(host, bridge, character, operation_id, action, guid, *, seed_k
     scope = host.native_recipients().get(character)
     if not scope or not scope.get("connected") or not scope.get("pawn"):
         raise party.RuleError("guest_not_active")
-    extra = (seed_kind,) if seed_kind is not None else ()
-    fingerprint = [action, guid, *extra]
+    extra = ("reported",) if reported else (seed_kind,) if seed_kind is not None else ()
+    fingerprint = [action, guid, visit] if reported else [action, guid, *extra]
     for receipt in host.party["receipts"].get(character, ()):
         if receipt["id"] == operation_id:
             if receipt["request"] != fingerprint:
                 raise party.RuleError("operation_id_conflict")
             return receipt["result"]
-    if host.party["players"].get(character, {}).get("downed") or host.party["wipe"]:
+    if host.party["wipe"] or (not reported and host.party["players"].get(character, {}).get("downed")):
         raise party.RuleError("downed")
     if character in host.party["pending_spawns"]:
         raise party.RuleError("respawn_in_progress")
@@ -279,6 +285,8 @@ async def perform(host, bridge, character, operation_id, action, guid, *, seed_k
             raise RuntimeError("The typed stock armor slot and derived stats did not verify")
         host.last_game, host.last_seen = snapshot, time.monotonic()
         result = {key: dict(proof, class_path=profile.class_path)}
+        if reported:
+            result[key]["reported"] = True
         candidate = party.load_party(host.party)
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation_id, "request": fingerprint, "result": result})

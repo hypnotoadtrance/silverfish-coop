@@ -24,6 +24,7 @@ local worn_classes = {
 local melee_class = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
 local stored_rounds, live_rounds = 5, 3
 local seed, remote_seed, last
+local stale_worn_hooks
 
 local function valid(o) return o and o:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -316,7 +317,8 @@ local function run(action, argument)
             pawn.CapsuleComponent:GetCollisionResponseToChannel(18))
     end
     if action == "remote-seed" or action == "remote-ready" or action == "remote-ammo" or action == "remote-read"
-        or action == "remote-worn-seed" or action == "remote-melee-seed" or action == "remote-melee-held"
+        or action == "remote-worn-seed" or action == "remote-worn-stale-busy" or action == "remote-worn-clear-busy"
+        or action == "remote-melee-seed" or action == "remote-melee-held"
         or action == "remote-quick-ammo" or action == "remote-quick-retired" or action == "remote-landmine-seed" then
         assert(not guest and #driver.ClientConnections == 1, "one enrolled guest required")
         local name = argument and argument:match("^Player_FP_C (.+)$")
@@ -331,7 +333,38 @@ local function run(action, argument)
         end
         assert(remote_seed and same(remote_seed.pawn, remote) and same(remote_seed.save, remote.Save),
             "fixture authoritative detached owner changed")
-        if action == "remote-landmine-seed" then
+        if action == "remote-worn-stale-busy" then
+            assert(not stale_worn_hooks and remote_seed.worn, "fixture worn rows required")
+            local busy = {count = 0, functions = {}}
+            local address = remote:GetAddress()
+            for _, name in ipairs({
+                "SilverfishEquipNativeGuestArmor", "SilverfishEquipNativeGuestHelmet", "SilverfishUnequipNativeGuestArmor"
+            }) do
+                local invoke = assert(_G[name])
+                busy.functions[name] = invoke
+                _G[name] = function(owner, ...)
+                    if owner ~= address then return invoke(owner, ...) end
+                    local prior = remote.IsWeaponBlocked
+                    remote.IsWeaponBlocked = true
+                    busy.count = busy.count + 1
+                    local result = table.pack(pcall(invoke, owner, ...))
+                    remote.IsWeaponBlocked = prior
+                    if not result[1] then error(result[2], 0) end
+                    return table.unpack(result, 2, result.n)
+                end
+            end
+            stale_worn_hooks = busy
+            local ok, status = SilverfishEquipNativeGuestHelmet(address, remote.Save:GetAddress(), remote_seed.worn[1])
+            assert(not ok and status == "native_guest_armor_pawn_ineligible", status)
+            busy.count = 0
+            return status
+        elseif action == "remote-worn-clear-busy" then
+            assert(stale_worn_hooks, "fixture stale worn state was not armed")
+            local busy = stale_worn_hooks
+            stale_worn_hooks = nil
+            for name, invoke in pairs(busy.functions) do _G[name] = invoke end
+            return tostring(busy.count)
+        elseif action == "remote-landmine-seed" then
             local class, output = asset("/Game/Classes/Equipment/Eqp_LandMine.Eqp_LandMine_C"), {}
             asset(factory):MakeDefaultItem(class, remote, output)
             local row = output.Item or output

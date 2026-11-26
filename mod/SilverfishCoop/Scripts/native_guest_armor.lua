@@ -98,8 +98,10 @@ function armor.command(fields, state, phase)
     if action ~= "native-guest-armor-equip" and action ~= "native-guest-armor-fixture" and not head then return end
     observation = nil
     local seed = action == "native-guest-armor-fixture"
-    local pawn_name, guid, seed_profile = fields[3], fields[4], fields[5]
-    local valid_count = #fields == 4 or (#fields == 5 and seed and seed_profiles[seed_profile])
+    local pawn_name, guid, option = fields[3], fields[4], fields[5]
+    local seed_profile = seed and option or nil
+    local reported = not seed and option == "reported"
+    local valid_count = #fields == 4 or (#fields == 5 and (reported or seed_profiles[seed_profile]))
     if not enabled or phase ~= "hosting" or not valid_count or not pawn_name
         or not guid or #guid ~= 32 or guid:find("[^0-9A-F]") or not guid:find("[^0]")
         or (seed and not fixtures) then error("native_guest_armor_exact_context_required", 0) end
@@ -115,7 +117,7 @@ function armor.command(fields, state, phase)
         local class = StaticFindObject(path)
         if not class or not class:IsValid() then LoadAsset(path) end
     end
-    local arguments = {pawn:GetAddress(), save:GetAddress(), guid, seed_profile}
+    local arguments = {pawn:GetAddress(), save:GetAddress(), guid, reported and true or seed_profile}
     observation = native_report(state.map, pawn_name, guid, seed and "seed" or "equip",
         invoke(table.unpack(arguments)))
     observation.head = head

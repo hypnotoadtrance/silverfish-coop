@@ -1063,12 +1063,17 @@ namespace
         constexpr bool seed_operation = operation == Operation::Seed;
         constexpr bool drop = operation == Operation::Drop;
         constexpr bool remove = operation == Operation::Unequip || drop;
+        constexpr auto ordinary_arguments = remove ? 4 : 3;
+        constexpr bool accepts_report = operation == Operation::Equip || operation == Operation::EquipHelmet ||
+            operation == Operation::Unequip;
         const auto arguments = lua.get_stack_size();
         const bool named_seed = seed_operation && arguments == 4 && lua.is_string(4);
-        const bool removal_slot = remove && arguments == 4 && lua.is_integer(4);
-        if (!enabled() || !U::IsInGameThreadRaw() || (remove ? !removal_slot : (arguments != 3 && !named_seed)) ||
-            !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3))
+        const bool has_report = accepts_report && arguments == ordinary_arguments + 1 && lua.is_bool(arguments);
+        if (!enabled() || !U::IsInGameThreadRaw() || (arguments != ordinary_arguments && !has_report && !named_seed) ||
+            (remove && !lua.is_integer(4)) || !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3))
             return report(lua, false, "native_guest_armor_exact_context_required");
+        const bool reported = has_report && lua.get_bool(arguments);
+        if (has_report && !reported) return report(lua, false, "native_guest_armor_exact_context_required");
         const auto slot = remove ? lua.get_integer(4) : -1;
         if (remove && slot != 8 && slot != 9) return report(lua, false, "native_guest_armor_worn_slot_unqualified");
         const auto pawn = lua.get_integer();
@@ -1082,11 +1087,13 @@ namespace
         const bool head = operation == Operation::EquipHelmet || operation == Operation::ProjectHelmet || (remove && slot == 8);
         if constexpr (!project)
         {
+            // The owner already moved reported gear through the stock inventory menu.
+            // The detached pawn may still be playing an earlier local action.
             auto* health = field<U::FDoubleProperty>(scope.guest, STR("PlayerHealth"));
-            if (!health || !std::isfinite(health->GetPropertyValueInContainer(scope.guest)) ||
+            if (!reported && (!health || !std::isfinite(health->GetPropertyValueInContainer(scope.guest)) ||
                 health->GetPropertyValueInContainer(scope.guest) <= 0 ||
                 !boolean(scope.pawn, STR("Dead"), false) || !boolean(scope.pawn, STR("IsWeaponBlocked"), false) ||
-                !boolean(scope.pawn, STR("UsingItem"), false) || !boolean(scope.pawn, STR("Reloading"), false))
+                !boolean(scope.pawn, STR("UsingItem"), false) || !boolean(scope.pawn, STR("Reloading"), false)))
                 return report(lua, false, "native_guest_armor_pawn_ineligible");
         }
         Inventory inventory;

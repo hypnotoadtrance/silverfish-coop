@@ -5513,12 +5513,15 @@ async def verify_stock_unequip(first, second, evidence):
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
         await leaves_stock_open()
         current_worn = ["-", "-"]
+        legacy_refusal = await portable_probe_command(host.bridge, probe, f"remote-worn-stale-busy\t{pawn}")
+        assert legacy_refusal == "native_guest_armor_pawn_ineligible", legacy_refusal
         evidence["guest_worn_equip"] = []
         for index, ((key, slot, equip, _), guid) in enumerate(zip(worn, worn_guids, strict=True)):
             assert (await portable_probe_command(guest.bridge, probe, f"{equip}\t{guid}")).split(",") == current_worn
             receipt = await witness("native_stock_inventory_action", key, guid)
             assert receipt["stock_inventory_proof"] == f"verified stock equipment slot {slot}", receipt
             proof = receipt[key]
+            assert proof.get("reported") is True, proof
             if slot == 8:
                 assert proof["class_path"].endswith("/Helm_FaceMask.Helm_FaceMask_C"), proof
             else:
@@ -5539,7 +5542,7 @@ async def verify_stock_unequip(first, second, evidence):
             displaced = current_worn[index]
             receipt = await witness("native_stock_inventory_action", key, guid)
             assert receipt["stock_inventory_proof"] == f"verified stock equipment slot {slot}", receipt
-            assert receipt[key]["replaced_guid"] == displaced, receipt
+            assert receipt[key]["replaced_guid"] == displaced and receipt[key].get("reported") is True, receipt
             if slot == 9:
                 assert receipt[key]["class_path"].endswith("/Armor_ExpiditionLight.Armor_ExpiditionLight_C"), receipt
             assert (await portable_probe_command(guest.bridge, probe, "guest-worn-state")).split(",") == replacements
@@ -5558,6 +5561,7 @@ async def verify_stock_unequip(first, second, evidence):
             receipt = await witness("native_stock_inventory_action", "native_inventory_unequip", guid)
             assert (receipt["native_inventory_unequip"]["slot"], receipt["stock_inventory_proof"]) == (
                 slot, f"verified stock unequip from slot {slot}"), receipt
+            assert receipt["native_inventory_unequip"].get("reported") is True, receipt
             current_worn[index] = "-"
             assert (await portable_probe_command(guest.bridge, probe, "guest-worn-state")).split(",") == current_worn
             authoritative = await submit(guest_run, "native-inventory-list")
@@ -5566,6 +5570,10 @@ async def verify_stock_unequip(first, second, evidence):
             assert len(rows) == 1 and rows[0]["source"] == "backpack", authoritative
             evidence["guest_worn"].append({"receipt": receipt, "backpack_row": rows[0],
                                            "local_move": await local_move(receipt, "unequip", guid, slot)})
+
+        mirrored = int(await portable_probe_command(host.bridge, probe, f"remote-worn-clear-busy\t{pawn}"))
+        assert mirrored == 6, mirrored
+        evidence["guest_worn_stale_busy"] = {"legacy_refusal": legacy_refusal, "mirrored_actions": mirrored}
 
         assert await portable_probe_command(guest.bridge, probe, "guest-reequip-utility") == "pressed"
         utility = await witness("native_stock_inventory_action", native_inventory.STORE_KEY, ids[2])

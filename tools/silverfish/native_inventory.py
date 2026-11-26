@@ -43,7 +43,7 @@ UNEQUIP_CAPABILITY = "native_inventory_unequip_capability"
 UNEQUIP_WORN_CAPABILITY = "native_inventory_unequip_worn_capability"
 UNEQUIP_KEY = "native_inventory_unequip"
 _STORE_TARGET = re.compile(r"([0-9A-F]{32})(?:\|([0-7]))?\Z")
-_UNEQUIP_TARGET = re.compile(r"([0-9A-F]{32})\|([0-9])\Z")
+_UNEQUIP_TARGET = re.compile(r"([0-9A-F]{32})\|([0-9])(?:\|([0-9a-f]{32}))?\Z")
 _STOCK_CLASS = re.compile(r"/Game/Classes/[A-Za-z0-9_./-]+_C\Z")
 
 
@@ -289,9 +289,14 @@ async def store_equipment(host, bridge, character: str, target, operation: str, 
     if (not selection or not valid_guid(selection[1])
             or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation)):
         raise party.RuleError(f"native_inventory_{suffix}_requires_item_and_operation")
-    item, requested_slot = selection.groups()
+    item, requested_slot = selection.group(1, 2)
+    reported = unequip and selection[3] is not None
     if unequip and int(requested_slot) >= 8:
         capability = UNEQUIP_WORN_CAPABILITY
+    elif reported:
+        raise party.RuleError("native_inventory_unequip_requires_item_and_operation")
+    if reported and selection[3] != host.zone_epoch:
+        raise party.RuleError("native_inventory_unequip_visit_expired")
     game = host.last_game
     if (not host.native_guest or not host.native_profile or host.stopping or host.transitioning
             or host.native_checkpoint_unsafe or game.get("state") != "hosting" or game.get(capability) != 1
@@ -307,7 +312,7 @@ async def store_equipment(host, bridge, character: str, target, operation: str, 
             if receipt["request"] != fingerprint:
                 raise party.RuleError("operation_id_conflict")
             return receipt["result"]
-    if player["downed"] or host.party["wipe"] or character in host.party["pending_spawns"]:
+    if host.party["wipe"] or character in host.party["pending_spawns"] or (not reported and player["downed"]):
         raise party.RuleError(f"native_inventory_{suffix}_refused_downed_or_respawning")
 
     area, pawn = game["map"], owner["pawn"]
@@ -316,6 +321,8 @@ async def store_equipment(host, bridge, character: str, target, operation: str, 
     try:
         try:
             arguments = (pawn, item) if requested_slot is None else (pawn, item, requested_slot)
+            if reported:
+                arguments += ("reported",)
             snapshot = await bridge.command(action, *arguments, timeout=6)
         except RuntimeError as error:
             if str(error).startswith(f"native_inventory_{suffix}_refused_"):
@@ -330,6 +337,8 @@ async def store_equipment(host, bridge, character: str, target, operation: str, 
             raise RuntimeError("The host did not verify the guest's stock equipment move")
         host.last_game, host.last_seen = snapshot, time.monotonic()
         result = {key: dict(proof, owner=character)}
+        if reported:
+            result[key]["reported"] = True
         candidate = party.load_party(host.party)
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": fingerprint, "result": result})

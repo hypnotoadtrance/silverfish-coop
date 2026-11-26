@@ -1,7 +1,7 @@
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from tools.silverfish import link, native_guest_armor as armor, party
 from tools.silverfish.enemy_loot_profiles import BY_MAP
@@ -41,6 +41,29 @@ class NativeGuestArmorTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(link.checkpoint_action_timeout(
             {"action": armor.ACTION, "operation_id": "a" * 32, "target": proof["guid"]}
         ), 15)
+
+    async def test_local_worn_report_mirrors_through_stale_host_status_only_in_its_visit(self):
+        host = self.host()
+        host.zone_epoch = "a" * 32
+        host.party["players"]["guest-id"]["downed"] = True
+        proof = self.report()
+        bridge = SimpleNamespace(command=AsyncMock(return_value={
+            "state": "hosting", "map": "area", "native_guest_armor": proof,
+        }))
+        args = (host, bridge, "guest-id", "f" * 32, armor.ACTION)
+        with self.assertRaisesRegex(party.RuleError, "downed"):
+            await armor.perform(*args, proof["guid"])
+        with self.assertRaisesRegex(party.RuleError, "visit_expired"):
+            await armor.perform(*args, f"{proof['guid']}|{'b' * 32}")
+        bridge.command.assert_not_awaited()
+
+        with patch.object(armor.native_inventory, "retain_guest_save", AsyncMock(return_value=True)):
+            request = f"{proof['guid']}|{host.zone_epoch}"
+            result = await armor.perform(*args, request)
+            self.assertEqual(await armor.perform(*args, request), result)
+        self.assertTrue(result["native_guest_armor"]["reported"])
+        bridge.command.assert_awaited_once_with(armor.ACTION, "exact pawn", proof["guid"], "reported", timeout=5)
+        host.checkpoint_native.assert_not_awaited()
 
     async def test_worn_slot_refusal_is_clean_and_projection_mismatch_is_unsafe(self):
         for proof in (self.report(ok=False, status="native_guest_armor_slot_occupied"),

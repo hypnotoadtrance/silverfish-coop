@@ -85,8 +85,9 @@ function inventory.command(fields, state, phase)
         removed = nil
         local name, item = fields[3], fields[4]
         local slot = math.tointeger(tonumber(fields[5]))
-        if #fields ~= 5 or not slot or slot < 0 or slot > 9 or phase ~= "hosting" or not state.listening
-            or state.server ~= false or not guid(item) then
+        local reported = #fields == 6 and fields[6] == "reported" and slot and slot >= 8
+        if (#fields ~= 5 and not reported) or not slot or slot < 0 or slot > 9 or phase ~= "hosting"
+            or not state.listening or state.server ~= false or not guid(item) then
             error("native_inventory_unequip_refused_scope", 0)
         end
         -- Slots eight and nine are the Helmet and Armor widgets in the stock manager.
@@ -94,7 +95,9 @@ function inventory.command(fields, state, phase)
         if type(invoke) ~= "function" then error("native_inventory_unequip_refused_scope", 0) end
         local exact, pawn, save = pcall(guest_save.exact_item_context, state, phase, name)
         if not exact or not pawn or not save then error("native_inventory_unequip_refused_owner", 0) end
-        local ok, status, source, class, rounds = invoke(pawn:GetAddress(), save:GetAddress(), item, slot)
+        local arguments = {pawn:GetAddress(), save:GetAddress(), item, slot}
+        if reported then arguments[5] = true end
+        local ok, status, source, class, rounds = invoke(table.unpack(arguments))
         if not ok and slot >= 8 and type(status) == "string" and status:match("^native_guest_armor_") then
             error("native_inventory_unequip_refused_" .. status:sub(20), 0)
         end
