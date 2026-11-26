@@ -1735,6 +1735,7 @@ local function observe_local_melee(action, pawn)
     return "watching"
 end
 
+local solo_travel
 local function solo_combat(world, action, slot)
     assert(valid(world) and not valid(world.NetDriver), "the singleplayer check requires a standalone world")
     local instance = world.OwningGameInstance
@@ -1743,6 +1744,7 @@ local function solo_combat(world, action, slot)
         assert(world:GetFullName() == "World /Game/Classes/Maps/MainMenu_P.MainMenu_P"
             and valid(instance) and slot:match("^%d+%-%d+$") and statics:DoesSaveGameExist(slot, 0),
             "the singleplayer check needs its copied stock save")
+        solo_travel = false
         instance:Load_GameState(slot, false)
         return "loading stock save"
     end
@@ -1752,6 +1754,15 @@ local function solo_combat(world, action, slot)
     if type(active_slot) == "userdata" then active_slot = active_slot:ToString() end
     assert(pawn:IsLocallyControlled() and pawn:HasAuthority() and same(pawn.Save, instance.SaveSlot_Ref)
         and active_slot == slot, "the stock singleplayer save is not active")
+    -- The most recent copied save can be in a stock safe zone where even a valid hit
+    -- does zero damage. Use a combat map while keeping the same standalone save.
+    if world:GetFullName() ~= "World " .. dock then
+        if not solo_travel then
+            solo_travel = true
+            statics:OpenLevel(controller, FName(dock:match("^[^.]+")), true, "")
+        end
+        return "loading"
+    end
     local inventory_input = "/Game/Classes/Player/Player_Inputs/IA_Inventory.IA_Inventory"
     local input = StaticFindObject(inventory_input)
     if not valid(input) then LoadAsset(inventory_input); input = StaticFindObject(inventory_input) end

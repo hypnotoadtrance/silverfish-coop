@@ -2775,11 +2775,15 @@ async def verify_tutorial_dock_melee(host: Seat, guest: Seat, pawn: str) -> dict
                 guest_point = await command(host, "dock-melee-approach")
 
         assert proof["target"] == worker and native_guest_melee.verified_damage(proof), (proof, after, misses, geometry)
-        assert math.isclose(proof["enemy_health_before"], float(baseline[3]), abs_tol=.001), (proof, baseline)
+        # The live worker can take other stock damage while the guest approaches.
+        # The exact guest attribution and health debit still come from the single verified contact.
+        assert 0 < proof["enemy_health_before"] <= float(baseline[3]) + .001, (proof, baseline)
         assert after[1] == "true" and math.isclose(proof["enemy_health_after"], float(after[3]), abs_tol=.001), (proof, after)
         assert campaign_save_hashes(host.campaign) == saves, "A warehouse melee hit wrote campaign saves"
+        other_damage = max(0., float(baseline[3]) - proof["enemy_health_before"])
         return {"tutorial_dock_melee": {"stock_input": tap, "authority_damage": proof, "baseline": baseline, "after": after,
-                                        "contact_geometry": geometry, "prior_misses": misses}}
+                                        "contact_geometry": geometry, "prior_misses": misses,
+                                        "damage_before_contact": other_damage}}
     finally:
         for seat in (host, guest):
             assert await command(seat, "clear-melee-aim") == "cleared"
