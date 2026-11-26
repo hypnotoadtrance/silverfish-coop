@@ -5949,6 +5949,70 @@ def lantern_observer_trace(receipt, role):
             "largest_sample_rotation_step_degrees": max_rotation_step, "settled": settled, "samples": samples}
 
 
+async def verify_spawned_prop_carry(host: Seat, guest: Seat, pawn: str, evidence: dict) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    host_status, guest_status = await asyncio.gather(*(
+        wait(run, lambda frame: frame.get("game", {}).get("pawns", {}).get("local", {}).get("name"))
+        for run in (host_run, guest_run)
+    ))
+    local_pawns = {name: frame["game"]["pawns"]["local"]["name"]
+                   for name, frame in (("host", host_status), ("guest", guest_status))}
+    checkpoint = campaign_save_hashes(host.campaign)
+
+    async def call(seat, action):
+        owner = local_pawns["host" if seat is host else "guest"]
+        return await portable_probe_command(seat.bridge, "portable-lantern", f"{action}\t{owner}")
+
+    async def dynamic_state(seat):
+        row = await call(seat, "dynamicstate")
+        if row == "absent":
+            return None
+        actor, replicates, held, point = row.split(";")
+        return {"actor": actor, "motion": replicates == "1", "held": held == "1",
+                "position": list(map(float, point.split()))}
+
+    for name, carrier in (("guest", guest), ("host", host)):
+        staging = tuple(map(float, (await call(host, "impactlane")).split()))
+        await wait(guest_run, lambda frame: (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
+                   and math.dist(point, staging) < 45)
+        await call(host, f"dynamicspawn{name}")
+        before = await dynamic_state(host)
+        async with asyncio.timeout(5):
+            while (replica := await dynamic_state(guest)) is None:
+                await asyncio.sleep(.05)
+        assert before and not before["motion"] and not before["held"] and not replica["held"], (before, replica)
+        observation = evidence[name] = dict(before=before, replica_before=replica)
+        assert await call(carrier, "dynamicgrab") == "grabbed"
+        if carrier is guest:
+            await wait(host_run, lambda frame: (edge := frame.get("game", {}).get(native_prop_carry.PROOF, {}))
+                       and (edge["edge"], edge["actor"]) == ("grab", before["actor"]), timeout=8)
+        held = await dynamic_state(host)
+        assert held and held["motion"], held
+        assert await call(carrier, "dynamicsweep") == "sweeping"
+        await asyncio.sleep(1.35)
+        during, seen = await asyncio.gather(dynamic_state(host), dynamic_state(guest))
+        for state in (during, seen):
+            assert state and math.dist(state["position"], before["position"]) > 25, state
+        assert await call(carrier, "dynamicdrop") == "dropped"
+        if carrier is guest:
+            await wait(host_run, lambda frame: (edge := frame.get("game", {}).get(native_prop_carry.PROOF, {}))
+                       and (edge["edge"], edge["actor"]) == ("drop", before["actor"]))
+        async with asyncio.timeout(8):
+            while True:
+                authority, observer = await asyncio.gather(dynamic_state(host), dynamic_state(guest))
+                if (authority and observer and not authority["held"] and not observer["held"]
+                        and math.dist(authority["position"], observer["position"]) < 20):
+                    break
+                await asyncio.sleep(.08)
+        observation.update(motion_authority=during, motion_guest=seen, released=(authority, observer))
+        assert await call(host, "dynamicremove") == "removed"
+        async with asyncio.timeout(5):
+            while await dynamic_state(guest) is not None:
+                await asyncio.sleep(.05)
+    assert campaign_save_hashes(host.campaign) == checkpoint, "A spawned prop carry wrote a campaign checkpoint"
+    return {"spawned_prop_carry": evidence}
+
+
 async def verify_stock_host_prop_observer(host: Seat, guest: Seat, pawn: str, evidence: dict) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_status, guest_status = await asyncio.gather(*(
@@ -6063,7 +6127,14 @@ async def verify_stock_host_prop_observer(host: Seat, guest: Seat, pawn: str, ev
                 assert frames["host"]["attributed_calls"] == frames["host"]["damage_calls"] == 1, frames
                 assert max(frames["host"]["impulses"], default=0) > 5000, frames
                 assert frames["host"]["hp"][0] == frames["host"]["hp"][1] == frames["guest"]["hp"][1], frames
-            assert math.dist(frames["host"]["settled"], frames["guest"]["settled"]) < 20, frames
+            # An impact can still be bouncing after the contact callback. Compare
+            # the two replicas once the movement updates converge.
+            async with asyncio.timeout(5):
+                while math.dist(frames["host"]["settled"], frames["guest"]["settled"]) >= 20:
+                    await asyncio.sleep(.15)
+                    points = await asyncio.gather(call(host, f"{prefix}impactposition"), call(guest, f"{prefix}impactposition"))
+                    for seat, point in zip(("host", "guest"), points, strict=True):
+                        frames[seat]["settled"] = list(map(float, point.split()))
         return impacts
 
     impacts = evidence["stock_impacts"] = await impact_pair(lantern_class, native_lantern.ACTOR)
@@ -6086,53 +6157,6 @@ async def verify_stock_host_prop_observer(host: Seat, guest: Seat, pawn: str, ev
     assert target["attributed_calls"] == target["damage_calls"] == 1, target
     assert target["hp"][1] < target["hp"][0], target
 
-    async def dynamic_state(seat):
-        row = await call(seat, "dynamicstate")
-        if row == "absent":
-            return None
-        actor, replicates, held, point = row.split(";")
-        return {"actor": actor, "motion": replicates == "1", "held": held == "1",
-                "position": list(map(float, point.split()))}
-
-    evidence["unregistered_spawned_props"] = {}
-    for name, carrier in (("guest", guest), ("host", host)):
-        staging = tuple(map(float, (await call(host, "impactlane")).split()))
-        await wait(guest_run, lambda frame: (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
-                   and math.dist(point, staging) < 45)
-        await call(host, f"dynamicspawn{name}")
-        before = await dynamic_state(host)
-        async with asyncio.timeout(5):
-            while (replica := await dynamic_state(guest)) is None:
-                await asyncio.sleep(.05)
-        assert before and not before["motion"] and not before["held"] and not replica["held"], (before, replica)
-        observation = evidence["unregistered_spawned_props"][name] = dict(before=before, replica_before=replica)
-        assert await call(carrier, "dynamicgrab") == "grabbed"
-        if carrier is guest:
-            await wait(host_run, lambda frame: (edge := frame.get("game", {}).get(native_prop_carry.PROOF, {}))
-                       and (edge["edge"], edge["actor"]) == ("grab", before["actor"]), timeout=8)
-        held = await dynamic_state(host)
-        assert held and held["motion"], held
-        assert await call(carrier, "dynamicsweep") == "sweeping"
-        await asyncio.sleep(1.35)
-        during, seen = await asyncio.gather(dynamic_state(host), dynamic_state(guest))
-        for state in (during, seen):
-            assert state and math.dist(state["position"], before["position"]) > 25, state
-        assert await call(carrier, "dynamicdrop") == "dropped"
-        if carrier is guest:
-            await wait(host_run, lambda frame: (edge := frame.get("game", {}).get(native_prop_carry.PROOF, {}))
-                       and (edge["edge"], edge["actor"]) == ("drop", before["actor"]))
-        async with asyncio.timeout(8):
-            while True:
-                authority, observer = await asyncio.gather(dynamic_state(host), dynamic_state(guest))
-                if (authority and observer and not authority["held"] and not observer["held"]
-                        and math.dist(authority["position"], observer["position"]) < 20):
-                    break
-                await asyncio.sleep(.08)
-        observation.update(motion_authority=during, motion_guest=seen, released=(authority, observer))
-        assert await call(host, "dynamicremove") == "removed"
-        async with asyncio.timeout(5):
-            while await dynamic_state(guest) is not None:
-                await asyncio.sleep(.05)
     assert campaign_save_hashes(host.campaign) == checkpoint, "A stock prop impact wrote a campaign checkpoint"
     return {"stock_host_prop_observer": True,
             "stock_prop_contact_both_seats": len(evidence["stock_contact_recipients"]) == 2,
@@ -7439,6 +7463,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_host_corpse_carry, "observatory", "stock_host_corpse_carry", verify_stock_host_corpse_carry),
         (stock_host_prop_observer, prop_campaign, "stock_host_prop_observer",
          lambda host, guest, pawn: verify_stock_host_prop_observer(host, guest, pawn, proof.setdefault("host_prop_observer", {}))),
+        (stock_host_prop_observer, "spawned_prop_carry", "spawned_prop_carry",
+         lambda host, guest, pawn: verify_spawned_prop_carry(host, guest, pawn, proof.setdefault("spawned_prop_carry", {}))),
         (stock_flashlights, "observatory", "stock_flashlights", verify_stock_flashlights),
         (stock_melee_edges, "observatory", "stock_melee_edges", verify_stock_melee_edges_only),
         (stock_avatar_tail, "observatory", "stock_avatar_tail", verify_stock_avatar_tail),
