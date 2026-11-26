@@ -156,7 +156,7 @@ local function steam_available()
     return available
 end
 
-local function multiplayer(offer)
+local function multiplayer(offer, focus)
     session.browser = nil
     local choices, rows = actions[offer.choices], {}
     if choices.host then rows[#rows + 1] = {button("host", "Host Game")} end
@@ -165,14 +165,14 @@ local function multiplayer(offer)
         rows[#rows + 1] = {button("steam-public", "Public Steam Lobbies")}
     end
     rows[#rows + 1] = {button("modes", "Back")}
-    present({title = "Multiplayer", rows = rows, navigation = resident})
+    present({title = "Multiplayer", rows = rows, navigation = resident, focus = focus})
 end
 
-local function modes(owner)
+local function modes(owner, focus)
     controls.remove(owner.solo_back)
     owner.solo_back = nil
     show_stock(owner, false)
-    present({title = "Project Silverfish", navigation = resident, rows = {
+    present({title = "Project Silverfish", navigation = resident, focus = focus, rows = {
         {button("singleplayer", "Singleplayer")},
         {button("multiplayer", "Multiplayer")},
         {button("quit", "Quit")},
@@ -294,9 +294,9 @@ local function choose(action, context, form_values, friendly_fire)
     return false, report.reason
 end
 
-local function host_menu()
+local function host_menu(focus)
     session.form.screen = "menu"
-    present({title = "Host Game", rows = {
+    present({title = "Host Game", focus = focus, rows = {
         {button("new", "New Game")},
         {button("browse", "Load Game")},
         {button("manage", "Manage Saves")},
@@ -304,7 +304,7 @@ local function host_menu()
     }})
 end
 
-local function host_settings(form, note)
+local function host_settings(form, note, focus)
     form.screen = "settings"
     local rows = form.api.rows(form.values, resident, not form.saved_name and (resident or form.fixture))
     if resident and not form.fixture then
@@ -314,12 +314,12 @@ local function host_settings(form, note)
     local label = form.saved_name and "Load Game" or "Start Game"
     rows[#rows + 1] = {button("submit", label), button("back", "Back")}
     local title_text = form.saved_name and "Load Game" or "New Game"
-    present({title = title_text, note = note or form.saved_display, rows = rows})
+    present({title = title_text, note = note or form.saved_display, rows = rows, focus = focus})
 end
 
 local function host_network(form, note)
     form.screen = "network"
-    present({title = "Host networking", note = note, rows = {
+    present({title = "Host networking", note = note, focus = form.values.steam_access and "steam" or "direct", rows = {
         {button("direct", "Direct IP"), button("steam", "Steam Networking")},
         {button("back", "Back")},
     }})
@@ -331,7 +331,7 @@ local function host_steam_access(form)
         return
     end
     form.screen = "steam-access"
-    present({title = "Steam lobby access", rows = {
+    present({title = "Steam lobby access", focus = form.values.steam_access, rows = {
         {button("invite", steam_access_labels.invite, "Join from a Steam invite")},
         {button("friends", steam_access_labels.friends, "Friends can use Join Game")},
         {button("public", steam_access_labels.public, "Listed in the lobby browser")},
@@ -339,7 +339,7 @@ local function host_steam_access(form)
     }})
 end
 
-local function show_saved(form)
+local function show_saved(form, focus)
     form.screen = "saved"
     local saved, rows, note = form.saved, {}, nil
     if not saved then
@@ -361,7 +361,7 @@ local function show_saved(form)
         if #pages > 0 then rows[#rows + 1] = pages end
     end
     rows[#rows + 1] = {button("back", "Back")}
-    present({title = "Load co-op campaign", note = note, rows = rows})
+    present({title = "Load co-op campaign", note = note, rows = rows, focus = focus})
 end
 
 local function handle_host_form(action, context)
@@ -381,7 +381,7 @@ local function handle_host_form(action, context)
     if form.manager then
         if form.management.press(form.manager, action) == "leave" then
             form.manager = nil
-            host_menu()
+            host_menu("manage")
         end
         return true
     end
@@ -395,13 +395,13 @@ local function handle_host_form(action, context)
     end
     if action == "back" then
         if form.screen == "steam-access" then host_network(form)
-        elseif form.screen == "network" then host_settings(form)
+        elseif form.screen == "network" then host_settings(form, nil, "network")
         elseif form.fixture and form.screen == "saved" then host_settings(form)
         elseif form.fixture or form.screen == "menu" or not resident then
             close_form(session)
-            multiplayer(offer)
-        elseif form.screen == "settings" and form.saved_name then show_saved(form)
-        else host_menu() end
+            multiplayer(offer, "host")
+        elseif form.screen == "settings" and form.saved_name then show_saved(form, "load:" .. form.saved_name)
+        else host_menu(form.screen == "settings" and "new" or "browse") end
         return true
     end
     if form.screen == "settings" and action == "network" and resident and not form.fixture then
@@ -413,13 +413,13 @@ local function handle_host_form(action, context)
         if action == "steam" then host_steam_access(form)
         elseif action == "direct" then
             form.values.steam_access = nil
-            host_settings(form)
+            host_settings(form, nil, "network")
         else return false, "title_host_form_unavailable" end
         return true
     end
     if form.screen == "steam-access" and steam_access_labels[action] then
         form.values.steam_access = action
-        host_settings(form)
+        host_settings(form, nil, "network")
         return true
     end
     if action == "new" and form.screen == "menu" then
@@ -516,7 +516,7 @@ local function handle_join_form(action, state, phase, context, steam_invite)
     end
     if failure == "title_join_form_back_to_title" then
         close_form(session)
-        multiplayer(offer)
+        multiplayer(offer, "join")
         return true
     end
     return accepted, failure
@@ -588,7 +588,7 @@ end
 local function browser_action(action)
     local browser = session.browser
     if action == "steam-back" then
-        multiplayer(session.offer)
+        multiplayer(session.offer, "steam-public")
         return
     end
     if action == "steam-public" then
@@ -960,8 +960,9 @@ dispatch = function(action)
             singleplayer(session)
         elseif action == "modes" then
             close_form(session)
+            local focus = singleplayer_title and "singleplayer" or "multiplayer"
             singleplayer_title = nil
-            modes(session)
+            modes(session, focus)
         elseif action == "multiplayer" then
             close_form(session)
             singleplayer_title = nil
@@ -1031,6 +1032,15 @@ function panel.command(fields, state, phase)
     if fields[2] == "native-title-settings-widget-fixture" then return settings_fixture_command(fields, state, phase) end
     if fields[2] == "native-title-host-form-fixture" then return host_form_fixture_command(fields, state, phase) end
     if fields[2] == "native-title-join-form-fixture" then return join_form_fixture_command(fields, state, phase) end
+    if fields[2] == "native-title-focus-fixture" then
+        if not fixture_enabled() or #fields ~= 3 or not can_choose(title.probe(state, phase)) then
+            error("title_panel_fixture_unavailable", 0)
+        end
+        local form = session.form
+        local view = form and form.role == "join" and form.draft.view or session.view
+        if not surface.has_focus(view, fields[3]) then error("title_panel_fixture_focus_unavailable", 0) end
+        return "title_control_focused"
+    end
     if fields[2] == "native-title-button-fixture" then
         if not fixture_enabled() or #fields ~= 3 or not can_choose(title.probe(state, phase)) then
             error("title_panel_fixture_unavailable", 0)

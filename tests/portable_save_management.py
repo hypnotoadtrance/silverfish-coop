@@ -25,18 +25,26 @@ async def verify_save_management(host, guest):
              for entry in native_host_save.references(original)}
     fixture = "native-title-button-fixture"
 
-    async def click(name):
+    async def title_control(action, name):
+        unavailable = "title_panel_fixture_focus_unavailable" if action == "focus" else "title_panel_fixture_button_unavailable"
+        command = "native-title-focus-fixture" if action == "focus" else fixture
         async with asyncio.timeout(8):
             while True:
                 try:
-                    reply = await host.bridge.command(fixture, name, timeout=3)
+                    reply = await host.bridge.command(command, name, timeout=3)
                 except RuntimeError as error:
-                    if str(error) != "title_panel_fixture_button_unavailable":
+                    if str(error) != unavailable:
                         raise
                     await asyncio.sleep(.1)
                 else:
                     assert reply["ack"]["result"] == "accepted", reply
                     return
+
+    async def click(name):
+        await title_control("click", name)
+
+    async def focused(name):
+        await title_control("focus", name)
 
     async def saved_after(revision):
         async with asyncio.timeout(12):
@@ -47,20 +55,35 @@ async def verify_save_management(host, guest):
                 await asyncio.sleep(.1)
 
     await click("multiplayer")
+    await focused("host")
     await click("host")
+    await click("new")
+    await focused("campaign")
+    await click("network")
+    await focused("direct")
+    await click("back")
+    await focused("network")
+    await click("back")
+    await focused("new")
     await click("manage")
     await click("save:" + campaign_id)
     await click("characters")
     await click("character:" + character)
+    await click("back")
+    await focused("character:" + character)
+    await click("character:" + character)
     await click("delete-character")
+    await focused("back")
     assert not (host.bridge.directory / title_host_campaigns.REQUEST).exists()
     assert read()["revision"] == original["revision"]
     await click("back")
+    await focused("back")
     await click("delete-character")
     await click("confirm")
     deleted_character = await saved_after(original["revision"])
     assert deleted_character["characters"][character]["state"][DELETED] is True
 
+    await focused("save:" + campaign_id)
     await click("save:" + campaign_id)
     await click("characters")
     await click("character:" + character)
@@ -70,6 +93,7 @@ async def verify_save_management(host, guest):
 
     await click("save:" + campaign_id)
     await click("delete-save")
+    await focused("back")
     assert read()["revision"] == restored_character["revision"]
     await click("confirm")
     deleted_save = await saved_after(restored_character["revision"])
@@ -84,6 +108,7 @@ async def verify_save_management(host, guest):
                 break
             await asyncio.sleep(.1)
     await click("back")
+    await focused("manage")
     await click("browse")
     try:
         await host.bridge.command(fixture, "load:" + host.campaign.name)
@@ -107,6 +132,6 @@ async def verify_save_management(host, guest):
     assert reopened["campaign_id"] == created["campaign_id"] and reopened["character_id"] == character
     assert reopened["host_pid"] == created["host_pid"] and reopened["guest_pid"] == created["guest_pid"]
     return {"created": created, "reopened": reopened, "deleted_saves_hidden": True,
-            "confirmation_cancelled": True, "native_slots_preserved": len(slots),
+            "confirmation_cancelled": True, "title_focus_verified": True, "native_slots_preserved": len(slots),
             "revisions": [original["revision"], deleted_character["revision"], restored_character["revision"],
                           deleted_save["revision"], restored_save["revision"]]}

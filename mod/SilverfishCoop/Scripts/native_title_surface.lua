@@ -78,6 +78,7 @@ local function prompt(view, field, y)
     input:SetIsReadOnly(false)
     input:SetIsPassword(field.secret == true)
     input:SetText(FText(field.value or ""))
+    input:SetVisibility(0)
     place(cell(view.canvas, input), x, y, width - padding - x, control_height, 1)
     view.inputs[field.key] = {widget = input, limit = field.limit}
     return input
@@ -216,9 +217,10 @@ function surface.mount(context, spec, on_action)
         widget:SetVisibility(4)
         view.active = true
         if not surface.sync(view) then error("title_surface_toggle_unavailable", 0) end
-        local focus = first_button
+        local preferred = view.buttons[spec.focus]
+        local focus = preferred and preferred.inner or first_button
         for _, input in ipairs(input_order) do
-            if input:GetIsEnabled() == true then
+            if not preferred and input:GetIsEnabled() == true then
                 focus = input
                 break
             end
@@ -260,6 +262,15 @@ end
 function surface.press_fixture(view, key)
     local button = view and view.active and view.buttons[key]
     return button and controls.press_fixture(button)
+end
+
+function surface.has_focus(view, key)
+    if not view or not view.active then return false end
+    local button, input, toggle = view.buttons[key], view.inputs[key], view.toggles[key]
+    local widget = button and button.inner or input and input.widget or toggle and toggle.widget
+    if not valid(widget) then return false end
+    local controller = view.widget:GetOwningPlayer()
+    return widget:HasUserFocus(controller) == true or widget:HasUserFocusedDescendants(controller) == true
 end
 
 return surface

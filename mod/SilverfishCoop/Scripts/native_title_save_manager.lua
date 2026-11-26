@@ -24,7 +24,7 @@ local function page_rows(rows, entries, first, row_for)
     if #navigation > 0 then rows[#rows + 1] = navigation end
 end
 
-local function draw(state, note)
+local function draw(state, note, focus)
     local rows, heading = {}, "Manage Saves"
     local save = state.save
     if state.screen == "list" then
@@ -74,16 +74,25 @@ local function draw(state, note)
     else
         note = note or "Updating co-op saves…"
     end
-    state.present({title = heading, note = note, rows = rows})
+    state.present({title = heading, note = note, rows = rows, focus = focus})
 end
 
-local function open_list(state, note)
+local function open_list(state, note, selected_id, entries)
     state.screen, state.save, state.character = "list", nil, nil
-    state.saves = state.catalog()
+    state.saves = entries or state.catalog()
+    state.list_return = not state.saves and {note = note, selected_id = selected_id} or nil
+    if selected_id then
+        for index, entry in ipairs(state.saves or {}) do
+            if entry.id == selected_id then
+                state.first = (index - 1) // page_size * page_size + 1
+                break
+            end
+        end
+    end
     if state.saves and state.first > #state.saves then
         state.first = math.max(1, (#state.saves - 1) // page_size * page_size + 1)
     end
-    draw(state, note)
+    draw(state, note, selected_id and "save:" .. selected_id)
 end
 
 local function request(state, action)
@@ -129,12 +138,19 @@ end
 function manager.press(state, action)
     local screen = state.screen
     if screen == "waiting" then return end
+    local focus
     if action == "back" then
         if screen == "list" then return "leave" end
-        if screen == "save" then open_list(state); return end
-        if screen == "characters" then state.screen = "save"
-        elseif screen == "character" then state.screen = "characters"
-        elseif screen == "confirm" then state.screen = state.confirm == "delete-save" and "save" or "character" end
+        if screen == "save" then
+            open_list(state, nil, state.save.id)
+            return
+        elseif screen == "characters" then
+            state.screen, focus = "save", "characters"
+        elseif screen == "character" then
+            state.screen, focus = "characters", "character:" .. state.character.id
+        elseif screen == "confirm" then
+            state.screen, focus = state.confirm == "delete-save" and "save" or "character", "back"
+        end
     elseif (action == "previous" or action == "next") and (screen == "list" or screen == "characters") then
         local list = screen == "list"
         local entries = list and state.saves or state.characters
@@ -155,6 +171,7 @@ function manager.press(state, action)
     elseif (screen == "save" and action == "delete-save" and not state.save.deleted)
         or (screen == "character" and action == "delete-character" and not state.character.deleted) then
         state.confirm, state.screen = action, "confirm"
+        focus = "back"
     elseif screen == "confirm" and action == "confirm" then
         start_request(state, state.confirm)
         return
@@ -165,7 +182,7 @@ function manager.press(state, action)
     else
         return
     end
-    draw(state)
+    draw(state, nil, focus)
 end
 
 local function response(state)
@@ -193,8 +210,10 @@ local function response(state)
 end
 
 function manager.poll(state)
-    if state.screen == "list" and not state.saves and state.catalog() then
-        open_list(state)
+    if state.list_return then
+        local entries = state.catalog()
+        local previous = state.list_return
+        if entries then open_list(state, previous.note, previous.selected_id, entries) end
         return
     end
     local pending = state.pending
@@ -204,13 +223,13 @@ function manager.poll(state)
     state.pending = nil
     if failure or not entries then
         open_list(state, failure == "busy" and "Close the hosted campaign before managing this save."
-            or "Could not complete the save request. Reopen the save and try again.")
+            or "Could not complete the save request. Reopen the save and try again.", state.save.id)
     elseif pending.action == "characters" then
         state.characters, state.screen = entries, "characters"
         draw(state)
     else
         local name = pending.action:match("%-character$") and "Character" or "Save"
-        open_list(state, name .. (pending.action:match("^restore") and " restored." or " moved to Deleted."))
+        open_list(state, name .. (pending.action:match("^restore") and " restored." or " moved to Deleted."), state.save.id)
     end
 end
 

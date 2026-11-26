@@ -84,6 +84,7 @@ function controls.create(context, parent, label, callback, font_size)
         if font_size then widget.Font_Size = font_size end
         widget:UpdateText(FText(label))
         if widget:GetText():ToString() ~= label then reject("text_unverified") end
+        record.inner.IsFocusable = true
         record.slot = parent[attachment.attach](parent, widget)
         if not exact(record.slot, attachment.slot) or not same(record.slot:GetOuter(), parent)
             or not same(widget:GetParent(), parent) then reject("slot_unverified") end
