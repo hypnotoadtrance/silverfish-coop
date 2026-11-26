@@ -1,4 +1,5 @@
 local wipe_view = {}
+local content_paths = require("content_paths")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_WIPE_VIEW") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
@@ -179,12 +180,12 @@ local function page(fields, row, offset)
     local records, locked_ordinal, guids, positions = {}, row.locked_ordinal, {}, {}
     for index = 13, #fields do
         local guid, source, raw_slot, raw_amount, class, policy, stackable =
-            fields[index]:match("^([0-9A-F]+)|([a-z]+)|(%d+)|(%d+)|(/Game/[%w_/%-%%]+%.[%w_%-%%]+_C)|([a-z]+)|([01])$")
+            fields[index]:match("^([0-9A-F]+)|([a-z]+)|(%d+)|(%d+)|([^|]+)|([a-z]+)|([01])$")
         local slot = integer(raw_slot, (source == "armor" or source == "helmet") and 0 or 4095)
         local amount = integer(raw_amount, 2147483647)
         local is_locked = source == "backpack" and class == black_stone
         if not hex32(guid, "^[0-9A-F]+$") or not sources[source] or not slot or not amount or amount < 1
-            or #class > 512 or is_locked ~= (policy == "locked")
+            or not content_paths.item_class(class, 512) or is_locked ~= (policy == "locked")
             or (policy ~= "selectable" and policy ~= "locked" and (policy ~= "excluded" or source ~= "backpack")) then
             error("The frozen wipe inventory contains an invalid stock item", 0)
         end

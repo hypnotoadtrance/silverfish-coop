@@ -206,12 +206,12 @@ local function page(fields)
             error("The authenticated inventory row contains an unsupported action", 0)
         end
         local guid, source, slot, amount, class = (marked or fields[index]):match(
-            "^([0-9A-F]+)|([a-z]+)|(%d+)|(%d+)|(/Game/[%w_./%-]+)$")
+            "^([0-9A-F]+)|([a-z]+)|(%d+)|(%d+)|([^|]+)$")
         local quantity = integer(amount, 2147483647)
-        local item = class and #class <= 512 and class:match("%.([%w_%-]+)_C$")
+        local actor_class = drop_items.stock_actor_class(class, 512)
         local index_in_source = integer(slot, 4095)
         if not guid or #guid ~= 32 or guid == string.rep("0", 32) or seen[guid] or not sources[source]
-            or not index_in_source or not quantity or quantity < 1 or not item then
+            or not index_in_source or not quantity or quantity < 1 or not actor_class then
             error("The authenticated inventory view contains an invalid stock item", 0)
         end
         local position = source .. "|" .. index_in_source
@@ -222,7 +222,7 @@ local function page(fields)
             and (weapon_profiles.kinds[class] ~= nil or class == camera_path or pry_tool_paths[class] or throwables[class]
                 or class == "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"))
             or (source == "backpack" and (body_armor.is_body_path(class) or body_armor.is_helmet_path(class)))
-        local name = item:gsub("_", " ")
+        local name = actor_class:sub(1, -3):gsub("_", " ")
         local consumable = class == bandage_path and "Bandage" or starter_bags[class] or mre_enabled and meals.label(class)
         local usable = source == "backpack" and consumable ~= false and consumable ~= nil
         local splittable = options == "split" or options == "split,drop"

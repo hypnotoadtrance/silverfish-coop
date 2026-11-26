@@ -1,4 +1,5 @@
 local audio = {}
+local content_paths = require("content_paths")
 local cash_popup = require("native_cash_popup")
 audio.update = cash_popup.update
 local pickup_base = "/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"
@@ -61,11 +62,9 @@ function audio.command(fields, state, phase, loaded_only)
         x, y, z = tonumber(x), tonumber(y), tonumber(z)
         local positioned = x and y and z
         local show_cash = amount and phase == "connected" and not loaded_only
-        local package, export
-        if path and #path <= 256 then package, export = path:match("^(/Game/Classes/[%w_/%-]+)%.([%w_%-]+)_C$") end
         if token(id) and seen[id] then
             heard[#heard + 1] = id
-        elseif token(id) and package and package:match("([^/]+)$") == export and (positioned or show_cash) then
+        elseif token(id) and content_paths.item_class(path) and (positioned or show_cash) then
             local near = positioned and (origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2 <= 1800^2
             local queued, played = false, false
             if show_cash then

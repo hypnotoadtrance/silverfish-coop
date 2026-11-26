@@ -3601,9 +3601,7 @@ namespace
             return result(lua, false, "native_inventory_grant_refused_arguments");
         const auto class_path = lua.get_string();
         const auto reported = lua.get_string();
-        if (class_path.size() > 512 || !class_path.starts_with("/Game/") || !class_path.ends_with("_C") ||
-            class_path.find("..") != std::string::npos ||
-            class_path.find_first_not_of("/._-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789") != std::string::npos ||
+        if (!silverfish::content_paths::item_class(std::string_view{class_path}, 512) ||
             reported.empty() || reported.size() > max_inventory_item_text || reported.front() != '(' ||
             reported.back() != ')' || reported.find_first_of("\t\r\n") != std::string::npos ||
             reported.find('\0') != std::string::npos)
@@ -3681,9 +3679,7 @@ namespace
         const auto units = lua.get_integer();
         if (units < 1 || units > INT32_MAX || !parse_guid(lua.get_string(), operation))
             return result(lua, false, "native_inventory_grant_refused_arguments");
-        if (class_path.size() > 512 || !class_path.starts_with("/Game/") || !class_path.ends_with("_C") ||
-            class_path.find("..") != std::string::npos ||
-            class_path.find_first_not_of("/._-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789") != std::string::npos)
+        if (!silverfish::content_paths::item_class(std::string_view{class_path}, 512))
             return result(lua, false, "native_inventory_grant_refused_class");
         if (!resolve_owner(context, pawn, save).empty())
             return result(lua, false, "native_inventory_grant_refused_owner");

@@ -1,4 +1,5 @@
 local stack_drop = {}
+local content_paths = require("content_paths")
 local guest_save = require("guest_save")
 local host_save = require("native_host_save")
 local players = require("players")
@@ -165,7 +166,7 @@ local function transfer(fields, state, phase)
     if debit then apply = SilverfishApplyPreparedNativeInventory end
     if (not memory and #fields ~= 11 and (#fields ~= 12 or debit or not item_guid(reclaim_guid)))
         or (memory and (not memory_available() or not quantity or quantity < 1 or quantity > 200
-            or type(class) ~= "string" or not class:match("^/Game/[%w_./%-]+$")))
+            or not content_paths.item_class(class)))
         or fields[11] ~= state.map or not hosting_map(state, phase)
         or (not debit and operation ~= "reclaim") or type(id) ~= "string" or #id ~= 32
         or not id:match("^[0-9a-f]+$") or not slot_name(source) or source == replacement

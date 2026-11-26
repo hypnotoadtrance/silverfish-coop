@@ -1,4 +1,5 @@
 local guest_ui = {}
+local content_paths = require("content_paths")
 local guest_save = require("guest_save")
 local scope = require("native_save_scope")
 local wallet = require("wallet")
@@ -94,12 +95,12 @@ local function fields(array, wrap)
 end
 
 local function item_path(class)
-    local path = valid(class) and class:GetFullName():match("^BlueprintGeneratedClass (/Game/[%w_./%-]+_C)$")
-    if path and #path <= 512 and not path:find("..", 1, true) then return path end
+    local path = valid(class) and class:GetFullName():match("^BlueprintGeneratedClass ([^%s]+)$")
+    if content_paths.item_class(path, 512) then return path end
 end
 
 local function resolve_item_class(name)
-    if #name > 512 or not name:match("^/Game/[%w_./%-]+_C$") or name:find("..", 1, true) then return end
+    if not content_paths.item_class(name, 512) then return end
     local class = StaticFindObject(name)
     if not valid(class) then
         if not pcall(LoadAsset, name) then return end

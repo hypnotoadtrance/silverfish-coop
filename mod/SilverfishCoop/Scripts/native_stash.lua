@@ -1,4 +1,5 @@
 local stash = {}
+local content_paths = require("content_paths")
 local guest_save = require("guest_save")
 local host_save = require("native_host_save")
 local statics_path = "/Script/Engine.Default__GameplayStatics"
@@ -218,7 +219,7 @@ local function move(fields, state, phase)
     if ok ~= true then error(tostring(status), 0) end
     snapshots[pawn:GetAddress()] = nil
     local merged = status == "merged"
-    if (status ~= "moved" and not (split and merged)) or type(class) ~= "string" or not class:match("^/Game/[%w_./%-]+$")
+    if (status ~= "moved" and not (split and merged)) or not content_paths.item_class(class, 512)
         or math.type(moved_quantity) ~= "integer" or moved_quantity < 1
         or (split and (moved_quantity ~= tonumber(quantity) or remaining ~= tonumber(stack_size) - moved_quantity
             or (not merged and destination ~= extra)))

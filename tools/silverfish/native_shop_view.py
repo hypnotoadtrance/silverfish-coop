@@ -8,6 +8,7 @@ import time
 import uuid
 
 from . import runtime
+from .content_paths import item_class_name
 from .native_finite_shop import CASTAWAY_ACTOR, MAX_PRICE, STOCK_REVISION, merchant_in_map, valid_stock_revision
 from .native_gold import valid_guid
 
@@ -18,7 +19,6 @@ STOCK_RECHECK_INTERVAL = 4
 WAITING = {"open": "pending", "page": "paging", "buy": "buying", "sell": "selling"}
 _CARD = re.compile(r"stock:(shelf|limited|buyback|backpack):([0-9A-F]{32})\Z")
 _QUANTITY_CARD = re.compile(r"stock-(open|cancel|amount):(shelf|limited|buyback):([0-9A-F]{32})(?::([1-9][0-9]{0,9}))?\Z")
-_ITEM = re.compile(r"/Game/[A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+_C\Z")
 _REFRESH_AFTER_REFUSAL = {
     "native_finite_shop_quote_changed", "native_finite_shop_item_unavailable", "insufficient_funds",
     "insufficient_merchant_funds", "finite_shop_refused_shop_quote_changed",
@@ -220,8 +220,7 @@ class ShopView:
         fields, quotes = [], {}
         for row in offers[offset:offset + PAGE_SIZE]:
             guid, item_class, quantity, price = (row[key] for key in ("guid", "class_path", "quantity", "price"))
-            if (not valid_guid(guid) or guid in quotes or not isinstance(item_class, str) or not item_class.startswith("/Game/")
-                    or "|" in item_class or type(quantity) is not int or not 0 < quantity <= MAX_PRICE
+            if (not valid_guid(guid) or guid in quotes or not item_class_name(item_class, 512) or type(quantity) is not int or not 0 < quantity <= MAX_PRICE
                     or type(price) is not int or not 0 <= price <= MAX_PRICE):
                 raise ValueError("The host returned an invalid merchant offer")
             fields.append(f"{guid}|{item_class}|{quantity}|{price}")
@@ -251,7 +250,7 @@ class ShopView:
             guid, path, source = offer["guid"], offer["class_path"], offer["source"]
             price, value, ammo, weight, protected = (offer[key] for key in ("price", "value", "ammo", "weight", "never_drop"))
             markup = offer.get("markup")
-            if (not valid_guid(guid) or guid in quotes or not _ITEM.fullmatch(path) or len(path) > 512
+            if (not valid_guid(guid) or guid in quotes or not item_class_name(path, 512)
                     or source not in {"shelf", "limited", "buyback"}
                     or type(price) is not int or not 0 <= price <= MAX_PRICE
                     or type(value) is not int or not 0 <= value <= MAX_PRICE

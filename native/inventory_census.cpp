@@ -175,19 +175,6 @@ namespace
         }
     };
 
-    bool asset_path(std::string_view path)
-    {
-        if (!path.starts_with("/Game/") || !path.ends_with("_C") || path.size() > max_class_path) return false;
-        const auto dot = path.find('.', 6);
-        if (dot == std::string_view::npos || dot == 6 || dot + 3 >= path.size()) return false;
-        const auto ordinary = [](char ch) {
-            return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
-                   (ch >= '0' && ch <= '9') || ch == '_' || ch == '%' || ch == '-';
-        };
-        return std::ranges::all_of(path.substr(6, dot - 6), [&](char ch) { return ordinary(ch) || ch == '/'; }) &&
-               std::ranges::all_of(path.substr(dot + 1), ordinary);
-    }
-
     struct ItemClass
     {
         std::string path;
@@ -206,7 +193,7 @@ namespace
             auto* importance = field<Unreal::FBoolProperty>(defaults, STR("Important"));
             auto* retention = field<Unreal::FBoolProperty>(defaults, STR("CanNotKeep_AfterDeath"));
             path = RC::to_string(type->GetPathName());
-            if (!stacks || !importance || !retention || !asset_path(path)) return false;
+            if (!stacks || !importance || !retention || !silverfish::content_paths::item_class(std::string_view{path}, max_class_path)) return false;
             stackable = stacks->GetPropertyValueInContainer(defaults);
             important = importance->GetPropertyValueInContainer(defaults);
             cannot_keep = retention->GetPropertyValueInContainer(defaults);

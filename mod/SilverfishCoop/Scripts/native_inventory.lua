@@ -1,4 +1,5 @@
 local inventory = {}
+local content_paths = require("content_paths")
 local guest_save = require("guest_save")
 local host_save = require("native_host_save")
 local weapon_profiles = require("guest_weapon_registry")
@@ -27,7 +28,7 @@ local function split_stack(fields, state, phase)
         pawn:GetAddress(), save:GetAddress(), source, created, take, expected)
     if ok ~= true then error(tostring(status), 0) end
     if status ~= "split" or before ~= expected or remaining ~= before - take or taken ~= take
-        or type(class) ~= "string" or not class:match("^/Game/[%w_./%-]+$") then
+        or not content_paths.item_class(class, 512) then
         error("mutation_unverified_native_inventory_split_receipt", 0)
     end
     split = {map = state.map, pawn = name, source = source, created = created, class = class,
@@ -74,7 +75,7 @@ local function merge_stacks(fields, state, phase)
         pawn:GetAddress(), save:GetAddress(), source, destination, amount, expected)
     if ok ~= true then error(tostring(status), 0) end
     if status ~= "merged" or before ~= expected or after ~= before + amount or moved ~= amount
-        or type(class) ~= "string" or not class:match("^/Game/[%w_./%-]+$") then
+        or not content_paths.item_class(class, 512) then
         error("mutation_unverified_native_inventory_merge_receipt", 0)
     end
     merged = {map = state.map, pawn = name, source = source, destination = destination, class = class,
@@ -129,7 +130,7 @@ function inventory.command(fields, state, phase)
             error("native_inventory_unequip_refused_" .. status:sub(20), 0)
         end
         if ok ~= true then error(tostring(status), 0) end
-        if status ~= "unequipped" or source ~= slot or type(class) ~= "string" or not class:match("^/Game/[%w_./%-]+$")
+        if status ~= "unequipped" or source ~= slot or not content_paths.item_class(class, 512)
             or math.type(rounds) ~= "integer" or rounds < -1 or rounds > 2147483647 then
             error("mutation_unverified_native_inventory_unequip_receipt", 0)
         end
@@ -155,7 +156,7 @@ function inventory.command(fields, state, phase)
         local ok, status, slot, class, displaced = SilverfishStoreNativeGuestEquipment(table.unpack(arguments))
         if ok ~= true then error(tostring(status), 0) end
         if status ~= "stored" or math.type(slot) ~= "integer" or slot < 0 or slot > 7 or requested and slot ~= requested
-            or type(class) ~= "string" or not class:match("^/Game/[%w_./%-]+$")
+            or not content_paths.item_class(class, 512)
             or (displaced ~= "-" and (not guid(displaced) or displaced == item)) then
             error("mutation_unverified_native_inventory_equip_receipt", 0)
         end

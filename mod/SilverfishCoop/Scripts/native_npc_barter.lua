@@ -1,4 +1,5 @@
 local barter = {}
+local content_paths = require("content_paths")
 local guest_save = require("guest_save")
 local wire = require("native_wire_quest")
 local identity = require("native_npc_barter_identity")
@@ -114,8 +115,8 @@ local function preferences(actor)
     local result = {}
     stock:ForEach(function(raw, weight)
         local class, value = raw:get(), weight:get()
-        local path = valid(class) and class:GetFullName():match("^BlueprintGeneratedClass (/Game/Classes/[^|%s]+)$")
-        if not path or #path > 512 or type(value) ~= "number" or not (value > 0 and value <= 100) then fail("preference") end
+        local path = valid(class) and class:GetFullName():match("^BlueprintGeneratedClass ([^|%s]+)$")
+        if not content_paths.item_class(path, 512) or type(value) ~= "number" or not (value > 0 and value <= 100) then fail("preference") end
         result[#result + 1] = {class, path, value}
     end)
     return result, actor.RngSeed
@@ -140,9 +141,9 @@ local function catalog(state, pawn, instance, actor, identifier)
         local item = inventory[index]
         local kind = item and item[item_class]
         local key = item and guid(item[item_guid])
-        local path = valid(kind) and kind:GetFullName():match("^BlueprintGeneratedClass (/Game/Classes/[^|%s]+)$")
+        local path = valid(kind) and kind:GetFullName():match("^BlueprintGeneratedClass ([^|%s]+)$")
         local weight, ammo, value, never = item[item_weight], item[item_ammo], item[item_value], item[item_never]
-        if not key or key == ("0"):rep(32) or seen[key] or not path or #path > 512 or not math.tointeger(ammo)
+        if not key or key == ("0"):rep(32) or seen[key] or not content_paths.item_class(path, 512) or not math.tointeger(ammo)
             or not math.tointeger(value) or value < 0 or not (weight >= 0 and weight <= 100000)
             or type(never) ~= "boolean" then fail("catalog_item") end
         local quote = {}
@@ -267,9 +268,9 @@ end
 
 local function read_item(text)
     local id, path, ammo, weight, value, never = text:match(
-        "^([0-9A-F]+)|(/Game/Classes/[%w_./%-]+_C)|(-?%d+)|([^|]+)|(%d+)|([01])$")
+        "^([0-9A-F]+)|([^|]+)|(-?%d+)|([^|]+)|(%d+)|([01])$")
     local mass, rounds, price = tonumber(weight), math.tointeger(tonumber(ammo)), math.tointeger(tonumber(value))
-    if not id or #id ~= 32 or not id:find("[^0]") or #path > 512 or path:find("..", 1, true)
+    if not id or #id ~= 32 or not id:find("[^0]") or not content_paths.item_class(path, 512)
         or not mass or not (mass >= 0 and mass <= 100000) or not rounds or rounds < -2147483648 or rounds > 2147483647
         or not price or price < 0 or price > 2147483647 then fail("view_item") end
     local class, base = load(path), load(item_base)
@@ -348,9 +349,9 @@ local function guest_command(action, fields, state, phase)
     for index = 9, #fields do
         local encoded = fields[index]
         if encoded:sub(1, 2) == "p|" then
-            local path, weight = encoded:match("^p|(/Game/Classes/[%w_./%-]+_C)|([^|]+)$")
+            local path, weight = encoded:match("^p|([^|]+)|([^|]+)$")
             local value = tonumber(weight)
-            if not path or #path > 512 or path:find("..", 1, true) or not value or not (value > 0 and value <= 100)
+            if not content_paths.item_class(path, 512) or not value or not (value > 0 and value <= 100)
                 or observed[path] or #taste >= 256 then fail("view_preference") end
             local class, base = load(path), load(item_base)
             if not valid(class) or not valid(base) or class:GetCDO():IsA(base) ~= true then fail("view_preference_class") end

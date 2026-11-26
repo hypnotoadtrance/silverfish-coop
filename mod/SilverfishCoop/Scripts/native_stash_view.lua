@@ -1,4 +1,5 @@
 local view = {}
+local content_paths = require("content_paths")
 local save_scope = require("native_save_scope")
 
 view.memory_render = "native-stash-view-render-memory"
@@ -138,9 +139,9 @@ end
 
 local function item_row(line, seen)
     local guid, path, ammo, weight, value, protected = line:match(
-        "^([0-9A-F]+)\t(/Game/[%w_./%-]+_C)\t(-?%d+)\t([^\t]+)\t(-?%d+)\t([01])$")
+        "^([0-9A-F]+)\t([^\t]+)\t(-?%d+)\t([^\t]+)\t(-?%d+)\t([01])$")
     ammo, weight, value = math.tointeger(tonumber(ammo)), tonumber(weight), math.tointeger(tonumber(value))
-    if not guid or #guid ~= 32 or not guid:find("[^0]") or seen[guid] or #path > 512 or path:find("..", 1, true)
+    if not guid or #guid ~= 32 or not guid:find("[^0]") or seen[guid] or not content_paths.item_class(path, 512)
         or not ammo or ammo < -2147483648 or ammo > 2147483647 or not weight or not (weight >= 0 and weight <= 100000)
         or not value or value < -2147483648 or value > 2147483647 then
         error("native_stash_view_invalid_item", 0)

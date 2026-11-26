@@ -443,7 +443,7 @@ def _verified_page(host, snapshot: dict, slot: str, offset: int, *, pawn: str | 
         if (not valid_guid(item.get("guid")) or item.get("source") not in SOURCES
                 or type(item.get("index")) is not int or not 0 <= item["index"] < 4096
                 or type(item.get("quantity")) is not int or item["quantity"] < 1
-                or not isinstance(item.get("class_path"), str) or not item["class_path"].startswith("/Game/")
+                or not item_class_name(item.get("class_path"), 512)
                 or any(type(item.get(key)) is not bool for key in ("stackable", "important", "cannot_keep"))):
             raise RuntimeError("The stock inventory census contains an invalid row")
     if len({item["guid"] for item in items}) != count:

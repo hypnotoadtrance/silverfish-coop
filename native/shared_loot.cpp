@@ -1,4 +1,5 @@
 #include "shared_loot.hpp"
+#include "content_paths.hpp"
 #include "authored_loot_registry.hpp"
 #include "loot_crate_input.hpp"
 #include "electronic_locker.hpp"
@@ -1253,7 +1254,7 @@ namespace
             if (!std::ranges::all_of(item.transform, [](double value) { return std::isfinite(value); })) return 0;
             item.name = RC::to_utf8_string(actor->GetFullName());
             item.class_path = RC::to_utf8_string(actor->GetClassPrivate()->GetPathName());
-            if (!item.class_path.starts_with("/Game/")) return 0;
+            if (!silverfish::content_paths::item_class(std::string_view{item.class_path})) return 0;
             if (auto* ammo = field<Unreal::FIntProperty>(actor, STR("Ammo")))
                 item.ammo = ammo->GetPropertyValueInContainer(actor);
         }

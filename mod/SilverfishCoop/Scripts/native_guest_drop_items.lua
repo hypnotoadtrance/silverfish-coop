@@ -1,4 +1,4 @@
-local drop_items = {}
+local drop_items = {stock_actor_class = require("content_paths").item_class}
 
 drop_items.ammo = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
 drop_items.pistol = "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"
@@ -27,13 +27,6 @@ for blueprint, label in pairs({
     local actor = blueprint .. "_C"
     local class = "/Game/Classes/Items/" .. blueprint .. "." .. actor
     drop_items.profiles[class] = { actor = actor, label = label, maximum = 200, stackable = true }
-end
-
-function drop_items.stock_actor_class(class)
-    if type(class) ~= "string" or #class > 256 or class:find("//", 1, true) then return end
-    local package, actor = class:match("^/Game/([A-Za-z0-9_/%-]+)%.([A-Za-z0-9_%-]+_C)$")
-    local asset = package and package:match("([A-Za-z0-9_%-]+)$")
-    if asset and actor == asset .. "_C" then return actor end
 end
 
 function drop_items.actor_path(class, area, leaf, name)

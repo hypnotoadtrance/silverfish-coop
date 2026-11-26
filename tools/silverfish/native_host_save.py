@@ -11,6 +11,7 @@ import uuid
 
 from . import native_stock_enemy_drops
 from .campaign import CampaignFormatError
+from .content_paths import item_class_name
 from .authored_loot import CRATES, loot_capacity, random_lid, valid_item_transform, valid_lid_angle, valid_loot_trait_calls
 from .enemy_loot_profiles import BY_MAP as ENEMY_LOOT_ZONES, SHELLS, for_roll as enemy_loot_profile
 from .native_gold import valid_guid
@@ -215,7 +216,7 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
                 or not valid_loot_trait_calls(container, calls)
                 or any(type(item) is not dict or not valid_guid(item.get("guid"))
                        or not isinstance(item.get("actor"), str) or not item["actor"]
-                       or not isinstance(item.get("class_path"), str) or not item["class_path"].startswith("/Game/")
+                       or not item_class_name(item.get("class_path"), 512)
                        or item.get("claimed_by") is not None and (not isinstance(item["claimed_by"], str)
                                                                   or item["claimed_by"] not in members) for item in items)
                 or len({item["guid"] for item in items}) != len(items)

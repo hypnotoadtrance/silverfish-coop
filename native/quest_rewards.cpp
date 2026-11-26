@@ -1,4 +1,5 @@
 #include "quest_rewards.hpp"
+#include "content_paths.hpp"
 #include "guest_item.hpp"
 #include "loot_escrow.hpp"
 #include "stock_wallet.hpp"
@@ -1030,8 +1031,7 @@ namespace
                 (value >= '0' && value <= '9') || value == '_';
         };
         if (objective_id == Guid{} || quest.empty() || quest.size() > 96 || !std::ranges::all_of(quest, word) ||
-            !class_path.starts_with("/Game/") || class_path.size() > 256 ||
-            !std::ranges::all_of(class_path, [&](char v) { return word(v) || v == '/' || v == '.' || v == '-'; }) ||
+            !silverfish::content_paths::item_class(std::string_view{class_path}) ||
             final_step < 1 || final_step > max_value || cash < 0 || cash > max_value || xp < 0 || xp > max_value ||
             units < 0 || units > max_value)
             return fail("board_objective_arguments_unqualified");

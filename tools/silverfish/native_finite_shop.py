@@ -5,6 +5,7 @@ import math
 import time
 
 from . import party
+from .content_paths import item_class_name
 from .native_gold import valid_guid
 from .native_guest_consumable import MRE_CLASS
 from .native_tape_profiles import BLANK_CLASS
@@ -91,8 +92,7 @@ def matching_report(snapshot: dict, area: str, pawn: str, expected_state: str, *
         guid, path = offer.get("guid"), offer.get("class_path")
         source = offer.get("source")
         from_backpack = expected_state in {"sale-quote", "sold"}
-        if (not valid_guid(guid) or guid in guids or type(path) is not str or not path.startswith("/Game/")
-                or len(path) > 512 or not 1 <= offer["quantity"] <= MAX_PRICE
+        if (not valid_guid(guid) or guid in guids or not item_class_name(path, 512) or not 1 <= offer["quantity"] <= MAX_PRICE
                 or not 0 <= offer["price"] <= MAX_PRICE or type(offer.get("value")) is not int
                 or source is not None and (source == "backpack") != from_backpack
                 or source == "buyback" and offer["price"] != offer["value"]):

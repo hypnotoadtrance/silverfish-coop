@@ -1,4 +1,5 @@
 local view = {}
+local content_paths = require("content_paths")
 local interaction_lease = require("guest_interaction_lease")
 local shopkeep = require("native_dialogue_shopkeep")
 local castaway = require("native_dialogue_castaway")
@@ -398,8 +399,9 @@ local function offers(fields, first, offset, total)
     if #fields - first + 1 ~= math.min(page_size, total - offset) then return nil end
     local list, seen = {}, {}
     for index = first, #fields do
-        local guid, path, quantity, price = fields[index]:match("^([0-9A-F]+)|(/Game/[%w_./%-]+)|(%d+)|(%d+)$")
-        local name = path and #path <= 512 and path:match("%.([%w_%-]+)_C$")
+        local guid, path, quantity, price = fields[index]:match("^([0-9A-F]+)|([^|]+)|(%d+)|(%d+)$")
+        local actor_class = content_paths.item_class(path, 512)
+        local name = actor_class and actor_class:sub(1, -3)
         quantity, price = integer(quantity, max_money), integer(price, max_money)
         if not guid or #guid ~= 32 or not guid:find("[^0]") or seen[guid]
             or not name or not quantity or quantity < 1 or not price then return nil end

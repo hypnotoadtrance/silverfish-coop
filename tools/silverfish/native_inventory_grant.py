@@ -8,6 +8,7 @@ import time
 import uuid
 
 from . import native_inventory, party
+from .content_paths import item_class_name
 from .native_gold import valid_guid
 
 
@@ -18,7 +19,6 @@ REPORT = "native-inventory-grant-report"
 READY = "native_inventory_grant_ready"
 RESULT = "native_inventory_grant"
 MAX_ITEM_BYTES = 8192
-_CLASS = re.compile(r"/Game/[A-Za-z0-9_./-]{1,500}_C")
 _STACK = re.compile(r"stack:([1-9][0-9]{0,9})")
 _TERMINAL = {
     "native_inventory_grant_refused_class",
@@ -39,7 +39,7 @@ def parse_ready(fields):
 
 def parse_item(value):
     guid, item_class, text = value.split("@", 2)
-    if not valid_guid(guid) or not _CLASS.fullmatch(item_class) or ".." in item_class:
+    if not valid_guid(guid) or not item_class_name(item_class, 512):
         raise ValueError("Invalid typed inventory grant")
     if stack := _STACK.fullmatch(text):
         units = int(stack[1])

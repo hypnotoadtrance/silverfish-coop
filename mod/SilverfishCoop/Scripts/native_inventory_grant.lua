@@ -1,4 +1,5 @@
 local grant = {}
+local content_paths = require("content_paths")
 local scope = require("native_save_scope")
 local guest_save = require("guest_save")
 
@@ -40,7 +41,7 @@ function grant.command(fields, state, phase)
     local pawn, save = guest_save.exact_item_context(state, phase, fields[3])
     if not pawn or not save then error("native_inventory_grant_scope_changed", 0) end
     local item_class = fields[5]
-    if not item_class:match("^/Game/[%w_./%-]+_C$") or item_class:find("..", 1, true) then
+    if not content_paths.item_class(item_class, 512) then
         error("native_inventory_grant_refused_class", 0)
     end
     local asset = StaticFindObject(item_class)

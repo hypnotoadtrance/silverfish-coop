@@ -15,6 +15,7 @@ import re
 import uuid
 
 from . import native_host_save
+from .content_paths import item_class_name
 from .campaign import CampaignFormatError
 from .native_gold import valid_guid
 
@@ -28,7 +29,6 @@ MAX_ARRAY_ROWS = 4096  # Matches the native guest item scanner.
 MAX_ITEMS = len(ARRAY_SOURCES) * MAX_ARRAY_ROWS + 2
 MAX_QUANTITY = 2_147_483_647
 _WIPE_ID = re.compile(r"[0-9a-f]{32}\Z")
-_CLASS_PATH = re.compile(r"/Game/[\w/%-]+\.[\w%-]+_C\Z", re.ASCII)
 _ITEM_FIELDS = {"guid", "source", "index", "class_path", "quantity", "stackable", "important", "cannot_keep"}
 _DRAFT_FIELDS = {"schema", "id", "roster", "frames", "inventories", "settings", "sha256"}
 
@@ -82,7 +82,7 @@ def _items(rows: object, *, from_census: bool) -> list[dict]:
             or not isinstance(source, str) or source not in SOURCES
             or type(index) is not int
             or not 0 <= index < (MAX_ARRAY_ROWS if source in ARRAY_SOURCES else 1)
-            or not isinstance(path, str) or len(path) > 512 or not _CLASS_PATH.fullmatch(path)
+            or not item_class_name(path, 512)
         ):
             raise InventoryWipeError("invalid_native_item_identity")
         if any(type(item[key]) is not bool for key in ("stackable", "important", "cannot_keep")):

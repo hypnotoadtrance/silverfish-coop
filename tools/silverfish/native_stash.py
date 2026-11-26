@@ -8,6 +8,7 @@ import time
 import uuid
 
 from . import native_host_save, native_inventory, party, runtime
+from .content_paths import item_class_name
 from .native_gold import valid_guid
 
 
@@ -42,7 +43,6 @@ _VIEW_CARD = re.compile(r"(?:(?:drag|cancel|return|close)-)?(?:stash|backpack):(
 _VIEW_REORDER_CARD = re.compile(r"reorder-stash:([0-9A-F]{32}):(0|[1-9][0-9]{0,3})\Z")
 _VIEW_SPLIT_CARD = re.compile(r"split-(?:stash|backpack):([0-9A-F]{32}):([1-9][0-9]{0,8}):(cancel|move)\Z")
 _PATH = re.compile(r"([A-Za-z0-9_-]+_C) (/Game/Classes/Maps/[A-Za-z0-9_/-]+)\.([A-Za-z0-9_-]+):PersistentLevel\.([A-Za-z0-9_-]+)\Z")
-_ITEM_CLASS = re.compile(r"/Game/[A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+_C\Z")
 
 
 def resident_ticket_body_limit(local_bridge):
@@ -154,7 +154,7 @@ async def inspect(host, bridge, character, target):
     if (len(items) != report["count"] or len(items) != min(page_size, max(0, total - offset))
             or len({item["guid"] for item in items}) != len(items)
             or any(item["source"] != "stash" or not valid_guid(item["guid"]) or item["quantity"] < 1
-                   or not 0 <= item["index"] < 4096 or not item["class_path"].startswith("/Game/")
+                   or not 0 <= item["index"] < 4096 or not item_class_name(item["class_path"], 512)
                    or live and (type(item.get("ammo")) is not int or not -2**31 <= item["ammo"] < 2**31
                                 or item.get("stackable") and item["ammo"] != item["quantity"]) for item in items)):
         raise RuntimeError("The isolated stock stash page is incomplete")
@@ -289,7 +289,7 @@ async def _stock_rows(client, site, operation):
         for row in rows:
             guid, path, ammo = row["guid"], row["class_path"], row["ammo"]
             weight, value, protected = row["weight"], row["value"], row["never_drop"]
-            if (row["source"] != "stash" or not valid_guid(guid) or guid in seen or not _ITEM_CLASS.fullmatch(path)
+            if (row["source"] != "stash" or not valid_guid(guid) or guid in seen or not item_class_name(path, 512)
                     or len(path) > 512 or type(ammo) is not int or not -2**31 <= ammo < 2**31
                     or type(weight) not in {int, float} or not math.isfinite(weight) or not 0 <= weight <= 100000
                     or type(value) is not int or not -2**31 <= value < 2**31 or type(protected) is not bool):

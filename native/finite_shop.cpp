@@ -1,4 +1,5 @@
 #include "finite_shop.hpp"
+#include "content_paths.hpp"
 #include "stock_wallet.hpp"
 #include "shop_view.hpp"
 
@@ -796,11 +797,7 @@ namespace
         if (result.guid == Guid{} || !live(klass) || !klass->IsChildOf(layout.item_base))
             return "shop_offer_identity_invalid";
         result.path = RC::to_string(klass->GetPathName());
-        if (!result.path.starts_with("/Game/") || result.path.size() > 512 ||
-            !std::ranges::all_of(result.path, [](char c) {
-                return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-                    c == '/' || c == '.' || c == '_' || c == '-';
-            })) return "shop_offer_class_invalid";
+        if (!silverfish::content_paths::item_class(std::string_view{result.path}, 512)) return "shop_offer_class_invalid";
         auto* cdo = klass->GetClassDefaultObject().Get();
         auto* stacks = field<Unreal::FBoolProperty>(cdo, STR("Stacks"));
         if (!cdo || cdo->GetClassPrivate() != klass || !cdo->HasAnyFlags(Unreal::RF_ClassDefaultObject) || !stacks)

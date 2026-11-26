@@ -9,6 +9,7 @@ import time
 import uuid
 
 from . import party
+from .content_paths import item_class_name
 from .native_gold import valid_guid
 
 
@@ -29,7 +30,6 @@ REQUOTE_REFUSALS = frozenset({
 MAX_ITEMS = 128
 MAX_CASH = 2**31 - 1
 REPUTATION_FLAG = re.compile(r"Rep_[A-Za-z0-9_ -]{1,120}")
-ITEM = re.compile(r"/Game/Classes/[A-Za-z0-9_./-]+_C")
 MAP = re.compile(r"/Game/Classes/Maps(?:/[A-Za-z0-9_-]+)+")
 PAWN_SUFFIX = re.compile(r"[0-9]+")
 STOCK_DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -51,7 +51,7 @@ def integer(raw: str, minimum: int, maximum: int) -> int:
 
 
 def item_key(path: str, guid: str) -> bool:
-    return valid_guid(guid) and 0 < len(path) <= 512 and ".." not in path and ITEM.fullmatch(path) is not None
+    return valid_guid(guid) and item_class_name(path, 512) is not None
 
 
 def parse(frame: list[str], items: list[list[str]], moved: list[list[str]], preferences: list[list[str]],
@@ -100,7 +100,7 @@ def parse(frame: list[str], items: list[list[str]], moved: list[list[str]], pref
     if len(preferences) > 256:
         raise ValueError("The NPC barter preference list is too large")
     for row in preferences:
-        if len(row) != 3 or not ITEM.fullmatch(row[1]) or ".." in row[1] or len(row[1]) > 512 or row[1] in taste:
+        if len(row) != 3 or not item_class_name(row[1], 512) or row[1] in taste:
             raise ValueError("Invalid native NPC barter preference")
         value = float(row[2])
         if not math.isfinite(value) or not 0 < value <= 100:

@@ -1,4 +1,5 @@
 local stock = {}
+local content_paths = require("content_paths")
 local scope = require("native_save_scope")
 local shared_wallet = require("wallet")
 local screen_path = "/Game/Classes/GUI/New/ShopScreen.ShopScreen_C"
@@ -78,12 +79,12 @@ local function read_rows(path, expected)
     local rows, total, seen = {shelf = {}, limited = {}, buyback = {}}, 0, {}
     for line in data:gmatch("([^\n]+)\n") do
         local guid, class, source, price, value, ammo, weight, never_drop, markup = line:match(
-            "^([0-9A-F]+)\t(/Game/[%w_./%-]+_C)\t(%l+)\t(%d+)\t(%d+)\t(-?%d+)\t(%S+)\t([01])\t?(%S*)$")
+            "^([0-9A-F]+)\t([^\t]+)\t(%l+)\t(%d+)\t(%d+)\t(-?%d+)\t(%S+)\t([01])\t?(%S*)$")
         local kilograms = tonumber(weight)
         local exact_markup = tonumber(markup)
         total = total + 1
         if total > expected or not guid or #guid ~= 32 or not guid:find("[^0]") or seen[guid] or not rows[source]
-            or #class > 512 or class:find("..", 1, true) or not kilograms or not (kilograms >= 0 and kilograms <= 100000)
+            or not content_paths.item_class(class, 512) or not kilograms or not (kilograms >= 0 and kilograms <= 100000)
             or (markup ~= "" and (not exact_markup or not (exact_markup >= 0 and exact_markup < 1e8))) then
             error("Invalid authenticated merchant row", 0)
         end

@@ -34,6 +34,26 @@ class NativeInventoryGrantTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.assert_awaited_once_with(native_inventory_grant.APPLY, PAWN, GUID, CLASS, "(Ammo=7)", timeout=3)
         host.checkpoint_native.assert_not_awaited()
 
+    async def test_item_from_a_mounted_mod_can_be_granted(self):
+        frame = {"map": OBSERVATORY, "state": "hosting", "ack": {"message": "added"}}
+        host = SimpleNamespace(
+            party=party.new_party(), control=Mock(), guest_inventory_grants={},
+            zone_epoch=EPOCH, last_game=frame.copy(), native_guest=True, native_profile=True,
+            native_recipients=lambda: {CHARACTER: {"pawn": PAWN, "connected": True}},
+            stopping=False, transitioning=False, native_checkpoint_unsafe=False, checkpoint_native=AsyncMock(),
+        )
+        bridge = SimpleNamespace(local_bridge=object(), command=AsyncMock(return_value=frame))
+        item = "/CommunityItems/Food/BeanSoup.BeanSoup_C"
+        target = f"{EPOCH}@{GUID}@{item}@(Ammo=1)"
+        with patch("tools.silverfish.native_inventory.retain_guest_save", AsyncMock(return_value=True)):
+            await native_inventory_grant.accept(host, bridge, CHARACTER, target, OPERATION)
+            for path in ("/BeanSoup.BeanSoup_C", "/CommunityItems//BeanSoup.BeanSoup_C",
+                         "/CommunityItems/Food/../BeanSoup.BeanSoup_C", "/CommunityItems/BeanSoup.Other_C"):
+                with self.subTest(path=path), self.assertRaisesRegex(party.RuleError, "invalid_native_inventory_grant"):
+                    await native_inventory_grant.accept(host, bridge, CHARACTER, target.replace(item, path), OPERATION)
+        bridge.command.assert_awaited_once_with(native_inventory_grant.APPLY, PAWN, GUID, item, "(Ammo=1)", timeout=3)
+        host.checkpoint_native.assert_not_awaited()
+
     async def test_stack_grants_on_same_guid_settle_by_operation(self):
         frame = {"map": OBSERVATORY, "state": "hosting", "ack": {"message": "increased"}}
         host = SimpleNamespace(
