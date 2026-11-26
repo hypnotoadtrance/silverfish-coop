@@ -1918,7 +1918,9 @@ local function run(action, actor_path)
     elseif action == "melee-view" then
         local owner = host and authoritative_guest(world) or pawn
         local eye, forward = owner.Camera:K2_GetComponentLocation(), owner.Camera:GetForwardVector()
-        return table.concat({point_string(eye), point_string(forward)}, ",")
+        local body, velocity = owner:K2_GetActorLocation(), owner:GetVelocity()
+        return table.concat({point_string(eye) .. "," .. point_string(forward), point_string(body),
+            point_string(velocity), tostring(owner.CharacterMovement.MovementMode)}, ";")
     elseif action == "melee-contact-view" or action == "dock-melee-contact-view" then
         assert(host, "the authoritative contact runs on the host")
         if type(SilverfishReadNativeGuestMeleeContactGeometry) ~= "function" then return "unavailable" end
@@ -2206,6 +2208,11 @@ local function run(action, actor_path)
         assert(valid(prop.PropMesh) and prop.PropMesh:IsSimulatingPhysics(FName("None")), "stock prop physics unavailable")
         prop.PropMesh:SetEnableGravity(false)
         return stage_melee(world, 1, prop)
+    elseif action == "clear-melee-prop" then
+        assert(host and valid(melee_prop) and same(melee_prop:GetWorld(), world), "stock melee fixture prop is unavailable")
+        melee_prop:K2_DestroyActor()
+        melee_prop = nil
+        return "cleared"
     elseif action == "melee-prop-state" then
         assert(host and valid(melee_prop), "stock melee prop disappeared")
         local velocity = melee_prop.PropMesh:GetPhysicsLinearVelocity(FName("None"))

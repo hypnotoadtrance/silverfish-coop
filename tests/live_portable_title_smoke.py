@@ -1207,7 +1207,8 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
         proof = event[native_guest_melee.SWING_KEY]
         contact = await command(host, "melee-contact")
         after = await command(host, f"melee-state\t{center}")
-        geometry = {"host_before": host_view, "guest_before": guest_view,
+        host_after, guest_after = await asyncio.gather(*(command(seat, "melee-view") for seat in (host, guest)))
+        geometry = {"host_before": host_view, "guest_before": guest_view, "host_after": host_after, "guest_after": guest_after,
                     "host_contact": await command(host, "melee-contact-view")}
         result = {"stock_input": tap, "host_damage": proof, "contact_geometry": geometry}
         if verify_observer:
@@ -1254,17 +1255,27 @@ async def stock_melee_edge(guest_run, guid, edge):
 
 async def stock_melee_edge_receipts(guest_run, guest_frame, *fixtures):
     sequences = {fixture["sequence"] for fixture in fixtures}
+    expected_rows = sequences | {fixture["sequence"] - 1 for fixture in fixtures if fixture["requested_edge"] == "tap"}
     async with asyncio.timeout(6):
         while True:
             rows = {event.get("sequence"): event for event in await resident_events(guest_run, guest_frame)
                     if event["event"] in ("native_guest_melee_edge", "native_guest_melee_edge_rejected")
-                    and event.get("sequence") in sequences}
+                    and event.get("sequence") in expected_rows}
             if sequences <= rows.keys():
                 break
             await asyncio.sleep(.05)
     for fixture in fixtures:
         event = rows[fixture["sequence"]]
-        assert event["event"] == "native_guest_melee_edge" and event["edge"] == fixture["requested_edge"], event
+        assert event["event"] == "native_guest_melee_edge", event
+        if fixture["requested_edge"] == "tap" and event["edge"] == "release":
+            # The worker can read the press before the native fixture queues its release.
+            press = rows.get(fixture["sequence"] - 1, {})
+            assert (press.get("event"), press.get("edge")) == ("native_guest_melee_edge", "press"), (press, event)
+            before, after = (row[native_guest_melee.INPUT_KEY] for row in (press, event))
+            assert before["serial"] == after["serial"] and before["guid"] == after["guid"] == fixture["guid"], (press, event)
+            assert (before["presses"], before["releases"] + 1) == (after["presses"], after["releases"]), (press, event)
+        else:
+            assert event["edge"] == fixture["requested_edge"], event
     return [rows[fixture["sequence"]][native_guest_melee.INPUT_KEY] for fixture in fixtures]
 
 
@@ -1378,6 +1389,7 @@ async def verify_stock_melee_edges_only(host: Seat, guest: Seat, pawn: str) -> d
             await asyncio.sleep(.08)
     prop = {"target": target, "health_before": health, "health_after": after_health, "velocity_cm_s": after_speed,
             "movement_cm": travel, "guest_sounds": sounds}
+    assert await command(host, "clear-melee-prop") == "cleared"
     assert campaign_save_hashes(host.campaign) == before, "A regular melee attack wrote campaign saves"
     return {"stock_melee_edges": {**edges, "first_person_contacts": first_person_contacts, "prop_impact": prop,
                                   "campaign_unchanged": True}}
@@ -7054,7 +7066,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_avatar_binoculars, "observatory", "stock_avatar_binoculars", verify_stock_avatar_binoculars),
         (stock_interaction_feedback, "observatory", "stock_lockpicks", verify_stock_lockpicks),
         (stock_interaction_feedback, "observatory", "stock_observatory_tv", verify_observatory_tv),
-        (stock_melee_family, "observatory", "stock_melee_family", verify_stock_melee_family),
+        # Keep the NPC contact lane independent of staged props and preceding player actions.
+        (stock_melee_family, "stock_melee_family", "stock_melee_family", verify_stock_melee_family),
         (stock_throwables, "observatory", "stock_throwables",
          lambda host, guest, pawn: verify_stock_throwables(host, guest, pawn, stock_throwables)),
         (stock_npc_rivalry, weapon_campaign, "stock_npc_rivalry", verify_stock_npc_rivalry),
@@ -7725,7 +7738,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
 
                 exit_actions = ("prompt", "confirm") if campaign in {
                     "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_shot_view", "tutorial_dock_buckshot",
-                    "tutorial_dock_melee", "tutorial_dock_late_join", "dock_population",
+                    "tutorial_dock_melee", "tutorial_dock_late_join", "dock_population", "stock_melee_family",
                     "crossroads", "crossroads_anomaly", "quarry_photo", "buried_placements",
                     "lab_east_wing_acid", "lab_terminal", "oil_lamps", "shopkeep", "simmi", "stock_board_offers", "missing_contact_untracked",
                     "friendly_fire_enabled", "friendly_fire_default", "stardust_handoff"
