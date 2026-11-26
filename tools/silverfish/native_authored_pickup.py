@@ -402,7 +402,10 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
             row.update(guid=merge["stack_guid"], source_guid=report["guid"],
                        stack_before=merge["before"], stack_after=merge["after"])
         result = {"native_authored_pickup_claim": row}
-        candidate = party.load_party(host.party)
+        if defer_save:
+            candidate = native_loot.copy_pending_loot(host.party, STATE_KEY, character=character, cash=is_cash)
+        else:
+            candidate = party.load_party(host.party)
         if is_cash:
             candidate["economy"].update(wallet=credit["after"], native_wallet_active=True)
         candidate.setdefault(STATE_KEY, {})[target] = row

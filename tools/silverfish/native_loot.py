@@ -46,6 +46,21 @@ CLAIM_REPLY_HEADER = "native-pickup-claim-reply\t1\n"
 CLAIM_REPLY_BYTES = "native_pickup_claim_reply_bytes"
 
 
+def copy_pending_loot(state, *ledgers, character=None, cash=False):
+    """Copy the sections changed by a verified loot action committed in memory."""
+    candidate = state.copy()
+    for ledger in ledgers:
+        if ledger in state:
+            candidate[ledger] = state[ledger].copy()
+    if character is not None:
+        receipts = state["receipts"]
+        candidate["receipts"] = dict(receipts)
+        candidate["receipts"][character] = list(receipts.get(character, ()))
+    if cash:
+        candidate["economy"] = state["economy"].copy()
+    return candidate
+
+
 def public_roll(roll: dict) -> dict:
     return {key: value for key, value in roll.items() if key != "escrow"}
 
@@ -962,7 +977,10 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                         or proof["escrow_slot"] != "-" or snapshot.get(VEHICLE_LOCKS, {}).get(crate) is not False
                         or snapshot.get("native_loot_crates", {}).get(crate, {}).get("state") != "ready"):
                     raise RuntimeError("The stock key unlock did not verify")
-                candidate = party.load_party(host.party)
+                if memory_escrow:
+                    candidate = copy_pending_loot(host.party, KEY_UNLOCKS, character=character)
+                else:
+                    candidate = party.load_party(host.party)
                 candidate.setdefault(KEY_UNLOCKS, {})[crate] = {"id": operation_id, "opener": character}
                 result = {UNLOCK_RESULT: {"map": area, "crate": crate, "opener": character, "locked": False}}
                 receipts = candidate["receipts"].setdefault(character, [])
@@ -1003,7 +1021,11 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                 settled = await _settled_native_lid(bridge, snapshot, crate, lid)
                 roll[lid[0]] = settled["native_loot_crates"][crate][lid[0]]
                 host.last_game, host.last_seen = settled, time.monotonic()
-            candidate = party.load_party(host.party)
+            if memory_escrow:
+                candidate = copy_pending_loot(host.party, STATE_KEY, KEY_UNLOCKS,
+                                              character=character if tool_receipt else None)
+            else:
+                candidate = party.load_party(host.party)
             if crate in candidate.get(KEY_UNLOCKS, {}):
                 del candidate[KEY_UNLOCKS][crate]
             candidate.setdefault(STATE_KEY, {})[crate] = roll
@@ -1043,7 +1065,14 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                 raise RuntimeError("The exact stock crate item transfer did not verify")
             remember_claim_snapshot(host, bridge, snapshot)
 
-            candidate = party.load_party(host.party)
+            deferred = defer_save and (character == "host" or proof.get("retained") is True)
+            if deferred:
+                candidate = copy_pending_loot(host.party, STATE_KEY, character=character, cash=credit is not None)
+                roll = candidate[STATE_KEY][crate]
+                candidate[STATE_KEY][crate] = dict(roll, items=[row.copy() if row["guid"] == guid else row
+                                                                for row in roll["items"]])
+            else:
+                candidate = party.load_party(host.party)
             claimed = next(row for row in candidate[STATE_KEY][crate]["items"] if row["guid"] == guid)
             claimed["claimed_by"] = character
             if credit:
@@ -1053,7 +1082,6 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             receipts = candidate["receipts"].setdefault(character, [])
             receipts.append({"id": operation_id, "request": fingerprint, "result": result})
             del receipts[:-party.RECENT_ACTIONS]
-            deferred = defer_save and (character == "host" or proof.get("retained") is True)
             if deferred:
                 if character == "host":
                     host.pending_host_save = bool(host.pending_host_save or merge)

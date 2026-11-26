@@ -256,12 +256,12 @@ async def claim(host, bridge, character, requested, operation, *, local_input=Fa
             raise RuntimeError(proof["status"])
         row = {key: proof[key] for key in ("map", "actor", "class_path", "mode")}
         row.update(epoch=host.zone_epoch, owner=character)
-        candidate = party.load_party(host.party)
-        if row["class_path"] in native_loot.CASH_RANGES:
+        is_cash = row["class_path"] in native_loot.CASH_RANGES
+        deferred = retained and (proof.get("memory") or is_cash)
+        if is_cash:
             credit = native_loot._verified_cash_credit(
                 {"status": proof["status"], "cash": proof}, dict(row, guid="-"), snapshot.get("native_wallet"))
             row["wallet_credit"] = credit
-            candidate["economy"].update(wallet=credit["after"], native_wallet_active=True)
         else:
             if proof["status"] not in ("claimed", "merged") or not valid_guid(proof["guid"]):
                 raise RuntimeError("The placed stock item did not transfer")
@@ -273,13 +273,18 @@ async def claim(host, bridge, character, requested, operation, *, local_input=Fa
                 row.update(native_loot.verified_stack_merge(merge, proof["guid"], merge.get("amount")))
             if not proof.get("memory"):
                 await asyncio.to_thread(native_host_save.record, host.native_profile, slot, area, flush=True)
+        if deferred:
+            candidate = native_loot.copy_pending_loot(host.party, STATE, character=character, cash=is_cash)
+        else:
+            candidate = party.load_party(host.party)
+        if is_cash:
+            candidate["economy"].update(wallet=credit["after"], native_wallet_active=True)
         candidate.setdefault(STATE, {})[path] = row
         result = {PROOF: row}
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
         native_loot.remember_claim_snapshot(host, bridge, snapshot)
-        deferred = retained and (proof.get("memory") or row["class_path"] in native_loot.CASH_RANGES)
         revision = None
         if not deferred:
             revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}),

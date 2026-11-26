@@ -634,7 +634,14 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
                  "merge": dict(guid=item["guid"], inventory_guid="B" * 32, amount=4, before=7, after=11)}
         bridge = SimpleNamespace(command=AsyncMock(return_value=self.game(CROSSROADS, native_loot=proof)))
         args = (host, bridge, "host", "claim", f"{item['guid']}@{OTHER_CRATE}")
+        original = host.party
+        unaffected = self.roll(CROSSROADS, LEGACY_CRATE, "2" * 32)
+        original[native_loot.STATE_KEY][LEGACY_CRATE] = unaffected
         result = await native_loot.perform(*args, OPERATION, defer_save=True)
+        self.assertNotIn("claimed_by", original[native_loot.STATE_KEY][OTHER_CRATE]["items"][0])
+        self.assertNotIn("host", original["receipts"])
+        self.assertIs(host.party[native_loot.STATE_KEY][LEGACY_CRATE], unaffected)
+        self.assertIs(host.party["players"], original["players"])
         self.assertTrue(host.pending_host_save)
         self.assertFalse(host.native_checkpoint_unsafe)
         self.assertEqual(result["native_loot_claim"]["claimed_by"], "host")
