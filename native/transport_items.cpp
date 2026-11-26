@@ -275,6 +275,7 @@ namespace
         std::int32_t expected{};
         Unreal::FWeakObjectPtr prior_held{};
         bool previewed{};
+        Guid merge_destination{};
     };
 
     struct PersonalPreview
@@ -2343,6 +2344,39 @@ namespace
         return item_class;
     }
 
+    void queue_guest_stack_merge(Unreal::UObject* manager, Unreal::UObject* screen, Unreal::UObject* panel,
+                                 Unreal::UObject* save, const ItemView& held, Unreal::UFunction* function,
+                                 const void* parameters, Clock::time_point now)
+    {
+        auto* index = field<Unreal::FIntProperty>(function, STR("Index"));
+        auto* cards = field<Unreal::FArrayProperty>(panel, STR("Cards"));
+        auto* element = cards ? Unreal::CastField<Unreal::FObjectProperty>(cards->GetInner()) : nullptr;
+        auto* holding = field<Unreal::FBoolProperty>(manager, STR("HoldingItem"));
+        if (!parameters || !index || index->GetOffset_Internal() != 8 || function->GetParmsSize() < 12 ||
+            !index->HasAnyPropertyFlags(Unreal::CPF_Parm) || index->HasAnyPropertyFlags(Unreal::CPF_OutParm) ||
+            !element || !holding || !holding->GetPropertyValueInContainer(manager)) return;
+        const int slot = index->GetPropertyValueInContainer(parameters);
+        Unreal::FScriptArrayHelper widgets(cards, cards->ContainerPtrToValuePtr<void>(panel));
+        if (slot < 0 || slot >= widgets.Num() || widgets.Num() > inventory_limit) return;
+        auto* card = object_value(element, widgets.GetRawPtr(slot));
+        if (!exact_class(card, card_path) || !same_widget_player(card) ||
+            object_field(card, STR("ItemManager")) != manager) return;
+        const auto target = card_item(card);
+        if (target.panel != panel) return;
+        Guid source{}, destination{};
+        auto* source_type = Unreal::Cast<Unreal::UClass>(exact_guest_cursor_item(save, held, source));
+        if (source != guest_use_cursor.held || !source_type || !silverfish::drop_item_class::stacks(source_type).value_or(false) ||
+            exact_guest_cursor_item(save, target, destination) != source_type || source == destination) return;
+        auto* units = field<Unreal::FIntProperty>(held.structure, item_ammo_name);
+        if (!units || held.structure != target.structure) return;
+        const int count = units->GetPropertyValueInContainer(held.value);
+        const int before = units->GetPropertyValueInContainer(target.value);
+        if (count < 1 || before < 1 || before > INT32_MAX - count) return;
+        host_drop_request = HostDropRequest{source, count, ++host_drop_sequence, false, now + request_lease,
+                                            manager, screen, panel, "merge", before};
+        host_drop_request->merge_destination = destination;
+    }
+
     bool intercept_guest_use_cursor(Iteration& iteration, Unreal::UObject* manager, Unreal::UFunction* function,
                                     const void* parameters, const Unreal::FName& name, bool guarded)
     {
@@ -2428,6 +2462,14 @@ namespace
             const GuidFields fields(item.structure);
             if (ready() && target == panel && fields.valid() && fields.read(item.value) == guid)
                 silverfish::native_authored_pickup::queue_nearby_pickup(screen, pawn, guid);
+            guest_use_cursor = {};
+            clear_stash_cursor(manager);
+            return true;
+        }
+        if (insert && target == panel && !guest_use_cursor.source_slot)
+        {
+            if (ready() && guest_use_cursor.source.Get() == panel)
+                queue_guest_stack_merge(manager, screen, panel, save, item, function, parameters, now);
             guest_use_cursor = {};
             clear_stash_cursor(manager);
             return true;
@@ -3296,6 +3338,13 @@ namespace
         lua.set_string({guid.data(), guid.size()});
         lua.set_integer(request.count);
         lua.set_string(request.entry);
+        if (request.entry == "merge")
+        {
+            const auto destination = format_guid(request.merge_destination);
+            lua.set_integer(request.expected);
+            lua.set_string({destination.data(), destination.size()});
+            return 6;
+        }
         if (request.entry == "split" || request.entry == "take-ammo" || request.entry == "equip" || request.entry == "unequip" ||
             request.entry == missing_contact_use ||
             request.entry.starts_with("worn_drop_") || request.entry.starts_with("quick_drop_"))

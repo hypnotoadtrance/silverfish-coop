@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 import uuid
 
 from tools.silverfish import native_inventory as inventory, party
@@ -110,6 +110,25 @@ class StackSplitTests(unittest.IsolatedAsyncioTestCase):
                 await inventory.split_stack(host, bridge, "guest", f"{GUID}|4|9", OPERATION)
             self.assertTrue(host.native_checkpoint_unsafe and host.stopping)
             self.assertFalse(host.party["receipts"])
+
+    async def test_merge_keeps_the_destination_and_replays_once(self):
+        with TemporaryDirectory() as temporary, CampaignStore(temporary) as store:
+            host = self.host(store)
+            host.last_game[inventory.MERGE_CAPABILITY] = 1
+            destination = "B" * 32
+            target = f"{GUID}|{destination}|3|5"
+            proof = {"map": OBSERVATORY, "pawn": PAWN, "source_guid": GUID, "destination_guid": destination,
+                     "quantity_before": 5, "quantity_after": 8, "quantity_moved": 3, "class_path": NINE_MM_BALL.item_path}
+            bridge = SimpleNamespace(command=AsyncMock(return_value={**host.last_game, inventory.MERGE_KEY: proof}))
+            with patch.object(inventory, "retain_guest_save", new=AsyncMock(return_value=True)):
+                result = await inventory.split_stack(host, bridge, "guest", target, OPERATION, merge=True)
+                replay = await inventory.split_stack(host, bridge, "guest", target, OPERATION, merge=True)
+                with self.assertRaisesRegex(party.RuleError, "operation_id_conflict"):
+                    await inventory.split_stack(host, bridge, "guest", f"{GUID}|{destination}|3|6", OPERATION, merge=True)
+            self.assertEqual(result, {inventory.MERGE_KEY: {**proof, "state": "merged", "owner": "guest"}})
+            self.assertEqual(replay, result)
+            bridge.command.assert_awaited_once_with(inventory.MERGE, PAWN, GUID, destination, "3", "5", timeout=6)
+            host.checkpoint_native.assert_not_awaited()
 
     async def test_backpack_sort_is_qualified_to_one_guest_and_replays_once(self):
         with TemporaryDirectory() as temporary, CampaignStore(temporary) as store:

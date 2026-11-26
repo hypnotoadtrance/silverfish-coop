@@ -4,7 +4,7 @@ local host_save = require("native_host_save")
 local weapon_profiles = require("guest_weapon_registry")
 local inventory_grant = require("native_inventory_grant")
 local statics_path = "/Script/Engine.Default__GameplayStatics"
-local observation, split, unloaded, sorted, stored, removed
+local observation, split, merged, unloaded, sorted, stored, removed
 local stock_backpack = "/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C"
 local page_size = 16
 
@@ -59,6 +59,29 @@ local function take_ammo(fields, state, phase)
     return "native guest weapon unloading verified"
 end
 
+local function merge_stacks(fields, state, phase)
+    local name, source, destination = fields[3], fields[4], fields[5]
+    local amount, expected = math.tointeger(tonumber(fields[6])), math.tointeger(tonumber(fields[7]))
+    if #fields ~= 7 or phase ~= "hosting" or not state.listening or state.server ~= false
+        or not guid(source) or not guid(destination) or source == destination or not amount or not expected
+        or amount < 1 or expected < 1 or expected > 2147483647 - amount
+        or type(SilverfishMergeNativeGuestStacks) ~= "function" then
+        error("native_inventory_merge_refused_scope", 0)
+    end
+    local exact, pawn, save = pcall(guest_save.exact_item_context, state, phase, name)
+    if not exact or not pawn or not save then error("native_inventory_merge_refused_owner", 0) end
+    local ok, status, before, after, moved, class = SilverfishMergeNativeGuestStacks(
+        pawn:GetAddress(), save:GetAddress(), source, destination, amount, expected)
+    if ok ~= true then error(tostring(status), 0) end
+    if status ~= "merged" or before ~= expected or after ~= before + amount or moved ~= amount
+        or type(class) ~= "string" or not class:match("^/Game/[%w_./%-]+$") then
+        error("mutation_unverified_native_inventory_merge_receipt", 0)
+    end
+    merged = {map = state.map, pawn = name, source = source, destination = destination, class = class,
+        before = before, after = after, moved = moved}
+    return "native guest stock stacks merged"
+end
+
 local function sort_backpack(fields, state, phase)
     sorted = nil
     if #fields ~= 3 or phase ~= "hosting" or not state.listening or state.server ~= false
@@ -83,6 +106,7 @@ function inventory.command(fields, state, phase)
     if grant then return grant end
     if fields[2] == "native-inventory-sort" then return sort_backpack(fields, state, phase) end
     if fields[2] == "native-inventory-split" then return split_stack(fields, state, phase) end
+    if fields[2] == "native-inventory-merge" then return merge_stacks(fields, state, phase) end
     if fields[2] == "native-inventory-take-ammo" then return take_ammo(fields, state, phase) end
     if fields[2] == "native-inventory-unequip" then
         removed = nil
@@ -193,7 +217,7 @@ function inventory.command(fields, state, phase)
 end
 
 function inventory.reset()
-    observation, split, unloaded, sorted, stored = nil, nil, nil, nil, nil
+    observation, split, merged, unloaded, sorted, stored = nil, nil, nil, nil, nil, nil
 end
 
 function inventory.rows(state, phase, status_row)
@@ -208,6 +232,13 @@ function inventory.rows(state, phase, status_row)
     if split and split.map == state.map then
         rows[#rows + 1] = status_row("native-inventory-split", split.map, split.pawn, split.source, split.created,
             split.class, split.before, split.remaining, split.taken)
+    end
+    if type(SilverfishMergeNativeGuestStacks) == "function" then
+        rows[#rows + 1] = status_row("native-inventory-merge-capability", 1)
+    end
+    if merged and merged.map == state.map then
+        rows[#rows + 1] = status_row("native-inventory-merge", merged.map, merged.pawn, merged.source,
+            merged.destination, merged.class, merged.before, merged.after, merged.moved)
     end
     if type(SilverfishTakeNativeGuestWeaponAmmo) == "function" then
         rows[#rows + 1] = status_row("native-inventory-take-ammo-capability", 1)

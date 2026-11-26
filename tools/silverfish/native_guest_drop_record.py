@@ -51,7 +51,7 @@ def parse_stock_action(fields, game):
             or not all(re.fullmatch(r"(?:0|[1-9][0-9]{0,9})", value) for value in (count, expected))):
         raise ValueError("Invalid stock backpack request scope")
     amount, before = int(count), int(expected)
-    mode = {"sort": "sort", "split": "split", "take-ammo": "unload", "equip": "equip", "unequip": "unequip",
+    mode = {"sort": "sort", "split": "split", "merge": "merge", "take-ammo": "unload", "equip": "equip", "unequip": "unequip",
             "context_menu": "drop", "ctrl_click": "drop"}.get(entry)
     if entry in WORN_DROP_ENTRIES:
         mode = "worn-drop"
@@ -63,12 +63,13 @@ def parse_stock_action(fields, game):
             or (mode == "sort" and amount != 0) or (mode in ("use", "equip", "unequip") and amount != 1)
             or (mode == "drop" and not 1 <= amount <= MAX_QUANTITY)
             or (mode == "split" and not 0 < amount < before < 2**31)
+            or (mode == "merge" and (not 0 < amount or not 0 < before or amount + before >= 2**31 or len(fields) != 10))
             or (mode == "unload" and not 1 <= amount == before <= MAX_TAKE_AMMO_ROUNDS)
             or (mode == "equip" and not 0 <= before <= 10)
             or (mode == "unequip" and not 1 <= before <= 10)
             or (mode == "worn-drop" and (amount != 1 or before not in (9, 10)))
             or (mode == "quick-drop" and (amount != 1 or not 1 <= before <= 8))
-            or (mode not in ("split", "unload", "equip", "unequip", "worn-drop", "quick-drop")
+            or (mode not in ("split", "merge", "unload", "equip", "unequip", "worn-drop", "quick-drop")
                 and before not in ((0, 1) if entry == MISSING_CONTACT_ENTRY else (0,)))):
         raise ValueError("Invalid stock backpack operation")
     result = dict(area=area, pawn=pawn, epoch=epoch, sequence=int(sequence), entry=entry, guid=guid,
@@ -77,7 +78,7 @@ def parse_stock_action(fields, game):
         preview = layout[0]
         if (mode == "sort" and preview == "sorted"
                 or mode == "equip" and 1 <= before <= 10 and (preview == "-" or valid_guid(preview) and preview != guid)
-                or mode in ("split", "unload") and valid_guid(preview) and preview != guid):
+                or mode in ("split", "merge", "unload") and valid_guid(preview) and preview != guid):
             result["layout_preview"] = preview
         elif mode == "unequip" and re.fullmatch(r"(?:-1|[0-9]{1,10})", preview) and int(preview) < 2**31:
             result["layout_preview"] = int(preview)

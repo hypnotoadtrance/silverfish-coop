@@ -2383,9 +2383,10 @@ class Host:
             elif action == native_stash.MOVE:
                 async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                     result = await native_stash.move(self, bridge, character, target, request["operation_id"])
-            elif action in (native_inventory.SPLIT, native_inventory.TAKE_AMMO):
+            elif action in (native_inventory.SPLIT, native_inventory.TAKE_AMMO, native_inventory.MERGE):
                 result = await native_inventory.split_stack(self, bridge, character, target, request["operation_id"],
-                                                            unload=action == native_inventory.TAKE_AMMO)
+                                                            unload=action == native_inventory.TAKE_AMMO,
+                                                            merge=action == native_inventory.MERGE)
             elif action in native_guest_drop.ACTIONS:
                 async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                     result = await native_guest_drop.perform(self, bridge, character, action, target, request["operation_id"])

@@ -4446,6 +4446,85 @@ namespace
         return 6;
     }
 
+    template <bool local>
+    int merge_backpack_stacks(const Lua& lua)
+    {
+        const auto refuse = [&](std::string_view reason) { return result(lua, false, reason); };
+        Context context;
+        StackSplit move;
+        if (lua.get_stack_size() != 6 || !lua.is_integer(1) || !lua.is_integer(2) ||
+            !lua.is_string(3) || !lua.is_string(4) || !lua.is_integer(5) || !lua.is_integer(6))
+            return refuse("native_inventory_merge_refused_arguments");
+        const auto pawn = lua.get_integer(), save = lua.get_integer();
+        if (!parse_guid(lua.get_string(), context.guid) || !parse_guid(lua.get_string(), move.created) ||
+            context.guid == move.created) return refuse("native_inventory_merge_refused_identity");
+        const auto take = lua.get_integer(), expected = lua.get_integer();
+        if (take < 1 || expected < 1 || take > INT32_MAX || expected > INT32_MAX - take)
+            return refuse("native_inventory_merge_refused_quantity");
+        const bool qualified = local ? bind_local_inventory(context, pawn, save)
+            : Unreal::IsInGameThreadRaw() && resolve_owner(context, pawn, save).empty();
+        if (!qualified) return refuse("native_inventory_merge_refused_owner");
+        auto target = context;
+        target.guid = move.created;
+        Inventory source, destination;
+        if (!locate(context, source).empty() || source.backpack_index < 0 ||
+            !locate(target, destination).empty() || destination.backpack_index < 0 ||
+            source.ammo->GetPropertyValueInContainer(source.item) != take ||
+            destination.ammo->GetPropertyValueInContainer(destination.item) != expected)
+            return refuse("native_inventory_merge_refused_stale_stacks");
+        auto* item_class = Unreal::Cast<Unreal::UClass>(source.row_class(source.item));
+        auto* row_struct = source.type->GetStruct().Get();
+        auto* payload = field<Unreal::FStructProperty>(row_struct, payload_name);
+        auto* never_drop = field<Unreal::FBoolProperty>(row_struct, STR("NeverDrop_21_57B44A714ED0B2B1776A5DA7627B4A8D"));
+        auto* weight = field<Unreal::FDoubleProperty>(row_struct, weight_name);
+        auto* price = field<Unreal::FIntProperty>(row_struct, value_name);
+        const auto same_payload = [&](const void* first, const void* second) {
+            return payload->Identical(payload->ContainerPtrToValuePtr<void>(first), payload->ContainerPtrToValuePtr<void>(second));
+        };
+        if (!item_class || source.row_class(destination.item) != item_class ||
+            !silverfish::drop_item_class::stacks(item_class).value_or(false) || !payload || !never_drop || !weight || !price ||
+            never_drop->GetPropertyValueInContainer(source.item) || never_drop->GetPropertyValueInContainer(destination.item) ||
+            !same_payload(source.item, destination.item)) return refuse("native_inventory_merge_refused_incompatible_stacks");
+
+        auto* property = source.backpack;
+        auto* live_array = property->ContainerPtrToValuePtr<void>(context.save);
+        using Value = std::unique_ptr<void, PropertyDeleter>;
+        Value original(property->AllocateAndInitializeValue(), {property});
+        Value proposed(property->AllocateAndInitializeValue(), {property});
+        Value combined(source.type->AllocateAndInitializeValue(), {source.type});
+        if (!original || !proposed || !combined) return refuse("native_inventory_merge_refused_storage");
+        property->CopyCompleteValue(original.get(), live_array);
+        property->CopyCompleteValue(proposed.get(), live_array);
+        Unreal::FScriptArrayHelper staged(property, proposed.get());
+        auto* surviving = staged.GetRawPtr(destination.backpack_index);
+        const bool calculated = silverfish::loot_escrow::calculate_stock_stack(
+            context.pawn, source.type, surviving, combined.get(), static_cast<int>(take));
+        if (!inventory_current<local>(context) || !property->Identical(original.get(), live_array))
+            return refuse("mutation_unverified_native_inventory_merge_stock_call");
+        const auto mass = weight->GetPropertyValueInContainer(combined.get());
+        const auto after = expected + take;
+        if (!calculated || source.row_class(combined.get()) != item_class || source.identity(combined.get()) != target.guid ||
+            source.ammo->GetPropertyValueInContainer(combined.get()) != after ||
+            !std::isfinite(mass) || mass < 0 || price->GetPropertyValueInContainer(combined.get()) < 0 ||
+            !same_payload(surviving, combined.get())) return refuse("native_inventory_merge_refused_stock_result");
+        source.type->CopyCompleteValue(surviving, combined.get());
+        staged.RemoveValues(source.backpack_index, 1);
+        property->CopyCompleteValue(live_array, proposed.get());
+        if (!inventory_current<local>(context) || !property->Identical(proposed.get(), live_array))
+        {
+            if (inventory_current<local>(context))
+            {
+                property->CopyCompleteValue(live_array, original.get());
+                if (property->Identical(original.get(), live_array)) return refuse("native_inventory_merge_refused_rolled_back");
+            }
+            return refuse("mutation_unverified_native_inventory_merge_commit");
+        }
+        proof(lua, true, "merged", static_cast<std::int32_t>(expected), static_cast<std::int32_t>(after));
+        lua.set_integer(take);
+        lua.set_string(RC::to_utf8_string(item_class->GetPathName()));
+        return 6;
+    }
+
     const profiles::StockAmmo* unloaded_ammo(const profiles::Profile* profile, const BoltProfile* bolt, Unreal::UClass* ammo)
     {
         if (profile) return magazine_round(*profile, ammo);
@@ -4961,6 +5040,8 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishReloadNativeGuestUnderbarrel", run<Operation::Reload, true>);
     lua.register_function("SilverfishSplitNativeGuestAmmoStack", split_backpack_stack<false>);
     lua.register_function("SilverfishSplitLocalGuestStack", split_backpack_stack<true>);
+    lua.register_function("SilverfishMergeNativeGuestStacks", merge_backpack_stacks<false>);
+    lua.register_function("SilverfishMergeLocalGuestStacks", merge_backpack_stacks<true>);
     lua.register_function("SilverfishTakeNativeGuestWeaponAmmo", take_ammo<false>);
     lua.register_function("SilverfishTakeLocalGuestWeaponAmmo", take_ammo<true>);
     lua.register_function("SilverfishSortNativeGuestBackpack", sort_backpack<false>);

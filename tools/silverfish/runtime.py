@@ -2716,6 +2716,17 @@ class Bridge:
                     data[native_inventory.TAKE_AMMO_CAPABILITY] = 1
                 elif fields == [native_inventory.TAKE_AMMO + "-preview-capability", "1"]:
                     data[native_inventory.TAKE_AMMO_PREVIEW_CAPABILITY] = 1
+                elif fields == [native_inventory.MERGE + "-capability", "1"]:
+                    data[native_inventory.MERGE_CAPABILITY] = 1
+                elif (fields[0] == native_inventory.MERGE and len(fields) == 9 and data.get("map") == fields[1]
+                      and valid_guid(fields[3]) and valid_guid(fields[4]) and fields[3] != fields[4]
+                      and native_inventory.split_class_path(fields[5])):
+                    before, after, moved = map(int, fields[6:9])
+                    if not 0 < before < after < 2**31 or after - before != moved:
+                        raise ValueError("Invalid stock stack-merge receipt")
+                    data[native_inventory.MERGE_KEY] = dict(map=fields[1], pawn=fields[2], source_guid=fields[3],
+                        destination_guid=fields[4], class_path=fields[5], quantity_before=before, quantity_after=after,
+                        quantity_moved=moved)
                 elif (fields[0] == native_inventory.TAKE_AMMO and len(fields) == 10 and data.get("map") == fields[1]
                       and valid_guid(fields[3]) and valid_guid(fields[4]) and fields[3] != fields[4]
                       and native_inventory.valid_take_ammo_result(fields[9], fields[5], int(fields[6]))):

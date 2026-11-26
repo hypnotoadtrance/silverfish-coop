@@ -143,6 +143,20 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                     or type(count := receipt.get("count")) is not int or not 0 <= count <= 4096):
                 raise RuntimeError("The host did not verify sorting the guest's stock backpack")
             committed = ("sorted",)
+        elif mode == "merge":
+            if entry != "merge" or not valid_guid(layout_preview) or layout_preview == guid:
+                raise ValueError("The stock merge did not identify the destination stack")
+            key = native_inventory.MERGE_KEY
+            target = f"{guid}|{layout_preview}|{quantity}|{expected}"
+            before, after = int(expected), int(expected) + quantity
+            receipt = (await client.gameplay_action(native_inventory.MERGE, operation, target)).get(key)
+            if (not isinstance(receipt, dict) or tuple(receipt.get(field) for field in (
+                "state", "owner", "map", "source_guid", "destination_guid", "quantity_before", "quantity_after", "quantity_moved",
+            )) != ("merged", client.invite["character_id"], area, guid, layout_preview, before, after, quantity)
+                    or not native_inventory.split_class_path(receipt.get("class_path"))):
+                raise RuntimeError("The host did not verify the merged stock stacks")
+            committed = (str(after), layout_preview)
+            local_result = layout_preview
         elif splitting or unloading:
             if entry != ("take-ammo" if unloading else "split") or expected is None or (guid, quantity, int(expected)) != split:
                 raise ValueError("The stock stack changed before the selected split")

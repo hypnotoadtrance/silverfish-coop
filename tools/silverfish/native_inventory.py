@@ -22,12 +22,16 @@ SPLIT = "native-inventory-split"
 SPLIT_KEY = "native_inventory_split"
 SPLIT_CAPABILITY = "native_inventory_split_capability"
 SPLIT_PREVIEW_CAPABILITY = "native_inventory_split_preview_capability"
+MERGE = "native-inventory-merge"
+MERGE_KEY = "native_inventory_merge"
+MERGE_CAPABILITY = "native_inventory_merge_capability"
 TAKE_AMMO = "native-inventory-take-ammo"
 TAKE_AMMO_KEY = "native_inventory_take_ammo"
 TAKE_AMMO_CAPABILITY = "native_inventory_take_ammo_capability"
 TAKE_AMMO_PREVIEW_CAPABILITY = "native_inventory_take_ammo_preview_capability"
 _TAKE_AMMO_TARGET = re.compile(r"([0-9A-F]{32})\|([1-9][0-9]{0,9})")
 _SPLIT_TARGET = re.compile(r"([0-9A-F]{32})\|([1-9][0-9]{0,9})\|([1-9][0-9]{0,9})")
+_MERGE_TARGET = re.compile(r"([0-9A-F]{32})\|([0-9A-F]{32})\|([1-9][0-9]{0,9})\|([1-9][0-9]{0,9})")
 SPLIT_VIEW = "native_guest_inventory_split_view"
 SORT = "native-inventory-sort"
 SORT_CAPABILITY = "native_inventory_sort_capability"
@@ -152,17 +156,26 @@ async def retain_guest_save(host, bridge, character: str, pawn: str) -> bool:
     return True
 
 
-async def split_stack(host, bridge, character: str, target, operation: str, *, unload=False) -> dict:
-    action, key, capability = ((TAKE_AMMO, TAKE_AMMO_KEY, TAKE_AMMO_CAPABILITY) if unload
-                               else (SPLIT, SPLIT_KEY, SPLIT_CAPABILITY))
-    prefix = key
+async def split_stack(host, bridge, character: str, target, operation: str, *, unload=False, merge=False) -> dict:
     preview_guid = None
-    parse_target = take_ammo_target if unload else split_target
-    selection = parse_target(target)
-    if not selection and isinstance(target, str):
-        base, _, created = target.rpartition("|")
-        if valid_guid(created) and (parsed := parse_target(base)) and created != parsed[0]:
-            selection, preview_guid = parsed, created
+    if merge:
+        action, key, capability = MERGE, MERGE_KEY, MERGE_CAPABILITY
+        selection = None
+        match = _MERGE_TARGET.fullmatch(target) if isinstance(target, str) else None
+        if match and valid_guid(match[1]) and valid_guid(match[2]) and match[1] != match[2]:
+            take, expected = int(match[3]), int(match[4])
+            if take + expected < 2**31:
+                selection, preview_guid = (match[1], take, expected), match[2]
+    else:
+        action, key, capability = ((TAKE_AMMO, TAKE_AMMO_KEY, TAKE_AMMO_CAPABILITY) if unload
+                                   else (SPLIT, SPLIT_KEY, SPLIT_CAPABILITY))
+        parse_target = take_ammo_target if unload else split_target
+        selection = parse_target(target)
+        if not selection and isinstance(target, str):
+            base, _, created = target.rpartition("|")
+            if valid_guid(created) and (parsed := parse_target(base)) and created != parsed[0]:
+                selection, preview_guid = parsed, created
+    prefix = key
     if not selection or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
         raise party.RuleError(f"{prefix}_requires_guid_amount_and_expected_quantity")
     game = host.last_game
@@ -184,8 +197,10 @@ async def split_stack(host, bridge, character: str, target, operation: str, *, u
         raise party.RuleError(f"{prefix}_refused_downed_or_respawning")
     source, take, expected = selection
     area, pawn = game["map"], owner["pawn"]
-    campaign = host.store.status()["campaign_id"]
-    created = preview_guid or uuid.uuid5(uuid.NAMESPACE_OID, f"{action}:{campaign}:{character}:{operation}").hex.upper()
+    created = preview_guid
+    if created is None:
+        campaign = host.store.status()["campaign_id"]
+        created = uuid.uuid5(uuid.NAMESPACE_OID, f"{action}:{campaign}:{character}:{operation}").hex.upper()
     amounts = (str(expected),) if unload else (str(take), str(expected))
     deferred = await retain_guest_save(host, bridge, character, pawn)
     host.native_checkpoint_unsafe = True
@@ -201,13 +216,15 @@ async def split_stack(host, bridge, character: str, target, operation: str, *, u
         ammo_class = proof.get("class_path")
         qualified = (valid_take_ammo_result(proof.get("weapon_class"), ammo_class, expected)
                      if unload else split_class_path(ammo_class))
+        proof_fields = ("map", "pawn", "source_guid", "destination_guid", "quantity_before", "quantity_after", "quantity_moved") if merge else (
+            "map", "pawn", "source_guid", "new_guid", "quantity_before", "remaining", "split")
+        quantity_after = expected + take if merge else expected - take
         if ((snapshot.get("state"), snapshot.get("map")) != ("hosting", area)
-                or tuple(proof.get(key) for key in ("map", "pawn", "source_guid", "new_guid", "quantity_before",
-                                                   "remaining", "split")) != (area, pawn, source, created, expected, expected - take, take)
+                or tuple(proof.get(field) for field in proof_fields) != (area, pawn, source, created, expected, quantity_after, take)
                 or not qualified):
-            raise RuntimeError("The native inventory split did not verify both exact stock stacks")
+            raise RuntimeError("The native inventory action did not verify both exact stock rows")
         host.last_game, host.last_seen = snapshot, time.monotonic()
-        result = {key: {"state": "unloaded" if unload else "split", "owner": character, **proof}}
+        result = {key: {"state": "merged" if merge else "unloaded" if unload else "split", "owner": character, **proof}}
         candidate = party.load_party(host.party)
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": fingerprint, "result": result})
@@ -220,7 +237,7 @@ async def split_stack(host, bridge, character: str, target, operation: str, *, u
             host.stopping = True
         raise
     host.party, host.native_checkpoint_unsafe = candidate, False
-    event = f"native_guest_inventory_{'take_ammo' if unload else 'split'}_{'accepted' if deferred else 'committed'}"
+    event = f"native_guest_inventory_{'merge' if merge else 'take_ammo' if unload else 'split'}_{'accepted' if deferred else 'committed'}"
     host.control.event(event, operation_id=operation, revision=revision, **result[key])
     return result
 

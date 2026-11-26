@@ -720,12 +720,14 @@ local function preview_stock_layout(action)
     elseif action.entry == "split" and stock_session.split_preview and type(SilverfishSplitLocalGuestStack) == "function" then
         local ok, _, _, _, _, _, created = SilverfishSplitLocalGuestStack(pawn, save, action.guid, action.quantity, action.expected)
         if ok then receipt = created end
+    elseif action.merge and type(SilverfishMergeLocalGuestStacks) == "function" then
+        local ok = SilverfishMergeLocalGuestStacks(pawn, save, action.guid, action.merge, action.quantity, action.expected)
+        if ok then receipt = action.merge end
     elseif action.unload and #stock_layout == 0 and stock_session.unload_preview
         and type(SilverfishTakeLocalGuestWeaponAmmo) == "function" then
-        local ok, status, _, _, _, _, _, created, index = SilverfishTakeLocalGuestWeaponAmmo(
+        local ok, _, _, _, _, _, _, created, index = SilverfishTakeLocalGuestWeaponAmmo(
             pawn, save, action.guid, action.quantity, action.expected)
         if ok then receipt, unload_slot = created, index >= 0 and index or nil end
-        if not ok and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then action.unload_fixture_status = status end
     elseif action.equip and target < 8 and type(SilverfishStoreLocalGuestEquipment) == "function" then
         local ok, _, stored, _, displaced = SilverfishStoreLocalGuestEquipment(pawn, save, action.guid, target)
         if ok then slot, receipt = stored, displaced end
@@ -751,6 +753,13 @@ local function preview_stock_layout(action)
     if slot and slot >= 8 then update_local_worn_slot(action.context, slot) end
 end
 
+local function apply_stock_merge(pawn, pending)
+    pcall(preview_stock_layout, pending)
+    if pending.layout_preview then return end
+    SilverfishFinishNativeGuestDropRequest(pawn, pending.epoch, pending.sequence)
+    stock_drop = nil
+end
+
 sync_stock = function(current, state, phase, allowed)
     local session, stack = stock_session, current.controller.MenuStack
     local top, present = stack:GetArrayNum(), false
@@ -760,6 +769,10 @@ sync_stock = function(current, state, phase, allowed)
     local exposed = top > 0 and same(widget_at(stack, top), session.screen)
     if not present or (exposed and not allowed) then
         if exposed then current.controller:CloseMenu({}) end
+        if stock_drop and stock_drop.merge and not stock_drop.layout_preview then
+            SilverfishFinishNativeGuestDropRequest(current.pawn:GetAddress(), session.epoch, stock_drop.sequence)
+            stock_drop = nil
+        end
         stock_session = nil
         if not stock_drop and #stock_layout == 0 then SilverfishClearNativeHostDropScope() end
         if observation then observation.state = "closed" end
@@ -774,16 +787,24 @@ sync_stock = function(current, state, phase, allowed)
         if observation then observation.state = "closed" end
         return
     end
-    if stock_drop or #stock_layout >= max_stock_layout or not exposed or not allowed then return end
-    local sequence, guid, quantity, entry, expected = SilverfishTakeNativeGuestDropRequest(pawn, session.epoch)
+    if stock_drop then
+        if stock_drop.merge and not stock_drop.layout_preview and #stock_layout == 0 then apply_stock_merge(pawn, stock_drop) end
+        return
+    end
+    if #stock_layout >= max_stock_layout or not exposed or not allowed then return end
+    local sequence, guid, quantity, entry, expected, destination = SilverfishTakeNativeGuestDropRequest(pawn, session.epoch)
     if not sequence then return end
     stock_drop = {context = current, screen = session.screen, save = save, epoch = session.epoch, sequence = sequence,
         guid = entry == "sort" and "-" or guid, quantity = quantity, entry = entry, expected = expected,
         sort = entry == "sort", split = (entry == "split" or entry == "take-ammo") and quantity or nil,
-        unload = entry == "take-ammo", equip = entry == "equip",
+        unload = entry == "take-ammo", equip = entry == "equip", merge = entry == "merge" and destination or nil,
         slot_drop = entry:match("^worn_drop_") ~= nil or entry:match("^quick_drop_") ~= nil, live = true}
     -- Release the native input latch after applying a personal move. The oldest report
     -- still goes first. A world action captured behind the moves keeps the latch.
+    if stock_drop.merge then
+        if #stock_layout == 0 then apply_stock_merge(pawn, stock_drop) end
+        return
+    end
     pcall(preview_stock_layout, stock_drop)
     if stock_drop.layout_preview and not stock_drop.unload and type(SilverfishReleaseNativeGuestLayoutRequest) == "function"
         and SilverfishReleaseNativeGuestLayoutRequest(pawn, session.epoch, sequence) then
@@ -837,6 +858,7 @@ local function finish_stock_drop(fields, current, state, phase)
     local remaining = integer(fields[5], 2147483647)
     local sorted = pending and pending.sort and fields[5] == "sorted"
     local created = #fields == 6 and fields[6]
+    local merged = pending and pending.merge and created == pending.merge and remaining == pending.expected + pending.quantity
     local split = pending and pending.split and remaining == pending.expected - pending.split
         and created and #created == 32 and created:match("^[0-9A-F]+$") and created:find("[^0]") and created ~= pending.guid
     local slot = pending and pending.equip and fields[5] == "equipped" and #fields == 7 and integer(fields[6], 9)
@@ -850,10 +872,10 @@ local function finish_stock_drop(fields, current, state, phase)
     local unequipped = source and pending.expected == source + 1 and rounds and rounds >= -1 and rounds <= 2147483647
     local dropped_slot = pending and pending.slot_drop and remaining == 0 and pending.expected
         and pending.expected >= 1 and pending.expected <= 10
-    if (not split and not equipped and not unequipped and #fields ~= 5) or not pending or not same_context(current, pending.context)
+    if (not split and not merged and not equipped and not unequipped and #fields ~= 5) or not pending or not same_context(current, pending.context)
         or fields[3] ~= pending.epoch or integer(fields[4], 9007199254740991) ~= pending.sequence
-        or (not sorted and not split and not equipped and not unequipped
-            and (not remaining or pending.sort or pending.split or pending.equip or pending.entry == "unequip"
+        or (not sorted and not split and not merged and not equipped and not unequipped
+            and (not remaining or pending.sort or pending.split or pending.merge or pending.equip or pending.entry == "unequip"
                 or pending.slot_drop and not dropped_slot)
             and fields[5] ~= "refused") then
         error("The stock inventory settlement belongs to another request", 0)
@@ -889,6 +911,13 @@ local function finish_stock_drop(fields, current, state, phase)
             finished, status = SilverfishFinishNativeGuestDropRequest(pawn, pending.epoch, pending.sequence)
         end
         if pending.live and finished and status == "screen_closed" then return "verified stock inventory settlement" end
+        if merged then
+            if not finished or status ~= "refreshed" or not stock_cards(pending.screen, save, pending.guid, 0)
+                or not stock_cards(pending.screen, save, created, remaining) then
+                error("The stock backpack did not reflect the merged stacks", 0)
+            end
+            return "verified stock backpack merge"
+        end
         if dropped_slot then
             local widget = widget_at(pending.screen.ItemManager.EquipSlots, pending.expected)
             local index = pending.expected - 1
@@ -1014,6 +1043,7 @@ function inventory_view.command(fields, state, phase)
         and operation ~= "native-inventory-stock-nearby-fixture"
         and operation ~= "native-inventory-stock-use-click-fixture"
         and operation ~= "native-inventory-stock-split-click-fixture"
+        and operation ~= "native-inventory-stock-merge-click-fixture"
         and operation ~= "native-inventory-stock-personal-preview"
         and operation ~= "native-inventory-view-equip-result"
         and operation ~= "native-inventory-view-use-result"
@@ -1142,6 +1172,32 @@ function inventory_view.command(fields, state, phase)
         local second = split(first, assert(integer(fields[5], 2147483647)))
         return first .. "," .. second
     end
+    if operation == "native-inventory-stock-merge-click-fixture" and #fields == 4
+        and headless and stock_session and not stock_drop and #stock_layout == 0
+        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
+        local screen = stock_session.screen
+        local panel, manager = screen.BackpackPanel, screen.ItemManager
+        local source, destination, index
+        for position = 1, panel.Cards:GetArrayNum() do
+            local card = widget_at(panel.Cards, position)
+            local guid = stock_card_guid(card)
+            if guid == fields[3] then source = card end
+            if guid == fields[4] then destination, index = card, position - 1 end
+        end
+        assert(valid(source) and valid(destination) and source ~= destination, "missing stock stack cards")
+        local amount = math.max(1, source.Item[item_ammo]) + math.max(1, destination.Item[item_ammo])
+        manager.HoveredCard = source
+        manager:InitiateItemTake()
+        manager:FinalTakeItem()
+        assert(manager.HoldingItem and stock_item_guid(manager.HeldItem) == fields[3], "could not drag the source stack")
+        manager.HoveredCard = destination
+        manager:InsertItem(panel, index)
+        sync_stock(current, state, phase, true)
+        assert(not manager.HoldingItem and stock_drop and stock_drop.merge == fields[4]
+            and stock_cards(screen, stock_session.save, fields[3], 0)
+            and stock_cards(screen, stock_session.save, fields[4], amount), "merge was not visible before the host reply")
+        return "stock drag merge displayed " .. amount .. " items"
+    end
     local sealed_fixture = fields[4] == "sealed-drag" or fields[4] == "sealed-context"
         or fields[4] == "sealed-confirm" or fields[4] == "sealed-cancel" or fields[4] == "sealed-journal"
     if operation == "native-inventory-stock-use-click-fixture"
@@ -1207,9 +1263,6 @@ function inventory_view.command(fields, state, phase)
             end
             sync_stock(current, state, phase, true)
             if stock_drop and stock_drop.guid == fields[3] then
-                if stock_drop.unload and screen and stock_session.unload_preview and not stock_drop.layout_preview then
-                    error("Take Ammo did not apply locally: " .. tostring(stock_drop.unload_fixture_status), 0)
-                end
                 if stock_drop.unload and stock_drop.layout_preview then
                     local equipped = stock_equipped_card(screen, stock_drop.guid)
                     local empty = equipped and equipped.Item[item_ammo] == 0
@@ -1322,7 +1375,7 @@ function inventory_view.rows(state, phase, status_row)
     local rows = {status_row("native-inventory-split-view-capability", 1)}
     if binding_state then rows[#rows + 1] = status_row("native-inventory-view-binding", binding_state) end
     local pending = stock_layout[1] or stock_drop
-    if pending and pending.live and same_context(current, pending.context) then
+    if pending and pending.live and (not pending.merge or pending.layout_preview) and same_context(current, pending.context) then
         rows[#rows + 1] = status_row("native-inventory-stock-action", current.map, current.name, pending.epoch,
             pending.sequence, pending.entry, pending.guid, pending.quantity, pending.expected or 0,
             pending.layout_preview or "")

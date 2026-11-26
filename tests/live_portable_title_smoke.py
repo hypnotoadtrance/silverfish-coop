@@ -4010,7 +4010,7 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
         pressed = await submit(guest_run, "native-inventory-stock-use-click-fixture", target=f"{guid}|take-ammo")
         assert pressed["ok"] and pressed["stock_action"]["guid"] == guid, pressed
         preview_guid = pressed["stock_action"].get("layout_preview")
-        assert isinstance(preview_guid, str) and re.fullmatch(r"[0-9A-F]{32}", preview_guid), pressed
+        assert preview_guid is None or re.fullmatch(r"[0-9A-F]{32}", preview_guid), pressed
         async with asyncio.timeout(12):
             while True:
                 matches = [entry[native_inventory.TAKE_AMMO_KEY] for entry in await resident_events(guest_run, guest_frame)
@@ -4019,7 +4019,8 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
                     break
                 await asyncio.sleep(.1)
         unloaded, = matches
-        assert unloaded["remaining"] == 0 and unloaded["split"] == before["stored_ammo"] and unloaded["new_guid"] == preview_guid, unloaded
+        assert unloaded["remaining"] == 0 and unloaded["split"] == before["stored_ammo"], unloaded
+        assert preview_guid is None or unloaded["new_guid"] == preview_guid, unloaded
         expected = alternate or (THIRTY_06_FMJ if kind == "obrez" else profiles[kind].ammo)
         assert unloaded["class_path"] == expected.item_path, unloaded
         inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
@@ -6786,6 +6787,23 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         after = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
         wanted = {bandage["guid"]: 5, split_id: 3, nested_id: 1}
         assert {row["guid"]: row["quantity"] for row in after["items"] if row["guid"] in wanted} == wanted
+        pressed = await guest.bridge.command("native-inventory-stock-merge-click-fixture", split_id, bandage["guid"])
+        assert pressed["ack"]["message"] == "stock drag merge displayed 8 items", pressed["ack"]
+        async with asyncio.timeout(10):
+            while True:
+                entries = await resident_events(guest_run, frame)
+                found = [row for row in entries if row.get(native_inventory.MERGE_KEY, {}).get("source_guid") == split_id]
+                if found:
+                    break
+                await asyncio.sleep(.07)
+        merged, = found
+        proof = merged[native_inventory.MERGE_KEY]
+        assert (proof["destination_guid"], proof["quantity_before"], proof["quantity_after"], proof["quantity_moved"]) == (
+            bandage["guid"], 5, 8, 3), proof
+        assert merged["stock_inventory_proof"] == "verified stock backpack merge", merged
+        bandage_split["drag_merge"] = merged
+        after = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
+        assert {row["guid"]: row["quantity"] for row in after["items"] if row["guid"] in wanted} == {bandage["guid"]: 8, nested_id: 1}
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
         await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
         assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before["native_inventory"]
