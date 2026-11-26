@@ -6,6 +6,7 @@ local prefix = mailbox .. "/portable-npc-override-"
 local command_limit = 4096
 local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
 local dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P.Tut_Dock_P"
+local outside_campaign = "/Game/PolygonHorrorAsylum/Maps/Overview.Overview"
 local class_path = "/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C"
 local damage_key = "Kenetic_2_47ECE93447043FC41017B8B98F2C7DE5"
 local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
@@ -1839,8 +1840,10 @@ local function run(action, actor_path)
         live_probe = nil
         return "stopped"
     end
-    assert(valid(world) and world:GetFullName() == "World " .. (at_dock and dock or map) and valid(world.NetDriver),
-        "the test requires the expected world in an isolated co-op pair")
+    local world_name = valid(world) and world:GetFullName()
+    local outside_population = world_name == "World " .. outside_campaign and action:match("^dock%-population%-")
+    assert(valid(world) and (world_name == "World " .. (at_dock and dock or map) or outside_population)
+        and valid(world.NetDriver), "the test requires the expected world in an isolated co-op pair")
     local pawn = statics:GetPlayerPawn(world, 0)
     assert(valid(pawn) and pawn:IsLocallyControlled() and same(pawn:GetWorld(), world), "local stock pawn unavailable")
     local host = pawn:HasAuthority()
@@ -1886,21 +1889,17 @@ local function run(action, actor_path)
             return row[item_class]:GetFName():ToString() == "Wep_RustyPistol_C"
         end)
     elseif action == "dock-population-spawn" or action == "dock-population-burst" then
-        assert(world:GetFullName() == "World " .. dock)
         return dock_spawn_population(pawn, world, host, action == "dock-population-burst")
     elseif action == "dock-population-at" or action == "dock-population-paths" then
-        assert(world:GetFullName() == "World " .. dock)
         return dock_population_at(world, actor_path, action == "dock-population-paths")
     elseif action == "dock-population-fixture-state" then
         return dock_population_fixture_state()
     elseif action == "dock-population-observe-view" then
-        assert(world:GetFullName() == "World " .. dock and not host)
+        assert(not host)
         return population_weapons_at(world, actor_path)
     elseif action == "dock-population-weapons" then
-        assert(world:GetFullName() == "World " .. dock)
         return tracked_population_weapons(world, actor_path == "equipped")
     elseif action == "dock-population-weapon-details" then
-        assert(world:GetFullName() == "World " .. dock)
         return population_weapon_details(world)
     elseif action == "dock-population-cleanup" then
         for _, actor in pairs(population_fixture) do

@@ -1,6 +1,7 @@
 #include "campaign_npc.hpp"
 #include "guest_sickness.hpp"
 #include "guest_regen.hpp"
+#include "world_path.hpp"
 
 #include <algorithm>
 #include <array>
@@ -331,6 +332,12 @@ namespace
         return nullptr;
     }
 
+    bool campaign_map_name(std::wstring_view path, bool allow_package = false)
+    {
+        if (path.substr(0, path.find(L'.')) == STR("/Game/Classes/Maps/MainMenu_P")) return false;
+        return silverfish::world_path::object(path) || (allow_package && silverfish::world_path::package(path));
+    }
+
     Network network(U::UWorld* world, bool during_load = false, bool any_campaign_map = false)
     {
         if (!live(world)) return {};
@@ -338,7 +345,7 @@ namespace
         if (!driver && (!during_load || !pending_client_load.context)) return {};
         const auto path = world->GetPathName();
         const auto* profile = director_for(path);
-        if (!profile && (!any_campaign_map || !path.starts_with(STR("/Game/Classes/Maps/")))) return {};
+        if (!profile && (!any_campaign_map || !campaign_map_name(path))) return {};
         auto* instance = object(world, STR("OwningGameInstance"));
         if (!exact(instance, instance_class)) return {};
         auto* connection = field<U::FObjectProperty>(driver, STR("ServerConnection"));
@@ -2820,7 +2827,7 @@ namespace silverfish::campaign_npc
                 if (!pending || url.Map.IsEmpty()) return;
                 const std::wstring_view map{*url.Map};
                 const auto* profile = director_for(map);
-                if (!profile && (!production_roster || !map.starts_with(STR("/Game/Classes/Maps/")))) return;
+                if (!profile && (!production_roster || !campaign_map_name(map, true))) return;
                 // The engine can start map Blueprints before publishing World.NetDriver.
                 auto* pending_object = reinterpret_cast<U::UObject*>(pending);
                 if (!exact(pending_object, STR("/Script/Engine.PendingNetGame"))) return;

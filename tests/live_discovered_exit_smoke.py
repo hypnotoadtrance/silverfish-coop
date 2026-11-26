@@ -39,7 +39,7 @@ async def wait_for_party(host_run, guest_run, destination):
 
 async def live_exit(host, guest, pawn, probe, *, unlisted_only=False, save_in_shop=False, with_door=False,
                     unlisted_map=UNLISTED_SHOP, mounted_items=False, mounted_quest=False,
-                    defer_host_travel=False, **options):
+                    mounted_npcs=False, defer_host_travel=False, **options):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     unlisted_world = "/Game/Classes/Maps/Maps_OverWorld/Campus_04_P"
     shop = unlisted_map
@@ -104,6 +104,11 @@ async def live_exit(host, guest, pawn, probe, *, unlisted_only=False, save_in_sh
         if mounted_quest:
             assert shop == UNLISTED_DEMO
             evidence["mounted_quest"] = await live_mounted_quest(host, guest)
+        if mounted_npcs:
+            current = await wait_for_party(host_run, guest_run, shop)
+            population = await suite.verify_dock_npc_population(
+                host, guest, current["game"]["native_guest_save"]["pawn"])
+            evidence["outside_tree_npcs"] = population["tutorial_dock_npc_population"]
     finally:
         if not save_in_shop:
             returned = await cross_unlisted(host, guest, probe, "return", shop, CROSSROADS)
@@ -380,10 +385,13 @@ if __name__ == "__main__":
     parser.add_argument("--outside-tree", action="store_true")
     parser.add_argument("--mounted-items", action="store_true")
     parser.add_argument("--mounted-quest", action="store_true")
+    parser.add_argument("--mounted-npcs", action="store_true")
     parser.add_argument("--defer-host-travel", action="store_true")
     args = parser.parse_args()
     if args.mounted_quest and not args.outside_tree:
         parser.error("--mounted-quest requires --outside-tree")
+    if args.mounted_npcs and not args.outside_tree:
+        parser.error("--mounted-npcs requires --outside-tree")
     if args.defer_host_travel and not args.outside_tree:
         parser.error("--defer-host-travel requires --outside-tree")
     work, first, second, saves = (path.resolve() for path in (args.work, args.first_game, args.second_game, args.vanilla_saved))
@@ -392,7 +400,8 @@ if __name__ == "__main__":
     suite.verify_weather_travel = partial(live_exit, unlisted_only=args.unlisted_only or args.resume_unlisted,
                                         save_in_shop=args.resume_unlisted, with_door=args.discovered_door,
                                         unlisted_map=unlisted, mounted_items=args.mounted_items,
-                                        mounted_quest=args.mounted_quest, defer_host_travel=args.defer_host_travel)
+                                        mounted_quest=args.mounted_quest, mounted_npcs=args.mounted_npcs,
+                                        defer_host_travel=args.defer_host_travel)
     if args.resume_unlisted:
         suite.start_pair = partial(check_unlisted_resume, unlisted_map=unlisted)
     if args.mounted_items:
@@ -413,4 +422,5 @@ if __name__ == "__main__":
             for game in (first, second):
                 probes.enter_context(suite.portable_main_overlay(game, defer_listener_open))
         asyncio.run(suite.verify(work, first, second, saves, stock_weather_travel=True,
-                                 stock_placed_item=not args.resume_unlisted, stock_eye_stacks=args.mounted_quest))
+                                 stock_placed_item=not args.resume_unlisted, stock_eye_stacks=args.mounted_quest,
+                                 stock_npc_override=args.mounted_npcs))
