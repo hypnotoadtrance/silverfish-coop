@@ -6,7 +6,8 @@ import math
 from pathlib import Path
 
 import live_portable_title_smoke as suite
-from tools.silverfish.authored_routes import AUTHORED_ROUTES
+from tools.silverfish.authored_routes import AUTHORED_ROUTES, MAPS
+from tools.silverfish.travel import AUTHORED_MAPS
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
 
@@ -27,6 +28,20 @@ async def wait_for_party(host_run, guest_run, destination):
 
 async def live_exit(host, guest, pawn, probe, **options):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
+    unlisted_world = "/Game/Classes/Maps/Maps_OverWorld/Campus_04_P"
+    assert unlisted_world not in MAPS | AUTHORED_MAPS
+    lookups = {
+        OBSERVATORY: "world",
+        unlisted_world: "world",
+        "/Game/Textures/ScifiWorlds_Texture_Custom_01": "non-world",
+        "/Game/CoopFixture/AbsentMap": "missing",
+        "/Game/../AbsentMap": "invalid-package",
+    }
+    for seat in (host, guest):
+        for path, status in lookups.items():
+            found = await seat.bridge.command("native-map-package", path)
+            assert found["ack"]["message"] == "map-package:" + status, (path, found["ack"])
+
     for source, destination in ((OBSERVATORY, CROSSROADS), (CROSSROADS, OBSERVATORY)):
         route = route_between(source, destination)
         for participant, position in ((pawn, "near"), ("local", "near"), ("local", "inside")):
@@ -46,7 +61,7 @@ async def live_exit(host, guest, pawn, probe, **options):
         await host.bridge.command("native-exit-position", participant, position, route.entrance, route.actor)
     reached = await wait_for_party(host_run, guest_run, OBSERVATORY)
     streamed = await live_discovered_exit(host, guest, reached["game"]["native_guest_save"]["pawn"], probe, streamed=True)
-    return {"persistent_exit": spawned, "streamed_exit": streamed}
+    return {"persistent_exit": spawned, "streamed_exit": streamed, "map_package_verdicts": lookups}
 
 
 async def live_discovered_exit(host, guest, pawn, probe, *, streamed):

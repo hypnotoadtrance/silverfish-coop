@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -24,6 +25,7 @@
 #include <Unreal/FWeakObjectPtr.hpp>
 #include <Unreal/Hooks.hpp>
 #include <Unreal/SoftObjectPtr.hpp>
+#include <Unreal/UAssetRegistryHelpers.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/World.hpp>
@@ -587,6 +589,72 @@ namespace
         return !text.empty() && std::ranges::all_of(text, [](RC::CharType c) {
             return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
         });
+    }
+
+    bool package_path(RC::StringViewType package)
+    {
+        if (package.size() > 240 || !package.starts_with(STR("/"))) return false;
+        package.remove_prefix(1);
+        if (package.find(STR('/')) == package.npos) return false;
+        while (true)
+        {
+            const auto split = package.find(STR('/'));
+            if (!exit_token(package.substr(0, split))) return false;
+            if (split == package.npos) return true;
+            package.remove_prefix(split + 1);
+        }
+    }
+
+    std::string_view map_package_status(RC::StringViewType package)
+    {
+        if (!package_path(package)) return "invalid-package";
+        const auto separator = package.rfind(STR('/'));
+        const auto asset_name = package.substr(separator + 1);
+        RC::StringType object{package};
+        object += STR('.');
+        object += asset_name;
+        auto* lookup = find<Unreal::UFunction>(STR("/Script/AssetRegistry.AssetRegistry:GetAssetByObjectPath"));
+        auto* asset_type = find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.AssetData"));
+        auto* class_type = find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.TopLevelAssetPath"));
+        auto* result = lookup ? Unreal::CastField<Unreal::FStructProperty>(lookup->GetReturnProperty()) : nullptr;
+        auto* object_path = field<Unreal::FNameProperty>(lookup, STR("ObjectPath"));
+        auto* disk_only = field<Unreal::FBoolProperty>(lookup, STR("bIncludeOnlyOnDiskAssets"));
+        auto* found_package = field<Unreal::FNameProperty>(asset_type, STR("PackageName"));
+        auto* found_asset = field<Unreal::FNameProperty>(asset_type, STR("AssetName"));
+        auto* found_class = field<Unreal::FStructProperty>(asset_type, STR("AssetClassPath"));
+        alignas(16) std::array<std::byte, 384> storage{};
+        if (!lookup || !result || !asset_type || result->GetStruct().Get() != asset_type || !class_type ||
+            !object_path || !disk_only || !found_package || !found_asset || !found_class ||
+            found_class->GetStruct().Get() != class_type || found_class->GetSize() != sizeof(Unreal::FTopLevelAssetPath) ||
+            lookup->GetNumParms() != 3 || lookup->GetParmsSize() > storage.size() ||
+            result->GetOffset_Internal() + result->GetSize() > lookup->GetParmsSize()) return "registry-unavailable";
+        auto* registry = Unreal::UAssetRegistryHelpers::GetAssetRegistry().ObjectPointer;
+        auto* registry_class = find<Unreal::UClass>(STR("/Script/AssetRegistry.AssetRegistryImpl"));
+        if (!live_object(registry) || !registry_class || !registry->IsA(registry_class)) return "registry-unavailable";
+
+        result->InitializeValue_InContainer(storage.data());
+        const auto release = [result](std::byte* bytes) { result->DestroyValue_InContainer(bytes); };
+        const std::unique_ptr<std::byte, decltype(release)> cleanup{storage.data(), release};
+        *object_path->ContainerPtrToValuePtr<Unreal::FName>(storage.data()) = Unreal::FName(object.c_str());
+        disk_only->SetPropertyValueInContainer(storage.data(), true);
+        registry->ProcessEvent(lookup, storage.data());
+
+        const auto* metadata = result->ContainerPtrToValuePtr<void>(storage.data());
+        const auto& resolved_package = *found_package->ContainerPtrToValuePtr<Unreal::FName>(metadata);
+        if (resolved_package.IsNone()) return "missing";
+        const auto& resolved_asset = *found_asset->ContainerPtrToValuePtr<Unreal::FName>(metadata);
+        if (resolved_package.ToString() != package || resolved_asset.ToString() != asset_name) return "missing";
+        const auto& asset_class = *found_class->ContainerPtrToValuePtr<Unreal::FTopLevelAssetPath>(metadata);
+        return asset_class.GetPackageName().ToString() == STR("/Script/Engine") &&
+            asset_class.GetAssetName().ToString() == STR("World") ? "world" : "non-world";
+    }
+
+    int lua_inspect_map_package(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_string(1)) return 0;
+        const auto status = map_package_status(RC::to_wstring(lua.get_string()));
+        lua.set_string(std::string{status});
+        return 1;
     }
 
     std::optional<DiscoveredExit> discover_exit(Unreal::UObject* exit, Unreal::UObject* box, Unreal::UWorld* world)
@@ -1573,6 +1641,7 @@ namespace silverfish::native_zone
         lua.register_function("SilverfishPauseNativeZoneScope", lua_pause);
         lua.register_function("SilverfishSetNativeExitApproach", lua_exit_approach);
         lua.register_function("SilverfishInspectDiscoveredOverlap", lua_discovered_overlap);
+        lua.register_function("SilverfishInspectMapPackage", lua_inspect_map_package);
         lua.register_function("SilverfishCheckNativeExitCrossing", lua_exit_crossing);
         lua.register_function("SilverfishTakeNativeZoneEvent", lua_take_event);
         lua.register_function("SilverfishTakeNativeAuthoredRoute", lua_take_authored_route);

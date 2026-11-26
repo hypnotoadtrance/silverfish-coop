@@ -882,6 +882,11 @@ local function run_command(fields, state, current_phase)
         end
         last_green_arrival = native_green.arrival(state, current_phase)
         return "qualified stock Green Cube arrival"
+    elseif command == "native-map-package" then
+        if not expanded_routes or #fields ~= 3 or type(SilverfishInspectMapPackage) ~= "function" then
+            error("Native map package lookup is unavailable", 0)
+        end
+        return "map-package:" .. (SilverfishInspectMapPackage(argument) or "registry-unavailable")
     elseif command == "native-authored-arrival" then
         last_authored_arrival = nil
         if not expanded_routes or #fields ~= 5 or role ~= "host" or current_phase ~= "hosting" then
