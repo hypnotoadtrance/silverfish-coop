@@ -138,3 +138,24 @@ class StockSwitchResponseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(await switches.project(bridge, stale, frame, epoch), stale)
         with self.assertRaises(RuntimeError):
             runtime.Bridge._local_stock_interaction_reply(raw.replace(f"{area}\t{radio}\t1", f"{area}\t{other}\t1"), fields)
+
+    def test_compact_switch_reply_uses_visit_map_for_a_streamed_actor(self):
+        area = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+        sublevel = "/Game/Classes/Maps/Maps_Dungeons/CoopSwitchSublevel"
+        switch = f"CircutBox_BP_C {sublevel}.Tut_Dock_P:PersistentLevel.CircutBox_BP_C_1"
+        nonce = "a" * 32
+        raw = (
+            f"native-stock-interaction-reply\t1\t{nonce}\thosting\t{area}\t12\thost pawn\taccepted\t"
+            f"stock switch interaction dispatched\n{switches.TAG}\t{area}\t{switch}\t1\t0\t0\t0\t-\t-\n"
+        )
+        fields = (nonce, switches.ACTION, switch, "guest pawn")
+        reply = runtime.Bridge._local_stock_interaction_reply(raw, fields)
+        self.assertEqual(reply["map"], area)
+        self.assertTrue(reply[switches.KEY][switch]["powered"])
+
+        projected = raw.replace("hosting", "connected").replace("interaction dispatched", "state projected")
+        projection = (nonce, switches.PROJECT, switch, area, "1", "0", "0", "0")
+        reply = runtime.Bridge._local_stock_interaction_reply(projected, projection)
+        self.assertTrue(reply[switches.KEY][switch]["powered"])
+        with self.assertRaises(RuntimeError):
+            runtime.Bridge._local_stock_interaction_reply(projected, (*projection[:3], sublevel, *projection[4:]))

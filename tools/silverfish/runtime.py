@@ -3914,8 +3914,14 @@ class Bridge:
             raise RuntimeError("The stock interaction receipt did not match the request")
         _, _, nonce, phase, area, sequence, pawn, status, message = rows[0]
         expected_phase = "connected" if fields[1] == native_stock_switch.PROJECT else "hosting"
-        target_in_area = (native_stock_door.matches_area(fields[2], area) if fields[1] == native_stock_door.DISPATCH
-                          else native_stock_door.actor_map(fields[2]) == area)
+        if fields[1] == native_stock_door.DISPATCH:
+            target_in_area = native_stock_door.matches_area(fields[2], area)
+        else:
+            # The game thread verifies the exact switch's visible level. A streamed
+            # switch's level package can differ from the active visit's world.
+            target_in_area = valid_campaign_package(area) and native_stock_switch.actor_package(fields[2]) is not None
+            if fields[1] == native_stock_switch.PROJECT:
+                target_in_area = target_in_area and len(fields) >= 4 and fields[3] == area
         if (phase != expected_phase or not target_in_area
                 or not (local_sequence := _held_input_sequence(sequence)) or not 0 < len(pawn) <= 512):
             raise RuntimeError("The stock interaction receipt did not match the current world")
