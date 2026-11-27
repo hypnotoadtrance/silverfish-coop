@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -2072,11 +2073,8 @@ namespace
         return 3;
     }
 
-    int read_remote_aim(const Lua& lua)
+    Unreal::UObject* remote_avatar_pawn(std::int64_t world_address, std::int64_t pawn_address)
     {
-        if (!available() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_integer(2)) return 0;
-        const auto world_address = lua.get_integer();
-        const auto pawn_address = lua.get_integer();
         auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
         auto* local = scope.pawn.Get();
         auto* driver = scope.driver.Get();
@@ -2085,20 +2083,24 @@ namespace
             pawn_address <= 0 || address(local) == pawn_address ||
             now >= scope.expires || scope.generation != generation.load(std::memory_order_acquire) ||
             object_field(world, STR("NetDriver")) != driver || object_field(driver, STR("World")) != world)
-            return 0;
+            return nullptr;
 
         struct Census
         {
-            Unreal::FWeakObjectPtr world, local;
+            Unreal::FWeakObjectPtr world, local, driver;
+            std::uint64_t generation{};
             std::array<Unreal::FWeakObjectPtr, 5> remotes{};
             Clock::time_point next_scan{};
         };
         static Census census;
-        if (census.world.Get() != world || census.local.Get() != local)
+        if (census.world.Get() != world || census.local.Get() != local ||
+            census.driver.Get() != driver || census.generation != scope.generation)
         {
             census = {};
             census.world = world;
             census.local = local;
+            census.driver = driver;
+            census.generation = scope.generation;
         }
         const auto remote = [&]() -> Unreal::UObject* {
             for (const auto& item : census.remotes)
@@ -2112,7 +2114,7 @@ namespace
             census.next_scan = now + std::chrono::milliseconds(250);
             census.remotes = {};
             auto* type = find<Unreal::UClass>(pawn_path);
-            if (!type) return 0;
+            if (!type) return nullptr;
             std::vector<Unreal::AActor*> actors;
             Unreal::UGameplayStatics::GetAllActorsOfClass(world, type, actors);
             std::size_t count = 0;
@@ -2125,35 +2127,214 @@ namespace
             }
             pawn = remote();
         }
-        if (!pawn) return 0;
+        return pawn;
+    }
 
-        using Rotation = std::array<double, 3>;
+    using AimRotation = std::array<double, 3>;
+
+    bool aim_rotator(Unreal::FStructProperty* property)
+    {
+        auto* type = property ? property->GetStruct().Get() : nullptr;
+        if (!type || type != find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.Rotator")) ||
+            property->GetSize() != sizeof(AimRotation)) return false;
+        constexpr std::array axes{STR("Pitch"), STR("Yaw"), STR("Roll")};
+        for (std::size_t index = 0; index < axes.size(); ++index)
+        {
+            auto* axis = field<Unreal::FDoubleProperty>(type, axes[index]);
+            if (!axis || axis->GetOffset_Internal() != static_cast<int>(index * sizeof(double))) return false;
+        }
+        return true;
+    }
+
+    int read_remote_aim(const Lua& lua)
+    {
+        if (!available() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_integer(2)) return 0;
+        const auto world_address = lua.get_integer();
+        const auto pawn_address = lua.get_integer();
+        auto* pawn = remote_avatar_pawn(world_address, pawn_address);
+        if (!pawn) return 0;
         static Unreal::FWeakObjectPtr cached_aim;
         auto* aim = static_cast<Unreal::UFunction*>(cached_aim.Get());
         if (!aim)
         {
             aim = find<Unreal::UFunction>(STR("/Script/Engine.Pawn:GetBaseAimRotation"));
             auto* result = aim ? Unreal::CastField<Unreal::FStructProperty>(aim->GetReturnProperty()) : nullptr;
-            auto* rotator = find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.Rotator"));
-            if (!result || !rotator || result->GetStruct().Get() != rotator || result->GetArrayDim() != 1 ||
-                result->GetSize() != sizeof(Rotation) || result->GetOffset_Internal() != 0 ||
+            if (!aim_rotator(result) || result->GetArrayDim() != 1 || result->GetOffset_Internal() != 0 ||
                 !aim->HasAnyFunctionFlags(Unreal::FUNC_Native) || aim->GetNumParms() != 1 ||
-                aim->GetParmsSize() != sizeof(Rotation) ||
+                aim->GetParmsSize() != sizeof(AimRotation) ||
                 aim->GetOuterPrivate() != find<Unreal::UClass>(STR("/Script/Engine.Pawn"))) return 0;
-            constexpr std::array axes{STR("Pitch"), STR("Yaw"), STR("Roll")};
-            for (std::size_t index = 0; index < axes.size(); ++index)
-            {
-                auto* axis = field<Unreal::FDoubleProperty>(rotator, axes[index]);
-                if (!axis || axis->GetOffset_Internal() != static_cast<int>(index * sizeof(double))) return 0;
-            }
             cached_aim = aim;
         }
-        Rotation rotation{};
+        AimRotation rotation{};
         pawn->ProcessEvent(aim, rotation.data());
         if (!std::isfinite(rotation[0]) || !std::isfinite(rotation[1])) return 0;
         lua.set_number(rotation[0]);
         lua.set_number(rotation[1]);
         return 2;
+    }
+
+    struct HeadRotationWriter
+    {
+        static constexpr int parameter_capacity = 512, parameter_alignment = 16;
+        Unreal::FWeakObjectPtr setter{}, scene{}, skeletal_mesh{};
+        Unreal::FStructProperty *rotation{}, *hit{};
+        Unreal::FBoolProperty *sweep{}, *teleport{}, *absolute{}, *replicated{};
+        Unreal::FObjectProperty* parent{};
+        Unreal::FNameProperty* socket{};
+        Unreal::FName head{};
+
+        void bind()
+        {
+            auto* scene_class = find<Unreal::UClass>(STR("/Script/Engine.SceneComponent"));
+            auto* mesh_class = find<Unreal::UClass>(STR("/Script/Engine.SkeletalMeshComponent"));
+            auto* function = find<Unreal::UFunction>(STR("/Script/Engine.SceneComponent:K2_SetWorldRotation"));
+            if (!scene_class || !mesh_class || !function || function->GetOuterPrivate() != scene_class ||
+                !function->HasAnyFunctionFlags(Unreal::FUNC_Native) || function->GetNumParms() != 4 ||
+                function->GetReturnProperty() || function->GetParmsSize() > parameter_capacity) return;
+
+            rotation = field<Unreal::FStructProperty>(function, STR("NewRotation"));
+            sweep = field<Unreal::FBoolProperty>(function, STR("bSweep"));
+            teleport = field<Unreal::FBoolProperty>(function, STR("bTeleport"));
+            hit = field<Unreal::FStructProperty>(function, STR("SweepHitResult"));
+            auto* hit_type = find<Unreal::UScriptStruct>(STR("/Script/Engine.HitResult"));
+            if (!aim_rotator(rotation) || !sweep || !teleport || !hit || !hit_type ||
+                hit->GetStruct().Get() != hit_type || !sweep->IsNativeBool() || !teleport->IsNativeBool() ||
+                sweep->GetByteOffset() >= sweep->GetSize() || teleport->GetByteOffset() >= teleport->GetSize()) return;
+
+            const std::array<Unreal::FProperty*, 4> parameters{rotation, hit, sweep, teleport};
+            const std::array<int, 4> alignments{rotation->GetStruct().Get()->GetMinAlignment(), hit_type->GetMinAlignment(),
+                                                alignof(bool), alignof(bool)};
+            for (std::size_t index = 0; index < parameters.size(); ++index)
+            {
+                auto* parameter = parameters[index];
+                const int offset = parameter->GetOffset_Internal(), size = parameter->GetSize();
+                const int alignment = alignments[index];
+                if (!parameter->HasAnyPropertyFlags(Unreal::CPF_Parm) ||
+                    parameter->HasAnyPropertyFlags(Unreal::CPF_ReturnParm) ||
+                    parameter->HasAnyPropertyFlags(Unreal::CPF_OutParm) != (parameter == hit) ||
+                    alignment <= 0 || alignment > parameter_alignment || (alignment & (alignment - 1)) ||
+                    offset < 0 || offset % alignment || size <= 0 || size > function->GetParmsSize() - offset) return;
+                for (std::size_t prior = 0; prior < index; ++prior)
+                {
+                    const int earlier = parameters[prior]->GetOffset_Internal();
+                    if (offset < earlier + parameters[prior]->GetSize() && earlier < offset + size) return;
+                }
+            }
+
+            parent = field<Unreal::FObjectProperty>(scene_class, STR("AttachParent"));
+            socket = field<Unreal::FNameProperty>(scene_class, STR("AttachSocketName"));
+            absolute = field<Unreal::FBoolProperty>(scene_class, STR("bAbsoluteRotation"));
+            replicated = field<Unreal::FBoolProperty>(scene_class, STR("bReplicates"));
+            if (!parent || parent->GetPropertyClass().Get() != scene_class || !socket || !absolute || !replicated)
+                return;
+            head = Unreal::FName{STR("Head"), Unreal::FNAME_Find};
+            if (head == Unreal::FName{}) return;
+
+            setter = function;
+            scene = scene_class;
+            skeletal_mesh = mesh_class;
+        }
+
+        Unreal::UObject* attachment(Unreal::UObject* component) const
+        {
+            return parent->GetObjectPropertyValue(parent->ContainerPtrToValuePtr<void>(component));
+        }
+
+        bool attached_head(Unreal::UObject* pawn, Unreal::UObject* pivot) const
+        {
+            if (!live(pivot) || pivot->GetClassPrivate() != scene.Get() || pivot->GetOuterPrivate() != pawn ||
+                socket->GetPropertyValueInContainer(pivot) != head || !absolute->GetPropertyValueInContainer(pivot) ||
+                replicated->GetPropertyValueInContainer(pivot)) return false;
+
+            auto* body = attachment(pivot);
+            auto* stock = object_field(pawn, STR("Mesh"));
+            return live(body) && body->GetClassPrivate() == skeletal_mesh.Get() && body->GetOuterPrivate() == pawn &&
+                !replicated->GetPropertyValueInContainer(body) && live(stock) && stock->GetOuterPrivate() == pawn &&
+                body != stock && attachment(body) == stock;
+        }
+
+        void apply(Unreal::UObject* pivot, const AimRotation& angles) const
+        {
+            alignas(parameter_alignment) std::array<std::byte, parameter_capacity> params{};
+            hit->InitializeValue_InContainer(params.data());
+            std::memcpy(rotation->ContainerPtrToValuePtr<void>(params.data()), angles.data(), sizeof(angles));
+            sweep->SetPropertyValueInContainer(params.data(), false);
+            teleport->SetPropertyValueInContainer(params.data(), true);
+            pivot->ProcessEvent(static_cast<Unreal::UFunction*>(setter.Get()), params.data());
+            hit->DestroyValue_InContainer(params.data());
+        }
+    };
+
+    int write_remote_head_rotation(const Lua& lua)
+    {
+        constexpr std::size_t max_path_size = 512;
+        if (!available() || lua.get_stack_size() != 6 || !lua.is_integer(1) || !lua.is_integer(2) ||
+            lua_type(lua.get_lua_state(), 3) != LUA_TSTRING || !lua.is_number(4) ||
+            !lua.is_number(5) || !lua.is_number(6)) return 0;
+
+        auto* stack = lua.get_lua_state();
+        const auto world_address = lua_tointeger(stack, 1);
+        const auto pawn_address = lua_tointeger(stack, 2);
+        std::size_t path_size{};
+        const auto* path_chars = lua_tolstring(stack, 3, &path_size);
+        const std::string_view path{path_chars, path_size};
+        const AimRotation angles{lua_tonumber(stack, 4), lua_tonumber(stack, 5), lua_tonumber(stack, 6)};
+        if (path.empty() || path.size() > max_path_size || path.find('\0') != std::string_view::npos ||
+            std::any_of(angles.begin(), angles.end(), [](double angle) {
+                return !std::isfinite(angle) || std::abs(angle) > 360;
+            })) return 0;
+
+        auto* pawn = remote_avatar_pawn(world_address, pawn_address);
+        if (!pawn) return 0;
+
+        struct Binding
+        {
+            Unreal::FWeakObjectPtr pawn{}, pivot{};
+            std::string path;
+            Clock::time_point next_lookup{};
+        };
+        static HeadRotationWriter writer;
+        static std::array<Binding, 5> bindings;
+        static std::uint64_t binding_generation{};
+        if (binding_generation != scope.generation)
+        {
+            writer = {};
+            writer.bind();
+            bindings = {};
+            binding_generation = scope.generation;
+        }
+        if (!writer.setter.Get() || !writer.scene.Get() || !writer.skeletal_mesh.Get()) return 0;
+        Binding* binding = nullptr;
+        for (auto& candidate : bindings)
+        {
+            if (candidate.pawn.Get() == pawn)
+            {
+                binding = &candidate;
+                break;
+            }
+            if (!binding && !candidate.pawn.Get()) binding = &candidate;
+        }
+        if (!binding) return 0;
+
+        auto* pivot = binding->path == path ? binding->pivot.Get() : nullptr;
+        if (!pivot)
+        {
+            const auto now = Clock::now();
+            if (now < binding->next_lookup) return 0;
+            binding->pawn = pawn;
+            binding->next_lookup = now + std::chrono::milliseconds(250);
+            const auto outer_path = RC::to_string(pawn->GetPathName());
+            if (!path.starts_with(outer_path) || path.size() <= outer_path.size() || path[outer_path.size()] != '.')
+                return 0;
+            pivot = find<Unreal::UObject>(RC::to_wstring(path).c_str());
+            if (!writer.attached_head(pawn, pivot)) return 0;
+            *binding = Binding{pawn, pivot, std::string(path), {}};
+        }
+        else if (!writer.attached_head(pawn, pivot)) return 0;
+
+        writer.apply(pivot, angles);
+        lua.set_bool(true);
+        return 1;
     }
 
     int dispatch_valve(const Lua& lua)
@@ -2609,6 +2790,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishTakeNativeStashPress", take_stash_press);
         lua.register_function("SilverfishReadNativeLocalLean", read_local_lean);
         lua.register_function("SilverfishReadNativeRemoteAim", read_remote_aim);
+        lua.register_function("SilverfishWriteNativeRemoteHeadRotation", write_remote_head_rotation);
         lua.register_function("SilverfishReadNativeReadyRoster", read_ready_roster);
         lua.register_function("SilverfishReadNativeSwitchPower", read_switch_power);
         lua.register_function("SilverfishTakeNativeLanternPress", take_lantern_press);

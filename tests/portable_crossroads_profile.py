@@ -487,7 +487,68 @@ def instrument_avatar_observer(source):
         if observer.count(anchor) != 1:
             raise ValueError(f"The remote avatar observer call changed: {call}")
         observer = observer.replace(anchor, f'SilverfishProfileCrossroadsCall("avatar.{call}", {call}, ')
-    return start + boundary + observer + end + after
+    source = start + boundary + observer + end + after
+    return source.replace("\nreturn avatar\n", """
+function SilverfishProfileRemoteHeadRotation()
+    local native, stamp = SilverfishWriteNativeRemoteHeadRotation, SilverfishBridgeProfileStamp
+    if type(native) ~= "function" then return "unavailable" end
+    for address, entry in pairs(avatars) do
+        local pivot = entry.head_pivot
+        if valid(pivot) and valid(entry.pawn) then
+            local path = pivot:GetFullName():match("^SceneComponent (%S+)$")
+            local original = pivot:K2_GetComponentRotation()
+            local function stock(pitch, yaw, roll)
+                pivot:K2_SetWorldRotation({Pitch = pitch, Yaw = yaw, Roll = roll}, false, {}, true)
+            end
+            local function write(pitch, yaw, roll)
+                return native(entry.world, address, path, pitch, yaw, roll)
+            end
+            local function compare(pitch, yaw, roll)
+                stock(pitch, yaw, roll)
+                local expected = pivot:K2_GetComponentRotation()
+                stock(0, 0, 0)
+                assert(write(pitch, yaw, roll), "remote head setter lost its scope")
+                local actual = pivot:K2_GetComponentRotation()
+                for _, axis in ipairs({"Pitch", "Yaw", "Roll"}) do
+                    assert(math.abs((actual[axis] - expected[axis] + 180) % 360 - 180) < .01,
+                        "remote head rotation diverged on " .. axis)
+                end
+            end
+            local function measure(setter)
+                local heap, started = collectgarbage("count"), stamp()
+                for _ = 1, 16 do
+                    setter(25, 179, 12)
+                    setter(-30, -177, -16)
+                end
+                return (stamp() - started) / 1000, collectgarbage("count") - heap
+            end
+            if path and write(original.Pitch, original.Yaw, original.Roll) then
+                local running = collectgarbage("isrunning")
+                local ok, result = pcall(function()
+                    assert(not native(0, address, path, 0, 0, 0), "accepted an invalid head world")
+                    assert(not native(entry.world, 0, path, 0, 0, 0), "accepted an invalid head owner")
+                    assert(not native(entry.world, address, path .. "_missing", 0, 0, 0),
+                        "accepted a missing head pivot")
+                    compare(25, 179, 12)
+                    compare(-30, -177, -16)
+                    compare(4, 60, 0)
+                    collectgarbage("stop")
+                    local native_ms, native_kib = measure(write)
+                    local lua_ms, lua_kib = measure(stock)
+                    return ("%.3f,%.3f,%.3f,%.3f"):format(native_ms, lua_ms, native_kib, lua_kib)
+                end)
+                if running then collectgarbage("restart") end
+                stock(original.Pitch, original.Yaw, original.Roll)
+                assert(ok, result)
+                return result
+            end
+        end
+    end
+    return "unavailable"
+end
+
+return avatar
+""", 1)
 
 
 def instrument_anomaly_work(source):
@@ -960,7 +1021,17 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
     anomaly_samples = {}
     dynamic_acid_samples = {}
     controller_inspection = {}
+    remote_head_rotation = {}
     if area == CROSSROADS:
+        rotations = await asyncio.gather(*(command(seat, "headrotation") for seat in seats.values()))
+        for seat, reply in zip(seats, rotations, strict=True):
+            if reply == "unavailable":
+                continue
+            assert not reply.startswith("head rotation comparison failed"), reply
+            native_ms, lua_ms, native_kib, lua_kib = map(float, reply.split(","))
+            remote_head_rotation[seat] = {"writes_per_path": 32, "native_ms": native_ms, "lua_ms": lua_ms,
+                                          "native_heap_growth_kib": native_kib, "lua_heap_growth_kib": lua_kib,
+                                          "all_angles_matched": True}
         inspections = await asyncio.gather(*(command(seat, "inspectcompare") for seat in seats.values()))
         for seat, reply in zip(seats, inspections, strict=True):
             if reply == "unavailable":
@@ -1002,4 +1073,5 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
             "guest_roster": {slot: row["name"] for slot, row in settled["game"]["pawns"].items()},
             "vitals_comparison": dict(zip(seats, comparison, strict=True)), **heartbeat, **guest_binding,
             **coarse, **journal, **anomaly_samples, **dynamic_acid_samples, **ready_roster,
-            "controller_inspection_comparison": controller_inspection}
+            "controller_inspection_comparison": controller_inspection,
+            "remote_head_rotation_comparison": remote_head_rotation}

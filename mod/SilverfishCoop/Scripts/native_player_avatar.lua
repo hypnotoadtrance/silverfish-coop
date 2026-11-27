@@ -750,14 +750,18 @@ local function aim_head(entry, pitch, yaw, now, lean_changed, math_api)
     end
     if lean_changed or entry.lean_rotation or not previous or math.abs(pitch - previous.pitch) > .01
         or math.abs(angle_delta(yaw, previous.yaw)) > .01 then
-        local aim = {Pitch = pitch, Yaw = yaw, Roll = 0}
+        local aim
         if entry.lean_rotation then
             local basis = entry.movement_mesh:K2_GetComponentRotation()
             local lean = math_api:ComposeRotators(
                 math_api:ComposeRotators(math_api:NegateRotator(basis), entry.lean_rotation), basis)
-            aim = math_api:ComposeRotators(aim, lean)
+            aim = math_api:ComposeRotators({Pitch = pitch, Yaw = yaw, Roll = 0}, lean)
         end
-        entry.head_pivot:K2_SetWorldRotation(aim, false, {}, true)
+        if not (entry.head_pivot_path and type(SilverfishWriteNativeRemoteHeadRotation) == "function"
+            and SilverfishWriteNativeRemoteHeadRotation(entry.world, entry.pawn_address, entry.head_pivot_path,
+                aim and aim.Pitch or pitch, aim and aim.Yaw or yaw, aim and aim.Roll or 0) == true) then
+            entry.head_pivot:K2_SetWorldRotation(aim or {Pitch = pitch, Yaw = yaw, Roll = 0}, false, {}, true)
+        end
         entry.head_roll_pending = true
         previous = previous or {}
         previous.pitch, previous.yaw, previous.time = pitch, yaw, now
@@ -850,6 +854,9 @@ local function create(entry)
     local pivot = attach_component(entry, "head_pivot", body, "Head", scene_class)
     -- Keep the animated bone position and use the remote player's aim rotation.
     pivot:SetAbsolute(false, true, false)
+    if type(SilverfishWriteNativeRemoteHeadRotation) == "function" then
+        entry.head_pivot_path = pivot:GetFullName():match("^SceneComponent (%S+)$")
+    end
     local head = visual_component(entry, "head", pivot)
     position_head(entry)
     head:SetStaticMesh(head_asset)
@@ -936,7 +943,8 @@ function avatar.sync(state, phase)
                 seen[address] = true
                 local entry = avatars[address]
                 if not entry or not valid(entry.pawn) or entry.name ~= details.name or entry.world ~= state.world:GetAddress() then
-                    entry = { pawn = pawn, name = details.name, map = state.map, world = state.world:GetAddress() }
+                    entry = { pawn = pawn, pawn_address = address, name = details.name, map = state.map,
+                        world = state.world:GetAddress() }
                     avatars[address] = entry
                     local ok, failure = pcall(create, entry)
                     if not ok then
