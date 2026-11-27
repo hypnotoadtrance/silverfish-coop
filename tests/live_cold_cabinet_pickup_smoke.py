@@ -103,8 +103,9 @@ def source_with_probe(name: str, before: bytes, *, combined: bool = False) -> by
     if name == "main.lua" and "local function tick(fields, pending, periodic)" in text:
         anchors = CURRENT_MAIN_PROBES
     if name == "native_loot_actions.lua" and "function actions.claim_reply(" in text:
-        anchors = {**anchors, "pcall(actions.command, fields, state, phase)":
-                   "pcall(cabinet_probe.timed, 'command:' .. fields[2], actions.command, fields, state, phase)"}
+        command = "pcall(actions.command, fields, state, phase"
+        anchors = {**anchors, command:
+                   "pcall(cabinet_probe.timed, 'command:' .. fields[2], actions.command, fields, state, phase"}
     if name == "players.lua" and "elseif SilverfishEnqueueLocalBridgeInput(record) ~= true then" in text:
         staged = "pending_interactions = {world = pawn:GetWorld(), expires = now(pawn) + 1.5, lines = {record}}"
         anchors = {staged: staged + "\n        else\n"
