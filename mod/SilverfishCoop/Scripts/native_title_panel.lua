@@ -38,7 +38,7 @@ end
 
 local function read_offer()
     local file = io.open(session_path, "rb")
-    if not file then return end
+    if not file then return nil, true end
     local contents = file:read(257)
     file:close()
     if not contents or #contents > 256 then return end
@@ -256,11 +256,26 @@ local function can_choose(context)
         and valid(session.root)
 end
 
+local function current_offer(context)
+    if not context then return end
+    local offer, unreadable = read_offer()
+    if unreadable and can_choose(context) then
+        -- The supervisor atomically renews the file. Keep the current form through
+        -- a brief sharing conflict. The supervisor still checks the exact generation.
+        local now = os.clock()
+        session.offer_read_retry_until = session.offer_read_retry_until or now + .25
+        if now < session.offer_read_retry_until then return session.offer end
+    elseif session then
+        session.offer_read_retry_until = nil
+    end
+    return offer
+end
+
 local function active_offer(action, context)
     if not can_choose(context) then return nil, "title_panel_not_ready" end
     if not actions[session.offer.choices][action] then return nil, "title_action_not_offered" end
     if submitted == session.offer.generation then return nil, "title_request_already_pending" end
-    local latest = read_offer()
+    local latest = current_offer(context)
     if not latest or latest.generation ~= session.offer.generation or latest.choices ~= session.offer.choices then
         remove_display()
         report = nil
@@ -1086,7 +1101,7 @@ function panel.sync(state, phase)
     local starting = installed and resident and (not startup_seen or session and not session.offer)
         and (context or title.starting(state, phase))
     if settings_fixture and not same_title(settings_fixture.context, context) then remove_settings_fixture() end
-    local offer = context and read_offer()
+    local offer = current_offer(context)
     if steam_handoff and offer and offer.generation ~= steam_handoff.generation then
         cancel_steam_form(steam_handoff.nonce)
         steam_handoff = nil

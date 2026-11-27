@@ -11,6 +11,7 @@ local save_response = "bridge/title-save-response.tsv"
 local files, flags, queued = {}, {}, {}
 local now, id, tick, display, solo_back, writes = 100, 0, nil, nil, nil, 0
 local refuse_rename = false
+local busy_offer_reads = 0
 
 local function object(parent, enabled)
     id = id + 1
@@ -151,6 +152,7 @@ env = setmetatable({
     StaticFindObject = function(path) if path == "/Script/Engine.Default__KismetGuidLibrary" then return guid end end,
     io = {open = function(path, mode)
         if mode == "rb" then
+            if path == descriptor and busy_offer_reads > 0 then busy_offer_reads = busy_offer_reads - 1; return end
             if not files[path] then return end
             local offset = 1
             return {read = function(_, size)
@@ -165,7 +167,7 @@ env = setmetatable({
         return {write = function(_, ...) files[path] = table.concat({...}); writes = writes + 1; return true end,
             close = function() return true end}
     end},
-    os = {time = function() return now end, getenv = function(name) return flags[name] end,
+    os = {time = function() return now end, clock = function() return now end, getenv = function(name) return flags[name] end,
         remove = function(path) files[path] = nil end,
         rename = function(source, target)
             assert(target == request or target == join_request or target == steam_cancel or target == steam_opened
@@ -619,6 +621,10 @@ files[join_response] = ("2\t%s\t%s\tok\t%s\t1\nFixture Guest\t%s\n%s\tOriginal c
 tick()
 assert(display.buttons["character:1"] and not display.buttons["character:1"].photo)
 click("character:1")
+local confirmed_view = display
+busy_offer_reads = 3
+sync()
+assert(display == confirmed_view and display.buttons.confirm, "Keep the selected character during descriptor renewal")
 click("confirm")
 assert(files[request] and not files[steam_cancel], "Keep the route through the submitted join")
 files[request], files[descriptor] = nil, nil
