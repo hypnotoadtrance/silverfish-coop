@@ -103,20 +103,11 @@ async def verify(work: Path, original: Path, source=pickup.CITY_PEACHES, *, pick
     async def eat(item):
         guid = item["guid"]
         await action(guest_run, "native-inventory-view-fixture")
-        state = await wait(guest_run, lambda s: s.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
-        selection = state["game"].get("native_guest_inventory_use_view", {})
-        key = "native-inventory-view-key-fixture"
-        for _ in range(state["game"]["native_inventory_view"]["count"]):
-            if selection.get("guid") == guid:
-                break
-            selection = (await action(guest_run, key, target="down")).get("native_guest_inventory_use_view", {})
-        assert (selection.get("state"), selection.get("guid")) == ("selecting", guid), selection
-        confirming = (await action(guest_run, key, target="confirm"))["native_guest_inventory_use_view"]
-        assert (confirming["state"], confirming["guid"]) == ("confirming", guid), confirming
-        pressed = (await action(guest_run, key, target="confirm"))["native_guest_inventory_use_view"]
-        assert (pressed["state"], pressed["guid"]) == ("using", guid), pressed
-        receipt = await wait_event(guest_run, "native_guest_inventory_used", lambda event: event.get("view_sequence") ==
-                                  pressed["sequence"] and event.get(result_key, {}).get("guid") == guid)
+        await wait(guest_run, lambda s: s.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
+        pressed = (await action(guest_run, "native-inventory-stock-use-click-fixture", target=guid))["stock_action"]
+        assert (pressed["mode"], pressed["guid"]) == ("use", guid), pressed
+        receipt = await wait_event(guest_run, "native_stock_inventory_action",
+                                   lambda event: event.get(result_key, {}).get("guid") == guid)
         proof = receipt[result_key]
         assert (proof["class_path"], proof["quantity_before"], proof["quantity_after"]) == (
             item["class_path"], item["quantity"], item["quantity"] - 1), proof
@@ -124,9 +115,7 @@ async def verify(work: Path, original: Path, source=pickup.CITY_PEACHES, *, pick
         assert proof["health_before"] == proof["health_after"] and proof["regen_after"] == max(25, proof["regen_before"]), proof
         assert proof["intox_after"] == max(proof["intox_before"] - int(expected.food / 10), 0), proof
         assert proof["host_intox_before"] == proof["host_intox_after"], proof
-        await wait(guest_run, lambda s: s.get("game", {}).get("native_guest_inventory_use_view", {}) ==
-                   dict(pressed, state="used"))
-        await action(guest_run, key, target="back")
+        await action(guest_run, "native-inventory-view-fixture")
         return receipt
 
     async def verify_food(authority, guest, invitation, initial):

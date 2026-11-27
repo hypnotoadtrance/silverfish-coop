@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock
 import uuid
 
 from tools.silverfish import native_guest_armor, native_guest_drop as drop, native_guest_drop_record as record, native_inventory
+from tools.silverfish import native_guest_consumable as consumable
 from tools.silverfish.guest_weapon_profiles import (
     BOLT_ACTION_AMMO, BOLT_ACTION_UNLOAD_CAPACITY, BOLT_ACTION_UNLOADS,
     FIREARMS, MAX_TAKE_AMMO_ROUNDS, NINE_MM_BALL,
@@ -119,6 +120,44 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
                 record.parse_stock_action([*envelope, amount, expected], game)
         for target in (f"{GUID}|0", f"{GUID}|{too_many}", f"{GUID}|1|2", f"{'0' * 32}|1"):
             self.assertIsNone(native_inventory.take_ammo_target(target))
+
+    async def test_stock_use_settles_one_current_intent_and_rejects_a_mismatched_receipt(self):
+        key = consumable.RESULT[consumable.ACTION]
+        receipt = dict(state="used", map=MAP, guid=GUID, quantity_before=2, quantity_after=1)
+        for accepted in (True, False):
+            with self.subTest(accepted=accepted):
+                client = self.client()
+                client.last_stock_inventory_action = 0
+                client.guest_ui = SimpleNamespace(refresh=AsyncMock())
+                client.bridge.command.return_value = {"ack": {"message": "stock action finished"}}
+                client.gameplay_action.side_effect = None
+                client.gameplay_action.return_value = {key: receipt if accepted else dict(receipt, guid="B" * 32)}
+                view = record.parse_stock_action(
+                    [record.STOCK_ACTION_ROW, MAP, PAWN, client.zone_epoch, "5", "use-bandage", GUID, "1", "0"],
+                    client.last_game,
+                )
+                game = {**client.last_game, record.STOCK_ACTION_KEY: view}
+                client.last_game = {**game, record.STOCK_ACTION_KEY: dict(view, epoch="d" * 32)}
+                await drop.service_stock_view(client, True)
+                client.gameplay_action.assert_not_awaited()
+
+                client.last_game = game
+                await drop.service_stock_view(client, True)
+                client.last_game = game
+                await drop.service_stock_view(client, True)
+                operation = uuid.uuid5(client.bridge.input_namespace,
+                                       f"{client.host_session}:{client.zone_epoch}:{PAWN}:stock-inventory:5").hex
+                client.gameplay_action.assert_awaited_once_with(consumable.ACTION, operation, GUID)
+                finish = ("native-inventory-stock-drop-finish", client.zone_epoch, "5")
+                if accepted:
+                    client.guest_ui.refresh.assert_awaited_once_with(client)
+                    client.bridge.command.assert_awaited_once_with(*finish, "1", timeout=5)
+                    client.control.event.assert_called_once_with("native_stock_inventory_action", operation_id=operation,
+                                                                **{key: receipt, "stock_inventory_proof": "stock action finished"})
+                else:
+                    client.guest_ui.refresh.assert_not_awaited()
+                    client.bridge.command.assert_awaited_once_with(*finish, "refused", timeout=3)
+                    self.assertEqual(client.control.event.call_args.args, ("native_stock_inventory_rejected",))
 
     async def test_take_ammo_clears_the_retained_magazine_before_guest_projection(self):
         client = self.client()

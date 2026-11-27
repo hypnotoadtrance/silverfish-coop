@@ -163,27 +163,19 @@ async def verify(work: Path, original: Path):
         return {row["guid"]: row for row in page["items"]}
 
     async def eat_stock(offer):
+        guid = offer["guid"]
         await action(guest_run, "native-inventory-view-fixture")
-        shown = await wait(guest_run, lambda s: s.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
-        selected = shown["game"].get("native_guest_inventory_use_view", {})
-        key = "native-inventory-view-key-fixture"
-        for _ in range(shown["game"]["native_inventory_view"]["count"]):
-            if selected.get("guid") == offer["guid"]:
-                break
-            selected = (await action(guest_run, key, target="down")).get("native_guest_inventory_use_view", {})
-        assert (selected.get("state"), selected.get("guid")) == ("selecting", offer["guid"]), selected
-        accepted = (await action(guest_run, key, target="confirm"))["native_guest_inventory_use_view"]
-        assert accepted["state"] == "confirming" and accepted["guid"] == offer["guid"], accepted
-        using = (await action(guest_run, key, target="confirm"))["native_guest_inventory_use_view"]
-        assert using["state"] == "using" and using["guid"] == offer["guid"], using
-        result = await wait_event(guest_run, "native_guest_inventory_used", lambda r: r.get("view_sequence") == using["sequence"])
+        await wait(guest_run, lambda s: s.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
+        pressed = (await action(guest_run, "native-inventory-stock-use-click-fixture", target=guid))["stock_action"]
+        assert (pressed["mode"], pressed["guid"]) == ("use", guid), pressed
+        result = await wait_event(guest_run, "native_stock_inventory_action",
+                                  lambda r: r.get("native_guest_mre", {}).get("guid") == guid)
         proof = result["native_guest_mre"]
         assert (proof["map"], proof["guid"], proof["class_path"]) == (SMUGGLER, offer["guid"], meals.MRE_CLASS)
         assert (proof["quantity_before"], proof["quantity_after"]) == (offer["quantity"], offer["quantity"] - 1), proof
         assert proof["food_after"] == min(200, proof["food_before"] + 30), proof
         assert proof["host_intox_before"] == proof["host_intox_after"], proof
-        await wait(guest_run, lambda s: s.get("game", {}).get("native_guest_inventory_use_view") == dict(using, state="used"))
-        await action(guest_run, key, target="back")
+        await action(guest_run, "native-inventory-view-fixture")
         return result
 
     try:

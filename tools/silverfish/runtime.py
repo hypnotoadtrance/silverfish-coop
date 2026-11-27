@@ -2772,13 +2772,6 @@ class Bridge:
                 elif fields[0] == "native-guest-inventory-equip-view" and len(fields) == 6:
                     data["native_guest_inventory_equip_view"] = {"sequence": int(fields[1]), "map": fields[2],
                                                                  "pawn": fields[3], "guid": fields[4], "state": fields[5]}
-                elif (fields[0] == "native-guest-inventory-use-view" and len(fields) == 6
-                      and fields[1].isascii() and fields[1].isdigit() and len(fields[1]) <= 16
-                      and 0 < (sequence := int(fields[1])) < 2**53
-                      and 0 < len(fields[2]) <= 256 and 0 < len(fields[3]) <= 512 and valid_guid(fields[4])
-                      and fields[5] in {"selecting", "confirming", "using", "used", "refused"}):
-                    data["native_guest_inventory_use_view"] = {"sequence": sequence, "map": fields[2],
-                                                                "pawn": fields[3], "guid": fields[4], "state": fields[5]}
                 elif fields[0] == "native-bag-projection" and len(fields) == 7:
                     data["native_bag_projection"] = {"map": fields[1], "epoch": fields[2], "owner": fields[3],
                                                      "count": int(fields[4]), "requested": int(fields[5]), "status": fields[6]}

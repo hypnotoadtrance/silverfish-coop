@@ -15,6 +15,7 @@ import time
 import uuid
 
 from live_multi_smoke import campaign_save_hashes
+from live_guest_held_fire_smoke import wait_event
 from rook_mixed_field_fixture import stage_rook_probe, verify_rook_mixed_fields
 from stock_acid_fixture import exercise_acid, stage_acid_probe
 
@@ -1830,28 +1831,17 @@ async def smoke():
             if args.native_bandage:
                 use_bandage = ("action", "--profile", profile, "native-guest-bandage", "--target", awarded["guid"])
                 if args.native_bandage_input:
-                    await command("action", "--profile", profile, "native-inventory-view-fixture")
-                    rendered = await wait(client_run, lambda state: state.get("game", {}).get("native_inventory_view", {})
-                                          .get("state") == "rendered")
-                    selection = rendered["game"].get("native_guest_inventory_use_view", {})
-                    key = ("action", "--profile", profile, "native-inventory-view-key-fixture", "--target")
-                    for _ in range(rendered["game"]["native_inventory_view"]["count"]):
-                        if selection.get("guid") == awarded["guid"]:
-                            break
-                        selection = (await command(*key, "down"))["native_guest_inventory_use_view"]
-                    assert (selection.get("state"), selection.get("guid")) == ("selecting", awarded["guid"]), selection
-                    armed = (await command(*key, "confirm"))["native_guest_inventory_use_view"]
-                    assert (armed["state"], armed["guid"]) == ("confirming", awarded["guid"]), armed
-                    requested = (await command(*key, "confirm"))["native_guest_inventory_use_view"]
-                    assert (requested["state"], requested["guid"]) == ("using", awarded["guid"]), requested
-                    await wait(client_run, lambda state: state.get("game", {}).get("native_guest_inventory_use_view", {})
-                               == dict(requested, state="used"))
-                    events = await command("events", "--profile", profile, "--tail", "100")
-                    receipt = next(row for row in events["events"] if row.get("event") == "native_guest_inventory_used"
-                                   and row["view_sequence"] == requested["sequence"])
+                    inventory_key = ("action", "--profile", profile, "native-inventory-view-fixture")
+                    await command(*inventory_key)
+                    await wait(client_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
+                    requested = (await command("action", "--profile", profile, "native-inventory-stock-use-click-fixture",
+                                               "--target", awarded["guid"]))["stock_action"]
+                    assert (requested["mode"], requested["guid"]) == ("use", awarded["guid"]), requested
+                    receipt = await wait_event(client_run, "native_stock_inventory_action",
+                                               lambda row: row.get("native_guest_bandage", {}).get("guid") == awarded["guid"])
                     bandage_proof = receipt["native_guest_bandage"]
                     use_bandage_once = (*use_bandage, "--operation-id", receipt["operation_id"])
-                    await command(*key, "back")
+                    await command(*inventory_key)
                     note("stock_inventory_input_used_selected_bandage", {"guid": awarded["guid"], "selection": requested})
                 else:
                     use_bandage_once = (*use_bandage, "--operation-id", uuid.uuid4().hex)

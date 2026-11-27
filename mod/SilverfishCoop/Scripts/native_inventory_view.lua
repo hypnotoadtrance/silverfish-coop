@@ -223,8 +223,6 @@ local function page(fields)
                 or class == "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"))
             or (source == "backpack" and (body_armor.is_body_path(class) or body_armor.is_helmet_path(class)))
         local name = actor_class:sub(1, -3):gsub("_", " ")
-        local consumable = class == bandage_path and "Bandage" or starter_bags[class] or mre_enabled and meals.label(class)
-        local usable = source == "backpack" and consumable ~= false and consumable ~= nil
         local splittable = options == "split" or options == "split,drop"
         if splittable and (source ~= "backpack" or not drop_items.stock_actor_class(class) or quantity <= 1) then
             error("The authenticated inventory split row did not qualify", 0)
@@ -235,9 +233,8 @@ local function page(fields)
             or quantity > (drop_profile and drop_profile.maximum or 200)) then
             error("The authenticated inventory drop row did not qualify", 0)
         end
-        if usable then name = consumable end
         if droppable and drop_profile then name = drop_profile.label end
-        records[#records + 1] = {guid = guid, class = class, equippable = equippable, usable = usable,
+        records[#records + 1] = {guid = guid, class = class, equippable = equippable,
             droppable = droppable, name = name, quantity = quantity, splittable = splittable,
             label = string.format("%s   %d x %s", sources[source], quantity, name)}
     end
@@ -279,16 +276,6 @@ local function show()
         lines[#lines + 1] = "Page Up / Page Down selects. Delete prepares a drop." .. other .. " End closes."
     elseif selected and selected.splittable then
         lines[#lines + 1] = "Page Up / Page Down selects. Home splits half the stack. End closes."
-    elseif row.use_state == "confirming" then
-        lines[#lines + 1] = "Use one " .. selected.name .. "? Home confirms. End cancels."
-    elseif row.use_state == "using" then
-        lines[#lines + 1] = selected.name .. " use pending"
-    elseif row.use_state == "used" then
-        lines[#lines + 1] = selected.name .. " used. Reopen inventory to refresh."
-    elseif row.use_state == "refused" then
-        lines[#lines + 1] = selected.name .. " use unavailable. Reopen inventory to refresh."
-    elseif row.use_state == "selecting" then
-        lines[#lines + 1] = "Page Up / Page Down selects. Home uses the selected item. End closes."
     elseif row.equip_state == "confirming" then
         lines[#lines + 1] = "Equip " .. selected.name .. "? Home confirms. End cancels."
     elseif row.equip_state == "equipping" then
@@ -339,7 +326,6 @@ end
 local function select_item()
     local selected = observation.records[observation.selection]
     observation.equip_state = selected and selected.equippable and "selecting" or "read_only"
-    observation.use_state = selected and selected.usable and "selecting" or nil
     observation.split_state = nil
     observation.drop_state = nil
     observation.confirm_guid = nil
@@ -350,12 +336,12 @@ local function choose(current, action)
     local row = observation
     local selected = row.records[row.selection]
     if action == "back" then
-        if row.equip_state == "confirming" or row.use_state == "confirming" or row.split_state == "confirming"
+        if row.equip_state == "confirming" or row.split_state == "confirming"
             or row.drop_state == "confirming" then
             select_item()
         elseif ready(current, true) then
             remove_display()
-            row.state, row.equip_state, row.use_state, row.split_state, row.drop_state = "closed", nil, nil, nil, nil
+            row.state, row.equip_state, row.split_state, row.drop_state = "closed", nil, nil, nil
             row.pending_offset = nil
             emit(current, row.sequence, "closed")
             return true
@@ -380,12 +366,6 @@ local function choose(current, action)
         elseif action == "confirm" and selected.droppable and row.drop_state == "confirming"
             and row.confirm_guid == selected.guid then
             row.request_guid, row.drop_state = selected.guid, "dropping"
-        elseif action == "confirm" and selected.usable then
-            if row.use_state == "confirming" and row.confirm_guid == selected.guid then
-                row.request_guid, row.use_state = selected.guid, "using"
-            else
-                row.use_state, row.confirm_guid = "confirming", selected.guid
-            end
         elseif action == "confirm" and selected.splittable then
             if row.split_state == "confirming" and row.confirm_guid == selected.guid then
                 row.request_guid, row.split_state = selected.guid, "splitting"
@@ -1047,7 +1027,6 @@ function inventory_view.command(fields, state, phase)
         and operation ~= "native-inventory-stock-merge-click-fixture"
         and operation ~= "native-inventory-stock-personal-preview"
         and operation ~= "native-inventory-view-equip-result"
-        and operation ~= "native-inventory-view-use-result"
         and operation ~= "native-inventory-view-split-result"
         and operation ~= "native-inventory-view-drop-result" then return end
     local current = context(state, phase)
@@ -1204,7 +1183,7 @@ function inventory_view.command(fields, state, phase)
     if operation == "native-inventory-stock-use-click-fixture"
         and (#fields == 3 or #fields == 4 and (fields[4] == "drag" or fields[4] == "take-ammo" or sealed_fixture))
         and headless and stock_session and not stock_drop
-        and (os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" or (mre_enabled and #fields == 3) or fields[4] == "take-ammo"
+        and (#fields == 3 or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" or fields[4] == "take-ammo"
             and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1") then
         local screen = stock_session.screen
         local cards, manager = screen.BackpackPanel.Cards, screen.ItemManager
@@ -1314,14 +1293,6 @@ function inventory_view.command(fields, state, phase)
         observation.equip_state = fields[6]
         show()
         return "verified inventory equip result displayed"
-    elseif operation == "native-inventory-view-use-result" then
-        if #fields ~= 6 or observation.use_state ~= "using" or fields[5] ~= observation.request_guid
-            or (fields[6] ~= "used" and fields[6] ~= "refused") or not ready(current, false) then
-            error("The authenticated result does not match the pending item use", 0)
-        end
-        observation.use_state = fields[6]
-        show()
-        return "verified inventory item result displayed"
     elseif operation == "native-inventory-view-drop-result" then
         if #fields ~= 6 or observation.drop_state ~= "dropping" or fields[5] ~= observation.request_guid
             or (fields[6] ~= "dropped" and fields[6] ~= "refused") or not ready(current, false) then
@@ -1392,11 +1363,6 @@ function inventory_view.rows(state, phase, status_row)
         local selected = observation.records[observation.selection]
         rows[#rows + 1] = status_row("native-guest-inventory-equip-view", observation.sequence, current.map,
             current.name, selected and selected.guid or "-", observation.equip_state)
-    end
-    if observation.use_state and ready(current, false) then
-        local selected = observation.records[observation.selection]
-        rows[#rows + 1] = status_row("native-guest-inventory-use-view", observation.sequence, current.map,
-            current.name, selected.guid, observation.use_state)
     end
     if observation.drop_state and ready(current, false) then
         local selected = observation.records[observation.selection]
