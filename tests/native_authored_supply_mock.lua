@@ -14,12 +14,15 @@ local function object(properties)
 end
 
 local world = object({})
+world.PersistentLevel = object({})
 local pawn = object({Dead = false, InteractionRange = 250})
 function pawn:GetWorld() return world end
 function pawn:HasAuthority() return true end
 function pawn:K2_GetActorLocation() return {X = 0, Y = 0, Z = 0} end
 local actor = object({})
 function actor:GetWorld() return world end
+function actor:GetOuter() return world.PersistentLevel end
+function actor:IsActorBeingDestroyed() return false end
 function actor:GetFullName() return profile.name .. " " .. profile.path end
 function actor:HasAuthority() return true end
 local camera_type, box_type = object({}), object({})
@@ -74,4 +77,22 @@ assert(not pickup.authority_sight(state, "hosting", placements[2], pawn, actor))
 local clone = {source = profile.source, map = profile.map, name = profile.name, path = profile.path}
 assert(not pickup.authority_sight(state, "hosting", clone, pawn, actor))
 assert(#calls == 0)
-print("Stock supply sight passed exact ownership, ordered channels and wall refusal.")
+
+for _, authored in ipairs({
+    {"crossroads-dead-drop-bag", "CrossRoads_P", "Bag_DeadDrop_CrossRoads_C"},
+    {"metro-dead-drop-bag", "City_01_P", "Bag_DeadDrop_Metro_C"},
+    {"flood-town-dead-drop-bag", "RuinFeilds_P", "Bag_DeadDrop_FloodVillage_C"},
+}) do
+    local source, map, name = table.unpack(authored)
+    local area = "/Game/Classes/Maps/Maps_OverWorld/" .. map
+    profile = {source = source, map = area, name = name, path = area .. "." .. map .. ":PersistentLevel." .. name .. "_1",
+        quest_source = true, authority_sight = true}
+    state.map, blocked, calls = area, false, {}
+    assert(pickup.authority_sight(state, "hosting", profile, pawn, actor), source)
+    assert(#calls == 2 and calls[1] == 1 and calls[2] == 4, source)
+    blocked = true
+    assert(not pickup.authority_sight(state, "hosting", profile, pawn, actor), source)
+    state.map, blocked, calls = "wrong map", false, {}
+    assert(not pickup.authority_sight(state, "hosting", profile, pawn, actor) and #calls == 0, source)
+end
+print("Stock supply and all three Dead Drops passed exact scope, stock sight and wall refusal.")

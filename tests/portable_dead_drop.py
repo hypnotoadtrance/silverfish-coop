@@ -75,13 +75,28 @@ async def verify_dead_drop(host, guest, contract, drop, *, via=(LAKE,), cash=Non
     async def select(area, verb):
         authority, _ = await seats(area)
         pawn = authority["game"]["native_guest_save"]["pawn"]
-        await host.bridge.command(contract.command("approach"), pawn)
-        await action(guest_run, native_wire_board.STOCK_F_FIXTURE, target=BOARDS[area])
+        board, epoch = BOARDS[area], authority["zone_epoch"]
+        placement = (await host.bridge.command(contract.command("approach"), pawn))["pawns"]["guest"]
+        assert placement["name"] == pawn and len(placement["location"]) == 3, placement
+
+        def at_board(frame, status_key, states):
+            game = frame.get("game", {})
+            local = game.get("pawns", {}).get("local", {})
+            status = game.get(status_key, {})
+            return (frame.get("state") == "connected" and frame.get("zone_epoch") == epoch
+                    and game.get("map") == area and local.get("name") == status.get("pawn")
+                    and status.get("board") == board and status.get("state") in states
+                    and (position := local.get("location")) is not None
+                    and math.dist(position, placement["location"]) <= 25)
+
         await wait_resident_status(guest_run, lambda frame:
-            frame["game"].get("native_wire_board_stock", {}).get("state") == "visible", timeout=14)
+            at_board(frame, "native_wire_board", ("armed", "focused")), timeout=8)
+        await action(guest_run, native_wire_board.STOCK_F_FIXTURE, target=board)
+        await wait_resident_status(guest_run, lambda frame:
+            at_board(frame, "native_wire_board_stock", ("visible",)), timeout=14)
         if not generic_board:
             preflight = (await action(guest_run, contract.command("preflight")))[contract.key]
-            assert preflight["board"] == BOARDS[area]
+            assert preflight["board"] == board
         await action(guest_run, native_wire_board.STOCK_FIXTURE, target=f"{drop.quest}|{verb}")
 
     paths = (OBSERVATORY, CROSSROADS, LAKE, BLACK_MARKET)

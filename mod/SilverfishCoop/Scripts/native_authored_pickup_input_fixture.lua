@@ -14,7 +14,6 @@ local cistern_locker = "cistern-old-nfta-locker"
 local crossroads_lockpick = "crossroads-lockpick"
 local coup_report = "dead-end-coup-report"
 local gold_bag = "scav-bar-gold-bag"
-local dead_drop, metro_drop = "crossroads-dead-drop-bag", "metro-dead-drop-bag"
 local sources = {
     [coup_report] = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P",
     [gold_bag] = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P",
@@ -23,8 +22,6 @@ local sources = {
     ["scientist-blank-data-tape"] = scientist,
     [lab_blank_tape] = "/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P",
     ["crossroads-pocket-watch"] = crossroads,
-    [dead_drop] = crossroads,
-    [metro_drop] = city,
     [crossroads_lockpick] = crossroads,
     ["savlo-estate-evil-eye-ring"] = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P",
     ["railyard-dust-filter"] = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P",
@@ -49,6 +46,7 @@ local fort_leto_key = "fort-leto-locker-key-543"
 local stolen_bag = "forest-brokers-artifacts-bag"
 local black_box = "gorge-insurrectionist-recorder"
 local city_shelf_supply = city .. ".City_01_P:PersistentLevel.Ammo_Magnum_BP_C_1"
+local quest_source_distances = {85, 115, 145, 175, 210}
 local precise_distances = {
     [coup_report] = {65, 95, 125, 155, 185},
     [gold_bag] = {65, 95, 125, 155, 185},
@@ -61,8 +59,6 @@ local precise_distances = {
     [savlo_locker] = {95, 125, 150, 185},
     [fort_leto_key] = {120, 155, 185, 220},
     [stolen_bag] = {85, 115, 145, 175, 210},
-    [dead_drop] = {85, 115, 145, 175, 210},
-    [metro_drop] = {85, 115, 145, 175, 210},
     [black_box] = {65, 85, 110, 140, 175, 205},
     [drill_head] = {85, 115, 145, 175, 210},
     [lab_blank_tape] = {80, 110, 140, 175, 205},
@@ -218,7 +214,8 @@ end
 
 function input.authority_sight(state, phase, profile, pawn, actor)
     local cash = cash_sources[profile.source] == profile
-    local sight_profile = ((profile.source == stolen_bag or profile.source == dead_drop or profile.source == metro_drop
+    local sight_profile = (profile.quest_source == true and profile.authority_sight == true)
+        or ((profile.source == stolen_bag
         or profile.source == black_box or profile.source == lab_blank_tape or profile.source == cistern_keycard
         or profile.source == crossroads_lockpick or profile.source == gold_bag or profile.source == coup_report)
         and profile.map == sources[profile.source] and profile.authority_sight == true)
@@ -385,20 +382,21 @@ local function approach_scope(state, phase, pawn, actor, map, title_fixture)
 end
 
 function input.precise_approach(state, phase, profile, pawn, actor)
-    local distances = precise_distances[profile.source]
+    local quest_source = profile.quest_source == true
+    local distances = quest_source and quest_source_distances or precise_distances[profile.source]
     if not distances then return end
     local label = "authored_pickup_fixture_" .. profile.source
     local drill_catwalk = profile.source == drill_head and profile == require("native_prototype_drill_pickup").profile
     if (profile.stock_supply and supplies[profile.source] ~= profile)
         or (profile.stock_cash and cash_sources[profile.source] ~= profile)
         or (profile.source == drill_head and not drill_catwalk)
-        or not approach_scope(state, phase, pawn, actor, sources[profile.source])
+        or not approach_scope(state, phase, pawn, actor, quest_source and profile.map or sources[profile.source])
         or not same(actor.Box, actor.RootComponent) then
         error(label .. "_scope_unavailable", 0)
     end
     local forest_locker_top = profile.source == stolen_bag
-    local nested_floor = profile.source == molasses or profile.source == shelf_source or forest_locker_top
-        or profile.source == dead_drop or profile.source == metro_drop or profile.source == black_box or profile.source == lab_blank_tape or drill_catwalk
+    local nested_floor = quest_source or profile.source == molasses or profile.source == shelf_source or forest_locker_top
+        or profile.source == black_box or profile.source == lab_blank_tape or drill_catwalk
         or profile.source == "city-large-stack-1" or profile.source == "crossroads-small-stack-1"
     -- The bag sits above the stock locker bank, about 248 units above the room floor.
     -- The Drill Head sits about 264 units above its catwalk, beside the drill assembly.
@@ -614,10 +612,12 @@ function input.press(state, phase, profile)
     local host = phase == "hosting" and state.server == false
     local guest = phase == "connected" and state.server == true
     local inspect, press = SilverfishReadNativeAuthoredPickup, SilverfishProbeNativeInteractInput
+    local quest_source = profile.quest_source == true
     if not headless or (not guest and not (host and host_fixtures)) or not state.listening or profile.map ~= state.map
         or (profile.stock_supply and supplies[profile.source] ~= profile)
         or (profile.stock_cash and cash_sources[profile.source] ~= profile)
-        or sources[profile.source] ~= state.map or type(inspect) ~= "function" or type(press) ~= "function" then
+        or (not quest_source and sources[profile.source] ~= state.map)
+        or type(inspect) ~= "function" or type(press) ~= "function" then
         error("authored_pickup_stock_input_fixture_unavailable", 0)
     end
     local detail = state.local_pawn
@@ -638,7 +638,7 @@ function input.press(state, phase, profile)
         or not owned(pawn.Camera, pawn, "CameraComponent") then
         error("authored_pickup_stock_input_exact_box_or_camera_unavailable", 0)
     end
-    press_stock(state, pawn, box, precise_distances[profile.source] ~= nil, "authored_pickup_stock_input", function()
+    press_stock(state, pawn, box, quest_source or precise_distances[profile.source] ~= nil, "authored_pickup_stock_input", function()
         local consumed, why = press(pawn:GetAddress(), true)
         local still_active, still_claimed, sequence, fixture = inspect(profile.source)
         if consumed ~= true or why ~= "stock_started_consumed" or still_active ~= true

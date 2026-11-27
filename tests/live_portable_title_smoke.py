@@ -80,6 +80,7 @@ from tools.silverfish.title_session import STATUS_FILE as TITLE_STATUS_FILE
 
 CABINET_RELEASE_SHA256 = "e35f410f7231f2c510b4ec43c34fb59ff7e9574187e2cd32fe66a61b3e87c14c"
 WAREHOUSE_DOCK = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
+DEAD_DROP_CASES = ("crossroads", "metro", "flood-town")
 
 # Checks that reacquire their target on an already loaded map can still run
 # when an unrelated fixture on the same map has failed.
@@ -7893,7 +7894,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_npc_override: bool = False, stock_dock_population: bool = False,
                  stock_streamed_npc: bool = False,
                  manage_saves: bool = False,
-                 stock_dead_drops: bool = False,
+                 stock_dead_drops: bool = False, dead_drop_cases: tuple[str, ...] = DEAD_DROP_CASES,
                  stock_board_offers: bool = False, stock_streamed_board: bool = False, stock_quarry_photo: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
                  stock_weather_travel: bool = False, stock_lightning: bool = False, stock_storm_ambience: bool = False,
@@ -8029,13 +8030,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_campfire, "observatory", "stock_campfire", verify_resident_campfire),
         (stock_npc_override and not resident_weapon_cues, "observatory", "stock_npc_override", verify_resident_npc_override),
         (stock_streamed_npc, "streamed_npc", "stock_streamed_npc", verify_stock_streamed_npc),
-        (stock_dead_drops, "crossroads_dead_drop", "crossroads_dead_drop",
+        (stock_dead_drops and "crossroads" in dead_drop_cases, "crossroads_dead_drop", "crossroads_dead_drop",
          lambda host, guest, _pawn: verify_dead_drop(host, guest, native_computer_board.DEAD_DROP,
                                                      native_dead_drop.CROSSROADS_DROP)),
-        (stock_dead_drops, "metro_dead_drop", "metro_dead_drop",
+        (stock_dead_drops and "metro" in dead_drop_cases, "metro_dead_drop", "metro_dead_drop",
          lambda host, guest, _pawn: verify_dead_drop(host, guest, native_computer_board.METRO_DEAD_DROP,
                                                      native_dead_drop.METRO_DROP)),
-        (stock_dead_drops, "flood_town_dead_drop", "flood_town_dead_drop",
+        (stock_dead_drops and "flood-town" in dead_drop_cases, "flood_town_dead_drop", "flood_town_dead_drop",
          lambda host, guest, _pawn: verify_dead_drop(host, guest, native_computer_board.METRO_DEAD_DROP,
                                                      native_dead_drop.FLOOD_TOWN_DROP, via=(LAKE, CROSSROADS), cash=400)),
         (stock_board_offers, "stock_board_offers", "stock_board_offers", verify_resident_board_offers),
@@ -8991,6 +8992,8 @@ if __name__ == "__main__":
                         help="Delete, restore and resume saves through the installed title")
     parser.add_argument("--stock-dead-drops", action="store_true",
                         help="Verify the Crossroads, Metro and Flood Town Dead Drops in one resident pair")
+    parser.add_argument("--dead-drop-case", action="append", choices=DEAD_DROP_CASES,
+                        help="Limit --stock-dead-drops to selected cases. Repeat for multiple cases.")
     parser.add_argument("--stock-board-offers", action="store_true",
                         help="compare stock board offers and complete a Forest fuel tank bounty through guest gunfire")
     parser.add_argument("--stock-streamed-board", action="store_true",
@@ -9166,6 +9169,8 @@ if __name__ == "__main__":
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
+    if args.dead_drop_case and not args.stock_dead_drops:
+        parser.error("Use --dead-drop-case with --stock-dead-drops")
     if args.nonmirrored_startup and any((
             args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby, args.projected_nearby,
             args.container_nearby, args.stock_use, args.steam_cloud, args.stock_prop_grip, args.stock_host_prop_observer,
@@ -9345,6 +9350,7 @@ if __name__ == "__main__":
                        stock_streamed_npc=args.stock_streamed_npc,
                        manage_saves=args.manage_saves,
                        stock_dead_drops=args.stock_dead_drops,
+                       dead_drop_cases=tuple(args.dead_drop_case or DEAD_DROP_CASES),
                        stock_board_offers=args.stock_board_offers,
                        stock_streamed_board=args.stock_streamed_board,
                        stock_quarry_photo=args.stock_quarry_photo,
