@@ -66,7 +66,7 @@ from . import native_dead_drop, native_savlo_locker, native_subway_valve
 from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, BOROUGH, CISTERN, CROSSROADS, DEAD_BRIDGE, GOLD_NEXUS,
                      NOTHING, OBSERVATORY, PLAYTEST_MAPS, SLATE, travel_decision)
 from .runtime import (Bridge, MAP, MENU, WORLD_WEATHER_FIELDS, game_environment, launch, native_death_backend, qualified_authored_routes, read_json, spare_udp_port, staged_build,
-                      staged_guest_controls,
+                      split_crate_input_outcomes, staged_guest_controls,
                       staged_script, stop_game, verify_loopback_socket, write_json, write_text)
 from .udp_ownership import owns_udp_port
 
@@ -6173,6 +6173,7 @@ class Client:
             return
         session, epoch = self.host_session, self.zone_epoch
         inputs = self.bridge.native_crate_inputs()
+        inputs, local_outcomes = split_crate_input_outcomes(self.last_game, inputs)
         await self.service_lockpick_results(scope, inputs)
         intents = self.crate_intents.take(self.last_game, inputs)
         for sequence, crate, _, source in intents:
@@ -6181,7 +6182,8 @@ class Client:
             operation = uuid.uuid5(self.bridge.input_namespace,
                                    f"{session}:{epoch}:{self.invite['character_id']}:crate:{sequence}:{crate}").hex
             try:
-                result = await self.open_stock_crate(scope, operation, crate, sequence)
+                result = await self.open_stock_crate(scope, operation, crate, sequence,
+                                                     local_outcomes.get((sequence, crate)))
                 self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation,
                                    crate=crate, input_source=source, **result)
             except (ValueError, OSError, RuntimeError) as error:
@@ -6197,12 +6199,16 @@ class Client:
                         and roll is not None and roll == result.get("native_loot_roll")):
                     self.crate_lids.prioritize(crate, scope)
 
-    async def open_stock_crate(self, scope, operation, crate, sequence):
+    async def open_stock_crate(self, scope, operation, crate, sequence, local_outcome=None):
         area, epoch = scope[2], scope[1]
         if self.bridge.local_bridge is None or not native_crate_outcome.supported(crate, area):
             return await self.gameplay_action("native-loot-open", operation, crate)
-        frame = await self.bridge.command(native_crate_outcome.LOCAL_ROLL, crate, str(sequence),
-                                          timeout=3, update_status=False)
+        if isinstance(local_outcome, native_crate_outcome.Refused):
+            raise local_outcome
+        frame = local_outcome
+        if frame is None:
+            frame = await self.bridge.command(native_crate_outcome.LOCAL_ROLL, crate, str(sequence),
+                                              timeout=3, update_status=False)
         if self.stock_interaction_scope() != scope:
             raise ValueError("The stock crate visit changed")
         outcome = frame.get("outcome")
@@ -6221,7 +6227,8 @@ class Client:
         self.provisional_crate_rolls[crate] = scope, local_roll, settlement
         self.world_loot_wake.set()
         self.control.event("native_loot_locally_rolled", crate=crate, operation_id=operation,
-                           item_count=len(local_roll["items"]))
+                           item_count=len(local_roll["items"]),
+                           outcome_source="memory_input" if local_outcome is not None else "bridge_command")
         settled = None
         try:
             try:

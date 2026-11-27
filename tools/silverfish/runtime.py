@@ -838,6 +838,32 @@ def _parse_crate_outcome(raw: str, request: tuple[str, ...]) -> dict:
         raise RuntimeError("The stock crate outcome payload did not verify") from error
 
 
+def split_crate_input_outcomes(game: dict, inputs: list[bytes]) -> tuple[list[bytes], dict]:
+    """Read compact local results from the same input record as their initiating press."""
+    presses, outcomes = [], {}
+    area, pawn = game.get("map"), game.get("pawns", {}).get("local", {}).get("name")
+    for record in inputs:
+        press, _, reply = record.partition(b"\n")
+        if not reply or not press.startswith(b"loot-crate-open\t"):
+            presses.append(record)
+            continue
+        presses.append(press)
+        try:
+            _, source, crate, owner, sequence = press.decode("ascii").split("\t")
+            if ((source, owner) != (area, pawn) or not native_crate_outcome.supported(crate, area)
+                    or not 0 < len(sequence) <= 16 or not sequence.isdigit() or not 0 < int(sequence) < 2**53):
+                continue
+            outcomes[int(sequence), crate] = _parse_crate_outcome(
+                reply.decode("utf-8").rstrip("\n") + "\n",
+                (sequence, native_crate_outcome.LOCAL_ROLL, crate, sequence))
+        except native_crate_outcome.Refused as error:
+            outcomes[int(sequence), crate] = error
+        except (UnicodeError, ValueError, RuntimeError):
+            # A malformed early result can be requested again through the bridge command.
+            continue
+    return presses, outcomes
+
+
 def _parse_local_stock_loot(raw: str, request: tuple[str, ...], *, opening: bool) -> dict:
     tag = "native-loot-open-reply" if opening else "native-loot-inspection-reply"
     byte_key = native_loot.OPEN_REPLY_BYTES if opening else native_loot.INSPECTION_BYTES

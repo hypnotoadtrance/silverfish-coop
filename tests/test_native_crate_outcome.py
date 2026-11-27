@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock
 
 from tools.silverfish import native_crate_outcome as transfer, native_loot, party
+from tools.silverfish.runtime import split_crate_input_outcomes
 from tools.silverfish.travel import OBSERVATORY
 
 
@@ -62,3 +63,21 @@ class CrateOutcomeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(party.RuleError, "outcome_invalid"):
             await transfer.accept(self.host, self.bridge, "guest", body, "a" * 32)
         self.bridge.command.assert_not_awaited()
+
+    def test_early_outcome_belongs_to_its_press_and_local_pawn(self):
+        game = {"map": OBSERVATORY, "state": "connected", "pawns": {"local": {"name": "guest pawn"}}}
+        press = f"loot-crate-open\t{OBSERVATORY}\t{self.crate}\tguest pawn\t7".encode()
+        reply = (f"native-loot-outcome-reply\t1\t7\tconnected\t{OBSERVATORY}\t{self.crate}\t7\taccepted\trolled\n"
+                 "loot-traits\t0\tnone\t0\n").encode()
+        presses, outcomes = split_crate_input_outcomes(game, [(press + b"\n" + reply).rstrip(b"\n")])
+        self.assertEqual(presses, [press])
+        self.assertEqual(native_loot.OpenIntents().take(game, presses), [(7, self.crate, "stock", "memory_input")])
+        self.assertEqual(outcomes[7, self.crate]["outcome"]["items"], [])
+        for changed_press, changed_reply in (
+            (press.replace(b"guest pawn", b"old pawn"), reply),
+            (press, reply.replace(b"\t1\t7\t", b"\t1\t6\t")),
+            (press, reply.replace(b"loot-traits", b"wrong-tag")),
+        ):
+            presses, outcomes = split_crate_input_outcomes(game, [changed_press + b"\n" + changed_reply])
+            self.assertEqual(presses, [changed_press])
+            self.assertEqual(outcomes, {})

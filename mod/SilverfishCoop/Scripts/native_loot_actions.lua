@@ -7,6 +7,7 @@ local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local title_fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
     and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local observation, daily_update
+local local_outcomes = {}
 local escrow_cache, escrow_order = {}, {}
 local cache_world, cache_save
 local pending_escrows = {}
@@ -432,6 +433,7 @@ end
 
 function actions.reset()
     observation, daily_update = nil, nil
+    local_outcomes = {}
 end
 
 local function result_row(row, status_row)
@@ -483,6 +485,7 @@ local function local_outcome(fields, state, phase)
     end)
     retire_items(items)
     if not exported then return "unavailable" end
+    for _, item in ipairs(items) do item.object = nil end
     return "rolled", { lucky = lucky, trait = source, calls = reply[6], items = items, rows = rows }
 end
 
@@ -527,9 +530,8 @@ local function adopt_outcome(fields, state, phase)
     return "adopted"
 end
 
-function actions.outcome_reply(fields, state, phase, row)
+local function outcome_reply(fields, state, phase, row, ok, message, result)
     local adopter = fields[2] == "native-loot-adopt-outcome"
-    local ok, message, result = pcall(adopter and adopt_outcome or local_outcome, fields, state, phase)
     local crate = fields[adopter and 4 or 3]
     local lines = {row("native-loot-outcome-reply", 1, fields[1], phase, state.map, crate,
         fields[adopter and 5 or 4], ok and "accepted" or "error", message)}
@@ -541,6 +543,42 @@ function actions.outcome_reply(fields, state, phase, row)
         end
     end
     return table.concat(lines, "\n") .. "\n"
+end
+
+function actions.prepare_outcome(state, phase, crate, sequence, row)
+    local pawn = state.local_pawn.pawn:GetAddress()
+    local world = state.world:GetAddress()
+    local now = os.clock()
+    local count = 0
+    for key, entry in pairs(local_outcomes) do
+        if entry.world ~= world or entry.pawn ~= pawn or entry.expires <= now then
+            local_outcomes[key] = nil
+        else
+            count = count + 1
+        end
+    end
+    -- Bound the game-thread cache for replies too large for the local input ring.
+    if count >= 8 then return end
+    local fields = {sequence, "native-loot-roll-local", crate, sequence}
+    local reply = table.pack(pcall(local_outcome, fields, state, phase))
+    local_outcomes[sequence] = {world = world, pawn = pawn, crate = crate, expires = now + 12, reply = reply}
+    return outcome_reply(fields, state, phase, row, table.unpack(reply, 1, reply.n))
+end
+
+function actions.outcome_reply(fields, state, phase, row)
+    if fields[2] == "native-loot-adopt-outcome" then
+        return outcome_reply(fields, state, phase, row, pcall(adopt_outcome, fields, state, phase))
+    end
+    local sequence = math.tointeger(fields[4])
+    local cached = local_outcomes[sequence]
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    if cached and phase == "connected" and #fields == 4 and cached.crate == fields[3]
+        and valid_object(pawn) and cached.pawn == pawn:GetAddress()
+        and valid_object(state.world) and cached.world == state.world:GetAddress() then
+        local_outcomes[sequence] = nil
+        return outcome_reply(fields, state, phase, row, table.unpack(cached.reply, 1, cached.reply.n))
+    end
+    return outcome_reply(fields, state, phase, row, pcall(local_outcome, fields, state, phase))
 end
 
 function actions.compact_open(fields, state, phase)

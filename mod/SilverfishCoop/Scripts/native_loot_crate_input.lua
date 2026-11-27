@@ -918,19 +918,25 @@ local function visit_lockpicks(state, status_row, accept)
     end
 end
 
-local function publish_stock_press(state, status_row, index, profile, pawn, sequence, pried, guest)
+local function publish_stock_press(state, phase, status_row, index, profile, pawn, sequence, pried, guest)
     if pried or guest ~= 0 or sequence == fixture_sequences[index] or sequence == published[index] then return end
     published[index] = sequence
     if not state.server or not loot.supports_outcome(profile) or type(SilverfishOpenNativeGuestLootCrate) ~= "function" then
         pcall(preview_open, state, profile, sequence)
     end
     if type(SilverfishEnqueueLocalBridgeInput) == "function" then
-        -- Status remains the fallback if the in-process input ring is detached or full.
-        SilverfishEnqueueLocalBridgeInput(status_row("loot-crate-open", state.map, profile.name, pawn, sequence) .. "\n")
+        local press = status_row("loot-crate-open", state.map, profile.name, pawn, sequence) .. "\n"
+        if phase == "connected" and state.server and loot.supports_outcome(profile)
+            and type(SilverfishOpenNativeGuestLootCrate) == "function" then
+            local reply = require("native_loot_actions").prepare_outcome(state, phase, profile.name, sequence, status_row)
+            if reply and SilverfishEnqueueLocalBridgeInput(press .. reply) then return end
+        end
+        -- For larger rolls, the command path reads the cached outcome. Status is the input fallback.
+        SilverfishEnqueueLocalBridgeInput(press)
     end
 end
 
-local function append_receipts(rows, state, status_row)
+local function append_receipts(rows, state, phase, status_row)
     visit_receipts(state, function(index, profile, pawn, sequence, pried, guest)
         if pried and guest ~= 0 then
             for _, candidate in ipairs(state.guests or {}) do
@@ -940,7 +946,7 @@ local function append_receipts(rows, state, status_row)
                 end
             end
         else
-            publish_stock_press(state, status_row, index, profile, pawn, sequence, pried, guest)
+            publish_stock_press(state, phase, status_row, index, profile, pawn, sequence, pried, guest)
             rows[#rows + 1] = status_row("native-loot-crate-interaction", state.map, profile.name, pawn, sequence,
                 pried and "pried" or sequence == fixture_sequences[index] and "fixture" or "stock")
         end
@@ -957,7 +963,7 @@ local function publish_receipts(frame)
     local pawn = state.local_pawn.pawn
     if not same(active_world, state.world) or not valid(pawn) or not same(pawn:GetWorld(), state.world) then return end
     visit_receipts(state, function(index, profile, pawn, sequence, pried, guest)
-        publish_stock_press(state, status_row, index, profile, pawn, sequence, pried, guest)
+        publish_stock_press(state, frame.phase, status_row, index, profile, pawn, sequence, pried, guest)
     end)
 end
 
@@ -1019,8 +1025,8 @@ function input.rows(state, phase, status_row, fields, separate_details, requeste
         details = nil
     end
     if not receipt_frame then receipt_frame = {} end
-    receipt_frame.state, receipt_frame.row = state, status_row
-    if type(SilverfishReadNativeLootCrateReceipts) == "function" then append_receipts(rows, state, status_row) end
+    receipt_frame.state, receipt_frame.phase, receipt_frame.row = state, phase, status_row
+    if type(SilverfishReadNativeLootCrateReceipts) == "function" then append_receipts(rows, state, phase, status_row) end
     if phase == "connected" then visit_lockpicks(state, status_row, function(_, row) rows[#rows + 1] = row end) end
     if tool_report and phase == "hosting" and tool_report.map == state.map then
         local report = tool_report
