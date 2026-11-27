@@ -223,6 +223,73 @@ class SavedCampaignTests(unittest.TestCase):
 
 
 class PublishedCampaignsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_character_lookup_and_delete_ignore_superseded_results(self):
+        bridge = Path(self.enterContext(TemporaryDirectory())).resolve()
+        generation = "1" * 32
+        campaign, character = str(uuid.uuid4()), str(uuid.uuid4())
+        account = "76561198000000001"
+        entry = CampaignEntry("Camp", "Observatory", "2025-01-01 00:00:00", 1, campaign, 7)
+        started, release = asyncio.Event(), asyncio.Event()
+        operations, avatar_reads = [], 0
+
+        def manage(offered, action, target):
+            self.assertEqual(offered, entry)
+            operations.append((action, target))
+            return ((character, "Scout", "Tester", account),) if action == "characters" else ()
+
+        async def avatars(accounts):
+            nonlocal avatar_reads
+            self.assertEqual(accounts, {account})
+            avatar_reads += 1
+            if avatar_reads in (1, 3):
+                started.set()
+                await release.wait()
+            return {}
+
+        catalogue = TitleHostCampaigns(bridge, lambda: (entry,), manage, avatars)
+        self.addAsyncCleanup(catalogue.close)
+        async with asyncio.timeout(2):
+            while not catalogue.contains(generation, "Camp"):
+                catalogue.poll(generation)
+                await asyncio.sleep(.005)
+
+        async def submit(token, action="characters", target="-"):
+            catalogue.request.write_bytes(f"1\t{generation}\t{token * 32}\t{action}\tCamp\t{campaign}\t7\t{target}\n".encode("ascii"))
+            await catalogue.service(generation)
+
+        def reply_head(token, count):
+            return f"2\t{generation}\t{token * 32}\tok\t{count}\n".encode("ascii")
+
+        async def expect_reply(header):
+            async with asyncio.timeout(2):
+                while not catalogue.response.is_file() or not catalogue.response.read_bytes().startswith(header):
+                    await catalogue.service(generation)
+                    await asyncio.sleep(.005)
+
+        await submit("a")
+        await asyncio.wait_for(started.wait(), 2)
+        await submit("b")
+        await submit("c")
+        self.assertEqual(operations, [("characters", None)])
+        self.assertFalse(catalogue.response.is_file())
+        release.set()
+        await expect_reply(reply_head("c", 1))
+        self.assertEqual(operations, [("characters", None)] * 2)
+
+        started.clear()
+        release.clear()
+        await submit("d")
+        await asyncio.wait_for(started.wait(), 2)
+        obsolete = catalogue._character_job[1]
+        await submit("e", "delete-character", character)
+        self.assertEqual(catalogue.response.read_bytes(), reply_head("e", 0))
+        self.assertEqual(operations[-1], ("delete-character", character))
+        self.assertFalse(obsolete.done())
+        release.set()
+        await asyncio.wait_for(obsolete, 2)
+        await catalogue.service(generation)
+        self.assertEqual(catalogue.response.read_bytes(), reply_head("e", 0))
+
     async def test_stale_worker_result_does_not_publish_and_new_generation_refreshes(self):
         bridge = Path(self.enterContext(TemporaryDirectory())).resolve()
         blocked = threading.Event()
@@ -243,7 +310,7 @@ class PublishedCampaignsTests(unittest.IsolatedAsyncioTestCase):
 
         (bridge / FILE).write_text(f"1\t{old}\t1\nstale\n", encoding="ascii")
         catalogue = TitleHostCampaigns(bridge, scan)
-        self.addCleanup(catalogue.close)
+        self.addAsyncCleanup(catalogue.close)
         self.assertFalse(catalogue.path.exists())
         catalogue.poll(old)
         for _ in range(100):

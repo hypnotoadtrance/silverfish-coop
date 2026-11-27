@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import uuid
 
 from test_title_handoff import ready
-from tools.silverfish import native_title_entry, runtime, service, title_session
+from tools.silverfish import native_title_entry, runtime, service, title_host_campaigns, title_session
 from tools.silverfish.control import Control
 from tools.silverfish.title_handoff import DESCRIPTOR_FILE, REQUEST_FILE
 from tools.silverfish.title_session import STATUS_FILE, SessionPlan, TitleSession, host_plan, join_plan
@@ -142,6 +142,54 @@ class TitleSessionTests(unittest.IsolatedAsyncioTestCase):
     async def control_reply(self, response):
         await self.wait(response.is_file)
         return runtime.read_json(response)
+
+    async def test_join_choice_does_not_wait_for_an_abandoned_manage_characters_read(self):
+        saved = self.directory.resolve() / "game-user" / "Saved"
+        saved.mkdir(parents=True)
+        host, join = Child("host"), Child("join")
+        stock_snapshot = self.bridge.snapshot
+
+        def snapshot():
+            data = stock_snapshot()
+            data["save_scope"] = None
+            data[native_title_entry.PANEL_KEY] = dict(state="ready", mounted=True, actions=["host", "join"])
+            data[native_title_entry.STARTUP_KEY] = dict(map=data["map"], sequence=data["sequence"], saved_directory=str(saved))
+            return data
+
+        self.bridge.snapshot = snapshot
+        started, released, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        account = "76561198000000001"
+        entry = title_host_campaigns.CampaignEntry("Camp", "Observatory", "2025-01-01 00:00:00", 1,
+                                                   str(uuid.uuid4()), 7)
+
+        async def avatars(accounts):
+            self.assertEqual(accounts, {account})
+            started.set()
+            try:
+                await released.wait()
+            finally:
+                finished.set()
+            return {}
+
+        session = TitleSession(self.bridge, {"host": host.plan(), "join": join.plan()}, resident=True,
+                               on_title_ready=Mock(), title_saved_directory=saved, poll_interval=.005,
+                               host_campaign_scan=lambda: (entry,), profile_avatars=avatars,
+                               host_campaign_manage=lambda *_: ((str(uuid.uuid4()), "Scout", "Tester", account),))
+        task = asyncio.create_task(session.run())
+        self.addAsyncCleanup(self.stop, task)
+        catalogue = self.directory / title_host_campaigns.FILE
+        await self.wait(catalogue.is_file)
+        generation = self.generation()
+        request = self.directory / title_host_campaigns.REQUEST
+        request.write_bytes(f"1\t{generation}\t{'a' * 32}\tcharacters\tCamp\t{entry.campaign_id}\t7\t-\n".encode("ascii"))
+        await self.wait(started.is_set)
+        self.request("join", generation, request_id="b" * 32)
+        await self.wait(join.started.is_set)
+        self.assertFalse(finished.is_set())
+        self.assertFalse((self.directory / title_host_campaigns.RESPONSE).exists())
+        await self.stop(task)
+        self.assertTrue(finished.is_set())
+        self.assertFalse((self.directory / title_host_campaigns.RESPONSE).exists())
 
     async def test_control_select_waits_for_same_advancing_title_and_reports_accepted_then_ready(self):
         control = self.enterContext(Control(self.directory / "control"))

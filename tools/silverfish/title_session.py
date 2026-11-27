@@ -324,7 +324,7 @@ class TitleSession:
                 self._local_request = None
             self._handoff.close()
             if self._host_campaigns is not None:
-                self._host_campaigns.close()
+                await self._host_campaigns.close()
             if self._join_settings is not None:
                 self._join_settings.poll(None)
 

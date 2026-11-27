@@ -53,6 +53,13 @@ class CampaignEntry:
     deleted: bool = False
 
 
+@dataclass(frozen=True)
+class _CharacterRequest:
+    generation: str
+    request_id: str
+    entry: CampaignEntry
+
+
 def _map_label(area: str) -> str:
     name = area.rsplit("/", 1)[-1]
     if name in _MAP_NAMES:
@@ -218,6 +225,8 @@ class TitleHostCampaigns:
         self._generation = None
         self._entries = None
         self._job = None
+        self._characters = None
+        self._character_job = None
         self._published = False
         _unlink(self.path)
 
@@ -225,6 +234,7 @@ class TitleHostCampaigns:
         if generation != self._generation:
             self._generation = generation
             self._entries = None
+            self._characters = None
             self._published = False
             _unlink(self.path)
         if self._job is not None and self._job[1].done():
@@ -258,8 +268,12 @@ class TitleHostCampaigns:
                 and any(entry.name == name and not entry.deleted for entry in self._entries))
 
     async def service(self, generation: str | None) -> None:
-        if self._manage is None or not generation:
+        if self._manage is None or not generation or generation != self._generation:
             return
+        await self._take_request(generation)
+        self._advance_character_lookup(generation)
+
+    async def _take_request(self, generation: str) -> None:
         try:
             info = self.request.lstat()
             if (not stat.S_ISREG(info.st_mode) or info.st_size > 384
@@ -277,6 +291,7 @@ class TitleHostCampaigns:
             return
         if version != "1" or offered != generation or not TOKEN.fullmatch(request_id) or not request_id.strip("0"):
             return
+        self._characters = None
         entry = next((entry for entry in self._entries or () if
                       (entry.name, entry.campaign_id, str(entry.revision)) == (name, key, revision)), None)
         status, data = "error", "stale"
@@ -284,30 +299,61 @@ class TitleHostCampaigns:
             needs_character = action == "delete-character"
             valid_character = (character == "-" if not needs_character else str(uuid.UUID(character)) == character)
             if entry and self._published and action in _OPERATIONS and valid_character:
-                rows = await asyncio.to_thread(self._manage, entry, action, None if character == "-" else character)
-                status, data = "ok", str(len(rows))
-                data += "".join(f"\n{key}\t{name}\t{creator}\t{account}" for key, name, creator, account in rows)
-                if self._profile_avatars is not None and rows:
-                    images = await self._profile_avatars({row[3] for row in rows})
-                    data += "".join(f"\n{account}\t{image}" for account, image in images.items())
-        except StoreBusyError:
-            data = "busy"
-        except (OSError, CampaignError, ValueError, RuntimeError):
+                if action == "characters":
+                    self._characters = _CharacterRequest(generation, request_id, entry)
+                    return
+                status, data = await self._run_management(entry, action, None if character == "-" else character)
+        except ValueError:
             data = "unavailable"
         if action != "characters":
             self._published = False
             self._entries = None
             _unlink(self.path)
+        self._publish_response(generation, request_id, status, data)
+
+    async def _run_management(self, entry, action, character, *, request=None):
+        try:
+            rows = await asyncio.to_thread(self._manage, entry, action, character)
+            data = str(len(rows)) + "".join(f"\n{key}\t{name}\t{creator}\t{account}"
+                                            for key, name, creator, account in rows)
+            if self._profile_avatars is not None and rows and (request is None or request is self._characters):
+                images = await self._profile_avatars({row[3] for row in rows})
+                data += "".join(f"\n{account}\t{image}" for account, image in images.items())
+            return "ok", data
+        except StoreBusyError:
+            return "error", "busy"
+        except (OSError, CampaignError, ValueError, RuntimeError):
+            return "error", "unavailable"
+
+    def _advance_character_lookup(self, generation):
+        if self._character_job is not None:
+            request, task = self._character_job
+            if not task.done():
+                return
+            self._character_job = None
+            status, data = task.result()
+            if request is self._characters and request.generation == generation:
+                self._characters = None
+                self._publish_response(generation, request.request_id, status, data)
+        if self._characters is not None:
+            request = self._characters
+            self._character_job = request, asyncio.create_task(
+                self._run_management(request.entry, "characters", None, request=request))
+
+    def _publish_response(self, generation, request_id, status, data):
         try:
             runtime.write_text(self.response, f"2\t{generation}\t{request_id}\t{status}\t{data}\n", newline="\n")
         except OSError:
             return
 
-    def close(self) -> None:
-        if self._job is not None:
-            self._job[1].cancel()
-            self._job = None
+    async def close(self) -> None:
+        tasks = [job[1] for job in (self._job, self._character_job) if job is not None]
+        self._job = self._character_job = self._characters = None
+        for task in tasks:
+            task.cancel()
         self.poll(None)
         if self._manage:
             _unlink(self.request)
             _unlink(self.response)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
