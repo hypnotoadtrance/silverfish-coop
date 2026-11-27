@@ -109,9 +109,10 @@ end
 local function bank(slot)
     return pcall(drops.command, {"req", "native-stock-enemy-loot-bank", "1", slot, "memory-escrow"}, state, phase)
 end
-local function claim(slot, legacy)
+local function claim(slot, legacy, compact)
     local fields = {"req", "native-stock-enemy-loot-claim", "guest", slot, stock_guid, "1", "2", "3", ("a"):rep(32)}
     if not legacy then fields[#fields + 1] = "memory-escrow" end
+    if compact then return drops.claim_reply(fields, state, phase, row) end
     return pcall(drops.command, fields, state, phase)
 end
 local function has_row(expected)
@@ -131,14 +132,21 @@ assert(captures == 1 and not actor.destroyed and not actor.bHidden and actor.col
 assert(releases[second_pool:GetAddress()] == 1 and not escrow.pending_escrow(world, second_slot))
 
 allow_capture = true
-assert(bank(third_slot))
+local accepted, _, bank_rows = drops.bank_reply(
+    {"req", "native-stock-enemy-loot-bank", "1", third_slot, "memory-escrow"}, state, phase, row)
+assert(accepted and #bank_rows == 2)
+assert(bank_rows[1]:find("native-stock-enemy-drop", 1, true) == 1 and bank_rows[1]:find(actor:GetFullName(), 1, true))
+assert(bank_rows[2]:find("native-stock-enemy-loot-banked", 1, true) == 1 and bank_rows[2]:find(third_slot, 1, true))
 assert(captures == 2 and actor.destroyed and actor.bHidden and not actor.collides)
 assert(escrow.pending_escrow(world, third_slot) == third_pool)
-assert(claim(third_slot))
-assert(has_row(row("native-stock-enemy-loot-claimed", map, "guest", third_slot, stock_guid,
-    "merged", 4, 5, 9, stack_guid)))
+local claimed, _, claim_rows, cash = claim(third_slot, false, true)
+assert(claimed and #claim_rows == 1 and not cash)
+assert(claim_rows[1] == row("native-stock-enemy-loot-claimed", map, "guest", third_slot, stock_guid,
+    "merged", 4, 5, 9, stack_guid))
 assert(claims == 1 and releases[third_pool:GetAddress()] == 1 and not escrow.pending_escrow(world, third_slot))
 
+ok, refusal = claim(third_slot, false, true)
+assert(not ok and refusal == "stock_enemy_loot_escrow_unavailable" and claims == 1)
 ok, refusal = claim(third_slot)
 assert(not ok and refusal == "stock_enemy_loot_escrow_unavailable" and claims == 1)
 ok, refusal = claim(third_slot, true)

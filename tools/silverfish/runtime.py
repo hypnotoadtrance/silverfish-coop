@@ -4197,9 +4197,13 @@ class Bridge:
                 return native_guest_stack_drop.parse_memory_reply(raw, fields)
             if action in native_inventory.ACTION_KEYS and raw.startswith(native_inventory.ACTION_REPLY_HEADER):
                 return self._local_inventory_action_reply(raw, fields)
-            if action in (native_loot.CLAIM, native_authored_pickup.ACTION, native_loose_pickup.CLAIM) and raw.startswith(
-                    native_loot.CLAIM_REPLY_HEADER):
-                body = raw.removeprefix(native_loot.CLAIM_REPLY_HEADER)
+            pickup_header, pickup_bytes = (
+                (native_stock_enemy_drops.BANK_REPLY_HEADER, native_stock_enemy_drops.BANK_REPLY_BYTES)
+                if action == native_stock_enemy_drops.BANK else (native_loot.CLAIM_REPLY_HEADER, native_loot.CLAIM_REPLY_BYTES)
+            )
+            if action in (native_loot.CLAIM, native_authored_pickup.ACTION, native_loose_pickup.CLAIM,
+                          native_stock_enemy_drops.CLAIM, native_stock_enemy_drops.BANK) and raw.startswith(pickup_header):
+                body = raw.removeprefix(pickup_header)
                 receipt = self._parse_status(body, cache=False)
                 if (not receipt or receipt.get("mode") != "host" or receipt.get("state") != "hosting"
                         or receipt.get("ack", {}).get("id") != fields[0]):
@@ -4207,7 +4211,7 @@ class Bridge:
                 ack = receipt["ack"]
                 if ack["result"] != "accepted":
                     raise RuntimeError(ack["message"] or f"The game declined the {action} command")
-                receipt[native_loot.CLAIM_REPLY_BYTES] = len(raw.encode("utf-8"))
+                receipt[pickup_bytes] = len(raw.encode("utf-8"))
                 return receipt
             combat = (native_guest_weapon if action in native_guest_weapon.COMPACT_ACTIONS else
                       native_guest_melee if action in native_guest_melee.COMPACT_ACTIONS else None)

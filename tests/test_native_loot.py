@@ -1133,6 +1133,67 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(host.party[enemy.STATE][guid], item)
                 host.checkpoint_native.assert_not_awaited()
 
+    async def test_stock_enemy_bank_and_pickup_receipts_keep_the_resident_world(self):
+        enemy = native_stock_enemy_drops
+        cash_class, (cash_amount, _) = next(iter(native_loot.CASH_RANGES.items()))
+        for class_path in (ITEM["class_path"], cash_class):
+            with self.subTest(class_path=class_path):
+                cash = class_path == cash_class
+                host = self.host(CROSSROADS)
+                bridge = runtime.Bridge(self.root, Mock())
+                guid = ITEM["guid"]
+                actor_type = class_path.rsplit(".", 1)[1]
+                actor = full_name(CROSSROADS, actor_type + "_5")
+                source = full_name(CROSSROADS, "NPC_Survivor_Worker_C_1")
+                observation = f"{enemy.TAG}\t{CROSSROADS}\t1\t2\t{source}\t-\t{actor}\t{class_path}\t1\tsettled\t10\n"
+                base = f"schema\t1\nseq\t4\nsession\thost\thosting\t{CROSSROADS}\t1\t0\n"
+                stock = base + (f"pawn\tlocal\t{PAWN}\t100\t0\t0\t0\tplr\nwallet\t50\n"
+                                f"native-stock-enemy-memory\t1\n{observation}")
+                game = bridge._parse_status(stock)
+                game["native_world_loot_version"] = 1
+                host.last_game = bridge._local_status = game
+                before_seen = host.last_seen
+                host.processed_stock_enemy_drops = set()
+                host.roles = dict
+                seen_sizes = []
+
+                async def command(request, timeout):
+                    ticket, action, target, slot, *_ = request.decode().strip().split("\t")
+                    header = base + f"ack\t{ticket}\taccepted\tverified\n"
+                    if action == enemy.BANK:
+                        self.assertEqual(target, "1")
+                        reply = (enemy.BANK_REPLY_HEADER + header + observation
+                                 + f"{enemy.BANKED}\t{CROSSROADS}\t1\t{actor}\t{class_path}\t{guid}\t4\t{slot}"
+                                 "\t1\t2\t3\t0\t0\t0\t1\t1\t1\tmemory\n")
+                    else:
+                        self.assertEqual((action, target), (enemy.CLAIM, PAWN))
+                        payload = (f"cash_credited\t{cash_amount}\t50\t{50 + cash_amount}\nwallet\t{50 + cash_amount}\n"
+                                   if cash else f"merged\t4\t7\t11\t{'B' * 32}\n")
+                        reply = (native_loot.CLAIM_REPLY_HEADER + header
+                                 + f"{enemy.CLAIMED}\t{CROSSROADS}\t{target}\t{slot}\t{guid}\t" + payload)
+                    seen_sizes.append(len(reply.encode()))
+                    return reply
+
+                bridge.local_bridge = SimpleNamespace(command=AsyncMock(side_effect=command))
+                await enemy.observe(host, bridge)
+                self.assertIs(host.last_game, game)
+                self.assertTrue(host.party[enemy.STATE][guid]["escrow"]["pending"])
+                result = await enemy.claim(host, bridge, "host", guid, OPERATION)
+                self.assertIs(await enemy.claim(host, bridge, "host", guid, OPERATION), result)
+                if cash:
+                    self.assertEqual(host.party["economy"]["wallet"], 50 + cash_amount)
+                    self.assertEqual(host.last_game, dict(game, native_wallet=50 + cash_amount))
+                    self.assertEqual(game["native_wallet"], 50)
+                else:
+                    self.assertEqual(result[enemy.CLAIM_KEY]["stack_merge"], dict(amount=4, before=7, after=11))
+                    self.assertIs(host.last_game, game)
+                self.assertIs(bridge._local_status, game)
+                self.assertEqual(host.last_seen, before_seen)
+                self.assertEqual(bridge.local_bridge.command.await_count, 2)
+                banked, claimed = [event.kwargs for event in host.control.event.call_args_list]
+                self.assertEqual([banked["bridge_reply_bytes"], claimed["bridge_reply_bytes"]], seen_sizes)
+                host.checkpoint_native.assert_not_awaited()
+
     async def test_stock_cash_credits_wallet_once_and_persists_the_exact_receipt(self):
         roll = self.roll(CROSSROADS, OTHER_CRATE, "1" * 32)
         item = roll["items"][0]

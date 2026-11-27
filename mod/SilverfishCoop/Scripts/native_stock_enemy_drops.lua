@@ -176,7 +176,6 @@ local function valid_slot(slot)
 end
 
 local function capture(fields, state, phase, fixture)
-    proof, bank = nil, nil
     local sequence, slot = math.tointeger(fields[3]), fields[4]
     local pending = not fixture and #fields == 5 and fields[5] == "memory-escrow"
     local host, fresh = transport.scoped_host(state, phase)
@@ -240,13 +239,21 @@ local function capture(fields, state, phase, fixture)
     actor:K2_DestroyActor()
     match.finished = true
     clear_pose(match)
-    bank = {sequence, name, match[6], guid, ammo, slot, table.unpack(pose)}
-    if pending then bank[#bank + 1] = "memory" end
-    return "exact stock NPC item banked and retired"
+    local outcome = {sequence, name, match[6], guid, ammo, slot, table.unpack(pose)}
+    if pending then outcome[#outcome + 1] = "memory" end
+    return "exact stock NPC item banked and retired", outcome, match
+end
+
+function drops.bank_reply(fields, state, phase, status_row)
+    local accepted, message, outcome, match = pcall(capture, fields, state, phase, false)
+    if not accepted then return false, message end
+    return true, message, {
+        status_row("native-stock-enemy-drop", state.map, table.unpack(match)),
+        status_row("native-stock-enemy-loot-banked", state.map, table.unpack(outcome)),
+    }
 end
 
 local function transfer(fields, state, phase)
-    claim = nil
     local name, slot, guid = fields[3], fields[4], fields[5]
     local x, y, z, identity = tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8]), fields[9]
     local host, fresh = transport.scoped_host(state, phase)
@@ -286,10 +293,17 @@ local function transfer(fields, state, phase)
     local ok, status, amount, before, after, inventory_guid = SilverfishClaimNativeLootEscrow(pawn:GetAddress(), save:GetAddress(),
         stock:GetAddress(), pool:GetAddress(), guid)
     if not ok then error(tostring(status), 0) end
-    claim = {name, slot, guid, status, amount or 0, before or 0, after or 0}
-    if status == "merged" then claim[8] = inventory_guid or "-" end
+    local outcome = {name, slot, guid, status, amount or 0, before or 0, after or 0}
+    if status == "merged" then outcome[8] = inventory_guid or "-" end
     if pending then escrow.retire_pending_escrow(slot) end
-    return "exact stock NPC item transferred"
+    return "exact stock NPC item transferred", outcome
+end
+
+function drops.claim_reply(fields, state, phase, status_row)
+    local accepted, message, outcome = pcall(transfer, fields, state, phase)
+    if not accepted then return false, message end
+    return true, message, {status_row("native-stock-enemy-loot-claimed", state.map, table.unpack(outcome))},
+        outcome[4] == "cash_credited"
 end
 
 local function broker_key_fixture(fields, state, phase)
@@ -311,9 +325,18 @@ end
 function drops.command(fields, state, phase)
     if fields[2] == "native-stock-broker-cue-remove" then return remove_broker_cue(fields, state, phase) end
     if fields[2] == "native-stock-broker-key-fixture" then return broker_key_fixture(fields, state, phase) end
-    if fields[2] == "native-stock-enemy-escrow-fixture" then return capture(fields, state, phase, true) end
-    if fields[2] == "native-stock-enemy-loot-bank" then return capture(fields, state, phase, false) end
-    if fields[2] == "native-stock-enemy-loot-claim" then return transfer(fields, state, phase) end
+    if fields[2] == "native-stock-enemy-escrow-fixture" or fields[2] == "native-stock-enemy-loot-bank" then
+        proof, bank = nil, nil
+        local message
+        message, bank = capture(fields, state, phase, fields[2] == "native-stock-enemy-escrow-fixture")
+        return message
+    end
+    if fields[2] == "native-stock-enemy-loot-claim" then
+        claim = nil
+        local message
+        message, claim = transfer(fields, state, phase)
+        return message
+    end
 end
 
 return drops

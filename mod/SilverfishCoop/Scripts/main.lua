@@ -1846,16 +1846,19 @@ status_publication.guest_combat_actions = {
     ["native-guest-melee-swing-start"] = native_guest_melee.local_reply,
 }
 
-status_publication.pickup_claims = {
+status_publication.pickup_actions = {
     ["native-authored-pickup-claim"] = native_authored_pickup.claim_reply,
     ["native-loose-pickup-claim"] = native_authored_pickup.claim_reply,
     ["native-loot-claim"] = native_loot_actions.claim_reply,
+    ["native-stock-enemy-loot-claim"] = native_stock_enemy_drops.claim_reply,
+    ["native-stock-enemy-loot-bank"] = native_stock_enemy_drops.bank_reply,
 }
 
-function status_publication.pickup_claim_reply(claim, fields, state, phase)
-    local accepted, message, records, cash = claim(fields, state, phase, status_row)
+function status_publication.pickup_reply(action, fields, state, phase)
+    local accepted, message, records, cash = action(fields, state, phase, status_row)
+    local tag = fields[2] == "native-stock-enemy-loot-bank" and "native-stock-enemy-loot-bank-reply" or "native-pickup-claim-reply"
     local rows = {
-        "native-pickup-claim-reply\t1",
+        status_row(tag, 1),
         status_row("schema", 1),
         status_row("seq", sequence),
         status_row("ack", fields[1], accepted and "accepted" or "error", message),
@@ -2024,13 +2027,13 @@ local function tick(fields, pending, periodic)
         if not periodic then return true end
         fields, pending = nil, nil
     end
-    local pickup_claim = fields and status_publication.pickup_claims[fields[2]]
-    if pickup_claim and pending and current_phase == "hosting"
+    local pickup_action = fields and status_publication.pickup_actions[fields[2]]
+    if pickup_action and pending and current_phase == "hosting"
         and status_publication.steady(state, current_phase) then
         if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
         pending.dispatched = true
         SilverfishPublishLocalBridgeReply(pending.ticket,
-            status_publication.pickup_claim_reply(pickup_claim, fields, state, current_phase))
+            status_publication.pickup_reply(pickup_action, fields, state, current_phase))
         if not periodic then return true end
         fields, pending = nil, nil
     end
@@ -2379,7 +2382,7 @@ if resident_title and status_publication.installed then
         if action == "native-world-loot-frame" or action == "native-loot-open" or action == "native-loot-inspect"
             or action == "native-guest-save-retain"
             or status_publication.stock_interactions[action] or status_publication.pickup_presentation[action]
-            or status_publication.pickup_claims[action] or status_publication.guest_combat_actions[action]
+            or status_publication.pickup_actions[action] or status_publication.guest_combat_actions[action]
             or status_publication.placed_view_actions[action] or status_publication.prop_carry_actions[action] then
             status_publication.dispatch(os.clock(), fields, pending, false)
         end

@@ -27,6 +27,8 @@ STATE = "native_stock_enemy_loot"
 BANK = "native-stock-enemy-loot-bank"
 BANKED = "native-stock-enemy-loot-banked"
 BANK_KEY = "native_stock_enemy_loot_banked"
+BANK_REPLY_HEADER = "native-stock-enemy-loot-bank-reply\t1\n"
+BANK_REPLY_BYTES = "native_stock_enemy_loot_bank_reply_bytes"
 MEMORY_CAPABILITY = "native_stock_enemy_memory"
 CLAIM = "native-stock-enemy-loot-claim"
 CLAIMED = "native-stock-enemy-loot-claimed"
@@ -465,9 +467,10 @@ async def observe(host, bridge, *, interaction_ready=None):
                                  claimed_by=None, settled=drop["initial_height"] is not None, escrow=frame)
             if drop.get("transform"):
                 records[guid]["visual_id"] = motion_identity(host.zone_epoch, actor)
-            host.last_game, host.last_seen = snapshot, time.monotonic()
+            if BANK_REPLY_BYTES not in snapshot:
+                host.last_game, host.last_seen = snapshot, time.monotonic()
             processed.add(seq)
-            committed.append((drop, records[guid]))
+            committed.append((drop, records[guid], snapshot.get(BANK_REPLY_BYTES)))
         if committed:
             revision = None
             if memory:
@@ -478,9 +481,9 @@ async def observe(host, bridge, *, interaction_ready=None):
                 revision = await host.checkpoint_native(bridge, candidate)
             host.party = candidate
             host.native_checkpoint_unsafe = False
-            for drop, record in committed:
+            for drop, record, reply_bytes in committed:
                 host.control.event("native_stock_enemy_loot_banked", revision=revision, sequence=drop["sequence"],
-                                   **_public(record))
+                                   bridge_reply_bytes=reply_bytes, **_public(record))
     finally:
         if host.native_checkpoint_unsafe:
             host.stopping = True
@@ -562,7 +565,7 @@ async def claim(host, bridge, character, guid, operation):
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        host.last_game, host.last_seen = snapshot, time.monotonic()
+        native_loot.remember_claim_snapshot(host, bridge, snapshot)
         revision = None
         if deferred:
             if character == "host":
@@ -572,7 +575,8 @@ async def claim(host, bridge, character, guid, operation):
                                                     typed_inventory=bool(merge))
         host.party = candidate
         host.native_checkpoint_unsafe = False
-        host.control.event("native_stock_enemy_loot_claimed", revision=revision, operation_id=operation, **result[CLAIM_KEY])
+        host.control.event("native_stock_enemy_loot_claimed", revision=revision, operation_id=operation,
+                           bridge_reply_bytes=snapshot.get(native_loot.CLAIM_REPLY_BYTES), **result[CLAIM_KEY])
         native_pickup_audio.committed(host, pawn, operation, committed["class_path"], credit=committed.get("wallet_credit"))
         return result
     finally:
