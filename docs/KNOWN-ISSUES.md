@@ -8,11 +8,12 @@ Use the same current candidate on both PCs. Start with a fresh campaign on `rc-a
 
 | Check | What to verify |
 | --- | --- |
-| Menus, join, and reconnect | Check title navigation, hover and click sounds, Public lobby discovery, passwordless join, two guests joining and creating characters together, creator names and avatars, Manage Saves, and rejoining after a disconnect. An in-game Steam invite already worked in a two-PC playtest. Direct IP and Manage Saves passed isolated tests. |
+| Menus | Check title navigation, hover and click sounds, Host and Join screens, creator names and avatars, and Manage Saves. Ordinary Steam joining is confirmed in the group's playtests. |
 | Observatory responsiveness and network load | Take several items from the shed cabinet by the campfire using stock Interact. Record any frame hitch or input delay on either seat. Compare rendered Crossroads pacing and capture the mod's own traffic during a Depot or three-guest session. The 20 Hz worker heartbeat and compression are implemented. The 100 ms round-trip target still needs live measurement where the connection allows it. |
 | Combat and session stability | Have the guest fire and use melee against moving enemies in the warehouse, including under the garage door. Check that both seats agree on hits, death, and loot pickup. Keep the earlier crashes and returns to title open until the reported scenarios pass. |
 | Inventory | Retest head and chest gear, Contractor Vest, Land Mine, and manual stack merge and split. These fixes passed isolated checks. |
 | Quests and travel | Accept and turn in the Flood Plains bounty through Simmi and retest the buried package between the two rocks by the Crossroads scarecrow. Check regrouping, the fade and audio on both seats, and the guest's first visible frame on arrival. |
+| Steam edge cases | When convenient, check Public discovery without an invite, a passwordless browser join, two guests creating characters at once, and rejoining after a crash or disconnect. |
 | World follow-ups | Toggle the same oil lantern from each seat. Compare lit state and check a previously broken lantern when a player joins late. Check mushroom regrowth between revisits and TV clip playback when convenient. |
 
 ## Resolved in two-PC playtests
@@ -20,6 +21,7 @@ Use the same current candidate on both PCs. Start with a fresh campaign on `rc-a
 | Report | Confirmed behavior |
 | --- | --- |
 | Wild mushroom pickup | Harvesting synchronized between host and guest. [Playtest report](#rc-161145a-playtest) |
+| Ordinary Steam joining | The group uses Steam joining for its playtests and reports it is working. Public discovery and reconnect after a crash remain specific follow-ups. |
 | Ragdolls | Players report that carrying and release are working in their current play. Reopen on a new report. |
 | Pipe bomb replication | The guest threw a pipe bomb and both players saw it explode in sync. [Playtest report](#rc-1799e4b-playtest) |
 | Television, radio, and candle toggles | Both players saw the TV and candle state sync. The guest heard the host's radio after it was switched on. Oil lanterns remain in the retest list. [TV and candle report](#rc-1799e4b-playtest) · [Radio report](#rc-161145a-playtest) |
@@ -204,7 +206,7 @@ Build `rc-e78fc64` verified three successive guest Bandage grants over Direct IP
 
 ## Current priorities
 
-1. Improve the main-menu, hosting, and joining flow using stock controls. Verify the new Manage Saves flow and rendered navigation with players.
+1. Improve the main-menu, Host and Join screen usability using stock controls. Verify rendered navigation and Manage Saves with players.
 2. Improve host and guest frame pacing, local interaction response, and network latency during play. Compare Observatory and Crossroads under load, track packet volume and queue delays, and work toward a 100 ms round trip where the connection allows it. Ordinary map loading time is a lower priority. Keep transition bugs that interrupt the session or leave the party behind in the functional backlog.
 3. Retest session stability and combat in a rendered Steam session. Prioritize any crash or return to title reproduced on the current candidate.
 4. Expand compatibility through the stock game's runtime discovery. Read live quest offers, progress, rewards, and map transitions from the game's existing data and events. Discover items and interactables by their stock classes and supported interfaces. Keep standard behavior shared across maps and mod content, and document which custom scripts need explicit integration.
