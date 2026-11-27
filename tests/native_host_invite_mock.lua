@@ -204,44 +204,21 @@ assert(not report())
 downed = false
 assert(action("close") and not report() and close_calls == 1)
 
--- Exercise the physical dispatch branch with scoped mocks and no system clipboard.
+-- A foreground stock journal has no Co-op invite, even with a valid invite offer.
 flags.SILVERFISH_COOP_HEADLESS = nil
+focused = true
+view = nil
 module = build()
-controller:OpenMenu(registered[journal_class], {})
+files[offer] = ("1\t%s\t%s\t104\n"):format(generation, epoch)
+local opened = {}
+controller:OpenMenu(registered[journal_class], opened)
 tick()
+assert(stack[1] == opened.CreatedMenu and opened.CreatedMenu:IsInViewport() and opened.CreatedMenu:IsVisible())
+assert(not view and not report() and not editing and not files[request] and copies == 0 and operations == 1)
+ok, reason = action("begin")
+assert(not ok and reason == "native_host_invite_fixture_unavailable")
+
 local function press(action) click(action); dispatch_click() end
-press("confirm")
-assert(report() == "journal" and not editing)
-focused = true
-press("confirm")
-assert(report() == "editing" and editing.field == "participant" and view.center == true)
-editing.value = "Bob Test"
-press("next")
-editing.value = "Pip"
-press("next")
-editing.value = "127.0.0.1"
-press("next")
-assert(report() == "editing" and not files[request])
-press("confirm")
-id = "00000001ffffffff0000003300000002"
-assert(files[request] == ("1\t%s\t%s\t%s\tBob Test\tPip\t127.0.0.1\n"):format(generation, epoch, id))
-files[request] = nil
-files[response] = ("1\t%s\t%s\t%s\tok\texported\n"):format(generation, epoch, id)
-files["bridge/host-invite-" .. id .. ".invite.json"] = payload .. "\n"
-tick()
-assert(report() == "exported" and copies == 0)
-focused = false
-press("confirm")
-assert(copies == 0)
-focused = true
-press("confirm")
-assert(copies == 1 and report() == "exported")
-files["bridge/host-invite-" .. id .. ".invite.json"] = '{"replaced":true}\n'
-press("confirm")
-assert(copies == 1 and report() == "refused")
-world.NetDriver.ServerConnection = object()
-tick()
-assert(not report() and not view.visible)
 
 local market = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
 local package_guid = string.rep("C", 32)
@@ -273,19 +250,17 @@ local function package_status(expected_state, offer_id, selected)
     end
 end
 
-world.NetDriver.ServerConnection = nil
+assert(not install_offer(first_offer))
 controller:CloseMenu({})
 tick()
+state.map = market
 assert(not install_offer(first_offer))
 controller:OpenMenu(registered[journal_class], {})
 tick()
-assert(not install_offer(first_offer) and #module.rows(state, "hosting", table.pack) == 1)
-controller:CloseMenu({})
-state.map = market
-controller:OpenMenu(registered[journal_class], {})
-tick()
 package_status("idle")
+assert(not view, "Only a real package offer should add a foreground journal control")
 assert(install_offer(first_offer) and view.buttons.next == "Give the sealed package" and view.center == false)
+assert(not view.buttons.confirm, "A package offer must not reintroduce the invite button")
 press("next")
 assert(view.caption:find(scout_label, 1, true))
 press("next")

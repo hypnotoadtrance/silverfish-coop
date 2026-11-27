@@ -180,11 +180,13 @@ async def verify_save_management(host, guest):
 
     await click("back")
     await click("manage")
-    await focused("back")
+    remaining = catalog.splitlines()[1:]
+    await focused("save:" + remaining[0].split("\t")[3] if remaining else "back")
     await click("back")
     await click("back")
     await click("modes")
     return {"created": created, "reopened": reopened, "campaign_files_erased": True,
             "guest_slot_erased": True, "confirmation_cancelled": True, "title_focus_verified": True,
             "pending_character_lookup_cancelled": True,
+            "remaining_campaign_count": len(remaining),
             "revisions": [original["revision"], deleted_character["revision"], reopened["revision"]]}

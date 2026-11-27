@@ -6,7 +6,7 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 
 ## Locked rules
 
-1. **Connection options.** Direct IP Join asks for the host's IP address, UDP port, and password when the host sets one. The host chooses the UDP port and whether to require a password. Deferred Steam Invite support uses the same host session and character roster. A Steam invite may carry a direct endpoint or lead to a lobby that uses Steam's relay. Steam relay sessions use virtual port addressing.
+1. **Connection options.** Direct IP Join asks for the host's IP address, UDP port, and password when the host sets one. The host chooses the UDP port and whether to require a password. Steam invites and lobby joins use the same host session and character roster through Steam relay. The host can make a Steam lobby Invite Only, Friends Only, or Public. Steam relay sessions use virtual port addressing.
 
 2. **Connection recovery.** Brief Internet or Steam interruptions can be recovered from using the reconnect rules in rule 14. Reconnecting through Direct IP during a Steam outage requires a reachable direct endpoint and the ability to authenticate the same campaign participant over that route.
 
