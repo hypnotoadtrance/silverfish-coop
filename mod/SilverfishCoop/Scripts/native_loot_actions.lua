@@ -54,10 +54,10 @@ local function remember_escrow(slot, pool, stock, retained)
             escrow_cache[evicted] = nil
             table.remove(escrow_order, 1)
         end
-        local path = pool:GetFullName():match("^%S+ (.+)$")
-        if not path or not retained and (type(SilverfishRetainNativeLootEscrow) ~= "function"
+        if not retained and (type(SilverfishRetainNativeLootEscrow) ~= "function"
             or not SilverfishRetainNativeLootEscrow(stock:GetAddress(), address)) then return false end
-        escrow_cache[slot] = {path = path, address = address}
+        -- The game instance retains this SaveGame for GC until the cache releases it.
+        escrow_cache[slot] = {pool = pool, address = address}
     elseif entry.address ~= address then
         return false
     end
@@ -317,7 +317,7 @@ function actions.command(fields, state, phase, status_row)
         bind_cache(scope)
         local pending_pool = actions.pending_escrow(scope.world, slot)
         local cached = escrow_cache[slot]
-        local pool = pending_pool or (cached and StaticFindObject(cached.path))
+        local pool = pending_pool or (cached and cached.pool)
         if not pending_pool and cached and (not valid_object(pool) or pool:GetAddress() ~= cached.address) then
             if release_reference(cached) then
                 escrow_cache[slot] = nil

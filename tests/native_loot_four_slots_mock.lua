@@ -11,7 +11,7 @@ local scope = {profile = {path = "/Game/Stock.Cabinet", small_cabinet = true, ca
     box = object(3), save = object(4), stock = object(5), world = object(10),
     lucky_looter = true, lucky_source = "detached", distance = 350}
 local scratched, restored = object(6), object(7)
-local retired, writes, claims = {}, 0, 0
+local retired, writes, claims, loads, releases = {}, 0, 0, 0, 0
 local expected_outputs, expected_items = {11, 0, 33, 44}, "11,33,44"
 local api, class = object(8), object(9)
 api.DoesSaveGameExist = function(_, expected) assert(expected == slot); return false end
@@ -21,12 +21,20 @@ api.SaveGameToSlot = function(_, source, expected)
     writes = writes + 1
     return true
 end
-api.LoadGameFromSlot = function(_, expected) assert(expected == slot); return restored end
-restored.GetFullName = function() return "StockSave /Engine/Transient.RestoredSave" end
+api.LoadGameFromSlot = function(_, expected)
+    assert(expected == slot)
+    loads = loads + 1
+    return restored
+end
 SilverfishRetainNativeLootEscrow = function(stock, pool) return stock == 5 and pool == 7 end
+SilverfishReleaseNativeLootEscrow = function(address)
+    assert(address == 7)
+    releases = releases + 1
+    return true
+end
 StaticFindObject = function(path)
-    if path == "/Engine/Transient.RestoredSave" then return restored end
     if path == "/Script/Engine.Default__GameplayStatics" then return api end
+    assert(path == "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C", "unexpected cached object lookup")
     return class
 end
 
@@ -98,7 +106,11 @@ assert(report[2][4] == ids[1] and report[3][4] == ids[3] and report[4][4] == ids
 assert(writes == 1 and table.concat(retired, ",") == expected_items)
 
 actions.command({"id", "native-loot-claim", pawn_name, name, ids[4], slot}, state, "hosting")
-assert(rows()[1][7] == "claimed" and claims == 1)
+assert(rows()[1][7] == "claimed" and claims == 1 and loads == 1)
+scope.world = object(12)
+actions.command({"id", "native-loot-claim", pawn_name, name, ids[4], slot}, state, "hosting")
+assert(rows()[1][7] == "claimed" and claims == 2 and releases == 1 and loads == 2,
+    "Changing worlds releases the old retained pool and reloads the durable slot")
 
 full_width = false
 actions.command({"id", "native-loot-open", pawn_name, name, slot}, state, "hosting")
