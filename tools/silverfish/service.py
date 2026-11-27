@@ -2997,12 +2997,19 @@ class Host:
             return None
         return pawn
 
+    def observe_host_frame(self, state: dict | None) -> None:
+        if state is None or state.get("sequence") == self.last_game.get("sequence"):
+            return
+        if (state.get("map") == MENU and (state.get("mode"), state.get("state")) in {
+                ("host", "opening"), ("idle", "ready")}
+                and state.get("server_connection") is False and state.get("remote_clients") == 0):
+            self.session_stop_reason = "host_returned_to_title"
+            self.stopping = True
+            raise RuntimeError("The active co-op host returned to the title")
+        self.last_game, self.last_seen = state, time.monotonic()
+
     async def observe(self, bridge: Bridge, transport) -> None:
-        state = bridge.snapshot()
-        if state is not None:
-            if state.get("sequence") != self.last_game.get("sequence"):
-                self.last_seen = time.monotonic()
-            self.last_game = state
+        self.observe_host_frame(bridge.snapshot())
         party.add_player(self.party, "host")
         pawn = await self.enrolled_pawn(bridge, self.last_game.get("pawns", {}).get("guest"), transport)
         if not pawn and "guest" in self.last_game.get("pawns", {}) and self.enrollment:
@@ -5017,6 +5024,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
         controller = None
         result = "stopped"
         stop_reason = None
+        cleanup_failed = False
         try:
             control.status(active=True, role="host", state="starting")
             identity = (direct_ip.resident_host_identity(work, directory)
@@ -5245,6 +5253,13 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                 try:
                     if controller:
                         controller.stopping = True
+                        reason = controller.session_stop_reason
+                        if (transport is not None and reason != "host_session_ended"
+                                and (result == "failed" or controller.native_checkpoint_unsafe)
+                                and (revision := store.status()["revision"]) > 0):
+                            with contextlib.suppress(OSError, RuntimeError):
+                                peers = await transport.announce_session_end(control.generation, revision)
+                                control.event("host_recovery_notified", revision=revision, peers_acknowledged=peers)
                         if native_guest and process.poll() is None:
                             with contextlib.suppress(OSError, RuntimeError):
                                 await bridge.command("native-guest-clear", timeout=2)
@@ -5252,6 +5267,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     await _stop_session_game(transport, process, embedded)
             except (Exception, asyncio.CancelledError) as error:
                 result = "failed"
+                cleanup_failed = True
                 control.event("host_cleanup_failed", error_type=type(error).__name__)
                 raise
             finally:
@@ -5259,7 +5275,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                 if not reason and controller and controller.native_checkpoint_unsafe:
                     reason = "native_checkpoint_unsafe"
                 control.status(active=False, role="host", state=result, campaign=store.status(),
-                               stop_reason=reason or stop_reason)
+                               stop_reason=reason or stop_reason, cleanup_failed=cleanup_failed)
 
 
 async def probe_transport(bridge: Bridge, item: str) -> dict:
@@ -5636,6 +5652,7 @@ class Client:
         self.last_game = state
         if not self.needs_travel and state.get("state") not in {"disconnected", "ready"}:
             return
+        self.empty_zone_retry.note_title_ejection(self, state)
         previous = self.game_visit
         if (previous and self.needs_travel and self.host_session == previous[0] and self.zone_epoch != previous[1]
                 and self.expected_zone != previous[2] and self.expected_zone in self.allowed_maps):
@@ -7435,6 +7452,7 @@ async def join_game(work: Path, directory: Path, invitation: Path | direct_ip.Co
     with Control(directory / "run", resident=resident_engine is not None and not headless) as control:
         process = transport = embedded = client = None
         result = "stopped"
+        cleanup_failed = False
         try:
             control.status(active=True, role="client", state="starting")
             if embedded_engine or resident_engine is not None:
@@ -7493,8 +7511,9 @@ async def join_game(work: Path, directory: Path, invitation: Path | direct_ip.Co
                 await _stop_session_game(transport, process, embedded, guest_left=reason == "guest_left")
             except (Exception, asyncio.CancelledError) as error:
                 result = "failed"
+                cleanup_failed = True
                 control.event("client_cleanup_failed", error_type=type(error).__name__)
                 raise
             finally:
                 control.status(active=False, role="client", state=result, character_id=invite["character_id"],
-                               stop_reason=reason)
+                               stop_reason=reason, cleanup_failed=cleanup_failed)

@@ -155,6 +155,7 @@ class TitleSession:
         self._handoff = None
         self._published = None
         self._last_failure = None
+        self._recovery = None
         self._starting = False
         self._cancel_requested = False
         self._control = control
@@ -268,7 +269,8 @@ class TitleSession:
             while self._bridge.process.poll() is None:
                 snapshot = self._bridge.snapshot()
                 plans = {} if self._resident and snapshot is not None and not self._solo_title(snapshot) else self._plans
-                offered = self._handoff.refresh(snapshot, plans, host_defaults=self._host_defaults)
+                offered = self._handoff.refresh(snapshot, plans, host_defaults=self._host_defaults,
+                                                recovery=self._recovery)
                 if self._host_campaigns is not None:
                     generation = self._handoff.generation if offered else None
                     self._host_campaigns.poll(generation)
@@ -329,6 +331,7 @@ class TitleSession:
     async def _launch(self, claim: Claim, original_title: tuple) -> bool:
         from .service import NATIVE_RUNTIME_RETIREMENT_WAIT, NATIVE_RUNTIME_RETIRING
 
+        self._recovery = None
         plan = claim.binding
         attempt = {key: getattr(claim, key) for key in ("action", "request_id", "generation")}
         try:
@@ -439,17 +442,16 @@ class TitleSession:
                         while self._control is not None and not task.done():
                             self._poll_control()
                             await asyncio.wait((task,), timeout=self._poll_interval)
-                        reason = await task
+                        try:
+                            reason = await task
+                        except Exception:
+                            if not self._resident:
+                                raise
+                            error = "session_failed"
+                            break
                         if self._resident:
-                            final = _read_plan_status(plan)
-                            if (not _is_attempt(final, baseline, started_wall, claim.action, producer_pid())
-                                    or final["generation"] != child_generation or final.get("active") is not False
-                                    or final.get("state") != "stopped"):
-                                raise RuntimeError("The resident session did not return to its solo title")
-                            # The in-memory save-scope release can finish before the file-backed title frame arrives.
-                            await self._bridge.wait_for(self._solo_title, timeout=_TITLE_RETURN_WAIT)
-                            self._publish("stopped", attempt=attempt)
-                            return False
+                            error = None
+                            break
                         if reason in native_session_exit.ORDERLY_REASONS:
                             final = _read_plan_status(plan)
                             self.return_to_title = (
@@ -462,16 +464,20 @@ class TitleSession:
                 else:
                     ready_at = None
                 await asyncio.sleep(self._poll_interval)
-            if task.cancelled():
-                error = "start_cancelled"
-            elif task.done() and task.exception() is not None:
-                error = "launch_failed"
+            if not retired:
+                if task.cancelled():
+                    error = "start_cancelled"
+                elif task.done() and task.exception() is not None:
+                    error = "launch_failed"
         except (OSError, RuntimeError, ValueError):
             if retired:
-                self._last_failure = dict(attempt, code="session_failed")
-                self._publish("stopped", attempt=attempt)
-                return True
-            error = "title_retire_failed" if not self._starting else "readiness_failed"
+                error = "session_failed"
+                if not self._resident:
+                    self._last_failure = dict(attempt, code=error)
+                    self._publish("stopped", attempt=attempt)
+                    return True
+            else:
+                error = "title_retire_failed" if not self._starting else "readiness_failed"
         finally:
             self._starting = False
             if not task.done():
@@ -487,17 +493,29 @@ class TitleSession:
                 raise asyncio.CancelledError
         status = _read_plan_status(plan)
         current = _is_attempt(status, baseline, started_wall, claim.action, producer_pid())
-        cleanup_proven = current and status.get("active") is False and status["generation"] == child_generation
+        cleanup_proven = (current and status.get("active") is False and status["generation"] == child_generation
+                          and status.get("state") in {"failed", "stopped"} and status.get("cleanup_failed") is not True)
         unsafe = (current and status.get("active") is True) or (child_generation is not None and not cleanup_proven)
         if self._resident and cleanup_proven:
             try:
-                await self._bridge.wait_for(self._solo_title, timeout=_TITLE_RETURN_WAIT)
+                # Save-scope release can finish before the title bridge sees the new stock menu.
+                await self._bridge.wait_for(
+                    lambda snapshot: self._solo_title(snapshot) and snapshot["sequence"] > original_title[0],
+                    timeout=_TITLE_RETURN_WAIT,
+                )
             except (OSError, RuntimeError, ValueError):
                 unsafe = True
-        if self._resident and cleanup_proven and not unsafe and status.get("stop_reason") == "creator_cancelled":
-            self._last_failure = None
-            self._publish("stopped", attempt=attempt)
-            return False
+            if not unsafe:
+                reason = status.get("stop_reason")
+                if reason == "creator_cancelled" or (
+                        retired and error is None and status["state"] == "stopped"
+                        and reason not in {"host_returned_to_title", "native_checkpoint_unsafe"}):
+                    self._last_failure = None
+                    self._publish("stopped", attempt=attempt)
+                    return False
+                if retired:
+                    self._recovery = claim.action
+                    error = "session_failed"
         self._last_failure = dict(attempt, code="cleanup_unverified" if unsafe else error)
         self._publish("cleanup_unverified" if unsafe else "failed", attempt=attempt)
         return unsafe

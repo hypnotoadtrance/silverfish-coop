@@ -788,6 +788,32 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(protocol._stats.relay_queue_expired_frames, 0)
             self.assertEqual(protocol._stats.relay_queue_evicted_frames, 0)
 
+    async def test_small_snapshot_responses_leave_queued_game_packets_eligible(self):
+        self.assertTrue((await self.connect_guest())["accepted"])
+        await self.exchange(64)
+        host_protocol = self.host._protocols[self.request["guest_id"]]
+        packets = [b"Unreal movement " + bytes([index]) for index in range(4)]
+
+        for world, compressed in (("short", False), ("repeated world snapshot state " * 150, True)):
+            with self.subTest(compressed=compressed):
+                result = {"ok": True, "gameplay": {"world": world}}
+                wire = link._encode_response(result, snapshot=True)
+                self.assertLessEqual(len(wire), link._FRAGMENT_SIZE)
+                self.assertEqual(wire.startswith(link._COMPRESSED_SNAPSHOT), compressed)
+
+                async def reply(_, request):
+                    self.assertEqual(request, {"action": "snapshot"})
+                    for packet in packets:
+                        host_protocol.forward_game_packet(packet)
+                    return result
+
+                self.application_handler = reply
+                before = self.host.statistics()["interaction_priority_passes"]
+                self.assertEqual(await self.client.request({"action": "snapshot"}), result)
+                self.assertCountEqual([(await self.client_inbox.next())[0] for _ in packets], packets)
+                self.assertEqual(self.host.statistics()["interaction_priority_passes"], before)
+                self.assertFalse(host_protocol._quic._datagrams_pending)
+
     async def test_flow_blocked_interaction_leaves_relay_datagrams_eligible(self):
         self.assertTrue((await self.connect_guest())["accepted"])
         protocol = self.client._protocol

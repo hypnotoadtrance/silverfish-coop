@@ -155,12 +155,13 @@ class TitleHandoff:
         _unlink(self.descriptor_path)
 
     def refresh(self, snapshot: dict | None, bindings: Mapping[str, object], *,
-                host_defaults: HostDefaults | None = None) -> bool:
+                host_defaults: HostDefaults | None = None, recovery: str | None = None) -> bool:
         """Publish or renew usable actions on the current exact stock title screen."""
         choices = dict(bindings)
         if (any(type(action) is not str or action not in ACTIONS or binding is None
                 for action, binding in choices.items()) or
-                (host_defaults is not None and type(host_defaults) is not HostDefaults)):
+                (host_defaults is not None and type(host_defaults) is not HostDefaults)
+                or (recovery is not None and recovery not in ACTIONS)):
             self.close()
             raise ValueError("Unsupported title handoff binding")
         if self._claim is not None or not choices:
@@ -191,6 +192,8 @@ class TitleHandoff:
         else:
             row = (f"2\t{generation}\t{advertised}\t{expires}"
                    f"\t{defaults.campaign}\t{defaults.bind}\t{defaults.port}\n").encode("ascii")
+        if recovery in choices:
+            row = row[:-1] + f"\trecover-{recovery}\n".encode("ascii")
         with NamedTemporaryFile(dir=self.descriptor_path.parent, prefix=".title-handoff-", delete=False) as stream:
             temporary = Path(stream.name)
             try:

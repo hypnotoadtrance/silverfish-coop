@@ -56,6 +56,69 @@ class EmptyZoneRetryTests(IsolatedAsyncioTestCase):
             local_datagrams=1, sent=0, received=0,
         )
 
+    async def test_same_visit_title_ejection_retries_one_empty_join_on_a_fresh_endpoint(self):
+        client = self.client
+        scope = "c" * 32
+        ejected = dict(self.ready, state="disconnected", mode="client", save_scope=scope)
+        self.joining["save_scope"], self.ready["save_scope"] = scope, scope
+        client.invite = {"character_id": "cccccccc-cccc-cccc-cccc-cccccccccccc", "native_zones": True}
+        client.game_visit = (client.host_session, client.zone_epoch, CITY)
+        client.allowed_maps = {CITY}
+        client.needs_travel = False
+        client.empty_zone_retry = self.retry
+        client.bridge.snapshot.return_value = ejected
+        self.retry.clear()
+
+        async def leave(frame):
+            self.assertIn(frame, (ejected, self.joining))
+            client.last_game = self.ready
+
+        async def join(*, timeout=18, renew_endpoint):
+            if renew_endpoint:
+                client.last_game = {"map": CITY, "state": "connected"}
+                client.needs_travel = False
+                return
+            client.needs_travel = True
+            client.bridge.snapshot.return_value = self.joining
+            raise TimeoutError
+
+        client.leave_for_rejoin.side_effect = leave
+        client.open_game_link.side_effect = join
+        await Client.reconcile_game(client)
+
+        self.assertEqual(client.last_game["map"], CITY)
+        self.assertFalse(client.needs_travel)
+        self.assertEqual(client.open_game_link.await_count, 2)
+        client.open_game_link.assert_awaited_with(renew_endpoint=True)
+        client.control.event.assert_called_once_with(
+            "native_guest_title_empty_join_retry", zone_epoch="city-epoch", map=CITY,
+            local_datagrams=0, sent=0, received=0,
+        )
+        self.assertFalse(await self.retry.after_timeout(client, client.zone_epoch))
+
+    async def test_same_visit_recovery_refuses_a_changed_private_title_scope(self):
+        client = self.client
+        scope = "c" * 32
+        client.invite = {"character_id": "cccccccc-cccc-cccc-cccc-cccccccccccc", "native_zones": True}
+        client.game_visit = (client.host_session, client.zone_epoch, CITY)
+        client.allowed_maps = {CITY}
+        client.needs_travel = False
+        self.retry.clear()
+
+        ejected = dict(self.ready, state="disconnected", mode="client", save_scope="d" * 32)
+        self.retry.note_title_ejection(client, ejected)
+        client.needs_travel = True
+        self.joining["save_scope"] = scope
+        self.assertFalse(await self.retry.after_timeout(client, client.zone_epoch))
+
+        client.needs_travel = False
+        self.retry.note_title_ejection(client, dict(ejected, save_scope=scope))
+        client.needs_travel = True
+        self.joining["save_scope"] = "d" * 32
+        self.assertFalse(await self.retry.after_timeout(client, client.zone_epoch))
+        client.refresh_gameplay.assert_not_awaited()
+        client.open_game_link.assert_not_awaited()
+
     async def test_timeout_without_exact_empty_title_does_not_rotate(self):
         client = self.client
         self.assertFalse(await self.retry.after_timeout(client, "initial-or-old-epoch"))

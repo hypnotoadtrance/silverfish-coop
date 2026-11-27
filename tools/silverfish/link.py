@@ -483,6 +483,7 @@ class _IncomingAction:
     body: bytearray = field(default_factory=bytearray)
     deadline: asyncio.TimerHandle | None = None
     abandoned: bool = False
+    snapshot: bool = False
 
 
 @dataclass
@@ -921,7 +922,7 @@ class _HostProtocol(_LinkProtocol):
                 return
             response = await self.host._run_action(self, action)
             if response is not None and self.authorized and not self.terminated and not action.abandoned:
-                self._send_action_stream(stream_id, response)
+                self._send_action_stream(stream_id, response, priority=not action.snapshot)
         finally:
             self._actions.pop(stream_id, None)
 
@@ -1210,6 +1211,7 @@ class HostLink:
             payload = _decode_action(bytes(action.body))
         except LinkError:
             return _encode_action({"error": "invalid"})
+        action.snapshot = payload.get("action") == "snapshot"
         try:
             async with asyncio.timeout(checkpoint_action_timeout(payload) or _ACTION_TIMEOUT):
                 result = self._request_callback(guest_id, payload)
@@ -1219,7 +1221,7 @@ class HostLink:
                     return None
                 if not isinstance(result, dict):
                     raise LinkError("invalid application callback response")
-                return _encode_response(result, snapshot=payload.get("action") == "snapshot", stats=self._stats)
+                return _encode_response(result, snapshot=action.snapshot, stats=self._stats)
         except TimeoutError:
             return _encode_action({"error": "timed_out"})
         except Exception:

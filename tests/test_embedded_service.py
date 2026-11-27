@@ -391,7 +391,8 @@ class EmbeddedServiceTests(unittest.IsolatedAsyncioTestCase):
         async def close():
             self.events.append(("transport-closed", port))
 
-        return SimpleNamespace(address=("127.0.0.1", port), close=AsyncMock(side_effect=close))
+        return SimpleNamespace(address=("127.0.0.1", port), close=AsyncMock(side_effect=close),
+                               announce_session_end=AsyncMock(return_value=1))
 
     @unittest.skipUnless(os.name == "nt", "Uses a Windows directory junction")
     def test_embedded_runtime_checks_nested_save_paths_before_starting_process(self):
@@ -554,6 +555,34 @@ class EmbeddedServiceTests(unittest.IsolatedAsyncioTestCase):
         self.launch.assert_not_called()
         self.kill.assert_not_called()
 
+    async def test_active_host_title_ejection_preserves_campaign_and_releases_scope(self):
+        self.simulate_boot(self.campaign, host=True)
+        transport = self.transport(self.quic_port)
+
+        async def ejection(controller, bridge, *_args, **_kwargs):
+            controller.store.issue_guest("Recovery test")
+            controller.transitioning = True
+            loading = dict(bridge.snapshot(), state="opening")
+            controller.observe_host_frame(loading)
+            self.assertFalse(controller.stopping)
+            bridge.state = "ready"
+            controller.observe_host_frame(bridge.snapshot())
+
+        with (patch.object(service, "verify_loopback_socket"),
+              patch.object(service.link, "start_host", return_value=transport),
+              patch.object(service.Host, "run", autospec=True, side_effect=ejection),
+              patch.object(service.Host, "checkpoint_native", new_callable=AsyncMock) as checkpoint):
+            with self.assertRaisesRegex(RuntimeError, "active co-op host returned to the title"):
+                await self.host()
+        checkpoint.assert_not_awaited()
+        status = runtime.read_json(self.campaign / "run" / "status.json")
+        self.assertEqual((status["state"], status["stop_reason"]), ("failed", "host_returned_to_title"))
+        self.assertIs(status["cleanup_failed"], False)
+        transport.announce_session_end.assert_awaited_once_with(status["generation"], status["campaign"]["revision"])
+        self.assertIsNone(self.bridge.save_scope)
+        self.assertEqual(self.events[-2][0], "leave")
+        self.assertEqual(self.events[-1][0], "native-save-scope-release")
+
     async def test_host_does_not_report_clean_stop_when_udp_closure_cannot_be_read(self):
         self.simulate_boot(self.campaign, host=True)
         transport = self.transport(self.quic_port)
@@ -568,5 +597,6 @@ class EmbeddedServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.events[-1][0], "native-save-scope-release")
         status = runtime.read_json(self.campaign / "run" / "status.json")
         self.assertEqual((status["state"], status["active"]), ("failed", False))
+        self.assertIs(status["cleanup_failed"], True)
         self.observe_udp.assert_called_once_with(os.getpid(), self.raw_port)
         self.kill.assert_not_called()

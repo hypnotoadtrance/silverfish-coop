@@ -399,9 +399,7 @@ class MultiHost(Host):
 
     async def observe(self, bridge, transport) -> None:
         self.relay = transport
-        snapshot = bridge.snapshot()
-        if snapshot is not None and snapshot.get("sequence") != self.last_game.get("sequence"):
-            self.last_game, self.last_seen = snapshot, time.monotonic()
+        self.observe_host_frame(bridge.snapshot())
         party.add_player(self.party, "host")
         result = self.members.observe(self.last_game)
         if await self.recover_joining_pawn(bridge, transport, result):

@@ -345,6 +345,58 @@ class TitleSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.status()["state"], "offered")
         self.assertIsNone(self.status()["last_failure"])
 
+    async def test_failed_ready_host_reoffers_campaign_only_when_cleanup_is_verified(self):
+        saved = self.directory.resolve() / "game-user" / "Saved"
+        saved.mkdir(parents=True)
+        for cleanup_failed in (False, True):
+            with self.subTest(cleanup_failed=cleanup_failed):
+                child = Child("host")
+                lease = "campaign"
+
+                async def start():
+                    nonlocal lease
+                    child.publish("starting")
+                    child.started.set()
+                    await child.finish.wait()
+                    lease = None
+                    child.publish("failed", stop_reason="host_returned_to_title", cleanup_failed=cleanup_failed)
+                    raise RuntimeError("The active co-op host returned to the title")
+
+                def snapshot():
+                    data = TitleBridge.snapshot(self.bridge)
+                    if child.state and child.state.get("game"):
+                        data.update(child.state["game"])
+                        data["save_scope"] = lease
+                        return data
+                    data["save_scope"] = lease if child.state else None
+                    data[native_title_entry.PANEL_KEY] = dict(state="ready", mounted=True, actions=["host"])
+                    data[native_title_entry.STARTUP_KEY] = dict(
+                        map=data["map"], sequence=data["sequence"], saved_directory=str(saved))
+                    return data
+
+                self.bridge.snapshot = snapshot
+                plan = SessionPlan(start, lambda: child.state, lambda status: True)
+                session = TitleSession(self.bridge, {"host": plan}, resident=True,
+                                       on_title_ready=Mock(), title_saved_directory=saved, poll_interval=.005)
+                task = asyncio.create_task(session.run())
+                self.addAsyncCleanup(self.stop, task)
+                offer = await self.wait(self.generation)
+                self.request("host", offer)
+                await child.started.wait()
+                child.ready()
+                await self.wait(lambda: self.status().get("state") == "ready")
+                child.finish.set()
+                if cleanup_failed:
+                    await asyncio.wait_for(task, 1)
+                    self.assertFalse(self.descriptor_path.exists())
+                    self.assertEqual(self.status()["last_failure"]["code"], "cleanup_unverified")
+                else:
+                    await self.wait(lambda: self.generation() and self.generation() != offer)
+                    self.assertFalse(task.done())
+                    self.assertIn("\trecover-host\n", self.descriptor_path.read_text(encoding="ascii"))
+                    self.assertEqual(self.status()["last_failure"]["code"], "session_failed")
+                    await self.stop(task)
+
     async def test_resident_host_uses_its_live_bridge_while_the_title_file_stays_stale(self):
         saved = self.directory.resolve() / "game-user" / "Saved"
         saved.mkdir(parents=True)
