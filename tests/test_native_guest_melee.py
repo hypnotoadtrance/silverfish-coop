@@ -1,3 +1,4 @@
+import asyncio
 import time
 import unittest
 import uuid
@@ -5,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import native_authored_pickup as pickup, native_guest_melee as melee, party
-from tools.silverfish.local_bridge import LocalCommandNotSubmitted
+from tools.silverfish.local_bridge import LocalBridge
 from tools.silverfish.runtime import Bridge
 from tools.silverfish.service import Client
 from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, OBSERVATORY, REFINERY
@@ -324,19 +325,30 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
         handler = melee.AuthorityInput(host)
         press = dict(map=CROSSROADS, pawn=pawn, guid=GUID, serial=3, status="pending", presses=1, releases=0,
                      contacts=0, hits=0, charged=0, combo=0)
-        bridge = SimpleNamespace(command=AsyncMock(side_effect=[LocalCommandNotSubmitted("queue busy"),
-                                                                 dict(host.last_game, **{melee.INPUT_KEY: press})]))
+        memory = LocalBridge.__new__(LocalBridge)
+        memory._lock = asyncio.Lock()
+        memory._submit = Mock(return_value=37)
+        memory._wait = Mock(return_value=-2)
+        memory._cancel = Mock()
+
+        async def expire_unclaimed(*_fields, timeout):
+            await memory.command(b"test press", timeout)
+
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=expire_unclaimed))
         target = f"epoch@{GUID}@{'1' * 32}@press"
         with patch.object(melee.native_inventory, "retain_guest_save", new=AsyncMock(return_value=True)):
-            with self.assertRaisesRegex(party.RuleError, "queue busy"):
+            with self.assertRaisesRegex(party.RuleError, "did not claim.*before it expired"):
                 await handler.request(bridge, "guest", target, OPERATION)
             self.assertIsNone(handler.scope)
             self.assertFalse(handler.receipts)
             self.assertFalse(host.native_checkpoint_unsafe)
             self.assertFalse(host.stopping)
+            bridge.command.side_effect = None
+            bridge.command.return_value = dict(host.last_game, **{melee.INPUT_KEY: press})
             self.assertEqual((await handler.request(bridge, "guest", target, OPERATION))[melee.INPUT_KEY], press)
 
         self.assertEqual(bridge.command.await_count, 2)
+        memory._cancel.assert_called_once_with(37)
         host.checkpoint_native.assert_not_awaited()
 
     async def test_exact_stroke_remains_bound_across_stock_combo_edges_without_checkpoint(self):

@@ -26,7 +26,7 @@ def spatial_cue_matches(game: dict, receipt: dict) -> bool:
 
 
 class LocalCommandNotSubmitted(RuntimeError):
-    """The command was refused before receiving a native ticket."""
+    """The command was refused or cancelled before the game claimed it."""
 
 
 class LocalBridge:
@@ -216,6 +216,8 @@ class LocalBridge:
             try:
                 delay = max(1, min(120000, int(timeout * 1000)))
                 size = await asyncio.to_thread(self._wait, ticket, delay)
+                if size == -2:
+                    raise LocalCommandNotSubmitted("The game did not claim the local co-op command before it expired")
                 if size == 0:
                     raise TimeoutError("The game did not acknowledge the local co-op command")
                 if size < 0:

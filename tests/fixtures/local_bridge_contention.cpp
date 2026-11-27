@@ -186,12 +186,26 @@ int main()
                 measured_count, lua_bytes, native_bytes);
     luaL_unref(stack, LUA_REGISTRYINDEX, rows);
 
+    const auto queued = SilverfishBridgeSubmitV1("queued", 6);
+    assert(queued > 0 && SilverfishBridgeWaitV1(queued, 0) == -2);
+    assert(take(lua) == 1);
+    lua_settop(stack, 0);
+
+    const auto taken = SilverfishBridgeSubmitV1("taken", 5);
+    assert(taken > queued && take(lua) == 3);
+    lua_settop(stack, 0);
+    assert(SilverfishBridgeWaitV1(taken, 0) == -2);
+    lua.set_integer(taken);
+    assert(claim_command(lua) == 1 && !lua_toboolean(stack, 1));
+    lua_settop(stack, 0);
+
     const auto ticket = SilverfishBridgeSubmitV1("test", 4);
     assert(ticket > 0 && take(lua) == 3);
     lua_settop(stack, 0);
     lua.set_integer(ticket);
     assert(claim_command(lua) == 1 && lua_toboolean(stack, 1));
     lua_settop(stack, 0);
+    assert(SilverfishBridgeWaitV1(ticket, 0) == 0);
     lua.set_integer(ticket);
     lua.set_string(std::string(packet_size, 'R'));
     assert(publish(lua) == 0);

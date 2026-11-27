@@ -829,6 +829,13 @@ extern "C" __declspec(dllexport) std::int32_t SilverfishBridgeWaitV1(std::int64_
         return ticket != active_ticket || state == State::replied || state == State::too_large;
     });
     if (ticket != active_ticket || state == State::too_large) return -1;
+    if (state == State::queued || state == State::taken)
+    {
+        // Retire the ticket while holding the same lock as claim_command.
+        // A command cancelled here could not have reached a stock mutation.
+        clear();
+        return -2;
+    }
     return state == State::replied ? static_cast<std::int32_t>(reply->size()) : 0;
 }
 
