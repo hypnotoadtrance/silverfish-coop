@@ -38,7 +38,7 @@ Host container pickups take effect immediately. The live campaign writes a check
 
 Open **Multiplayer → Host Game → Manage Saves** on the host PC. Select a campaign to open its details.
 
-- **Manage Characters** lists the guest characters for that campaign. Confirm **Delete Character** to erase the selected guest's progress and remove that character from their Join list.
+- **Manage Characters** lists the guest characters for that campaign. Confirm **Delete Character** to erase the selected guest's progress and remove that character from their Join list. Manage Characters refreshes and stays open.
 - Steam character rows show the recorded creator’s Steam name and profile picture when Steam can supply the image. A returning guest’s existing characters gain that attribution after a successful Steam connection and the next campaign save. Character names already stored in the campaign keep their saved values.
 - Confirm **Delete Save** to erase the campaign and its characters. The host character belongs to the campaign and is deleted with it.
 - Both confirmations start on **Cancel**. Confirmed deletions are permanent. The mod keeps a deletion record to prevent older Steam Cloud backups from bringing the data back. Singleplayer slots are stored separately.
