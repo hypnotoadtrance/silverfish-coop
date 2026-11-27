@@ -612,7 +612,9 @@ local function poll_steam_invite(context)
         show_stock(session, false)
         local note = host_version == "-" and "The host's mod version is unknown. Use the same release on both PCs."
             or "Incompatible builds. Host " .. host_version .. ". Yours " .. local_version .. ". Use the same release."
-        multiplayer(session.offer, "steam-public", note)
+        if not browser_offer or not start_public_browser(browser.selection, note) then
+            multiplayer(session.offer, "steam-public", note)
+        end
         return
     end
     if #port > 5 or tonumber(port) > 65535 then return end
@@ -632,13 +634,13 @@ local function show_public_lobbies(browser, preserve_back_focus)
     if browser.state == "joining" then
         note = "Connecting through Steam…"
     elseif browser.state == "returning" then
-        note = "Leaving the Steam lobby…"
+        note = note and note .. " Refreshing…" or "Leaving the Steam lobby…"
     elseif browser.state == "searching" then
-        note = "Looking for public lobbies…"
+        note = note and note .. " Refreshing…" or "Looking for public lobbies…"
     elseif browser.state == "unavailable" then
         note = "Steam lobbies are unavailable. Try again."
     elseif #browser.lobbies == 0 then
-        note = "No public lobbies found."
+        note = note and note .. " No public lobbies found." or "No public lobbies found."
     else
         local first = browser.first
         for index = first, math.min(first + 3, #browser.lobbies) do
@@ -678,14 +680,14 @@ local function browser_request(browser, action)
     return false
 end
 
-start_public_browser = function(selection)
+start_public_browser = function(selection, note)
     local token = request_id()
     if not token then return end
     local now = os.time()
     local browser = {generation = session.offer.generation, token = token, first = 1,
         state = selection and "returning" or "searching", lobbies = {},
         expires = now + (selection and steam_join_timeout or steam_search_timeout),
-        previous_selection = selection, release_until = now + 3}
+        previous_selection = selection, release_until = now + 3, note = note}
     session.browser = browser
     if not selection then browser.search_sent = browser_request(browser, "search") end
     show_public_lobbies(browser)
@@ -706,14 +708,15 @@ local function browser_action(action)
         local lobby = selected and session.view.buttons[action] and browser.lobbies[tonumber(selected)]
         if lobby then
             if lobby.compatible then
-                browser.note = nil
-                browser.state = browser_request(browser, selected) and "joining" or "unavailable"
-                browser.expires = os.time() + steam_join_timeout
-                if browser.state == "joining" then
+                if browser_request(browser, selected) then
+                    browser.state, browser.note, browser.expires = "joining", nil, os.time() + steam_join_timeout
                     browser.selection = {first = browser.first, index = tonumber(selected), name = lobby.name, version = lobby.version}
+                else
+                    browser.note, browser.focus = "Steam is finishing the previous request. Try again.", action
                 end
             else
                 browser.note = "Install the same mod release as the host to join."
+                browser.focus = action
             end
         elseif action == "steam-prev" or action == "steam-next" then
             local first = browser.first + (action == "steam-prev" and -4 or 4)
@@ -723,6 +726,20 @@ local function browser_action(action)
     if browser then show_public_lobbies(browser) end
 end
 
+local function recover_browser_join(browser, note)
+    if start_public_browser(browser.selection, note) then return end
+    browser.state, browser.selection = "unavailable", nil
+    show_public_lobbies(browser)
+end
+
+local function lobby_leave_pending(path)
+    if steam_cancel_retries[path] then return true end
+    local cancel = io.open(path, "rb")
+    if not cancel then return false end
+    cancel:close()
+    return true
+end
+
 local function poll_public_lobbies(browser)
     if browser.state ~= "searching" and browser.state ~= "joining" and browser.state ~= "returning" then return end
     local was_searching = browser.state == "searching"
@@ -730,7 +747,8 @@ local function poll_public_lobbies(browser)
     if now > browser.expires then
         if browser.state == "joining" then
             cancel_steam_form(browser.token, steam_browser_cancel_path)
-            browser.selection = nil
+            recover_browser_join(browser, "Steam did not finish joining the lobby.")
+            return
         end
         browser.state = "unavailable"
         show_public_lobbies(browser, was_searching)
@@ -741,14 +759,8 @@ local function poll_public_lobbies(browser)
     if browser.state == "returning" then
         -- Steam will reject a new search until the previous lobby route closes.
         -- If the route already closed, the cancel request may never be read.
-        if now <= browser.release_until then
-            if steam_cancel_retries[steam_cancel_path] then return end
-            local cancel = io.open(steam_cancel_path, "rb")
-            if cancel then
-                cancel:close()
-                return
-            end
-        end
+        if now <= browser.release_until
+            and (lobby_leave_pending(steam_cancel_path) or lobby_leave_pending(steam_browser_cancel_path)) then return end
         browser.state = "searching"
         browser.search_sent = browser_request(browser, "search")
         browser.expires = now + steam_search_timeout
@@ -767,10 +779,14 @@ local function poll_public_lobbies(browser)
     if not data or #data > 2200 or data:sub(-1) ~= "\n" then return end
     local generation, token, result, count, start = data:match("^2\t([0-9a-f]+)\t([0-9a-f]+)\t([a-z]+)\t([0-9][0-9]?)\n()")
     if generation ~= browser.generation or token ~= browser.token or not count or tonumber(count) > 12 then return end
-    if result == "unavailable" then
+    if browser.state == "joining" and (result == "expired" or result == "unavailable") then
+        recover_browser_join(browser, result == "expired" and "The lobby list expired." or "Could not join that lobby.")
+        return
+    elseif result == "unavailable" then
         browser.state = "unavailable"
     elseif result == "incompatible" and browser.state == "joining" then
         browser.state, browser.note = "ready", "Install the same mod release as the host to join."
+        browser.focus, browser.selection = "steam-pick:" .. browser.selection.index, nil
     elseif result == "ready" and browser.state == "searching" then
         local lobbies = {}
         for row in data:sub(start):gmatch("([^\n]*)\n") do

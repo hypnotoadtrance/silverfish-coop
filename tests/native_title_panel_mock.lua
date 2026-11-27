@@ -958,3 +958,53 @@ assert(not display and not files[join_request] and not files[steam_opened],
 assert(files[browse_cancel] == ("1\t%s\tcancel\n"):format(late_lobby))
 sync()
 assert(display.title == "Project Silverfish" and report()[3] == "ready")
+
+click("multiplayer")
+local live_generation = generation("3")
+local expired_lobby = pick_retiring_lobby(live_generation)
+files[browse_response] = ("2\t%s\t%s\texpired\t0\n"):format(live_generation, expired_lobby)
+next_guid, now = next_guid + 1, now + 1
+tick()
+assert(display.title == "Public Steam Lobbies" and display.note == "The lobby list expired. Refreshing…")
+assert(display.focus == "steam-back" and not files[join_request])
+local renewed = operation_id()
+assert(renewed ~= expired_lobby)
+
+-- A late offer from the old attempt cannot reopen a Join form.
+now = now + 1
+files[steam_join] = ("1\t%s\t28951\t%d\tbrowser\n"):format(expired_lobby, now + 20)
+tick()
+assert(not files[join_request] and not files[browse_request])
+assert(files[browse_cancel] == ("1\t%s\tcancel\n"):format(expired_lobby))
+files[browse_cancel], files[steam_join] = nil, nil
+now = now + 1
+tick()
+assert(files[browse_request] == ("1\t%s\t%s\tsearch\n"):format(live_generation, renewed))
+files[browse_request] = nil
+files[browse_response] = ("2\t%s\t%s\tready\t1\nFresh Host\trc-abcdef0\t1\n"):format(live_generation, renewed)
+now = now + 1
+offer("host,join", now + 8, live_generation, defaults)
+tick()
+assert(display.buttons["steam-pick:1"].label == "Fresh Host")
+click("steam-pick:1")
+files[browse_request] = nil
+files[browse_response] = ("2\t%s\t%s\tunavailable\t0\n"):format(live_generation, renewed)
+next_guid, now = next_guid + 1, now + 1
+tick()
+assert(display.title == "Public Steam Lobbies" and display.note == "Could not join that lobby. Refreshing…")
+click("steam-back")
+assert(display.title == "Multiplayer" and display.focus == "steam-public")
+
+local silent_lobby = pick_retiring_lobby(live_generation)
+next_guid, now = next_guid + 1, now + 16
+offer("host,join", now + 8, live_generation, defaults)
+tick()
+assert(display.note == "Steam did not finish joining the lobby. Refreshing…")
+assert(files[browse_cancel] == ("1\t%s\tcancel\n"):format(silent_lobby))
+now = now + 1
+tick()
+assert(not files[browse_request], "Wait for cancellation before refreshing after a join times out")
+files[browse_cancel] = nil
+now = now + 1
+tick()
+assert(files[browse_request] == ("1\t%s\t%s\tsearch\n"):format(live_generation, operation_id()))

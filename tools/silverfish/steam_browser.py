@@ -13,6 +13,7 @@ REQUEST = "steam-coop-browser-request.tsv"
 RESPONSE = "steam-coop-browser-response.tsv"
 _REQUEST = re.compile(rb"1\t([0-9a-f]{32})\t([0-9a-f]{32})\t(search|[1-9][0-9]?)\n")
 _TITLE = re.compile(rb"[12]\t([0-9a-f]{32})\t(?:join|host,join)\t([0-9]{1,10})(?:\t[^\r\n]+)?\r?\n")
+_LIST_LIFETIME = 60.0
 
 
 def _qualified(bridge: Path, generation: bytes) -> bool:
@@ -64,7 +65,9 @@ async def serve(bridge, transport, open_lobby, pump):
                 elif search is None and (lookup is None or lookup[:2] == (generation, token)):
                     index = int(action) - 1
                     result = "unavailable"
-                    if (lookup is not None and time.monotonic() < lookup[2] and index < len(lookup[3])):
+                    if lookup is None or time.monotonic() >= lookup[2]:
+                        result = "expired"
+                    elif index < len(lookup[3]):
                         selected = lookup[3][index]
                         if not selected.compatible:
                             result = "incompatible"
@@ -84,7 +87,7 @@ async def serve(bridge, transport, open_lobby, pump):
                     if rows is None:
                         _publish(bridge, generation, token, "unavailable")
                     else:
-                        lookup = generation, token, time.monotonic() + 60, rows
+                        lookup = generation, token, time.monotonic() + _LIST_LIFETIME, rows
                         _publish(bridge, generation, token, "ready", rows)
             await asyncio.sleep(.15)
     finally:

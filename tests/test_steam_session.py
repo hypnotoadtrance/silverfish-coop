@@ -444,13 +444,25 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(int(expiry), time.time())
         self.assertIsNone(guest.transport.lobby)
 
+        mismatch_notice = offer.read_bytes()
         self.platform.metadata[_BUILD_KEY] = f"{VERSION}:{BUILD}"
+        discovery_time = [time.monotonic()]
+        with patch.object(steam_browser, "time", SimpleNamespace(time=time.time, monotonic=lambda: discovery_time[0])):
+            await exchange("search", f"ready\t1\nFixture Host\t{VERSION}\t1\n")
+            discovery_time[0] += steam_browser._LIST_LIFETIME
+            with patch.object(guest_api, "join_lobby", wraps=guest_api.join_lobby) as join:
+                await exchange("1", "expired\t0\n")
+                join.assert_not_called()
+            self.assertEqual(offer.read_bytes(), mismatch_notice)
+
+        fresh = "d" * 32
+        prefix, response = f"1\t{generation}\t{fresh}\t", f"2\t{generation}\t{fresh}\t"
         await exchange("search", f"ready\t1\nFixture Host\t{VERSION}\t1\n")
         await exchange("1", "joined\t0\n")
         await self.ready(offer.exists)
         self.assertEqual(guest_api.lobby_owner(LOBBY), HOST)
         _, nonce, port, _, source = offer.read_text().split()
-        self.assertEqual((nonce, source), (token, "browser"))
+        self.assertEqual((nonce, source), (fresh, "browser"))
         self.assertEqual(guest.fingerprint_for("127.0.0.1", int(port)), fingerprint)
 
         cancel = bridge / steam_session.BROWSER_CANCEL
@@ -458,7 +470,7 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         await self.ready(lambda: not cancel.exists())
         self.assertEqual(guest.transport.lobby, LOBBY)
         self.assertTrue(offer.exists())
-        runtime.write_text(cancel, f"1\t{token}\tcancel\n", newline="\n")
+        runtime.write_text(cancel, f"1\t{fresh}\tcancel\n", newline="\n")
         await self.ready(lambda: guest.transport.lobby is None)
         self.assertFalse(offer.exists())
         self.assertEqual(host.transport.lobby, LOBBY)
