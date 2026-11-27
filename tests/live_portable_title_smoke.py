@@ -7464,9 +7464,10 @@ async def verify_stock_inventory_fall(host: Seat, guest: Seat, pawn: str) -> dic
             await asyncio.sleep(.04)
 
     async def drop_from_guest(item):
-        stocked = await submit(guest_run, "native-inventory-view-fixture", target="stock")
+        stocked = await submit(guest_run, "native-inventory-view-fixture")
         assert stocked["ok"], stocked
-        frame = await wait_resident_status(guest_run, lambda row: row.get("gameplay_fresh"))
+        frame = await wait_resident_status(guest_run, lambda row:
+            row.get("gameplay_fresh") and row.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
         pressed = await submit(guest_run, "native-inventory-stock-use-click-fixture", target=item["guid"] + "|drop")
         assert pressed["ok"] and pressed["stock_action"]["layout_preview"] == "dropped", pressed
         while True:
