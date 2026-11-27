@@ -161,10 +161,18 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
                              and f["game"].get("native_zone", {}).get("state") == "ready")
         fixture_timeout = None
         for participant, position in ((pawn, "near"), ("local", "near"), ("local", "inside")):
-            try:
-                await host.bridge.command("native-exit-position", participant, position, tag, route.actor)
-            except TimeoutError as error:
-                fixture_timeout = error
+            for attempt in range(2):
+                try:
+                    await host.bridge.command("native-exit-position", participant, position, tag, route.actor)
+                    break
+                except TimeoutError as error:
+                    current = await current_status(host_run)
+                    if (attempt or position == "inside" or current["zone_epoch"] != before["zone_epoch"]
+                            or current["game"]["map"] != source
+                            or current["game"].get("native_zone", {}).get("state") != "ready"):
+                        fixture_timeout = error
+                        break
+            if fixture_timeout:
                 break
         arrived = await state(host, lambda f: f["game"]["map"] == destination
                               and f["zone_epoch"] != before["zone_epoch"] and not f.get("awaiting_zone_guest")
@@ -279,23 +287,24 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
         while await command(guest, "selectpistol") != "equipped":
             await asyncio.sleep(.14)
     before_travel = await confirm_weapon(7)
+    flood_out = await cross(CROSSROADS, FLOOD.objective_map, "CR_RF")
+    flood = await observe_jammer(FLOOD)
+    await confirm_weapon(7)
+    magazine, flood_completion = await destroy_jammer(FLOOD, 7)
+    flood_return = await cross(FLOOD.objective_map, CROSSROADS, "CR_RF")
+    await confirm_weapon(magazine)
     lake_out = await cross(CROSSROADS, LAKE, "Lake_Cave")
     lake = await observe_jammer(BLACK_LAKE)
     # The guest never presses a quick slot again. The restored weapon must be
     # selected in the host's detached pawn and available to the stock input.
-    restored = await confirm_weapon(7)
+    restored = await confirm_weapon(magazine)
     assert restored["pawn"] != before_travel["pawn"], restored
-    magazine, lake_completion = await destroy_jammer(BLACK_LAKE, 7)
-    await journal("1,2", 1)
+    magazine, lake_completion = await destroy_jammer(BLACK_LAKE, magazine)
+    await journal("1,2", 2)
     lake_return = await cross(LAKE, CROSSROADS, "Lake_Cave")
     await observe_jammer(CROSSROADS_JAMMER)
     await confirm_weapon(magazine)
     magazine, crossroads_completion = await destroy_jammer(CROSSROADS_JAMMER, magazine)
-    flood_out = await cross(CROSSROADS, FLOOD.objective_map, "CR_RF")
-    flood = await observe_jammer(FLOOD)
-    await confirm_weapon(magazine)
-    magazine, flood_completion = await destroy_jammer(FLOOD, magazine)
-    flood_return = await cross(FLOOD.objective_map, CROSSROADS, "CR_RF")
     final_visit = await cross(CROSSROADS, OBSERVATORY, "Obsv_Etr")
     await confirm_weapon(magazine)
     completed_journal = await journal("2,2", 2)
@@ -329,7 +338,7 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
     return {"stock_simmi_jammers": {
         "offered": sorted(offers), "remaining": sorted(remaining), "initial_journals": accepted_journal,
         "crossroads": crossroads, "lake": lake, "flood_plains": flood,
-        "visits": [outbound, lake_out, lake_return, flood_out, flood_return, final_visit],
+        "visits": [outbound, flood_out, flood_return, lake_out, lake_return, final_visit],
         "visits_verified_after_fixture_timeout": travel_receipts,
         "weapon_before_travel": before_travel, "weapon_after_travel": restored,
         "objective_journals": completed_journal, "paid_journals": final_journal,
