@@ -38,12 +38,7 @@ local function number(value, minimum, maximum)
     return type(value) == "number" and value >= minimum and value <= maximum
 end
 
-local function sample_pose(component, previous, next_id)
-    local frame = component:K2_GetComponentToWorld()
-    local p, s, r = frame.Translation, frame.Scale3D, component:K2_GetComponentRotation()
-    local x, y, z = p.X, p.Y, p.Z
-    local pitch, yaw, roll = r.Pitch, r.Yaw, r.Roll
-    local sx, sy, sz = s.X, s.Y, s.Z
+local function sample_pose(previous, next_id, x, y, z, pitch, yaw, roll, sx, sy, sz)
     if previous and previous.x == x and previous.y == y and previous.z == z
         and previous.pitch == pitch and previous.yaw == yaw and previous.roll == roll
         and previous.sx == sx and previous.sy == sy and previous.sz == sz then return previous end
@@ -57,10 +52,10 @@ local function sample_pose(component, previous, next_id)
     return pose
 end
 
-local function admit()
+local function admit(world_address)
     local added = false
     for _ = 1, max_fields do
-        local path = SilverfishTakeNativeDrumFire(world:GetAddress())
+        local path = SilverfishTakeNativeDrumFire(world_address)
         if not path then break end
         local actor = StaticFindObject(path)
         if #host.fields < max_fields and valid(actor) and same(actor:GetWorld(), world) and actor:HasAuthority()
@@ -68,7 +63,7 @@ local function admit()
             serial = (serial or 0) + 1
             local origin = actor:K2_GetActorLocation()
             if number(origin.X, -1e7, 1e7) and number(origin.Y, -1e7, 1e7) then
-                host.fields[#host.fields + 1] = {actor = actor, id = serial,
+                host.fields[#host.fields + 1] = {actor = actor, address = actor:GetAddress(), id = serial,
                     center = ("%.3f,%.3f"):format(origin.X, origin.Y), poses = {}, parts = {}, next_id = 0}
                 added = true
             end
@@ -87,28 +82,16 @@ local function stock_particle(component, owner_address, asset_address)
     return asset:GetFullName() == particle_name
 end
 
-local function sample(entry, asset_address)
-    local actor = entry.actor
-    local particles = actor.Particles
-    local count = particles and particles:GetArrayNum() or 0
-    if count == 0 or count > max_particles then return end
-    local owner_address = actor:GetAddress()
-    local parts, used, changed = entry.parts, 0, false
-    for index = 1, count do
-        local object = particles[index]
-        if stock_particle(object, owner_address, asset_address) then
-            local address = object:GetAddress()
-            local previous = entry.poses[address]
-            if previous or entry.next_id < max_particles then
-                local pose = sample_pose(object, previous, entry.next_id + 1)
-                if pose then
-                    if not previous then entry.poses[address], entry.next_id = pose, pose.id end
-                    used = used + 1
-                    if parts[used] ~= pose.text then parts[used], changed = pose.text, true end
-                end
-            end
-        end
-    end
+local function remember_pose(entry, address, pose, used, changed)
+    if not pose then return used, changed end
+    if not entry.poses[address] then entry.poses[address], entry.next_id = pose, pose.id end
+    used = used + 1
+    if entry.parts[used] ~= pose.text then entry.parts[used], changed = pose.text, true end
+    return used, changed
+end
+
+local function complete_sample(entry, used, changed)
+    local parts = entry.parts
     if used < #parts then
         for index = #parts, used + 1, -1 do parts[index] = nil end
         changed = true
@@ -117,6 +100,40 @@ local function sample(entry, asset_address)
         entry.encoded = used > 0 and ("%d|%s|%s"):format(entry.id, entry.center, table.concat(parts, ";")) or nil
     end
     return entry.encoded
+end
+
+local function sample(entry, asset_address)
+    local particles = entry.actor.Particles
+    local count = particles and particles:GetArrayNum() or 0
+    if count == 0 or count > max_particles then return end
+    local used, changed = 0, false
+    for index = 1, count do
+        local object = particles[index]
+        if stock_particle(object, entry.address, asset_address) then
+            local address = object:GetAddress()
+            local previous = entry.poses[address]
+            if previous or entry.next_id < max_particles then
+                local frame = object:K2_GetComponentToWorld()
+                local p, s, r = frame.Translation, frame.Scale3D, object:K2_GetComponentRotation()
+                local pose = sample_pose(previous, entry.next_id + 1, p.X, p.Y, p.Z, r.Pitch, r.Yaw, r.Roll, s.X, s.Y, s.Z)
+                used, changed = remember_pose(entry, address, pose, used, changed)
+            end
+        end
+    end
+    return complete_sample(entry, used, changed)
+end
+
+local function native_sample(entry, particles)
+    local used, changed = 0, false
+    for index = 1, #particles, 10 do
+        local address = particles[index]
+        local previous = entry.poses[address]
+        if previous or entry.next_id < max_particles then
+            local pose = sample_pose(previous, entry.next_id + 1, table.unpack(particles, index + 1, index + 9))
+            used, changed = remember_pose(entry, address, pose, used, changed)
+        end
+    end
+    return complete_sample(entry, used, changed)
 end
 
 local function host_rows(row)
@@ -128,16 +145,28 @@ local function host_rows(row)
             removed = true
         end
     end
-    local admitted = admit()
+    local world_address = world:GetAddress()
+    local admitted = admit(world_address)
     if #host.fields == 0 and not removed then return host.rows end
     local now = os.clock()
     if not admitted and not removed and now < host.next_sample then return host.rows end
     host.next_sample = now + .10
     local fields = {}
-    local asset = #host.fields > 0 and StaticFindObject(particle_path)
-    local asset_address = valid(asset) and asset:GetAddress()
+    local read = SilverfishReadNativeDrumFireParticles
+    local asset_checked, asset_address
     for index = #host.fields, 1, -1 do
-        local encoded = sample(host.fields[index], asset_address)
+        local entry, particles = host.fields[index]
+        if type(read) == "function" then particles = read(entry.address, world_address) end
+        local encoded
+        if type(particles) == "table" then
+            encoded = native_sample(entry, particles)
+        elseif particles == nil then
+            if not asset_checked then
+                local asset = StaticFindObject(particle_path)
+                asset_address, asset_checked = valid(asset) and asset:GetAddress(), true
+            end
+            encoded = sample(entry, asset_address)
+        end
         if encoded then fields[#fields + 1] = encoded end
     end
     local content = table.concat(fields, "\t")

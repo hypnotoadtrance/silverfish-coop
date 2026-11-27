@@ -6,7 +6,8 @@ local marker_path = "/Script/Engine.AmbientSound"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local byte_angle = 360 / 256
 local maximum, marker_lifetime, cue_lifetime = 128, 15, .6
-local current, hooked, npc_class, point_class, statics
+local discovery_interval = .15
+local current, hooked, notifications, npc_class, point_class, statics
 
 local function valid(value)
     return value and value:IsValid()
@@ -77,14 +78,47 @@ local function capture(context, animation, rate, blend_in, blend_out, duration)
     end
 end
 
-local function remember_markers()
-    for _, marker in ipairs(FindAllOf("AmbientSound") or {}) do
-        if valid(marker) and same(marker:GetClass(), point_class) and same(marker:GetWorld(), current.world)
-            and marker:GetLocalRole() == 1 and valid(marker.AudioComponent) and not valid(marker.AudioComponent.Sound)
-            and actor_ready(marker:GetOwner(), 1) then
-            local rotation = marker:K2_GetActorRotation()
-            local id = byte(rotation.Roll) * 256 + byte(rotation.Yaw)
-            if id > 0 then current.markers[id] = marker end
+local function remember_marker(marker)
+    if not valid(marker) or marker:HasAnyFlags(EObjectFlags.RF_WasLoaded) then return true end
+    local world = marker:GetWorld()
+    if not valid(world) then return false end
+    if not same(world, current.world) or not same(marker:GetClass(), point_class) then return true end
+    local audio = marker.AudioComponent
+    if valid(audio) and valid(audio.Sound) then return true end
+    if marker:GetLocalRole() ~= 1 or not valid(audio) or not actor_ready(marker:GetOwner(), 1) then return false end
+    local rotation = marker:K2_GetActorRotation()
+    local id = byte(rotation.Roll) * 256 + byte(rotation.Yaw)
+    if id == 0 then return false end
+    current.markers[id] = marker
+    return true
+end
+
+local function created(marker)
+    local scope = current
+    if not scope or scope.capture or not valid(marker) or scope.candidate_count >= maximum then return end
+    local address = marker:GetAddress()
+    if not scope.candidates[address] then
+        scope.candidates[address] = marker
+        scope.candidate_count = scope.candidate_count + 1
+    end
+end
+
+local function discover_markers(now)
+    for address, marker in pairs(current.candidates) do
+        if remember_marker(marker) then
+            current.candidates[address] = nil
+            current.candidate_count = current.candidate_count - 1
+        end
+    end
+    for id in pairs(current.pending) do
+        if not valid(current.markers[id]) then
+            if now >= current.next_discovery then
+                -- Owner and rotation can arrive after construction, or a
+                -- marker can already exist when a guest enters this world.
+                current.next_discovery = now + (notifications and discovery_interval or .05)
+                for _, marker in ipairs(FindAllOf("AmbientSound") or {}) do remember_marker(marker) end
+            end
+            return
         end
     end
 end
@@ -136,13 +170,17 @@ function melee.sync(state, phase, on_capture)
     if not valid(world) then current = nil; return end
     if not same(current and current.world, world) or current.capture ~= (hosting and on_capture or nil) then
         current = {world = world, capture = hosting and on_capture or nil,
-            markers = {}, pending = {}, serial = 0, next_scan = 0, count = 0}
+            markers = {}, pending = {}, candidates = {}, serial = 0, next_scan = 0, next_discovery = 0,
+            count = 0, candidate_count = 0}
     end
     current.active = hosting and state.clients > 0 and type(SilverfishPublishLocalWeaponCue) == "function"
     if not valid(npc_class) then npc_class = StaticFindObject(npc_path) end
     if not valid(point_class) then point_class = StaticFindObject(marker_path) end
     if not valid(statics) then statics = StaticFindObject(statics_path) end
     if not valid(npc_class) or not valid(statics) then return end
+    if watching and notifications == nil and valid(point_class) then
+        notifications = type(NotifyOnNewObject) == "function" and pcall(NotifyOnNewObject, marker_path, created)
+    end
     if hosting and not hooked and valid(StaticFindObject(strike_path)) then
         RegisterHook(strike_path, function(context, animation, rate, blend_in, blend_out, duration)
             pcall(capture, context, animation, rate, blend_in, blend_out, duration)
@@ -169,9 +207,15 @@ function melee.update(get_world)
             end
         end
     else
-        remember_markers()
         for id, cue in pairs(current.pending) do
-            if now - cue.received >= cue_lifetime or play(current.markers[id], cue, now) ~= nil then
+            if now - cue.received >= cue_lifetime then
+                current.pending[id] = nil
+                current.count = current.count - 1
+            end
+        end
+        discover_markers(now)
+        for id, cue in pairs(current.pending) do
+            if play(current.markers[id], cue, now) ~= nil then
                 current.pending[id] = nil
                 current.count = current.count - 1
             end

@@ -169,3 +169,34 @@ clock = 5.4
 local restored = fire.rows(hosting, "hosting", row)[1]
 assert(restored[2] == 3 and restored[3]:find("1,-98.000", 1, true)
     and restored[3]:find("2,-97.000", 1, true) and asset_names == 4)
+
+-- Use the same field and compare both readers, including ID reuse when the native reader declines.
+objects[asset_path] = asset
+local native_reads, native_records = 0, {}
+function SilverfishReadNativeDrumFireParticles(address, world)
+    assert(address == host_field and world == host_world)
+    native_reads = native_reads + 1
+    return native_records
+end
+for _, component in ipairs(particles) do
+    local location = component.location
+    for _, value in ipairs({component, location.X, location.Y, location.Z, 10, -90, 0, 1, 1, .5}) do
+        native_records[#native_records + 1] = value
+    end
+end
+local previous_transforms, previous_rotations, previous_lookups = world_transforms, rotations, asset_lookups
+clock = 5.6
+assert(fire.rows(hosting, "hosting", row)[1] == restored and native_reads == 1)
+assert(world_transforms == previous_transforms and rotations == previous_rotations and asset_lookups == previous_lookups)
+native_records[2], particles[1].location.X = -97.875, -97.875
+clock = 5.8
+local native_moved = fire.rows(hosting, "hosting", row)[1]
+assert(native_moved[2] == 4 and native_moved[3]:find("1,-97.875", 1, true))
+native_records = nil
+clock = 6
+assert(fire.rows(hosting, "hosting", row)[1] == native_moved and native_reads == 3)
+assert(world_transforms == previous_transforms + #particles and rotations == previous_rotations + #particles)
+native_records = false
+clock = 6.2
+local empty = fire.rows(hosting, "hosting", row)[1]
+assert(empty[2] == 5 and #empty == 2 and native_reads == 4)

@@ -33,6 +33,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from .native_guest_consumable import RESULT as GUEST_CONSUMABLE_ACTIONS
 from .gameplay_snapshot import DELTA as GAMEPLAY_DELTA
 from .gameplay_snapshot import ROW_CHANGES as GAMEPLAY_ROW_CHANGES
+from .gameplay_snapshot import WORLD_SECTION as GAMEPLAY_WORLD
 from .udp_ownership import verify_loopback_socket
 
 __all__ = [
@@ -420,6 +421,7 @@ class _TransportStatistics:
     snapshot_responses_compressed: int = 0
     snapshot_delta_responses: int = 0
     snapshot_row_delta_responses: int = 0
+    snapshot_world_delta_responses: int = 0
     snapshot_rows_changed: int = 0
     snapshot_plaintext_bytes: int = 0
     snapshot_encoded_bytes: int = 0
@@ -452,6 +454,7 @@ def _encode_response(result: Action, *, snapshot: bool, stats: _TransportStatist
         stats.snapshot_delta_responses += GAMEPLAY_DELTA in result
         if rows:
             stats.snapshot_row_delta_responses += 1
+            stats.snapshot_world_delta_responses += GAMEPLAY_WORLD in rows
             stats.snapshot_rows_changed += sum(len(patch["changed"]) + len(patch["removed"]) for patch in rows.values())
         stats.snapshot_responses_compressed += len(frame) < plaintext_size
         stats.snapshot_plaintext_bytes += plaintext_size

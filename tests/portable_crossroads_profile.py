@@ -699,7 +699,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
                 "keepalive_probes_queued", "keepalive_probes_acked", "keepalive_ticks_congested",
                 "relay_queue_evicted_frames", "relay_queue_expired_frames", "interaction_priority_passes",
                 "snapshot_responses_encoded", "snapshot_delta_responses",
-                "snapshot_row_delta_responses", "snapshot_rows_changed",
+                "snapshot_row_delta_responses", "snapshot_world_delta_responses", "snapshot_rows_changed",
                 "snapshot_encoded_bytes", "snapshot_plaintext_bytes", "snapshot_responses_decoded", "snapshot_received_bytes")
 
     async def transport():

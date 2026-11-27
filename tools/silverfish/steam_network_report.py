@@ -23,6 +23,7 @@ LINK_COUNTERS = (
     "snapshot_received_bytes",
     "snapshot_responses_encoded",
     "snapshot_responses_decoded",
+    "snapshot_world_delta_responses",
     "relay_queue_evicted_frames",
     "relay_queue_expired_frames",
 )

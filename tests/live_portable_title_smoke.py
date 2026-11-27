@@ -54,6 +54,7 @@ from portable_dock_pursuit import verify_dock_pursuit
 from portable_held_mask import verify_stock_held_mask
 from portable_eye_board import verify_stock_eye_stacks
 from portable_guest_world_start import GuestWorldStartProof, resident_events, wait_resident_status
+from portable_guest_title_recovery import verify_stock_guest_title_recovery
 from portable_acid_pool import acid_pool_overlay, verify_acid_pool
 from portable_alternate_ammo import verify_alternate_ammo
 from portable_light_ar import verify_fire_mode_reopen, verify_stock_light_ar
@@ -76,7 +77,9 @@ from portable_mushrooms import instrument_mushroom_sampler, verify_stock_mushroo
 from portable_placed_item import placed_item_overlay, verify_stock_placed_food, verify_stock_placed_item
 from portable_pickup_preview import pickup_preview_overlay, recorded_drop_motion, verified_drop_preview
 from portable_cash_popup import cash_pickup_overlay, verify_reported_wallet, verify_stock_cash_popup
-from portable_crossroads_canister import allow_portable_canister_fixture, instrument_canisters, verify_crossroads_canister
+from portable_crossroads_canister import (
+    allow_portable_canister_fixture, instrument_canisters, instrument_drum_fire, verify_crossroads_canister,
+)
 from portable_world_view_receipt import patch_world_view_receipts, verify_world_view_receipt
 from tools.silverfish.title_session import STATUS_FILE as TITLE_STATUS_FILE
 
@@ -8108,6 +8111,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_wipe_chooser: bool = False,
                  stock_npc_override: bool = False, stock_dock_population: bool = False,
                  stock_streamed_npc: bool = False,
+                 stock_guest_title_recovery: bool = False,
                  manage_saves: bool = False,
                  stock_dead_drops: bool = False, dead_drop_cases: tuple[str, ...] = DEAD_DROP_CASES,
                  stock_board_offers: bool = False, stock_streamed_board: bool = False, stock_quarry_photo: bool = False,
@@ -8269,6 +8273,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_streamed_pickup, "streamed_loose_pickup", "streamed_loose_pickup", verify_streamed_loose_pickup),
         (stock_flashlights, "observatory", "stock_flashlights", verify_stock_flashlights),
         (stock_inventory_fall, "inventory_fall", "stock_inventory_fall", verify_stock_inventory_fall),
+        (stock_guest_title_recovery, "observatory", "stock_guest_title_recovery", verify_stock_guest_title_recovery),
         (stock_melee_edges, "observatory", "stock_melee_edges", verify_stock_melee_edges_only),
         (stock_avatar_tail, "observatory", "stock_avatar_tail", verify_stock_avatar_tail),
         (stock_avatar_binoculars, "observatory", "stock_avatar_binoculars", verify_stock_avatar_binoculars),
@@ -8528,7 +8533,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(portable_script_overlay(game, script, patch))
                 for game in games
                 for script, patch in (("native_canister_fixture.lua", allow_portable_canister_fixture),
-                                      ("native_explosive_canisters.lua", instrument_canisters))
+                                      ("native_explosive_canisters.lua", instrument_canisters),
+                                      ("native_drum_fire.lua", instrument_drum_fire))
             ]
         if stock_weather_travel:
             for game in games:
@@ -9265,6 +9271,8 @@ if __name__ == "__main__":
     parser.add_argument("--stock-host-corpse-carry", action="store_true",
                         help="Measure stock host ragdoll carry on the guest and verify physics returns on release")
     parser.add_argument("--stock-streamed-npc", action="store_true", help="check stock NPC damage in a streamed sublevel")
+    parser.add_argument("--stock-guest-title-recovery", action="store_true",
+                        help="force the guest alone back to title and verify automatic in-session recovery")
     parser.add_argument("--stock-npc-override", action="store_true",
                         help="verify stock drone damage authority in co-op and stock combat after returning to Singleplayer")
     parser.add_argument("--stock-split", action="store_true", help="test the stock guest stack-split popup with a Veteran loadout")
@@ -9539,7 +9547,8 @@ if __name__ == "__main__":
         parser.error("Use --stock-shovel-host-quest with --stock-shovel-quest")
     resident_check_options.add("stock_cooked_meal")
     resident_check_options.update(("crossroads_profile", "crossroads_gc_trial", "stock_crossroads_recovery",
-                                   "stock_discovered_overlap", "stock_authored_quest_placement", "rendered"))
+                                   "stock_discovered_overlap", "stock_authored_quest_placement",
+                                   "stock_guest_title_recovery", "rendered"))
     if args.crossroads_gc_trial and not args.crossroads_profile:
         parser.error("--crossroads-gc-trial requires --crossroads-profile")
     resident_check_options.update(("guest_stash_memory", "guest_stash_large_memory"))
@@ -9547,7 +9556,7 @@ if __name__ == "__main__":
         resident_check_options.add("stock_crate_ring")
     if any((args.stock_food, args.stock_cooked_meal, args.stock_personal_consumable, args.stock_wipe_chooser,
             args.stock_campfire, args.stock_npc_override, args.stock_dock_population, args.stock_streamed_npc,
-            args.stock_dead_drops,
+            args.stock_dead_drops, args.stock_guest_title_recovery,
             args.stock_board_offers, args.stock_streamed_board, args.stock_quarry_photo, args.tutorial_dock_melee,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_buried_placements,
             args.stock_take_ammo, args.stock_shotguns,
@@ -9607,6 +9616,7 @@ if __name__ == "__main__":
                        stock_wipe_chooser=args.stock_wipe_chooser,
                        stock_npc_override=args.stock_npc_override, stock_dock_population=args.stock_dock_population,
                        stock_streamed_npc=args.stock_streamed_npc,
+                       stock_guest_title_recovery=args.stock_guest_title_recovery,
                        manage_saves=args.manage_saves,
                        stock_dead_drops=args.stock_dead_drops,
                        dead_drop_cases=tuple(args.dead_drop_case or DEAD_DROP_CASES),

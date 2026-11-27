@@ -135,7 +135,14 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
                  for index in range(18)}
         changed, removed, *_ = doors
         added = f"{area}.Observitory_P:PersistentLevel.Door_Wood_C_40"
-        gameplay = {"host_world": {"clock": 8}, native_stock_door.KEY: {
+        world = {
+            "native_scene": {"game_seconds": 8},
+            "native_rules": {"difficulty": 2},
+            "native_reputation": {"WesternUnion": 10},
+            "native_seed": {"seed": 745},
+            "native_weather_ambience": {"active": True},
+        }
+        gameplay = {"host_world": world, "players": {}, native_stock_door.KEY: {
             "map": area, "epoch": "epoch", "sequence": 10, "doors": doors,
         }}
         host = SimpleNamespace(stopping=False, native_guest=False, transitioning=False, zone_epoch="epoch",
@@ -161,9 +168,12 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
 
         await refresh()
         self.assertNotIn(gameplay_snapshot.ROW_UPDATES, requests[-1])
+        self.assertNotIn(gameplay_snapshot.WORLD_UPDATES, requests[-1])
         await refresh()
         self.assertIs(requests[-1][gameplay_snapshot.ROW_UPDATES], True)
+        self.assertIs(requests[-1][gameplay_snapshot.WORLD_UPDATES], True)
         legacy = service.Host.guest_request(host, "legacy", {"action": "snapshot", gameplay_snapshot.BASE: ""})
+        actor_only = service.Host.guest_request(host, "actor-only", {"action": "snapshot", gameplay_snapshot.BASE: ""})
         client.gameplay[native_stock_door.KEY]["doors"][changed]["yaw"] = 123
         untouched = next(key for key in doors if key not in {changed, removed})
         client.gameplay[native_stock_door.KEY]["doors"][untouched]["yaw"] = -999
@@ -171,21 +181,56 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         doors.pop(removed)
         doors[added] = {"open": False, "yaw": 90}
         gameplay[native_stock_door.KEY]["sequence"] = 12
+        world["native_scene"]["game_seconds"] = 9
+        del world["native_weather_ambience"]
         await refresh()
         patch = replies[-1][gameplay_snapshot.DELTA]
-        self.assertEqual(patch[gameplay_snapshot.ROW_CHANGES], {native_stock_door.KEY: {
-            "changed": {changed: doors[changed], added: doors[added]}, "removed": [removed], "sequence": 12,
-        }})
+        self.assertEqual(patch[gameplay_snapshot.ROW_CHANGES], {
+            native_stock_door.KEY: {
+                "changed": {changed: doors[changed], added: doors[added]}, "removed": [removed], "sequence": 12,
+            },
+            gameplay_snapshot.WORLD_SECTION: {
+                "changed": {"native_scene": {"game_seconds": 9}}, "removed": ["native_weather_ambience"],
+            },
+        })
         self.assertEqual(client.gameplay, gameplay)
         self.assertNotIn(native_stock_door.KEY, patch["changed"])
+        self.assertNotIn("host_world", patch["changed"])
+
+        actor_only = service.Host.guest_request(host, "actor-only", {
+            "action": "snapshot", gameplay_snapshot.BASE: actor_only[gameplay_snapshot.REVISION],
+            gameplay_snapshot.ROW_UPDATES: True,
+        })
+        self.assertEqual(actor_only[gameplay_snapshot.DELTA]["changed"]["host_world"], world)
+        self.assertNotIn("host_world", actor_only[gameplay_snapshot.DELTA][gameplay_snapshot.ROW_CHANGES])
 
         legacy = service.Host.guest_request(host, "legacy", {
             "action": "snapshot", gameplay_snapshot.BASE: legacy[gameplay_snapshot.REVISION],
         })
         self.assertNotIn(gameplay_snapshot.ROW_CHANGES, legacy[gameplay_snapshot.DELTA])
         self.assertEqual(legacy[gameplay_snapshot.DELTA]["changed"][native_stock_door.KEY]["doors"], doors)
-        self.assertLess(len(service.link._encode_response(replies[-1], snapshot=True)),
-                        len(service.link._encode_response(legacy, snapshot=True)))
+        stats = service.link._TransportStatistics()
+        compact_wire = service.link._encode_response(replies[-1], snapshot=True, stats=stats)
+        actor_wire = service.link._encode_response(actor_only, snapshot=True, stats=stats)
+        self.assertLess(len(compact_wire), len(actor_wire))
+        self.assertLess(len(compact_wire), len(service.link._encode_response(legacy, snapshot=True)))
+        self.assertEqual(stats.snapshot_world_delta_responses, 1)
+
+    def test_snapshot_rejects_a_world_delta_without_the_host_advertising_it(self):
+        client = gameplay_snapshot.ClientSnapshots()
+        client.read({"gameplay": {"host_world": {"native_scene": {"game_seconds": 8}}},
+                     gameplay_snapshot.REVISION: "a" * 32, gameplay_snapshot.ROW_UPDATES: True})
+        with self.assertRaisesRegex(RuntimeError, "no matching baseline"):
+            client.read({
+                gameplay_snapshot.BASE: "a" * 32, gameplay_snapshot.REVISION: "b" * 32,
+                gameplay_snapshot.ROW_UPDATES: True, gameplay_snapshot.WORLD_UPDATES: True,
+                gameplay_snapshot.DELTA: {"changed": {}, "removed": [], gameplay_snapshot.ROW_CHANGES: {
+                    "host_world": {"changed": {"native_scene": {"game_seconds": 9}}, "removed": []},
+                }},
+            })
+        self.assertIsNone(client.base)
+        self.assertFalse(client.row_updates)
+        self.assertFalse(client.world_updates)
 
     def test_snapshot_rejects_actor_row_changes_that_overlap_a_section_replacement(self):
         section = native_loot.STATE_KEY

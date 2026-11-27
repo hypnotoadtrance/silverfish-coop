@@ -152,9 +152,57 @@ def ground_fire_fields(view):
     return fields
 
 
-async def verify_ground_fire(host_run, guest_run, baseline, origin, first_host):
+def instrument_drum_fire(source):
+    anchor = "function fire.command(args, state, seat)\n"
+    if source.count(anchor) != 1:
+        raise ValueError("The stock ground fire command handler changed")
+    return source.replace(anchor, anchor + """    if args[2] == "native-drum-fire-sample-fixture" then
+        assert(seat == "hosting" and host and same(world, state.world))
+        local actor_entry
+        for _, entry in ipairs(host.fields) do
+            if entry.id == tonumber(args[3]) then actor_entry = entry; break end
+        end
+        assert(actor_entry, "the selected fire field has retired")
+        local address, scope = actor_entry.actor:GetAddress(), world:GetAddress()
+        local native = SilverfishReadNativeDrumFireParticles
+        local raw = assert(native(address, scope), "the stock fire field did not qualify natively")
+        assert(#raw > 0 and #raw % 10 == 0 and native(address, scope + 1) == nil)
+        local asset = StaticFindObject(particle_path)
+        local asset_address = valid(asset) and asset:GetAddress()
+        local function fixture_entry()
+            return {actor = actor_entry.actor, address = address, id = actor_entry.id, center = actor_entry.center,
+                poses = {}, parts = {}, next_id = 0}
+        end
+        local function measure(reader, entry)
+            local heap, started = collectgarbage("count"), SilverfishBridgeProfileStamp()
+            for _ = 1, 8 do assert(reader(entry)) end
+            return (SilverfishBridgeProfileStamp() - started) / 1000, collectgarbage("count") - heap
+        end
+        local function sample_native(entry) return native_sample(entry, native(address, scope)) end
+        local function sample_lua(entry) return sample(entry, asset_address) end
+        local running = collectgarbage("isrunning")
+        local ok, output = pcall(function()
+            local first, second = fixture_entry(), fixture_entry()
+            local normal = sample_native(first)
+            assert(normal and normal == sample_lua(second), "ground fire poses differ from Lua")
+            collectgarbage("stop")
+            local native_first, native_kib_first = measure(sample_native, first)
+            local lua_first, lua_kib_first = measure(sample_lua, second)
+            local lua_second, lua_kib_second = measure(sample_lua, second)
+            local native_second, native_kib_second = measure(sample_native, first)
+            return ("%d,%d,%.3f,%.3f,%.3f,%.3f"):format(#raw / 10, 16, native_first + native_second,
+                lua_first + lua_second, native_kib_first + native_kib_second, lua_kib_first + lua_kib_second)
+        end)
+        if running then collectgarbage("restart") end
+        assert(ok, output)
+        return output
+    end
+""", 1)
+
+
+async def verify_ground_fire(host_run, guest_run, baseline, origin, first_host, sample):
     host_revisions, target_ids = {}, set()
-    active = None
+    active = comparison = None
     epoch = first_host["zone_epoch"]
 
     def observe(frame):
@@ -191,9 +239,11 @@ async def verify_ground_fire(host_run, guest_run, baseline, origin, first_host):
                 proof = {"revision": revision, "expected_particles": expected, "host_fields": fields, "guest": local}
                 if remaining:
                     active = proof
+                    if comparison is None:
+                        comparison = await sample(min(remaining))
                 elif active and revision > active["revision"]:
                     return {"baseline_ids": sorted(baseline), "target_ids": sorted(target_ids),
-                            "active": active, "retired": proof}
+                            "active": active, "retired": proof, "native_reader_comparison": comparison}
         await asyncio.sleep(.12)
     raise RuntimeError(f"Stock drum ground fire did not render and retire for {DRUM}: "
                        f"baseline={sorted(baseline)}, target={sorted(target_ids)}, active={active}, "
@@ -276,7 +326,15 @@ async def verify_crossroads_canister(host, guest, _pawn, resident_events, campai
             await asyncio.sleep(.12)
     # The muted run verifies cue dispatch and reports particle creation separately.
     assert len(blasts) == 1, blasts
-    drum["ground_fire"] = await verify_ground_fire(host_run, guest_run, baseline, origin, exploded)
+    async def sample_fire(identity):
+        result = await host.bridge.command("native-drum-fire-sample-fixture", str(identity), timeout=5)
+        particles, reads, native_ms, lua_ms, native_kib, lua_kib = map(float, result["ack"]["message"].split(","))
+        return {"particles": int(particles), "reads_per_path": int(reads),
+                "native_ms": native_ms, "lua_ms": lua_ms,
+                "native_heap_growth_kib": native_kib, "lua_heap_growth_kib": lua_kib,
+                "rows_matched": True, "wrong_world_refused": True}
+
+    drum["ground_fire"] = await verify_ground_fire(host_run, guest_run, baseline, origin, exploded, sample_fire)
     assert campaign_save_hashes(host.campaign) == checkpoint
     drum["guest_blast"] = blasts[0]
     drum["removed_on_both_seats"] = True

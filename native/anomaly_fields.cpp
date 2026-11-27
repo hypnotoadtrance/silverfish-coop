@@ -25,6 +25,7 @@
 #include <Unreal/FURL.hpp>
 #include <Unreal/FWeakObjectPtr.hpp>
 #include <Unreal/Hooks.hpp>
+#include <Unreal/Transform.hpp>
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/World.hpp>
@@ -502,6 +503,7 @@ namespace
         U::FWeakObjectPtr actor, world;
     };
     thread_local std::array<DrumFire, 4> drum_fires;
+    thread_local std::array<DrumFire, 4> sampled_drum_fires;
 
     struct DrumBreak
     {
@@ -594,10 +596,116 @@ namespace
                 continue;
             }
             lua.set_string(RC::to_utf8_string(actor->GetPathName()));
+            const auto sample = std::ranges::find_if(sampled_drum_fires, [&](const auto& active) {
+                return active.actor.Get() == actor || !active.actor.Get() || active.world.Get() != slot.world.Get();
+            });
+            if (sample != sampled_drum_fires.end()) *sample = slot;
             slot = {};
             return 1;
         }
         return 0;
+    }
+
+    template <typename ResultProperty>
+    U::UFunction* particle_getter(U::UClass* type, const U::TCHAR* name, const U::TCHAR* owner_path, std::size_t size)
+    {
+        auto* method = type->GetFunctionByNameInChain(U::FName{name, U::FNAME_Find});
+        auto* result = method ? U::CastField<ResultProperty>(method->GetReturnProperty()) : nullptr;
+        auto* declaring_type = method ? method->GetOuterPrivate() : nullptr;
+        if (!declaring_type || declaring_type->GetPathName() != owner_path ||
+            !method->HasAnyFunctionFlags(U::FUNC_Native) || method->GetNumParms() != 1 ||
+            method->GetParmsSize() != size || !result || result->GetArrayDim() != 1 ||
+            result->GetElementSize() != size || result->GetOffset_Internal() != 0) return nullptr;
+        return method;
+    }
+
+    int read_drum_fire_particles(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        if (guest_session || !U::IsInGameThreadRaw() || lua_gettop(stack) != 2 ||
+            !lua_isinteger(stack, 1) || !lua_isinteger(stack, 2)) return 0;
+        const auto actor_address = static_cast<std::uintptr_t>(lua_tointeger(stack, 1));
+        const auto world_address = static_cast<std::uintptr_t>(lua_tointeger(stack, 2));
+        if (!actor_address || !world_address) return 0;
+        const auto slot = std::ranges::find_if(sampled_drum_fires, [&](const auto& current) {
+            return reinterpret_cast<std::uintptr_t>(current.actor.Get()) == actor_address &&
+                reinterpret_cast<std::uintptr_t>(current.world.Get()) == world_address;
+        });
+        if (slot == sampled_drum_fires.end()) return 0;
+        auto* actor = static_cast<U::AActor*>(slot->actor.Get());
+        constexpr auto destroyed = static_cast<U::EObjectFlags>(U::RF_BeginDestroyed | U::RF_FinishDestroyed);
+        auto* actor_type = actor->GetClassPrivate();
+        auto* dying = property<U::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
+        auto* role = property<U::FByteProperty>(actor, STR("Role"));
+        if (!actor_type || actor_type->GetFName() != drum_fire_name || actor_type->GetPathName() != drum_fire_class ||
+            actor->GetWorld() != slot->world.Get() || actor->IsUnreachable() || actor->HasAnyFlags(destroyed) ||
+            !dying || dying->GetPropertyValueInContainer(actor) || !role || role->GetPropertyValueInContainer(actor) != 3) return 0;
+        auto* particles = property<U::FArrayProperty>(actor, STR("Particles"));
+        auto* element = particles ? U::CastField<U::FObjectProperty>(particles->GetInner()) : nullptr;
+        auto* component_type = element ? element->GetPropertyClass().Get() : nullptr;
+        if (!particles || particles->GetArrayDim() != 1 || !component_type ||
+            component_type->GetPathName() != STR("/Script/Niagara.NiagaraComponent")) return 0;
+
+        U::FScriptArrayHelper components(particles, particles->ContainerPtrToValuePtr<void>(actor));
+        constexpr int max_particles = 64;
+        constexpr int sample_width = 10;
+        if (!components.Num() || components.Num() > max_particles)
+        {
+            lua_pushboolean(stack, false);
+            return 1;
+        }
+        auto* asset_property = property<U::FObjectProperty>(component_type, STR("Asset"));
+        auto* asset = U::UObjectGlobals::StaticFindObject<U::UObject*>(nullptr, nullptr,
+            STR("/Game/Assets/PFX/NI_FireMolotov.NI_FireMolotov"));
+        auto* asset_type = asset_property ? asset_property->GetPropertyClass().Get() : nullptr;
+        if (!asset || asset->IsUnreachable() || asset->HasAnyFlags(destroyed) ||
+            !asset_type || asset->GetClassPrivate() != asset_type ||
+            asset_type->GetPathName() != STR("/Script/Niagara.NiagaraSystem")) return 0;
+        auto* owner_getter = particle_getter<U::FObjectProperty>(component_type, STR("GetOwner"),
+            STR("/Script/Engine.ActorComponent"), sizeof(U::UObject*));
+        auto* to_world = particle_getter<U::FStructProperty>(component_type, STR("K2_GetComponentToWorld"),
+            STR("/Script/Engine.SceneComponent"), sizeof(U::FTransform_As500Plus));
+        auto* get_rotation = particle_getter<U::FStructProperty>(component_type, STR("K2_GetComponentRotation"),
+            STR("/Script/Engine.SceneComponent"), sizeof(U::FRotator::As500Plus));
+        const auto return_type_is = [](U::UFunction* method, const U::TCHAR* expected) {
+            auto* result = method ? U::CastField<U::FStructProperty>(method->GetReturnProperty()) : nullptr;
+            auto* type = result ? result->GetStruct().Get() : nullptr;
+            return type && type->GetPathName() == expected;
+        };
+        if (!owner_getter || !return_type_is(to_world, STR("/Script/CoreUObject.Transform")) ||
+            !return_type_is(get_rotation, STR("/Script/CoreUObject.Rotator"))) return 0;
+
+        lua_createtable(stack, components.Num() * sample_width, 0);
+        int output = 0;
+        for (int index = 0; index < components.Num(); ++index)
+        {
+            auto* component = element->GetObjectPropertyValue(components.GetRawPtr(index));
+            if (!component || component->IsUnreachable() || component->HasAnyFlags(destroyed)) continue;
+            if (component->GetClassPrivate() != component_type)
+            {
+                // Preserve reflection support for modded component subclasses.
+                lua_pop(stack, 1);
+                return 0;
+            }
+            if (asset_property->GetObjectPropertyValue(asset_property->ContainerPtrToValuePtr<void>(component)) != asset)
+                continue;
+            U::UObject* component_owner = nullptr;
+            component->ProcessEvent(owner_getter, &component_owner);
+            if (component_owner != actor) continue;
+            U::FTransform_As500Plus transform;
+            U::FRotator::As500Plus rotation{0, 0, 0};
+            component->ProcessEvent(to_world, &transform);
+            component->ProcessEvent(get_rotation, &rotation);
+            lua_pushinteger(stack, static_cast<lua_Integer>(reinterpret_cast<std::uintptr_t>(component)));
+            lua_rawseti(stack, -2, ++output);
+            for (auto number : {transform.Translation.X, transform.Translation.Y, transform.Translation.Z,
+                rotation.Pitch, rotation.Yaw, rotation.Roll, transform.Scale3D.X, transform.Scale3D.Y, transform.Scale3D.Z})
+            {
+                lua_pushnumber(stack, number);
+                lua_rawseti(stack, -2, ++output);
+            }
+        }
+        return 1;
     }
 
     bool fixed_prop_class(U::UObject* type)
@@ -1519,6 +1627,7 @@ namespace
                 blocked_storm_updates = 0;
                 loading = {};
                 drum_fires = {};
+                sampled_drum_fires = {};
                 drum_breaks = {};
                 prop_breaks = {};
                 spatial_cues = {};
@@ -1781,6 +1890,7 @@ namespace silverfish::native_anomaly_fields
         travel_spawn = {};
         lingering_spawns = {};
         drum_fires = {};
+        sampled_drum_fires = {};
         drum_breaks = {};
         prop_breaks = {};
         spatial_cues = {};
@@ -1815,6 +1925,7 @@ namespace silverfish::native_anomaly_fields
             (stock_event_post != H::ERROR_ID || stock_script_post != H::ERROR_ID || stock_internal_post != H::ERROR_ID))
         {
             lua.register_function("SilverfishTakeNativeDrumFire", take_drum_fire);
+            lua.register_function("SilverfishReadNativeDrumFireParticles", read_drum_fire_particles);
             lua.register_function("SilverfishTakeNativeLingeringTeleport", take_lingering_spawn);
         }
         if (observer_enabled) lua.register_function("SilverfishSetNativeObserverTarget", set_observer_target);
