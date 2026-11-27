@@ -19,10 +19,9 @@ def cash_pickup_overlay(game, overlay):
         return script.replace(gate, gate.replace("not host_fixtures", "not (host_fixtures or title_fixtures)"))
 
     def allow_title_approach(script):
-        guard = "not approach_scope(state, phase, pawn, actor, sources[profile.source])"
+        guard = "not approach_scope(state, phase, pawn, actor, quest_source and profile.map or sources[profile.source])"
         assert script.count(guard) == 1
-        return script.replace(guard, 'not approach_scope(state, phase, pawn, actor, sources[profile.source], '
-                              'os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1")')
+        return script.replace(guard, guard[:-1] + ', os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1")')
 
     def wallet_fixture(script):
         marker = "    local action = fields[2]\n    if action == \"wallet-guest-sync\""

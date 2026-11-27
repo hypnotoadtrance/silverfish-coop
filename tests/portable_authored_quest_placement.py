@@ -131,14 +131,18 @@ async def verify_authored_quest_placement(host, guest, pawn):
     assert save_fingerprints() == saved, "Observing the quest placement changed a campaign save"
 
     def projected(frame):
-        return same_visit(frame) and frame.get("state") == "connected" and loose_state(frame) == "available" and placed(frame)
+        return same_visit(frame) and frame.get("state") == "connected" and placed(frame)
 
     guest_frame = await wait_resident_status(guest_run, projected, timeout=12)
     assert (placements(guest_frame)["map"], placements(guest_frame)["epoch"]) == (SMUGGLER, epoch)
     active = placed(guest_frame)
     assert (active["quest"], active["class_path"]) == (QUEST, ITEM_CLASS), active
-    guest_visible = parse_stock_state(await command(guest, "stock-state"))
-    assert not guest_visible["hidden"] and guest_visible["collision"], guest_visible
+    async with asyncio.timeout(8):
+        while True:
+            guest_visible = parse_stock_state(await command(guest, "stock-state"))
+            if not guest_visible.get("absent") and not guest_visible["hidden"] and guest_visible["collision"]:
+                break
+            await asyncio.sleep(.1)
     for component in ("position", "rotation", "scale"):
         assert math.dist(guest_visible["transform"][component], after["transform"][component]) < .03, guest_visible
         assert math.dist(active["transform"][component], after["transform"][component]) < .03, active
@@ -148,7 +152,7 @@ async def verify_authored_quest_placement(host, guest, pawn):
     assert all(item["class_path"] != ITEM_CLASS for item in host_inventory + guest_inventory)
     approached = await host.bridge.command(loose.APPROACH, SOURCE, pawn, timeout=5)
     assert approached["ack"]["message"] == "shared level pickup approach verified", approached["ack"]
-    await wait_resident_status(guest_run, lambda frame: projected(frame) and math.dist(
+    await wait_resident_status(guest_run, lambda frame: projected(frame) and loose_state(frame) == "available" and math.dist(
         frame["game"]["pawns"]["local"]["location"], guest_visible["stock_position"]) < 225)
     pressed = await guest.bridge.command(loose.FIXTURE, SOURCE, timeout=5)
     assert pressed["ack"]["message"] == "stock_started_consumed", pressed["ack"]
@@ -198,12 +202,14 @@ async def verify_authored_quest_placement(host, guest, pawn):
     assert await stock_inventory(host_run) == host_inventory
     assert [row for row in await resident_events(host_run, reached)
             if row["event"] == "native_loose_pickup_claimed" and row.get("actor") == SOURCE] == [claim]
-    inventory_view = await submit(guest_run, "native-inventory-view-fixture", target="stock")
+    inventory_view = await submit(guest_run, "native-inventory-view-fixture")
     assert inventory_view["ok"], inventory_view
     await wait_resident_status(guest_run, lambda frame: same_visit(frame)
         and frame["game"].get("native_inventory_view", {}).get("state") == "stock")
     card = await command(guest, "guest-item", claim["guid"])
     assert card == "stock backpack shows the exact sealed case", card
+    closed = await submit(guest_run, "native-inventory-view-fixture")
+    assert closed["ok"], closed
     assert save_fingerprints() == saved, "Collecting or replaying the quest placement wrote campaign files"
     return {"route": passages, "near_retry": near_retry, "dormant": before, "active": after,
             "guest_scope_rejected": True, "guest_projection": guest_visible, "stock_interact": pressed["ack"]["message"],
