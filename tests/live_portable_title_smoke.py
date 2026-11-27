@@ -4533,6 +4533,23 @@ async def verify_stock_castaway_dialogue(host: Seat, guest: Seat, pawn: str) -> 
         return menu.get("state") == "ready" and menu.get("actor") == actor and menu.get("stock") is True
 
     host_run = host.campaign / "run"
+    regular = f"Shop_BP_C {native_dialogue.LEVEL}Shop_BP_C_2"
+
+    def counter_revisions(frame):
+        return frame.get("gameplay", {}).get(native_finite_shop.STOCK_REVISION, {}).get("revisions", {})
+
+    async def read_revisions(actor=None, previous=None):
+        def current(frame):
+            revisions = counter_revisions(frame)
+            return (shop in revisions and regular in revisions
+                    and (actor is None or revisions[actor] != previous[actor]))
+
+        frame = await wait_resident_status(guest_run, current)
+        revisions = counter_revisions(frame)
+        if actor:
+            other = regular if actor == shop else shop
+            assert revisions[other] == previous[other], (actor, previous, revisions)
+        return revisions
 
     async def purchase_card(frame, actor, selection):
         source, guid, raw_price = (await castaway(guest, selection)).split(";")
@@ -4567,17 +4584,19 @@ async def verify_stock_castaway_dialogue(host: Seat, guest: Seat, pawn: str) -> 
 
     guest_trade = await wait_resident_status(guest_run, lambda frame: ready(frame, shop))
     assert await stock_menu(guest, "shop") == [screen, shop, data, "false"]
+    before_purchase = await read_revisions()
     purchase = await purchase_card(guest_trade, shop, "offer")
+    castaway_revisions = await read_revisions(shop, before_purchase)
     assert (await submit(guest_run, "native-shop-view-fixture", target="back"))["ok"]
     await wait_resident_status(guest_run, lambda frame: shop_view(frame).get("state") in (None, "closed"))
     await castaway(host, "regular")
     assert await stock_menu(guest, "near") == ["near"]
-    regular = f"Shop_BP_C {native_dialogue.LEVEL}Shop_BP_C_2"
     opened = await submit(guest_run, "native-shop-view-fixture", target="open")
     assert opened["ok"], opened
     guest_regular = await wait_resident_status(guest_run, lambda frame: ready(frame, regular))
     assert (await stock_menu(guest, "shop"))[1] == regular
     reusable_purchase = await purchase_card(guest_regular, regular, "shelf")
+    regular_revisions = await read_revisions(regular, castaway_revisions)
     catalog = (await host.bridge.command("native-finite-shop-list", pawn))["native_finite_shop"]
     assert any(offer["guid"] == reusable_purchase["offer_guid"] and offer["source"] == "shelf"
                for offer in catalog["offers"]), catalog
@@ -4587,6 +4606,9 @@ async def verify_stock_castaway_dialogue(host: Seat, guest: Seat, pawn: str) -> 
             "castaway_trade_route": {"host_choices": host_choices, "guest_choices": guest_choices,
                                      "host_screen": screen, "host_shop": shop, "merchant_data": data,
                                      "guest_purchase": purchase, "regular_shop": regular,
+                                     "stock_revisions_before": before_purchase,
+                                     "stock_revisions_after_castaway_purchase": castaway_revisions,
+                                     "stock_revisions_after_regular_purchase": regular_revisions,
                                      "regular_shelf_purchase": reusable_purchase}}
 
 
@@ -7437,6 +7459,7 @@ async def verify_stock_inventory_fall(host: Seat, guest: Seat, pawn: str) -> dic
         distance = drop["location"][2] - settled["position"][2]
         assert motion and distance > 8, (role, drop["location"], motion, settled)
         assert any(point[2] > settled["position"][2] + 2 for point in motion), (role, motion, settled)
+        assert identity in guest_motion, (role, "the guest did not observe the falling item", identity)
         assert all(len(rows[identity]) == 1 for rows in actors.values()), (role, actors)
         return identity, {"drop": drop, "settled": settled, "host_moving_positions": motion, "fall_cm": distance,
                           "host_actor": next(iter(actors["host"][identity])),

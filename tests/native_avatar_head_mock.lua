@@ -97,11 +97,11 @@ animate()
 assert(clock_lookups == 2 and math_lookups == 2 and #writes == 5 and stock_reads == 1)
 assert(raw[1] == 76 and raw[2] == -172, "The stock fallback is sampled once for both consumers")
 
-local native_writes, accept = 0, true
+local native_writes, accept, expected_roll = 0, true, 0
 entry.pawn_address, entry.head_pivot_path = pawn, "/Game/Test.Test:PersistentLevel.Guest.SceneComponent_0"
 function SilverfishWriteNativeRemoteHeadRotation(scope, actor, path, pitch, yaw, roll)
     assert(scope == world and actor == pawn and path == entry.head_pivot_path)
-    assert(pitch == 45 and yaw == -172 and roll == 0)
+    assert(pitch == 45 and yaw == -172 and roll == expected_roll)
     native_writes = native_writes + 1
     return accept
 end
@@ -112,3 +112,15 @@ entry.head_aim, now, accept = nil, .2, false
 animate()
 assert(native_writes == 2 and #writes == 6 and writes[6].Pitch == 45 and writes[6].Yaw == -172,
     "A refused native write applies the identical stock fallback")
+
+function math_api:NegateRotator(value)
+    return {Pitch = -value.Pitch, Yaw = -value.Yaw, Roll = -value.Roll}
+end
+function math_api:ComposeRotators(left, right)
+    return {Pitch = left.Pitch + right.Pitch, Yaw = left.Yaw + right.Yaw, Roll = left.Roll + right.Roll}
+end
+entry.movement_mesh = object({K2_GetComponentRotation = function() return {Pitch = 0, Yaw = 90, Roll = 0} end})
+entry.lean_rotation = {Pitch = 0, Yaw = 0, Roll = 18}
+now, accept, expected_roll = .25, true, 18
+animate()
+assert(native_writes == 3 and #writes == 6, "The native write preserves the composed lean roll")
