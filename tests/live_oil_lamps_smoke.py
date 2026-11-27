@@ -17,7 +17,7 @@ def lamp_id(area, number):
     return f"Prop_Lantern_01_C {area}.{area.rsplit('/', 1)[1]}:PersistentLevel.Prop_Lantern_01_C_{number}"
 
 
-async def verify_oil_lamps(host, guest, pawn, *, playtest_batch=False):
+async def verify_oil_lamps(host, guest, pawn, *, playtest_batch=False, lamps_only=False):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     evidence = {}
 
@@ -126,6 +126,20 @@ async def verify_oil_lamps(host, guest, pawn, *, playtest_batch=False):
         assert stored["source"] == inventory_source, stored
         return stored["class_path"], guid
 
+    async def visit_crossroads():
+        await enter_crossroads(host, pawn)
+        await suite.wait_resident_status(host_run, lambda frame:
+            frame.get("game", {}).get("map") == CROSSROADS and not frame.get("awaiting_zone_guest")
+            and frame.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
+        await suite.wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("map") == CROSSROADS)
+
+    async def verify_crossroads_lamp():
+        adjacent = lamp_id(CROSSROADS, 3)
+        await verify_state(adjacent, False)
+        await verify_one(lamp_id(CROSSROADS, 1))
+        await verify_state(adjacent, False)
+        return adjacent
+
     debt_evidence = []
     for balance in ("3000000", "2000000"):
         assert await suite.portable_probe_command(host.bridge, "portable-oil-lamps", f"debt-set\t{balance}") == balance
@@ -165,6 +179,10 @@ async def verify_oil_lamps(host, guest, pawn, *, playtest_batch=False):
     print("Shared debt and both Observatory gas lamp states verified", flush=True)
     if not playtest_batch:
         await verify_one(lamp_id(OBSERVATORY, 1))
+    if lamps_only:
+        await visit_crossroads()
+        adjacent = await verify_crossroads_lamp()
+        return {"gas_lamps": gas_evidence, "lamps": evidence, "other_lamp_stayed_unlit": adjacent}
     cabinet = await verify_observer_open(OBSERVATORY, "LootCrate_Small_BP_C_1")
     print("Guest watched the stock cabinet move through intermediate angles", flush=True)
     async def reputation(seat, action="read"):
@@ -207,7 +225,8 @@ async def verify_oil_lamps(host, guest, pawn, *, playtest_batch=False):
     await simmi("host")
     try:
         await simmi("talk")
-        assert quest in (await simmi("read")).split(";")[-1].split(",")
+        offers = (await simmi("read")).split(";")[-1].split(",")
+        assert quest in offers, f"Simmi offered {offers} in place of {quest}"
         await simmi("acceptdeaddrop")
         for run in (host_run, guest_run):
             await suite.wait_resident_status(run, lambda frame:
@@ -215,21 +234,13 @@ async def verify_oil_lamps(host, guest, pawn, *, playtest_batch=False):
     finally:
         await simmi("closesimmi")
     print("Both journals received Simmi's Crossroads Dead Drop", flush=True)
-    await enter_crossroads(host, pawn)
-    await suite.wait_resident_status(host_run, lambda frame:
-        frame.get("game", {}).get("map") == CROSSROADS and not frame.get("awaiting_zone_guest")
-        and frame.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
-    await suite.wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("map") == CROSSROADS)
+    await visit_crossroads()
     unloaded = f"{CROSSROADS}.CrossRoads_P:PersistentLevel.SilverfishUnloadedLootFixture_C_1"
     for _ in range(3):
         check = await host.bridge.command(native_loose_pickup.CHECK, unloaded)
         assert check[native_loose_pickup.CHECK_KEY] == {unloaded: False}, check.get("ack")
     print("Crossroads host repeatedly refused an unloaded loot source", flush=True)
-    adjacent = lamp_id(CROSSROADS, 3)
-    if not playtest_batch:
-        await verify_state(adjacent, False)
-        await verify_one(lamp_id(CROSSROADS, 1))
-        await verify_state(adjacent, False)
+    adjacent = None if playtest_batch else await verify_crossroads_lamp()
     latch = f"DoorLatch_BP_C {CROSSROADS}.CrossRoads_P:PersistentLevel.DoorLatch_BP_C_2"
     position = tuple(map(float, (await probe(host, "stage", latch)).split(",")))
     await suite.wait_resident_status(guest_run, lambda frame:
@@ -340,15 +351,17 @@ async def verify_streamed_switch(host, guest, pawn):
             "unloaded_on_both": True, "checkpoint_unchanged": True}
 
 
-async def exercise(work, first, second, saved, streamed_switch=False, crossroads_profile=False, playtest_batch=False):
+async def exercise(work, first, second, saved, streamed_switch=False, crossroads_profile=False, playtest_batch=False,
+                   lamps_only=False):
     with ExitStack() as fixtures:
         for game in (first, second):
             fixtures.enter_context(suite.installed_probe(game, mod="SilverfishPortableOilLampProbe",
                                                          fixture="portable_oil_lamp_probe.lua"))
-            fixtures.enter_context(suite.installed_probe(game, mod="SilverfishPortableSimmiJobsProbe",
-                                                         fixture="simmi_jobs_probe.lua"))
+            if not lamps_only:
+                fixtures.enter_context(suite.installed_probe(game, mod="SilverfishPortableSimmiJobsProbe",
+                                                             fixture="simmi_jobs_probe.lua"))
         async def power_checks(host, guest, pawn):
-            return await verify_oil_lamps(host, guest, pawn, playtest_batch=playtest_batch)
+            return await verify_oil_lamps(host, guest, pawn, playtest_batch=playtest_batch, lamps_only=lamps_only)
         await suite.verify(work, first, second, saved,
                            crossroads_profile=crossroads_profile, stock_interaction_feedback=True, stock_placed_item=playtest_batch,
                            oil_lamps_check=power_checks,
@@ -363,7 +376,10 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--streamed-switch", action="store_true")
     parser.add_argument("--crossroads-profile", action="store_true")
-    parser.add_argument("--playtest-batch", action="store_true", help="Skip the separately verified stock oil-lantern route")
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--playtest-batch", action="store_true", help="Skip the separately verified stock oil-lantern route")
+    scope.add_argument("--lamps-only", action="store_true", help="Check lamps on both maps without the gear and quest checks")
     args = parser.parse_args()
     asyncio.run(exercise(args.work.resolve(), args.first_game.resolve(), args.second_game.resolve(),
-                         args.vanilla_saved.resolve(), args.streamed_switch, args.crossroads_profile, args.playtest_batch))
+                         args.vanilla_saved.resolve(), args.streamed_switch, args.crossroads_profile, args.playtest_batch,
+                         args.lamps_only))
