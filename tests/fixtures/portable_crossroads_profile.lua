@@ -227,8 +227,9 @@ local function compare_switch_reads()
     return result
 end
 
-local function compare_placed_acid_reads()
-    local native = SilverfishReadNativePlacedAcidPhases
+local function compare_acid_reads(dynamic)
+    local reader = dynamic and "SilverfishReadNativeDynamicAcidSample" or "SilverfishReadNativePlacedAcidPhases"
+    local native = _G[reader]
     if type(native) ~= "function" then return "unavailable" end
     local pools = require("native_acid_pools")
     local state = inspect()
@@ -238,8 +239,8 @@ local function compare_placed_acid_reads()
         return assert(pools.rows(state, "hosting", status_row), "no placed acid pool row")
     end
 
-    local function measure(reader)
-        SilverfishReadNativePlacedAcidPhases = reader
+    local function measure(operation)
+        _G[reader] = operation
         local heap, start = collectgarbage("count"), stamp()
         for _ = 1, 16 do read() end
         return (stamp() - start) / 1000, collectgarbage("count") - heap
@@ -247,29 +248,41 @@ local function compare_placed_acid_reads()
 
     local running = collectgarbage("isrunning")
     local ok, result = pcall(function()
-        local batch, world_address, pool_addresses
-        SilverfishReadNativePlacedAcidPhases = function(world, addresses)
-            world_address, pool_addresses = world, addresses
-            batch = native(world, addresses)
-            return batch
+        local pool_count, native_count, first_address, second_argument = 0, 0
+        _G[reader] = function(first, second)
+            first_address, second_argument = first, second
+            local sample, pose = native(first, second)
+            if dynamic then
+                pool_count = pool_count + 1
+                if type(sample) == "string" and pose then native_count = native_count + 1 end
+            elseif sample then
+                pool_count = #sample
+                local _, phases = sample:gsub("[afe]", "")
+                native_count = phases
+            end
+            return sample, pose
         end
-        local native_row = read()
-        assert(batch and batch:find("[afe]"), "no placed phases read natively")
-        assert(native(world_address + 1, pool_addresses) == nil, "native acid reader accepted another world")
-        SilverfishReadNativePlacedAcidPhases = nil
-        assert(read() == native_row, "placed acid status did not match Lua")
+        local native_row = pools.rows(state, "hosting", status_row)
+        if not native_row or not first_address then return "unavailable" end
+        assert(native_count > 0, "no acid samples read natively")
+        if dynamic then
+            assert(native(first_address, second_argument + 1) == nil, "native acid sample accepted another world")
+        else
+            assert(native(first_address + 1, second_argument) == nil, "native acid phases accepted another world")
+        end
+        _G[reader] = nil
+        assert(read() == native_row, "acid pool status did not match Lua")
 
         collectgarbage("stop")
         local native_first, native_first_kib = measure(native)
         local lua_first, lua_first_kib = measure(nil)
         local lua_second, lua_second_kib = measure(nil)
         local native_second, native_second_kib = measure(native)
-        local _, native_count = batch:gsub("[afe]", "")
-        return ("%d,%d,%.3f,%.3f,%.3f,%.3f"):format(#batch, native_count,
+        return ("%d,%d,%.3f,%.3f,%.3f,%.3f"):format(pool_count, native_count,
             native_first + native_second, lua_first + lua_second,
             native_first_kib + native_second_kib, lua_first_kib + lua_second_kib)
     end)
-    SilverfishReadNativePlacedAcidPhases = native
+    _G[reader] = native
     if running then collectgarbage("restart") end
     if not ok then error(result, 0) end
     return result
@@ -437,9 +450,9 @@ LoopInGameThreadWithDelay(50, function()
     elseif action == "switchreader" and not capture then
         local ok, value = pcall(compare_switch_reads)
         if ok then message = value else message = "switch comparison failed: " .. tostring(value) end
-    elseif action == "acidphasereader" and not capture then
-        local ok, value = pcall(compare_placed_acid_reads)
-        if ok then message = value else message = "acid phase comparison failed: " .. tostring(value) end
+    elseif (action == "acidphasereader" or action == "acidposereader") and not capture then
+        local ok, value = pcall(compare_acid_reads, action == "acidposereader")
+        if ok then message = value else message = "acid reader comparison failed: " .. tostring(value) end
     elseif action == "readyroster" and not capture then
         if type(SilverfishProfileReadyRoster) == "function" then
             local ok, value = pcall(SilverfishProfileReadyRoster)

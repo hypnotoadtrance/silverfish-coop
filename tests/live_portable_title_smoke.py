@@ -8367,7 +8367,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_simmi_jammers, "simmi", "stock_simmi_jammers",
          lambda host, guest, pawn: verify_stock_simmi_jammers(host, guest, pawn, portable_probe_command)),
         (stock_acid_pool, "lab_east_wing_acid", "stock_acid_pool",
-         lambda host, guest, _pawn: verify_acid_pool(host, guest, portable_probe_command)),
+         lambda host, guest, _pawn: verify_acid_pool(host, guest, portable_probe_command, profile=crossroads_profile)),
         (stock_dock_gate, "tutorial_dock", "stock_dock_gate", check_dock_gate),
         (stock_warehouse_switch, "tutorial_dock", "stock_warehouse_switch", verify_warehouse_switch),
         (stock_warehouse_switch, "tutorial_dock", "stock_warehouse_radio",

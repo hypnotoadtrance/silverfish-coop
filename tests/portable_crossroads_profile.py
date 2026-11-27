@@ -12,6 +12,18 @@ from tools.silverfish.control import current_status, submit
 from tools.silverfish.travel import CROSSROADS
 
 
+async def compare_acid_reader(seat, probe, *, dynamic):
+    action = "acidposereader" if dynamic else "acidphasereader"
+    reply = (await probe(seat.bridge, "crossroads-profile", action, reply_end="|end")).removesuffix("|end")
+    if reply == "unavailable":
+        return None
+    assert not reply.startswith("acid reader comparison failed"), reply
+    count, native_count, native_ms, lua_ms, native_kib, lua_kib = map(float, reply.split(","))
+    return {"pools": int(count), "native_samples": int(native_count), "passes_per_reader": 32,
+            "native_ms": native_ms, "lua_ms": lua_ms, "native_heap_growth_kib": native_kib,
+            "lua_heap_growth_kib": lua_kib, "all_rows_matched": True}
+
+
 def instrument_profile(source, *, stock_receipts=False):
     code = (Path(__file__).with_name("fixtures") / "portable_crossroads_profile.lua").read_text(encoding="utf-8")
     anchor = "local function write_status("
@@ -934,7 +946,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
     lean = await asyncio.gather(*(compare_lean_reader(seat, probe) for seat in seats.values()))
     journal = {}
     anomaly_samples = {}
-    placed_acid_phases = {}
+    dynamic_acid_samples = {}
     if area == CROSSROADS:
         reply = await command(host, "anomalysamples")
         if reply != "unavailable":
@@ -943,14 +955,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
             anomaly_samples = {"anomaly_sample_comparison": {"actors": int(count), "passes_per_reader": 32,
                                 "native_ms": native_ms, "lua_ms": lua_ms, "native_heap_growth_kib": native_kib,
                                 "lua_heap_growth_kib": lua_kib, "all_samples_matched": True}}
-        reply = await command(host, "acidphasereader")
-        if reply != "unavailable":
-            assert not reply.startswith("acid phase comparison failed"), reply
-            count, native_count, native_ms, lua_ms, native_kib, lua_kib = map(float, reply.split(","))
-            placed_acid_phases = {"placed_acid_phase_comparison": {
-                "pools": int(count), "native_phase_reads": int(native_count), "passes_per_reader": 32,
-                "native_ms": native_ms, "lua_ms": lua_ms, "native_heap_growth_kib": native_kib,
-                "lua_heap_growth_kib": lua_kib, "all_rows_matched": True}}
+        dynamic_acid_samples = {"dynamic_acid_sample_comparison": await compare_acid_reader(host, probe, dynamic=True)}
         async def journal_action(action, receipt):
             reply = await host.bridge.command("native-host-invite-fixture", action)
             assert reply["ack"]["message"] == receipt, reply
@@ -974,4 +979,4 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
                            for seat, frame in zip(seats, wall_status, strict=True)},
             "guest_roster": {slot: row["name"] for slot, row in settled["game"]["pawns"].items()},
             "vitals_comparison": dict(zip(seats, comparison, strict=True)), **heartbeat, **guest_binding,
-            **coarse, **journal, **anomaly_samples, **placed_acid_phases, **ready_roster}
+            **coarse, **journal, **anomaly_samples, **dynamic_acid_samples, **ready_roster}

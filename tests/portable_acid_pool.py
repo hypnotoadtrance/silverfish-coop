@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 
 from live_multi_smoke import campaign_save_hashes
+from portable_crossroads_profile import compare_acid_reader
 from portable_guest_world_start import wait_resident_status
 from tools.silverfish.native_anomaly_effects import ACID_POOL_VIEW, ACID_POOLS
 from tools.silverfish.travel import CROSSROADS, EAST_WING, OBSERVATORY, RUIN_FIELDS
@@ -89,7 +90,7 @@ def pool_readback(raw):
     return parse(selected), parse(control)
 
 
-async def verify_dynamic_pool(host, guest, operate):
+async def verify_dynamic_pool(host, guest, operate, profile_probe):
     assert await operate(guest, "spawn-guest") == "suppressed"
     identity = await operate(host, "spawn-host")
     read = f"read-dynamic\t{identity}"
@@ -110,6 +111,7 @@ async def verify_dynamic_pool(host, guest, operate):
                 await asyncio.sleep(.09)
 
     await guest_state("a")
+    comparison = await compare_acid_reader(host, profile_probe, dynamic=True) if profile_probe else None
     assert await operate(host, f"fizzle-dynamic\t{identity}") == "f"
     await guest_state("f")
     await guest_state("e")
@@ -119,10 +121,10 @@ async def verify_dynamic_pool(host, guest, operate):
             await asyncio.sleep(.09)
     assert await operate(host, read) == "absent"
     return {"identity": identity, "pose": pose, "guest_phases": ["a", "f", "e"], "guest_only_pool_suppressed": True,
-            "retired_on_both_seats": True, "guest_damage_component_inactive": True}
+            "retired_on_both_seats": True, "guest_damage_component_inactive": True, "reader_comparison": comparison}
 
 
-async def verify_acid_pool(host, guest, probe):
+async def verify_acid_pool(host, guest, probe, *, profile=False):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     visits = await cross_to_east_wing(host, guest, probe)
     epoch = visits[-1]["epoch"]
@@ -150,6 +152,7 @@ async def verify_acid_pool(host, guest, probe):
                for value in (host_initial, host_control, guest_initial, guest_control)), (authority, observer)
     assert host_initial["dot_active"] and not guest_initial["dot_active"], (authority, observer)
     assert await operate(guest, "guest-extinguish") == "blocked"
+    placed_comparison = await compare_acid_reader(host, probe, dynamic=False) if profile else None
 
     center = [float(value) for value in (await operate(host, "begin")).split(",")]
     try:
@@ -191,7 +194,7 @@ async def verify_acid_pool(host, guest, probe):
                 break
             await asyncio.sleep(.12)
     assert all(values == ["a", "f", "e"] for values in phases.values()), phases
-    dynamic = await verify_dynamic_pool(host, guest, operate)
+    dynamic = await verify_dynamic_pool(host, guest, operate, probe if profile else None)
 
     def roster_retired(frame):
         game = frame.get("game", {})
@@ -224,4 +227,5 @@ async def verify_acid_pool(host, guest, probe):
                                 "retirement": {"trigger": "stock_timer", "host_roster_omitted_pool": True,
                                                "host_removed_after_seconds": round(host_removed_after, 3),
                                                "host": readings[0], "guest": readings[1]},
-                                "dynamic": dynamic, "checkpoint_unchanged": True}}
+                                "dynamic": dynamic, "placed_reader_comparison": placed_comparison,
+                                "checkpoint_unchanged": True}}

@@ -93,7 +93,21 @@ local dynamic_host = pool(host.world, "Dynamic_Test", 8, false)
 pools.created(dynamic_host, "host")
 assert(pools.rows(host, "hosting", row)[3]:find("spawned_Dynamic_Test:a:10.000", 1, true))
 dynamic_host.x = 20
-assert(pools.rows(host, "hosting", row)[3]:find("spawned_Dynamic_Test:a:20.000", 1, true))
+local dynamic_row = pools.rows(host, "hosting", row)[3]
+assert(dynamic_row:find("spawned_Dynamic_Test:a:20.000", 1, true))
+local native_phase = "a"
+SilverfishReadNativeDynamicAcidSample = function(address, world)
+    assert(address == dynamic_host.address and world == host.world.address)
+    return native_phase, "20.000,20.000,30.000:0.000,0.000,0.000:1.000,1.000,1.000:1.000"
+end
+assert(pools.rows(host, "hosting", row)[3] == dynamic_row)
+native_phase = "f"
+assert(pools.rows(host, "hosting", row)[3]:find("spawned_Dynamic_Test:f:20.000", 1, true))
+native_phase = false
+assert(pools.rows(host, "hosting", row)[3] == second .. ":a")
+native_phase = nil
+assert(pools.rows(host, "hosting", row)[3] == dynamic_row)
+SilverfishReadNativeDynamicAcidSample = nil
 pools.ended(dynamic_host.address, true)
 assert(pools.rows(host, "hosting", row)[3] == second .. ":a")
 

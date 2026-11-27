@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <string_view>
@@ -786,8 +787,10 @@ namespace
     }
 
     constexpr std::size_t placed_acid_limit = 64;
+    constexpr std::size_t dynamic_acid_limit = 128;
+    using AcidActors = std::unordered_map<std::uintptr_t, U::FWeakObjectPtr>;
 
-    struct PlacedAcidReader
+    struct AcidReader
     {
         U::FWeakObjectPtr world, pool_type, component_type, timeline_type;
         U::FBoolProperty* destroying{};
@@ -795,14 +798,16 @@ namespace
         U::FObjectProperty* component{};
         U::FStructProperty* timeline{};
         U::FBoolProperty* playing{};
-        std::unordered_map<std::uintptr_t, U::FWeakObjectPtr> actors;
+        U::FDoubleProperty* size{};
+        U::FObjectProperty* root{};
+        AcidActors placed, dynamic;
     };
 
-    thread_local PlacedAcidReader placed_acid_reader;
+    thread_local AcidReader acid_reader;
 
-    void remember_placed_acid_pool(U::UObject* actor, U::UWorld* world)
+    void remember_acid_pool(U::UObject* actor, U::UWorld* world)
     {
-        auto& reader = placed_acid_reader;
+        auto& reader = acid_reader;
         auto* pool_type = actor->GetClassPrivate();
         if (reader.world.Get() != world || reader.pool_type.Get() != pool_type)
         {
@@ -820,21 +825,41 @@ namespace
                 !timeline || timeline->GetArrayDim() != 1 || !timeline_type ||
                 timeline_type->GetPathName() != STR("/Script/Engine.Timeline") ||
                 !playing || playing->GetArrayDim() != 1) return;
-            reader = {world, pool_type, component_type, timeline_type, destroying, fizzled_out, component, timeline, playing, {}};
+            auto* size = property<U::FDoubleProperty>(actor, STR("SizeScaler"));
+            auto* root = property<U::FObjectProperty>(actor, STR("RootComponent"));
+            reader = {world, pool_type, component_type, timeline_type, destroying, fizzled_out, component, timeline, playing,
+                size && size->GetArrayDim() == 1 ? size : nullptr,
+                root && root->GetArrayDim() == 1 ? root : nullptr, {}, {}};
         }
+        const bool placed = actor->HasAnyFlags(U::RF_WasLoaded);
+        if (!placed && (!reader.size || !reader.root)) return;
+        auto& actors = placed ? reader.placed : reader.dynamic;
+        const auto limit = placed ? placed_acid_limit : dynamic_acid_limit;
         const auto address = reinterpret_cast<std::uintptr_t>(actor);
-        if (reader.actors.size() >= placed_acid_limit)
-            std::erase_if(reader.actors, [](const auto& entry) { return !entry.second.Get(); });
-        if (reader.actors.size() < placed_acid_limit || reader.actors.contains(address))
-            reader.actors.insert_or_assign(address, U::FWeakObjectPtr{actor});
+        if (actors.size() >= limit)
+            std::erase_if(actors, [](const auto& entry) { return !entry.second.Get(); });
+        if (actors.size() < limit || actors.contains(address))
+            actors.insert_or_assign(address, U::FWeakObjectPtr{actor});
     }
 
-    char placed_acid_phase(const PlacedAcidReader& reader, std::uintptr_t address, U::UObject* world)
+    U::UObject* acid_sample_world(std::uintptr_t address)
     {
-        const auto entry = reader.actors.find(address);
-        auto* actor = entry == reader.actors.end() ? nullptr : entry->second.Get();
-        if (!actor || actor->GetClassPrivate() != reader.pool_type.Get() ||
-            static_cast<U::AActor*>(actor)->GetWorld() != world) return '?';
+        auto* world = acid_reader.world.Get();
+        if (!world || reinterpret_cast<std::uintptr_t>(world) != address ||
+            !acid_reader.pool_type.Get() || !acid_reader.component_type.Get() || !acid_reader.timeline_type.Get()) return nullptr;
+        return world;
+    }
+
+    U::AActor* acid_sample_actor(const AcidActors& actors, std::uintptr_t address, U::UObject* world)
+    {
+        const auto entry = actors.find(address);
+        auto* actor = entry == actors.end() ? nullptr : static_cast<U::AActor*>(entry->second.Get());
+        return actor && actor->GetClassPrivate() == acid_reader.pool_type.Get() && actor->GetWorld() == world ? actor : nullptr;
+    }
+
+    char acid_sample_phase(const AcidReader& reader, U::AActor* actor)
+    {
+        if (!actor) return '?';
         if (reader.destroying->GetPropertyValueInContainer(actor)) return '-';
         if (reader.fizzled_out->GetPropertyValueInContainer(actor)) return 'e';
         auto* component = reader.component->GetObjectPropertyValue(reader.component->ContainerPtrToValuePtr<void>(actor));
@@ -851,10 +876,8 @@ namespace
         auto* stack = lua.get_lua_state();
         if (!U::IsInGameThreadRaw() || guest_session || lua_gettop(stack) != 2 || !lua_isinteger(stack, 1) ||
             lua_type(stack, 2) != LUA_TTABLE) return 0;
-        const auto& reader = placed_acid_reader;
-        auto* world = reader.world.Get();
-        if (!world || reinterpret_cast<std::uintptr_t>(world) != static_cast<std::uintptr_t>(lua_tointeger(stack, 1)) ||
-            !reader.pool_type.Get() || !reader.component_type.Get() || !reader.timeline_type.Get()) return 0;
+        auto* world = acid_sample_world(static_cast<std::uintptr_t>(lua_tointeger(stack, 1)));
+        if (!world) return 0;
 
         const auto count = lua_rawlen(stack, 2);
         if (!count || count > placed_acid_limit) return 0;
@@ -864,10 +887,48 @@ namespace
             lua_rawgeti(stack, 2, static_cast<lua_Integer>(index + 1));
             const auto address = lua_isinteger(stack, -1) ? static_cast<std::uintptr_t>(lua_tointeger(stack, -1)) : 0;
             lua_pop(stack, 1);
-            phases[index] = placed_acid_phase(reader, address, world);
+            phases[index] = acid_sample_phase(acid_reader, acid_sample_actor(acid_reader.placed, address, world));
         }
         lua_pushlstring(stack, phases.data(), count);
         return 1;
+    }
+
+    int read_dynamic_acid_sample(const Lua& lua)
+    {
+        if (!U::IsInGameThreadRaw() || guest_session || lua.get_stack_size() != 2 ||
+            !lua.is_integer(1) || !lua.is_integer(2)) return 0;
+        auto* world = acid_sample_world(static_cast<std::uintptr_t>(lua.get_integer(2)));
+        if (!world) return 0;
+        const auto& reader = acid_reader;
+        auto* actor = acid_sample_actor(reader.dynamic, static_cast<std::uintptr_t>(lua.get_integer(1)), world);
+        if (!actor || !reader.size || !reader.root) return 0;
+
+        const auto size = reader.size->GetPropertyValueInContainer(actor);
+        const auto phase = acid_sample_phase(reader, actor);
+        // Match the Lua SizeScaler gate before reading the pose.
+        if (!(size >= .001 && size <= 4) || phase == '-')
+        {
+            lua.set_bool(false);
+            return 1;
+        }
+        if (phase == '?') return 0;
+        auto* root = reader.root->GetObjectPropertyValue(reader.root->ContainerPtrToValuePtr<void>(actor));
+        constexpr auto destroyed = static_cast<U::EObjectFlags>(U::RF_BeginDestroyed | U::RF_FinishDestroyed);
+        if (!root || root->IsUnreachable() || root->HasAnyFlags(destroyed)) return 0;
+
+        const auto position = actor->K2_GetActorLocation();
+        const auto angles = actor->K2_GetActorRotation();
+        const auto scale = actor->GetActorScale3D();
+        std::array<char, 256> pose{};
+        const auto length = std::snprintf(pose.data(), pose.size(),
+            "%.3f,%.3f,%.3f:%.3f,%.3f,%.3f:%.3f,%.3f,%.3f:%.3f",
+            position.X(), position.Y(), position.Z(), angles.GetPitch(), angles.GetYaw(), angles.GetRoll(),
+            scale.X(), scale.Y(), scale.Z(), size);
+        if (length < 0 || static_cast<std::size_t>(length) >= pose.size()) return 0;
+        auto* stack = lua.get_lua_state();
+        lua_pushlstring(stack, &phase, 1);
+        lua_pushlstring(stack, pose.data(), static_cast<std::size_t>(length));
+        return 2;
     }
 
     int acid_pool_view(const Lua& lua)
@@ -885,8 +946,7 @@ namespace
         const bool guest = accepted && guest_world(world);
         if (count == 2)
         {
-            if (accepted && !guest && actor->HasAnyFlags(U::RF_WasLoaded))
-                remember_placed_acid_pool(actor, world);
+            if (accepted && !guest) remember_acid_pool(actor, world);
             lua.set_bool(accepted);
             lua.set_bool(guest);
             return 2;
@@ -1779,6 +1839,7 @@ namespace silverfish::native_anomaly_fields
             [](const Lua& current) { return qualify_placed(current, trap_class); });
         lua.register_function("SilverfishNativeAcidPool", acid_pool_view);
         lua.register_function("SilverfishReadNativePlacedAcidPhases", read_placed_acid_phases);
+        lua.register_function("SilverfishReadNativeDynamicAcidSample", read_dynamic_acid_sample);
         lua.register_function("SilverfishQualifyNativePlacedCanister",
             [](const Lua& current) { return qualify_placed(current, canister_class, remember_canister); });
         lua.register_function("SilverfishReadNativePlacedCanister", read_placed_canister);

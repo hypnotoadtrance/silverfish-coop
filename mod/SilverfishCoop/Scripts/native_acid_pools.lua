@@ -204,13 +204,21 @@ function pools.rows(state, phase, row)
         end
     end
     table.sort(dynamic_ids)
+    local read = SilverfishReadNativeDynamicAcidSample
+    local world = type(read) == "function" and current.world:GetAddress()
     for _, id in ipairs(dynamic_ids) do
         if #states >= max_pools then break end
-        local actor = current.dynamic[id].actor
-        local size = actor.SizeScaler
-        if type(size) == "number" and size >= .001 and size <= max_dynamic_size then
-            states[#states + 1] = id .. ":" .. stock_phase(actor) .. ":" .. transform(actor)
+        local entry = current.dynamic[id]
+        local phase, pose
+        if world then phase, pose = read(entry.address, world) end
+        if phase == nil then
+            local actor = entry.actor
+            local size = actor.SizeScaler
+            if type(size) == "number" and size >= .001 and size <= max_dynamic_size then
+                phase, pose = stock_phase(actor), transform(actor)
+            end
         end
+        if phase then states[#states + 1] = id .. ":" .. phase .. ":" .. pose end
     end
     current.published = current.published or #current.ids > 0 or #states > 0
     if current.published then return row("native-acid-pool-roster", current.area, #states > 0 and table.concat(states, "|") or "-") end
