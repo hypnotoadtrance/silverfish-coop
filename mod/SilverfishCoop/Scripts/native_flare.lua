@@ -1,18 +1,17 @@
 local flare = {}
 local guest_save = require("guest_save")
 local bolt_view = require("native_short_bolt_view")
+local content_paths = require("content_paths")
 
 local folder = "/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/"
 local bolt = "BlueprintGeneratedClass " .. folder .. "Bolt_Projectile_BP.Bolt_Projectile_BP_C"
 local pipe_bomb = "BlueprintGeneratedClass " .. folder .. "PipeBomb_Projectile_BP.PipeBomb_Projectile_BP_C"
+local projectile_base = folder .. "GrenadeProjectile_Master_BP.GrenadeProjectile_Master_BP_C"
+local loaded_projectile_base
 local gameplay_statics = "/Script/Engine.Default__GameplayStatics"
 local classes = {[bolt] = "bolt", [pipe_bomb] = "pipebomb"}
 for _, name in ipairs({"Flare_Projectile_BP", "Blue_Flare_Projectile_BP", "Yellow_Flare_Projectile_BP"}) do
     classes["BlueprintGeneratedClass " .. folder .. name .. "." .. name .. "_C"] = "flare"
-end
-flare.equipment = {}
-for _, name in ipairs({"Eqp_Flare", "Eqp_Flare_Blue", "Eqp_Flare_Yellow", "Eqp_Bolt", "Gren_PipeBomb"}) do
-    flare.equipment["/Game/Classes/Equipment/" .. name .. "." .. name .. "_C"] = true
 end
 local intent, receipt
 local projectiles, replicas = {}, {}
@@ -45,7 +44,13 @@ local function qualified(context, client)
     if not valid(actor) then return end
     local class = actor:GetClass()
     local kind = valid(class) and classes[class:GetFullName()]
-    if not kind or actor:IsActorBeingDestroyed() then return end
+    if not kind then
+        if not valid(loaded_projectile_base) then loaded_projectile_base = StaticFindObject(projectile_base) end
+        if not valid(loaded_projectile_base) or same(class, loaded_projectile_base)
+            or not actor:IsA(loaded_projectile_base) then return end
+        kind = "grenade"
+    end
+    if actor:IsActorBeingDestroyed() then return end
     local world = actor:GetWorld()
     local driver = valid(world) and world.NetDriver
     if not valid(driver) or not valid(driver.World) or driver.World:GetAddress() ~= world:GetAddress()
@@ -262,7 +267,7 @@ function flare.sync(state, phase)
     local local_pawn = state.local_pawn
     if not local_pawn or not valid(local_pawn.pawn) then return end
     local sequence, guid, toss, class, fuse_ms = SilverfishTakeLocalGuestFlare(local_pawn.pawn:GetAddress())
-    if sequence and flare.equipment[class] then
+    if sequence and content_paths.item_class(class, 512) then
         local pawn = local_pawn.pawn
         intent = {state.map, local_pawn.name, sequence, guid, toss and 1 or 0, class, fuse_ms}
         intent.actor, intent.slot, intent.save = pawn.EquipedItem, pawn.Save.PlayerEquipIndex, pawn.Save
@@ -321,7 +326,7 @@ function flare.command(fields, state, phase)
         or (toss ~= "0" and toss ~= "1") or type(SilverfishThrowNativeGuestFlare) ~= "function" then
         error("native_guest_flare_refused_scope", 0)
     end
-    if #fields == 6 and (not fuse or fuse < 0 or fuse > 5000 or tostring(fuse) ~= fields[6]) then
+    if #fields == 6 and (not fuse or fuse < 0 or fuse > 60000 or tostring(fuse) ~= fields[6]) then
         error("native_guest_flare_refused_fuse", 0)
     end
     local qualified, pawn, detached = pcall(guest_save.exact_item_context, state, phase, name)

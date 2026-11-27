@@ -5,6 +5,7 @@ import time
 import uuid
 
 from . import native_gold, native_inventory, party
+from .content_paths import item_class_name, named_actor
 
 
 ACTION = "native-guest-flare-throw"
@@ -25,14 +26,16 @@ CLASSES = {
 
 
 def _parse_fuse(raw):
-    if not isinstance(raw, str) or not re.fullmatch(r"0|[1-9][0-9]{0,3}", raw) or int(raw) > 5000:
-        raise ValueError("Invalid stock pipe bomb fuse")
+    if not isinstance(raw, str) or not re.fullmatch(r"0|[1-9][0-9]{0,4}", raw) or int(raw) > 60_000:
+        raise ValueError("Invalid stock grenade fuse")
     return int(raw)
 
 
 def _fuse_field(item_class, extra):
-    if item_class == PIPE_BOMB and len(extra) == 1:
-        return {"fuse_ms": _parse_fuse(extra[0])}
+    if len(extra) == 1 and (item_class == PIPE_BOMB or item_class not in CLASSES):
+        fuse_ms = _parse_fuse(extra[0])
+        if item_class != PIPE_BOMB or fuse_ms <= 5000:
+            return {"fuse_ms": fuse_ms}
     if item_class == PIPE_BOMB or extra:
         raise ValueError("Wrong fuse field for stock throwable")
     return {}
@@ -44,18 +47,19 @@ def parse(fields, phase, area):
     if fields[0] == INPUT and phase == "connected" and len(fields) in (7, 8):
         _, _, pawn, serial, guid, toss, item_class, *extra = fields
         sequence = int(serial)
-        if not 0 < sequence < 2**53 or not native_gold.valid_guid(guid) or toss not in ("0", "1") or item_class not in CLASSES:
+        if (not 0 < sequence < 2**53 or not native_gold.valid_guid(guid) or toss not in ("0", "1")
+                or not item_class_name(item_class, 512)):
             raise ValueError("Invalid stock flare input")
         return dict(map=area, pawn=pawn, sequence=sequence, guid=guid, toss=toss, class_path=item_class,
                     **_fuse_field(item_class, extra))
     if fields[0] == ACTION and phase == "hosting" and len(fields) in (9, 10):
         _, _, pawn, guid, toss, raw_before, raw_after, item_class, projectile, *extra = fields
         before, after = int(raw_before), int(raw_after)
-        projectile_class = CLASSES.get(item_class)
+        leaf = projectile.rsplit(":", 1)[-1].removeprefix("PersistentLevel.")
+        projectile_class = CLASSES.get(item_class, leaf.rpartition("_")[0])
         if (not native_gold.valid_guid(guid) or toss not in ("0", "1") or not 1 <= before < 2**31 or after != before - 1
-                or not projectile_class or not re.fullmatch(
-                    re.escape(f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel.{projectile_class}_") + r"[0-9]+",
-                    projectile)):
+                or not item_class_name(item_class, 512) or not re.fullmatch(r"[A-Za-z0-9_-]+_C", projectile_class)
+                or not named_actor(area, f"{projectile_class} {projectile}", projectile_class)):
             raise ValueError("Invalid stock flare throw receipt")
         return dict(map=area, pawn=pawn, guid=guid, toss=toss, before=before, after=after,
                     class_path=item_class, projectile=projectile, **_fuse_field(item_class, extra))

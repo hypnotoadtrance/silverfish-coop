@@ -89,26 +89,21 @@ namespace
     constexpr auto grenade_base_path = STR("/Game/Classes/Equipment/Grenade_Master_BP.Grenade_Master_BP_C");
     constexpr auto grenade_spawn_path = STR("/Game/Classes/Equipment/Grenade_Master_BP.Grenade_Master_BP_C:SpawnNade");
     constexpr auto grenade_throw_path = STR("/Game/Classes/Equipment/Grenade_Master_BP.Grenade_Master_BP_C:ThrowNade");
-    constexpr std::int32_t max_pipe_fuse_ms = 5000;
+    constexpr auto grenade_projectile_base =
+        STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/GrenadeProjectile_Master_BP.GrenadeProjectile_Master_BP_C");
+    constexpr std::int32_t max_throwable_fuse_ms = 60000;
     struct ThrowableProfile
     {
         const Unreal::TCHAR* equipment;
-        const Unreal::TCHAR* projectile;
         std::string_view fixture_kind;
         bool carries_fuse{};
     };
     constexpr ThrowableProfile throwables[]{
-        {STR("/Game/Classes/Equipment/Eqp_Flare.Eqp_Flare_C"),
-         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Flare_Projectile_BP.Flare_Projectile_BP_C"), "stock-flare"},
-        {STR("/Game/Classes/Equipment/Eqp_Flare_Blue.Eqp_Flare_Blue_C"),
-         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Blue_Flare_Projectile_BP.Blue_Flare_Projectile_BP_C"), "stock-flare-blue"},
-        {STR("/Game/Classes/Equipment/Eqp_Flare_Yellow.Eqp_Flare_Yellow_C"),
-         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Yellow_Flare_Projectile_BP.Yellow_Flare_Projectile_BP_C"), "stock-flare-yellow"},
-        {STR("/Game/Classes/Equipment/Eqp_Bolt.Eqp_Bolt_C"),
-         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Bolt_Projectile_BP.Bolt_Projectile_BP_C"), "stock-bolt"},
-        {STR("/Game/Classes/Equipment/Gren_PipeBomb.Gren_PipeBomb_C"),
-         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/PipeBomb_Projectile_BP.PipeBomb_Projectile_BP_C"),
-         "stock-pipe-bomb", true},
+        {STR("/Game/Classes/Equipment/Eqp_Flare.Eqp_Flare_C"), "stock-flare"},
+        {STR("/Game/Classes/Equipment/Eqp_Flare_Blue.Eqp_Flare_Blue_C"), "stock-flare-blue"},
+        {STR("/Game/Classes/Equipment/Eqp_Flare_Yellow.Eqp_Flare_Yellow_C"), "stock-flare-yellow"},
+        {STR("/Game/Classes/Equipment/Eqp_Bolt.Eqp_Bolt_C"), "stock-bolt"},
+        {STR("/Game/Classes/Equipment/Gren_PipeBomb.Gren_PipeBomb_C"), "stock-pipe-bomb", true},
     };
     constexpr auto old_pipe_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C");
     constexpr auto weapon_base_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C");
@@ -2916,13 +2911,29 @@ namespace
 
     constexpr int quick_slots = 8;
 
-    const ThrowableProfile* throwable_profile(Unreal::UClass* type)
+    const ThrowableProfile* throwable_fixture(Unreal::UClass* type)
     {
         if (!live(type)) return nullptr;
         const auto path = type->GetPathName();
         const auto match = std::ranges::find_if(throwables, [&](const auto& profile) { return path == profile.equipment; });
-        auto* base = match != std::ranges::end(throwables) ? find<Unreal::UClass>(grenade_base_path) : nullptr;
-        return base && type->IsChildOf(base) ? &*match : nullptr;
+        return match != std::ranges::end(throwables) ? &*match : nullptr;
+    }
+
+    Unreal::UClass* throwable_projectile(Unreal::UClass* equipment, Unreal::UObject* item)
+    {
+        auto* grenade = find<Unreal::UClass>(grenade_base_path);
+        if (!live(equipment) || !live(item) || !grenade || equipment == grenade || !equipment->IsChildOf(grenade) ||
+            !boolean(item, STR("Stacks"), true)) return nullptr;
+        auto* projectile = Unreal::Cast<Unreal::UClass>(object(item, STR("Projectile")));
+        auto* base = find<Unreal::UClass>(grenade_projectile_base);
+        return live(projectile) && base && projectile != base && projectile->IsChildOf(base) ? projectile : nullptr;
+    }
+
+    bool carries_throwable_fuse(Unreal::UObject* item)
+    {
+        if (const auto* fixture = throwable_fixture(item->GetClassPrivate())) return fixture->carries_fuse;
+        auto* fuse = field<Unreal::FFloatProperty>(item, STR("FuseTime_Player"));
+        return fuse && fuse->GetPropertyValueInContainer(item) >= 0;
     }
 
     bool supported_stack_equipment(Unreal::UClass* type, Unreal::UObject* defaults)
@@ -2969,9 +2980,8 @@ namespace
 
     struct LocalFlareIntent
     {
-        Unreal::FWeakObjectPtr pawn, save;
+        Unreal::FWeakObjectPtr pawn, save, equipment;
         Guid guid{};
-        const ThrowableProfile* profile{};
         std::uint64_t sequence{};
         bool toss{};
         std::int32_t fuse_ms{-1};
@@ -2986,18 +2996,15 @@ namespace
         static const Unreal::FName spawn{STR("SpawnNade")};
         if (!function || function->GetFName() != spawn || !parameters || !live(actor) ||
             !Unreal::IsInGameThreadRaw()) return;
-        const auto* throwable = throwable_profile(actor->GetClassPrivate());
-        auto* pawn = throwable ? object(actor, STR("Player_Ref")) : nullptr;
+        auto* pawn = object(actor, STR("Player_Ref"));
         if (!pawn || silverfish::native_interaction_input::current_guest_pawn(reinterpret_cast<std::uintptr_t>(pawn)) != pawn ||
-            object(pawn, STR("EquipedItem")) != actor) return;
+            object(pawn, STR("EquipedItem")) != actor || !throwable_projectile(actor->GetClassPrivate(), actor)) return;
         ThrowableCall call{grenade_spawn_path};
         if (!call.valid() || call.function != function) return;
-        iteration.PreventOriginalFunctionCall();
-        if (!iteration.OriginalFunctionCallPrevented()) return;
-
         const bool toss = call.toss->GetPropertyValueInContainer(parameters);
+        const bool carries_fuse = carries_throwable_fuse(actor);
         std::int32_t fuse_ms = -1;
-        if (throwable->carries_fuse)
+        if (carries_fuse)
         {
             auto* fuse = field<Unreal::FFloatProperty>(actor, STR("FuseTime_Player"));
             auto* cook = field<Unreal::FDoubleProperty>(actor, STR("CookTime"));
@@ -3005,16 +3012,12 @@ namespace
             {
                 const double stock_fuse = fuse->GetPropertyValueInContainer(actor);
                 const double elapsed = cook->GetPropertyValueInContainer(actor);
-                if (std::isfinite(stock_fuse) && stock_fuse >= 0 && stock_fuse <= max_pipe_fuse_ms / 1000.0 &&
+                if (std::isfinite(stock_fuse) && stock_fuse >= 0 && stock_fuse <= max_throwable_fuse_ms / 1000.0 &&
                     std::isfinite(elapsed) && elapsed >= 0)
                     fuse_ms = static_cast<std::int32_t>(std::lround(std::max(0.0, stock_fuse - elapsed) * 1000));
             }
         }
-        // The native throw completion restores the hand pose and its audio. An
-        // empty ThrownNade makes that branch return without consuming stock.
-        ThrowableCall cleanup{grenade_throw_path};
-        if (cleanup.valid() && !live(object(actor, STR("ThrownNade")))) cleanup.invoke(actor, toss);
-        if (flare_sequence >= (1ULL << 53) - 1 || (throwable->carries_fuse && fuse_ms < 0)) return;
+        if (flare_sequence >= (1ULL << 53) - 1 || (carries_fuse && fuse_ms < 0)) return;
         Context context{};
         context.pawn = pawn;
         context.weapon = actor->GetClassPrivate();
@@ -3032,8 +3035,13 @@ namespace
         const auto guid = inventory.identity(row);
         const auto ammo = inventory.ammo->GetPropertyValueInContainer(row);
         if (guid == Guid{} || inventory.row_class(row) != context.weapon || ammo < 1) return;
-        local_flare = {pawn, context.save, guid, throwable, ++flare_sequence, toss, fuse_ms,
+        iteration.PreventOriginalFunctionCall();
+        if (!iteration.OriginalFunctionCallPrevented()) return;
+        local_flare = {pawn, context.save, context.weapon, guid, ++flare_sequence, toss, fuse_ms,
             HoldClock::now() + std::chrono::seconds(2)};
+        // With an empty ThrownNade, stock restores the hand pose without debiting inventory.
+        ThrowableCall cleanup{grenade_throw_path};
+        if (cleanup.valid() && !live(object(actor, STR("ThrownNade")))) cleanup.invoke(actor, toss);
     }
 
     void flare_script_pre(HoldHook& iteration, Unreal::UObject* actor, Unreal::FFrame& frame, void*)
@@ -3046,14 +3054,15 @@ namespace
         if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
         const auto address = lua.get_integer();
         auto* pawn = address > 0 ? silverfish::native_interaction_input::current_guest_pawn(address) : nullptr;
+        auto* equipment = local_flare.equipment.Get();
         if (!pawn || pawn != local_flare.pawn.Get() || object(pawn, STR("Save")) != local_flare.save.Get() ||
-            !local_flare.profile || HoldClock::now() >= local_flare.deadline) return 0;
+            !live(equipment) || HoldClock::now() >= local_flare.deadline) return 0;
         const auto intent = std::exchange(local_flare, {});
         const auto& guid = intent.guid;
         lua.set_integer(intent.sequence);
         lua.set_string(std::format("{:08X}{:08X}{:08X}{:08X}", guid[0], guid[1], guid[2], guid[3]));
         lua.set_bool(intent.toss);
-        lua.set_string(RC::to_utf8_string(intent.profile->equipment));
+        lua.set_string(RC::to_utf8_string(equipment->GetPathName()));
         if (intent.fuse_ms >= 0)
         {
             lua.set_integer(intent.fuse_ms);
@@ -3080,19 +3089,18 @@ namespace
         if (!locate(context, inventory).empty() || !inventory.item || inventory.equipment_index < 0 ||
             inventory.equipment_index >= quick_slots) return refuse("native_guest_flare_refused_slot");
         context.weapon = Unreal::Cast<Unreal::UClass>(inventory.row_class(inventory.item));
-        const auto* throwable = throwable_profile(context.weapon);
-        auto* actor = throwable ? equipped(context, inventory) : nullptr;
-        auto* projectile_class = actor ? object(actor, STR("Projectile")) : nullptr;
+        auto* actor = equipped(context, inventory);
+        auto* projectile_class = throwable_projectile(context.weapon, actor);
         auto* ammo = field<Unreal::FIntProperty>(actor, STR("Ammo"));
         const auto before = inventory.ammo->GetPropertyValueInContainer(inventory.item);
-        if (!actor || !live(projectile_class) || projectile_class->GetPathName() != throwable->projectile ||
-            !boolean(actor, STR("Stacks"), true) || !ammo || before < 1 ||
+        if (!projectile_class || !ammo || before < 1 ||
             ammo->GetPropertyValueInContainer(actor) != before) return refuse("native_guest_flare_refused_equipment");
         const auto fuse_ms = arguments == 5 ? lua.get_integer() : -1;
-        auto* fuse = throwable->carries_fuse ? field<Unreal::FFloatProperty>(actor, STR("FuseTime_Player")) : nullptr;
-        auto* cook = throwable->carries_fuse ? field<Unreal::FDoubleProperty>(actor, STR("CookTime")) : nullptr;
-        if ((arguments == 5) != throwable->carries_fuse || (throwable->carries_fuse &&
-            (!fuse || !cook || fuse_ms < 0 || fuse_ms > max_pipe_fuse_ms)))
+        const bool carries_fuse = carries_throwable_fuse(actor);
+        auto* fuse = carries_fuse ? field<Unreal::FFloatProperty>(actor, STR("FuseTime_Player")) : nullptr;
+        auto* cook = carries_fuse ? field<Unreal::FDoubleProperty>(actor, STR("CookTime")) : nullptr;
+        if ((arguments == 5) != carries_fuse || (carries_fuse &&
+            (!fuse || !cook || fuse_ms < 0 || fuse_ms > max_throwable_fuse_ms)))
             return refuse("native_guest_flare_refused_fuse");
         ThrowableCall call{grenade_spawn_path};
         auto* equipped_property = field<Unreal::FObjectProperty>(context.pawn, STR("EquipedItem"));
@@ -3153,7 +3161,7 @@ namespace
         result(lua, true, "thrown");
         lua.set_integer(before);
         lua.set_integer(before - 1);
-        lua.set_string(RC::to_utf8_string(throwable->equipment));
+        lua.set_string(RC::to_utf8_string(context.weapon->GetPathName()));
         lua.set_string(RC::to_utf8_string(spawned->GetPathName()));
         if (fuse)
         {
@@ -4848,7 +4856,7 @@ namespace
             auto* expected_class = find<Unreal::UClass>(path);
             if (!expected_class || (operation == Operation::Seed && !qualified_weapon(expected_class) &&
                 !qualified_blowtorch(expected_class) && !qualified_melee_item(expected_class, crowbar_path) &&
-                !throwable_profile(expected_class)))
+                !throwable_projectile(expected_class, expected_class->GetClassDefaultObject().Get())))
                 return fail(operation == Operation::SeedAmmo ? "stock_guest_ammo_fixture_class_unavailable"
                                                              : "stock_guest_weapon_class_unavailable");
             if (const auto error = locate(context, inventory, expected_class); !error.empty()) return fail(error);
@@ -4873,7 +4881,8 @@ namespace
             if constexpr (operation == Operation::Inspect)
             {
                 auto* item_type = Unreal::Cast<Unreal::UClass>(row_class);
-                if (!context.weapon && throwable_profile(item_type)) context.weapon = item_type;
+                if (!context.weapon && item_type && throwable_projectile(item_type, item_type->GetClassDefaultObject().Get()))
+                    context.weapon = item_type;
             }
         }
         if (!context.weapon) return fail("guest_weapon_class_unqualified");

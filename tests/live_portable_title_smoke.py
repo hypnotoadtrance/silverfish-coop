@@ -2444,7 +2444,8 @@ async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str)
         raise AssertionError((kind, role, "retired" if retired else "in flight", status))
 
     verified = {}
-    for owner, kind in ((host, "pipebomb"), (host, "bolt"), (guest, "bolt"), (guest, "pipebomb")):
+    for owner, kind in ((host, "pipebomb"), (host, "bolt"), (guest, "bolt"), (guest, "pipebomb"),
+                        (guest, "flashbang")):
         if case not in ("all", kind) and (case != "ground" or kind != "bolt"):
             continue
         side = "host" if owner is host else "guest"
@@ -2466,7 +2467,7 @@ async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str)
             await wait_resident_status(position_run, lambda frame: math.dist(frame.get("game", {}).get("pawns", {})
                                        .get("local", {}).get("location", [0, 0, 0]), target) < 20, timeout=8)
         assert await probe(owner, "press", kind) == "press"
-        if owner is guest and kind == "pipebomb":
+        if owner is guest and kind in ("pipebomb", "flashbang"):
             async with asyncio.timeout(3):
                 while (cooked := float(await probe(owner, "cook", kind))) < .18:
                     await asyncio.sleep(.05)
@@ -2532,16 +2533,17 @@ async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str)
             receipt = confirmation["game"]["native_guest_flare_throw"]
             assert (receipt["pawn"], receipt["before"], receipt["after"]) == (pawn, 1, 0), receipt
             record["consumed"] = receipt
-            if kind == "pipebomb":
+            if kind in ("pipebomb", "flashbang"):
                 assert 0 < receipt["fuse_ms"] < 5000 and abs(shots[0]["fuse_seconds"] - receipt["fuse_ms"] / 1000) < .002
                 record["stock_cook_before_release"] = cooked
                 async with asyncio.timeout(5):
                     while (charges := await probe(guest, "charges", kind)) != "0,-1":
                         await asyncio.sleep(.05)
                 record["guest_charges_after_throw"] = charges
-        if kind == "pipebomb":
+        if kind in ("pipebomb", "flashbang"):
             record["retired"] = await asyncio.gather(observe(host, kind, 3, retired=True),
                                                       observe(guest, kind, 1, retired=True))
+        if kind == "pipebomb":
             record["stock_blast"] = await probe(host, "blasts", kind)
             assert record["stock_blast"].startswith("1:"), record
             async with asyncio.timeout(8):
@@ -9432,7 +9434,7 @@ if __name__ == "__main__":
                         help="verify a guest stock camera shutter advances the authored Bronze Quarry photo objective")
     parser.add_argument("--stock-bottle", action="store_true",
                         help="verify stock bottle throws, prop break cues, acid pools, and wooden debris on both peers")
-    parser.add_argument("--stock-throwables", choices=("all", "pipebomb", "bolt", "ground"), nargs="?", const="all",
+    parser.add_argument("--stock-throwables", choices=("all", "pipebomb", "bolt", "ground", "flashbang"), nargs="?", const="all",
                         help="verify host and guest bolt flight, a stock host pipe bomb detonation, or both")
     parser.add_argument("--stock-roaming-barter", action="store_true",
                         help="compare the stock identity of a replicated dynamically spawned NPC trader")

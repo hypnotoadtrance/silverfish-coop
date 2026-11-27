@@ -17,7 +17,8 @@ end
 
 local folder = "/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/"
 local fixture_class = folder .. "Flare_Projectile_BP.Flare_Projectile_BP_C"
-local capsule_class, primitive_class, grab_fn = object(), object(), object()
+local base_path = folder .. "GrenadeProjectile_Master_BP.GrenadeProjectile_Master_BP_C"
+local capsule_class, primitive_class, grab_fn, grenade_base = object(), object(), object(), object()
 local traced, grab_hook, pre, post, authoritative_pawn
 local origin, center = {X = 0, Y = 0, Z = 0}, {X = 100, Y = 0, Z = 0}
 local trace = object()
@@ -32,6 +33,7 @@ local known = {
     ["/Script/Engine.PrimitiveComponent"] = primitive_class,
     ["/Script/Engine.Default__KismetSystemLibrary"] = trace,
     ["/Game/Classes/Player/Player_FP.Player_FP_C:Grab_Release_Object"] = grab_fn,
+    [base_path] = grenade_base,
 }
 function StaticFindObject(path) return known[path] end
 function RegisterBeginPlayPreHook(callback) pre = callback end
@@ -45,15 +47,16 @@ package.loaded.native_observer_target = {}
 package.loaded.native_guest_drop_projection = {start_carry = function() end}
 package.loaded.players = {is_standing_guest = function(pawn) return pawn == authoritative_pawn end}
 
-local function projectile(path, server, world)
+local function projectile(path, server, world, derived)
     if not world then
         world = object()
         world.NetDriver = object({World = world, ServerConnection = not server and object() or nil})
     end
-    local class = object()
+    local class = path == base_path and grenade_base or object()
     function class:GetFullName() return "BlueprintGeneratedClass " .. path end
     local actor = object({Lit = true, bReplicateMovement = true, ReplicatedMovement = {bRepPhysics = false}})
     function actor:GetClass() return class end
+    function actor:IsA(wanted) return wanted == grenade_base and (derived or class == grenade_base) end
     function actor:GetWorld() return world end
     function actor:GetLocalRole() return server and 3 or 1 end
     function actor:HasAuthority() return server end
@@ -73,6 +76,10 @@ local function projectile(path, server, world)
         function part:SetCollisionEnabled(value) self.mode = value end
         function part:GetCollisionEnabled() return self.mode end
         function part:SetEnableGravity(value) self.gravity = value end
+        function part:SetOnlyOwnerSee(value) self.only_owner_see = value end
+        function part:SetOwnerNoSee(value) self.owner_no_see = value end
+        function part:SetVisibility(value) self.visible = value end
+        function part:SetHiddenInGame(value) self.hidden = value end
         function part:IsAnySimulatingPhysics() return self.simulating == true end
         function part:SetSimulatePhysics(value) self.simulating = value end
         function part:SetCollisionResponseToChannel(channel, value) self.response[channel] = value end
@@ -155,10 +162,20 @@ post(pipe_context)
 assert(pipe.FuseTime == 86400 and pipe.collision == false and not pipe.ProjectileMovement.active)
 assert(not flare.carry_root(pipe, client.world), "the bomb replica cannot become a local physics grip")
 
-local grenade, _, grenade_context = projectile(folder .. "GrenadeProjectile_Master_BP.GrenadeProjectile_Master_BP_C", false)
+local grenade, _, grenade_context = projectile(base_path, false)
 pre(grenade_context)
 post(grenade_context)
 assert(grenade.collision == nil and grenade.ProjectileMovement.active, "unscoped projectile touched")
+
+local custom_path = "/ModContent/Equipment/CustomGrenade.CustomGrenade_C"
+local custom, _, custom_context = projectile(custom_path, false, client.world, true)
+pre(custom_context)
+post(custom_context)
+assert(custom.FuseTime == 86400 and custom.collision == false and not custom.ProjectileMovement.active)
+local unrelated, _, unrelated_context = projectile(custom_path, false, client.world)
+pre(unrelated_context)
+post(unrelated_context)
+assert(unrelated.FuseTime == nil and unrelated.ProjectileMovement.active)
 
 now = now + 1
 replica.ReplicatedMovement.bRepPhysics = true

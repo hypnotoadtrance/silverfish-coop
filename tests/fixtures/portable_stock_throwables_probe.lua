@@ -13,6 +13,7 @@ local item_ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local profiles = {
     bolt = {"Eqp_Bolt", "Bolt_Projectile_BP_C"},
     pipebomb = {"Gren_PipeBomb", "PipeBomb_Projectile_BP_C"},
+    flashbang = {"Gren_FlashBang", "FlashBang_Projectile_BP_C"},
 }
 local shots, blasts, last, landed = {}, {}, nil, nil
 local watch_pawn, short_bolt_samples, watching
@@ -33,7 +34,7 @@ local function face_open_space(pawn, held, kind)
     local origin = camera:K2_GetComponentLocation()
     local color = {R = 0, G = 0, B = 0, A = 1}
     local aim
-    if kind == "pipebomb" then
+    if kind ~= "bolt" then
         aim = {Pitch = -18, Yaw = direction.Yaw, Roll = 0}
     else
         for _, pitch in ipairs({25, 45, 60, 5}) do

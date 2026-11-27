@@ -8,6 +8,16 @@ from tools.silverfish.travel import OBSERVATORY
 
 
 class StockFlareReceiptTests(unittest.TestCase):
+    def test_discovered_projectile_receipt_accepts_a_mounted_content_class(self):
+        item = "/ModContent/Grenades/CustomFlash.CustomFlash_C"
+        path = f"{OBSERVATORY}.Observitory_P:PersistentLevel.CustomProjectile_C_25"
+        row = [native_flare.ACTION, OBSERVATORY, "guest", "A" * 32, "0", "2", "1", item, path, "12000"]
+        proof = native_flare.parse(row, "hosting", OBSERVATORY)
+        self.assertEqual((proof["class_path"], proof["projectile"], proof["fuse_ms"]), (item, path, 12000))
+        row[8] = path.replace("PersistentLevel", "DifferentLevel")
+        with self.assertRaises(ValueError):
+            native_flare.parse(row, "hosting", OBSERVATORY)
+
     def test_each_stock_class_verifies_only_its_own_projectile(self):
         for item, projectile in native_flare.CLASSES.items():
             with self.subTest(item=item):
