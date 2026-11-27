@@ -31,26 +31,26 @@ class NativeStashTests(unittest.IsolatedAsyncioTestCase):
 
         bridge.local_bridge.command.side_effect = command
         received = await bridge.command(native_stash.RENDER_MEMORY, "42", OBSERVATORY, SITE, "1",
-                                        timeout=5, stash_payload=body)
+                                        timeout=5, catalog_body=body)
         self.assertTrue(received[native_stash.MEMORY_VIEW])
         self.assertTrue(received[native_stash.LARGE_MEMORY_VIEW])
         bridge.local_bridge.command.reset_mock()
         for invalid in (None, "text", b"truncated", b"\r\n", b"x" * native_stash.MEMORY_VIEW_MAX_BYTES + b"\n"):
             with self.assertRaisesRegex(ValueError, "Invalid resident stash view payload"):
-                await bridge.command(native_stash.RENDER_MEMORY, "42", OBSERVATORY, SITE, "1", stash_payload=invalid)
-        with self.assertRaisesRegex(ValueError, "requires the resident stash view command"):
-            await bridge.command("ordinary-command", stash_payload=body)
+                await bridge.command(native_stash.RENDER_MEMORY, "42", OBSERVATORY, SITE, "1", catalog_body=invalid)
+        with self.assertRaisesRegex(ValueError, "requires a stash or merchant view command"):
+            await bridge.command("ordinary-command", catalog_body=body)
         bridge.local_bridge.command.assert_not_awaited()
 
         bridge.local_bridge.command.side_effect = lambda request, timeout: response + "ack\twrong\taccepted\t-\n"
         with self.assertRaisesRegex(RuntimeError, "did not match"):
-            await bridge.command(native_stash.RENDER_MEMORY, "42", OBSERVATORY, SITE, "0", stash_payload=b"")
+            await bridge.command(native_stash.RENDER_MEMORY, "42", OBSERVATORY, SITE, "0", catalog_body=b"")
         self.assertIs(bridge._local_status, received)
         bridge.local_bridge.command.side_effect = lambda request, timeout: response + (
             f"ack\t{request.partition(b'\t')[0].decode()}\taccepted\t-\n"
             "native-guest-ui-body\t1\n\n")
         with self.assertRaisesRegex(RuntimeError, "unexpected body"):
-            await bridge.command(native_stash.RENDER_MEMORY, "42", OBSERVATORY, SITE, "0", stash_payload=b"")
+            await bridge.command(native_stash.RENDER_MEMORY, "42", OBSERVATORY, SITE, "0", catalog_body=b"")
         self.assertIs(bridge._local_status, received)
 
     async def test_large_resident_ticket_binds_payload_and_prefix_only_with_native_support(self):
@@ -69,15 +69,15 @@ class NativeStashTests(unittest.IsolatedAsyncioTestCase):
 
         bridge.local_bridge.command.side_effect = command
         command_args = native_stash.RENDER_MEMORY, "1", OBSERVATORY, SITE, "1"
-        await bridge.command(*command_args, stash_payload=body)
+        await bridge.command(*command_args, catalog_body=body)
         for args, invalid in ((command_args, body + b"\n"),
                               ((native_stash.RENDER_MEMORY, "1", "x" * 1024, SITE, "1"), body),
                               (("ordinary-command",), body)):
             with self.assertRaises(ValueError):
-                await bridge.command(*args, stash_payload=invalid)
+                await bridge.command(*args, catalog_body=invalid)
         bridge.local_bridge.stash_body_limit = 0
         with self.assertRaisesRegex(ValueError, "Invalid resident stash view payload"):
-            await bridge.command(*command_args, stash_payload=body)
+            await bridge.command(*command_args, catalog_body=body)
         bridge.local_bridge.command.assert_awaited_once()
 
     async def test_stash_view_uses_memory_for_split_and_empty_pages_with_legacy_fallback(self):
@@ -121,7 +121,7 @@ class NativeStashTests(unittest.IsolatedAsyncioTestCase):
                         return game
                     if in_memory:
                         self.assertEqual((action, extra, kwargs), (native_stash.RENDER_MEMORY, (str(len(page)),),
-                            {"timeout": 5, "stash_payload": "".join(page).encode("ascii")}))
+                            {"timeout": 5, "catalog_body": "".join(page).encode("ascii")}))
                         self.assertEqual(list(directory.iterdir()), [])
                     else:
                         nonce, count = extra

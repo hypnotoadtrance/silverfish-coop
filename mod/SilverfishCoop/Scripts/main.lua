@@ -1307,7 +1307,8 @@ end
 
 local pending_local
 local function read_command(periodic, memory_only)
-    local content, ticket
+    local content, ticket, action
+    local action_pattern = "^[^\t\r\n]+\t([^\t\r\n]+)\t"
     if type(SilverfishTakeLocalBridgeCommand) == "function" then
         local active
         active, ticket, content = SilverfishTakeLocalBridgeCommand()
@@ -1325,18 +1326,29 @@ local function read_command(periodic, memory_only)
         local file = io.open(command_path, "rb")
         if not file then return end
         content = file:read(32769)
+        action = content and content:match(action_pattern)
+        if action == native_shop_view.stock_render and #content == 32769 then
+            local limit = native_shop_view.catalog_header_limit + native_shop_view.catalog_body_limit
+            content = content .. (file:read(limit + 1 - #content) or "")
+        end
         file:close()
     end
     if not content then return end
     local line, body
-    local action = ticket and content:match("^[^\t\r\n]+\t([^\t\r\n]+)\t")
-    local stash_memory = action == native_stash_view.memory_render
-    if #content > 32768 and (not stash_memory
-        or #content > native_stash_view.memory_body_limit() + native_stash_view.memory_header_limit) then return end
-    if ticket and (native_guest_ui.is_memory_command(action) or stash_memory) then
+    action = action or content:match(action_pattern)
+    local stash_memory = ticket and action == native_stash_view.memory_render
+    local shop_catalog = action == native_shop_view.stock_render
+    local header_limit = shop_catalog and native_shop_view.catalog_header_limit
+        or stash_memory and native_stash_view.memory_header_limit
+    if #content > 32768 then
+        local body_limit = shop_catalog and native_shop_view.catalog_body_limit
+            or stash_memory and native_stash_view.memory_body_limit()
+        if not body_limit or #content > body_limit + header_limit then return end
+    end
+    if shop_catalog or ticket and (native_guest_ui.is_memory_command(action) or stash_memory) then
         local boundary = content:find("\n", 1, true)
         if boundary then
-            if stash_memory and boundary > native_stash_view.memory_header_limit then return end
+            if header_limit and boundary > header_limit then return end
             line, body = content:sub(1, boundary - 1), content:sub(boundary + 1)
         end
     end
@@ -1349,6 +1361,9 @@ local function read_command(periodic, memory_only)
     local id = fields[1]
     if not id or #id > 80 or not id:match("^[%w_.%-]+$") or seen_commands[id] then
         return
+    end
+    if shop_catalog then
+        fields.catalog_body, body = body, nil
     end
     if ticket then
         pending_local = {ticket = ticket, fields = fields, dispatched = false, body = body}

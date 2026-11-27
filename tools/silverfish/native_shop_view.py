@@ -7,13 +7,15 @@ import re
 import time
 import uuid
 
-from . import runtime
 from .content_paths import item_class_name
 from .native_finite_shop import CASTAWAY_ACTOR, MAX_PRICE, STOCK_REVISION, merchant_in_map, valid_stock_revision
 from .native_gold import valid_guid
 
 
 MAX_OFFERS = 128
+RENDER_STOCK = "native-shop-view-render-stock"
+CATALOG_BODY_MAX_BYTES = 90_000
+CATALOG_HEADER_MAX_BYTES = 1_024
 STOCK_RECHECK_INTERVAL = 4
 WAITING = {"open": "pending", "buy": "buying", "sell": "selling"}
 _CARD = re.compile(r"stock:(shelf|limited|buyback|backpack):([0-9A-F]{32})\Z")
@@ -220,15 +222,9 @@ class ShopView:
         await client.guest_ui.refresh(client)
         if (client.host_session, client.zone_epoch) != (expected_host, expected_visit):
             raise ValueError("The merchant catalog belongs to another visit")
-        nonce = uuid.uuid4().hex
-        path = client.bridge.directory / f"native-shop-stock-{nonce}.tsv"
-        try:
-            runtime.write_text(path, "".join(lines), newline="")
-            snapshot = await client.bridge.command("native-shop-view-render-stock", str(sequence), str(event), area, actor,
-                                                   str(wallet), str(len(offers)), nonce, timeout=5)
-        finally:
-            with contextlib.suppress(FileNotFoundError, PermissionError):
-                path.unlink()
+        snapshot = await client.bridge.command(RENDER_STOCK, str(sequence), str(event), area, actor,
+                                               str(wallet), str(len(offers)), catalog_body="".join(lines).encode("ascii"),
+                                               timeout=5)
         observed = snapshot.get("native_shop_view", {})
         keys = ("sequence", "map", "pawn", "actor", "state", "visible", "stock", "wallet")
         if tuple(observed.get(key) for key in keys) != (sequence, area, pawn, actor, "ready", len(offers), True, wallet):

@@ -5,6 +5,10 @@ local castaway = require("native_dialogue_castaway")
 local focus_fixture = require("native_shop_focus_fixture")
 local stock = require("native_shop_stock")
 
+view.stock_render = "native-shop-view-render-stock"
+view.catalog_header_limit = 1024
+view.catalog_body_limit = 90000
+
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_SHOP_VIEW") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local embedded = os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") == "1"
@@ -39,7 +43,7 @@ profiles[smuggler].prove_focus = true
 
 local actor_path = "/Game/Classes/Actors/Shop_BP.Shop_BP_C"
 local max_offers, max_money, max_sequence = 128, 2147483647, 9007199254740991
-local events_path, heartbeat_path, mailbox, is_downed, binding, session
+local events_path, heartbeat_path, is_downed, binding, session
 local event_sequence = 0
 local lease_through = 0
 
@@ -327,11 +331,13 @@ end
 
 function view.command(fields, state, phase)
     local operation = fields[2]
-    local stock_render = operation == "native-shop-view-render-stock"
+    local stock_render = operation == view.stock_render
     local stock_refresh = operation == "native-shop-view-refresh-stock"
     local unavailable = operation == "native-shop-view-unavailable"
     if not stock_render and not stock_refresh and not unavailable
         and operation ~= "native-shop-view-fixture" then return end
+    local catalog = fields.catalog_body
+    fields.catalog_body = nil
     local current = context(state, phase)
     if not current or not same_context(current, binding) or not can_use(current) or not in_reach(current) then
         error("The exact standing merchant guest is unavailable", 0)
@@ -362,11 +368,12 @@ function view.command(fields, state, phase)
         return "stock shop closed after rejected trade"
     end
     if stock_render then
-        local balance, total, nonce = integer(fields[7], max_money), integer(fields[8], max_offers), fields[9]
-        if not stock.available() or #fields ~= 9 or fields[6] ~= current.profile.actor_name or not balance or not total
-            or #nonce ~= 32 or not nonce:match("^[0-9a-f]+$") then error("The native merchant catalog is unavailable", 0) end
-        local ok, rows = pcall(stock.render, session, qualified_actor(current), state, phase, balance,
-            mailbox .. "/native-shop-stock-" .. nonce .. ".tsv", total)
+        local balance, total = integer(fields[7], max_money), integer(fields[8], max_offers)
+        if not stock.available() or #fields ~= 8 or fields[6] ~= current.profile.actor_name or not balance or not total
+            or type(catalog) ~= "string" or #catalog > view.catalog_body_limit then
+            error("The native merchant catalog is unavailable", 0)
+        end
+        local ok, rows = pcall(stock.render, session, qualified_actor(current), state, phase, balance, catalog, total)
         if not ok then close(); error(rows, 0) end
         session.wallet, session.total, session.stock_offers, session.state = balance, total, rows, "ready"
         session.stock_selection, session.render_event = nil, event
@@ -391,7 +398,6 @@ end
 function view.start(bridge, downed)
     if not enabled or not bridge or bridge == "" then return end
     events_path, heartbeat_path = bridge .. "/native-shop-view-events", bridge .. "/native-shop-view-heartbeat"
-    mailbox = bridge
     is_downed = downed
 end
 

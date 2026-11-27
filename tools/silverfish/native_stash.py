@@ -354,7 +354,7 @@ async def service_view(client, active):
                  else MEMORY_VIEW_MAX_BYTES)
         if client.last_game.get(MEMORY_VIEW) is True and local_bridge is not None and len(contents) <= limit:
             snapshot = await client.bridge.command(RENDER_MEMORY, *arguments, str(len(rows)),
-                                                   stash_payload=contents.encode("ascii"), timeout=5)
+                                                   catalog_body=contents.encode("ascii"), timeout=5)
             if snapshot.get("ack", {}).get("message") != MEMORY_VIEW_ACK:
                 raise RuntimeError("The resident stash renderer did not acknowledge the in-process page")
         else:

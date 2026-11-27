@@ -1,5 +1,5 @@
 #include "local_bridge.hpp"
-#include "local_stash_ticket.hpp"
+#include "local_catalog_ticket.hpp"
 
 #include <algorithm>
 #include <array>
@@ -138,7 +138,7 @@ namespace
 
     int stash_body_limit(const Lua& lua)
     {
-        lua.set_integer(silverfish::local_stash_ticket::body_limit);
+        lua.set_integer(silverfish::local_catalog_ticket::stash_body_limit);
         return 1;
     }
 
@@ -731,22 +731,22 @@ extern "C" __declspec(dllexport) int SilverfishBridgePublishFootstepsV1(const ch
 
 extern "C" __declspec(dllexport) std::uint32_t SilverfishBridgeStashBodyLimitV1()
 {
-    return silverfish::local_stash_ticket::body_limit;
+    return silverfish::local_catalog_ticket::stash_body_limit;
 }
 
 extern "C" __declspec(dllexport) std::int64_t SilverfishBridgeSubmitV1(const char* data, std::uint32_t size)
 {
     if (!data || !size) return 0;
-    std::string large_stash;
+    std::string large_catalog;
     if (size > command_limit)
     {
-        if (!silverfish::local_stash_ticket::accepts({data, size})) return 0;
-        large_stash.assign(data, size);
+        if (!silverfish::local_catalog_ticket::accepts({data, size})) return 0;
+        large_catalog.assign(data, size);
     }
     std::lock_guard lock(mutex);
     if (!attached || state != State::idle || last_ticket == std::numeric_limits<std::int64_t>::max()) return 0;
-    if (large_stash.empty()) command.assign(data, size);
-    else command = std::move(large_stash);
+    if (large_catalog.empty()) command.assign(data, size);
+    else command = std::move(large_catalog);
     active_ticket = ++last_ticket;
     state = State::queued;
     return active_ticket;

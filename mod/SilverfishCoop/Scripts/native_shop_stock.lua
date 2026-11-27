@@ -70,12 +70,8 @@ local function integer(value, low, high)
     return number
 end
 
-local function read_rows(path, expected)
-    local file = io.open(path, "rb")
-    if not file then error("The authenticated merchant rows are unavailable", 0) end
-    local data = file:read(90001) or ""
-    file:close()
-    if #data > 90000 or #data > 0 and data:sub(-1) ~= "\n" then error("The merchant rows exceed their bounds", 0) end
+local function read_rows(data, expected)
+    if #data > 0 and data:sub(-1) ~= "\n" then error("The merchant rows are incomplete", 0) end
     local rows, total, seen = {shelf = {}, limited = {}, buyback = {}}, 0, {}
     for line in data:gmatch("([^\n]+)\n") do
         local guid, class, source, price, value, ammo, weight, never_drop, markup = line:match(
@@ -141,8 +137,8 @@ function stock.refresh_host(controller, actor)
     return true
 end
 
-function stock.render(session, actor, state, phase, wallet, path, total)
-    local rows, offers = read_rows(path, total)
+function stock.render(session, actor, state, phase, wallet, catalog, total)
+    local rows, offers = read_rows(catalog, total)
     local save, pawn = scope.bind_guest(state, phase)
     local controller = session.context.controller
     local api, class, widgets, widget_class = StaticFindObject(statics_path), load(save_path), StaticFindObject(widgets_path), load(screen_path)

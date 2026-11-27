@@ -2,15 +2,48 @@ import asyncio
 import time
 import unittest
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
-from tools.silverfish import native_finite_shop, party
+from tools.silverfish import native_finite_shop, native_shop_view, party, runtime
 from tools.silverfish.native_finite_shop import BALL_AMMO, GUNSMITH, MERCHANTS, matching_report
 from tools.silverfish.native_shop_view import ShopView
 
 
 class MerchantScreenTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stock_catalog_uses_one_bounded_bridge_command(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        actor = MERCHANTS[GUNSMITH]
+        arguments = (native_shop_view.RENDER_STOCK, "1", "2", GUNSMITH, actor, "500", "80")
+        body = (b"x" * 450 + b"\n") * 80
+
+        async def command(request, timeout):
+            header, _, catalog = request.partition(b"\n")
+            nonce, *fields = header.decode("ascii").split("\t")
+            self.assertEqual((tuple(fields), catalog, timeout), (arguments, body, 5))
+            return (f"schema\t1\nseq\t1\nsession\tclient\tconnected\t{GUNSMITH}\t1\t1\n"
+                    f"ack\t{nonce}\taccepted\tverified stock shop screen\n")
+
+        bridge.local_bridge = SimpleNamespace(command=AsyncMock(side_effect=command))
+        with patch.object(runtime, "write_text") as write:
+            await bridge.command(*arguments, catalog_body=body, timeout=5)
+            for invalid in (None, "rows", b"missing newline", b"\r\n", b"x" * 90000 + b"\n"):
+                with self.assertRaisesRegex(ValueError, "Invalid stock merchant catalog"):
+                    await bridge.command(*arguments, catalog_body=invalid)
+            write.assert_not_called()
+        bridge.local_bridge.command.assert_awaited_once()
+
+        bridge.local_bridge = None
+        bridge.wait_for = AsyncMock(return_value={"ack": {"result": "accepted"}})
+        with patch.object(runtime, "write_text") as write:
+            await bridge.command(*arguments, catalog_body=body)
+            write.assert_called_once()
+            path, request = write.call_args.args
+            header, _, catalog = request.partition("\n")
+            self.assertEqual((path, tuple(header.split("\t")[1:]), catalog.encode("ascii")),
+                             (bridge.directory / "command.tsv", arguments, body))
+
     async def test_open_stock_screen_refreshes_when_stock_changes_without_wallet_change(self):
         actor, pawn = MERCHANTS[GUNSMITH], "exact stock guest"
         guid = "A" * 32

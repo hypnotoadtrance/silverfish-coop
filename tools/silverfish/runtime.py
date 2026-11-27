@@ -22,7 +22,7 @@ import uuid
 
 from .content_paths import asset_name, item_class_name
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
-from . import native_finite_shop
+from . import native_finite_shop, native_shop_view
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
 from . import native_board_contract
 from . import native_authored_pickup, native_borough_barter, native_dead_drop, native_ladder, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
@@ -3993,7 +3993,7 @@ class Bridge:
         return reply
 
     async def command(self, action: str, *arguments: str, timeout: float = 8, update_status: bool = True,
-                      stash_payload: bytes | None = None) -> dict:
+                      catalog_body: bytes | None = None) -> dict:
         fields = (uuid.uuid4().hex, action, *arguments)
         long_fields = ((5, 6) if action == native_board_contract.MENU_OPEN else
                        (5,) if action == native_inventory_grant.APPLY and self.local_bridge is not None else
@@ -4002,21 +4002,30 @@ class Bridge:
                or "\t" in value or "\r" in value or "\n" in value for index, value in enumerate(fields)):
             raise ValueError("Invalid game bridge command value")
         request = "\t".join(fields) + "\n"
+        header = request.encode("utf-8")
         if action == native_stash.RENDER_MEMORY:
-            if (self.local_bridge is None or not isinstance(stash_payload, bytes)
-                    or len(request.encode("utf-8")) > native_stash.MEMORY_VIEW_HEADER_MAX_BYTES
-                    or len(stash_payload) > native_stash.resident_ticket_body_limit(self.local_bridge)
-                    or stash_payload and (not stash_payload.endswith(b"\n") or not _GUEST_UI_BYTES.fullmatch(stash_payload))):
+            if self.local_bridge is None:
                 raise ValueError("Invalid resident stash view payload")
-        elif stash_payload is not None:
-            raise ValueError("A stash payload requires the resident stash view command")
+            limits = native_stash.MEMORY_VIEW_HEADER_MAX_BYTES, native_stash.resident_ticket_body_limit(self.local_bridge)
+        elif action == native_shop_view.RENDER_STOCK:
+            limits = native_shop_view.CATALOG_HEADER_MAX_BYTES, native_shop_view.CATALOG_BODY_MAX_BYTES
+        else:
+            limits = None
+        if limits:
+            max_header, max_body = limits
+            if (not isinstance(catalog_body, bytes) or len(header) > max_header or len(catalog_body) > max_body
+                    or catalog_body and (not catalog_body.endswith(b"\n") or not _GUEST_UI_BYTES.fullmatch(catalog_body))):
+                raise ValueError("Invalid resident stash view payload" if action == native_stash.RENDER_MEMORY
+                                 else "Invalid stock merchant catalog")
+        elif catalog_body is not None:
+            raise ValueError("A catalog payload requires a stash or merchant view command")
         if self.local_bridge is None:
             async with self._file_command_lock:
-                write_text(self.directory / "command.tsv", request)
+                write_text(self.directory / "command.tsv", request + (catalog_body or b"").decode("ascii"))
                 status = await self.wait_for(lambda state: state.get("ack", {}).get("id") == fields[0], timeout,
                                              interval=.025, file_reply=True)
         else:
-            raw = await self.local_bridge.command(request.encode("utf-8") + (stash_payload or b""), timeout)
+            raw = await self.local_bridge.command(header + (catalog_body or b""), timeout)
             if action in {"travel", "travel-party"} and raw.startswith("native-travel-reply\t"):
                 return self._local_travel_reply(raw, fields)
             if action in {native_voice.COMMAND, native_anomaly_effects.PLAY_CUES, native_weather_view.LIGHTNING_PLAY}:
