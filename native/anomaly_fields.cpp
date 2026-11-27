@@ -388,10 +388,10 @@ namespace
     int read_anomaly_sample(const Lua& lua)
     {
         if (!U::IsInGameThreadRaw() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_integer(2)) return 0;
+        const auto world = static_cast<std::uintptr_t>(lua.get_integer(2));
         const auto tracked = anomaly_samples.find(static_cast<std::uintptr_t>(lua.get_integer(1)));
         if (tracked == anomaly_samples.end()) return 0;
         auto* actor = static_cast<U::AActor*>(tracked->second.actor.Get());
-        const auto world = static_cast<std::uintptr_t>(lua.get_integer(2));
         if (!actor || !world || reinterpret_cast<std::uintptr_t>(actor->GetWorld()) != world) return 0;
         const auto& sample = tracked->second;
         auto* root = sample.root->GetObjectPropertyValue(sample.root->ContainerPtrToValuePtr<void>(actor));

@@ -5143,6 +5143,12 @@ async def verify_stock_streamed_npc(host: Seat, guest: Seat, _pawn: str) -> dict
     assert await command(guest, "plank-break") == "stock plank break requested"
     assert await command(guest, "plank") == initial_planks[1]
     assert await command(host, "plank-break") == "stock plank break requested"
+    try:
+        async with asyncio.timeout(8):
+            while (host_plank := await command(host, "plank")) != "removed":
+                await asyncio.sleep(.1)
+    except TimeoutError as error:
+        raise AssertionError(f"Stock break did not remove the host's streamed plank. Last state was {host_plank}") from error
     await wait_resident_status(host_run, lambda status: scope in (
         roster := status["game"].get(native_destructibles.KEY, ())) and plank not in roster)
     async with asyncio.timeout(8):

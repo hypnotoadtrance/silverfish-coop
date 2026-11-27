@@ -1854,7 +1854,8 @@ local function streamed_npc(world, pawn, host, action)
         local placed, remote = SilverfishQualifyNativePlacedDestructible(path, world:GetAddress())
         assert(placed and remote == not host and same(plank:GetOuter(), level), "streamed plank scope unavailable")
         if action == "stream-npc-plank-break" then
-            plank:InstantKill(pawn)
+            local point = plank.StaticMesh:K2_GetComponentLocation()
+            plank:Damage_Feedback(true, {Location = point, ImpactPoint = point})
             return "stock plank break requested"
         end
         return ("%s;%s;%s"):format(path, tostring(plank.bHidden), tostring(plank:GetActorEnableCollision()))
