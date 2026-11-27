@@ -1,21 +1,33 @@
 import re
 
 from .native_guest_drop_record import valid_id
+from .native_map_preflight import valid_campaign_package
 
 KEY = "native_destructible_roster"
 _MAX_ACTORS = 512
 _MAX_ROSTER_BYTES = 30 * 1024
 _ACTOR_ID = re.compile(r"[A-Za-z0-9_]{1,96}")
+_STREAM_ID = re.compile(r"(/[A-Za-z0-9_/]+)\.[A-Za-z0-9_]+:PersistentLevel(?:\.[A-Za-z0-9_-]+)?")
 
 
 def valid_roster(ids):
-    return (
-        isinstance(ids, list)
-        and len(ids) <= _MAX_ACTORS
-        and all(isinstance(actor, str) and _ACTOR_ID.fullmatch(actor) for actor in ids)
-        and sum(len(actor) + 1 for actor in ids) <= _MAX_ROSTER_BYTES + 1
-        and all(left < right for left, right in zip(ids, ids[1:]))
-    )
+    if (not isinstance(ids, list) or len(ids) > _MAX_ACTORS
+            or any(not isinstance(actor, str) or len(actor) > 384 for actor in ids)
+            or sum(len(actor) + 1 for actor in ids) > _MAX_ROSTER_BYTES + 1
+            or any(left >= right for left, right in zip(ids, ids[1:]))):
+        return False
+    scopes = set()
+    for actor in ids:
+        if _ACTOR_ID.fullmatch(actor):
+            continue
+        match = _STREAM_ID.fullmatch(actor)
+        if not match or not valid_campaign_package(match[1]):
+            return False
+        if actor.endswith(":PersistentLevel"):
+            scopes.add(actor)
+        elif actor.rsplit(".", 1)[0] not in scopes:
+            return False
+    return True
 
 
 class Playback:

@@ -1,6 +1,7 @@
 #include "guest_melee.hpp"
 #include "enemy_loot_registry.hpp"
 #include "guest_regen.hpp"
+#include "zone_exit.hpp"
 
 #include <algorithm>
 #include <array>
@@ -699,8 +700,7 @@ namespace
         auto* base = find<U::UClass>(destructible_class);
         if (!live(candidate) || !base || !candidate->GetClassPrivate()->IsChildOf(base)) return false;
         auto* actor = static_cast<U::AActor*>(candidate);
-        return actor->GetWorld() == world && actor->HasAnyFlags(U::RF_WasLoaded) &&
-            actor->GetLevel() == object(world, STR("PersistentLevel")) &&
+        return actor->HasAnyFlags(U::RF_WasLoaded) && silverfish::native_zone::visible_actor_level(actor, world) &&
             boolean(actor, STR("bReplicates"), false) && boolean(actor, STR("bActorIsBeingDestroyed"), false);
     }
 
@@ -739,11 +739,12 @@ namespace
         const bool player = candidate->GetClassPrivate() == find<U::UClass>(player_class);
         if (player && !silverfish::native_death::friendly_fire_pair(attacker, candidate))
             return reject("friendly_fire_unavailable");
-        if (!player && !npc && !placed_destructible(candidate, world) && !physics_prop_target(candidate))
+        const bool placed = !player && !npc && placed_destructible(candidate, world);
+        if (!player && !npc && !placed && !physics_prop_target(candidate))
             return reject("target_class_unqualified");
         auto* actor = static_cast<U::AActor*>(candidate);
         auto* role = field<U::FByteProperty>(actor, STR("Role"));
-        if (actor->GetWorld() != world || !role || role->GetPropertyValueInContainer(actor) != 3)
+        if ((!placed && actor->GetWorld() != world) || !role || role->GetPropertyValueInContainer(actor) != 3)
             return reject("target_authority_unqualified");
         if ((npc && !boolean(actor, STR("Alive"), true)) || (player && !boolean(actor, STR("Dead"), false)) ||
             !boolean(actor, STR("bActorIsBeingDestroyed"), false))

@@ -683,6 +683,28 @@ function fields.update_destructibles(current_world)
     destructibles.update(current_world)
 end
 
+local read_native_sample = SilverfishReadNativeAnomalySample
+local remember_native_sample = SilverfishRememberNativeAnomalySample
+
+local function activate(address, entry)
+    active[address] = entry
+    if remember_native_sample and entry.kind ~= "spinning-ball" then
+        local path = entry.placed or entry.actor:GetFullName():match("^%S+ (.+)$")
+        if path then remember_native_sample(path, address, world:GetAddress()) end
+    end
+end
+
+local function sample_anomaly(actor, kind, address, world_address, native_read)
+    if native_read and kind ~= "spinning-ball" then
+        local x, y, z, collision = native_read(address, world_address)
+        if x ~= nil then return x, y, z, collision end
+    end
+    if valid(actor) and not actor:IsActorBeingDestroyed() and valid(actor.RootComponent) then
+        local position = actor:K2_GetActorLocation()
+        return position.X, position.Y, position.Z, trigger_enabled(actor, kind) and true or false
+    end
+end
+
 function fields.rows(state, phase, row, compact)
     if phase ~= "hosting" and phase ~= "connected" or not valid(state.world) then
         recovery = nil
@@ -735,7 +757,7 @@ function fields.rows(state, phase, row, compact)
                 if entry.kind == "glass-thread" then
                     if replica(actor) then glass_live[address] = entry end
                 elseif not trigger_enabled(actor, entry.kind) then
-                    active[address] = entry
+                    activate(address, entry)
                 end
             elseif entry.placed or entry.travel_source or actor:ActorHasTag(FName("Anomaly")) then
                 -- SpawnField applies its stock tag after finishing the spawned actor's BeginPlay.
@@ -752,7 +774,7 @@ function fields.rows(state, phase, row, compact)
                         if valid(sphere) and same(sphere:GetOwner(), actor) then sphere:SetIsReplicated(true) end
                     end
                     actor:ForceNetUpdate()
-                    active[address] = entry
+                    activate(address, entry)
                 end
             end
         end
@@ -778,20 +800,21 @@ function fields.rows(state, phase, row, compact)
         pending_fires[address] = nil
     end
     local rows, live = {}, 0
+    local world_address = read_native_sample and world:GetAddress()
     for address, entry in pairs(active) do
         local actor = entry.actor
-        if valid(actor) and not actor:IsActorBeingDestroyed() and valid(actor.RootComponent) then
+        local x, y, z, collision = sample_anomaly(actor, entry.kind, address, world_address, read_native_sample)
+        if x ~= nil then
             if phase == "hosting" and entry.kind == "starburst" then effects.observe_charge(entry) end
-            if phase == "connected" and entry.placed and trigger_enabled(actor, entry.kind) then
+            if phase == "connected" and entry.placed and collision then
                 suppress_trigger(actor, entry.kind)
+                collision = trigger_enabled(actor, entry.kind)
             end
             live = live + 1
-            local position = actor:K2_GetActorLocation()
-            local collision = trigger_enabled(actor, entry.kind) and 1 or 0
-            rows[#rows + 1] = row("native-anomaly-position", entry.kind, position.X, position.Y, position.Z, collision)
+            local enabled = collision and 1 or 0
+            rows[#rows + 1] = row("native-anomaly-position", entry.kind, x, y, z, enabled)
             if entry.placed then
-                rows[#rows + 1] = row("native-placed-anomaly", entry.placed, entry.kind, position.X, position.Y, position.Z,
-                    collision, actor:GetLocalRole())
+                rows[#rows + 1] = row("native-placed-anomaly", entry.placed, entry.kind, x, y, z, enabled, actor:GetLocalRole())
             end
             if entry.kind == "vortex" and (not compact or entry.placed) then
                 local sensor = vortex_sensor(actor)
@@ -803,17 +826,17 @@ function fields.rows(state, phase, row, compact)
                         local mesh = actor.Sphere1
                         if valid(mesh) and same(mesh:GetOwner(), actor) then
                             local center, visual = sensor:K2_GetComponentLocation(), mesh:K2_GetComponentLocation()
-                            rows[#rows + 1] = row("native-vortex-sensor", entry.placed or "-", position.X, position.Y, position.Z,
+                            rows[#rows + 1] = row("native-vortex-sensor", entry.placed or "-", x, y, z,
                                 relative.X, relative.Y, relative.Z, center.X, center.Y, center.Z, visual.X, visual.Y, visual.Z)
                         end
                     end
                 end
             elseif entry.kind == "electrode" then
-                rows[#rows + 1] = electrodes.observe(entry, phase, row, position)
+                rows[#rows + 1] = electrodes.observe(entry, phase, row, {X = x, Y = y, Z = z})
             elseif entry.kind == "angler-lamp" then
                 rows[#rows + 1] = lamps.color_row(actor, row)
             elseif entry.kind == "observer" then
-                rows[#rows + 1] = observers.opacity_row(actor, phase, row, position)
+                rows[#rows + 1] = observers.opacity_row(actor, phase, row, {X = x, Y = y, Z = z})
             end
         else
             if phase == "hosting" and entry.kind == "electrode" then electrodes.retire(entry) end

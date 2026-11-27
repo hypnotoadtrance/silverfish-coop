@@ -2,6 +2,8 @@
 
 #include "guest_regen.hpp"
 #include "stock_enemy_drops.hpp"
+#include "world_path.hpp"
+#include "zone_exit.hpp"
 
 #include <algorithm>
 #include <array>
@@ -350,6 +352,59 @@ namespace
             std::ranges::find(replicated_classes, std::wstring_view{path}) != replicated_classes.end();
     }
 
+    struct AnomalySample
+    {
+        U::FWeakObjectPtr actor;
+        U::FObjectProperty* root;
+        U::FBoolProperty* destroying;
+    };
+    thread_local std::unordered_map<std::uintptr_t, AnomalySample> anomaly_samples;
+
+    int remember_anomaly_sample(const Lua& lua)
+    {
+        if (!U::IsInGameThreadRaw() || lua.get_stack_size() != 3 || !lua.is_string(1) ||
+            !lua.is_integer(2) || !lua.is_integer(3)) return 0;
+        const auto world = static_cast<std::uintptr_t>(lua.get_integer(3));
+        const auto address = static_cast<std::uintptr_t>(lua.get_integer(2));
+        const auto path = RC::to_generic_string(lua.get_string(1));
+        if (!world || !address || path.size() > 512 || !path.starts_with(STR("/"))) return 0;
+        auto* actor = U::Cast<U::AActor>(U::UObjectGlobals::StaticFindObject<U::UObject*>(nullptr, nullptr, path.c_str()));
+        if (!actor || reinterpret_cast<std::uintptr_t>(actor) != address ||
+            reinterpret_cast<std::uintptr_t>(actor->GetWorld()) != world) return 0;
+        const auto type = actor->GetClassPrivate()->GetPathName();
+        if (type != lingering_class && type != pyrogeist_class && type != angler_class && type != observer_class &&
+            type != shadow_class && std::ranges::find(replicated_classes, std::wstring_view{type}) == replicated_classes.end()) return 0;
+        auto* root = property<U::FObjectProperty>(actor, STR("RootComponent"));
+        auto* destroying = property<U::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
+        if (!root || !destroying) return 0;
+        constexpr std::size_t limit = 1024;
+        if (anomaly_samples.size() >= limit)
+            std::erase_if(anomaly_samples, [](const auto& entry) { return !entry.second.actor.Get(); });
+        if (anomaly_samples.size() < limit)
+            anomaly_samples.insert_or_assign(address, AnomalySample{actor, root, destroying});
+        return 0;
+    }
+
+    int read_anomaly_sample(const Lua& lua)
+    {
+        if (!U::IsInGameThreadRaw() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_integer(2)) return 0;
+        const auto tracked = anomaly_samples.find(static_cast<std::uintptr_t>(lua.get_integer(1)));
+        if (tracked == anomaly_samples.end()) return 0;
+        auto* actor = static_cast<U::AActor*>(tracked->second.actor.Get());
+        const auto world = static_cast<std::uintptr_t>(lua.get_integer(2));
+        if (!actor || !world || reinterpret_cast<std::uintptr_t>(actor->GetWorld()) != world) return 0;
+        const auto& sample = tracked->second;
+        auto* root = sample.root->GetObjectPropertyValue(sample.root->ContainerPtrToValuePtr<void>(actor));
+        constexpr auto destroyed = static_cast<U::EObjectFlags>(U::RF_BeginDestroyed | U::RF_FinishDestroyed);
+        if (!root || root->HasAnyFlags(destroyed) || sample.destroying->GetPropertyValueInContainer(actor)) return 0;
+        const auto location = actor->K2_GetActorLocation();
+        lua.set_number(location.X());
+        lua.set_number(location.Y());
+        lua.set_number(location.Z());
+        lua.set_bool(actor->GetActorEnableCollision());
+        return 4;
+    }
+
     bool canister_class(U::UObject* type)
     {
         if (!type) return false;
@@ -619,6 +674,16 @@ namespace
     {
         auto* base = U::UObjectGlobals::StaticFindObject<U::UClass*>(nullptr, nullptr, destructible);
         return type && base && static_cast<U::UClass*>(type)->IsChildOf(base);
+    }
+
+    U::UWorld* destructible_world(U::AActor* actor)
+    {
+        auto* world = actor->GetWorld();
+        auto* level = actor->GetLevel();
+        auto* owner = U::Cast<U::UWorld>(object(level, STR("OwningWorld")));
+        if (owner && owner != world)
+            return silverfish::native_zone::visible_actor_level(actor, owner) ? owner : nullptr;
+        return silverfish::native_zone::visible_actor_level(actor, world) ? world : nullptr;
     }
 
     bool replicated_field(U::UObject* field, U::UWorld* world)
@@ -1216,9 +1281,8 @@ namespace
             actor->HasAnyFlags(U::RF_WasLoaded))
         {
             auto* replicates = property<U::FBoolProperty>(actor, STR("bReplicates"));
-            auto* world = static_cast<U::AActor*>(actor)->GetWorld();
             if (replicates && !replicates->GetPropertyValueInContainer(actor) &&
-                guest_world(world) && actor->GetOuterPrivate() == object(world, STR("PersistentLevel")))
+                guest_world(destructible_world(static_cast<U::AActor*>(actor))))
                 call.PreventOriginalFunctionCall();
             return;
         }
@@ -1566,6 +1630,7 @@ namespace silverfish::native_anomaly_fields
 
     void uninstall_hooks()
     {
+        anomaly_samples.clear();
         travel_spawn = {};
         lingering_spawns = {};
         drum_fires = {};
@@ -1589,6 +1654,8 @@ namespace silverfish::native_anomaly_fields
         lua.register_function("SilverfishSetNativeAnomalyGuest", set_guest);
         lua.register_function("SilverfishTakeNativeAnomalySpatialCue", take_spatial_cue);
         lua.register_function("SilverfishReadNativeAnomalySkips", count);
+        lua.register_function("SilverfishRememberNativeAnomalySample", remember_anomaly_sample);
+        lua.register_function("SilverfishReadNativeAnomalySample", read_anomaly_sample);
         lua.register_function("SilverfishReadNativeGuestStormGuard", [](const Lua& current) {
             if (!U::IsInGameThreadRaw() || !guest_session || current.get_stack_size() != 0) return 0;
             auto* world = storm_world.Get();
@@ -1631,6 +1698,21 @@ namespace silverfish::native_anomaly_fields
             [](const Lua& current) { return qualify_placed(current, fixed_prop_class, remember_fixed_prop); });
         lua.register_function("SilverfishReadNativePlacedFixedExplosive", read_placed_fixed_prop);
         lua.register_function("SilverfishQualifyNativePlacedDestructible",
-            [](const Lua& current) { return qualify_placed(current, destructible_class); });
+            [](const Lua& current) {
+                if (!U::IsInGameThreadRaw() || current.get_stack_size() != 2 ||
+                    !current.is_string(1) || !current.is_integer(2)) return 0;
+                const auto path = RC::to_generic_string(current.get_string());
+                const auto address = static_cast<std::uintptr_t>(current.get_integer());
+                const auto dot = path.find('.');
+                auto* actor = dot != path.npos && path.size() <= 384 &&
+                    silverfish::world_path::package(RC::StringViewType{path}.substr(0, dot))
+                    ? U::UObjectGlobals::StaticFindObject<U::AActor*>(nullptr, nullptr, path.c_str()) : nullptr;
+                auto* world = actor && !actor->IsUnreachable() && actor->HasAnyFlags(U::RF_WasLoaded) &&
+                    destructible_class(actor->GetClassPrivate()) ? destructible_world(actor) : nullptr;
+                const bool scoped = address && reinterpret_cast<std::uintptr_t>(world) == address;
+                current.set_bool(scoped);
+                current.set_bool(scoped && guest_world(world));
+                return 2;
+            });
     }
 }

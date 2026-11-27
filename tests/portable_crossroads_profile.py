@@ -392,7 +392,44 @@ def instrument_anomaly_work(source):
         if rest.count(anchor) != 1:
             raise ValueError(f"The anomaly status call changed: {call}")
         rest = rest.replace(anchor, f'SilverfishProfileCrossroadsCall("anomalies.{call}", {call}, ')
-    return start + separator + rest
+    return start + separator + rest.replace("\nreturn fields\n", """
+function SilverfishProfileAnomalySamples()
+    local native, stamp = SilverfishReadNativeAnomalySample, SilverfishBridgeProfileStamp
+    if type(native) ~= "function" or not valid(world) then return "unavailable" end
+    local address, tracked = world:GetAddress(), {}
+    for key, entry in pairs(active) do
+        local x, y, z, collision = native(key, address)
+        if x ~= nil then
+            local lx, ly, lz, lc = sample_anomaly(entry.actor, entry.kind, key, address, nil)
+            assert(x == lx and y == ly and z == lz and collision == lc, "anomaly sample diverged from reflection")
+            assert(native(key, address + 1) == nil and native(0, address) == nil, "unqualified anomaly sample")
+            tracked[#tracked + 1] = {key = key, actor = entry.actor, kind = entry.kind}
+        end
+    end
+    if #tracked == 0 then return "unavailable" end
+    local function measure(reader)
+        local heap, started = collectgarbage("count"), stamp()
+        for _ = 1, 32 do
+            for _, entry in ipairs(tracked) do
+                sample_anomaly(entry.actor, entry.kind, entry.key, address, reader)
+            end
+        end
+        return (stamp() - started) / 1000, collectgarbage("count") - heap
+    end
+    local running = collectgarbage("isrunning")
+    collectgarbage("stop")
+    local ok, answer = pcall(function()
+        local native_ms, native_kib = measure(native)
+        local lua_ms, lua_kib = measure(nil)
+        return ("%d,%.3f,%.3f,%.3f,%.3f"):format(#tracked, native_ms, lua_ms, native_kib, lua_kib)
+    end)
+    if running then collectgarbage("restart") end
+    assert(ok, answer)
+    return answer
+end
+
+return fields
+""", 1)
 
 
 def instrument_vital_reads(source):
@@ -776,7 +813,15 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
     switches = await asyncio.gather(*(compare_switch_reads(seat) for seat in seats.values()))
     lean = await asyncio.gather(*(compare_lean_reader(seat, probe) for seat in seats.values()))
     journal = {}
+    anomaly_samples = {}
     if area == CROSSROADS:
+        reply = await command(host, "anomalysamples")
+        if reply != "unavailable":
+            assert not reply.startswith("anomaly sample comparison failed"), reply
+            count, native_ms, lua_ms, native_kib, lua_kib = map(float, reply.split(","))
+            anomaly_samples = {"anomaly_sample_comparison": {"actors": int(count), "passes_per_reader": 32,
+                                "native_ms": native_ms, "lua_ms": lua_ms, "native_heap_growth_kib": native_kib,
+                                "lua_heap_growth_kib": lua_kib, "all_samples_matched": True}}
         async def journal_action(action, receipt):
             reply = await host.bridge.command("native-host-invite-fixture", action)
             assert reply["ack"]["message"] == receipt, reply
@@ -798,4 +843,5 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
             "zone_walls": {seat: frame["game"]["native_zone_wall"]
                            for seat, frame in zip(seats, wall_status, strict=True)},
             "guest_roster": {slot: row["name"] for slot, row in settled["game"]["pawns"].items()},
-            "vitals_comparison": dict(zip(seats, comparison, strict=True)), **heartbeat, **guest_binding, **coarse, **journal}
+            "vitals_comparison": dict(zip(seats, comparison, strict=True)), **heartbeat, **guest_binding,
+            **coarse, **journal, **anomaly_samples}
