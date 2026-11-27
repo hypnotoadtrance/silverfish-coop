@@ -622,7 +622,15 @@ function guest_ui.is_memory_command(operation)
 end
 
 function guest_ui.memory_command(fields, state, phase, payload)
-    if (#fields ~= 3 and (#fields ~= 4 or fields[2] ~= "native-guest-ui-project-memory"))
+    local field_count = #fields
+    local last = fields[field_count]
+    local refresh = last and last:match("^refresh=([a-f0-9]+)$")
+    if refresh and #refresh == 32 and fields[2] == "native-guest-ui-project-memory" then
+        field_count = field_count - 1
+    else
+        refresh = nil
+    end
+    if (field_count ~= 3 and (field_count ~= 4 or fields[2] ~= "native-guest-ui-project-memory"))
         or #fields[1] ~= 32 or not fields[1]:match("^[a-f0-9]+$") then
         error("Invalid resident co-op view request", 0)
     end
@@ -631,7 +639,13 @@ function guest_ui.memory_command(fields, state, phase, payload)
     end
     if fields[2] == "native-guest-ui-project-memory" and payload and #payload > 0 and #payload <= max_size
         and payload:sub(-1) == "\n" and not payload:find("[^\t\n -~]") then
-        return project(state, phase, fields[3], nil, payload, fields[4])
+        local message = project(state, phase, fields[3], nil, payload, field_count == 4 and fields[4] or nil)
+        if refresh and message ~= "stock personal inventory update pending" then
+            local ok, status = pcall(inventory_view.refresh_projected, state, phase, refresh)
+            local result = ok and (status == "verified stock backpack refresh" and "refreshed" or "closed") or "deferred"
+            message = message .. " stock-menu-" .. result
+        end
+        return message
     end
     error("Invalid resident co-op view payload", 0)
 end

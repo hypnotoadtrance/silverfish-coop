@@ -19,7 +19,8 @@ HEALTH_PROJECT = "native-guest-health-project"
 VITALS = "native_guest_vitals"
 MAX_BYTES = runtime.GUEST_UI_MAX_BYTES
 _DIGEST = re.compile(r"[0-9a-f]{64}")
-_READY = re.compile(r"stock co-op inventory and Journal projected (\d+) (\d+) (\d+) (\d+) (\d+)")
+_READY = re.compile(r"stock co-op inventory and Journal projected (\d+) (\d+) (\d+) (\d+) (\d+)"
+                    r"(?: stock-menu-(refreshed|closed|deferred))?")
 
 
 def bounded_health(health, maximum):
@@ -241,11 +242,11 @@ class GuestView:
                 reply = request.result()
                 # A pickup arrived after this request started. Use one fresh view for all resulting changes.
                 if not pending and (requested_stock is None or requested_stock == scope):
-                    projected = await self.receive(client, reply["native_guest_ui"], area, epoch, character)
+                    refresh = requested_stock is not None and requested_stock == self.stock_view(client)
+                    projected = await self.receive(client, reply["native_guest_ui"], area, epoch, character,
+                                                   refresh_stock=refresh)
                     if not projected and requested_stock is not None:
                         self.pending_stock_refresh = requested_stock
-                    if projected and requested_stock is not None and requested_stock == self.stock_view(client):
-                        client.last_game = await client.bridge.command("native-inventory-stock-refresh", epoch, timeout=4)
                     self.last_error = None
             except (KeyError, TypeError, OSError, RuntimeError, ValueError, zlib.error) as error:
                 if requested_stock is not None and requested_stock == self.inventory_scope(client):
@@ -263,13 +264,22 @@ class GuestView:
             self.pending_stock_refresh = None
             self.request = asyncio.create_task(client.gameplay_action(ACTION, uuid.uuid4().hex, self.digest))
 
-    async def receive(self, client, result, area, epoch, character, *, layout_sequence=None):
+    async def _refresh_stock_screen(self, client, scope):
+        if scope is not None and scope == self.stock_view(client):
+            before = client.last_game
+            updated = await client.bridge.command("native-inventory-stock-refresh", scope[1], timeout=4)
+            if client.last_game is before and scope == self.stock_view(client):
+                client.last_game = updated
+
+    async def receive(self, client, result, area, epoch, character, *, layout_sequence=None, refresh_stock=False):
         digest = result["digest"]
         if ((result["map"], result["epoch"], result["owner"]) != (area, epoch, character)
                 or (client.last_game.get("map"), client.zone_epoch) != (area, epoch)
                 or not isinstance(digest, str) or not _DIGEST.fullmatch(digest)):
             raise ValueError("The co-op view belongs to another visit")
         if digest == self.digest:
+            if refresh_stock:
+                await self._refresh_stock_screen(client, self.stock_view(client))
             return True
         encoded = result["payload"]
         if not isinstance(encoded, str) or len(encoded) > 27_000:
@@ -279,7 +289,7 @@ class GuestView:
         if not stream.eof or stream.unused_data or sha256(contents).hexdigest() != digest:
             raise ValueError("Invalid co-op view content")
         projected = await self.project(client, character, validate(contents, area, character),
-                                       layout_sequence=layout_sequence)
+                                       layout_sequence=layout_sequence, refresh_stock=refresh_stock)
         if projected:
             self.digest = digest
         return projected
@@ -294,27 +304,28 @@ class GuestView:
         try:
             reply = await client.gameplay_action(ACTION, uuid.uuid4().hex, "-")
             if not await self.receive(client, reply["native_guest_ui"], area, epoch, character,
-                                      layout_sequence=layout_sequence):
+                                      layout_sequence=layout_sequence, refresh_stock=layout_sequence is not None):
                 self.queue_stock_inventory(client)
                 if layout_sequence is not None or allow_local_pending:
                     return
                 raise RuntimeError("The local inventory changed before reconciliation")
-            if layout_sequence is not None and self.stock_view(client) is not None:
-                client.last_game = await client.bridge.command("native-inventory-stock-refresh", epoch, timeout=4)
         except (KeyError, TypeError, OSError, RuntimeError, ValueError, zlib.error):
             self.queue_stock_inventory(client)
             raise
         self.identity = (client.host_session, epoch, area)
         self.next_poll = time.monotonic() + 3
 
-    async def project(self, client, character, contents, *, layout_sequence=None):
+    async def project(self, client, character, contents, *, layout_sequence=None, refresh_stock=False):
         bridge, game = client.bridge, getattr(client, "last_game", {})
         path = None
         epoch = getattr(client, "zone_epoch", None)
+        menu_scope = self.stock_view(client) if refresh_stock else None
         try:
             if game.get(runtime.GUEST_UI_MEMORY) is True and bridge.local_bridge is not None:
-                layout = {"layout_sequence": layout_sequence} if layout_sequence is not None else {}
-                response, _ = await bridge.guest_ui_command(character, payload=contents.encode("ascii"), **layout)
+                options = {"layout_sequence": layout_sequence} if layout_sequence is not None else {}
+                if menu_scope is not None:
+                    options["refresh_epoch"] = menu_scope[1]
+                response, _ = await bridge.guest_ui_command(character, payload=contents.encode("ascii"), **options)
                 if (response.get("state"), response.get("map"), response.get("save_scope")) != (
                         "connected", game.get("map"), uuid.UUID(character).hex):
                     raise RuntimeError("The resident stock view belongs to another guest or visit")
@@ -337,12 +348,17 @@ class GuestView:
             receipt = _READY.fullmatch(message)
             if not receipt:
                 raise RuntimeError("The isolated guest inventory and Journal did not verify")
-            items, notes, quests, completed, attachments = map(int, receipt.groups())
+            items, notes, quests, completed, attachments = map(int, receipt.groups()[:5])
+            menu = receipt[6]
             evidence = dict(items=items, notes=notes, quests=quests, completed=completed, attachments=attachments)
             if bytes_used is None:
                 client.last_game = response
             else:
                 evidence["local_reply_bytes"] = bytes_used
+            if menu is not None:
+                evidence["stock_menu"] = menu
+            if menu_scope and menu in (None, "deferred"):
+                await self._refresh_stock_screen(client, menu_scope)
             client.control.event("native_guest_ui_projected", **evidence)
             return True
         finally:

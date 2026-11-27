@@ -259,6 +259,32 @@ class ResidentGuestUIBridgeTests(unittest.IsolatedAsyncioTestCase):
                 await self.bridge.guest_ui_command(str(self.character), payload=payload)
         self.bridge.local_bridge.command.assert_not_awaited()
 
+    async def test_resident_projection_refreshes_the_open_backpack_on_its_projection_ticket(self):
+        owner, epoch = str(self.character), "a" * 32
+        current = {"state": "connected", "map": self.area, "save_scope": self.character.hex,
+                   "pawns": {"local": {"name": self.target}}, runtime.GUEST_UI_MEMORY: True,
+                   "native_inventory_view": {"state": "stock"}}
+        client = SimpleNamespace(last_game=current, host_session="session", zone_epoch=epoch, bridge=self.bridge,
+                                 expected_zone=self.area, invite={"character_id": owner}, control=Mock())
+
+        def compact(request, _):
+            header, _, payload = request.partition(b"\n")
+            nonce, action, character, visit = header.decode().split("\t")
+            self.assertEqual((action, character, visit, payload),
+                             ("native-guest-ui-project-memory", owner, "refresh=" + epoch, self.body))
+            return (f"native-guest-ui-project-reply\t1\t{nonce}\tconnected\t{self.area}\t{self.character.hex}\t"
+                    f"{self.target}\taccepted\tstock co-op inventory and Journal projected 1 0 0 0 0 stock-menu-refreshed\n")
+
+        self.bridge.local_bridge.command.side_effect = compact
+        view = native_guest_ui.GuestView()
+        self.assertTrue(await view.project(client, owner, self.body.decode(), refresh_stock=True))
+        self.bridge.local_bridge.command.assert_awaited_once()
+        self.assertIs(client.last_game, current)
+        self.assertEqual(client.control.event.call_args.kwargs["stock_menu"], "refreshed")
+        with self.assertRaises(ValueError):
+            await self.bridge.guest_ui_command(self.target, refresh_epoch=epoch)
+        self.bridge.local_bridge.command.assert_awaited_once()
+
     async def test_prefix_in_target_and_unsolicited_project_reply_body_are_refused(self):
         with self.assertRaises(ValueError):
             await self.bridge.guest_ui_command(self.target + "\n" + self.body.decode())
@@ -349,8 +375,9 @@ class NativeGuestStockPickupViewTests(unittest.IsolatedAsyncioTestCase):
         await self.view.sync(self.client, True)
         await self.view.request
         await self.view.sync(self.client, True)
-        self.view.receive.assert_awaited_with(self.client, {"capture": 2}, self.area, self.epoch, str(self.character))
-        self.client.bridge.command.assert_awaited_once_with("native-inventory-stock-refresh", self.epoch, timeout=4)
+        self.view.receive.assert_awaited_with(self.client, {"capture": 2}, self.area, self.epoch, str(self.character),
+                                             refresh_stock=True)
+        self.client.bridge.command.assert_not_awaited()
         self.assertIsNone(self.view.pending_stock_refresh)
 
     async def test_pickups_coalesce_without_waiting_for_stale_inventory_reply(self):
@@ -370,8 +397,9 @@ class NativeGuestStockPickupViewTests(unittest.IsolatedAsyncioTestCase):
         await self.view.sync(self.client, True)
 
         self.assertEqual(self.amount, 2)
-        self.view.receive.assert_awaited_once_with(self.client, {"capture": 2}, self.area, self.epoch, str(self.character))
-        self.client.bridge.command.assert_awaited_once_with("native-inventory-stock-refresh", self.epoch, timeout=4)
+        self.view.receive.assert_awaited_once_with(self.client, {"capture": 2}, self.area, self.epoch, str(self.character),
+                                                  refresh_stock=True)
+        self.client.bridge.command.assert_not_awaited()
 
     async def test_pickup_invalidates_inventory_before_stock_screen_opens(self):
         self.game["native_inventory_view"]["state"] = "closed"
@@ -387,7 +415,7 @@ class NativeGuestStockPickupViewTests(unittest.IsolatedAsyncioTestCase):
         await self.view.sync(self.client, True)
         self.assertFalse(self.view.inventory_needs_refresh(self.client))
         self.view.receive.assert_awaited_once_with(
-            self.client, {"capture": 1}, self.area, self.epoch, str(self.character))
+            self.client, {"capture": 1}, self.area, self.epoch, str(self.character), refresh_stock=False)
         self.client.bridge.command.assert_not_awaited()
 
     async def test_refresh_does_not_rebuild_closed_or_replaced_stock_view(self):

@@ -775,6 +775,33 @@ local function fixture(current, state, phase, preview, drop_epoch, drop_item, us
     return "verified exact stock inventory key path"
 end
 
+function inventory_view.refresh_projected(state, phase, epoch)
+    local current = context(state, phase)
+    local live = stock_session
+    if not current or not live or not same_context(current, binding) or not can_view(current)
+        or not same_context(current, live.context) or not same(current.pawn.Save, live.save) or live.epoch ~= epoch then
+        return "stock inventory closed before refresh"
+    end
+    local stack = current.controller.MenuStack
+    if stack:GetArrayNum() ~= 1 or not same(widget_at(stack, 1), live.screen) then
+        return "stock inventory closed before refresh"
+    end
+    live.screen.BackpackPanel:FullRefresh()
+    for index = 1, 10 do
+        local slot = widget_at(live.screen.ItemManager.EquipSlots, index)
+        if valid(slot) then
+            local row = index <= 8 and live.save.PlayerEquipment[index]
+                or index == 9 and live.save.PlayerHelmet or live.save.PlayerArmor
+            local guid = valid(row[item_class]) and stock_item_guid(row) or nil
+            local card = slot.ItemCard
+            local visible = exact(card, card_path) and valid(card.Item[item_class]) and stock_card_guid(card) or nil
+            if guid ~= visible then slot:FullRefresh() end
+        end
+    end
+    if not stock_cards(live.screen, live.save) then error("stock backpack contents did not refresh", 0) end
+    return "verified stock backpack refresh"
+end
+
 function inventory_view.command(fields, state, phase)
     local operation = fields[2]
     if operation ~= "native-inventory-stock-unavailable" and operation ~= "native-inventory-view-fixture"
@@ -815,26 +842,7 @@ function inventory_view.command(fields, state, phase)
         return preview_personal_consumable(fields, current, state, phase)
     end
     if operation == "native-inventory-stock-refresh" and #fields == 3 then
-        local live = stock_session
-        local stack = current.controller.MenuStack
-        if not live or not same_context(current, live.context) or live.epoch ~= fields[3]
-            or stack:GetArrayNum() ~= 1 or not same(widget_at(stack, 1), live.screen) then
-            return "stock inventory closed before refresh"
-        end
-        live.screen.BackpackPanel:FullRefresh()
-        for index = 1, 10 do
-            local slot = widget_at(live.screen.ItemManager.EquipSlots, index)
-            if valid(slot) then
-                local row = index <= 8 and live.save.PlayerEquipment[index]
-                    or index == 9 and live.save.PlayerHelmet or live.save.PlayerArmor
-                local guid = valid(row[item_class]) and stock_item_guid(row) or nil
-                local card = slot.ItemCard
-                local visible = exact(card, card_path) and valid(card.Item[item_class]) and stock_card_guid(card) or nil
-                if guid ~= visible then slot:FullRefresh() end
-            end
-        end
-        if not stock_cards(live.screen, live.save) then error("stock backpack contents did not refresh", 0) end
-        return "verified stock backpack refresh"
+        return inventory_view.refresh_projected(state, phase, fields[3])
     end
     if operation == "native-inventory-stock-nearby-fixture" and (#fields == 3 or #fields == 4) and headless and stock_session
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then

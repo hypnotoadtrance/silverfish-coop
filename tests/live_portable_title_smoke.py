@@ -7928,9 +7928,10 @@ async def verify_container_pickup(host: Seat, guest: Seat, pawn: str, *, memory_
     memory_proof = {}
     if memory_ui:
         refreshed = projections()[projections_before:]
-        assert refreshed and refreshed[-1]["items"] >= 1, refreshed
+        combined, = [record for record in refreshed if record.get("stock_menu") == "refreshed"]
+        assert combined["items"] >= 1 and combined["local_reply_bytes"] < 1024, combined
         assert save_state() == before
-        memory_proof = {"resident_ui_projection": refreshed[-1], "saves_unchanged_before_checkpoint": True}
+        memory_proof = {"resident_ui_projection": combined, "saves_unchanged_before_checkpoint": True}
     checkpoint = await submit(host_run, "checkpoint")
     assert checkpoint["ok"], checkpoint
     saved = json.loads((host.campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
