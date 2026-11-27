@@ -56,7 +56,8 @@ local function heartbeat_fresh()
 end
 
 local function controlled(pawn, controller, world, local_controller)
-    return valid(pawn) and valid(controller) and pawn:HasAuthority()
+    return valid(pawn) and not pawn:IsActorBeingDestroyed()
+        and valid(controller) and not controller:IsActorBeingDestroyed() and pawn:HasAuthority()
         and controller:IsLocalController() == local_controller
         and same(controller.Pawn, pawn) and same(controller:GetWorld(), world)
         and same(pawn:GetWorld(), world)
@@ -170,11 +171,14 @@ local function clear_binding(binding)
     end
 
     local pawn = binding.pawn
-    local current = valid(pawn) and pawn.Save or nil
+    -- EndPlay can start while the pawn wrapper still resolves. The detached
+    -- save remains available through any retained reference after that pawn.
+    local current = valid(pawn) and not pawn:IsActorBeingDestroyed() and pawn.Save or nil
     if managed_save(current, binding) then error("The guest is using a different managed save", 0) end
     if same(current, binding.detached) then
         for _, other in pairs(bindings) do
-            if other ~= binding and valid(other.pawn) and same(other.pawn.Save, binding.detached) then
+            if other ~= binding and valid(other.pawn) and not other.pawn:IsActorBeingDestroyed()
+                and same(other.pawn.Save, binding.detached) then
                 error("The detached save is also in use by another guest", 0)
             end
         end
@@ -234,7 +238,8 @@ local function verified_binding(binding, state, host, guest)
         or not same(host.pawn, binding.host) or not same(host.controller_object, binding.host_controller)
         or not same(guest.controller_object, binding.controller) or not matches(binding, guest.pawn) then return false end
     for _, other in ipairs(state.pawns) do
-        if not same(other.pawn, binding.pawn) and valid(other.pawn) and same(other.pawn.Save, binding.detached) then
+        if not same(other.pawn, binding.pawn) and valid(other.pawn) and not other.pawn:IsActorBeingDestroyed()
+            and same(other.pawn.Save, binding.detached) then
             return false
         end
     end

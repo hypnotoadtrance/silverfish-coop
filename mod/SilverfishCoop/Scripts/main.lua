@@ -236,7 +236,8 @@ local function current_world()
 end
 
 local function controller_in_world(controller, world)
-    return valid(controller) and same_object(controller:GetWorld(), world)
+    return valid(controller) and not controller:IsActorBeingDestroyed()
+        and same_object(controller:GetWorld(), world)
 end
 
 local function session_controllers(world, driver, server, statics)
@@ -361,7 +362,7 @@ local function inspect()
             local is_local = controller:IsLocalController()
             local pawn = controller.Pawn
             if is_local then state.controller = controller end
-            local name = valid(pawn) and pawn:GetFullName()
+            local name = valid(pawn) and not pawn:IsActorBeingDestroyed() and pawn:GetFullName()
             if name and name:match("^Player_FP_C ") then
                 local details = describe_pawn(pawn, name, is_local, controller, read_health)
                 state.pawns[#state.pawns + 1] = details
