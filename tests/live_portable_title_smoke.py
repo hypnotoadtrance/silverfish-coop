@@ -7014,6 +7014,7 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
             started = max(starts)
             timings["press_to_guest_projection_ms"] = round((started - pressed_us) / 1000, 2)
             timings["projection_to_first_world_item_ms"] = round((min(first_views.values()) - started) / 1000, 2)
+        timings["stock_crate_pickup"] = await claim_stock_crate_item(host, guest, pawn, crate, roll, host_state, guest_state)
     assert save_fingerprints() == before
     return {
         "local_bridge": {"host": host_state["local_bridge"], "guest": guest_state["local_bridge"]},
@@ -7030,6 +7031,48 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
         "guest_preview_collision_preserved": True,
         **timings,
     }
+
+
+async def claim_stock_crate_item(host, guest, pawn, crate, roll, host_state, guest_state):
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    selected = min(roll["items"], key=lambda item: item["class_path"] in native_loot.CASH_RANGES)
+    guid = selected["guid"]
+    identity = native_world_loot.crate_identity(roll["id"], guid)
+    for run in (host_run, guest_run):
+        visible = await wait(run, lambda state: identity in state["game"].get(native_world_loot.KEY, {}))
+        assert visible["game"][native_world_loot.KEY][identity]["class_path"] == selected["class_path"]
+    for stance in ((), ("left",), ("right",), ("back",)):
+        try:
+            approached = await host.bridge.command(native_world_loot.APPROACH, identity, pawn, *stance, timeout=5)
+        except RuntimeError as error:
+            if not str(error).startswith("world_loot_fixture_no_clear_sight:"):
+                raise
+            continue
+        position, = (row["location"] for row in approached["pawns"].values() if row["name"] == pawn)
+        await wait(guest_run, lambda state: (point := state["game"]["pawns"]["local"].get("location"))
+                   and math.dist(point, position) < 35)
+        try:
+            picked = await guest.bridge.command(native_world_loot.FIXTURE, identity, timeout=5)
+        except RuntimeError as error:
+            if not str(error).startswith("world_loot_fixture_focus_unavailable:"):
+                raise
+        else:
+            break
+    else:
+        raise AssertionError(f"Stock Interact could not focus crate loot {identity}")
+    assert picked["ack"]["message"] == "stock world loot interaction intercepted", picked["ack"]
+    for run in (host_run, guest_run):
+        await wait(run, lambda state: identity not in state["game"].get(native_world_loot.KEY, {})
+                   and any(item["guid"] == guid and item.get("claimed_by") == guest_state["character_id"]
+                           for item in state.get("gameplay", {}).get(native_loot.STATE_KEY, {}).get(crate, {}).get("items", ())))
+    receipt, = (row for row in await resident_events(host_run, host_state)
+                if row["event"] == "native_loot_claim_accepted" and row.get("guid") == guid)
+    if not receipt.get("wallet_credit"):
+        inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
+        assert any(item["guid"] == receipt.get("inventory_guid", guid) and item["class_path"] == selected["class_path"]
+                   for item in inventory), inventory
+    return {"guid": guid, "class_path": selected["class_path"], "claimed_by": receipt["claimed_by"],
+            "present_on_both_seats_before_pickup": True, "removed_from_both_seats_after_pickup": True}
 
 
 async def verify_compact_crate_status(host: Seat, guest: Seat, pawn: str) -> dict:

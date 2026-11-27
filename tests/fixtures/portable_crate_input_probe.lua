@@ -96,6 +96,8 @@ local function press(mode)
         local pressed_us = type(SilverfishBridgeProfileStamp) == "function" and SilverfishBridgeProfileStamp()
         pawn:InpActEvt_IA_Interact_K2Node_EnhancedInputActionEvent_19(started, 0, 0, action)
         pawn:InpActEvt_IA_Interact_K2Node_EnhancedInputActionEvent_21(completed, .05, .05, action)
+        -- Match the native synthetic press so the next fixture starts with the key released.
+        pawn.Holding_Interact = false
         return pressed_us and crate:GetFullName() .. "|" .. pressed_us or crate:GetFullName()
     end)
     camera:K2_SetRelativeRotation(restore, false, {}, true)
