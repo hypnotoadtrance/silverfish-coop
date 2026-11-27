@@ -8202,6 +8202,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if manage_saves:
             for game in games:
                 probes.enter_context(portable_script_overlay(game, "native_title_surface.lua", with_test_profile_photo))
+        if stock_dead_drops:
+            for game in games:
+                probes.enter_context(portable_main_overlay(game, observe_dead_drop_replies))
         if crossroads_profile or stock_crossroads_recovery:
             for game in games:
                 probes.enter_context(portable_script_overlay(
@@ -8363,7 +8366,6 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(stock_board_approach_overlay(game))
         if stock_dead_drops:
             for game in games:
-                probes.enter_context(portable_main_overlay(game, observe_dead_drop_replies))
                 probes.enter_context(portable_script_overlay(game, "native_computer_board.lua", allow_resident_contract_xp))
                 for name in ("native_authored_pickup.lua", "native_authored_pickup_input_fixture.lua"):
                     probes.enter_context(portable_script_overlay(game, name, allow_resident_dead_drop_fixtures))
