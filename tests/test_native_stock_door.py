@@ -194,6 +194,20 @@ class StockDoorActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(game[door.KEY]["doors"][self.actor]["open"])
         self.assertIsNone(view.accept(game, receipt, CROSSROADS, self.epoch, self.actor))
         self.assertIsNone(view.accept(game, dict(receipt, sequence=24), CROSSROADS, self.epoch, self.actor))
+
+    def test_unchanged_doors_reuse_the_published_frame_until_a_pose_or_visibility_changes(self):
+        closed = dict(self.closed, observed_at=8)
+        first = self.actions.world_frame({**self.host.last_game, door.KEY: {self.actor: closed}}, self.epoch)
+        static = {**self.host.last_game, "sequence": 13, door.KEY: {self.actor: dict(closed)}}
+        self.assertIs(self.actions.world_frame(static, self.epoch), first)
+        opened = dict(closed, open=True, yaw=90, observed_at=14)
+        changed = {**static, "sequence": 14, door.KEY: {self.actor: opened}}
+        self.assertEqual(self.actions.world_frame(changed, self.epoch)["doors"], {self.actor: opened})
+        absent = {**changed, "sequence": 15, door.KEY: {}}
+        retired = self.actions.world_frame(absent, self.epoch)
+        self.assertEqual(retired, {"map": CROSSROADS, "epoch": self.epoch, "sequence": 15, "doors": {}})
+        self.assertIs(self.actions.world_frame(dict(absent, sequence=16), self.epoch), retired)
+        self.assertEqual(self.actions.world_frame(absent, "e" * 32), {})
     async def test_pending_motion_releases_dispatch_and_deduplicates_until_authoritative_frame(self):
         reply = {**self.host.last_game, "sequence": 11,
                  "ack": {"message": "stock hinged door interaction dispatched closed"}}

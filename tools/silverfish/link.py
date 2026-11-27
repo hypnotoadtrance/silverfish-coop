@@ -57,6 +57,7 @@ _MAX_ACTION_FRAME = _MAX_ACTION_BODY + 64
 _MAX_SNAPSHOT_BODY = 256 * 1024
 _MAX_SNAPSHOT_FRAME = 96 * 1024
 _COMPRESS_SNAPSHOT_MINIMUM = 1024
+_COMPRESS_DELTA_MINIMUM = 256
 _COMPRESSED_SNAPSHOT = b"SFZ\x01"
 _MAX_ACTIONS = 8
 _ACTION_TIMEOUT = 8.0
@@ -452,8 +453,10 @@ def _encode_response(result: Action, *, snapshot: bool, snapshot_limit: int = _M
     delta = result.get(GAMEPLAY_DELTA) if snapshot else None
     rows = delta.get(GAMEPLAY_ROW_CHANGES) if isinstance(delta, dict) else None
     fields = delta.get(GAMEPLAY_FIELD_CHANGES) if isinstance(delta, dict) else None
-    # Repeated authored paths can keep a small row delta compressible.
-    if snapshot and (rows or plaintext_size >= _COMPRESS_SNAPSHOT_MINIMUM):
+    # Small deltas repeat world keys, paths and revision IDs across changed sections.
+    # Keep the existing codec and use compression only when the result is smaller.
+    minimum = _COMPRESS_DELTA_MINIMUM if isinstance(delta, dict) else _COMPRESS_SNAPSHOT_MINIMUM
+    if snapshot and (rows or plaintext_size >= minimum):
         compressed = _COMPRESSED_SNAPSHOT + zlib.compress(frame, level=1)
         if len(compressed) < plaintext_size:
             frame = compressed

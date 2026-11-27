@@ -285,12 +285,16 @@ class Interactions:
         self.pending = {}
         self.confirmed_scope = None
         self.confirmed = {}
+        self.published = {}
+        self.published_source = None
 
     def _confirm_scope(self, area, epoch):
         scope = area, epoch
         if scope != self.confirmed_scope:
             self.confirmed_scope = scope
             self.confirmed.clear()
+            self.published = {}
+            self.published_source = None
 
     def current_rows(self, game, epoch):
         area = game.get("map")
@@ -309,7 +313,20 @@ class Interactions:
 
     def world_frame(self, game, epoch):
         sequence, doors = self.current_rows(game, epoch)
-        return frame({**game, KEY: doors, "sequence": sequence}, epoch)
+        if game.get("state") != "hosting":
+            return {}
+        if self.published_source is not None:
+            source_sequence, source_rows = self.published_source
+            if source_sequence == sequence and source_rows is doors:
+                return self.published
+        candidate = frame({**game, KEY: doors, "sequence": sequence}, epoch)
+        if not candidate and self.published:
+            # An empty census supersedes previously visible doors in this visit.
+            candidate = {**self.published, "sequence": sequence, "doors": {}}
+        if candidate.get("doors") != self.published.get("doors"):
+            self.published = candidate
+        self.published_source = sequence, doors
+        return self.published
 
     async def dispatch(self, host, bridge, character, requested, operation, future):
         epoch, _, actor = requested.partition("@") if isinstance(requested, str) else ("", "", "")
@@ -398,6 +415,8 @@ class Interactions:
             motion.respond({"ok": False, "error": "stock_door_scope_unavailable"})
         self.pending.clear()
         self.confirmed.clear()
+        self.published = {}
+        self.published_source = None
 
 
 async def _start_motion(host, bridge, character, pawn, area, epoch, actor, operation, fingerprint, future):

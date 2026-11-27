@@ -800,9 +800,16 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         host_protocol = self.host._protocols[self.request["guest_id"]]
         packets = [b"Unreal movement " + bytes([index]) for index in range(4)]
 
-        for world, compressed in (("short", False), ("repeated world snapshot state " * 150, True)):
+        small_delta = {"ok": True, "gameplay_delta": {"changed": {}, "removed": [], "fields": {
+            "native_world_view": {"changed": {"weather_source": "nearby weather scene " * 18}, "removed": []}
+        }}}
+        self.assertLess(len(link._encode_action(small_delta)), link._COMPRESS_SNAPSHOT_MINIMUM)
+        for result, compressed in (
+            ({"ok": True, "gameplay": {"world": "short"}}, False),
+            (small_delta, True),
+            ({"ok": True, "gameplay": {"world": "repeated world snapshot state " * 150}}, True),
+        ):
             with self.subTest(compressed=compressed):
-                result = {"ok": True, "gameplay": {"world": world}}
                 wire = link._encode_response(result, snapshot=True)
                 self.assertLessEqual(len(wire), link._FRAGMENT_SIZE)
                 self.assertEqual(wire.startswith(link._COMPRESSED_SNAPSHOT), compressed)
