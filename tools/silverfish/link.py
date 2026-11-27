@@ -14,7 +14,7 @@ import struct
 import zlib
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Sequence
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from time import perf_counter_ns
@@ -128,6 +128,7 @@ _MAX_CACHED_GUESTS = 16
 _MAX_CATALOG_LINKS = 16
 _MAX_HOST_TASKS = 32
 _APP_ERROR = 0x100
+_SNAPSHOT_CANCELLED = 0x101
 _LOG = logging.getLogger(__name__)
 
 Address = tuple[str, int]
@@ -846,9 +847,9 @@ class _HostProtocol(_LinkProtocol):
             action = self._actions.get(event.stream_id)
             if action is not None:
                 action.abandoned = True
-                # Cancel partial reads. Submitted callbacks can finish, so disconnection
-                # and timeout are never guarantees about whether the action took effect.
-                if action.deadline is not None and isinstance(event, events.StreamReset):
+                # A partial request can be discarded once either side closes the stream.
+                # A submitted callback can still finish without returning a response.
+                if action.deadline is not None:
                     action.deadline.cancel()
                     action.deadline = None
                     self._actions.pop(event.stream_id)
@@ -879,6 +880,10 @@ class _HostProtocol(_LinkProtocol):
         stream_id = event.stream_id
         if not self.authorized or not _application_stream(stream_id):
             self.close(error_code=_APP_ERROR, reason_phrase="unexpected application stream")
+            return
+        stream = self._quic._streams.get(stream_id)
+        if stream is not None and stream.sender._reset_error_code is not None:
+            # STOP_SENDING can reach the host before the request on the same stream.
             return
 
         action = self._actions.get(stream_id)
@@ -912,8 +917,8 @@ class _HostProtocol(_LinkProtocol):
         try:
             if not self.authorized or self.terminated or action.abandoned:
                 return
-            response = await self.host._run_action(self, bytes(action.body))
-            if self.authorized and not self.terminated and not action.abandoned:
+            response = await self.host._run_action(self, action)
+            if response is not None and self.authorized and not self.terminated and not action.abandoned:
                 self._send_action_stream(stream_id, response)
         finally:
             self._actions.pop(stream_id, None)
@@ -1193,14 +1198,14 @@ class HostLink:
                         prior.transport.close()
                     await self._release_locked(protocol)
 
-    async def _run_action(self, protocol: _HostProtocol, body: bytes) -> bytes:
+    async def _run_action(self, protocol: _HostProtocol, action: _IncomingAction) -> bytes | None:
         guest_id = protocol.guest_id
         if self._closed or not protocol.authorized or guest_id is None or self._protocols.get(guest_id) is not protocol:
             return _encode_action({"error": "failed"})
         if self._request_callback is None:
             return _encode_action({"error": "disabled"})
         try:
-            payload = _decode_action(body)
+            payload = _decode_action(bytes(action.body))
         except LinkError:
             return _encode_action({"error": "invalid"})
         try:
@@ -1208,6 +1213,8 @@ class HostLink:
                 result = self._request_callback(guest_id, payload)
                 if inspect.isawaitable(result):
                     result = await result
+                if action.abandoned or not protocol.authorized or protocol.terminated:
+                    return None
                 if not isinstance(result, dict):
                     raise LinkError("invalid application callback response")
                 return _encode_response(result, snapshot=payload.get("action") == "snapshot", stats=self._stats)
@@ -1515,8 +1522,16 @@ class _ClientProtocol(_LinkProtocol):
             self._send_action_stream(stream_id, body, priority=not snapshot)
             async with asyncio.timeout(timeout):
                 return await action.response
-        except TimeoutError:
-            raise LinkError("application request timed out") from None
+        except (TimeoutError, asyncio.CancelledError) as error:
+            if snapshot and self.authorized and not self.terminated:
+                # Stop the obsolete reply without promising rollback of a request
+                # already delivered to the host.
+                with suppress(OSError, ValueError):
+                    self._quic.stop_stream(stream_id, _SNAPSHOT_CANCELLED)
+                    self.transmit()
+            if isinstance(error, TimeoutError):
+                raise LinkError("application request timed out") from None
+            raise
         finally:
             self._actions.pop(stream_id, None)
             if not action.response.done():

@@ -379,12 +379,18 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
         command.assert_awaited_once()
         host.checkpoint_native.assert_not_awaited()
 
-    async def test_stale_binding_denies_weapon_request_without_stopping_host(self):
-        for action, target in (("fire", "1" * 32), ("equip", "1" * 32), ("reload", "equipped")):
-            with self.subTest(action=action):
+    async def test_preflight_denies_weapon_request_without_stopping_host(self):
+        for action, target, refusal in (
+            ("fire", "1" * 32, "guest_weapon_refused_detached_save"),
+            ("equip", "1" * 32, "guest_weapon_refused_detached_save"),
+            ("reload", "equipped", "guest_weapon_refused_detached_save"),
+            ("fire", "1" * 32, "A native weapon operation needs an exact guest and item GUID"),
+            ("reload", "equipped", "The matched native weapon add-on is unavailable"),
+        ):
+            with self.subTest(action=action, refusal=refusal):
                 host = self.host()
-                bridge = SimpleNamespace(command=AsyncMock(side_effect=RuntimeError("guest_weapon_refused_detached_save")))
-                with self.assertRaisesRegex(party.RuleError, "^guest_weapon_refused_detached_save$"):
+                bridge = SimpleNamespace(command=AsyncMock(side_effect=RuntimeError(refusal)))
+                with self.assertRaisesRegex(party.RuleError, f"^{refusal}$"):
                     await native_guest_weapon.perform(host, bridge, "character", "a" * 32,
                                                       f"native-guest-weapon-{action}", target)
                 bridge.command.assert_awaited_once_with(f"native-guest-weapon-{action}", "exact pawn", target, timeout=5)
@@ -392,6 +398,21 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(host.native_checkpoint_unsafe)
                 self.assertEqual(host.party["receipts"], {})
                 host.checkpoint_native.assert_not_awaited()
+
+    async def test_quick_slot_selection_denies_detached_save_loss_without_stopping_host(self):
+        host = self.host()
+        host.native_zones, host.zone_epoch = True, "current"
+        guid = "1" * 32
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=RuntimeError("guest_weapon_refused_detached_save")))
+
+        with self.assertRaisesRegex(party.RuleError, "^guest_weapon_refused_detached_save$"):
+            await native_guest_weapon.select_equipment(host, bridge, "character", f"current@{guid}")
+
+        bridge.command.assert_awaited_once_with(native_guest_weapon.SELECT_EQUIPMENT, "exact pawn", guid, timeout=3)
+        self.assertFalse(host.stopping)
+        self.assertFalse(host.native_checkpoint_unsafe)
+        self.assertEqual(host.party["receipts"], {})
+        host.checkpoint_native.assert_not_awaited()
 
     async def test_trigger_view_is_scoped_to_the_current_visit(self):
         host = self.host()

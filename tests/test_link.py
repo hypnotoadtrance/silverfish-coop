@@ -808,6 +808,59 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
             spawn.assert_not_called()
         self.application_handler.assert_awaited_once_with(self.request["guest_id"], {"action": "snapshot"})
 
+    async def test_cancelled_and_timed_out_snapshots_stop_their_response_streams(self):
+        snapshots = asyncio.Queue()
+        world = {"gameplay": {"rows": [f"actor-{index}" for index in range(3500)]}}
+
+        async def reply(_, payload):
+            if payload == {"action": "snapshot"}:
+                release = asyncio.Event()
+                snapshots.put_nowait(release)
+                await release.wait()
+                return world
+            return {"ok": True}
+
+        self.application_handler = reply
+        self.assertTrue((await self.connect_guest())["accepted"])
+        server = self.host._protocols[self.request["guest_id"]]
+        client = self.client._protocol
+        for cancel in (True, False):
+            with self.subTest(cancel=cancel), self.assertNoLogs("tools.silverfish.link", level="WARNING"):
+                stream = client._quic.get_next_available_stream_id()
+                request = asyncio.create_task(self.client.request({"action": "snapshot"}, timeout=.25))
+                release = await asyncio.wait_for(snapshots.get(), 1)
+                try:
+                    if cancel:
+                        request.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await request
+                    else:
+                        with self.assertRaisesRegex(LinkError, "application request timed out"):
+                            await request
+                    async with asyncio.timeout(1):
+                        while not server._actions[stream].abandoned:
+                            await asyncio.sleep(.01)
+                finally:
+                    release.set()
+                async with asyncio.timeout(1):
+                    while stream in server._actions:
+                        await asyncio.sleep(.01)
+                self.assertEqual(self.host.statistics()["snapshot_responses_encoded"], 0)
+                self.assertEqual(await self.client.request({"action": "interact"}), {"ok": True})
+                await self.exchange(1200)
+
+        # aioquic can emit STOP_SENDING before the initial STREAM frame when
+        # cancellation happens while both are waiting for their first send.
+        with patch.object(client, "transmit"):
+            request = asyncio.create_task(self.client.request({"action": "snapshot"}, timeout=1))
+            await asyncio.sleep(0)
+        request.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await request
+        self.assertEqual(await self.client.request({"action": "interact"}), {"ok": True})
+        self.assertEqual(self.host.statistics()["snapshot_responses_encoded"], 0)
+        self.assertTrue(snapshots.empty())
+
     async def test_repeated_admission_fin_leaves_both_seats_connected(self):
         self.assertTrue((await self.connect_guest())["accepted"])
         server = self.host._protocols[self.request["guest_id"]]

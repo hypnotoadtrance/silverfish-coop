@@ -9,6 +9,13 @@ from . import guest_weapon_profiles, native_guest_melee, native_inventory, party
 GUEST_ACTIONS = ("native-guest-weapon-inspect", "native-guest-weapon-equip", "native-guest-weapon-fire",
                  "native-guest-weapon-reload")
 COMPACT_ACTIONS = frozenset(("native-guest-weapon-fire", "native-guest-weapon-reload"))
+# These bridge refusals come from the Lua preflight, before it calls the native weapon operation.
+_PREFLIGHT_REFUSALS = frozenset({
+    "A native weapon operation needs an exact guest and item GUID",
+    "native_guest_weapon_fixtures_disabled",
+    "The matched native weapon add-on is unavailable",
+    "guest_weapon_refused_detached_save",
+})
 REPLY_HEADER = "native-guest-weapon-reply\t1\n"
 REPLY_BYTES = "native_guest_weapon_reply_bytes"
 EQUIPPED = "native_guest_equipped_weapons"
@@ -101,7 +108,15 @@ async def select_equipment(host, bridge, character: str, target: str | None) -> 
     await native_inventory.retain_guest_save(host, bridge, character, pawn)
     host.native_checkpoint_unsafe = True
     try:
-        snapshot = await bridge.command(SELECT_EQUIPMENT, pawn, guid, timeout=3)
+        try:
+            snapshot = await bridge.command(SELECT_EQUIPMENT, pawn, guid, timeout=3)
+        except RuntimeError as error:
+            reason = str(error)
+            if reason not in _PREFLIGHT_REFUSALS:
+                raise
+            host.native_checkpoint_unsafe = False
+            host.control.event("native_guest_weapon_preflight_refused", action=SELECT_EQUIPMENT, map=area, reason=reason)
+            raise party.RuleError(reason) from error
         proof = snapshot.get("native_guest_weapon", {})
         if ((snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("pawn"),
              proof.get("action"), proof.get("guid")) != ("hosting", area, area, pawn, "select", guid)):
@@ -146,7 +161,7 @@ async def service_equipment_selection(client, active: bool) -> None:
         result = await client.gameplay_action(SELECT_EQUIPMENT, operation, f"{client.zone_epoch}@{guid}")
     except (OSError, RuntimeError, ValueError) as error:
         reason = str(error)
-        if reason in {"native_guest_selection_unavailable", "game_connection_unavailable"}:
+        if reason in {"native_guest_selection_unavailable", "game_connection_unavailable", "guest_weapon_refused_detached_save"}:
             client.equipment_selection_retry = selection, time.monotonic() + .8
             return
         client.control.event("native_guest_equipment_selection_rejected", sequence=sequence, reason=reason)
@@ -281,11 +296,13 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
             try:
                 snapshot = await bridge.command(action, pawn, guid, *extra, timeout=5)
             except RuntimeError as error:
-                if str(error) != "guest_weapon_refused_detached_save":
+                reason = str(error)
+                if reason not in _PREFLIGHT_REFUSALS:
                     raise
                 if mutates:
                     host.native_checkpoint_unsafe = False
-                raise party.RuleError(str(error)) from error
+                host.control.event("native_guest_weapon_preflight_refused", action=action, map=source, reason=reason)
+                raise party.RuleError(reason) from error
         else:
             try:
                 snapshot = await bridge.command("native-bandit-shot-fixture", bandit_fixture, pawn, guid, timeout=5)
