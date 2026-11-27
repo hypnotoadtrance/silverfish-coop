@@ -4,6 +4,7 @@
 #include "loot_crate_input.hpp"
 #include "electronic_locker.hpp"
 #include "loot_escrow.hpp"
+#include "interaction_input.hpp"
 
 #include <algorithm>
 #include <array>
@@ -118,6 +119,16 @@ namespace
         return live(object) && role && role->GetPropertyValueInContainer(object) == 3 &&
                read_bool(object, STR("bActorIsBeingDestroyed"), false) &&
                static_cast<Unreal::AActor*>(object)->GetWorld() == world;
+    }
+
+    // Placed actors load with a simulated role on the guest, even when stock
+    // marks them non-replicated. Only that local copy may run the guest roll.
+    bool crate_on_seat(Unreal::UObject* crate, Unreal::UWorld* world, bool guest)
+    {
+        if (!guest) return authority(crate, world);
+        return live(crate) && read_bool(crate, STR("bReplicates"), false) &&
+               read_bool(crate, STR("bActorIsBeingDestroyed"), false) &&
+               static_cast<Unreal::AActor*>(crate)->GetWorld() == world;
     }
 
     Address address(Unreal::UObject* object)
@@ -327,8 +338,28 @@ namespace
         return qualify_opener(pawn, save, stock, context).empty();
     }
 
+    std::string_view qualify_guest_opener(Address pawn, Address save, Address stock, Context& context)
+    {
+        using silverfish::native_interaction_input::current_guest_pawn;
+        context.pawn = current_guest_pawn(pawn);
+        if (!live(context.pawn) || context.pawn->GetClassPrivate() != find<Unreal::UClass>(pawn_class) ||
+            static_cast<Unreal::AActor*>(context.pawn)->GetWorld() != context.world ||
+            !read_bool(context.pawn, STR("Dead"), false)) return "standing_stock_opener_unavailable";
+        context.instance = object_field(context.world, STR("OwningGameInstance"));
+        context.save = object_field(context.pawn, STR("Save"));
+        context.stock = object_field(context.instance, STR("SaveSlot_Ref"));
+        auto* type = find<Unreal::UClass>(save_class);
+        auto* health = field<Unreal::FDoubleProperty>(context.save, STR("PlayerHealth"));
+        if (!type || !live(context.instance) || context.instance->GetClassPrivate() != find<Unreal::UClass>(instance_class) ||
+            !live(context.save) || context.save->GetClassPrivate() != type || context.save != context.stock ||
+            address(context.save) != save || address(context.stock) != stock || !health)
+            return "stock_opener_ownership_unavailable";
+        const auto hp = health->GetPropertyValueInContainer(context.save);
+        return std::isfinite(hp) && hp > 0 ? std::string_view{} : "standing_stock_opener_unavailable";
+    }
+
     std::string_view qualify(const Unreal::TCHAR* crate_path, Address crate, Address pawn, Address box,
-                             Address save, Address stock, Context& context)
+                             Address save, Address stock, Context& context, bool guest)
     {
         context.crate = find<Unreal::UObject>(crate_path);
         if (!context.crate || address(context.crate) != crate)
@@ -336,7 +367,12 @@ namespace
         context.profile = silverfish::shared_loot::authored_profile(context.crate);
         context.world = silverfish::shared_loot::authored_crate_world(context.crate);
         if (!context.profile || !context.world ||
-            !authority(context.crate, context.world)) return "exact_stock_crate_unavailable";
+            !crate_on_seat(context.crate, context.world, guest)) return "exact_stock_crate_unavailable";
+        // An authored replica can run the ordinary stock roll on its own seat.
+        // Replicated actors and authored external triggers retain the host route.
+        if (guest && (context.profile->stock_class->pry_entry ||
+            silverfish::electronic_locker::is_electronic(*context.profile)))
+            return "stock_guest_crate_requires_host";
         auto* value = field<Unreal::FIntProperty>(context.crate, STR("SpawnedValue"));
         if (!value || value->GetPropertyValueInContainer(context.crate) != 0 ||
             !read_bool(context.crate, STR("Looted"), false) ||
@@ -352,7 +388,8 @@ namespace
             context.red_lockbox_empty = empty->GetPropertyValueInContainer(context.crate);
         }
 
-        if (const auto error = qualify_opener(pawn, save, stock, context); !error.empty()) return error;
+        if (const auto error = guest ? qualify_guest_opener(pawn, save, stock, context)
+                                     : qualify_opener(pawn, save, stock, context); !error.empty()) return error;
         context.box = object_field(context.crate, STR("Box"));
         auto* component_type = find<Unreal::UClass>(STR("/Script/Engine.BoxComponent"));
         if (!component_type || !live(context.box) || address(context.box) != box ||
@@ -727,6 +764,7 @@ namespace
         std::array<Unreal::FWeakObjectPtr, max_container_slots> items{};
         std::array<bool, max_container_slots> produced{};
         Clock::time_point expires{};
+        bool guest{};
     };
 
     thread_local OpenScope* opening = nullptr;
@@ -1057,11 +1095,19 @@ namespace
         return true;
     }
 
+    template <bool guest>
     int open_crate(const Lua& lua)
     {
         if (!Unreal::IsInGameThreadRaw() || !installed.load(std::memory_order_acquire) || opening)
             return result(lua, false, "native_loot_scope_unavailable");
         const auto argc = lua.get_stack_size();
+        // Guest rolls stay behind the private fixture until their exact item and
+        // source outcome can be transferred and settled together.
+        if constexpr (guest)
+        {
+            if (!env_flag("SILVERFISH_COOP_HEADLESS") || !env_flag("SILVERFISH_COOP_TITLE_FIXTURES") || argc != 7)
+                return result(lua, false, "stock_guest_crate_fixture_unavailable");
+        }
         if (argc < 7 || argc > 10 || !lua.is_string(1) || !lua.is_bool(7) || (argc >= 8 && !lua.is_bool(8)) ||
             (argc >= 9 && !lua.is_bool(9)) || (argc == 10 && !lua.is_integer(10)))
             return result(lua, false, "native_loot_exact_open_arguments_required");
@@ -1084,7 +1130,7 @@ namespace
             return result(lua, false, "stock_loot_fixture_seed_unavailable");
         const auto stock_path = RC::to_generic_string(crate_path);
         if (const auto failure = qualify(stock_path.c_str(), addresses[0], addresses[1], addresses[2],
-                                         addresses[3], addresses[4], context); !failure.empty())
+                                         addresses[3], addresses[4], context, guest); !failure.empty())
             return result(lua, false, failure);
         Unreal::UClass* key{};
         if (!pried && !powered && context.profile->stock_class->pry_entry && read_bool(context.crate, STR("Locked"), true))
@@ -1140,7 +1186,7 @@ namespace
             if (force_nonempty) restored = fixture.restore();
         }
 
-        const bool looted = authority(context.crate, context.world) && read_bool(context.crate, STR("Looted"), true);
+        const bool looted = crate_on_seat(context.crate, context.world, guest) && read_bool(context.crate, STR("Looted"), true);
         const bool opener_unchanged = object_field(context.crate, STR("Player")) == context.pawn;
         const bool save_owner_unchanged = object_field(context.world, STR("OwningGameInstance")) == context.instance &&
             object_field(context.instance, STR("SaveSlot_Ref")) == context.stock &&
@@ -1202,6 +1248,7 @@ namespace
             latest_roll.items = scope.items;
             latest_roll.produced = scope.produced;
             latest_roll.expires = Clock::now() + std::chrono::seconds(2);
+            latest_roll.guest = guest;
         }
         const std::string_view detail = force_nonempty ? "opened_fixture_seeded" : "opened";
         const auto extra = slots > 2 ? std::span<Unreal::UObject* const>{items}.subspan(2, slots - 2) :
@@ -1748,10 +1795,19 @@ namespace silverfish::shared_loot
         auto* world = authored_crate_world(expected);
         const auto* profile = authored_profile(expected);
         if (!crate || !expected || crate != address(expected) || Clock::now() >= latest_roll.expires ||
-            !world || !profile || slots != profile->stock_class->slots ||
-            !qualify_escrow_owner_in_world(world, address(latest_roll.pawn.Get()), address(latest_roll.save.Get()),
-                                                     address(latest_roll.stock.Get()), owner) ||
-            !authority(expected, owner.world) || !read_bool(expected, STR("Looted"), true) ||
+            !world || !profile || slots != profile->stock_class->slots) return false;
+        const auto pawn = address(latest_roll.pawn.Get());
+        const auto save = address(latest_roll.save.Get());
+        const auto stock = address(latest_roll.stock.Get());
+        if (latest_roll.guest)
+        {
+            Context context;
+            context.world = world;
+            if (!qualify_guest_opener(pawn, save, stock, context).empty()) return false;
+            owner = {world, context.pawn, context.save, context.stock};
+        }
+        else if (!qualify_escrow_owner_in_world(world, pawn, save, stock, owner)) return false;
+        if (!crate_on_seat(expected, owner.world, latest_roll.guest) || !read_bool(expected, STR("Looted"), true) ||
             object_field(expected, STR("Player")) != owner.pawn) return false;
 
         for (std::size_t index = 0; index < actors.size(); ++index)
@@ -1800,7 +1856,8 @@ namespace silverfish::shared_loot
     void register_lua(RC::LuaMadeSimple::Lua& lua)
     {
         if (!enabled()) return;
-        lua.register_function("SilverfishOpenNativeLootCrate", open_crate);
+        lua.register_function("SilverfishOpenNativeLootCrate", open_crate<false>);
+        lua.register_function("SilverfishOpenNativeGuestLootCrate", open_crate<true>);
         lua.register_function("SilverfishDescribeNativeLootRoll", describe_loot_roll);
         if (env_flag("SILVERFISH_COOP_NATIVE_FIXTURES"))
             lua.register_function("SilverfishSeedNativeLootLuckyLooter", seed_lucky_looter);

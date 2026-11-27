@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <format>
 #include <limits>
 #include <memory>
@@ -22,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include <Helpers/String.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
@@ -62,6 +64,7 @@ namespace
     constexpr int max_escrow = 2;
     constexpr int max_party = 5;
     constexpr std::size_t parameter_capacity = 256;
+    constexpr std::size_t max_item_text = 8192;
     std::array<Unreal::FWeakObjectPtr, 64> qualified_escrows{};
     std::size_t next_qualified_escrow{};
 
@@ -428,6 +431,128 @@ namespace
             if (!committed && rows.Num() > before) rows.RemoveValues(before, rows.Num() - before);
         }
     };
+
+    std::string item_text(const Inventory& inventory, Unreal::UObject* escrow, const void* row)
+    {
+        Unreal::FString text;
+        inventory.row->ExportTextItem_Direct(text, row, nullptr, escrow, Unreal::PPF_Delimited);
+        if (text.Len() <= 0 || static_cast<std::size_t>(text.Len()) > max_item_text) return {};
+        auto encoded = RC::to_utf8_string(*text);
+        if (encoded.size() > max_item_text || !encoded.starts_with('(') || !encoded.ends_with(')') ||
+            std::ranges::any_of(encoded, [](unsigned char value) { return value < 32; })) return {};
+        return encoded;
+    }
+
+    int export_escrow(const Lua& lua)
+    {
+        if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1))
+            return result(lua, false, "native_loot_export_arguments");
+        const auto requested = lua.get_integer();
+        Unreal::UObject* escrow{};
+        for (const auto& reference : qualified_escrows)
+        {
+            auto* entry = reference.Get();
+            if (requested > 0 && reinterpret_cast<Address>(entry) == static_cast<Address>(requested) && live(entry))
+            {
+                escrow = entry;
+                break;
+            }
+        }
+        Inventory inventory;
+        if (!escrow || !inventory.bind() || escrow->GetClassPrivate() != inventory.save_class)
+            return result(lua, false, "native_loot_export_escrow_unavailable");
+        Unreal::FScriptArrayHelper rows(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(escrow));
+        if (!qualified_escrow(inventory, escrow, rows, max_container_slots))
+            return result(lua, false, "native_loot_export_escrow_unqualified");
+        struct Item
+        {
+            std::string guid, class_path, text;
+        };
+        std::array<Item, max_container_slots> items;
+        for (int index = 0; index < rows.Num(); ++index)
+        {
+            const auto* row = rows.GetRawPtr(index);
+            auto& item = items[index];
+            item.guid = print_guid(inventory.identity(row));
+            item.class_path = RC::to_utf8_string(inventory.klass(row)->GetPathName());
+            item.text = item_text(inventory, escrow, row);
+            if (item.text.empty() || !silverfish::content_paths::item_class(std::string_view{item.class_path}))
+                return result(lua, false, "native_loot_export_payload_unavailable");
+        }
+        result(lua, true, "exported");
+        auto* stack = lua.get_lua_state();
+        lua_createtable(stack, rows.Num(), 0);
+        for (int index = 0; index < rows.Num(); ++index)
+        {
+            const auto& item = items[index];
+            lua_createtable(stack, 0, 3);
+            lua.set_string(item.guid);
+            lua_setfield(stack, -2, "guid");
+            lua.set_string(item.class_path);
+            lua_setfield(stack, -2, "class_path");
+            lua.set_string(item.text);
+            lua_setfield(stack, -2, "text");
+            lua_rawseti(stack, -2, index + 1);
+        }
+        return 3;
+    }
+
+    int import_escrow(const Lua& lua)
+    {
+        const auto argc = lua.get_stack_size();
+        std::array<Address, 1> arguments{};
+        if (!enabled() || !Unreal::IsInGameThreadRaw() || argc < 2 || (argc - 2) % 3 ||
+            argc > 2 + 3 * max_container_slots || !read_addresses(lua, arguments, 1) || !lua.is_integer(1))
+            return result(lua, false, "native_loot_import_arguments");
+        const auto capacity = lua.get_integer();
+        const auto count = (argc - 2) / 3;
+        if (capacity < 1 || capacity > max_container_slots || count > capacity)
+            return result(lua, false, "native_loot_import_capacity");
+        Inventory inventory;
+        if (!inventory.bind()) return result(lua, false, "native_loot_inventory_schema_unavailable");
+        std::string_view failure;
+        auto* scratch = isolated_save(arguments[0], inventory, failure);
+        if (!scratch) return result(lua, false, failure);
+        Unreal::FScriptArrayHelper rows(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(scratch));
+        if (rows.Num() != 0 || !qualified_escrow(inventory, scratch, rows, static_cast<int>(capacity)))
+            return result(lua, false, "native_loot_blank_escrow_required");
+        AddedRows append{rows};
+        for (int index = 0; index < count; ++index)
+        {
+            if (!lua.is_string(1) || !lua.is_string(2) || !lua.is_string(3))
+                return result(lua, false, "native_loot_import_arguments");
+            const auto guid = parse_guid(lua.get_string());
+            const auto class_path = lua.get_string();
+            const auto text = lua.get_string();
+            if (guid == Guid{} || class_path.size() > 512 ||
+                !silverfish::content_paths::item_class(std::string_view{class_path}) ||
+                text.empty() || text.size() > max_item_text || !text.starts_with('(') || !text.ends_with(')') ||
+                std::ranges::any_of(text, [](unsigned char value) { return value < 32; }))
+                return result(lua, false, "native_loot_import_payload_unqualified");
+            try
+            {
+                auto* expected = find<Unreal::UClass>(RC::to_wstring(class_path).c_str());
+                if (!live(expected) || !expected->IsChildOf(inventory.item_base))
+                    return result(lua, false, "native_loot_import_class_unavailable");
+                const auto target = rows.AddValue();
+                auto* row = rows.GetRawPtr(target);
+                const auto decoded = RC::to_wstring(text);
+                const auto* tail = inventory.row->ImportText_Direct(decoded.c_str(), row, scratch, Unreal::PPF_Delimited, nullptr);
+                if (tail != decoded.data() + decoded.size() || inventory.klass(row) != expected ||
+                    inventory.identity(row) != guid || !std::isfinite(inventory.weight->GetPropertyValueInContainer(row)) ||
+                    inventory.ammo->GetPropertyValueInContainer(row) < -1 || item_text(inventory, scratch, row) != text)
+                    return result(lua, false, "native_loot_import_payload_mismatch");
+            }
+            catch (const std::exception&)
+            {
+                return result(lua, false, "native_loot_import_encoding");
+            }
+        }
+        if (rows.Num() != count || !qualified_escrow(inventory, scratch, rows, static_cast<int>(capacity)))
+            return result(lua, false, "native_loot_import_identity_conflict");
+        append.committed = true;
+        return result(lua, true, "imported");
+    }
 
     bool sealed_package_row(const Inventory& inventory, const void* row)
     {
@@ -1234,6 +1359,8 @@ namespace silverfish::loot_escrow
         if (!enabled()) return;
         lua.register_function("SilverfishCaptureNativeLootEscrow", capture<false>);
         lua.register_function("SilverfishVerifyNativeLootEscrow", verify_escrow);
+        lua.register_function("SilverfishExportNativeLootEscrow", export_escrow);
+        lua.register_function("SilverfishImportNativeLootEscrow", import_escrow);
         lua.register_function("SilverfishClaimNativeLootEscrow", claim<false>);
         lua.register_function("SilverfishMergeNativeGroundStack", claim<false, true>);
         lua.register_function("SilverfishCaptureNativeEnemyLootEscrow", capture<true>);

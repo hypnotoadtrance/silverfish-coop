@@ -470,7 +470,7 @@ namespace
             component->GetPropertyClass().Get() != find<U::UClass>(STR("/Script/Engine.SceneComponent"))) return;
         auto* pawn = read(player, args);
         auto* hit = read(component, args);
-        if (local.host && silverfish::shared_loot::permits_stock_interaction(crate, pawn, hit, method)) return;
+        if (silverfish::shared_loot::permits_stock_interaction(crate, pawn, hit, method)) return;
 
         call.PreventOriginalFunctionCall();
         if (!call.OriginalFunctionCallPrevented() || pawn != local.pawn || sequence == max_sequence ||
