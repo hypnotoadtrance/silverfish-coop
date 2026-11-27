@@ -22,6 +22,58 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(client.cancel_gameplay_snapshot)
         return client
 
+    async def test_reload_input_is_collected_while_a_shot_waits(self):
+        for visit_changed in (False, True):
+            with self.subTest(visit_changed=visit_changed):
+                client = self.guest(AsyncMock())
+                pawn, guid = "Player_FP_C guest", "a" * 32
+                visit = ("session", "visit", OBSERVATORY, pawn)
+                frame = {"state": "connected", "map": OBSERVATORY,
+                         "pawns": {"local": {"name": pawn}},
+                         "native_guest_primary_scope": {"map": OBSERVATORY, "pawn": pawn, "guid": guid}}
+                edge = {"map": OBSERVATORY, "pawn": pawn, "guid": guid, "sequence": 3, "captured_ms": 1000}
+                client.stock_interaction_scope = lambda: visit
+                client.bridge.snapshot.return_value = frame
+                shooting, release, captured = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                dispatches = []
+
+                def take_reload(area, local_pawn):
+                    if shooting.is_set() and not release.is_set() and not captured.is_set():
+                        self.assertEqual((area, local_pawn), (OBSERVATORY, pawn))
+                        captured.set()
+                        return edge
+                    return None
+
+                async def primary(active, game):
+                    if shooting.is_set():
+                        client.stopping = True
+                    else:
+                        shooting.set()
+                        await release.wait()
+
+                async def reload(active, game):
+                    if intent := game.get("native_guest_reload_intent"):
+                        self.assertTrue(active)
+                        dispatches.append(intent)
+                        client.last_reload_intent = intent["sequence"]
+
+                client.bridge.take_guest_reload_input.side_effect = take_reload
+                client.service_primary_input = primary
+                client.service_reload_input = reload
+                lane = asyncio.create_task(client.run_stock_combat_inputs())
+                try:
+                    await asyncio.wait_for(captured.wait(), .5)
+                    self.assertEqual(dispatches, [])
+                    if visit_changed:
+                        visit = ("session", "next-visit", OBSERVATORY, pawn)
+                    release.set()
+                    await asyncio.wait_for(lane, .5)
+                    self.assertEqual(dispatches, [] if visit_changed else [edge])
+                finally:
+                    if not lane.done():
+                        lane.cancel()
+                        await asyncio.gather(lane, return_exceptions=True)
+
     async def test_slow_snapshot_does_not_hold_guest_input_loop_or_start_duplicate(self):
         release = asyncio.Event()
 

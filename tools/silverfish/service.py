@@ -7500,20 +7500,59 @@ class Client:
                     self.bridge, self.control, self.last_game, shots, self.zone_epoch)
 
     async def run_stock_combat_inputs(self) -> None:
-        while not self.stopping:
-            stock_scope = self.stock_interaction_scope()
+        game, scope, pending_reload = self.last_game, None, None
+
+        def capture() -> None:
+            nonlocal game, scope, pending_reload
             game = self.bridge.snapshot() or self.last_game
+            area = game.get("map")
             pawn = game.get("pawns", {}).get("local", {}).get("name")
-            active = bool(stock_scope and game.get("state") == "connected" and stock_scope[2:] == (game.get("map"), pawn))
-            await self.service_primary_input(active, game)
-            intent = self.bridge.take_guest_reload_input(game.get("map"), pawn)
+            current = self.stock_interaction_scope()
+            scope = current if current and game.get("state") == "connected" and current[2:] == (area, pawn) else None
             primary = game.get("native_guest_primary_scope", {})
-            if (intent and (intent["map"], intent["pawn"], intent["guid"]) ==
-                    (primary.get("map"), primary.get("pawn"), primary.get("guid"))
-                    and intent["sequence"] >= game.get("native_guest_reload_intent", {}).get("sequence", 0)):
-                game = {**game, "native_guest_reload_intent": intent}
-            await self.service_reload_input(active and self.stock_interaction_scope() == stock_scope, game)
-            await asyncio.sleep(.02)
+            weapon = primary.get("map"), primary.get("pawn"), primary.get("guid")
+            if pending_reload and pending_reload[0] != (scope, weapon):
+                pending_reload = None
+            intent = self.bridge.take_guest_reload_input(area, pawn)
+            if (scope and intent and intent["sequence"] > self.last_reload_intent
+                    and (intent["map"], intent["pawn"], intent["guid"]) == weapon
+                    and (pending_reload is None or intent["sequence"] > pending_reload[1]["sequence"])):
+                pending_reload = (scope, weapon), intent
+
+        async def collect_reload() -> None:
+            # The input ring expires unread edges. Keep polling while a shot or
+            # its stock reload presentation is awaiting a reply.
+            while not self.stopping:
+                capture()
+                await asyncio.sleep(.02)
+
+        capture()
+        collector = asyncio.create_task(collect_reload())
+        try:
+            while not self.stopping:
+                if collector.done():
+                    await collector
+                initial_scope = scope
+                await self.service_primary_input(scope is not None, game)
+                capture()
+                if scope == initial_scope and scope is not None:
+                    latest = game
+                    if pending_reload:
+                        _, intent = pending_reload
+                        if intent["sequence"] >= latest.get("native_guest_reload_intent", {}).get("sequence", 0):
+                            latest = {**latest, "native_guest_reload_intent": intent}
+                    await self.service_reload_input(True, latest)
+                    if pending_reload and pending_reload[1]["sequence"] <= self.last_reload_intent:
+                        pending_reload = None
+                elif scope is None:
+                    await self.service_reload_input(False, game)
+                else:
+                    self.tube_reload = None
+                await asyncio.sleep(.02)
+        finally:
+            collector.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await collector
 
     async def run(self) -> None:
         engine = self.bridge.process if isinstance(self.bridge.process, EmbeddedEngine) else None
