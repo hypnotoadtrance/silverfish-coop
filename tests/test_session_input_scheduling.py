@@ -216,6 +216,72 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(len(compact_wire), len(service.link._encode_response(legacy, snapshot=True)))
         self.assertEqual(stats.snapshot_world_delta_responses, 1)
 
+    async def test_quest_placement_updates_compact_only_negotiated_rows(self):
+        loose = service.native_loose_pickup
+        epoch = "a" * 32
+        world = f"{OBSERVATORY}.Observitory_P"
+        sources = [f"{world}:PersistentLevel.Case_Test_C_{index}" for index in range(loose.QUEST_LIMIT)]
+        items = {
+            source: {"quest": f"Mod.Collect-{index}", "class_path": "/ModContent/Items/Case_Test.Case_Test_C",
+                     "transform": {"position": [index * 125.6, 15.0, 17.0],
+                                   "rotation": [0, index, 0], "scale": [1, 1, 1]}}
+            for index, source in enumerate(sources)
+        }
+        gameplay = {"players": {}, loose.QUEST_FRAME: {"map": OBSERVATORY, "epoch": epoch, "items": items}}
+        host = SimpleNamespace(stopping=False, native_guest=False, transitioning=False, zone_epoch=epoch,
+                               map_preflight=None, gameplay_snapshots=gameplay_snapshot.HostSnapshots(),
+                               authenticated_guest=Mock(return_value=("guest", "character")))
+        host.snapshot_for_guest = lambda *_: {
+            "ok": True, "gameplay": gameplay.copy(), "zone_epoch": host.zone_epoch, "zone": OBSERVATORY,
+            "viewer_role": "guest", "travel_in_progress": False,
+        }
+        requests, frames, replies = [], [], []
+
+        async def request(payload, *, timeout):
+            requests.append(payload)
+            reply = service.Host.guest_request(host, "new", payload)
+            frames.append(service.link._encode_response(reply, snapshot=True))
+            replies.append(service.link._decode_response(frames[-1])["result"])
+            return replies[-1]
+
+        guest = self.guest(AsyncMock(side_effect=request))
+
+        async def refresh():
+            guest.next_snapshot = 0
+            await guest.refresh_gameplay(project=False)
+
+        await refresh()
+        self.assertNotIn(gameplay_snapshot.PLACEMENT_UPDATES, requests[-1])
+        await refresh()
+        self.assertTrue(requests[-1][gameplay_snapshot.PLACEMENT_UPDATES])
+        legacy_request = {"action": "snapshot", gameplay_snapshot.BASE: "", gameplay_snapshot.ROW_UPDATES: True,
+                          gameplay_snapshot.WORLD_UPDATES: True}
+        legacy_baseline = service.Host.guest_request(host, "old", legacy_request)
+        removed, moved = sources[:2]
+        del items[removed]
+        items[moved]["transform"]["position"][2] += 85.5
+        await refresh()
+        delta = replies[-1][gameplay_snapshot.DELTA]
+        self.assertEqual(delta[gameplay_snapshot.ROW_CHANGES][loose.QUEST_FRAME],
+                         {"changed": {moved: items[moved]}, "removed": [removed]})
+        self.assertNotIn(loose.QUEST_FRAME, delta["changed"])
+        self.assertEqual(guest.gameplay, gameplay)
+
+        legacy_request[gameplay_snapshot.BASE] = legacy_baseline[gameplay_snapshot.REVISION]
+        legacy_reply = service.Host.guest_request(host, "old", legacy_request)
+        self.assertEqual(legacy_reply[gameplay_snapshot.DELTA]["changed"][loose.QUEST_FRAME]["items"], items)
+        self.assertLess(len(frames[-1]), len(service.link._encode_response(legacy_reply, snapshot=True)) / 3)
+
+        # No census is distinct from an empty census. A temporary omission
+        # must neither leave a stale delta baseline nor retire every item.
+        section = gameplay.pop(loose.QUEST_FRAME)
+        await refresh()
+        self.assertNotIn(loose.QUEST_FRAME, guest.gameplay)
+        gameplay[loose.QUEST_FRAME] = section
+        await refresh()
+        self.assertEqual(guest.gameplay, gameplay)
+        self.assertEqual(replies[-1][gameplay_snapshot.DELTA]["changed"][loose.QUEST_FRAME], section)
+
     def test_snapshot_rejects_a_world_delta_without_the_host_advertising_it(self):
         client = gameplay_snapshot.ClientSnapshots()
         client.read({"gameplay": {"host_world": {"native_scene": {"game_seconds": 8}}},

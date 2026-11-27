@@ -12,12 +12,15 @@ REVISION = "gameplay_revision"
 DELTA = "gameplay_delta"
 ROW_UPDATES = "gameplay_row_updates"
 WORLD_UPDATES = "gameplay_world_updates"
+PLACEMENT_UPDATES = "gameplay_placement_updates"
 ROW_CHANGES = "rows"
 WORLD_SECTION = "host_world"
+_PLACEMENT_SECTION = "native_authored_quest_placements"
 _TOKEN = re.compile(r"[0-9a-f]{32}")
 _MAX_PEERS = 16
 _TABLES = {
     WORLD_SECTION: None,
+    _PLACEMENT_SECTION: "items",
     "native_loot_rolls": None,
     "native_stock_enemy_loot": None,
     "native_stock_doors": "doors",
@@ -126,9 +129,10 @@ class HostSnapshots:
         self._peers: OrderedDict[tuple[str, str], tuple[_Snapshot, ...]] = OrderedDict()
 
     def encode(self, guest: str, character: str, base: object, reply: dict, *,
-               row_updates=False, world_updates=False) -> dict:
+               row_updates=False, world_updates=False, placement_updates=False) -> dict:
         reply[ROW_UPDATES] = True
         reply[WORLD_UPDATES] = True
+        reply[PLACEMENT_UPDATES] = True
         if base != "" and not _revision(base):
             # Advertise support without keeping a baseline for a legacy guest.
             reply[REVISION] = ""
@@ -146,6 +150,8 @@ class HostSnapshots:
             if row_updates:
                 for section in sorted(changed.keys() & old.keys() & _TABLES.keys()):
                     if section == WORLD_SECTION and not world_updates:
+                        continue
+                    if section == _PLACEMENT_SECTION and not placement_updates:
                         continue
                     if patch := _row_patch(section, old[section], changed[section]):
                         rows[section] = patch
@@ -178,6 +184,7 @@ class ClientSnapshots:
         self._confirmed: _Snapshot | None = None
         self.row_updates = False
         self.world_updates = False
+        self.placement_updates = False
 
     def _delta(self, reply, scope, revision):
         previous = self._confirmed
@@ -191,6 +198,7 @@ class ClientSnapshots:
             return None
         if sections and (not self.row_updates or not sections.keys() <= _TABLES.keys() & base.keys()
                          or WORLD_SECTION in sections and not self.world_updates
+                         or _PLACEMENT_SECTION in sections and not self.placement_updates
                          or sections.keys() & (changed.keys() | set(removed))):
             return None
         for section, rows in sections.items():
@@ -224,6 +232,7 @@ class ClientSnapshots:
             self.base = revision
             self.row_updates = reply.get(ROW_UPDATES) is True
             self.world_updates = self.row_updates and reply.get(WORLD_UPDATES) is True
+            self.placement_updates = self.row_updates and reply.get(PLACEMENT_UPDATES) is True
             # Local optimistic actions can edit the displayed view before the next snapshot.
             return deepcopy(gameplay)
         self.clear()
@@ -231,4 +240,5 @@ class ClientSnapshots:
             self.base = ""
             self.row_updates = reply.get(ROW_UPDATES) is True
             self.world_updates = self.row_updates and reply.get(WORLD_UPDATES) is True
+            self.placement_updates = self.row_updates and reply.get(PLACEMENT_UPDATES) is True
         return gameplay

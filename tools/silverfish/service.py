@@ -2305,7 +2305,7 @@ class Host:
             "action", "voice_events", "avatar_aim", "sprinting", "zone_epoch", native_guest_clock.WORLD_START,
             native_flashlight.GUEST_SOURCE, native_player_avatar.GUEST_LIGHTER, native_player_avatar.GUEST_VISOR,
             gameplay_snapshot.BASE, gameplay_snapshot.ROW_UPDATES, gameplay_snapshot.WORLD_UPDATES,
-            native_map_preflight.VOTE,
+            gameplay_snapshot.PLACEMENT_UPDATES, native_map_preflight.VOTE,
         }:
             if self.map_preflight:
                 self.map_preflight.receive(character, request.get("zone_epoch"), request.get(native_map_preflight.VOTE))
@@ -2333,9 +2333,12 @@ class Host:
                 reply[native_guest_clock.WORLD_START] = start
             if "gameplay" not in reply or request.get(native_guest_clock.WORLD_START) is True:
                 return reply
-            return self.gameplay_snapshots.encode(guest_id, character, request.get(gameplay_snapshot.BASE), reply,
-                                                  row_updates=request.get(gameplay_snapshot.ROW_UPDATES) is True,
-                                                  world_updates=request.get(gameplay_snapshot.WORLD_UPDATES) is True)
+            return self.gameplay_snapshots.encode(
+                guest_id, character, request.get(gameplay_snapshot.BASE), reply,
+                row_updates=request.get(gameplay_snapshot.ROW_UPDATES) is True,
+                world_updates=request.get(gameplay_snapshot.WORLD_UPDATES) is True,
+                placement_updates=request.get(gameplay_snapshot.PLACEMENT_UPDATES) is True,
+            )
         action = request.get("action")
         if action in (link.GUEST_LEAVE, link.GUEST_LEAVE_CONFIRM):
             operation, epoch = request.get("operation_id"), request.get("target")
@@ -6489,6 +6492,8 @@ class Client:
                 request[gameplay_snapshot.ROW_UPDATES] = True
             if self.gameplay_snapshots.world_updates:
                 request[gameplay_snapshot.WORLD_UPDATES] = True
+            if self.gameplay_snapshots.placement_updates:
+                request[gameplay_snapshot.PLACEMENT_UPDATES] = True
         if active:
             if events := native_voice.client_events(self.last_game):
                 request.update(voice_events=events, zone_epoch=self.zone_epoch)
