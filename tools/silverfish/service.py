@@ -7648,7 +7648,8 @@ class Client:
             await self.bridge.wait_for_interaction(
                 .25, wake_if=lambda: self.gameplay_snapshot_ready() or self.gameplay_change_ready()
                 or (self.bridge.local_bridge is None and self.transport.weapon_shots_ready())
-                or self.transport.loot_motion_ready() or self.guest_ui.stock_refresh_ready(), guest=True)
+                or self.transport.loot_motion_ready()
+                or (self.stock_inventory_job is None and self.guest_ui.stock_refresh_ready()), guest=True)
 
     def publish_gameplay_status(self, active: bool) -> None:
         fresh = active and time.monotonic() - self.gameplay_seen < 3
