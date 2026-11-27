@@ -845,6 +845,25 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(protocol._game_enqueued)
         self.assertEqual(protocol._stats.interaction_priority_passes, 0)
 
+    def test_snapshot_dictionary_saves_bytes_on_a_short_world_delta(self):
+        area = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+        door = f"Door_Wood_04_BP_C {area}.CrossRoads_P:PersistentLevel.Door_Wood_04_BP_C_1719"
+        result = {
+            "ok": True, "zone_epoch": "f1" * 16, "zone": area, "viewer_role": "guest", "travel_in_progress": False,
+            "gameplay_base": "a1" * 16, "gameplay_revision": "b2" * 16,
+            "gameplay_delta": {"changed": {}, "removed": [], "rows": {
+                "native_stock_doors": {"changed": {door: {"locked": False, "observed_at": 61, "angles": [0, 40, 0]}},
+                                       "removed": []},
+            }},
+        }
+        plain = b'{"result":' + link._encode_action(result) + b"}"
+        previous_size = len(link._COMPRESSED_SNAPSHOT) + len(zlib.compress(plain, level=1))
+        wire = link._encode_response(result, snapshot=True)
+        self.assertLess(len(wire), previous_size)
+        self.assertEqual(link._decode_response(wire)["result"], result)
+        with self.assertRaises(LinkError):
+            link._decode_response(wire + b"trailing")
+
     async def test_large_world_snapshot_is_compressed_and_game_datagrams_stay_independent(self):
         world = {"ok": True, "gameplay": {"loot_sources": [
             f"/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P:PersistentLevel.LootCrate_Small_BP_C_{index}"

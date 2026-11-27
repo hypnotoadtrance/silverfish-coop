@@ -58,7 +58,31 @@ _MAX_SNAPSHOT_BODY = 256 * 1024
 _MAX_SNAPSHOT_FRAME = 96 * 1024
 _COMPRESS_SNAPSHOT_MINIMUM = 1024
 _COMPRESS_DELTA_MINIMUM = 256
-_COMPRESSED_SNAPSHOT = b"SFZ\x01"
+_COMPRESSED_SNAPSHOT = b"SFZ\x02"
+# Both seats ship this dictionary with the frame version. Keep it small so
+# seeding the compressor costs little for ordinary one- or two-row updates.
+_SNAPSHOT_DICTIONARY = (
+    b'/Game/Classes/Maps/Maps_OverWorld/ /Game/Classes/Maps/Maps_Dungeons/'
+    b'/Game/Classes/Items/ /Game/Classes/Weapons/ .Observitory_P:PersistentLevel.'
+    b'.CrossRoads_P:PersistentLevel. .RailYard_P:PersistentLevel. '
+    b'"native_authored_quest_placements": {"items":{'
+    b'"native_stock_enemy_loot":{ "native_loot_rolls":{ "native_loot_roll_revision":'
+    b'"native_world_view":{ "native_stock_doors":{ "native_stock_switches":{ '
+    b'"native_guest_health":{ "native_reputation":{ "native_explosive_canisters":{ '
+    b'"native_guest_route":{ "native_player_outfits":{ "native_quests":{ '
+    b'"class_path":"/Game/Classes/ "transform":{"position":[ "rotation":[ "scale":[ '
+    b'"actor":" "location":[ "velocity":[ "pawn":"Player_FP_C /Game/Classes/Maps/'
+    b'"phase": "health": "maximum": "downed":false "character_id":" "observed_at":'
+    b'"mode":"sample","map":" "doors":{ "switches":{ "powered":false "locked":false '
+    b'"sequence": "close": "open": "lights":{ "angles":[ "owner":" '
+    b'"host_world":{ "native_scene":{ "instance_seed": "native_rules":{ '
+    b'"gameplay_world_updates":true,"gameplay_placement_updates":true,"gameplay_field_updates":true,'
+    b'"gameplay_row_updates":true, "gameplay_revision":" "gameplay_base":" '
+    b'"gameplay_delta":{"changed":{ "fields":{ "rows":{ "removed":[]'
+    b'"zone_epoch":" "viewer_role":"guest","zone":"/Game/Classes/Maps/Maps_OverWorld/'
+    b'"travel_in_progress":false, "loading_zone":" "map":"/Game/Classes/Maps/'
+    b'"epoch":" {"result":{"ok":true,"gameplay":{'
+)
 _MAX_ACTIONS = 8
 _ACTION_TIMEOUT = 8.0
 _CHECKPOINT_ACTION_TIMEOUTS = {
@@ -457,7 +481,8 @@ def _encode_response(result: Action, *, snapshot: bool, snapshot_limit: int = _M
     # Keep the existing codec and use compression only when the result is smaller.
     minimum = _COMPRESS_DELTA_MINIMUM if isinstance(delta, dict) else _COMPRESS_SNAPSHOT_MINIMUM
     if snapshot and (rows or plaintext_size >= minimum):
-        compressed = _COMPRESSED_SNAPSHOT + zlib.compress(frame, level=1)
+        compressor = zlib.compressobj(level=1, zdict=_SNAPSHOT_DICTIONARY)
+        compressed = _COMPRESSED_SNAPSHOT + compressor.compress(frame) + compressor.flush()
         if len(compressed) < plaintext_size:
             frame = compressed
     maximum = min(snapshot_limit, _MAX_SNAPSHOT_FRAME) if snapshot else _MAX_ACTION_FRAME
@@ -485,7 +510,7 @@ def _encode_response(result: Action, *, snapshot: bool, snapshot_limit: int = _M
 
 def _decode_response(frame: bytes) -> Action:
     if frame.startswith(_COMPRESSED_SNAPSHOT):
-        decoder = zlib.decompressobj()
+        decoder = zlib.decompressobj(zdict=_SNAPSHOT_DICTIONARY)
         maximum = _MAX_SNAPSHOT_BODY + 16
         try:
             frame = decoder.decompress(frame[len(_COMPRESSED_SNAPSHOT):], maximum + 1)
