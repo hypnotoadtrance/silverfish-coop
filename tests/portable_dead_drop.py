@@ -7,6 +7,7 @@ import math
 
 from live_multi_smoke import campaign_save_hashes, saved_hashes
 from portable_guest_world_start import wait_resident_status
+from portable_simmi_jammer import accept_crossroads_dead_drop
 from tools.silverfish import native_authored_pickup, native_dead_drop, native_host_save, native_wire_board
 from tools.silverfish.authored_loot import same_pose
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
@@ -53,14 +54,15 @@ def resident_metro_seed_overlay(script):
 
 
 def observe_dead_drop_replies(script):
-    needle = '''        SilverfishPublishLocalBridgeReply(pending.ticket,
-            native_authored_pickup.dead_drop_reply(fields, state, current_phase, status_row))'''
-    replacement = '''        local reply = native_authored_pickup.dead_drop_reply(fields, state, current_phase, status_row)
+    needle = "        SilverfishPublishLocalBridgeReply(pending.ticket, placed_view(fields, state, current_phase, status_row))"
+    replacement = '''        local reply = placed_view(fields, state, current_phase, status_row)
         SilverfishPublishLocalBridgeReply(pending.ticket, reply)
-        local log = io.open(bridge .. "/dead-drop-replies.tsv", "a")
-        if log then
-            log:write(fields[2], "\\t", fields[3] or "-", "\\t", #reply, "\\n")
-            log:close()
+        if placed_view == native_authored_pickup.dead_drop_reply then
+            local log = io.open(bridge .. "/dead-drop-replies.tsv", "a")
+            if log then
+                log:write(fields[2], "\\t", fields[3] or "-", "\\t", #reply, "\\n")
+                log:close()
+            end
         end'''
     assert script.count(needle) == 1
     return script.replace(needle, replacement)
@@ -79,7 +81,7 @@ def allow_resident_contract_xp(script):
     return script.replace(gate, f'({gate} and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") ~= "1")')
 
 
-async def verify_dead_drop(host, guest, contract, drop, *, via=(LAKE,), cash=None):
+async def verify_dead_drop(host, guest, contract, drop, *, via=(LAKE,), cash=None, simmi_probe=None):
     generic_board = drop.quest != contract.quest_id
     host_run, guest_run = host.campaign / "run", guest.client / "run"
 
@@ -152,10 +154,13 @@ async def verify_dead_drop(host, guest, contract, drop, *, via=(LAKE,), cash=Non
         start = BLACK_MARKET
     authority, _ = await seats(start)
     host_pawn = authority["game"]["pawns"]["local"]["name"]
-    await host.bridge.command(contract.command("approach"), host_pawn)
-    await host.bridge.command(contract.command("xp-fixture"), host_pawn)
     before = save_fingerprints()
-    await select(start, "start")
+    if simmi_probe:
+        await accept_crossroads_dead_drop(host, guest, simmi_probe)
+    else:
+        await host.bridge.command(contract.command("approach"), host_pawn)
+        await host.bridge.command(contract.command("xp-fixture"), host_pawn)
+        await select(start, "start")
     accepted = await wait_resident_status(host_run, lambda frame:
         frame["gameplay"].get("native_quests", {}).get(drop.quest, {}).get("step") == 1)
     assert save_fingerprints() == before

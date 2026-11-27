@@ -8,6 +8,8 @@ from pathlib import Path
 import time
 
 import live_portable_title_smoke as suite
+from portable_dead_drop import allow_resident_contract_xp
+from portable_simmi_jammer import accept_crossroads_dead_drop
 from portable_weather_travel import enter_crossroads
 from tools.silverfish import native_guest_drop, native_loose_pickup, native_loot, native_stock_switch
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
@@ -218,21 +220,7 @@ async def verify_oil_lamps(host, guest, pawn, *, playtest_batch=False, lamps_onl
     assert restored["ok"], restored
     await expect_disguise("0")
     print("Fur Cap and Flashbang stayed equipped after reconciliation", flush=True)
-    async def simmi(action):
-        return await suite.portable_probe_command(host.bridge, "simmi-jobs", action)
-
-    quest = "DeadDrop_CrossRoads"
-    await simmi("host")
-    try:
-        await simmi("talk")
-        offers = (await simmi("read")).split(";")[-1].split(",")
-        assert quest in offers, f"Simmi offered {offers} in place of {quest}"
-        await simmi("acceptdeaddrop")
-        for run in (host_run, guest_run):
-            await suite.wait_resident_status(run, lambda frame:
-                frame.get("gameplay", {}).get("native_quests", {}).get(quest, {}).get("step") == 1, timeout=8)
-    finally:
-        await simmi("closesimmi")
+    simmi = await accept_crossroads_dead_drop(host, guest, suite.portable_probe_command, by_host=True)
     print("Both journals received Simmi's Crossroads Dead Drop", flush=True)
     await visit_crossroads()
     unloaded = f"{CROSSROADS}.CrossRoads_P:PersistentLevel.SilverfishUnloadedLootFixture_C_1"
@@ -257,7 +245,7 @@ async def verify_oil_lamps(host, guest, pawn, *, playtest_batch=False, lamps_onl
     dumpster = await verify_observer_open(CROSSROADS, "Loot_Dumpster_BP_C_1")
     return {"debt": debt_evidence, "gear": gear, "shared_reputation": {"baseline": baseline, "host_cap": host_cap},
             "guest_disguise": [0, 4, 0],
-            "simmi": quest, "unloaded_source_refused": unloaded, "cabinet": cabinet, "dumpster": dumpster, "gas_lamps": gas_evidence, "lamps": evidence,
+            "simmi": simmi, "unloaded_source_refused": unloaded, "cabinet": cabinet, "dumpster": dumpster, "gas_lamps": gas_evidence, "lamps": evidence,
             "other_lamp_stayed_unlit": adjacent, "latch": {"actor": latch, "initial": before, "toggled": after}}
 
 
@@ -360,6 +348,9 @@ async def exercise(work, first, second, saved, streamed_switch=False, crossroads
             if not lamps_only:
                 fixtures.enter_context(suite.installed_probe(game, mod="SilverfishPortableSimmiJobsProbe",
                                                              fixture="simmi_jobs_probe.lua"))
+                fixtures.enter_context(suite.stock_board_approach_overlay(game))
+                fixtures.enter_context(suite.portable_script_overlay(game, "native_computer_board.lua",
+                                                                     allow_resident_contract_xp))
         async def power_checks(host, guest, pawn):
             return await verify_oil_lamps(host, guest, pawn, playtest_batch=playtest_batch, lamps_only=lamps_only)
         await suite.verify(work, first, second, saved,

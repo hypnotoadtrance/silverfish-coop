@@ -5,14 +5,59 @@ import math
 import time
 
 from live_multi_smoke import campaign_save_hashes
-from portable_guest_world_start import resident_events
-from tools.silverfish import native_inventory
+from portable_guest_world_start import resident_events, wait_resident_status
+from tools.silverfish import native_computer_board, native_inventory, native_wire_board
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.control import current_status, submit
 from tools.silverfish.native_flood_jammer import (
     BLACK_LAKE, CROSSROADS_JAMMER, FLOOD, OBSERVATORY_BOUNTY_BOARD, POSE, SIMMI_BOARD, same_pose,
 )
 from tools.silverfish.travel import CROSSROADS, LAKE, OBSERVATORY
+
+
+async def accept_crossroads_dead_drop(host, guest, probe, *, by_host=False):
+    contract = native_computer_board.DEAD_DROP
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    frame = await wait_resident_status(host_run, lambda current: current.get("game", {}).get("map") == OBSERVATORY)
+    host_pawn = frame["game"]["pawns"]["local"]["name"]
+    await host.bridge.command(contract.command("approach"), host_pawn)
+    eligible = await host.bridge.command(contract.command("xp-fixture"), host_pawn)
+    assert eligible[contract.key]["xp_after"] == contract.fixture_xp
+    seat, run = (host, host_run) if by_host else (guest, guest_run)
+
+    async def command(target, operation):
+        return await probe(target.bridge, "simmi-jobs", operation)
+
+    position = tuple(map(float, (await command(host, "host" if by_host else "guest")).split(",")))
+    await wait_resident_status(run, lambda current:
+        current.get("game", {}).get("map") == OBSERVATORY
+        and (location := current["game"].get("pawns", {}).get("local", {}).get("location"))
+        and math.dist(location, position) < 45, timeout=8)
+    checkpoint = campaign_save_hashes(host.campaign)
+    widget = await command(seat, "talk")
+    try:
+        await wait_resident_status(run, lambda current:
+            (menu := current.get("game", {}).get("native_wire_board_stock", {})).get("board") == SIMMI_BOARD
+            and menu.get("state") == "visible", timeout=12)
+        board, identity, offers = (await command(seat, "read")).split(";")
+        assert (board, identity) == (SIMMI_BOARD, widget) and contract.quest_id in offers.split(","), offers
+        if by_host:
+            assert await command(host, "acceptdeaddrop") == "clicked"
+        else:
+            result = await submit(guest_run, native_wire_board.STOCK_FIXTURE, target=f"{contract.quest_id}|start")
+            assert result["ok"], result
+            report = result["native_wire_board_stock"]
+            assert (report["board"], report["quest"], report["state"]) == (SIMMI_BOARD, contract.quest_id, "starting"), report
+        for current in (host_run, guest_run):
+            await wait_resident_status(current, lambda status:
+                status.get("gameplay", {}).get("native_quests", {}).get(contract.quest_id, {}).get("step") == 1, timeout=12)
+        async with asyncio.timeout(8):
+            while await asyncio.gather(*(command(player, "deaddropjournal") for player in (host, guest))) != ["1", "1"]:
+                await asyncio.sleep(.12)
+        assert campaign_save_hashes(host.campaign) == checkpoint
+    finally:
+        assert await command(seat, "closesimmi") == "closed"
+    return {"quest": contract.quest_id, "board": SIMMI_BOARD, "player": "host" if by_host else "guest"}
 
 
 def instrument_jammer_sampler(source):

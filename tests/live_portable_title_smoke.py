@@ -8389,7 +8389,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_streamed_npc, "streamed_npc", "stock_streamed_npc", verify_stock_streamed_npc),
         (stock_dead_drops and "crossroads" in dead_drop_cases, "crossroads_dead_drop", "crossroads_dead_drop",
          lambda host, guest, _pawn: verify_dead_drop(host, guest, native_computer_board.DEAD_DROP,
-                                                     native_dead_drop.CROSSROADS_DROP)),
+                                                     native_dead_drop.CROSSROADS_DROP, simmi_probe=portable_probe_command)),
         (stock_dead_drops and "metro" in dead_drop_cases, "metro_dead_drop", "metro_dead_drop",
          lambda host, guest, _pawn: verify_dead_drop(host, guest, native_computer_board.METRO_DEAD_DROP,
                                                      native_dead_drop.METRO_DROP)),
@@ -8746,6 +8746,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(portable_script_overlay(game, "native_computer_board.lua", allow_resident_contract_xp))
                 for name in ("native_authored_pickup.lua", "native_authored_pickup_input_fixture.lua"):
                     probes.enter_context(portable_script_overlay(game, name, allow_resident_dead_drop_fixtures))
+                if "crossroads" in dead_drop_cases and not (stock_simmi_jammers or stock_board_offers):
+                    probes.enter_context(installed_probe(game, mod="SilverfishPortableSimmiJobsProbe",
+                                                         fixture="simmi_jobs_probe.lua"))
             if "metro" in dead_drop_cases:
                 proof["metro_seed_overlays"] = [probes.enter_context(portable_script_overlay(
                     game, "native_fresh_campaign.lua", resident_metro_seed_overlay)) for game in games]
