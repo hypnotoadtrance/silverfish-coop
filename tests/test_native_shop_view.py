@@ -7,8 +7,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import native_finite_shop, native_shop_view, party, runtime
-from tools.silverfish.native_finite_shop import BALL_AMMO, GUNSMITH, MERCHANTS, matching_report
+from tools.silverfish.guest_weapon_profiles import NINE_MM_BALL
+from tools.silverfish.native_finite_shop import GUNSMITH, MERCHANTS, matching_report
 from tools.silverfish.native_shop_view import ShopView
+
+
+BALL_AMMO = NINE_MM_BALL.item_path
 
 
 class MerchantScreenTests(unittest.IsolatedAsyncioTestCase):
@@ -128,6 +132,10 @@ class MerchantScreenTests(unittest.IsolatedAsyncioTestCase):
                   "count": 1, "offers": [other]}
         snapshot = {"state": "hosting", "map": SCIENTIST_SHOP, "native_finite_shop": report}
         self.assertEqual(matching_report(snapshot, SCIENTIST_SHOP, pawn, "listed", guest=True), report)
+        del other["source"]
+        with self.assertRaisesRegex(RuntimeError, "invalid stock offer"):
+            matching_report(snapshot, SCIENTIST_SHOP, pawn, "listed", guest=True)
+        other["source"] = "shelf"
         report["state"] = "purchased"
         with self.assertRaisesRegex(RuntimeError, "exact qualified stock offer"):
             matching_report(snapshot, SCIENTIST_SHOP, pawn, "purchased", guest=True)
@@ -135,7 +143,8 @@ class MerchantScreenTests(unittest.IsolatedAsyncioTestCase):
     async def test_reusable_observatory_shelf_requires_fresh_exact_inventory_guid(self):
         area = native_finite_shop.OBSERVATORY
         guid, minted, pawn = "A" * 32, "B" * 32, "exact stock guest"
-        item = {"guid": guid, "source": "shelf", "class_path": BALL_AMMO, "price": 50, "quantity": 10, "value": 25}
+        item = {"guid": guid, "source": "shelf", "class_path": "/GuestItems/Supplies/Tonic.Tonic_C",
+                "price": 50, "quantity": 10, "value": 25}
         game = {"state": "hosting", "map": area}
         listing = {"map": area, "pawn": pawn, "actor": MERCHANTS[area], "state": "listed",
                    "wallet_before": 100, "wallet_after": 100, "merchant_cash_before": 25, "merchant_cash_after": 25,
@@ -156,7 +165,7 @@ class MerchantScreenTests(unittest.IsolatedAsyncioTestCase):
                 operation = native_finite_shop.perform(host, bridge, "guest", "native-finite-shop-buy",
                                                        f"{guid}@50", "a" * 32)
                 if received == guid:
-                    with self.assertRaisesRegex(RuntimeError, "reusable shelf transfer"):
+                    with self.assertRaisesRegex(RuntimeError, "GUID already in stock"):
                         await operation
                     self.assertTrue(host.stopping)
                     self.assertFalse(host.party["receipts"])

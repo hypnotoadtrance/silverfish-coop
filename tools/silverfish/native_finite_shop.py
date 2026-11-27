@@ -7,7 +7,6 @@ import time
 from . import party
 from .content_paths import item_class_name
 from .native_gold import valid_guid
-from .native_guest_consumable import MRE_CLASS
 from .native_tape_profiles import BLANK_CLASS
 from .travel import OBSERVATORY, SCIENTIST_SHOP, SHOPKEEP
 
@@ -19,7 +18,6 @@ BLACK_MARKET = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
 GUNSMITH = "/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P"
 SMUGGLER = "/Game/Classes/Maps/Maps_SafeZones/Shop_Smuggler_P"
 CAMERA = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
-BALL_AMMO = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
 MERCHANTS = {
     OBSERVATORY: ACTOR,
     SCAV_BAR: f"Shop_BP_C {SCAV_BAR}.Shop_ScavBar_P:PersistentLevel.Shop_BP_C_2",
@@ -32,6 +30,7 @@ MERCHANTS = {
 ACTIONS = ("native-finite-shop-list", "native-finite-shop-buy", "native-finite-shop-sale-quote", "native-finite-shop-sell")
 MAX_PRICE = (1 << 31) - 1
 STOCK_REVISION = "native_finite_shop_stock_revision"
+STOCK_SOURCES = frozenset({"shelf", "limited", "buyback"})
 
 
 def valid_stock_revision(value) -> bool:
@@ -60,19 +59,18 @@ def parse_summary(fields: list[str]) -> dict:
 def parse_item(fields: list[str]) -> dict:
     item = {"guid": fields[1], "class_path": fields[2], "quantity": int(fields[3]),
             "value": int(fields[4]), "price": int(fields[5])}
-    if len(fields) in (11, 12):
-        source, raw_ammo, raw_weight, never_drop, stacks = fields[6:11]
-        ammo, weight = int(raw_ammo), float(raw_weight)
-        if (source not in {"shelf", "limited", "buyback", "backpack"} or not -2**31 <= ammo <= MAX_PRICE
-                or not math.isfinite(weight) or not 0 <= weight <= 100000 or never_drop not in {"0", "1"}
-                or stacks not in {"0", "1"} or item["quantity"] != (ammo if stacks == "1" else 1)):
-            raise ValueError("The merchant returned an invalid stock inventory row")
-        item.update(source=source, ammo=ammo, weight=weight, never_drop=never_drop == "1", stackable=stacks == "1")
-        if len(fields) == 12:
-            markup = float(fields[11])
-            if not 0 <= markup < 1e8 or math.ceil(markup * item["value"]) != item["price"]:
-                raise ValueError("The merchant returned an invalid stock markup")
-            item["markup"] = markup
+    source, raw_ammo, raw_weight, never_drop, stacks = fields[6:11]
+    ammo, weight = int(raw_ammo), float(raw_weight)
+    if ((source not in STOCK_SOURCES and source != "backpack") or not -2**31 <= ammo <= MAX_PRICE
+            or not math.isfinite(weight) or not 0 <= weight <= 100000 or never_drop not in {"0", "1"}
+            or stacks not in {"0", "1"} or item["quantity"] != (ammo if stacks == "1" else 1)):
+        raise ValueError("The merchant returned an invalid stock inventory row")
+    item.update(source=source, ammo=ammo, weight=weight, never_drop=never_drop == "1", stackable=stacks == "1")
+    if len(fields) == 12:
+        markup = float(fields[11])
+        if not 0 <= markup < 1e8 or math.ceil(markup * item["value"]) != item["price"]:
+            raise ValueError("The merchant returned an invalid stock markup")
+        item["markup"] = markup
     return item
 
 
@@ -88,13 +86,13 @@ def matching_report(snapshot: dict, area: str, pawn: str, expected_state: str, *
         raise RuntimeError("The stock finite merchant did not return the exact authoritative report")
     guids = set()
     blank_seen = False
+    sources = {"backpack"} if expected_state in {"sale-quote", "sold"} else STOCK_SOURCES
     for offer in offers:
         guid, path = offer.get("guid"), offer.get("class_path")
         source = offer.get("source")
-        from_backpack = expected_state in {"sale-quote", "sold"}
         if (not valid_guid(guid) or guid in guids or not item_class_name(path, 512) or not 1 <= offer["quantity"] <= MAX_PRICE
                 or not 0 <= offer["price"] <= MAX_PRICE or type(offer.get("value")) is not int
-                or source is not None and (source == "backpack") != from_backpack
+                or source not in sources
                 or source == "buyback" and offer["price"] != offer["value"]):
             raise RuntimeError("The finite merchant returned an invalid stock offer")
         if area == SCIENTIST_SHOP and expected_state != "listed":
@@ -194,12 +192,12 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
     if not offer:
         raise party.RuleError("native_finite_shop_item_unavailable")
     if area == SCIENTIST_SHOP and (offer["class_path"] not in ((CAMERA, BLANK_CLASS) if guest else (CAMERA,))
-                                  or offer.get("source") == "buyback"
-                                  or offer["class_path"] == BLANK_CLASS and offer.get("source") not in (None, "shelf")):
+                                  or offer["source"] == "buyback"
+                                  or offer["class_path"] == BLANK_CLASS and offer["source"] != "shelf"):
         raise party.RuleError("native_scientist_purchase_profile_unavailable")
     quantity = offer["quantity"] if selected_quantity is None else selected_quantity
     if selected_quantity is not None and (not offer.get("stackable") or "markup" not in offer
-                                          or offer.get("source") != "shelf" and quantity > offer["quantity"]):
+                                          or offer["source"] != "shelf" and quantity > offer["quantity"]):
         raise party.RuleError("native_finite_shop_invalid_quantity")
     if selected_quantity is None and price != offer["price"]:
         raise party.RuleError("native_finite_shop_quote_changed")
@@ -232,19 +230,15 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
             raise
         proof = matching_report(snapshot, area, pawn, "sold" if sale else "purchased", guest=guest, merchant=merchant)
         reported = proof["offers"]
-        shelf_classes = {SCIENTIST_SHOP: (CAMERA, BLANK_CLASS), GUNSMITH: (BALL_AMMO,), SMUGGLER: (MRE_CLASS,)}
-        reusable = offer.get("source") == "shelf"
-        legacy_special = offer["class_path"] in shelf_classes.get(area, ())
+        reusable = offer["source"] == "shelf"
         finite_split = selected_quantity is not None and not reusable and quantity < offer["quantity"]
-        if not sale and len(reported) == 1 and (reusable or legacy_special or finite_split):
+        if len(reported) == 1 and (reusable or finite_split):
             stock_guids = {row["guid"] for row in listing["offers"]}
             received_guid = reported[0]["guid"]
-            if ((reusable or finite_split) and received_guid in stock_guids or
-                    not (reusable or finite_split) and received_guid != guid
-                    and (offer.get("source") is not None or received_guid in stock_guids)):
-                raise RuntimeError("The merchant did not verify an exact reusable shelf transfer")
+            if received_guid in stock_guids:
+                raise RuntimeError("The merchant minted a GUID already in stock")
             proof["offer_guid"] = guid
-            proof["stock_source"] = "stock_shelf" if reusable or not finite_split and received_guid != guid else "limited_stock"
+            proof["stock_source"] = "stock_shelf" if reusable else "limited_stock"
             reported = [dict(reported[0], guid=guid)]
         exact_offer = reported == [offer]
         if selected_quantity is not None and len(reported) == 1:

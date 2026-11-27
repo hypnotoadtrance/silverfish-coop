@@ -41,10 +41,13 @@ class NativeInventoryTransactionTests(unittest.IsolatedAsyncioTestCase):
             checkpoint_native=AsyncMock(side_effect=checkpoint), native_pickup=Mock(),
         )
 
-    def shop_frame(self, area, pawn, state, wallet_delta=0, *, item=None, guid=GUID, value=125, price=125):
+    def shop_frame(self, area, pawn, state, wallet_delta=0, *, item=None, guid=GUID, value=125, price=125, source=None):
         if item is None:
-            item = native_finite_shop.CAMERA if area == SCIENTIST_SHOP else native_finite_shop.BALL_AMMO
-        offer = {"guid": guid, "class_path": item, "quantity": 1, "value": value, "price": price}
+            item = native_finite_shop.CAMERA if area == SCIENTIST_SHOP else "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
+        if source is None:
+            source = "backpack" if state in {"sale-quote", "sold"} else "limited"
+        offer = {"guid": guid, "class_path": item, "quantity": 1, "value": value, "price": price,
+                 "source": source, "ammo": 0, "weight": 1, "never_drop": False, "stackable": False}
         return {"state": "hosting", "map": area, "native_finite_shop": {
             "state": state, "map": area, "pawn": pawn, "actor": native_finite_shop.MERCHANTS[area],
             "wallet_before": 1000, "wallet_after": 1000 + wallet_delta,
@@ -176,7 +179,7 @@ class NativeInventoryTransactionTests(unittest.IsolatedAsyncioTestCase):
         host = self.host_without_fresh_guest_frame(SCIENTIST_SHOP)
         host.checkpoint_native = AsyncMock(side_effect=[10, 11])
         minted = "C" * 32
-        blank = {"item": BLANK_CLASS, "value": 30, "price": 47}
+        blank = {"item": BLANK_CLASS, "value": 30, "price": 47, "source": "shelf"}
         listing = self.shop_frame(SCIENTIST_SHOP, PAWN, "listed", **blank)
         purchase = self.shop_frame(SCIENTIST_SHOP, PAWN, "purchased", -47, guid=minted, **blank)
         bridge = SimpleNamespace(command=AsyncMock(side_effect=[listing, purchase]))
@@ -195,7 +198,7 @@ class NativeInventoryTransactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((bridge.command.await_count, host.checkpoint_native.await_count), (2, 2))
 
     async def test_scientist_blank_host_report_and_reused_shelf_guid_fail_closed(self):
-        blank = {"item": BLANK_CLASS, "value": 30, "price": 47}
+        blank = {"item": BLANK_CLASS, "value": 30, "price": 47, "source": "shelf"}
         host = self.host_without_fresh_guest_frame(SCIENTIST_SHOP)
         bridge = SimpleNamespace(command=AsyncMock(return_value=self.shop_frame(SCIENTIST_SHOP, HOST_PAWN, "listed", **blank)))
         with self.assertRaisesRegex(party.RuleError, "native_scientist_purchase_profile_unavailable"):
@@ -205,12 +208,11 @@ class NativeInventoryTransactionTests(unittest.IsolatedAsyncioTestCase):
 
         host = self.host_without_fresh_guest_frame(SCIENTIST_SHOP)
         listing = self.shop_frame(SCIENTIST_SHOP, PAWN, "listed", **blank)
-        listing["native_finite_shop"]["offers"][0]["source"] = "shelf"
         bridge = SimpleNamespace(command=AsyncMock(side_effect=[
             listing,
             self.shop_frame(SCIENTIST_SHOP, PAWN, "purchased", -47, **blank),
         ]))
-        with self.assertRaisesRegex(RuntimeError, "exact reusable shelf transfer"):
+        with self.assertRaisesRegex(RuntimeError, "GUID already in stock"):
             await native_finite_shop.perform(host, bridge, GUEST, "native-finite-shop-buy", f"{GUID}@47", OPERATION_ID)
         self.assertEqual(host.party["receipts"], {})
         self.assertEqual(host.checkpoint_native.await_count, 1)

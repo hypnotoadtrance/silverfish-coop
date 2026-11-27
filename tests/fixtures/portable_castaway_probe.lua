@@ -90,11 +90,12 @@ local function inspect(action)
         assert(pawn:HasAuthority() and #stack == 0)
         world.OwningGameInstance:Give_PlayerCash(2500, false)
         return "funded"
-    elseif action == "offer" then
+    elseif action == "offer" or action == "shelf" then
         assert(not pawn:HasAuthority() and exact(menu, shop_screen))
         local groups = {shelf = "Cards_Infinite", limited = "Cards_Limited", buyback = "Cards_BuyBack"}
         local selected
-        for _, source in ipairs({"shelf", "limited", "buyback"}) do
+        local sources = action == "shelf" and {"shelf"} or {"shelf", "limited", "buyback"}
+        for _, source in ipairs(sources) do
             local cards = menu.ShopPanel[groups[source]]
             for index = 1, #cards do
                 local card = cards[index]

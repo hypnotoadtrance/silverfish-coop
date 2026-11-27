@@ -5,6 +5,7 @@ local shopkeep = require("native_dialogue_shopkeep")
 local castaway = require("native_dialogue_castaway")
 local focus_fixture = require("native_shop_focus_fixture")
 local stock_view = require("native_shop_stock")
+local content_paths = require("content_paths")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
@@ -213,9 +214,9 @@ local function offer_rows(encoded)
     local rows, seen = {}, {}
     for line in encoded:gmatch("[^\n]+") do
         local key, class, quantity, value, price, source, ammo, weight, never_drop, stacks, markup = line:match(
-            "^([0-9A-F]+)\t(/Game/[%w_./%-]+)\t(%d+)\t(%d+)\t(%d+)\t(%l+)\t(-?%d+)\t(%S+)\t([01])\t([01])\t?(%S*)$")
+            "^([0-9A-F]+)\t([^\t]+)\t(%d+)\t(%d+)\t(%d+)\t(%l+)\t(-?%d+)\t(%S+)\t([01])\t([01])\t?(%S*)$")
         local units, kilograms = math.tointeger(tonumber(ammo)), tonumber(weight)
-        if not guid(key) or seen[key] or #class > 512 or not integer(quantity, 1, max_money)
+        if not guid(key) or seen[key] or not content_paths.item_class(class, 512) or not integer(quantity, 1, max_money)
             or not integer(value, 0, max_money) or not integer(price, 0, max_money)
             or (source ~= "limited" and source ~= "shelf" and source ~= "buyback" and source ~= "backpack")
             or not units or units < -2147483648 or units > max_money

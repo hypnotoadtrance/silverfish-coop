@@ -2734,7 +2734,7 @@ class Bridge:
                     data[key] = native_finite_shop.parse_stock_revision(fields, data.get("state"), data.get("map"))
                 elif fields[0] == "native-finite-shop" and len(fields) == 10:
                     data["native_finite_shop"] = parse_finite_shop_summary(fields)
-                elif fields[0] == "native-finite-shop-item" and len(fields) in {6, 11, 12} and "native_finite_shop" in data:
+                elif fields[0] == "native-finite-shop-item" and len(fields) in {11, 12} and "native_finite_shop" in data:
                     data["native_finite_shop"]["offers"].append(parse_finite_shop_item(fields))
                 elif fields[0] == "native-shop-view" and len(fields) in {12, 13}:
                     data["native_shop_view"] = {

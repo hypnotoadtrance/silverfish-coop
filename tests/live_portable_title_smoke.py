@@ -4493,31 +4493,42 @@ async def verify_stock_castaway_dialogue(host: Seat, guest: Seat, pawn: str) -> 
         menu = shop_view(frame)
         return menu.get("state") == "ready" and menu.get("actor") == actor and menu.get("stock") is True
 
+    host_run = host.campaign / "run"
+
+    async def purchase_card(frame, actor, selection):
+        source, guid, raw_price = (await castaway(guest, selection)).split(";")
+        price = int(raw_price)
+        wallet = shop_view(frame)["wallet"]
+        assert 0 < price <= wallet
+        started = time.time()
+        bought = await submit(guest_run, "native-shop-view-fixture", target=f"stock:{source}:{guid}")
+        assert bought["ok"], bought
+        async with asyncio.timeout(8):
+            while True:
+                events = [row for row in await resident_events(guest_run, frame)
+                          if row["event"] == "native_shop_view_purchased" and row["time_unix"] >= started]
+                if events:
+                    receipt, = events
+                    break
+                await asyncio.sleep(.05)
+        purchase = receipt["native_finite_purchase"]
+        item, = purchase["offers"]
+        assert (purchase["actor"], purchase["wallet_before"], purchase["wallet_after"], item["price"], item["source"]) == (
+            actor, wallet, wallet - price, price, source), purchase
+        if source == "shelf":
+            assert (purchase["stock_source"], purchase["offer_guid"]) == ("stock_shelf", guid), purchase
+            assert item["guid"] != guid, purchase
+        else:
+            assert item["guid"] == guid, purchase
+        inventory = await submit(guest_run, "native-inventory-list")
+        assert inventory["ok"] and any(row["guid"] == item["guid"] for row in inventory["native_inventory"]["items"]), item
+        await wait_resident_status(host_run, lambda state: state.get("gameplay", {}).get("shared_wallet") == wallet - price)
+        await wait_resident_status(guest_run, lambda state: ready(state, actor) and shop_view(state).get("wallet") == wallet - price)
+        return purchase
+
     guest_trade = await wait_resident_status(guest_run, lambda frame: ready(frame, shop))
     assert await stock_menu(guest, "shop") == [screen, shop, data, "false"]
-    source, guid, price = (await castaway(guest, "offer")).split(";")
-    wallet = shop_view(guest_trade)["wallet"]
-    assert 0 < int(price) <= wallet
-    started = time.time()
-    bought = await submit(guest_run, "native-shop-view-fixture", target=f"stock:{source}:{guid}")
-    assert bought["ok"], bought
-    async with asyncio.timeout(8):
-        while True:
-            events = [row for row in await resident_events(guest_run, guest_trade)
-                      if row["event"] == "native_shop_view_purchased" and row["time_unix"] >= started]
-            if events:
-                receipt, = events
-                break
-            await asyncio.sleep(.05)
-    purchase = receipt["native_finite_purchase"]
-    item, = purchase["offers"]
-    assert (purchase["actor"], purchase["wallet_before"], purchase["wallet_after"], item["price"]) == (
-        shop, wallet, wallet - int(price), int(price)), purchase
-    inventory = await submit(guest_run, "native-inventory-list")
-    assert inventory["ok"] and any(row["guid"] == item["guid"] for row in inventory["native_inventory"]["items"]), item
-    host_run = host.campaign / "run"
-    await wait_resident_status(host_run, lambda frame: frame.get("gameplay", {}).get("shared_wallet") == wallet - int(price))
-    await wait_resident_status(guest_run, lambda frame: ready(frame, shop) and shop_view(frame).get("wallet") == wallet - int(price))
+    purchase = await purchase_card(guest_trade, shop, "offer")
     assert (await submit(guest_run, "native-shop-view-fixture", target="back"))["ok"]
     await wait_resident_status(guest_run, lambda frame: shop_view(frame).get("state") in (None, "closed"))
     await castaway(host, "regular")
@@ -4525,14 +4536,19 @@ async def verify_stock_castaway_dialogue(host: Seat, guest: Seat, pawn: str) -> 
     regular = f"Shop_BP_C {native_dialogue.LEVEL}Shop_BP_C_2"
     opened = await submit(guest_run, "native-shop-view-fixture", target="open")
     assert opened["ok"], opened
-    await wait_resident_status(guest_run, lambda frame: ready(frame, regular))
+    guest_regular = await wait_resident_status(guest_run, lambda frame: ready(frame, regular))
     assert (await stock_menu(guest, "shop"))[1] == regular
+    reusable_purchase = await purchase_card(guest_regular, regular, "shelf")
+    catalog = (await host.bridge.command("native-finite-shop-list", pawn))["native_finite_shop"]
+    assert any(offer["guid"] == reusable_purchase["offer_guid"] and offer["source"] == "shelf"
+               for offer in catalog["offers"]), catalog
     assert (await submit(guest_run, "native-shop-view-fixture", target="back"))["ok"]
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"stock_castaway_dialogue": responses,
             "castaway_trade_route": {"host_choices": host_choices, "guest_choices": guest_choices,
                                      "host_screen": screen, "host_shop": shop, "merchant_data": data,
-                                     "guest_purchase": purchase, "regular_shop": regular}}
+                                     "guest_purchase": purchase, "regular_shop": regular,
+                                     "regular_shelf_purchase": reusable_purchase}}
 
 
 async def verify_streamed_stock_board(host: Seat, guest: Seat, pawn: str) -> dict:
