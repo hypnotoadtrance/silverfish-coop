@@ -1,13 +1,12 @@
 """Exact stock persistent-level small crates qualified for shared loot."""
 
 import math
-import re
 
 from .authored_container_placements import (ARMOR_FIRST_CLASSES, CLASS_CAPACITIES, CONTAINER_PLACEMENTS,
                                             DEFERRED_PRY_CLASSES, KEY_UNLOCK_ONLY_CLASSES,
                                             KEYED_LOCK_CLASSES, KEYLESS_LOCK_CLASSES, MIXED_GUARANTEE_CLASSES, RANDOM_LID_CLASSES)
 from .travel import CITY, CISTERN, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, RAIL_YARD
-from .native_map_preflight import valid_campaign_package
+from .content_paths import actor_source_map
 
 
 PLACEMENTS = (
@@ -527,21 +526,13 @@ DISCOVERED_CAPACITIES = {"LootCrate_Small_BP_C": 2, **{
     family: capacity for family, capacity in CLASS_CAPACITIES.items()
     if family not in LOCKABLE_CONTAINER_CLASSES and family not in RANDOM_LID_CLASSES
 }}
-_PLACED_CONTAINER = re.compile(
-    r"([A-Za-z0-9_]+) (/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):PersistentLevel\.[A-Za-z0-9_]+")
-
-
 def crate_area(crate: object) -> str | None:
-    if not isinstance(crate, str) or len(crate) > 440:
+    if not isinstance(crate, str) or len(crate) > 640:
         return None
     if area := CRATES.get(crate):
         return area
-    if match := _PLACED_CONTAINER.fullmatch(crate):
-        family, area, world = match.groups()
-        if (family in DISCOVERED_CAPACITIES and valid_campaign_package(area)
-                and area.rsplit("/", 1)[-1] == world):
-            return area
-    return None
+    family, _, source = crate.partition(" ")
+    return actor_source_map(source) if family in DISCOVERED_CAPACITIES else None
 
 
 def loot_capacity(container: str) -> int:

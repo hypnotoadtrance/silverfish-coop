@@ -1,3 +1,41 @@
+    if fields[2] == "fixture-streamed-crate" and title_fixtures and os.getenv("SILVERFISH_COOP_HEADLESS") == "1" then
+        local mode, world = fields[3], state.world
+        local stream = actions.crate_stream
+        assert(state.listening and state.map == "/Game/Classes/Maps/Maps_OverWorld/Observitory_P")
+        if mode == "load" then
+            assert(not valid_object(stream))
+            local loader = StaticFindObject("/Script/Engine.Default__LevelStreamingDynamic")
+            stream = loader:LoadLevelInstance(world, "/Game/Classes/Maps/Maps_Dungeons/Cistern_P",
+                {X = 45000, Y = 45000, Z = 2000}, {Pitch = 0, Yaw = 0, Roll = 0}, {}, "CoopCrateSublevel", nil, false)
+            assert(valid_object(stream))
+            actions.crate_stream = stream
+            return "loading"
+        end
+        assert(valid_object(stream))
+        local level = stream:GetLoadedLevel()
+        if mode == "unload" then
+            stream:SetShouldBeVisible(false)
+            stream:SetShouldBeLoaded(false)
+            return "unloading"
+        elseif mode == "reload" then
+            assert(not valid_object(level))
+            stream:SetShouldBeLoaded(true)
+            stream:SetShouldBeVisible(true)
+            return "loading"
+        elseif mode == "loaded" then
+            return tostring(not not valid_object(level))
+        end
+        if not stream:IsLevelVisible() or not valid_object(level) then return "absent" end
+        local path = assert(level:GetFullName():match("^%S+ (.+)$")) .. ".LootCrate_Small_BP_C_1"
+        local crate = StaticFindObject(path)
+        if not valid_object(crate) then return "absent" end
+        if mode == "observe" then
+            return table.concat({"LootCrate_Small_BP_C " .. state.map .. "|" .. path, tostring(crate.Looted)}, ";")
+        end
+        assert(mode == "interact" and phase == "connected" and crate.Looted == false)
+        assert(require("native_loot_crate_input").stock_focus(state.local_pawn.pawn, crate.Box))
+        return "pressed"
+    end
     if fields[2] == "fixture-stock-crate-transfer" and title_fixtures then
         local mode, requested = fields[3], fields[4]
         local profile = assert(loot.profile(state.map, requested), "fixture requires an exact stock crate")

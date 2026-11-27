@@ -149,8 +149,10 @@ def crate_identity(roll_id, guid):
     return uuid.uuid5(uuid.NAMESPACE_OID, f"{roll_id}:{guid}").hex
 
 
-def _crate_items(rolls, area):
+def _crate_items(rolls, area, observed):
     for crate, roll in native_loot.rolls_in_area(rolls, area).items():
+        if "|" in crate and observed.get(crate, {}).get("state") != "exhausted":
+            continue
         roll_id = roll.get("id")
         if not isinstance(roll_id, str) or not party.REQUEST_ID.fullmatch(roll_id):
             continue
@@ -271,7 +273,8 @@ def nearby(game, rolls, zone, *, enemy_frame=None, enemy_rolls=None, player_drop
     moves = {item.identity: item for item in _moving_enemy_items(enemy_motion, area, zone)}
     carried_ids = {key for key in carried if isinstance(key, str) and party.REQUEST_ID.fullmatch(key)} if (
         isinstance(carried, list) and len(carried) <= _MAX_VISIBLE) else set()
-    for item in chain(_crate_items(rolls, area), _enemy_items(enemy_frame, enemy_rolls or {}, area, zone),
+    for item in chain(_crate_items(rolls, area, game.get("native_loot_crates", {})),
+                      _enemy_items(enemy_frame, enemy_rolls or {}, area, zone),
                       _player_items(player_drops or {}, area), _stock_enemy_items(stock_enemy_drops, area),
                       _mushroom_items(mushroom_frame, area, zone), _quest_package(quest_package, area, zone), moves.values()):
         if item.carryable and item.identity in carried_ids:

@@ -568,7 +568,11 @@ namespace
                 // This branch supplies telemetry after set_scope. Stock callbacks and
                 // mutations still perform full identity, transport, and scene checks.
                 auto* world = static_cast<U::UWorld*>(scope->world.Get());
-                active = world && actor_in_world(crate, world) && actor_in_world(scope->pawn.Get(), world);
+                const bool streamed = world &&
+                    static_cast<U::AActor*>(crate)->GetLevel() != object(world, STR("PersistentLevel"));
+                active = world && actor_in_world(scope->pawn.Get(), world) &&
+                    (streamed ? silverfish::shared_loot::authored_crate_world(crate) == world
+                              : actor_in_world(crate, world));
             }
             else
             {
@@ -631,21 +635,27 @@ namespace
         else if (lua.is_string(1))
         {
             const auto value = lua.get_string();
-            if (value.size() > 440) return 0;
+            if (value.size() > 384) return 0;
             const auto path = RC::to_generic_string(value);
             profile = silverfish::shared_loot::authored_profile(find<U::UObject>(path.c_str()));
             if (profile && silverfish::shared_loot::profile_index(*profile) < profiles.size()) return 0;
         }
         if (!profile) return 0;
         auto* crate = find<U::UObject>(profile->actor);
-        if (!silverfish::shared_loot::authored_crate_world(crate) ||
-            !silverfish::shared_loot::qualified_crate_settings(crate)) return 0;
+        auto* world = silverfish::shared_loot::authored_crate_world(crate);
+        if (!world || !silverfish::shared_loot::qualified_crate_settings(crate) ||
+            silverfish::shared_loot::authored_profile(crate) != profile) return 0;
+        const std::basic_string_view world_path{profile->world};
+        const auto area = world_path.substr(0, world_path.find(STR('.')));
+        const bool streamed = static_cast<U::AActor*>(crate)->GetLevel() != object(world, STR("PersistentLevel"));
         lua.set_integer(static_cast<std::int64_t>(silverfish::shared_loot::profile_index(*profile) + 1));
         lua.set_string(RC::to_utf8_string(crate->GetFullName()));
         lua.set_string(RC::to_utf8_string(profile->stock_class->actor_class));
         lua.set_integer(profile->salt);
         lua.set_integer(profile->stock_class->slots);
-        return 5;
+        lua.set_string(RC::to_utf8_string(area));
+        lua.set_bool(streamed);
+        return 7;
     }
 
     int arm_guest_pry(const Lua& lua)

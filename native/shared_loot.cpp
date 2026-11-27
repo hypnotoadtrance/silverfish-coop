@@ -5,6 +5,7 @@
 #include "electronic_locker.hpp"
 #include "loot_escrow.hpp"
 #include "interaction_input.hpp"
+#include "zone_exit.hpp"
 
 #include <algorithm>
 #include <array>
@@ -126,10 +127,16 @@ namespace
     // marks them non-replicated. Only that local copy may run the guest roll.
     bool crate_on_seat(Unreal::UObject* crate, Unreal::UWorld* world, bool guest)
     {
-        if (!guest) return authority(crate, world);
-        return live(crate) && read_bool(crate, STR("bReplicates"), false) &&
-               read_bool(crate, STR("bActorIsBeingDestroyed"), false) &&
-               static_cast<Unreal::AActor*>(crate)->GetWorld() == world;
+        if (!live(crate) || !live(world) || !read_bool(crate, STR("bActorIsBeingDestroyed"), false)) return false;
+        auto* actor = static_cast<Unreal::AActor*>(crate);
+        if (actor->GetLevel() == object_field(world, STR("PersistentLevel")))
+        {
+            if (actor->GetWorld() != world) return false;
+        }
+        else if (!silverfish::native_zone::visible_actor_level(actor, world)) return false;
+        if (guest) return read_bool(crate, STR("bReplicates"), false);
+        auto* role = field<Unreal::FByteProperty>(crate, STR("Role"));
+        return role && role->GetPropertyValueInContainer(crate) == 3;
     }
 
     Address address(Unreal::UObject* object)
@@ -1577,7 +1584,16 @@ namespace silverfish::shared_loot
         };
 
         std::deque<DiscoveredContainer> discovered;
-        std::unordered_map<std::basic_string_view<Unreal::TCHAR>, std::size_t> discovery_index;
+        std::unordered_map<Path, std::size_t> discovery_index;
+
+        Unreal::UWorld* crate_level_world(Unreal::AActor* actor)
+        {
+            auto* level = actor->GetLevel();
+            if (!live(level)) return nullptr;
+            if (auto* owner = Unreal::Cast<Unreal::UWorld>(object_field(level, STR("OwningWorld")))) return owner;
+            auto* world = actor->GetWorld();
+            return live(world) && level == object_field(world, STR("PersistentLevel")) ? world : nullptr;
+        }
     }
 
     const authored_loot::Profile* authored_profile(Unreal::UObject* crate)
@@ -1592,38 +1608,42 @@ namespace silverfish::shared_loot
         const auto path = crate->GetPathName();
         const auto match = profiles_by_path.find(path);
         if (match != profiles_by_path.end())
-            return crate->GetClassPrivate() == find<Unreal::UClass>(match->second->stock_class->actor_class)
-                ? match->second : nullptr;
+        {
+            if (crate->GetClassPrivate() != find<Unreal::UClass>(match->second->stock_class->actor_class)) return nullptr;
+            auto* actor = static_cast<Unreal::AActor*>(crate);
+            auto* world = crate_level_world(actor);
+            if (world && actor->GetLevel() == object_field(world, STR("PersistentLevel"))) return match->second;
+        }
         if (!Unreal::IsInGameThreadRaw() || !crate->HasAnyFlags(Unreal::RF_WasLoaded)) return nullptr;
         const auto type = crate->GetClassPrivate()->GetPathName();
-        if (const auto cached = discovery_index.find(path); cached != discovery_index.end())
-        {
-            const auto& profile = discovered[cached->second].profile;
-            return type == profile.stock_class->actor_class ? &profile : nullptr;
-        }
         const auto family = std::ranges::find_if(authored_loot::stock_classes, [&](const auto* stock) {
             return type == stock->actor_class;
         });
         if (family == authored_loot::stock_classes.end() || (*family)->pry_entry ||
             *family == &authored_loot::dumpster) return nullptr;
         auto* actor = static_cast<Unreal::AActor*>(crate);
-        auto* world = actor->GetWorld();
+        auto* world = crate_level_world(actor);
         auto* salt = field<Unreal::FIntProperty>(crate, STR("SpawnSalt"));
         if (!live(world) || !salt || !read_bool(crate, STR("bActorIsBeingDestroyed"), false) ||
-            !read_bool(crate, STR("bReplicates"), false) || !object_field(world, STR("PersistentLevel")) ||
-            actor->GetLevel() != object_field(world, STR("PersistentLevel"))) return nullptr;
+            !read_bool(crate, STR("bReplicates"), false)) return nullptr;
+        auto world_path = world->GetPathName();
+        auto key = world_path + STR("|") + path;
+        if (const auto cached = discovery_index.find(key); cached != discovery_index.end())
+            return discovered[cached->second].profile.stock_class == *family
+                ? &discovered[cached->second].profile : nullptr;
+        if (!native_zone::visible_actor_level(actor, world)) return nullptr;
         const auto index = discovered.size();
-        auto& placed = discovered.emplace_back(DiscoveredContainer{world->GetPathName(), path, {}});
+        auto& placed = discovered.emplace_back(DiscoveredContainer{std::move(world_path), path, {}});
         placed.profile = {placed.world.c_str(), placed.path.c_str(), salt->GetPropertyValueInContainer(crate)};
         placed.profile.stock_class = *family;
-        discovery_index.emplace(placed.path, index);
+        placed.profile.discovery_index = index + 1;
+        discovery_index.emplace(std::move(key), index);
         return &placed.profile;
     }
 
     std::size_t profile_index(const authored_loot::Profile& profile)
     {
-        if (const auto match = discovery_index.find(profile.actor); match != discovery_index.end())
-            return authored_loot::profiles.size() + match->second;
+        if (profile.discovery_index) return authored_loot::profiles.size() + profile.discovery_index - 1;
         return static_cast<std::size_t>(&profile - authored_loot::profiles.data());
     }
 
@@ -1644,12 +1664,13 @@ namespace silverfish::shared_loot
         const auto* profile = authored_profile(crate);
         if (!profile) return refuse("crate_identity");
         auto* actor = static_cast<Unreal::AActor*>(crate);
-        auto* world = actor->GetWorld();
+        auto* world = crate_level_world(actor);
         if (!live(world) || world->GetPathName() != profile->world ||
             world != find<Unreal::UWorld>(profile->world)) return refuse("world_identity");
         if (!read_bool(crate, STR("bActorIsBeingDestroyed"), false)) return refuse("crate_destroying");
         auto* level = object_field(world, STR("PersistentLevel"));
-        if (!level || actor->GetLevel() != level) return refuse("crate_level");
+        if (!level || (actor->GetLevel() != level &&
+            (!profile->discovery_index || !native_zone::visible_actor_level(actor, world)))) return refuse("crate_level");
         auto* salt = field<Unreal::FIntProperty>(crate, STR("SpawnSalt"));
         if (!salt || salt->GetPropertyValueInContainer(crate) != profile->salt) return refuse("crate_salt");
         return world;
@@ -1663,7 +1684,7 @@ namespace silverfish::shared_loot
         };
         const auto* profile = authored_profile(crate);
         if (!profile) return refuse("crate_settings_profile");
-        if (profile_index(*profile) >= authored_loot::profiles.size() &&
+        if (profile->discovery_index &&
             !read_bool(crate, STR("bReplicates"), false)) return refuse("crate_settings_replication");
         if (!read_bool(crate, STR("GuaranteeSpawn"), profile->guarantee_spawn)) return refuse("crate_settings_guarantee");
         if (!read_bool(crate, STR("IgnoreKarma"), profile->stock_class->armor_first)) return refuse("crate_settings_ignore_karma");
@@ -1812,7 +1833,7 @@ namespace silverfish::shared_loot
         auto* crate = live_object_at(address_value);
         const auto* profile = authored_profile(crate);
         auto* world = authored_crate_world(crate);
-        if (!profile || !world || (expected_world && expected_world != world) || !authority(crate, world) ||
+        if (!profile || !world || (expected_world && expected_world != world) || !crate_on_seat(crate, world, false) ||
             !qualified_crate_settings(crate) || !read_bool(crate, STR("Looted"), true)) return 0;
         return profile->stock_class->slots;
     }

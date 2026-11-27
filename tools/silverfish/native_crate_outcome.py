@@ -52,13 +52,17 @@ def decode_report(target, area):
         if not isinstance(items, list) or not isinstance(typed, list) or len(items) != len(typed) or len(items) > native_loot.loot_capacity(crate):
             raise ValueError("Invalid item count")
         ids, actors = set(), set()
+        _, _, sublevel = crate.partition("|")
+        sublevel_world = sublevel.partition(":")[0]
         for item, text in zip(items, typed, strict=True):
             if not isinstance(item, dict) or item.keys() != {"actor", "guid", "class_path", "ammo", "transform"}:
                 raise ValueError("Invalid stock item result")
             actor, guid, item_class, ammo, transform = (item[key] for key in ("actor", "guid", "class_path", "ammo", "transform"))
-            if (not native_loot.valid_guid(guid) or guid in ids or not item_class_name(item_class, 256)
+            family = item_class_name(item_class, 256)
+            if (not native_loot.valid_guid(guid) or guid in ids or not family
                     or not isinstance(actor, str) or len(actor) > 512 or actor in actors
-                    or not actor.startswith(item_class.rsplit(".", 1)[1] + " " + area + ".")
+                    or not (actor.startswith(f"{family} {area}.")
+                            or sublevel_world and actor.startswith(f"{family} {sublevel_world}:PersistentLevel."))
                     or type(ammo) is not int or not -1 <= ammo < 2**31 or not valid_item_transform(transform)
                     or not isinstance(text, str) or not text.startswith("(")):
                 raise ValueError("Unqualified stock item result")

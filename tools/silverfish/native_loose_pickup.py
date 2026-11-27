@@ -6,9 +6,8 @@ import time
 
 from . import native_inventory, native_inventory_grant, native_loot, native_pickup_audio, party
 from .authored_loot import same_pose, valid_item_transform
-from .content_paths import item_class_name, quest_id
+from .content_paths import actor_source_map as actor_map, item_class_name, quest_id
 from .native_gold import valid_guid
-from .native_map_preflight import valid_campaign_package
 from .native_guest_drop_record import valid_position
 
 STATE = "native_loose_pickup_claims"
@@ -44,21 +43,7 @@ _QUEST_BATCH_LIMIT = 32  # The native renewal command and its memory bridge payl
 _QUEST_RENEWAL = .65
 _QUEST_MAX_AGE = 1.5
 _PREFIX = "loose:"
-_PATH = re.compile(r"(/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):PersistentLevel\.[A-Za-z0-9_-]+")
 _SLOT = re.compile(r"SFCoop_[0-9a-f]{32}")
-
-
-def actor_map(path):
-    if not isinstance(path, str) or len(path) > 568:
-        return None
-    parent, separator, actor = path.partition("|")
-    raw = actor if separator else parent
-    match = _PATH.fullmatch(raw) if len(raw) <= 384 else None
-    if not match or not valid_campaign_package(match[1]):
-        return None
-    if separator:
-        return parent if valid_campaign_package(parent) and parent != match[1] else None
-    return match[1] if match[1].rsplit("/", 1)[-1] == match[2] else None
 
 
 def target_path(value):

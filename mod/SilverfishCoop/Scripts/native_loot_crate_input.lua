@@ -176,12 +176,12 @@ function input.update(state, phase, profile)
         return nil, reason or "native_scope"
     end
     local binding = bindings[index]
-    if binding and same(binding.pawn, pawn) and binding.host == host and valid(binding.crate)
-        and same(binding.crate:GetWorld(), state.world) and not binding.crate:IsActorBeingDestroyed() then
+    if binding and same(binding.pawn, pawn) and binding.host == host
+        and loot.matches_crate(binding.crate, state.world, profile) then
         return binding
     end
     local crate = StaticFindObject(profile.path)
-    if not valid(crate) or crate:GetFullName() ~= profile.name or not same(crate:GetWorld(), state.world) then
+    if not loot.matches_crate(crate, state.world, profile) then
         bindings[index], fixture_sequences[index] = nil, nil
         return nil, "lua_crate"
     end

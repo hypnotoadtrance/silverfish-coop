@@ -103,3 +103,18 @@ class CrateOutcomeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "Invalid stock crate state"):
             _read_crate_state(game, ["native-loot-crate-state", crate.replace("NewShedCrate", "Invalid@Crate"),
                                      "ready", "0", "-", "-"])
+
+    def test_streamed_result_belongs_to_its_parent_map_and_exact_level(self):
+        level = "/Game/Mods/CoopSublevel.Cistern_P:PersistentLevel."
+        crate = f"LootCrate_Small_BP_C {OBSERVATORY}|{level}NewCrate"
+        self.outcome["trait_calls"] = 1
+        self.outcome["items"][0]["actor"] = f"Item_Bandage_C {level}Item_Bandage_C_11"
+        body = transfer.report_body(self.epoch, crate, self.outcome)
+        self.assertEqual(transfer.decode_report(body, OBSERVATORY)["crate"], crate)
+        for source, observed in ((crate, "/Game/Mods/OtherMap"),
+                                 (crate.replace(OBSERVATORY + "|", ""), OBSERVATORY)):
+            with self.assertRaisesRegex(party.RuleError, "outcome_invalid"):
+                transfer.decode_report(transfer.report_body(self.epoch, source, self.outcome), observed)
+        self.outcome["items"][0]["actor"] = f"Item_Bandage_C {level.replace('CoopSublevel', 'OtherSublevel')}Item_Bandage_C_11"
+        with self.assertRaisesRegex(party.RuleError, "outcome_invalid"):
+            transfer.decode_report(transfer.report_body(self.epoch, crate, self.outcome), OBSERVATORY)

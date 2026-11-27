@@ -6,7 +6,7 @@ from contextlib import ExitStack
 from pathlib import Path
 
 import live_portable_title_smoke as suite
-from tools.silverfish import native_inventory_grant, native_loot
+from tools.silverfish import native_inventory_grant, native_loot, native_world_loot
 from tools.silverfish.travel import OBSERVATORY
 
 
@@ -64,11 +64,72 @@ async def verify_transfer(host, guest, _pawn):
     return {"crates": evidence, "checkpoint_unchanged": True}
 
 
+async def verify_streamed_transfer(host, guest, pawn):
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    before = suite.campaign_save_hashes(host.campaign)
+
+    async def command(seat, mode):
+        frame = await seat.bridge.command("fixture-streamed-crate", mode, update_status=False)
+        return frame["ack"]["message"]
+
+    async def wait_actor(seat):
+        async with asyncio.timeout(15):
+            while (value := await command(seat, "observe")) == "absent":
+                await asyncio.sleep(.08)
+        return value.split(";")
+
+    for seat in (host, guest):
+        assert await command(seat, "load") == "loading"
+    (crate, host_open), (guest_crate, guest_open) = await asyncio.gather(wait_actor(host), wait_actor(guest))
+    assert crate == guest_crate and host_open == guest_open == "false"
+    assert native_loot.crate_area(crate) == OBSERVATORY and crate not in native_loot.CRATES
+    approach = await host.bridge.command("native-loot-approach", pawn, crate, timeout=5)
+    position, = [row["location"] for row in approach["pawns"].values() if row["name"] == pawn]
+    await suite.wait(guest_run, lambda frame:
+        (point := frame["game"]["pawns"]["local"].get("location"))
+        and sum((a - b) ** 2 for a, b in zip(point, position)) < 50**2)
+    assert await command(guest, "interact") == "pressed"
+
+    async def committed(run):
+        frame = await suite.wait(run, lambda state:
+            state["game"].get("native_loot_crates", {}).get(crate, {}).get("state") == "exhausted"
+            and crate in state.get("gameplay", {}).get(native_loot.STATE_KEY, {}))
+        return frame["gameplay"][native_loot.STATE_KEY][crate], frame
+
+    (roll, host_frame), (guest_roll, _) = await asyncio.gather(committed(host_run), committed(guest_run))
+    assert roll == guest_roll and roll["opener"] != "host" and roll["trait_source"] == "permanent"
+    published = [row for row in await suite.resident_events(host_run, host_frame)
+                 if row["event"] == "native_loot_roll_accepted" and row["id"] == roll["id"]]
+    assert len(published) == 1 and published[0]["origin"] == "player", published
+    identities = {native_world_loot.crate_identity(roll["id"], row["guid"]) for row in roll["items"]}
+    if identities:
+        await suite.wait(guest_run, lambda frame: identities <= frame["game"].get(native_world_loot.KEY, {}).keys())
+
+    assert await command(guest, "unload") == "unloading"
+    async with asyncio.timeout(12):
+        while await command(guest, "loaded") != "false":
+            await asyncio.sleep(.08)
+    await suite.wait(guest_run, lambda frame: crate not in frame["game"].get("native_loot_crates", {})
+                     and not (identities & frame["game"].get(native_world_loot.KEY, {}).keys()))
+    assert await command(guest, "reload") == "loading"
+    returned, _ = await committed(guest_run)
+    assert returned == roll and await wait_actor(guest) == [crate, "true"]
+    if identities:
+        await suite.wait(guest_run, lambda frame: identities <= frame["game"].get(native_world_loot.KEY, {}).keys())
+    assert suite.campaign_save_hashes(host.campaign) == before
+    return {"crate": crate, "items": len(identities), "same_roll_after_reload": True, "checkpoint_unchanged": True}
+
+
+async def verify_crates(host, guest, pawn):
+    return {"persistent": await verify_transfer(host, guest, pawn),
+            "streamed": await verify_streamed_transfer(host, guest, pawn)}
+
+
 async def exercise(work, first, second, saved):
     with ExitStack() as fixtures:
         for game in (first, second):
             fixtures.enter_context(install_fixture(game))
-        await suite.verify(work, first, second, saved, crate_transfer_check=verify_transfer)
+        await suite.verify(work, first, second, saved, crate_transfer_check=verify_crates)
 
 
 if __name__ == "__main__":

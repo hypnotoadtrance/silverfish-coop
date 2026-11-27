@@ -671,6 +671,21 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         transform["scale"] = [0., 1., 1.]
         self.assertEqual(native_world_loot.nearby(game, rolls, OPERATION, pinned={identity}), {})
 
+    def test_streamed_crate_items_follow_local_level_presence(self):
+        crate = f"LootCrate_Small_BP_C {CROSSROADS}|/Game/Mods/Visit.Cistern_P:PersistentLevel.Crate"
+        roll = self.roll(CROSSROADS, crate, "1" * 32)
+        roll["items"][0]["transform"] = {"position": [0., 0., 0.], "rotation": [0., 0., 0.], "scale": [1., 1., 1.]}
+        identity = native_world_loot.crate_identity(roll["id"], ITEM["guid"])
+        game = self.game(CROSSROADS, pawns={"local": {
+            "name": f"Player_FP_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Player_FP_C_0", "location": [0., 0., 0.],
+        }})
+        rolls = {crate: roll}
+        self.assertEqual(native_loot.published(rolls, CROSSROADS), {crate: native_loot.public_roll(roll)})
+        for state in (None, "ready", "exhausted", None, "exhausted"):
+            game["native_loot_crates"] = {crate: {"state": state}} if state else {}
+            visible = native_world_loot.nearby(game, rolls, OPERATION)
+            self.assertEqual(set(visible), {identity} if state == "exhausted" else set())
+
     async def test_only_authority_replenishment_retires_the_exact_saved_roll(self):
         expired = self.roll(CROSSROADS, OTHER_CRATE, "1" * 32)
         untouched = self.roll(CROSSROADS, LEGACY_CRATE, "2" * 32)

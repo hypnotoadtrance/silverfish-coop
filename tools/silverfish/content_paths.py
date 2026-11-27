@@ -8,6 +8,28 @@ from .native_map_preflight import valid_campaign_package
 _ITEM = re.compile(r"/(?:[A-Za-z0-9_-]+/)+([A-Za-z0-9_-]+)\.\1_C")
 _ASSET = re.compile(r"/(?:[A-Za-z0-9_-]+/)+([A-Za-z0-9_-]+)\.\1")
 _QUEST = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,95}")
+_LEVEL_ACTOR = re.compile(r"(/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):PersistentLevel\.[A-Za-z0-9_-]+")
+
+
+def actor_package(path: object) -> str | None:
+    if isinstance(path, str) and len(path) <= 384 and (match := _LEVEL_ACTOR.fullmatch(path)):
+        return match[1] if valid_campaign_package(match[1]) else None
+    return None
+
+
+def actor_source_map(source: object) -> str | None:
+    if not isinstance(source, str) or len(source) > 568:
+        return None
+    parent, separator, path = source.partition("|")
+    if not separator:
+        path = parent
+    package = actor_package(path)
+    if not package:
+        return None
+    if separator:
+        return parent if valid_campaign_package(parent) and parent != package else None
+    export = path.split(".", 1)[1].split(":", 1)[0]
+    return package if package.rsplit("/", 1)[-1] == export else None
 
 
 def quest_id(value: object) -> bool:

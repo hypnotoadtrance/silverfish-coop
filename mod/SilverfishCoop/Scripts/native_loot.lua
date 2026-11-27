@@ -1,6 +1,7 @@
 local loot = {}
 local guest_save = require("guest_save")
 local registry = require("authored_loot_registry")
+local world_path = require("world_path")
 
 local crate_class = "/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C"
 local cabinet_class = "/Game/Classes/Actors/Lootables/LootCabnet_Small_BP.LootCabnet_Small_BP_C"
@@ -46,15 +47,15 @@ end
 
 local function discover(map, target)
     if type(SilverfishDiscoverNativeLootCrate) ~= "function" then return end
-    local index, name, class, salt, capacity = SilverfishDiscoverNativeLootCrate(target)
-    if not index then return end
-    local path = name:match("^%S+ (%S+)$")
-    local world = path and path:match("^(.-):PersistentLevel%.")
-    local leaf = map and map:match("/([^/]+)$")
-    if not world or not leaf or world ~= map .. "." .. leaf then return end
+    local index, full_name, class, salt, capacity, owner, streamed = SilverfishDiscoverNativeLootCrate(target)
+    if not index or owner ~= map then return end
+    local family, path = full_name:match("^(%S+) (%S+)$")
+    local leaf = world_path.leaf(map)
+    if not leaf or not world_path.level_actor_package(path) then return end
+    local name = streamed and (family .. " " .. map .. "|" .. path) or full_name
     if names[name] then return names[name] end
-    local profile = {index = index, name = name, path = path, world = world, map = map,
-        actor_class = class, salt = salt, capacity = capacity, discovered = true}
+    local profile = {index = index, name = name, full_name = full_name, path = path, world = map .. "." .. leaf, map = map,
+        actor_class = class, salt = salt, capacity = capacity, discovered = true, streamed = streamed}
     for key, value in pairs(layouts[class] or {}) do profile[key] = value end
     discovered[index], names[name] = profile, profile
     table.insert(loot.profiles(map), profile)
@@ -69,8 +70,13 @@ end
 function loot.profile(map, name)
     local profile = name == nil and loot.profiles(map)[1] or names[name]
     if not profile and type(name) == "string" and map then
-        local path = name:match("^%S+ (%S+)$")
-        if path and path:sub(1, #map + 1) == map .. "." then profile = discover(map, path) end
+        local source = name:match("^%S+ (%S+)$")
+        local parent, path = (source or ""):match("^([^|]+)|([^|]+)$")
+        if parent == map and world_path.level_actor_package(path) then
+            profile = discover(map, path)
+        elseif world_path.actor_package(source) == map then
+            profile = discover(map, source)
+        end
         if profile and profile.name ~= name then return nil end
     end
     return profile and profile.map == map and profile or nil
@@ -96,9 +102,18 @@ local function authority(actor, world)
     return valid(actor) and same(actor:GetWorld(), world) and actor:HasAuthority() and not actor:IsActorBeingDestroyed()
 end
 
+function loot.matches_crate(actor, world, profile)
+    if not valid(actor) or actor:IsActorBeingDestroyed() or actor:GetFullName() ~= (profile.full_name or profile.name) then
+        return false
+    end
+    if profile.streamed then return world_path.visible_actor_level(actor, world) ~= nil end
+    return same(actor:GetWorld(), world)
+end
+
 function loot.temporary_activation(crate, pawn)
     if not valid(crate) or crate.Replenish_Mode ~= 1 or not valid(pawn)
-        or not pawn:HasAuthority() or not same(crate:GetWorld(), pawn:GetWorld()) then return end
+        or not pawn:HasAuthority() or not (same(crate:GetWorld(), pawn:GetWorld())
+            or world_path.visible_actor_level(crate, pawn:GetWorld())) then return end
     local instance = crate["As Game Instance FP"]
     local save = exact(instance, StaticFindObject(instance_class)) and instance.SaveSlot_Ref
     if not exact(save, StaticFindObject(save_class)) or not same(pawn.Save, save) or not save.GameRules
@@ -240,7 +255,7 @@ local function find_crate(world, profile)
     local class = StaticFindObject(profile.actor_class
         or profile.office_desk and desk_class or profile.small_cabinet and cabinet_class or crate_class)
     local crate = StaticFindObject(profile.path)
-    if not exact(crate, class) or crate:GetFullName() ~= profile.name or not authority(crate, world)
+    if not exact(crate, class) or not loot.matches_crate(crate, world, profile) or not crate:HasAuthority()
         or crate.SpawnSalt ~= profile.salt then
         error("native_loot_authored_crate_unavailable", 0)
     end
