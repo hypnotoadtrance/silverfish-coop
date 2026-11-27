@@ -498,6 +498,78 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         settle.set()
         await client.stock_door_requests[actor]
 
+    async def test_independent_power_reports_bypass_a_linked_control_and_keep_device_order(self):
+        switch = service.native_stock_switch
+        epoch = "a" * 32
+        scope = ("session", epoch, OBSERVATORY, "guest pawn")
+        radio = f"Radio_BP_C {OBSERVATORY}.Observitory_P:PersistentLevel.Radio_BP_C_1"
+        lamp = f"Prop_Lantern_C {OBSERVATORY}.Observitory_P:PersistentLevel.Prop_Lantern_C_2"
+        latch = f"Prop_Latch_C {OBSERVATORY}.Observitory_P:PersistentLevel.Prop_Latch_C_3"
+        inputs = [
+            ("latch", switch.TARGET + latch),
+            ("radio-on", switch.OUTCOME_TARGET + "1:1:" + radio),
+            ("radio-off", switch.PROP_TARGET + radio),
+            ("lamp-ignite", switch.IGNITION_TARGET + lamp),
+        ]
+        sent = []
+        lamps_sent, second_radio_sent, release_latch, release_radio = (asyncio.Event() for _ in range(4))
+
+        async def request(body, *, timeout):
+            operation = body["operation_id"]
+            sent.append(operation)
+            if operation == "latch":
+                await release_latch.wait()
+            elif operation == "radio-on":
+                self.assertEqual(body["target"], f"{epoch}@{radio}@1")
+                await release_radio.wait()
+            elif operation == "radio-off":
+                self.assertEqual(body["target"], f"{epoch}@{radio}")
+                second_radio_sent.set()
+            elif operation == "lamp-ignite":
+                self.assertEqual((body["action"], body["target"]), (switch.IGNITE, f"{epoch}@{lamp}"))
+                lamps_sent.set()
+            return {"ok": True}
+
+        client = self.guest(AsyncMock(side_effect=request))
+        client.transport.connected = True
+        client.host_session, client.zone_epoch, client.expected_zone = scope[:3]
+        client.last_game = {"state": "connected", "map": OBSERVATORY, "pawns": {"local": {"name": scope[3]}}}
+
+        def read_inputs():
+            batch = inputs.copy()
+            inputs.clear()
+            return batch
+
+        client.bridge.stock_interaction_ready.side_effect = lambda **_: bool(inputs)
+        client.bridge.interactions.side_effect = read_inputs
+        worker = asyncio.create_task(client.run_stock_interactions())
+        try:
+            await asyncio.wait_for(lamps_sent.wait(), .5)
+            self.assertEqual(set(sent), {"latch", "radio-on", "lamp-ignite"})
+            self.assertFalse(second_radio_sent.is_set())
+            release_radio.set()
+            await asyncio.wait_for(second_radio_sent.wait(), .5)
+            self.assertFalse(release_latch.is_set())
+            self.assertLess(sent.index("radio-on"), sent.index("radio-off"))
+            # A queued radio press waiting for a radio response must not be
+            # carried into the next visit when its predecessor finishes.
+            release_radio.clear()
+            inputs.extend((("radio-on", switch.OUTCOME_TARGET + "2:1:" + radio),
+                           ("abandoned", switch.OUTCOME_TARGET + "3:0:" + radio)))
+            async with asyncio.timeout(.5):
+                while sent.count("radio-on") < 2:
+                    await asyncio.sleep(.005)
+            client.zone_epoch = "b" * 32
+            release_radio.set()
+            await asyncio.sleep(.035)
+            self.assertNotIn("abandoned", sent)
+        finally:
+            release_latch.set()
+            release_radio.set()
+            worker.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await worker
+
     async def test_loose_and_projected_pickups_send_independently_of_a_pending_crate_roll(self):
         client = self.guest(AsyncMock())
         epoch = "a" * 32

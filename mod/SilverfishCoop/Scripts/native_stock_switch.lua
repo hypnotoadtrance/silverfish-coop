@@ -381,7 +381,7 @@ function switches.focused_target(pawn, pressed_component)
     if entry and not (entry.lantern and actor.Broken_0 == true)
         and (same(box, entry.box) or entry.candle and same(box, entry.mesh)) then
         local name = actor:GetFullName()
-        if placed_actor(name) then return "stock-switch:" .. name end
+        if placed_actor(name) then return (entry.power and "stock-prop-switch:" or "stock-switch:") .. name end
     end
 end
 
@@ -477,7 +477,7 @@ local function can_set_power(entry)
 end
 
 function switches.local_interaction(pawn, target, sequence)
-    local name = type(target) == "string" and target:match("^stock%-switch:(.+)$")
+    local name = type(target) == "string" and target:match("^stock%-prop%-switch:(.+)$")
     local package, path = placed_actor(name)
     if not package or not valid(pawn) or pawn:HasAuthority() or not pawn:IsLocallyControlled()
         or pawn.Dead ~= false or not same(world, pawn:GetWorld()) then return end

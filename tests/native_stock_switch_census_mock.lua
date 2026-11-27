@@ -116,7 +116,7 @@ callbacks[radio]()
 local target_rows = switches.rows(state, "hosting", row)
 assert(#target_rows == 1 and target_rows[1][3] == child_name, "Only the inherited stock class qualifies")
 local pawn = object({Dead = false, HasAuthority = function() return false end, GetWorld = function() return state.world end})
-assert(switches.focused_target(pawn, child_path .. ".Box") == "stock-switch:" .. child_name)
+assert(switches.focused_target(pawn, child_path .. ".Box") == "stock-prop-switch:" .. child_name)
 package.loaded.guest_save.exact_item_context = function(_, _, name)
     assert(name == "qualified guest")
     return pawn
@@ -161,7 +161,7 @@ local function has_stream_row()
         if device_row[3] == stream_name then return true end
     end
 end
-assert(has_stream_row() and switches.focused_target(pawn, stream_path .. ".Box") == "stock-switch:" .. stream_name)
+assert(has_stream_row() and switches.focused_target(pawn, stream_path .. ".Box") == "stock-prop-switch:" .. stream_name)
 level.bIsVisible = false
 assert(not has_stream_row() and not switches.focused_target(pawn, stream_path .. ".Box"))
 assert(not pcall(switches.command,

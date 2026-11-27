@@ -181,7 +181,7 @@ local function drain_native_interact()
         for _ = 1, 2 do
             local _, actor, ignite = lantern(address)
             if type(actor) ~= "string" then break end
-            write_interaction(pawn, (ignite and "stock-switch-ignite:" or "stock-switch:") .. actor)
+            write_interaction(pawn, (ignite and "stock-switch-ignite:" or "stock-prop-switch:") .. actor)
         end
     end
     local released = native_ladder.release_target(pawn)

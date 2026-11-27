@@ -7156,6 +7156,15 @@ class Client:
         interact = asyncio.Queue(maxsize=_LOCAL_STOCK_INPUT_BACKLOG)
         controls = asyncio.Queue(maxsize=_LOCAL_STOCK_INPUT_BACKLOG)
         pickups = {}
+        power_slots = asyncio.Semaphore(4)
+        power_requests = {}
+        latest_power_request = {}
+
+        async def report_power(scope, operation, target, previous):
+            if previous is not None:
+                await asyncio.shield(previous)
+            async with power_slots:
+                await self.finish_stock_interaction(scope, operation, target)
 
         workers = [asyncio.create_task(self.run_stock_input_queue(queue)) for queue in (interact, controls)]
         try:
@@ -7168,6 +7177,12 @@ class Client:
                         if request.done():
                             del requests[target]
                             await request
+                for request, key in tuple(power_requests.items()):
+                    if request.done():
+                        del power_requests[request]
+                        if latest_power_request.get(key) is request:
+                            del latest_power_request[key]
+                        await request
                 scope = self.stock_interaction_scope()
                 self.prop_carry.poll_local_edges(scope)
                 inputs = self.bridge.interactions() if self.bridge.stock_interaction_ready(crates=False) else ()
@@ -7184,10 +7199,18 @@ class Client:
                             else:
                                 pickups[item] = asyncio.create_task(self.finish_stock_interaction(scope, operation, target))
                             continue
-                        # Keep linked controls in order, independently of pickups waiting on shared loot.
+                        if actor := native_stock_switch.independent_actor(target):
+                            if len(power_requests) >= _LOCAL_STOCK_INPUT_BACKLOG:
+                                self.control.event("interaction_rejected", operation_id=operation, reason="stock_input_queue_full")
+                            else:
+                                key = scope, actor
+                                request = asyncio.create_task(report_power(scope, operation, target, latest_power_request.get(key)))
+                                latest_power_request[key] = request
+                                power_requests[request] = key
+                            continue
+                        # Linked switches and door latches stay ordered together.
                         queue = controls if (native_stock_door.target_actor(target) or native_stock_switch.input_target(target)
-                                             or native_stock_switch.local_outcome(target) or native_lantern.target_angles(target)
-                                             or native_ladder.target_parts(target)) else interact
+                                             or native_lantern.target_angles(target) or native_ladder.target_parts(target)) else interact
                         try:
                             queue.put_nowait((scope, operation, target))
                         except asyncio.QueueFull:
@@ -7197,7 +7220,7 @@ class Client:
             for worker in workers:
                 worker.cancel()
             await asyncio.gather(*workers, return_exceptions=True)
-            requests = (*self.stock_door_requests.values(), *pickups.values())
+            requests = (*self.stock_door_requests.values(), *pickups.values(), *power_requests)
             for request in requests:
                 request.cancel()
             for request in requests:

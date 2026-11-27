@@ -16,6 +16,7 @@ PROJECT = TAG + "-project"
 RELEASE_LOCAL = TAG + "-release-local"
 ACTIONS = (ACTION, IGNITE, REPORT)
 TARGET = "stock-switch:"
+PROP_TARGET = "stock-prop-switch:"
 IGNITION_TARGET = "stock-switch-ignite:"
 OUTCOME_TARGET = "stock-switch-state:"
 _ACTOR = re.compile(r"[A-Za-z0-9_-]+_C (/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):PersistentLevel\.[A-Za-z0-9_-]+")
@@ -30,8 +31,10 @@ def actor_package(actor):
 
 
 def target_actor(value):
-    if isinstance(value, str) and value.startswith(TARGET) and actor_package(actor := value[len(TARGET):]):
-        return actor
+    if isinstance(value, str):
+        prefix, _, actor = value.partition(":")
+        if prefix in (TARGET[:-1], PROP_TARGET[:-1]) and actor_package(actor):
+            return actor
     return None
 
 
@@ -51,6 +54,15 @@ def local_outcome(value):
         power, _, actor = rest.partition(":")
         if re.fullmatch(r"[0-9]{1,16}", serial) and 0 < int(serial) < 2**53 and power in ("0", "1") and actor_package(actor):
             return actor, power, serial
+    return None
+
+
+def independent_actor(target):
+    if outcome := local_outcome(target):
+        return outcome[0]
+    if isinstance(target, str) and target.startswith((PROP_TARGET, IGNITION_TARGET)):
+        if switch := input_target(target):
+            return switch[1]
     return None
 
 
