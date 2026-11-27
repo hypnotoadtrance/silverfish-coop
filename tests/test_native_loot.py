@@ -133,6 +133,81 @@ class AuthoredCrateRegistryTests(unittest.TestCase):
 
 
 class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_quest_placement_renews_only_fresh_frames_and_honors_an_empty_census(self):
+        loose = native_loose_pickup
+        area, epoch = OBSERVATORY, "1" * 32
+        world = f"{area}.Observitory_P"
+        path = world + ":PersistentLevel.Item_Bandage_C_1"
+        axes = ["12", "15", "17", "0", "90", "0", "1", "1", "1"]
+        fields = [loose.QUEST_ROW, world, path, "Collect_Test", ITEM["class_path"], *axes]
+        source, row = loose.parse_quest_placement(fields, "hosting", area)
+        with self.assertRaises(ValueError):
+            loose.parse_quest_placement(fields, "connected", area)
+        status = {"state": "connected", "map": area, loose.VIEW_SCOPE: 1, loose.CAPABILITY: 1}
+        client = SimpleNamespace(last_game=status, zone_epoch=epoch, host_session="live host", needs_travel=False,
+                                 server_transitioning=False, gameplay_seen=10, control=Mock(),
+                                 bridge=SimpleNamespace(command=AsyncMock(return_value=status)))
+        view = loose.QuestPlacementView()
+        frame = {"map": area, "epoch": epoch, "items": {source: row}}
+        client.gameplay = {loose.STATE: [], loose.QUEST_FRAME: frame}
+        with patch.object(loose.time, "monotonic", return_value=10) as clock:
+            await view.project(client)
+            clock.return_value = 10.3
+            await view.project(client)
+            self.assertEqual(client.bridge.command.await_count, 1)
+            clock.return_value = 10.7
+            await view.project(client)
+            self.assertEqual(client.bridge.command.await_count, 2)
+            clock.return_value = 12
+            await view.project(client)
+            client.gameplay_seen = 12
+            client.gameplay.pop(loose.QUEST_FRAME)
+            await view.project(client)
+            self.assertEqual(client.bridge.command.await_count, 2)
+            client.gameplay[loose.QUEST_FRAME] = {**frame, "items": {}}
+            await view.project(client)
+        client.bridge.command.assert_awaited_with(loose.QUEST_CLEAR, epoch, path, timeout=1.5, update_status=False)
+        self.assertFalse(view.leases)
+
+    async def test_quest_claim_requires_retention_before_pickup_and_replays_without_writing(self):
+        loose = native_loose_pickup
+        area, epoch, character = OBSERVATORY, "1" * 32, "guest"
+        path = f"{area}.Observitory_P:PersistentLevel.Item_Bandage_C_1"
+        quest, slot = "Collect_Test", "SFCoop_" + "b" * 32
+        scene = {"state": "hosting", "map": area, loose.CAPABILITY: 1,
+                 loose.QUEST_SOURCES: {path: {"quest": quest, "class_path": ITEM["class_path"]}}}
+        state = party.new_party()
+        state["players"][character] = {"downed": False}
+        host = SimpleNamespace(last_game=scene, zone_epoch=epoch, native_profile=Path("fixture"), stopping=False,
+                               transitioning=False, native_checkpoint_unsafe=False, party=state,
+                               control=Mock(), checkpoint_native=AsyncMock(), loose_pickups=loose.Visibility())
+        bridge = SimpleNamespace(command=AsyncMock())
+        target = f"loose:{path}@{epoch}"
+        fields = [loose.CLAIM, area, path, ITEM["class_path"], "2", PAWN, slot, "claimed", "1", "1",
+                  ITEM["guid"], "0", "0", "0", "memory", quest]
+        with self.assertRaises(ValueError):
+            loose.parse_claim([*fields[:14], "disk", quest], "hosting", area)
+        proof = loose.parse_claim(fields, "hosting", area)
+        with (patch.object(native_loot, "_scope", return_value=PAWN),
+              patch.object(native_loot, "remember_claim_snapshot"),
+              patch.object(native_loot.native_pickup_audio, "committed"),
+              patch.object(native_host_save, "new_slot", return_value=slot),
+              patch.object(native_host_save, "record") as save,
+              patch("tools.silverfish.native_inventory.retain_guest_save", new_callable=AsyncMock) as retain):
+            retain.return_value = False
+            with self.assertRaisesRegex(party.RuleError, "memory_retention_unavailable"):
+                await loose.claim(host, bridge, character, target, OPERATION)
+            bridge.command.assert_not_awaited()
+            retain.return_value = True
+            bridge.command.return_value = {**scene, loose.PROOF: proof}
+            claimed = await loose.claim(host, bridge, character, target, OPERATION)
+            self.assertEqual(claimed[loose.PROOF]["quest"], quest)
+            self.assertEqual(await loose.claim(host, bridge, character, target, OPERATION), claimed)
+            save.assert_not_called()
+        bridge.command.assert_awaited_once_with(loose.CLAIM, PAWN, slot, path, "memory-retained", timeout=7)
+        host.checkpoint_native.assert_not_awaited()
+        self.assertFalse(host.native_checkpoint_unsafe)
+
     async def test_streamed_claim_uses_the_owning_campaign_and_survives_missing_local_actor(self):
         loose = native_loose_pickup
         raw = "/FrontierPack/Maps/StockroomInstance.Stockroom:PersistentLevel.Item_Bandage_C_1"

@@ -367,7 +367,7 @@ local function loose_profile(source, state)
         or type(SilverfishDescribeLoosePickup) ~= "function" then return end
     local path = loose_actor_path(source, state.map)
     if not path then return end
-    local class, mode, claimed, cash = SilverfishDescribeLoosePickup(source)
+    local class, mode, claimed, cash, quest = SilverfishDescribeLoosePickup(source)
     local actor = class and StaticFindObject(path)
     local name = valid(actor) and actor:GetFullName():match("^(%S+) ")
     local leaf = path:match(":PersistentLevel%.([%w_%-]+)$")
@@ -375,7 +375,7 @@ local function loose_profile(source, state)
     local limits = class and cash_limits[class]
     if not name or not leaf or not area_name or (cash and not limits) then return end
     return {loose = true, streamed = source ~= path, source = source, path = path, name = name, class = class, map = state.map,
-        mode = mode, claimed = claimed, stock_cash = cash, cash_min = limits and limits[1], cash_max = limits and limits[2],
+        mode = mode, claimed = claimed, quest = quest, stock_cash = cash, cash_min = limits and limits[1], cash_max = limits and limits[2],
         cash_flag = source ~= path and "-" or leaf .. "-" .. area_name .. "-"}
 end
 
@@ -472,6 +472,10 @@ local function claim(fields, state, phase, profile)
         or type(SilverfishRecoverNativeInventoryBag) ~= "function" then error("authored_pickup_claim_arguments", 0) end
     local save_class = StaticFindObject(save_path)
     local memory = type(SilverfishVerifyNativeStashSave) == "function"
+    if profile.quest and (not memory or fields[#fields] ~= "memory-retained") then
+        report.status = "quest_placement_memory_retention_unavailable"
+        return "authored loose pickup refused"
+    end
     if not valid(pawn) or not valid(save_class) or not memory and statics:DoesSaveGameExist(slot, 0) then
         report.status = "authored_pickup_claimant_or_slot_unavailable"
         return "authored loose pickup reported"
@@ -550,7 +554,9 @@ local function claim(fields, state, phase, profile)
         end
     end
     local status, merged = "append", nil
-    if memory and profile.loose then status, merged = ground_stack.merge(pawn, save, stock, source, item) end
+    if memory and profile.loose and not profile.quest then
+        status, merged = ground_stack.merge(pawn, save, stock, source, item)
+    end
     if status == "append" then
         local applied, outcome, count = SilverfishRecoverNativeInventoryBag(source:GetAddress(), save:GetAddress(), pawn:GetAddress())
         report.applied = applied == true or tostring(outcome):match("^mutation_unverified_") ~= nil
@@ -563,13 +569,16 @@ local function claim(fields, state, phase, profile)
     if report.ok and profile.loose then
         local actor = StaticFindObject(profile.path)
         if not valid(actor) then error("mutation_unverified_loose_pickup_source_lost", 0) end
-        if profile.streamed then
-            if profile.mode == 1 and stream_activation(stock, profile, true) ~= true then
-                error("mutation_unverified_loose_pickup_stream_activation", 0)
+        -- The shared claim owns retirement for a quest occurrence.
+        if not profile.quest then
+            if profile.streamed then
+                if profile.mode == 1 and stream_activation(stock, profile, true) ~= true then
+                    error("mutation_unverified_loose_pickup_stream_activation", 0)
+                end
+            else
+                actor:ResolveSaveMode()
+                if not verify_stock_mark(profile, actor) then error("mutation_unverified_loose_pickup_stock_persistence", 0) end
             end
-        else
-            actor:ResolveSaveMode()
-            if not verify_stock_mark(profile, actor) then error("mutation_unverified_loose_pickup_stock_persistence", 0) end
         end
         if not SilverfishProjectNativeAuthoredPickup(true, profile.source) then
             error("mutation_unverified_loose_pickup_retirement", 0)
@@ -702,6 +711,28 @@ function pickup.command(fields, state, phase)
         if cleared ~= true then error(status, 0) end
         return "cleared local stock Dead Drop presentation"
     end
+    if action == "native-quest-placement-project" or action == "native-quest-placement-clear" then
+        local projecting = action == "native-quest-placement-project"
+        local native = SilverfishClearNativeAuthoredQuestPlacement
+        if projecting then native = SilverfishProjectNativeAuthoredQuestPlacement end
+        local detail = state.local_pawn
+        if #fields ~= (projecting and 15 or 4) or phase ~= "connected" or not state.listening or state.server ~= true
+            or not detail or not valid(detail.pawn) or not loose_actor_path(fields[4], state.map)
+            or type(native) ~= "function" then
+            error("quest_placement_projection_scope_unavailable", 0)
+        end
+        local pawn, epoch, source = detail.pawn:GetAddress(), fields[3], fields[4]
+        local applied, reason
+        if projecting then
+            local pose = {}
+            for index = 1, 9 do pose[index] = tonumber(fields[index + 6]) end
+            applied, reason = native(pawn, source, fields[5], fields[6], epoch, table.unpack(pose, 1, 9))
+        else
+            applied, reason = native(pawn, source, epoch)
+        end
+        if applied ~= true then error(reason or "quest_placement_projection_refused", 0) end
+        return reason or "stock quest placement synchronized"
+    end
     if action == "native-loose-pickup-expire-fixture" then
         if phase ~= "hosting" or not (fixtures and host_fixtures) or #fields ~= 3 then
             error("loose_pickup_fixture_scope_unavailable", 0)
@@ -713,7 +744,8 @@ function pickup.command(fields, state, phase)
     end
     if action == "native-loose-pickup-claim" then
         bind_pickup_seat(state, phase)
-        local valid_args = #fields == 5 or (#fields == 6 and fields[6] == "stock-input")
+        local valid_args = #fields == 5 or (#fields == 6 and (fields[6] == "stock-input" or fields[6] == "memory-retained"))
+            or (#fields == 7 and fields[6] == "stock-input" and fields[7] == "memory-retained")
         local profile = valid_args and loose_profile(fields[5], state)
         if not profile or profile.claimed or require("native_prop_carry").item_is_held(StaticFindObject(profile.path)) then
             error("loose_pickup_source_unavailable", 0)
@@ -965,7 +997,8 @@ end
 local function append_claim_rows(rows, state, status_row, report)
     if report.loose then
         local profile, cash, merge = report.loose, report.cash, report.stack_merge
-        local evidence = merge and {merge.source, merge.destination, merge.amount, merge.before, merge.after} or {}
+        local evidence = profile.quest and {profile.quest}
+            or merge and {merge.source, merge.destination, merge.amount, merge.before, merge.after} or {}
         rows[#rows + 1] = status_row("native-loose-pickup-claim", state.map, profile.source, profile.class,
             profile.mode, report.pawn, report.slot, report.status, report.ok and 1 or 0, report.applied and 1 or 0,
             report.guid or "-", cash and cash.amount or 0, cash and cash.before or 0, cash and cash.after or 0,
@@ -1040,6 +1073,12 @@ function pickup.dead_drop_reply(fields, state, phase, status_row)
     return row and header .. row .. "\n" or header
 end
 
+function pickup.quest_placement_reply(fields, state, phase, status_row)
+    local accepted, reason = pcall(pickup.command, fields, state, phase)
+    return status_row("native-quest-placement-reply", 1, fields[1], phase, state.map, fields[3], fields[4],
+        accepted and "accepted" or "error", reason) .. "\n"
+end
+
 function pickup.rows(state, phase, status_row)
     local rows = {}
     if phase == "hosting" and state.server == false and type(SilverfishVerifyNativeStashSave) == "function" then
@@ -1072,6 +1111,13 @@ function pickup.rows(state, phase, status_row)
         end
         if binding.loose_generation then
             rows[#rows + 1] = status_row("native-loose-pickup-view-scope", binding.loose_generation)
+        end
+        if binding.host and type(SilverfishReadNativeAuthoredQuestPlacements) == "function" then
+            local quest_rows = SilverfishReadNativeAuthoredQuestPlacements(binding.pawn:GetAddress())
+            if type(quest_rows) == "string" then
+                rows[#rows + 1] = status_row("native-authored-quest-sources", 1)
+                if quest_rows ~= "" then rows[#rows + 1] = quest_rows:sub(1, -2) end
+            end
         end
         local publish = SilverfishNearbyLoosePickupStatusRows
         local nearby = type(publish) == "function" and publish(state.map)

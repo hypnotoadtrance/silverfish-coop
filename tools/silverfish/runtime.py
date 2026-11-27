@@ -2763,6 +2763,16 @@ class Bridge:
                     if native_dead_drop.KEY in data:
                         raise ValueError("Repeated stock Dead Drop report")
                     data[native_dead_drop.KEY] = native_dead_drop.parse(fields, data.get("state"), data.get("map"))
+                elif fields == [native_loose_pickup.QUEST_HEADER, "1"]:
+                    if data.get("state") != "hosting" or native_loose_pickup.QUEST_SOURCES in data:
+                        raise ValueError("Repeated or misplaced stock quest placement header")
+                    data[native_loose_pickup.QUEST_SOURCES] = {}
+                elif fields[0] == native_loose_pickup.QUEST_ROW:
+                    source, placement = native_loose_pickup.parse_quest_placement(fields, data.get("state"), data.get("map"))
+                    current = data.get(native_loose_pickup.QUEST_SOURCES)
+                    if current is None or source in current or len(current) >= native_loose_pickup.QUEST_LIMIT:
+                        raise ValueError("Repeated or oversized stock quest placement census")
+                    current[source] = placement
                 elif fields[0] == "native-loose-pickup-capability" and len(fields) == 3:
                     data[native_loose_pickup.CAPABILITY] = int(fields[1])
                     data["native_loose_pickup_count"] = int(fields[2])
@@ -4082,6 +4092,9 @@ class Bridge:
             if (action in (native_dead_drop.PROJECT, native_dead_drop.CLEAR)
                     and raw.startswith(native_dead_drop.REPLY + "\t")):
                 return native_dead_drop.parse_projection_reply(raw, fields)
+            if (action in (native_loose_pickup.QUEST_PROJECT, native_loose_pickup.QUEST_CLEAR)
+                    and raw.startswith(native_loose_pickup.QUEST_REPLY + "\t")):
+                return native_loose_pickup.parse_quest_reply(raw, fields)
             if action in native_prop_carry.COMPACT_ACTIONS and raw.startswith(native_prop_carry.REPLY + "\t"):
                 return native_prop_carry.parse_local_reply(raw, fields)
             if action == native_guest_clock.APPLY and raw.startswith(native_guest_clock.REPLY + "\t"):

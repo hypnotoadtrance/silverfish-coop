@@ -6,29 +6,78 @@
         local class = "/Game/Classes/Items/Key_Items/Case_HandOff_01.Case_HandOff_01_C"
         local quest = "Clct_HandOff_01"
         local operation = fields[3]
-        assert(#fields == 3 and state.listening and state.map == map and valid(state.world)
+        local inventory = operation == "guest-item"
+        assert(#fields == (inventory and 4 or 3) and state.listening and state.map == map and valid(state.world)
             and state.world:GetFullName() == "World " .. world_path, "expected joined Smuggler Shop")
         local pawn = state.local_pawn and state.local_pawn.pawn
         assert(valid(pawn) and pawn:IsLocallyControlled() and same(pawn:GetWorld(), state.world))
         assert(type(SilverfishReadNativeAuthoredQuestPlacements) == "function", "native placement observer unavailable")
-        if operation == "guest" then
-            assert(phase == "connected" and state.server == true)
+        local client = phase == "connected" and state.server == true
+        if client then
             assert(SilverfishReadNativeAuthoredQuestPlacements(pawn:GetAddress()) == nil)
-            return "guest scope rejected"
+            if operation == "guest" then return "guest scope rejected" end
+            if inventory then
+                local id = fields[4]
+                assert(#id == 32 and id:match("^[0-9A-F]+$"))
+                local stack = state.controller.MenuStack
+                assert(stack:GetArrayNum() == 1, "stock guest inventory is not open")
+                local screen = stack[1]
+                assert(valid(screen) and same(screen:GetClass(),
+                    StaticFindObject("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C")))
+                local cards, found = screen.BackpackPanel.Cards, 0
+                local item_type = StaticFindObject(class)
+                for index = 1, cards:GetArrayNum() do
+                    local card = cards[index]
+                    if card and type(card.type) == "function" and card:type() == "RemoteUnrealParam" then
+                        card = card:get()
+                    end
+                    if valid(card) and same(card.Item.Item_Class_3_2813641E42AA35FC0693029E4EE49F81, item_type) then
+                        local guid = card.Item.GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A
+                        assert(("%08X%08X%08X%08X"):format(
+                            guid.A & 0xffffffff, guid.B & 0xffffffff, guid.C & 0xffffffff, guid.D & 0xffffffff) == id)
+                        assert(math.max(1, card.Item.Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788) == 1)
+                        found = found + 1
+                    end
+                end
+                assert(found == 1, "stock guest backpack does not show exactly one sealed briefcase")
+                return "stock backpack shows the exact sealed case"
+            end
+            assert(operation == "stock-state")
+        else
+            assert(phase == "hosting" and state.server == false and pawn:HasAuthority())
         end
 
-        assert(phase == "hosting" and state.server == false and pawn:HasAuthority())
+        local function actor_state(actor)
+            local at, angle, scale = actor:K2_GetActorLocation(), actor:K2_GetActorRotation(), actor:GetActorScale3D()
+            return {at.X, at.Y, at.Z, angle.Pitch, angle.Yaw, angle.Roll, scale.X, scale.Y, scale.Z}
+        end
+
+        local function format_state(hidden, collision, pose)
+            return ("%s|%s|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.6f|%.6f|%.6f"):format(
+                tostring(hidden), tostring(collision), table.unpack(pose))
+        end
+
+        local key = FName(quest, EFindName.FNAME_Find)
+        assert(key:GetComparisonIndex() ~= 0)
+        local instance, active, step
+        if not client and operation ~= "stock-state" then
+            instance = state.world.OwningGameInstance
+            assert(valid(instance) and valid(pawn.Save) and same(instance.SaveSlot_Ref, pawn.Save))
+            active = pawn.Save.ActiveQuests
+            step = active:Contains(key) and active:Find(key):get().Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A or 0
+            if operation == "quest-step" then return tostring(step) end
+        end
+
         local actor = StaticFindObject(source)
+        if operation == "stock-state" and not valid(actor) then return "absent" end
         assert(valid(actor) and same(actor:GetClass(), StaticFindObject(class))
             and same(actor:GetWorld(), state.world) and same(actor:GetOuter(), state.world.PersistentLevel)
             and actor:HasAnyFlags(EObjectFlags.RF_WasLoaded) and not actor:IsActorBeingDestroyed()
             and same(actor.Box, actor.RootComponent), "exact placed Metal Briefcase unavailable")
-        local instance = state.world.OwningGameInstance
-        assert(valid(instance) and valid(pawn.Save) and same(instance.SaveSlot_Ref, pawn.Save))
-        local key = FName(quest, EFindName.FNAME_Find)
-        assert(key:GetComparisonIndex() ~= 0 and actor.Quest_ID:ToString() == quest)
-        local active = pawn.Save.ActiveQuests
-        local step = active:Contains(key) and active:Find(key):get().Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A or 0
+        assert(actor.Quest_ID:ToString() == quest)
+        if operation == "stock-state" then
+            return format_state(actor.bHidden, actor:GetActorEnableCollision(), actor_state(actor))
+        end
         if operation == "activate" then
             local library = StaticFindObject("/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C")
             assert(valid(library) and step == 0, "activation requires the dormant stock quest")
@@ -40,8 +89,7 @@
         end
 
         assert(operation == "snapshot")
-        local at, angle, scale = actor:K2_GetActorLocation(), actor:K2_GetActorRotation(), actor:GetActorScale3D()
-        local observed = {at.X, at.Y, at.Z, angle.Pitch, angle.Yaw, angle.Roll, scale.X, scale.Y, scale.Z}
+        local observed = actor_state(actor)
         local hidden, collision = actor.bHidden, actor:GetActorEnableCollision()
         local rows = SilverfishReadNativeAuthoredQuestPlacements(pawn:GetAddress())
         if rows == nil then return "census unavailable" end
@@ -58,14 +106,14 @@
                     assert(math.abs(observed[index] - assert(tonumber(row[index + 5]))) <= 0.001,
                         "native placement differs from the stock actor")
                 end
-                assert((at.X + 2698.7365)^2 + (at.Y - 6589.5794)^2 + (at.Z + 325.2872)^2 <= 1,
+                assert((observed[1] + 2698.7365)^2 + (observed[2] - 6589.5794)^2 + (observed[3] + 325.2872)^2 <= 1,
                     "stock case did not return to its authored location")
                 matched = true
             end
         end
         local after = actor:K2_GetActorLocation()
         assert(hidden == actor.bHidden and collision == actor:GetActorEnableCollision()
-            and at.X == after.X and at.Y == after.Y and at.Z == after.Z, "readback changed the stock case")
-        return ("%d|%s|%s|%s|%.4f|%.4f|%.4f"):format(step, tostring(matched), tostring(hidden), tostring(collision),
-            at.X, at.Y, at.Z)
+            and observed[1] == after.X and observed[2] == after.Y and observed[3] == after.Z,
+            "readback changed the stock case")
+        return ("%d|%s|%s"):format(step, tostring(matched), format_state(hidden, collision, observed))
     end

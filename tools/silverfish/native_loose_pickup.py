@@ -5,7 +5,8 @@ import re
 import time
 
 from . import native_inventory, native_loot, native_pickup_audio, party
-from .content_paths import item_class_name
+from .authored_loot import same_pose, valid_item_transform
+from .content_paths import item_class_name, quest_id
 from .native_gold import valid_guid
 from .native_map_preflight import valid_campaign_package
 from .native_guest_drop_record import valid_position
@@ -28,6 +29,16 @@ CHECK_ROW = "native-loose-pickup-check-result"
 CHECK_KEY = "native_loose_pickup_check"
 RESPAWN_HIDDEN_ROW = "native-loose-pickup-respawn-hidden"
 RESPAWN_HIDDEN = "native_loose_pickup_respawn_hidden"
+QUEST_SOURCES = "native_authored_quest_sources"
+QUEST_FRAME = "native_authored_quest_placements"
+QUEST_HEADER = "native-authored-quest-sources"
+QUEST_ROW = "native-authored-quest-placement"
+QUEST_PROJECT = "native-quest-placement-project"
+QUEST_CLEAR = "native-quest-placement-clear"
+QUEST_REPLY = "native-quest-placement-reply"
+QUEST_LIMIT = 32
+_QUEST_RENEWAL = .65
+_QUEST_MAX_AGE = 1.5
 _PREFIX = "loose:"
 _PATH = re.compile(r"(/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):PersistentLevel\.[A-Za-z0-9_-]+")
 _SLOT = re.compile(r"SFCoop_[0-9a-f]{32}")
@@ -57,6 +68,50 @@ def _stock_source(area, path, class_path, mode):
             and type(mode) is int and mode in (0, 1, 2))
 
 
+def _quest_source(area, path, class_path, quest):
+    return (_stock_source(area, path, class_path, 2) and "|" not in path
+            and class_path not in native_loot.CASH_RANGES and quest_id(quest))
+
+
+def _epoch(value):
+    return isinstance(value, str) and value != "0" * 32 and party.REQUEST_ID.fullmatch(value) is not None
+
+
+def parse_quest_placement(fields, phase, area):
+    if len(fields) != 14 or phase != "hosting" or not area:
+        raise ValueError("Invalid stock quest placement report")
+    _, world, source, quest, class_path, *axes = fields
+    values = list(map(float, axes))
+    pose = {"position": values[:3], "rotation": values[3:6], "scale": values[6:]}
+    if (world != f"{area}.{area.rsplit('/', 1)[-1]}" or not _quest_source(area, source, class_path, quest)
+            or not valid_item_transform(pose)):
+        raise ValueError("Invalid stock quest placement identity or pose")
+    return source, {"quest": quest, "class_path": class_path, "transform": pose}
+
+
+def parse_quest_reply(raw, request):
+    fields = raw[:-1].split("\t") if len(raw) <= 1536 and raw.endswith("\n") and "\n" not in raw[:-1] else []
+    if (len(request) < 4 or len(fields) != 9 or fields[:4] != [QUEST_REPLY, "1", request[0], "connected"]
+            or fields[4] != actor_map(request[3]) or fields[5:7] != list(request[2:4])):
+        raise RuntimeError("The stock quest projection reply did not match its local request")
+    if fields[7] != "accepted":
+        raise RuntimeError(fields[8] or "The stock quest projection was refused")
+    return {"state": "connected", "map": fields[4],
+            "ack": {"id": fields[2], "result": fields[7], "message": fields[8]}}
+
+
+def quest_frame(host, hidden):
+    game, epoch = host.last_game, host.zone_epoch
+    sources = game.get(QUEST_SOURCES)
+    if (sources is None or game.get("state") != "hosting" or not _epoch(epoch) or host.stopping
+            or host.transitioning or host.native_checkpoint_unsafe or not host.native_profile
+            or time.monotonic() - host.last_seen >= _QUEST_MAX_AGE):
+        return None
+    retired = set(hidden)
+    return {"map": game["map"], "epoch": epoch, "items": {path: row for path, row in sources.items()
+                                                           if path not in retired}}
+
+
 def parse(fields, phase, area):
     if len(fields) != 9 or fields[1] != area or phase not in ("hosting", "connected"):
         raise ValueError("Invalid loose stock item report")
@@ -70,7 +125,7 @@ def parse(fields, phase, area):
 
 
 def parse_claim(fields, phase, area):
-    if len(fields) not in (14, 15, 20) or fields[1] != area or phase != "hosting":
+    if len(fields) not in (14, 15, 16, 20) or fields[1] != area or phase != "hosting":
         raise ValueError("Invalid loose stock item transfer")
     _, _, actor, class_path, mode, pawn, slot, status, ok, applied, guid, amount, before, after = fields[:14]
     method = fields[14:15]
@@ -84,6 +139,13 @@ def parse_claim(fields, phase, area):
     proof = dict(map=area, actor=actor, class_path=class_path, mode=int(mode), pawn=pawn, slot=slot,
                  status=status, ok=ok == "1", applied=applied == "1", guid=guid,
                  amount=int(amount), before=int(before), after=int(after), memory=method == ["memory"])
+    if len(fields) == 16:
+        quest = fields[15]
+        if (proof["mode"] != 2 or not _quest_source(area, actor, class_path, quest)
+                or any(proof[key] for key in ("amount", "before", "after"))
+                or proof["ok"] and (not proof["memory"] or status != "claimed")):
+            raise ValueError("Invalid quest placement pickup receipt")
+        proof["quest"] = quest
     if status == "merged":
         if (len(fields) != 20 or not proof["memory"] or (ok, applied) != ("1", "1")
                 or class_path in native_loot.CASH_RANGES or any(proof[key] for key in ("amount", "before", "after"))):
@@ -108,6 +170,9 @@ def validate_records(data, members):
                 or not isinstance(row.get("epoch"), str) or not party.REQUEST_ID.fullmatch(row["epoch"])
                 or (row["class_path"] not in native_loot.CASH_RANGES and not valid_guid(row.get("guid")))):
             raise ValueError("Invalid placed stock pickup record")
+        if "quest" in row and (row["mode"] != 2 or not _quest_source(row["map"], path, row["class_path"], row["quest"])
+                               or "stack_merge" in row or "inventory_guid" in row):
+            raise ValueError("Invalid stock quest placement pickup record")
         if "stack_merge" in row or "inventory_guid" in row:
             merge = row.get("stack_merge")
             if (row["class_path"] in native_loot.CASH_RANGES or type(merge) is not dict
@@ -150,7 +215,8 @@ class Visibility:
                 raise RuntimeError("The placed stock replenishment reply did not match the requested map and sources")
             self.replenished.update(path for path, available in observed.items() if available)
             host.last_game, host.last_seen = snapshot, time.monotonic()
-        placed = [path for path in self.hidden(host) if "|" in path]
+        claims = host.party.get(STATE, {})
+        placed = [path for path in self.hidden(host) if "|" in path or "quest" in claims.get(path, {})]
         await self.host_view.project(host, bridge, placed)
 
     def hidden(self, host):
@@ -193,6 +259,92 @@ class PickupView:
                 else:
                     self.hidden.difference_update(batch)
                 service.last_game = reply
+
+
+class QuestPlacementView:
+    def __init__(self):
+        self.scope = None
+        self.leases = {}
+        self.refused = {}
+
+    @staticmethod
+    def _scope(client):
+        game = client.last_game
+        generation = game.get(VIEW_SCOPE)
+        if (game.get("state") == "connected" and game.get(CAPABILITY) == 1 and client.host_session
+                and type(generation) is int and generation > 0
+                and _epoch(client.zone_epoch) and not client.needs_travel and not client.server_transitioning):
+            return client.host_session, client.zone_epoch, game.get("map"), generation
+        return None
+
+    async def _apply(self, client, action, scope, path, *arguments):
+        if self._scope(client) != scope or time.monotonic() - client.gameplay_seen >= _QUEST_MAX_AGE:
+            return False
+        _, epoch, area, _ = scope
+        prior = self.refused.get(path)
+        if prior and time.monotonic() < prior[0]:
+            return False
+        try:
+            reply = await client.bridge.command(action, epoch, path, *arguments, timeout=1.5, update_status=False)
+            if (reply.get("map"), reply.get("state")) != (area, "connected"):
+                raise RuntimeError("The stock quest placement changed worlds")
+        except (OSError, RuntimeError) as error:
+            reason = str(error)
+            self.refused[path] = time.monotonic() + _QUEST_RENEWAL, reason
+            if not prior or prior[1] != reason:
+                client.control.event("native_quest_placement_projection_unavailable", actor=path, reason=reason)
+            return False
+        self.refused.pop(path, None)
+        return self._scope(client) == scope
+
+    async def project(self, client):
+        scope = self._scope(client)
+        if self.scope != scope:
+            self.scope = scope
+            self.leases.clear()
+            self.refused.clear()
+        if scope is None or time.monotonic() - client.gameplay_seen >= _QUEST_MAX_AGE:
+            return
+        _, epoch, area, _ = scope
+        frame = client.gameplay.get(QUEST_FRAME)
+        if not isinstance(frame, dict) or (frame.get("map"), frame.get("epoch")) != (area, epoch):
+            return
+        items = frame.get("items")
+        if not isinstance(items, dict) or len(items) > QUEST_LIMIT:
+            return
+        for path, row in items.items():
+            if (not isinstance(row, dict) or not _quest_source(area, path, row.get("class_path"), row.get("quest"))
+                    or not valid_item_transform(row.get("transform"))):
+                return
+        retired = client.gameplay.get(STATE)
+        if not isinstance(retired, list) or any(not isinstance(path, str) for path in retired):
+            return
+        hidden = set(retired)
+        active = items.keys() - hidden
+        for path in self.refused.keys() - (self.leases.keys() | active):
+            del self.refused[path]
+        clear = sorted(self.leases.keys() - active)[:4]
+        for path in clear:
+            if await self._apply(client, QUEST_CLEAR, scope, path):
+                del self.leases[path]
+        now = time.monotonic()
+        due = []
+        for path in active:
+            previous, at = self.leases.get(path, (None, -float("inf")))
+            row = items[path]
+            if (previous is None or now - at >= _QUEST_RENEWAL or previous["quest"] != row["quest"]
+                    or previous["class_path"] != row["class_path"]
+                    or not same_pose(previous["transform"], row["transform"])):
+                due.append((at, path))
+        for _, path in sorted(due)[:4 - len(clear)]:
+            if path in (client.gameplay.get(STATE) or ()):
+                continue
+            row = items[path]
+            pose = row["transform"]
+            axes = (*pose["position"], *pose["rotation"], *pose["scale"])
+            if await self._apply(client, QUEST_PROJECT, scope, path, row["quest"], row["class_path"],
+                                 *(str(axis) for axis in axes)):
+                self.leases[path] = (row, time.monotonic())
 
 
 async def refresh_claimed_stock_view(client):
@@ -247,10 +399,15 @@ async def claim(host, bridge, character, requested, operation, *, local_input=Fa
         raise party.RuleError("loose_pickup_claimant_unavailable")
     slot = native_host_save.new_slot()
     retained = character == "host" or await native_inventory.retain_guest_save(host, bridge, character, pawn)
+    quest_placement = game.get(QUEST_SOURCES, {}).get(path)
+    if quest_placement and not retained:
+        raise party.RuleError("quest_placement_memory_retention_unavailable")
     host.native_checkpoint_unsafe = True
     try:
         try:
             receipt = ("stock-input",) if local_input and character == "host" else ()
+            if quest_placement:
+                receipt += ("memory-retained",)
             snapshot = await bridge.command(CLAIM, pawn, slot, path, *receipt, timeout=7)
         except RuntimeError as error:
             if str(error) == "loose_pickup_source_unavailable":
@@ -266,6 +423,11 @@ async def claim(host, bridge, character, requested, operation, *, local_input=Fa
         if not (proof["ok"] and proof["applied"]):
             raise RuntimeError(proof["status"])
         row = {key: proof[key] for key in ("map", "actor", "class_path", "mode")}
+        if quest_placement or "quest" in proof:
+            if (not quest_placement or (proof.get("quest"), proof["class_path"]) !=
+                    (quest_placement["quest"], quest_placement["class_path"]) or not proof.get("memory")):
+                raise RuntimeError("The stock quest placement did not verify its in-memory claim")
+            row["quest"] = proof["quest"]
         row.update(epoch=host.zone_epoch, owner=character)
         is_cash = row["class_path"] in native_loot.CASH_RANGES
         deferred = retained and (proof.get("memory") or is_cash)

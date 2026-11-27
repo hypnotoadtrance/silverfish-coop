@@ -1042,7 +1042,9 @@ class Host:
                 native_authored_pickup.GOLD_BAG not in view[native_authored_pickup.STATE_KEY]
                 and native_authored_pickup._displayed(self.last_game, native_authored_pickup.GOLD_BAG).get("state") == "available")
         if self.last_game.get(native_loose_pickup.CAPABILITY) == 1:
-            view[native_loose_pickup.STATE] = self.loose_pickups.hidden(self)
+            hidden = view[native_loose_pickup.STATE] = self.loose_pickups.hidden(self)
+            if (placements := native_loose_pickup.quest_frame(self, hidden)) is not None:
+                view[native_loose_pickup.QUEST_FRAME] = placements
         if mushrooms := native_mushrooms.frame(self.last_game, self.zone_epoch):
             view[native_mushrooms.KEY] = mushrooms
         if package := native_host_dig_live.package_frame(self):
@@ -5404,6 +5406,7 @@ class Client:
         self.expected_zone = None
         self.loot_tracking = None
         self.loose_pickup_view = native_loose_pickup.PickupView()
+        self.quest_placement_view = native_loose_pickup.QuestPlacementView()
         self.pickup_playback = native_pickup_audio.Playback()
         self.voice_playback = native_voice.Playback()
         self.hurt_playback = native_damage_feedback.Playback()
@@ -6528,6 +6531,7 @@ class Client:
                         self, self.bridge, self.gameplay.get(native_authored_pickup.STATE_KEY, {}),
                         gold_bag=self.gameplay.get(native_authored_pickup.GOLD_BAG_VIEW))
                     await self.loose_pickup_view.project(self, self.bridge, self.gameplay.get(native_loose_pickup.STATE))
+                    await self.quest_placement_view.project(self)
                     await native_dust_cabinet.project_client(self)
                     await native_savlo_locker.project_client(self)
                     await native_flood_jammer.project_client(self)

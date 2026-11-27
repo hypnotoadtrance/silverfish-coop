@@ -76,6 +76,7 @@ namespace
         const U::TCHAR* dead_drop{};
         bool stock_bandage{};
         bool discovered{};
+        std::string_view quest_id{};
 
         bool stacked_supply() const { return stock_ammo || stock_bandage; }
     };
@@ -404,9 +405,9 @@ namespace
 
     bool headless() { return env("SILVERFISH_COOP_HEADLESS"); }
 
-    bool quest_placement_fixture()
+    bool quest_placement_enabled()
     {
-        static const bool enabled = headless() && env("SILVERFISH_COOP_TITLE_FIXTURES");
+        static const bool enabled = env("SILVERFISH_COOP_NATIVE_GUEST_SAVE");
         return enabled;
     }
 
@@ -429,14 +430,23 @@ namespace
     };
 
     std::array<Scope, profiles.size()> scopes{};
+    using DropPose = std::array<double, 9>;
+    struct QuestPlacementView
+    {
+        DropPose baseline{};
+        std::optional<DropPose> applied;
+        Clock::time_point expires{};
+    };
+
     struct LooseSource
     {
         RC::StringType world, actor, item_class;
-        std::string item_class_utf8;
+        std::string item_class_utf8, quest_id;
         Profile profile{};
         Scope scope{};
         U::UObject* indexed_actor{};
         std::optional<U::FVector> static_position;
+        std::optional<QuestPlacementView> quest_view;
         bool carry_candidate{}, carry_enrolled{};
     };
     std::map<std::string, LooseSource, std::less<>> loose_sources;
@@ -444,6 +454,9 @@ namespace
     std::set<std::string, std::less<>> loose_carry_pending;
     std::vector<U::FWeakObjectPtr> loose_candidates;
     std::vector<U::FWeakObjectPtr> quest_placements, pending_quest_placements;
+    Clock::time_point quest_placements_at{};
+    std::set<LooseSource*> guest_quest_sources;
+    std::string guest_quest_epoch;
     std::size_t next_loose_candidate{};
     std::set<std::string, std::less<>> loose_hidden;
     std::uint64_t loose_generation{};
@@ -457,7 +470,6 @@ namespace
 
     std::uint64_t sequence{};
     Scope* fixture_scope{};
-    using DropPose = std::array<double, 9>;
     struct DropProjection
     {
         Scope scope{};
@@ -468,6 +480,7 @@ namespace
     U::FWeakObjectPtr drop_settled_actor{};
     Clock::time_point drop_settles_at{};
     constexpr auto drop_lease = std::chrono::milliseconds(1800);
+    constexpr auto quest_placement_lease = std::chrono::milliseconds(2600);
     constexpr auto drop_settle = std::chrono::milliseconds(750);
     std::atomic<bool> installed{};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID,
@@ -788,6 +801,50 @@ namespace
             value == object(actor, STR("RootComponent")) ? value : nullptr;
     }
 
+    std::optional<U::FName> quest_placement_id(U::UObject* actor)
+    {
+        if (!quest_placement_enabled()) return {};
+        static U::FWeakObjectPtr container_ref, transform_ref;
+        auto* container = static_cast<U::UClass*>(container_ref.Get());
+        if (!container)
+        {
+            container = find<U::UClass>(quest_container_class);
+            if (container) container_ref = container;
+        }
+        if (!container || !actor->IsA(container)) return {};
+        auto* quest = field<U::FNameProperty>(actor, STR("Quest_ID"));
+        auto* original = field<U::FStructProperty>(actor, STR("OriginalTrans"));
+        if (!quest || !original) return {};
+        auto* transform = static_cast<U::UScriptStruct*>(transform_ref.Get());
+        if (!transform)
+        {
+            transform = find<U::UScriptStruct>(STR("/Script/CoreUObject.Transform"));
+            if (transform) transform_ref = transform;
+        }
+        if (!transform || original->GetStruct().Get() != transform ||
+            !boolean(actor, STR("bReplicates"), false) || !boolean(actor, STR("Stacks"), false) ||
+            !boolean(actor, STR("Physics"), false)) return {};
+        const auto id = quest->GetPropertyValueInContainer(actor);
+        if (id.IsNone()) return {};
+        const auto name = id.ToString();
+        return silverfish::content_paths::quest_id(RC::StringViewType{name}) ? std::optional{id} : std::nullopt;
+    }
+
+    bool quest_placement_identity(const Scope& scope)
+    {
+        auto* actor = static_cast<U::AActor*>(scope.actor.Get());
+        auto* world = scope.world.Get();
+        if (!live(actor) || !live(world) || !scope.profile || scope.profile->quest_id.empty() ||
+            !actor->HasAnyFlags(U::RF_WasLoaded) || !boolean(actor, STR("bActorIsBeingDestroyed"), false) ||
+            actor->GetWorld() != world || actor->GetLevel() != object(world, STR("PersistentLevel")) ||
+            !live(scope.box.Get()) || source_box(actor) != scope.box.Get() ||
+            actor->GetPathName() != scope.profile->actor) return false;
+        auto* type = actor->GetClassPrivate();
+        if (!type || type->GetPathName() != scope.profile->item_class) return false;
+        const auto id = quest_placement_id(actor);
+        return id && RC::to_utf8_string(id->ToString()) == scope.profile->quest_id;
+    }
+
     const Profile* dead_drop_in_world(U::UObject* world)
     {
         if (!live(world)) return nullptr;
@@ -832,7 +889,7 @@ namespace
         return state.profile && !drop_identity_fault(state.actor.Get(), state.world.Get(), *state.profile);
     }
 
-    bool valid_drop_pose(const DropPose& pose)
+    bool finite_drop_pose(const DropPose& pose)
     {
         for (std::size_t axis = 0; axis < pose.size(); ++axis)
         {
@@ -840,7 +897,13 @@ namespace
             if (!std::isfinite(pose[axis]) || std::abs(pose[axis]) > limit || (axis >= 6 && pose[axis] == 0))
                 return false;
         }
-        return std::abs(pose[0]) > 1.0 || std::abs(pose[1]) > 1.0 || std::abs(pose[2] - 9999.0) > 1.0;
+        return true;
+    }
+
+    bool valid_drop_pose(const DropPose& pose)
+    {
+        return finite_drop_pose(pose) &&
+            (std::abs(pose[0]) > 1.0 || std::abs(pose[1]) > 1.0 || std::abs(pose[2] - 9999.0) > 1.0);
     }
 
     DropPose read_drop_pose(U::AActor* actor)
@@ -852,9 +915,9 @@ namespace
             scale.X(), scale.Y(), scale.Z()};
     }
 
-    bool same_drop_pose(const DropPose& actual, const DropPose& expected)
+    bool same_placement_pose(const DropPose& actual, const DropPose& expected)
     {
-        if (!valid_drop_pose(actual) || !valid_drop_pose(expected)) return false;
+        if (!finite_drop_pose(actual) || !finite_drop_pose(expected)) return false;
         for (std::size_t axis = 0; axis < actual.size(); ++axis)
         {
             const double delta = actual[axis] - expected[axis];
@@ -862,6 +925,20 @@ namespace
             if (std::abs(difference) > (axis < 6 ? .1 : .005)) return false;
         }
         return true;
+    }
+
+    bool same_drop_pose(const DropPose& actual, const DropPose& expected)
+    {
+        return valid_drop_pose(actual) && valid_drop_pose(expected) && same_placement_pose(actual, expected);
+    }
+
+    bool set_quest_placement_pose(U::AActor* actor, const DropPose& pose)
+    {
+        if (same_placement_pose(read_drop_pose(actor), pose)) return true;
+        if (!silverfish::native_actor_pose::set_location_rotation(
+            actor, {pose[0], pose[1], pose[2]}, {pose[3], pose[4], pose[5]})) return false;
+        actor->SetActorScale3D(U::FVector{pose[6], pose[7], pose[8]});
+        return same_placement_pose(read_drop_pose(actor), pose);
     }
 
     bool hidden_drop(U::AActor* actor)
@@ -896,6 +973,16 @@ namespace
             state.controller.Get() == bound.controller.Get() && state.driver.Get() == bound.driver.Get();
     }
 
+    bool networked_placement_world(U::UObject* world)
+    {
+        auto* driver = object(world, STR("NetDriver"));
+        auto* field_server = field<U::FObjectProperty>(driver, STR("ServerConnection"));
+        auto* server = read(field_server, driver);
+        return live(driver) && object(driver, STR("World")) == world &&
+            exact(object(world, STR("OwningGameInstance")), instance_path) &&
+            field_server && (server ? connection(driver, server) : env("SILVERFISH_COOP_NATIVE_GUEST_SAVE"));
+    }
+
     bool drop_fence(U::UObject* actor)
     {
         auto* type = live(actor) ? actor->GetClassPrivate() : nullptr;
@@ -917,12 +1004,20 @@ namespace
         if (match == classes.end() || type->GetPathName() != match->second->item_class) return false;
         auto* world = static_cast<U::AActor*>(actor)->GetWorld();
         if (placed_drop_fault(actor, world, *match->second)) return false;
-        auto* driver = object(world, STR("NetDriver"));
-        auto* field_server = field<U::FObjectProperty>(driver, STR("ServerConnection"));
-        auto* server = read(field_server, driver);
-        return live(driver) && object(driver, STR("World")) == world &&
-            exact(object(world, STR("OwningGameInstance")), instance_path) &&
-            field_server && (server ? connection(driver, server) : env("SILVERFISH_COOP_NATIVE_GUEST_SAVE"));
+        return networked_placement_world(world);
+    }
+
+    bool authored_path(std::basic_string_view<U::TCHAR> path);
+
+    bool quest_placement_fence(U::UObject* source)
+    {
+        if (!live(source) || !source->HasAnyFlags(U::RF_WasLoaded) || !quest_placement_id(source)) return false;
+        auto* actor = static_cast<U::AActor*>(source);
+        auto* world = actor->GetWorld();
+        if (!live(world) || actor->GetLevel() != object(world, STR("PersistentLevel")) ||
+            !boolean(actor, STR("bActorIsBeingDestroyed"), false) || !networked_placement_world(world) ||
+            authored_path(actor->GetPathName()) || !source_box(actor)) return false;
+        return !generic_payload_fault(actor, false);
     }
 
     bool settle_drop_projection()
@@ -981,10 +1076,27 @@ namespace
         return function;
     }
 
+    bool quest_placement_active(const Scope& scope)
+    {
+        if (scope.profile->quest_id.empty()) return true;
+        if (!quest_placement_identity(scope)) return false;
+        if (scope.host)
+        {
+            auto* save = object(object(scope.world.Get(), STR("OwningGameInstance")), STR("SaveSlot_Ref"));
+            return live(save) && object(scope.pawn.Get(), STR("Save")) == save &&
+                valid_drop_pose(read_drop_pose(static_cast<U::AActor*>(scope.actor.Get()))) &&
+                silverfish::native_quest_rewards::active_dead_drop(save, scope.actor.Get());
+        }
+        const auto found = loose_sources.find(scope.profile->source);
+        const auto* view = found != loose_sources.end() && found->second.quest_view ? &*found->second.quest_view : nullptr;
+        return view && view->applied && Clock::now() < view->expires &&
+            same_placement_pose(read_drop_pose(static_cast<U::AActor*>(scope.actor.Get())), *view->applied);
+    }
+
     bool available(const Scope& scope)
     {
         auto* actor = scope.actor.Get();
-        return !scope.claimed && local_scope(scope) && drop_gate(scope) &&
+        return !scope.claimed && local_scope(scope) && drop_gate(scope) && quest_placement_active(scope) &&
             (!scope.profile->dead_drop || present_drop(scope)) && exact_source(actor, scope.world.Get(), *scope.profile) &&
             source_box(actor) == scope.box.Get() && static_cast<U::AActor*>(actor)->GetActorEnableCollision() &&
             boolean(actor, STR("bHidden"), false);
@@ -1032,7 +1144,8 @@ namespace
     bool set_visibility(Scope& scope, bool claimed)
     {
         auto* actor = static_cast<U::AActor*>(scope.actor.Get());
-        if (!local_scope(scope) || (scope.profile->dead_drop && (!scope.host || !claimed || !drop_gate(scope))) ||
+        if (!local_scope(scope) || (!scope.host && !scope.profile->quest_id.empty()) ||
+            (scope.profile->dead_drop && (!scope.host || !claimed || !drop_gate(scope))) ||
             !exact_source(actor, scope.world.Get(), *scope.profile, !scope.claimed || !claimed))
             return false;
         if (claimed && !scope.claimed && scope.profile->discovered)
@@ -1060,7 +1173,8 @@ namespace
         if (claimed)
         {
             scope.observed = {};
-            if (scope.host && scope.profile->discovered && scope.profile->source.contains('|'))
+            if (scope.host && scope.profile->discovered &&
+                (scope.profile->source.contains('|') || !scope.profile->quest_id.empty()))
                 loose_hidden.emplace(scope.profile->source);
         }
         return true;
@@ -1081,14 +1195,45 @@ namespace
         scope = {};
     }
 
+    bool retire_quest_view(LooseSource& source, bool teardown = false)
+    {
+        auto& scope = source.scope;
+        auto& view = *source.quest_view;
+        view.expires = {};
+        scope.observed = {};
+        auto* actor = static_cast<U::AActor*>(scope.actor.Get());
+        if (!live(actor) || (!teardown && !view.applied && !actor->GetActorEnableCollision() &&
+            boolean(actor, STR("bHidden"), true))) return true;
+        if (!quest_placement_identity(scope)) return true;
+        if (!boolean(actor, STR("bHidden"), true)) actor->SetActorHiddenInGame(true);
+        if (actor->GetActorEnableCollision()) actor->SetActorEnableCollision(false);
+        if (view.applied && !set_quest_placement_pose(actor, view.baseline)) return false;
+        view.applied.reset();
+        if (teardown)
+        {
+            actor->SetActorHiddenInGame(scope.original_hidden);
+            actor->SetActorEnableCollision(scope.original_collision);
+        }
+        return actor->GetActorEnableCollision() == (teardown && scope.original_collision) &&
+            boolean(actor, STR("bHidden"), !teardown || scope.original_hidden);
+    }
+
     void clear_loose()
     {
+        for (auto* loose : guest_quest_sources)
+        {
+            retire_quest_view(*loose, true);
+            loose->scope.claimed = false;
+        }
+        guest_quest_sources.clear();
+        guest_quest_epoch.clear();
         for (auto& [_, loose] : loose_sources) clear(loose.scope);
         loose_sources.clear();
         loose_by_actor.clear();
         loose_candidates.clear();
         quest_placements.clear();
         pending_quest_placements.clear();
+        quest_placements_at = {};
         loose_carry_pending.clear();
         next_loose_candidate = 0;
         loose_hidden.clear();
@@ -1259,7 +1404,8 @@ namespace
             auto* item = read(parameter<U::FObjectProperty>(function, STR("Item"), 0), args);
             const auto* scope = actor_scope(item);
             if ((scope && context == object(scope->world.Get(), STR("OwningGameInstance"))) ||
-                (drop_fence(item) && context == object(static_cast<U::AActor*>(item)->GetWorld(), STR("OwningGameInstance"))))
+                ((drop_fence(item) || quest_placement_fence(item)) &&
+                    context == object(static_cast<U::AActor*>(item)->GetWorld(), STR("OwningGameInstance"))))
                 call.PreventOriginalFunctionCall();
             return;
         }
@@ -1268,7 +1414,8 @@ namespace
         {
             // Stock waits half a second before hiding a dormant bag. Veto its exact
             // placed pickup callbacks even before Lua has a qualified input lease.
-            if (function->GetOuterPrivate() == find<U::UClass>(base_class) && drop_fence(context))
+            if (function->GetOuterPrivate() == find<U::UClass>(base_class) &&
+                (drop_fence(context) || quest_placement_fence(context)))
                 call.PreventOriginalFunctionCall();
             return;
         }
@@ -2272,14 +2419,24 @@ namespace
         return 1;
     }
 
-    void apply_loose_view(std::string_view path, Scope& scope)
+    bool apply_loose_view(std::string_view path, Scope& scope)
     {
         auto* actor = static_cast<U::AActor*>(scope.actor.Get());
         const bool hidden = loose_hidden.contains(path);
-        if (!live(actor) || (scope.host && !path.contains('|') && !hidden)) return;
+        if (!scope.host && !scope.profile->quest_id.empty())
+        {
+            auto found = loose_sources.find(path);
+            if (found == loose_sources.end() || !found->second.quest_view) return false;
+            auto& loose = found->second;
+            scope.claimed = hidden;
+            if (!hidden && Clock::now() < loose.quest_view->expires) return true;
+            return retire_quest_view(loose);
+        }
+        if (!live(actor) || (scope.host && !path.contains('|') && !hidden)) return true;
         if (scope.claimed != hidden ||
             (hidden && (actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), true))))
             set_visibility(scope, hidden);
+        return true;
     }
 
     LooseSource* enrolled_loose_actor(U::UObject* actor)
@@ -2312,30 +2469,49 @@ namespace
         auto* box = source_box(actor);
         if (!box) return nullptr;
         const auto path = actor->GetPathName();
-        const auto source = loose_source_key(path, seat.profile->world, actor->GetLevel() != object(world, STR("PersistentLevel")));
+        const bool streamed = actor->GetLevel() != object(world, STR("PersistentLevel"));
+        const auto source = loose_source_key(path, seat.profile->world, streamed);
         if (loose_actor_path(source, RC::to_utf8_string(seat.profile->world)).empty()) return nullptr;
-        if ((!actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false)) &&
+        const auto quest = streamed ? std::optional<U::FName>{} : quest_placement_id(actor);
+        const bool collision = actor->GetActorEnableCollision();
+        const bool hidden = boolean(actor, STR("bHidden"), true);
+        if (!quest && (!collision || !boolean(actor, STR("bHidden"), false)) &&
             (seat.host || (!loose_hidden.contains(source) && !remotely_hidden_loose(actor)))) return nullptr;
         const auto class_path = actor->GetClassPrivate()->GetPathName();
         if (authored_path(path) ||
             !silverfish::content_paths::item_class(std::basic_string_view{class_path.data(), class_path.size()})) return nullptr;
         const bool cash = silverfish::stock_cash::is_family(actor->GetClassPrivate());
         if (generic_payload_fault(actor, cash)) return nullptr;
+        std::optional<QuestPlacementView> view;
+        if (quest && !seat.host)
+        {
+            const auto pose = read_drop_pose(actor);
+            if (!finite_drop_pose(pose)) return nullptr;
+            view.emplace(QuestPlacementView{.baseline = pose});
+        }
 
         auto [entry, _] = loose_sources.try_emplace(source);
         auto& loose = entry->second;
+        if (loose.quest_view)
+        {
+            retire_quest_view(loose, true);
+            guest_quest_sources.erase(&loose);
+        }
         if (auto stale = loose_by_actor.find(loose.indexed_actor); stale != loose_by_actor.end() && stale->second == &loose)
             loose_by_actor.erase(stale);
         loose.world = seat.profile->world;
         loose.actor = path;
         loose.item_class = class_path;
         loose.item_class_utf8 = RC::to_utf8_string(class_path);
+        loose.quest_id = quest ? RC::to_utf8_string(quest->ToString()) : std::string{};
         loose.profile = {.source = entry->first, .world = loose.world.c_str(), .actor = loose.actor.c_str(),
-            .item_class = loose.item_class.c_str(), .stock_cash = cash, .discovered = true};
+            .item_class = loose.item_class.c_str(), .stock_cash = cash, .discovered = true, .quest_id = loose.quest_id};
         loose.scope = {seat.world.Get(), seat.pawn.Get(), actor, box, seat.controller.Get(), seat.driver.Get(), &loose.profile,
-            seat.host, false, true, false};
+            seat.host, false, quest ? collision : true, quest && hidden};
+        loose.quest_view = view;
         loose.indexed_actor = actor;
         loose_by_actor.insert_or_assign(actor, &loose);
+        if (view) guest_quest_sources.insert(&loose);
         loose.static_position = immutable_loose_root(actor, box) ? std::optional{actor->K2_GetActorLocation()} : std::nullopt;
         loose.carry_candidate = seat.host && !cash && carryable_placed_item(actor);
         loose.carry_enrolled = false;
@@ -2409,22 +2585,11 @@ namespace
                 auto& scope = found->second.scope;
                 if (was_hidden && scope.host && !path.contains('|') && scope.claimed)
                     set_visibility(scope, false);
-                else
-                    apply_loose_view(path, scope);
+                else if (!apply_loose_view(path, scope))
+                    return result(lua, false, "quest_placement_visibility_unverified");
             }
         }
         return result(lua, true, "loose_pickup_projection_applied");
-    }
-
-    std::optional<U::FName> quest_placement_id(U::AActor* actor, U::UScriptStruct* transform)
-    {
-        auto* quest = field<U::FNameProperty>(actor, STR("Quest_ID"));
-        auto* original = field<U::FStructProperty>(actor, STR("OriginalTrans"));
-        if (!quest || !original || original->GetStruct().Get() != transform) return {};
-        const auto id = quest->GetPropertyValueInContainer(actor);
-        const auto name = id.ToString();
-        if (id.IsNone() || !silverfish::content_paths::quest_id(RC::StringViewType{name})) return {};
-        return id;
     }
 
     int discover_loose(const Lua& lua)
@@ -2449,6 +2614,8 @@ namespace
             loose_world = world;
             loose_host = host;
         }
+        for (auto* loose : guest_quest_sources)
+            apply_loose_view(loose->profile.source, loose->scope);
         const auto now = Clock::now();
         auto* base = find<U::UClass>(base_class);
         if (!base) return 0;
@@ -2468,21 +2635,19 @@ namespace
         const auto cutoff = Clock::now() + loose_scan_budget;
         const auto first = next_loose_candidate;
         const auto limit = std::min(loose_candidates.size(), first + loose_scan_limit);
-        auto* container = host && first < limit && quest_placement_fixture() ? find<U::UClass>(quest_container_class) : nullptr;
-        auto* transform = container ? find<U::UScriptStruct>(STR("/Script/CoreUObject.Transform")) : nullptr;
         while (next_loose_candidate < limit)
         {
             auto* actor = static_cast<U::AActor*>(loose_candidates[next_loose_candidate++].Get());
-            if (transform && pending_quest_placements.size() < quest_placement_limit &&
-                live(actor) && actor->IsA(container) && quest_placement_id(actor, transform))
+            auto* loose = enroll_loose_actor(actor, base, seat);
+            if (host && loose && !loose->profile.quest_id.empty() && pending_quest_placements.size() <= quest_placement_limit)
                 pending_quest_placements.emplace_back(actor);
-            enroll_loose_actor(actor, base, seat);
             if (Clock::now() >= cutoff) break;
         }
-        if (next_loose_candidate == loose_candidates.size() && (rescan || first != next_loose_candidate))
+        if (host && next_loose_candidate == loose_candidates.size() && (rescan || first != next_loose_candidate))
         {
             quest_placements.swap(pending_quest_placements);
             pending_quest_placements.clear();
+            quest_placements_at = quest_placements.size() <= quest_placement_limit ? Clock::now() : Clock::time_point{};
         }
 
         std::string carry_paths;
@@ -2503,7 +2668,8 @@ namespace
 
     int read_quest_placements(const Lua& lua)
     {
-        if (!ready() || !loose_host || !quest_placement_fixture() || !env("SILVERFISH_COOP_NATIVE_GUEST_SAVE") ||
+        if (!ready() || !loose_host || !quest_placement_enabled() || quest_placements_at == Clock::time_point{} ||
+            Clock::now() - quest_placements_at >= loose_scan_interval * 2 ||
             lua.get_stack_size() != 1 || !lua.is_integer()) return 0;
         const auto pointer = static_cast<Address>(lua.get_integer());
         auto* pawn = loose_pawn.Get();
@@ -2515,31 +2681,18 @@ namespace
             object(world, STR("NetDriver")), &seat_profile, true};
         if (!local_scope(seat)) return 0;
         auto* save = object(object(world, STR("OwningGameInstance")), STR("SaveSlot_Ref"));
-        auto* transform = find<U::UScriptStruct>(STR("/Script/CoreUObject.Transform"));
-        if (!live(save) || object(pawn, STR("Save")) != save || !transform) return 0;
+        if (!live(save) || object(pawn, STR("Save")) != save) return 0;
         const auto world_utf8 = RC::to_utf8_string(world_path);
-        auto* persistent = object(world, STR("PersistentLevel"));
         std::string rows;
         for (const auto& candidate : quest_placements)
         {
-            auto* actor = static_cast<U::AActor*>(candidate.Get());
-            if (!live(actor) || !actor->HasAnyFlags(U::RF_WasLoaded) || !in_loose_level(actor, world) ||
-                !boolean(actor, STR("bActorIsBeingDestroyed"), false) || !boolean(actor, STR("bHidden"), false) ||
-                !boolean(actor, STR("bReplicates"), false) || !boolean(actor, STR("Stacks"), false) ||
-                !boolean(actor, STR("Physics"), false) || !actor->GetActorEnableCollision() || !source_box(actor))
-                continue;
-            const auto path = actor->GetPathName();
-            const auto type = actor->GetClassPrivate()->GetPathName();
-            if (authored_path(path) || !silverfish::content_paths::item_class(RC::StringViewType{type})) continue;
-            const auto source = loose_source_key(path, world_path, actor->GetLevel() != persistent);
-            if (loose_actor_path(source, world_utf8).empty()) continue;
-            const auto id = quest_placement_id(actor, transform);
-            if (!id || !silverfish::native_quest_rewards::active_dead_drop(save, actor)) continue;
-            const auto pose = read_drop_pose(actor);
-            if (!valid_drop_pose(pose)) continue;
+            auto* loose = enrolled_loose_actor(candidate.Get());
+            if (!loose || loose->profile.quest_id.empty() || loose_hidden.contains(loose->profile.source) ||
+                !available(loose->scope)) continue;
+            const auto pose = read_drop_pose(static_cast<U::AActor*>(loose->scope.actor.Get()));
             std::format_to(std::back_inserter(rows),
                 "native-authored-quest-placement\t{}\t{}\t{}\t{}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.6f}\t{:.6f}\t{:.6f}\n",
-                world_utf8, source, RC::to_utf8_string(id->ToString()), RC::to_utf8_string(type),
+                world_utf8, loose->profile.source, loose->profile.quest_id, loose->item_class_utf8,
                 pose[0], pose[1], pose[2], pose[3], pose[4], pose[5], pose[6], pose[7], pose[8]);
         }
         lua.set_string(rows);
@@ -2584,9 +2737,14 @@ namespace
         auto* mode = loose_respawn_mode(actor);
         if (!mode) return 0;
         lua.set_string(RC::to_utf8_string(scope->profile->item_class));
-        lua.set_integer(mode->GetPropertyValueInContainer(actor));
+        lua.set_integer(scope->profile->quest_id.empty() ? mode->GetPropertyValueInContainer(actor) : 2);
         lua.set_bool(scope->claimed);
         lua.set_bool(scope->profile->stock_cash);
+        if (!scope->profile->quest_id.empty())
+        {
+            lua.set_string(scope->profile->quest_id);
+            return 5;
+        }
         return 4;
     }
 
@@ -2657,7 +2815,8 @@ namespace
             if (!scope.claimed && !available(scope) && !awaiting_claim) continue;
             if (!rows.empty()) rows.push_back('\n');
             std::format_to(std::back_inserter(rows), "native-loose-pickup\t{}\t{}\t{}\t{}\t{}\t{:.3f}\t{:.3f}\t{:.3f}",
-                map, scope.profile->source, source->item_class_utf8, mode->GetPropertyValueInContainer(actor),
+                map, scope.profile->source, source->item_class_utf8,
+                scope.profile->quest_id.empty() ? mode->GetPropertyValueInContainer(actor) : 2,
                 scope.claimed ? "claimed" : "available", at.GetX(), at.GetY(), at.GetZ());
         }
         lua.set_string(rows);
@@ -2756,7 +2915,7 @@ namespace
 
     void push_status(const Lua& lua, Scope* scope)
     {
-        const bool active = scope && (scope->claimed || drop_gate(*scope)) &&
+        const bool active = scope && (scope->claimed || (drop_gate(*scope) && quest_placement_active(*scope))) &&
             exact_source(scope->actor.Get(), scope->world.Get(), *scope->profile, !scope->claimed) &&
             (scope->claimed || !scope->profile->dead_drop || present_drop(*scope));
         const bool emitted = active && Clock::now() < scope->observed.expires;
@@ -2918,6 +3077,93 @@ namespace
     {
         return epoch.size() == 32 && epoch != "00000000000000000000000000000000" &&
             std::ranges::all_of(epoch, [](char digit) { return (digit >= '0' && digit <= '9') || (digit >= 'a' && digit <= 'f'); });
+    }
+
+    bool guest_quest_request(Address pointer, std::string_view source, std::string_view epoch)
+    {
+        auto* pawn = loose_pawn.Get();
+        auto* world = loose_world.Get();
+        if (loose_host || !live(pawn) || address(pawn) != pointer || !live(world) ||
+            !valid_drop_epoch(epoch) || (!guest_quest_epoch.empty() && guest_quest_epoch != epoch) || source.contains('|'))
+            return false;
+        const auto path = world->GetPathName();
+        const Profile profile{.world = path.c_str()};
+        const Scope seat{world, pawn, nullptr, nullptr, object(pawn, STR("Controller")),
+            object(world, STR("NetDriver")), &profile, false};
+        return local_scope(seat) && !loose_actor_path(source, RC::to_utf8_string(path)).empty();
+    }
+
+    int project_quest_placement(const Lua& lua)
+    {
+        if (!ready() || !quest_placement_enabled() || lua.get_stack_size() != 14 || !lua.is_integer(1))
+            return result(lua, false, "quest_placement_projection_arguments");
+        const auto pointer = static_cast<Address>(lua.get_integer());
+        std::array<std::string, 4> request;
+        for (auto& field : request)
+        {
+            if (!lua.is_string()) return result(lua, false, "quest_placement_projection_arguments");
+            field = lua.get_string();
+        }
+        const auto& [source, quest, type, epoch] = request;
+        DropPose pose{};
+        for (auto& axis : pose)
+        {
+            if (!lua.is_number()) return result(lua, false, "quest_placement_projection_arguments");
+            axis = lua.get_number();
+        }
+        if (!valid_drop_pose(pose) || !silverfish::content_paths::quest_id(std::string_view{quest}) ||
+            !silverfish::content_paths::item_class(std::string_view{type}))
+            return result(lua, false, "quest_placement_projection_arguments");
+        if (!guest_quest_request(pointer, source, epoch))
+            return result(lua, false, "quest_placement_scope_unavailable");
+        if (loose_hidden.contains(source))
+            return result(lua, false, "quest_placement_already_claimed");
+        auto found = loose_sources.find(source);
+        if (found == loose_sources.end()) return result(lua, false, "quest_placement_source_unavailable");
+        auto& loose = found->second;
+        const auto& scope = loose.scope;
+        if (!loose.quest_view || scope.claimed || loose.item_class_utf8 != type ||
+            loose.profile.quest_id != quest || !local_scope(scope) || !quest_placement_identity(scope))
+            return result(lua, false, "quest_placement_source_unavailable");
+        auto* placed = static_cast<U::AActor*>(scope.actor.Get());
+        auto& view = *loose.quest_view;
+        const bool renewing = view.applied && Clock::now() < view.expires &&
+            same_placement_pose(read_drop_pose(placed), pose) && boolean(placed, STR("bHidden"), false) &&
+            placed->GetActorEnableCollision();
+        if (!renewing)
+        {
+            view.applied = pose;
+            if (set_quest_placement_pose(placed, pose))
+            {
+                placed->SetActorEnableCollision(true);
+                placed->SetActorHiddenInGame(false);
+            }
+            if (!same_placement_pose(read_drop_pose(placed), pose) ||
+                !boolean(placed, STR("bHidden"), false) || !placed->GetActorEnableCollision())
+            {
+                const bool restored = retire_quest_view(loose);
+                return result(lua, false, restored ? "quest_placement_projection_refused" :
+                    "mutation_unverified_quest_placement_projection");
+            }
+        }
+        view.expires = Clock::now() + quest_placement_lease;
+        guest_quest_epoch = epoch;
+        return result(lua, true, renewing ? "renewed" : "projected");
+    }
+
+    int clear_quest_placement(const Lua& lua)
+    {
+        if (!ready() || !quest_placement_enabled() || lua.get_stack_size() != 3 || !lua.is_integer(1) ||
+            !lua.is_string(2) || !lua.is_string(3))
+            return result(lua, false, "quest_placement_clear_arguments");
+        const auto pointer = static_cast<Address>(lua.get_integer());
+        const std::string source{lua.get_string()};
+        const std::string epoch{lua.get_string()};
+        if (!guest_quest_request(pointer, source, epoch))
+            return result(lua, false, "quest_placement_scope_unavailable");
+        auto found = loose_sources.find(source);
+        const bool cleared = found == loose_sources.end() || !found->second.quest_view || retire_quest_view(found->second);
+        return result(lua, cleared, cleared ? "cleared" : "mutation_unverified_quest_placement_clear");
     }
 
     int project_drop(const Lua& lua)
@@ -3296,7 +3542,9 @@ namespace silverfish::native_authored_pickup
         lua.register_function("SilverfishSetNativeAuthoredPickupScope", set_scope);
         lua.register_function("SilverfishSampleNativeAuthoredPickups", sample_authored);
         lua.register_function("SilverfishDiscoverLoosePickups", discover_loose);
-        if (quest_placement_fixture()) lua.register_function("SilverfishReadNativeAuthoredQuestPlacements", read_quest_placements);
+        lua.register_function("SilverfishReadNativeAuthoredQuestPlacements", read_quest_placements);
+        lua.register_function("SilverfishProjectNativeAuthoredQuestPlacement", project_quest_placement);
+        lua.register_function("SilverfishClearNativeAuthoredQuestPlacement", clear_quest_placement);
         lua.register_function("SilverfishReadHostLooseRespawnHidden", read_host_respawn_hidden);
         lua.register_function("SilverfishAcknowledgeLooseCarry", acknowledge_loose_carry);
         lua.register_function("SilverfishSetGuestLoosePickupView", set_guest_loose_view);

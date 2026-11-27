@@ -11,11 +11,12 @@ local world, weapon_class, arrow_class = object({}), object({}), object({})
 local firearm = "/Game/Classes/Weapons/Wep_Revolver_01.Wep_Revolver_01_C"
 weapon_class.GetFullName = function() return "BlueprintGeneratedClass " .. firearm end
 local aim = {Pitch = 15, Yaw = 25, Roll = 42}
+local aim_reads = 0
 local pawn = object({
     GetWorld = function() return world end,
     IsActorBeingDestroyed = function() return false end,
     IsLocallyControlled = function(self) return self.local_control == true end,
-    GetBaseAimRotation = function() return aim end,
+    GetBaseAimRotation = function() aim_reads = aim_reads + 1; return aim end,
     K2_GetActorRotation = function() return {Yaw = 10} end,
     CharacterMovement = {IsFalling = function(self) return self.falling == true end},
 })
@@ -100,14 +101,14 @@ handgun.sync(entry, true, attach)
 assert(attachment and parent == outer)
 handgun.update(entry, api)
 assert(outer.absolute and outer.world_rotation.Pitch == 15 and outer.world_rotation.Yaw + 90 == 25)
-handgun.update(entry, api)
-assert(rotations == 1, "Steady aim rewrote the weapon transform")
-aim.Pitch, aim.Yaw = 345, 40
-handgun.update(entry, api)
+handgun.update(entry, api, 15, 25)
+assert(rotations == 1 and aim_reads == 1, "A shared steady sample must not reread aim or rewrite the transform")
+handgun.update(entry, api, 345, 40)
 assert(outer.absolute and outer.world_rotation.Pitch == -15 and outer.world_rotation.Yaw + 90 == 40)
+assert(aim_reads == 1)
 aim.Yaw = 170
-handgun.update(entry, api)
-assert(not outer.absolute and outer.relative_rotation.Yaw == 0)
+handgun.update(entry, api, 0, math.huge)
+assert(not outer.absolute and outer.relative_rotation.Yaw == 0 and aim_reads == 2)
 aim.Yaw = 0
 handgun.update(entry, api)
 assert(outer.absolute)

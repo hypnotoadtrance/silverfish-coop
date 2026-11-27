@@ -94,7 +94,7 @@ function handgun.sync(entry, aiming, create_hardpoint)
         correction = correction, requested = true}
 end
 
-function handgun.update(entry, api)
+function handgun.update(entry, api, aim_pitch, aim_yaw)
     local view, pawn = entry.handgun_view, entry.pawn
     if not view or not view.requested or not valid(pawn) or pawn:IsActorBeingDestroyed() then return end
     local actor = view.actor
@@ -106,13 +106,17 @@ function handgun.update(entry, api)
         lower(view)
         return
     end
-    local aim, facing = pawn:GetBaseAimRotation(), pawn:K2_GetActorRotation()
-    if not finite(aim.Pitch, 360) or not finite(aim.Yaw, 360) or not finite(facing.Yaw, 360)
-        or math.abs(signed(aim.Yaw - facing.Yaw)) > max_turn then
+    if not finite(aim_pitch, 360) or not finite(aim_yaw, 360) then
+        local aim = pawn:GetBaseAimRotation()
+        aim_pitch, aim_yaw = aim.Pitch, aim.Yaw
+    end
+    local facing = pawn:K2_GetActorRotation()
+    if not finite(aim_pitch, 360) or not finite(aim_yaw, 360) or not finite(facing.Yaw, 360)
+        or math.abs(signed(aim_yaw - facing.Yaw)) > max_turn then
         lower(view)
         return
     end
-    local pitch, yaw = math.max(-max_pitch, math.min(max_pitch, signed(aim.Pitch))), signed(aim.Yaw)
+    local pitch, yaw = math.max(-max_pitch, math.min(max_pitch, signed(aim_pitch))), signed(aim_yaw)
     if view.absolute and math.abs(view.pitch - pitch) < .05 and math.abs(signed(view.yaw - yaw)) < .05 then return end
     if not view.absolute then view.outer:SetAbsolute(false, true, false) end
     local rotation = api:ComposeRotators(view.correction, {Pitch = pitch, Yaw = yaw, Roll = 0})

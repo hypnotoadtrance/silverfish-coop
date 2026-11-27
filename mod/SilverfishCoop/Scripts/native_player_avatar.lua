@@ -39,6 +39,7 @@ local identity = {
     Scale3D = { X = 1, Y = 1, Z = 1 },
 }
 local avatars = {}
+local avatar_clock, avatar_math
 local swings = {}
 local uses = {}
 local observations, client_outfits = {}, {}
@@ -722,7 +723,7 @@ local function apply_lean(entry, now, math_api)
     return true
 end
 
-local function aim_head(entry, address, now, lean_changed, math_api)
+local function read_base_aim(entry, address)
     local pitch, yaw
     if type(SilverfishReadNativeRemoteAim) == "function" then
         pitch, yaw = SilverfishReadNativeRemoteAim(entry.world, address)
@@ -731,6 +732,10 @@ local function aim_head(entry, address, now, lean_changed, math_api)
         local rotation = entry.pawn:GetBaseAimRotation()
         pitch, yaw = rotation.Pitch, rotation.Yaw
     end
+    return pitch, yaw
+end
+
+local function aim_head(entry, pitch, yaw, now, lean_changed, math_api)
     pitch = math.max(-45, math.min(45, (pitch + 180) % 360 - 180))
     local previous = entry.head_aim
     if previous then
@@ -753,34 +758,44 @@ local function aim_head(entry, address, now, lean_changed, math_api)
             aim = math_api:ComposeRotators(aim, lean)
         end
         entry.head_pivot:K2_SetWorldRotation(aim, false, {}, true)
-        entry.aim_roll = entry.head_pivot:K2_GetComponentRotation().Roll
+        entry.head_roll_pending = true
         previous = previous or {}
         previous.pitch, previous.yaw, previous.time = pitch, yaw, now
         entry.head_aim = previous
     end
 end
 
+local function aim_math()
+    if not valid(avatar_math) then avatar_math = StaticFindObject(math_library) end
+    return avatar_math
+end
+
 function avatar.animate_head(get_world)
     if not next(avatars) then return end
-    local world, clock = get_world(), StaticFindObject(gameplay_statics)
-    if not valid(world) or not valid(clock) then return end
-    local scope, now = world:GetAddress(), clock:GetRealTimeSeconds(world)
+    local world = get_world()
+    if not valid(world) then return end
+    if not valid(avatar_clock) then
+        avatar_clock = StaticFindObject(gameplay_statics)
+        if not valid(avatar_clock) then return end
+    end
+    local scope, now = world:GetAddress(), avatar_clock:GetRealTimeSeconds(world)
     local math_api
     for address, entry in pairs(avatars) do
         if entry.world == scope and valid(entry.head_pivot) and valid(entry.pawn)
             and not entry.pawn:IsActorBeingDestroyed() then
             local lean_changed = false
             if entry.lean_until or entry.lean_rotation then
-                math_api = math_api or StaticFindObject(math_library)
+                math_api = math_api or aim_math()
                 if valid(math_api) and valid(entry.body) and valid(entry.movement_mesh) then
                     lean_changed = apply_lean(entry, now, math_api)
                 end
             end
-            aim_head(entry, address, now, lean_changed, math_api)
+            local aim_pitch, aim_yaw = read_base_aim(entry, address)
+            aim_head(entry, aim_pitch, aim_yaw, now, lean_changed, math_api)
             character_view.align_tail(entry)
             if not uses[entry] and not swings[entry] then gait.advance(entry, now) end
             if entry.rifle_grip and (entry.rifle_idle or entry.rifle_rotated) then
-                math_api = math_api or StaticFindObject(math_library)
+                math_api = math_api or aim_math()
                 local movement = entry.pawn.CharacterMovement
                 if valid(math_api) then
                     weapon_view.rifle_idle(entry, entry.rifle_idle and not uses[entry] and not swings[entry]
@@ -789,8 +804,8 @@ function avatar.animate_head(get_world)
                 end
             end
             if entry.handgun_view and entry.handgun_view.requested then
-                math_api = math_api or StaticFindObject(math_library)
-                if valid(math_api) and not pcall(handgun_view.update, entry, math_api) then
+                math_api = math_api or aim_math()
+                if valid(math_api) and not pcall(handgun_view.update, entry, math_api, aim_pitch, aim_yaw) then
                     pcall(handgun_view.release, entry)
                 end
             end
@@ -1059,9 +1074,19 @@ function avatar.command(fields, state, phase)
     return "Remote avatar outfits received"
 end
 
+local function read_head_roll(pivot)
+    return pivot:K2_GetComponentRotation().Roll
+end
+
 function avatar.rows(row)
     local rows = {}
     for _, entry in pairs(avatars) do
+        -- Actual head roll is diagnostic and only read when publishing the avatar.
+        if entry.head_roll_pending and valid(entry.head_pivot)
+            and valid(entry.pawn) and not entry.pawn:IsActorBeingDestroyed() then
+            local ok, roll = pcall(read_head_roll, entry.head_pivot)
+            if ok then entry.aim_roll, entry.head_roll_pending = roll, nil end
+        end
         rows[#rows + 1] = row("native-player-avatar", entry.map, entry.name, entry.status, entry.failure or "",
             entry.id or "-", entry.body_worn or "-", entry.head_worn or "-", entry.aim_roll or "-",
             entry.weapon_model or "-", entry.appearance or "-", entry.pose_animation or "-", entry.weapon_socket_height or "-",
