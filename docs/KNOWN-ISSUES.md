@@ -14,10 +14,10 @@ Use the same release candidate on all PCs. Builds before `rc-ad3c9da` used an ol
 
 | Issue | Current status |
 | --- | --- |
-| Steam password prompt | `rc-479ae08` separates connection retry from the dedicated password screen. Automated checks cover passwordless join, retry, and protected lobbies. Confirm the behavior in a two-account Steam session. |
+| Steam join screens | Automated checks cover open and protected lobbies, retry, and returning to the previous Public lobby page on `rc-a82232c`. Confirm on two Steam accounts. |
 | Oil lantern state | `rc-5a157fb` passed ignition and extinguishing from both seats and a guest joining after the host broke a lamp in isolated Direct IP. Check gold and gray lanterns in a Steam playtest. |
 | Concurrent trader menus | When one player completes a trade, the other player's menu can close. Ordinary stock and barter are confirmed. Refreshing the second player's offers in place is a low-priority UX improvement. |
-| Interaction delay and frame hitches | In isolated Direct IP, the saved cabinet pickup left saves untouched and the longest nearby frame was 23 ms. A Crossroads walk still caught a 38 ms host frame after switch reads got faster. `rc-112bee9` can report co-op Steam traffic by map and lobby size. Rendered Steam timing and larger-party traffic measurements remain open. [Timing details](NATIVE-INTEGRATION.md#replication-and-travel-pacing) · [Enable the Steam report](PLAYING-COOP.md#network-timing) |
+| Interaction delay and frame hitches | The saved cabinet pickup left saves untouched and the longest nearby frame was 23 ms. On `rc-a82232c`, an offscreen Direct IP Crossroads walk measured 15.6 ms P99 and 16.7 ms maximum host game-thread frame intervals over five seconds. Foreground Steam timing and larger-party traffic measurements remain open. [Timing details](NATIVE-INTEGRATION.md#replication-and-travel-pacing) · [Enable the Steam report](PLAYING-COOP.md#network-timing) |
 | Crash and disconnect recovery | `rc-68f74c6` recovered a guest's inventory and unsaved character state after a forced game exit in isolated Direct IP. The host and a second guest stayed in play, and the campaign saved on the next explicit checkpoint. The replacement took 113 seconds. Repeat over Steam and report any longer wait or return to title. Enemy-loot crashes, the aimed weapon-swap crash, and the singleplayer crash remain regression checks. |
 
 <a id="current-playtest-checks"></a>
