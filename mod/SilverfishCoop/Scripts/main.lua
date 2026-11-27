@@ -1874,6 +1874,7 @@ status_publication.stock_interactions = {
     ["native-stock-door-guest-interact"] = {phase = "hosting", command = native_stock_door.command},
     ["native-stock-switch-interact"] = {phase = "hosting", command = native_stock_switch.command},
     ["native-stock-switch-ignite"] = {phase = "hosting", command = native_stock_switch.command},
+    ["native-stock-switch-report"] = {phase = "hosting", command = native_stock_switch.command},
     ["native-stock-switch-project"] = {phase = "connected", command = native_stock_switch.command},
 }
 

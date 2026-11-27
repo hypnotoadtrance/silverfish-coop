@@ -6,6 +6,38 @@ from tools.silverfish import native_stock_switch as switches, runtime
 
 
 class StockSwitchResponseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_guest_power_report_applies_absolute_result_once(self):
+        area = "/CommunityMaps/Shelter"
+        actor = f"Prop_Radio01_C {area}.Shelter:PersistentLevel.Radio_1"
+        epoch, nonce = "e" * 32, "a" * 32
+        off = {"powered": False, "angles": [0, 0, 0], "lights": {}}
+        game = {"map": area, "state": "hosting", switches.KEY: {actor: off}}
+        host = SimpleNamespace(zone_epoch=epoch, last_game=game, native_recipients=lambda: {"guest": {
+            "connected": True, "pawn": "qualified guest"}}, transitioning=False, stopping=False,
+            native_checkpoint_unsafe=False, party={"players": {"guest": {"downed": False}}, "wipe": None,
+                                                   "pending_spawns": {}, "receipts": {}})
+        reply = dict(game, ack={"message": "stock switch report applied"})
+        bridge = SimpleNamespace(command=AsyncMock(return_value=reply))
+        local = switches.local_outcome(f"stock-switch-state:12:0:{actor}")
+        self.assertEqual(local, (actor, "0", "12"))
+        for invalid in ("12:2", "0:0", "9007199254740992:0", "１２:0"):
+            self.assertIsNone(switches.local_outcome(f"stock-switch-state:{invalid}:{actor}"))
+        request = f"{epoch}@{actor}@0"
+        result = await switches.interact(host, bridge, "guest", request, nonce, switches.REPORT)
+        self.assertEqual(await switches.interact(host, bridge, "guest", request, nonce, switches.REPORT), result)
+        bridge.command.assert_awaited_once_with(switches.REPORT, actor, "qualified guest", "0", timeout=3)
+        with self.assertRaisesRegex(switches.party.RuleError, "operation_id_conflict"):
+            await switches.interact(host, bridge, "guest", f"{epoch}@{actor}@1", nonce, switches.REPORT)
+
+        connected = dict(game, state="connected")
+        bridge.command.reset_mock()
+        bridge.command.return_value = connected
+        frame = result[switches.KEY]
+        self.assertIs(await switches.project(bridge, connected, frame, epoch), connected)
+        bridge.command.assert_not_awaited()
+        self.assertIs(await switches.project(bridge, connected, frame, epoch, sequence="12"), connected)
+        bridge.command.assert_awaited_once_with(switches.PROJECT, actor, area, "0", "0", "0", "0", "ack=12", timeout=2)
+
     def test_candle_variants_share_the_stock_switch_protocol(self):
         area = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
         for suffix in ("01", "02", "03"):

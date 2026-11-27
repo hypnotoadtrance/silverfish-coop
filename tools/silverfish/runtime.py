@@ -1096,6 +1096,7 @@ class Bridge:
                     and not native_guest_drop_projection.target_parts(decoded)
                     and not native_world_loot.target_parts(decoded)
                     and not native_stock_door.target_actor(decoded) and not native_stock_switch.input_target(decoded)
+                    and not native_stock_switch.local_outcome(decoded)
                     and not native_loose_pickup.target_path(decoded)
                     and not native_critters.target_id(decoded)
                     and not native_ladder.target_parts(decoded)

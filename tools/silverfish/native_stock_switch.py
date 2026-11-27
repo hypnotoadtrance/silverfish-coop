@@ -11,10 +11,13 @@ TAG = "native-stock-switch"
 KEY = "native_stock_switches"
 ACTION = TAG + "-interact"
 IGNITE = TAG + "-ignite"
+REPORT = TAG + "-report"
 PROJECT = TAG + "-project"
-ACTIONS = (ACTION, IGNITE)
+RELEASE_LOCAL = TAG + "-release-local"
+ACTIONS = (ACTION, IGNITE, REPORT)
 TARGET = "stock-switch:"
 IGNITION_TARGET = "stock-switch-ignite:"
+OUTCOME_TARGET = "stock-switch-state:"
 _ACTOR = re.compile(r"[A-Za-z0-9_-]+_C (/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):PersistentLevel\.[A-Za-z0-9_-]+")
 _LAMP_STATES = {"intact", "broken", "removed"}
 
@@ -42,6 +45,15 @@ def input_target(value):
     return None
 
 
+def local_outcome(value):
+    if isinstance(value, str) and value.startswith(OUTCOME_TARGET):
+        serial, _, rest = value[len(OUTCOME_TARGET):].partition(":")
+        power, _, actor = rest.partition(":")
+        if re.fullmatch(r"[0-9]{1,16}", serial) and 0 < int(serial) < 2**53 and power in ("0", "1") and actor_package(actor):
+            return actor, power, serial
+    return None
+
+
 def parse(fields, phase, area):
     if (len(fields) not in (9, 10) or fields[1] != area or not actor_package(fields[2])
             or phase not in ("hosting", "connected") or fields[3] not in ("0", "1")):
@@ -66,6 +78,13 @@ def parse(fields, phase, area):
 
 async def interact(host, bridge, character, requested, operation, action=ACTION):
     epoch, _, actor = requested.partition("@") if isinstance(requested, str) else ("", "", "")
+    power = None
+    message = "stock switch interaction dispatched"
+    if action == REPORT:
+        actor, _, power = actor.rpartition("@")
+        if power not in ("0", "1"):
+            raise party.RuleError("stock_switch_state_unavailable")
+        message = "stock switch report applied"
     game = host.last_game
     member = host.native_recipients().get(character, {})
     player = host.party["players"].get(character)
@@ -85,14 +104,16 @@ async def interact(host, bridge, character, requested, operation, action=ACTION)
                 raise party.RuleError("operation_id_conflict")
             return receipt["result"]
     try:
-        snapshot = await bridge.command(action, actor, member["pawn"], timeout=3)
+        arguments = (actor, member["pawn"]) if power is None else (actor, member["pawn"], power)
+        snapshot = await bridge.command(action, *arguments, timeout=3)
     except RuntimeError as error:
         if str(error).startswith("stock_switch_"):
             raise party.RuleError(str(error)) from error
         raise
     row = snapshot.get(KEY, {}).get(actor)
     if ((snapshot.get("state"), snapshot.get("map"), snapshot.get("ack", {}).get("message"))
-            != ("hosting", game["map"], "stock switch interaction dispatched") or row is None):
+            != ("hosting", game["map"], message) or row is None
+            or (power is not None and row.get("powered") is not (power == "1"))):
         raise RuntimeError("The stock switch interaction did not verify")
     if native_stock_door.LOCAL_SCOPE in snapshot:
         if host.zone_epoch != epoch or not native_stock_door.matches_local_scope(host.last_game, snapshot):
@@ -109,22 +130,24 @@ async def interact(host, bridge, character, requested, operation, action=ACTION)
     return result
 
 
-async def apply_interaction(client, frame, actor):
+async def apply_interaction(client, frame, actor, *, sequence=None):
     area, epoch = client.last_game.get("map"), client.zone_epoch
     if (not isinstance(frame, dict) or (frame.get("map"), frame.get("epoch")) != (area, epoch)
             or not actor_package(actor) or not epoch or client.needs_travel or client.server_transitioning
             or not isinstance(rows := frame.get("switches"), dict) or rows.keys() != {actor}):
         return
     await client.cancel_gameplay_snapshot()
+    if (client.last_game.get("map"), client.zone_epoch) != (area, epoch) or client.needs_travel or client.server_transitioning:
+        return
     cached = client.gameplay.get(KEY, {})
     if (cached.get("map"), cached.get("epoch")) == (area, epoch):
         client.gameplay[KEY] = {**frame, "switches": {**cached["switches"], **rows}}
     else:
         client.gameplay[KEY] = frame
-    client.last_game = await project(client.bridge, client.last_game, frame, client.zone_epoch)
+    client.last_game = await project(client.bridge, client.last_game, frame, client.zone_epoch, sequence=sequence)
 
 
-async def project(bridge, game, frame, epoch):
+async def project(bridge, game, frame, epoch, *, sequence=None):
     area = game.get("map")
     if not isinstance(frame, dict) or (frame.get("map"), frame.get("epoch")) != (area, epoch) or not epoch:
         return game
@@ -134,7 +157,7 @@ async def project(bridge, game, frame, epoch):
         return game
     for actor, target in rows.items():
         if (not actor_package(actor) or actor not in local or not isinstance(target, dict)
-                or target == local[actor] or type(target.get("powered")) is not bool):
+                or (sequence is None and target == local[actor]) or type(target.get("powered")) is not bool):
             continue
         angles, lights = target.get("angles"), target.get("lights")
         if (not isinstance(angles, list) or len(angles) != 3
@@ -148,6 +171,8 @@ async def project(bridge, game, frame, epoch):
             if not isinstance(lamp, str) or lamp not in _LAMP_STATES or "lamp" not in local[actor]:
                 continue
             bulbs = [lamp]
+        if sequence is not None:
+            bulbs.append(f"ack={sequence}")
         try:
             updated = await bridge.command(PROJECT, actor, area, str(int(target["powered"])),
                                            *map(str, angles), *bulbs, timeout=2)

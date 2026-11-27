@@ -8,6 +8,14 @@ Use a gameplay-time disk write only when an operation requires durable storage t
 
 When a shared gameplay path replaces a specialized patch, trace both paths through the normal game entry point before removing the old code. Retire superseded dispatch cases, hooks, fixtures, and documentation together. Keep coverage for the original report through the shared path. Keep a dedicated handler only when it still implements distinct stock behavior or supports a documented compatibility path. Development candidates may drop support for earlier co-op save schemas. When changing the schema, reject unsupported checkpoints, keep the existing files intact, and document which builds require a fresh campaign. Begin maintaining save compatibility with the first official release.
 
+# Local gameplay and shared outcomes
+
+Run stock input, personal gameplay, and presentation on the acting player's machine. Prefer reporting the stock result over forwarding input for the host to execute again. Give admitted guests the same trust as the host for their own inventories, equipment, stat changes, and actions. Preserve built-in traits and effects and discover supported content through stock classes and events.
+
+Use the host to relay outcomes and settle conflicts over shared resources such as the same pickup, trader stock, or a quest reward. Scope reports to the current visit, source, and operation. Make retries return the same result, preserve exact item data, and reconcile only the provisional changes a conflicting outcome affects. Keep local controls responsive while the network is catching up.
+
+When adding or changing an integration, trace both players' normal game input through local feedback, the network message, and the other player's applied result. Record any host round trip that still gates normal play in the [gameplay path audit](docs/DESIGN.md#gameplay-path-audit). Test simultaneous claims and late or repeated results where the action can race.
+
 # Automated testing
 
 Reuse the existing isolated game replicas. For new replicas on the same volume, pass `stage --stock-cache` with the project-local shared stock cache so the IoStore archive, radio tracks, and TV clips use hard links. The cache has `SilverFish-Windows.ucas` at its root and stores media under its original `SilverFish/Content` paths. Keep mods, configuration and user data private to each replica. Keep the shared stock copy separate from the live Steam installation.

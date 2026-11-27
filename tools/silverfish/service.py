@@ -5938,7 +5938,7 @@ class Client:
                         self.last_game = await native_stock_door.project(self.bridge, self.last_game, delta, epoch)
                     except (OSError, RuntimeError, TimeoutError) as error:
                         self.control.event("native_stock_door_projection_deferred", reason=str(error))
-            if target and action in native_stock_switch.ACTIONS:
+            if target and action in native_stock_switch.ACTIONS and action != native_stock_switch.REPORT:
                 try:
                     await native_stock_switch.apply_interaction(self, reply.get(native_stock_switch.KEY), target.split("@", 1)[1])
                 except (OSError, RuntimeError, TimeoutError) as error:
@@ -7156,6 +7156,20 @@ class Client:
             if self.stock_interaction_scope() == scope:
                 self.guest_ui.queue_stock_inventory(self)
             return result
+        if outcome := native_stock_switch.local_outcome(target):
+            actor, power, sequence = outcome
+            try:
+                result = await self.gameplay_action(native_stock_switch.REPORT, operation, f"{actor}@{power}")
+                if self.stock_interaction_scope() == scope:
+                    await native_stock_switch.apply_interaction(
+                        self, result.get(native_stock_switch.KEY), actor, sequence=sequence)
+                return result
+            except (ValueError, OSError, RuntimeError):
+                if self.stock_interaction_scope() == scope:
+                    with contextlib.suppress(OSError, RuntimeError, TimeoutError):
+                        await self.bridge.command(native_stock_switch.RELEASE_LOCAL, actor, scope[2], sequence,
+                                                  timeout=.8, update_status=False)
+                raise
         if switch := native_stock_switch.input_target(target):
             action, actor = switch
             return await self.gameplay_action(action, operation, actor)

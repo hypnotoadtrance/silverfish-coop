@@ -38,6 +38,7 @@ local bulb_profiles = {
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local world, entries, dirty, visible_streams
 local candle_overlaps, retired_lamps = {}, {}
+local local_power = {}
 
 local function valid(object) return object and object:IsValid() end
 local function same(left, right) return valid(left) and valid(right) and left:GetAddress() == right:GetAddress() end
@@ -175,6 +176,7 @@ local function census(state, phase)
     end
     if not same(world, state.world) then
         world, entries, dirty, visible_streams = state.world, {}, {}, nil
+        local_power = {}
         for kind in pairs(profiles) do dirty[kind] = true end
     end
     local changed_levels = refresh_streamed_levels()
@@ -393,7 +395,7 @@ local function project_lamp(entry, cached, state)
     entry.retired = cached.retired
 end
 
-local function project(entry, powered, angles, lights)
+local function project(entry, powered, angles, lights, replica)
     local actor, lever = entry.actor, entry.lever
     if entry.candle then
         if entry.gas_lamp then
@@ -403,7 +405,7 @@ local function project(entry, powered, angles, lights)
         elseif actor.Lit ~= powered or entry.lantern and entry.light:IsVisible() ~= powered then
             actor:SetLitUnlit(powered, false)
         end
-        suppress_candle_overlap(actor:GetFullName(), entry.box)
+        if replica then suppress_candle_overlap(actor:GetFullName(), entry.box) end
         if actor.Lit ~= powered or entry.light:IsVisible() ~= powered then error("stock_switch_candle_unverified", 0) end
         return
     end
@@ -434,13 +436,50 @@ local function project(entry, powered, angles, lights)
     end
 end
 
+local function can_set_power(entry)
+    return entry.power and not (entry.lantern and entry.actor.Broken_0 == true)
+        and not (entry.television and entry.actor.Working ~= true)
+end
+
+function switches.local_interaction(pawn, target, sequence)
+    local name = type(target) == "string" and target:match("^stock%-switch:(.+)$")
+    local package, path = placed_actor(name)
+    if not package or not valid(pawn) or pawn:HasAuthority() or not pawn:IsLocallyControlled()
+        or pawn.Dead ~= false or not same(world, pawn:GetWorld()) then return end
+    local entry = parts(StaticFindObject(path), world)
+    if not entry or not can_set_power(entry) then return end
+    local actor = entry.actor
+    local toggles = not entry.candle or entry.gas_lamp
+    local expected = toggles and not actor[entry.power]
+    project(entry, expected, nil, nil, true)
+    if not valid(actor) or actor:IsActorBeingDestroyed() then return end
+    local powered = actor[entry.power]
+    local_power[name] = {actor = actor:GetAddress(), sequence = sequence, expires = os.clock() + 4}
+    return "stock-switch-state:" .. sequence .. ":" .. bit(powered) .. ":" .. name
+end
+
 function switches.command(fields, state, phase)
     local action = fields[2]
     local ignite = action == "native-stock-switch-ignite"
-    if not ignite and action ~= "native-stock-switch-project" and action ~= "native-stock-switch-interact" then return end
+    local report = action == "native-stock-switch-report"
+    local clear = action == "native-stock-switch-release-local"
+    if not ignite and not report and not clear and action ~= "native-stock-switch-project"
+        and action ~= "native-stock-switch-interact" then return end
+    if clear and phase == "connected" and #fields == 5 and fields[4] == state.map and same(world, state.world) then
+        local pending = local_power[fields[3]]
+        if pending and tonumber(fields[5]) == pending.sequence then local_power[fields[3]] = nil end
+        return "stock switch local result released"
+    end
     local entry = find_switch(state, phase, fields[3])
     if not entry or not valid(entry.actor) or entry.actor:IsActorBeingDestroyed() then
         error("stock_switch_unavailable", 0)
+    end
+    if report and phase == "hosting" and #fields == 5 and (fields[5] == "0" or fields[5] == "1") then
+        local pawn = guest_save.exact_item_context(state, phase, fields[4])
+        if not valid(pawn) or pawn.Dead ~= false then error("stock_switch_guest_unavailable", 0) end
+        if not can_set_power(entry) then error("stock_switch_state_unavailable", 0) end
+        project(entry, fields[5] == "1")
+        return "stock switch report applied", entry
     end
     if (ignite or action == "native-stock-switch-interact") and phase == "hosting" and #fields == 4 then
         if entry.lantern and entry.actor.Broken_0 == true then error("stock_switch_lamp_broken", 0) end
@@ -473,6 +512,17 @@ function switches.command(fields, state, phase)
         return "stock switch interaction dispatched", entry
     end
     if action == "native-stock-switch-project" and phase == "connected" and fields[4] == state.map and #fields >= 8 then
+        local pending = local_power[fields[3]]
+        local last = #fields
+        local confirmed = fields[last]:match("^ack=(%d+)$")
+        if confirmed then last = last - 1 end
+        if pending then
+            if pending.actor == entry.actor:GetAddress() and os.clock() < pending.expires
+                and tonumber(confirmed) ~= pending.sequence then
+                return "stock switch local result pending", entry
+            end
+            local_power[fields[3]] = nil
+        end
         local power, pitch, yaw, roll = fields[5], tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8])
         if (power ~= "0" and power ~= "1") or not pitch or not yaw or not roll
             or not (math.abs(pitch) <= 360 and math.abs(yaw) <= 360 and math.abs(roll) <= 360) then
@@ -481,22 +531,22 @@ function switches.command(fields, state, phase)
         local lights = {}
         if entry.lantern then
             local lamp = fields[9]
-            if #fields ~= 9 or (lamp ~= "intact" and lamp ~= "broken" and lamp ~= "removed") then
+            if last ~= 9 or (lamp ~= "intact" and lamp ~= "broken" and lamp ~= "removed") then
                 error("stock_switch_lamp_state_unavailable", 0)
             end
             local intact = lamp == "intact"
             local cached = entries[fields[3]]
             if intact then project_lamp(entry, cached, lamp) end
-            project(entry, intact and power == "1", {Pitch = pitch, Yaw = yaw, Roll = roll}, lights)
+            project(entry, intact and power == "1", {Pitch = pitch, Yaw = yaw, Roll = roll}, lights, true)
             if not intact then project_lamp(entry, cached, lamp) end
             return "stock switch state projected", entry
         end
-        for index = 9, #fields do
+        for index = 9, last do
             local id, on, visible = fields[index]:match("^([^|]+)|([01])|([01])$")
             if not id then error("stock_switch_light_unavailable", 0) end
             lights[#lights + 1] = {id = id, powered = on == "1", visible = visible == "1"}
         end
-        project(entry, power == "1", {Pitch = pitch, Yaw = yaw, Roll = roll}, lights)
+        project(entry, power == "1", {Pitch = pitch, Yaw = yaw, Roll = roll}, lights, true)
         return "stock switch state projected", entry
     end
     error("stock_switch_scope_unavailable", 0)

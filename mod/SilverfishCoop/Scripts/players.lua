@@ -119,6 +119,10 @@ local function write_interaction(pawn, pickup_source, pressed_component, project
         or players.critters.focused_target(pawn, pressed_component)
         or native_bag_projection.focused_target(pawn) or native_enemy_shell_view.focused_target(pawn)
     input_sequence = input_sequence + 1
+    if embedded and target then
+        local ok, outcome = pcall(native_stock_switch.local_interaction, pawn, target, input_sequence)
+        if ok and outcome then target = outcome end
+    end
     local record = "interact\t" .. tostring(input_sequence) .. (target and "\t" .. target or "") .. "\n"
     if embedded then
         if pending_interactions then
