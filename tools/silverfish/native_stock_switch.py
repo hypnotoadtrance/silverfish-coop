@@ -146,7 +146,10 @@ async def apply_interaction(client, frame, actor, *, sequence=None):
         client.gameplay[KEY] = {**frame, "switches": {**cached["switches"], **rows}}
     else:
         client.gameplay[KEY] = frame
-    client.last_game = await project(client.bridge, client.last_game, frame, client.zone_epoch, sequence=sequence)
+    game = client.last_game
+    projected = await project(client.bridge, game, frame, epoch, sequence=sequence)
+    if client.last_game is game and client.zone_epoch == epoch and not client.needs_travel and not client.server_transitioning:
+        client.last_game = projected
 
 
 async def project(bridge, game, frame, epoch, *, sequence=None):

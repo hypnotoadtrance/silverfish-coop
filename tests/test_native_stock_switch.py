@@ -147,6 +147,17 @@ class StockSwitchResponseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.gameplay[switches.KEY]["switches"], {radio: on, wall: off})
         self.assertIs(client.last_game, updated)
 
+        client.last_game = initial
+        newer = dict(updated, sequence=17)
+
+        async def delayed_projection(*_args, **_kwargs):
+            client.last_game = newer
+            return updated
+
+        client.bridge.command.side_effect = delayed_projection
+        await switches.apply_interaction(client, response, radio)
+        self.assertIs(client.last_game, newer)
+
     async def test_compact_switch_reply_merges_only_the_verified_actor(self):
         area = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
         radio = f"Prop_Radio01_C {area}.Tut_Dock_P:PersistentLevel.Prop_Radio01_C_3"

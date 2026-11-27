@@ -7235,10 +7235,14 @@ class Client:
             result = await self.gameplay_action(action, operation, claim)
             if self.stock_interaction_scope() == scope:
                 try:
-                    self.last_game = await self.world_loot.retire_claim(self.bridge, self.last_game, loot)
+                    game = self.last_game
+                    projected = await self.world_loot.retire_claim(self.bridge, game, loot)
+                    if self.last_game is game and self.stock_interaction_scope() == scope:
+                        self.last_game = projected
                 except (OSError, RuntimeError) as error:
                     self.control.event("native_world_loot_retirement_deferred", reason=str(error))
-                self.guest_ui.queue_stock_inventory(self)
+                if self.stock_interaction_scope() == scope:
+                    self.guest_ui.queue_stock_inventory(self)
             return result
         if dropped := native_guest_drop_projection.target_parts(target):
             result = await self.stack_drop_projection.reclaim(self, operation, dropped)
