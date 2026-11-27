@@ -18,7 +18,7 @@ def lamp_id(area, number):
     return f"Prop_Lantern_01_C {area}.{area.rsplit('/', 1)[1]}:PersistentLevel.Prop_Lantern_01_C_{number}"
 
 
-async def verify_oil_lamps(host, guest, pawn):
+async def verify_oil_lamps(host, guest, pawn, *, playtest_batch=False):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     evidence = {}
 
@@ -161,10 +161,14 @@ async def verify_oil_lamps(host, guest, pawn):
         gas_evidence[actor] = dict(initial=initial, host_lit=host_lit, guest_visual_repair=repaired,
                                    guest_off=off, guest_on=on, host_off=host_off)
     assert suite.campaign_save_hashes(host.campaign) == checkpoint
-    await verify_one(lamp_id(OBSERVATORY, 1))
+    print("Shared debt and both Observatory gas lamp states verified", flush=True)
+    if not playtest_batch:
+        await verify_one(lamp_id(OBSERVATORY, 1))
     cabinet = await verify_observer_open(OBSERVATORY, "LootCrate_Small_BP_C_1")
+    print("Guest watched the stock cabinet move through intermediate angles", flush=True)
     gear = {item: await verify_equip(item, source)
             for item, source in (("fur-cap", "helmet"), ("flashbang", "equipment"))}
+    print("Fur Cap and Flashbang stayed equipped after reconciliation", flush=True)
     guid = await suite.portable_probe_command(host.bridge, "portable-guest-food", "seed-homebrew")
     async with asyncio.timeout(10):
         while (await guest.bridge.command("fixture-stock-take-ammo-backpack", guid,
@@ -174,15 +178,31 @@ async def verify_oil_lamps(host, guest, pawn):
     homebrew = await use_stock_item(guest_run, frame, guid, FALLBACK_RECEIPT)
     assert homebrew["class_path"].endswith(".Item_HomeBrew_Med_C") and homebrew["quantity_after"] == 2, homebrew
     await stock_inventory_open(guest_run, False)
+    print("Guest Homebrew Medicine stock use and inventory debit verified", flush=True)
+
+    async def simmi(action):
+        return await suite.portable_probe_command(host.bridge, "simmi-jobs", action)
+
+    quest = "DeadDrop_CrossRoads"
+    await simmi("host")
+    await simmi("talk")
+    assert quest in (await simmi("read")).split(";")[-1].split(",")
+    await simmi("acceptdeaddrop")
+    for run in (host_run, guest_run):
+        await suite.wait_resident_status(run, lambda frame:
+            frame.get("gameplay", {}).get("native_quests", {}).get(quest, {}).get("step") == 1)
+    await simmi("closesimmi")
+    print("Both journals received Simmi's Crossroads Dead Drop", flush=True)
     await enter_crossroads(host, pawn)
     await suite.wait_resident_status(host_run, lambda frame:
         frame.get("game", {}).get("map") == CROSSROADS and not frame.get("awaiting_zone_guest")
         and frame.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
     await suite.wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("map") == CROSSROADS)
     adjacent = lamp_id(CROSSROADS, 3)
-    await verify_state(adjacent, False)
-    await verify_one(lamp_id(CROSSROADS, 1))
-    await verify_state(adjacent, False)
+    if not playtest_batch:
+        await verify_state(adjacent, False)
+        await verify_one(lamp_id(CROSSROADS, 1))
+        await verify_state(adjacent, False)
     latch = f"DoorLatch_BP_C {CROSSROADS}.CrossRoads_P:PersistentLevel.DoorLatch_BP_C_2"
     position = tuple(map(float, (await probe(host, "stage", latch)).split(",")))
     await suite.wait_resident_status(guest_run, lambda frame:
@@ -197,7 +217,7 @@ async def verify_oil_lamps(host, guest, pawn):
             while await asyncio.gather(*(probe(seat, "latch-state", latch) for seat in (host, guest))) != [expected] * 2:
                 await asyncio.sleep(.05)
     dumpster = await verify_observer_open(CROSSROADS, "Loot_Dumpster_BP_C_1")
-    return {"debt": debt_evidence, "gear": gear, "homebrew": homebrew, "cabinet": cabinet, "dumpster": dumpster, "gas_lamps": gas_evidence, "lamps": evidence,
+    return {"debt": debt_evidence, "gear": gear, "homebrew": homebrew, "simmi": quest, "cabinet": cabinet, "dumpster": dumpster, "gas_lamps": gas_evidence, "lamps": evidence,
             "other_lamp_stayed_unlit": adjacent, "latch": {"actor": latch, "initial": before, "toggled": after}}
 
 
@@ -289,16 +309,20 @@ async def verify_streamed_switch(host, guest, pawn):
             "unloaded_on_both": True, "checkpoint_unchanged": True}
 
 
-async def exercise(work, first, second, saved, streamed_switch=False, crossroads_profile=False):
+async def exercise(work, first, second, saved, streamed_switch=False, crossroads_profile=False, playtest_batch=False):
     with ExitStack() as fixtures:
         for game in (first, second):
             fixtures.enter_context(suite.installed_probe(game, mod="SilverfishPortableOilLampProbe",
                                                          fixture="portable_oil_lamp_probe.lua"))
             fixtures.enter_context(suite.installed_probe(game, mod="SilverfishPortableGuestFoodProbe",
                                                          fixture="portable_guest_food_probe.lua"))
+            fixtures.enter_context(suite.installed_probe(game, mod="SilverfishPortableSimmiJobsProbe",
+                                                         fixture="simmi_jobs_probe.lua"))
+        async def power_checks(host, guest, pawn):
+            return await verify_oil_lamps(host, guest, pawn, playtest_batch=playtest_batch)
         await suite.verify(work, first, second, saved,
                            crossroads_profile=crossroads_profile, stock_interaction_feedback=True,
-                           oil_lamps_check=verify_oil_lamps,
+                           oil_lamps_check=power_checks,
                            streamed_switch_check=verify_streamed_switch if streamed_switch else None)
 
 
@@ -310,6 +334,7 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--streamed-switch", action="store_true")
     parser.add_argument("--crossroads-profile", action="store_true")
+    parser.add_argument("--playtest-batch", action="store_true", help="Skip the separately verified stock oil-lantern route")
     args = parser.parse_args()
     asyncio.run(exercise(args.work.resolve(), args.first_game.resolve(), args.second_game.resolve(),
-                         args.vanilla_saved.resolve(), args.streamed_switch, args.crossroads_profile))
+                         args.vanilla_saved.resolve(), args.streamed_switch, args.crossroads_profile, args.playtest_batch))

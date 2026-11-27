@@ -1,5 +1,6 @@
 local contract = {}
 local wire = require("native_wire_quest")
+local simmi = require("native_jammer_profiles").by_tag["native-crossroads-jammer"].speaker
 
 local library_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C"
 local characters_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_Characters.Default__FL_Characters_C"
@@ -11,7 +12,7 @@ local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local boards = {
     [1] = {map = black_market, actor = "BountyBoard_BP_C_0", global_contracts = true},
     [2] = {map = shopkeep, actor = "BountyBoard_BP_C_1"},
-    [3] = {map = observatory, actor = "BountyBoard_BP_C_0", global_contracts = true},
+    [3] = {map = observatory, actor = "BountyBoard_BP_C_0", global_contracts = true, speaker = simmi},
     [4] = {map = scientist, actor = "BountyBoard_BP_C_2"},
     [5] = {map = wire.map, actor = "BountyBoard_BP_C_3"},
     [10] = {map = scav_bar, actor = "BountyBoard_BP_C_2", global_contracts = true},
@@ -157,7 +158,7 @@ for prefix, spec in pairs(recipes) do
         local path = world .. ":PersistentLevel." .. board.actor
         spec.boards[board.map] = {map = board.map, world_path = world, board_path = path, board_name = "BountyBoard_BP_C " .. path,
             board_id = id, quest_id = spec.id, quest_display_alias = spec.quest_display_alias,
-            global_contracts = board.global_contracts}
+            global_contracts = board.global_contracts, speaker = board.speaker}
     end
     for _, action in ipairs({"preflight", "approach", "start", "turn-in"}) do
         operations[prefix .. "-" .. action] = {spec = spec, action = action}

@@ -155,8 +155,7 @@ local function journal(state, flood)
     return flood and quests.Jmr_FloodPlains or quests.Jmr_CrossRoads .. "," .. quests.Jmr_Lake
 end
 
-local function accept_lake_quest(state)
-    local id = "Jmr_Lake"
+local function accept_job(state, id)
     local menu, board = top(state.controller), StaticFindObject(level .. "BountyBoard_BP_C_0")
     assert(exact(menu, log_class) and same(menu.BountyBoard_Ref, board), "The actual host Simmi jobs menu must be open")
     local quest = FName(id, EFindName.FNAME_Find)
@@ -284,7 +283,8 @@ local function sync(state, phase)
         assert(state.map == area, "Simmi's stock board is only available in Observatory")
         if portable and phase == "hosting" then
             if operation == "seedpistol" then return seed_pistol(state) end
-            if operation == "acceptlake" then return accept_lake_quest(state) end
+            if operation == "acceptlake" then return accept_job(state, "Jmr_Lake") end
+            if operation == "acceptdeaddrop" then return accept_job(state, "DeadDrop_CrossRoads") end
             if operation == "turnincrossroads" then return turn_in_crossroads(state) end
         end
         if operation == "host" or operation == "guest" or operation == "board" then return approach(state, phase, operation) end
