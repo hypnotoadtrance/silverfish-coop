@@ -77,6 +77,8 @@ Use the same player-facing checks when moving an action to the acting seat. The 
 
 Use a delayed reply in the interaction checks to measure two distinct intervals. Measure from input to the acting player's stock response, then measure from the recorded result to the teammate's update. For doors and switches, check whether the actor can keep interacting while the first report is in flight. For loot, retry a settled claim and verify that exactly one character received the item and that it was removed from the world on both seats.
 
+The guest can send two claims for different loose or projected items at a time. A crate waiting for its local roll to be accepted holds neither request slot. The host still settles competing claims in order. The guest tracks the latest applied receipt per inventory item, so an out-of-order reply for another item can still update the backpack. A full inventory view must include all applied receipts before it can replace the backpack.
+
 ## Compatibility with game updates and other mods
 
 - Discover quest offers, objective items, progress, and reward data from the host’s active stock boards and journal. Use stock acceptance and completion paths for quests with the same recipe. Publish the resulting journal and campaign changes to the party.

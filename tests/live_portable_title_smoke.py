@@ -7868,7 +7868,8 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
                if stock_drop_proof else {})}
 
 
-async def verify_container_pickup(host: Seat, guest: Seat, pawn: str, *, memory_ui: bool = False) -> dict:
+async def verify_container_pickup(host: Seat, guest: Seat, pawn: str, *, memory_ui: bool = False,
+                                  require_stack_merge: bool = True) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     game = await host.bridge.wait_for(lambda frame: frame.get("state") == "hosting")
     area = game["map"]
@@ -7883,10 +7884,15 @@ async def verify_container_pickup(host: Seat, guest: Seat, pawn: str, *, memory_
     if memory_ui:
         candidates = [row["class_path"] for row in roll["items"] if row.get("ammo", 0) > 0
                       and row["class_path"] not in native_loot.CASH_RANGES]
-        assert len(candidates) >= 2, roll
-        seeded = await host.bridge.command("fixture-stock-crate-merge-seed", *candidates)
-        stack, _, stack_class = seeded["ack"]["message"].partition("|")
-        assert re.fullmatch(r"[0-9A-F]{32}", stack) and stack_class in candidates, seeded["ack"]
+        if candidates and len({row["class_path"] for row in roll["items"]
+                               if row["class_path"] not in native_loot.CASH_RANGES}) >= 2:
+            seeded = await host.bridge.command("fixture-stock-crate-merge-seed", *candidates)
+            seed = seeded["ack"]["message"]
+            if seed != "no stackable crate item":
+                stack, _, stack_class = seed.partition("|")
+                assert re.fullmatch(r"[0-9A-F]{32}", stack) and stack_class in candidates, seed
+        if require_stack_merge:
+            assert stack, roll
     item = next((row for row in roll["items"] if row["class_path"] not in native_loot.CASH_RANGES
                  and row["class_path"] != stack_class), None)
     assert item is not None and "ammo" in item, roll
@@ -7950,6 +7956,9 @@ async def verify_container_pickup(host: Seat, guest: Seat, pawn: str, *, memory_
         assert combined["guid"] == inventory_guid and combined["item_bytes"] > 0, combined
         assert save_state() == before
         memory_proof = {"resident_ui_projection": combined, "saves_unchanged_before_checkpoint": True}
+        if stack is None:
+            memory_proof["stack_merge_skipped"] = "The stock roll had no stackable item and separate pickup to test"
+    if stack:
         rounds = next(row for row in roll["items"] if row["class_path"] == stack_class)
         stack_identity = native_world_loot.crate_identity(roll["id"], rounds["guid"])
         await host.bridge.wait_for(lambda frame: stack_identity in frame.get(native_world_loot.KEY, {}))
