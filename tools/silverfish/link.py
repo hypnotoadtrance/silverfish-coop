@@ -32,6 +32,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 from .native_guest_consumable import RESULT as GUEST_CONSUMABLE_ACTIONS
 from .gameplay_snapshot import DELTA as GAMEPLAY_DELTA
+from .gameplay_snapshot import FIELD_CHANGES as GAMEPLAY_FIELD_CHANGES
 from .gameplay_snapshot import ROW_CHANGES as GAMEPLAY_ROW_CHANGES
 from .gameplay_snapshot import WORLD_SECTION as GAMEPLAY_WORLD
 from .udp_ownership import verify_loopback_socket
@@ -427,6 +428,7 @@ class _TransportStatistics:
     snapshot_delta_responses: int = 0
     snapshot_row_delta_responses: int = 0
     snapshot_world_delta_responses: int = 0
+    snapshot_field_delta_responses: int = 0
     snapshot_rows_changed: int = 0
     snapshot_plaintext_bytes: int = 0
     snapshot_encoded_bytes: int = 0
@@ -446,6 +448,7 @@ def _encode_response(result: Action, *, snapshot: bool, snapshot_limit: int = _M
     plaintext_size = len(frame)
     delta = result.get(GAMEPLAY_DELTA) if snapshot else None
     rows = delta.get(GAMEPLAY_ROW_CHANGES) if isinstance(delta, dict) else None
+    fields = delta.get(GAMEPLAY_FIELD_CHANGES) if isinstance(delta, dict) else None
     # Repeated authored paths can keep a small row delta compressible.
     if snapshot and (rows or plaintext_size >= _COMPRESS_SNAPSHOT_MINIMUM):
         compressed = _COMPRESSED_SNAPSHOT + zlib.compress(frame, level=1)
@@ -465,6 +468,7 @@ def _encode_response(result: Action, *, snapshot: bool, snapshot_limit: int = _M
             stats.snapshot_row_delta_responses += 1
             stats.snapshot_world_delta_responses += GAMEPLAY_WORLD in rows
             stats.snapshot_rows_changed += sum(len(patch["changed"]) + len(patch["removed"]) for patch in rows.values())
+        stats.snapshot_field_delta_responses += bool(fields)
         stats.snapshot_responses_compressed += len(frame) < plaintext_size
         stats.snapshot_plaintext_bytes += plaintext_size
         stats.snapshot_encoded_bytes += len(frame)

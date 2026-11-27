@@ -298,6 +298,80 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(client.row_updates)
         self.assertFalse(client.world_updates)
 
+    async def test_idle_scalar_updates_preserve_vitals_weather_and_door_ordering(self):
+        snapshot = gameplay_snapshot
+        epoch = "a" * 32
+        clock = {"map": OBSERVATORY, "mode": "sample", "epoch": epoch, "sequence": 35,
+                 "game_seconds": 123.0, "sun_intensity": 290.12, "sky_r": 0.2961, "wind": 2.5, "rain": 0}
+        health = {"map": OBSERVATORY, "epoch": epoch, "owner": "verified-guest-character-id", "health": 88.75,
+                  "food": 124.756, "maximum": 250, "stim": 0, "rads": 0, "regen": 190.14}
+        actor = f"{OBSERVATORY}.Observitory_P:PersistentLevel.Door_Wood_C_10"
+        doors = {"map": OBSERVATORY, "epoch": epoch, "sequence": 28,
+                 "doors": {actor: {"open": False, "locked": True, "broken": False, "yaw": 90.4}}}
+        gameplay = {"players": {}, "host_world": {"native_world_view": clock, "native_seed": {"value": 42}},
+                    "native_guest_health": health, native_stock_door.KEY: doors}
+        host = SimpleNamespace(stopping=False, native_guest=False, transitioning=False, zone_epoch=epoch,
+                               map_preflight=None, gameplay_snapshots=snapshot.HostSnapshots(),
+                               authenticated_guest=Mock(return_value=("guest", "character")))
+        host.snapshot_for_guest = lambda *_: {"ok": True, "gameplay": gameplay.copy(), "zone_epoch": epoch,
+                                             "zone": OBSERVATORY, "viewer_role": "guest", "travel_in_progress": False}
+        requests, replies = [], []
+
+        async def request(payload, *, timeout):
+            requests.append(payload)
+            replies.append(service.Host.guest_request(host, "new", payload))
+            return service.link._decode_response(service.link._encode_response(replies[-1], snapshot=True))["result"]
+
+        client = self.guest(AsyncMock(side_effect=request))
+        await client.refresh_gameplay(project=False)
+        self.assertNotIn(snapshot.FIELD_UPDATES, requests[-1])
+        client.next_snapshot = 0
+        await client.refresh_gameplay(project=False)
+        older = {"action": "snapshot", snapshot.BASE: "", snapshot.ROW_UPDATES: True, snapshot.WORLD_UPDATES: True}
+        baseline = service.Host.guest_request(host, "old", older)
+        health["food"] = 123.942
+        health.pop("stim")
+        clock.update(sequence=65, game_seconds=124.113)
+        doors["sequence"] = 59
+        client.gameplay["native_guest_health"]["health"] = 0
+        client.next_snapshot = 0
+        await client.refresh_gameplay(project=False)
+        self.assertIs(requests[-1][snapshot.FIELD_UPDATES], True)
+        result = replies[-1]
+        delta = result[snapshot.DELTA]
+        self.assertEqual(delta[snapshot.FIELD_CHANGES], {
+            "native_guest_health": {"changed": {"food": 123.942}, "removed": ["stim"]},
+            "native_world_view": {"changed": {"sequence": 65, "game_seconds": 124.113}, "removed": []},
+        })
+        self.assertEqual(delta[snapshot.ROW_CHANGES][native_stock_door.KEY], {"changed": {}, "removed": [], "sequence": 59})
+        self.assertEqual(client.gameplay, gameplay)
+        old_reply = service.Host.guest_request(host, "old", {**older, snapshot.BASE: baseline[snapshot.REVISION]})
+        self.assertNotIn(snapshot.FIELD_CHANGES, old_reply[snapshot.DELTA])
+        stats = service.link._TransportStatistics()
+        reduced = service.link._encode_response(result, snapshot=True, stats=stats)
+        self.assertLess(len(reduced), len(service.link._encode_response(old_reply, snapshot=True)))
+        self.assertEqual(stats.snapshot_field_delta_responses, 1)
+
+        # A sibling change must survive even when the nested clock itself is a field patch.
+        gameplay["host_world"]["native_seed"] = {"value": 44}
+        clock["wind"] = 0
+        client.next_snapshot = 0
+        await client.refresh_gameplay(project=False)
+        self.assertEqual(client.gameplay, gameplay)
+
+    def test_snapshot_rejects_a_field_update_that_overlaps_its_world_row(self):
+        snapshot = gameplay_snapshot
+        client = snapshot.ClientSnapshots()
+        client.read({"gameplay": {"host_world": {"native_world_view": {"game_seconds": 8}}},
+                     snapshot.REVISION: "a" * 32, snapshot.ROW_UPDATES: True, snapshot.WORLD_UPDATES: True,
+                     snapshot.FIELD_UPDATES: True})
+        with self.assertRaisesRegex(RuntimeError, "no matching baseline"):
+            client.read({snapshot.BASE: "a" * 32, snapshot.REVISION: "b" * 32,
+                         snapshot.DELTA: {"changed": {}, "removed": [],
+                                          snapshot.ROW_CHANGES: {"host_world": {"changed": {}, "removed": ["native_world_view"]}},
+                                          snapshot.FIELD_CHANGES: {"native_world_view": {"changed": {"game_seconds": 9}, "removed": []}}}})
+        self.assertIsNone(client.base)
+
     def test_snapshot_rejects_actor_row_changes_that_overlap_a_section_replacement(self):
         section = native_loot.STATE_KEY
         gameplay = {section: {"crate": {"items": []}}}
