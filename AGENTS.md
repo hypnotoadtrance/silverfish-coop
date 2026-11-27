@@ -4,6 +4,10 @@ Keep gameplay and networking updates in memory by default. Commit campaign chang
 
 Use a gameplay-time disk write only when an operation requires durable storage to work correctly. Keep the write off the game thread where possible and document the dependency beside the operation. Avoid recurring file writes for diagnostics and interprocess communication when the in-memory bridge can carry the same information.
 
+# Retiring superseded code
+
+When a shared gameplay path replaces a specialized patch, trace both paths through the normal game entry point before removing the old code. Retire superseded dispatch cases, hooks, fixtures, and documentation together. Keep coverage for the original report through the shared path. Keep a dedicated handler only when it still implements distinct stock behavior or supports a documented compatibility path.
+
 # Automated testing
 
 Reuse the existing isolated game replicas. For new replicas on the same volume, pass `stage --stock-cache` with the project-local shared stock cache so the IoStore archive, radio tracks, and TV clips use hard links. The cache has `SilverFish-Windows.ucas` at its root and stores media under its original `SilverFish/Content` paths. Keep mods, configuration and user data private to each replica. Keep the shared stock copy separate from the live Steam installation.

@@ -41,7 +41,9 @@ The inventory check copies allowlisted inventory, equipment, and vitals from the
 
 The paired playtest uses `host --fixtures --native-events --native-guest`. C++ rechecks pawn, controller, connection, world, and save ownership at the stock death call. The smoke test waits for scope renewal, triggers stock direct damage, and checks both in-place revives at 10% of native maximum HP. It tests friendly fire separately through the stock damage interface. The wipe check tests full native health at the saved rest location, removal of the guest Bandage from the backpack, and recovery by its owner through the co-op ledger.
 
-The staged merchant quotes one Bandage from real infinite stock. `native-shop-buy` applies the quoted amount to the shared wallet before issuing the item. The sampled merchant quote is zero. The positive-price and insufficient-funds cases are covered by automated transaction tests. The `status` JSON exposes the verified native inventory GUIDs, native pawn HP, downed state, wallet, and quest progress. The stock inventory widget, generic use and equip actions, and finite shop stock remain development areas.
+The staged merchant quotes one Bandage from real infinite stock. `native-shop-buy` applies the quoted amount to the shared wallet before issuing the item. The sampled merchant quote is zero. Automated transaction tests cover positive prices and insufficient funds. The `status` JSON exposes the verified native inventory GUIDs, native pawn HP, downed state, wallet, and quest progress. The [current playtest backlog](../docs/KNOWN-ISSUES.md) records stock inventory, item-use, and finite-trade coverage.
+
+For stock quest verification, use the portable title runner with `--stock-simmi-jammers --stock-streamed-board`. It covers the actual jammer objectives and shared payouts plus a live quest supplied by a streamed board. Use the two private replicas described in [the release test instructions](../docs/RELEASING.md).
 
 ## Authored travel
 

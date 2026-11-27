@@ -52,7 +52,7 @@ def instrument_jammer_sampler(source):
 """)
 
 
-async def verify_stock_simmi_jammers(host, guest, pawn, probe):
+async def verify_stock_simmi_jammers(host, guest, pawn, probe, *, flood_objective=True):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     peers = host, guest
     journal_rows = (CROSSROADS_JAMMER.quest, BLACK_LAKE.quest)
@@ -287,12 +287,17 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
         while await command(guest, "selectpistol") != "equipped":
             await asyncio.sleep(.14)
     before_travel = await confirm_weapon(7)
-    flood_out = await cross(CROSSROADS, FLOOD.objective_map, "CR_RF")
-    flood = await observe_jammer(FLOOD)
-    await confirm_weapon(7)
-    magazine, flood_completion = await destroy_jammer(FLOOD, 7)
-    flood_return = await cross(FLOOD.objective_map, CROSSROADS, "CR_RF")
-    await confirm_weapon(magazine)
+    magazine, flood_step = 7, 1
+    flood_visits, flood_evidence = [], {}
+    if flood_objective:
+        flood_visits.append(await cross(CROSSROADS, FLOOD.objective_map, "CR_RF"))
+        flood = await observe_jammer(FLOOD)
+        await confirm_weapon(magazine)
+        magazine, flood_completion = await destroy_jammer(FLOOD, magazine)
+        flood_visits.append(await cross(FLOOD.objective_map, CROSSROADS, "CR_RF"))
+        await confirm_weapon(magazine)
+        flood_step = 2
+        flood_evidence = {"flood_plains": flood, "flood_plains_completion": flood_completion}
     lake_out = await cross(CROSSROADS, LAKE, "Lake_Cave")
     lake = await observe_jammer(BLACK_LAKE)
     # The guest never presses a quick slot again. The restored weapon must be
@@ -300,20 +305,23 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
     restored = await confirm_weapon(magazine)
     assert restored["pawn"] != before_travel["pawn"], restored
     magazine, lake_completion = await destroy_jammer(BLACK_LAKE, magazine)
-    await journal("1,2", 2)
+    await journal("1,2", flood_step)
     lake_return = await cross(LAKE, CROSSROADS, "Lake_Cave")
     await observe_jammer(CROSSROADS_JAMMER)
     await confirm_weapon(magazine)
     magazine, crossroads_completion = await destroy_jammer(CROSSROADS_JAMMER, magazine)
     final_visit = await cross(CROSSROADS, OBSERVATORY, "Obsv_Etr")
     await confirm_weapon(magazine)
-    completed_journal = await journal("2,2", 2)
+    completed_journal = await journal("2,2", flood_step)
 
     payout_checkpoint = campaign_save_hashes(host.campaign)
     wallet = (await state(host, lambda frame: type(frame.get("game", {}).get("native_wallet")) is int))["game"]["native_wallet"]
     guest_id = (await state(guest, lambda frame: frame.get("state") == "connected"))["character_id"]
     payouts = []
-    for seat, spec, owner in ((host, CROSSROADS_JAMMER, "host"), (guest, BLACK_LAKE, guest_id), (guest, FLOOD, guest_id)):
+    turnins = [(host, CROSSROADS_JAMMER, "host"), (guest, BLACK_LAKE, guest_id)]
+    if flood_objective:
+        turnins.append((guest, FLOOD, guest_id))
+    for seat, spec, owner in turnins:
         await board(seat)
         actual_board, _, ready = (await command(seat, "ready")).split(";")
         assert actual_board == SIMMI_BOARD and spec.quest in ready.split(","), ready
@@ -331,18 +339,17 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
         repeated = await action(guest, "native-quest-turnin", target=spec.quest)
         assert repeated["effect"] == "native_quest_already_settled" and repeated["wallet"] == wallet, repeated
         payouts.append(paid)
-    final_journal = await journal("-10,-10", -10)
-    await state(host, lambda frame: all(row.get("quest_xp") == 3 and not row.get("native_quest_xp_pending")
+    final_journal = await journal("-10,-10", -10 if flood_objective else flood_step)
+    await state(host, lambda frame: all(row.get("quest_xp") == len(turnins) and not row.get("native_quest_xp_pending")
                      for row in (frame.get("gameplay", {}).get("players", {}).get(role, {}) for role in ("host", "guest"))))
     assert campaign_save_hashes(host.campaign) == payout_checkpoint, "Stock turn-in wrote a save before the normal checkpoint"
     return {"stock_simmi_jammers": {
         "offered": sorted(offers), "remaining": sorted(remaining), "initial_journals": accepted_journal,
-        "crossroads": crossroads, "lake": lake, "flood_plains": flood,
-        "visits": [outbound, flood_out, flood_return, lake_out, lake_return, final_visit],
+        "crossroads": crossroads, "lake": lake, **flood_evidence,
+        "visits": [outbound, *flood_visits, lake_out, lake_return, final_visit],
         "visits_verified_after_fixture_timeout": travel_receipts,
         "weapon_before_travel": before_travel, "weapon_after_travel": restored,
         "objective_journals": completed_journal, "paid_journals": final_journal,
         "lake_completion": lake_completion, "crossroads_completion": crossroads_completion,
-        "flood_plains_completion": flood_completion,
         "payouts": payouts, "shared_wallet": wallet, "no_gameplay_checkpoints": True,
     }}
