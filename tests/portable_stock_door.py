@@ -199,8 +199,10 @@ async def verify_stock_crossroads_door(host, guest, pawn, *, lockpick=None, insp
     await check_passage(True)
     reopened, reopen_motion, reopen_preview = await toggle_door(host, guest, WOOD_DOOR, pawn, True)
     await check_passage(False)
-    replay = await submit(guest_run, door.ACTION, operation_id=closed["operation_id"], target=WOOD_DOOR)
+    replay = await submit(guest_run, door.ACTION, operation_id=closed["operation_id"], target=f"{WOOD_DOOR}|closed")
     assert replay.get("ok") and replay[door.RESULT] == closed[door.RESULT], (replay, closed)
+    already_open = await submit(guest_run, door.ACTION, target=f"{WOOD_DOOR}|open")
+    assert already_open["ok"] and already_open[door.RESULT] == reopened[door.RESULT] and door.SETTLEMENT not in already_open, already_open
     await check_passage(False)
     assert campaign_save_hashes(host.campaign) == checkpoint
     snapshot_rows = None
@@ -217,6 +219,7 @@ async def verify_stock_crossroads_door(host, guest, pawn, *, lockpick=None, insp
                                      "independent_inspection": closed.get("independent_inspection"),
                                      "snapshot_rows_changed": snapshot_rows,
                                      "close_replay_preserved_open_door": True,
+                                     "matching_open_preserved_pose_without_motion": True,
                                      "collision_verified_both_seats": True, "campaign_unchanged": True}}
 
 

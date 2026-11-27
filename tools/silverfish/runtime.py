@@ -4076,7 +4076,16 @@ class Bridge:
             raise RuntimeError(message or "The stock interaction was refused")
         reply = {"state": phase, "map": area, "sequence": local_sequence, native_stock_door.LOCAL_SCOPE: pawn,
                  "ack": {"id": nonce, "result": status, "message": message}}
-        if fields[1] == native_stock_door.DISPATCH and len(rows) == 1:
+        if fields[1] == native_stock_door.DISPATCH:
+            if len(rows) == 1 and message != native_stock_door.UNCHANGED:
+                return reply
+            if (len(rows) != 2 or message != native_stock_door.UNCHANGED
+                    or rows[1][:3] != [native_stock_door.TAG, area, fields[2]]):
+                raise RuntimeError("The stock door receipt did not verify the requested actor")
+            try:
+                reply[native_stock_door.KEY] = {fields[2]: native_stock_door.parse(rows[1], phase, area)}
+            except ValueError as error:
+                raise RuntimeError("The stock door receipt contained an invalid state") from error
             return reply
         if fields[1] == native_stock_door.PROJECT:
             try:
@@ -4090,8 +4099,7 @@ class Bridge:
         if fields[1] == native_host_dig_live.GUEST_ACTION and len(rows) == 1:
             reply[native_host_dig_live.COMPACT_SCOPE] = fields[2]
             return reply
-        if (fields[1] == native_stock_door.DISPATCH or len(rows) != 2
-                or rows[1][:3] != [native_stock_switch.TAG, area, fields[2]]):
+        if len(rows) != 2 or rows[1][:3] != [native_stock_switch.TAG, area, fields[2]]:
             raise RuntimeError("The stock switch receipt did not verify the requested actor")
         try:
             proof = native_stock_switch.parse(rows[1], phase, area)

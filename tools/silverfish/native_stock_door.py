@@ -27,6 +27,7 @@ STAGE_FIXTURE = "native-stock-door-stage-fixture"
 TRACE_FIXTURE = "native-stock-door-trace"
 TRACE_RESULT = "native_stock_door_trace"
 SETTLEMENT = "native_stock_door_settlement"
+UNCHANGED = "stock hinged door outcome unchanged"
 PRY_RESULT = "native_stock_door_pry"
 PRY_ACTIONS = {"blowtorch": "native-guest-door-blowtorch", "crowbar": "native-guest-door-crowbar"}
 TARGET_PREFIX = "stock-door:"
@@ -62,8 +63,8 @@ def matches_area(actor, area):
 
 def target_actor(target):
     if isinstance(target, str) and target.startswith(TARGET_PREFIX):
-        actor = target[len(TARGET_PREFIX):]
-        if actor_map(actor) or streamed_package(actor):
+        actor, separator, direction = target[len(TARGET_PREFIX):].partition("|")
+        if (not separator or direction in {"open", "closed"}) and (actor_map(actor) or streamed_package(actor)):
             return actor
     return None
 
@@ -242,17 +243,25 @@ async def project(bridge, game, frame, epoch):
 
 
 @dataclass
+class DoorRequest:
+    fingerprint: list
+    replies: list[asyncio.Future]
+
+    def respond(self, reply):
+        for future in self.replies:
+            if not future.done():
+                future.set_result(reply)
+
+
+@dataclass
 class DoorMotion:
     area: str
     epoch: str
     actor: str
-    character: str
-    operation: str
-    fingerprint: list
     sequence: int
     opens: bool
     deadline: float
-    replies: list[asyncio.Future]
+    requests: dict[tuple[str, str], DoorRequest]
     dispatch_id: str | None = None
     destination: dict | None = None
 
@@ -267,15 +276,15 @@ class DoorMotion:
         result = {RESULT: {"actor": self.actor, "open": self.opens}, DELTA: frame(game, self.epoch, self.actor)}
         if settle_ms is not None:
             result[SETTLEMENT] = {"source": "memory_input", "host_dispatch_to_settle_ms": settle_ms}
-        receipts = host.party["receipts"].setdefault(self.character, [])
-        receipts.append({"id": self.operation, "request": self.fingerprint, "result": result})
-        del receipts[:-party.RECENT_ACTIONS]
+        for (character, operation), request in self.requests.items():
+            receipts = host.party["receipts"].setdefault(character, [])
+            receipts.append({"id": operation, "request": request.fingerprint, "result": result})
+            del receipts[:-party.RECENT_ACTIONS]
         return result
 
     def respond(self, reply):
-        for future in self.replies:
-            if not future.done():
-                future.set_result(reply)
+        for request in self.requests.values():
+            request.respond(reply)
 
 
 class Interactions:
@@ -329,7 +338,10 @@ class Interactions:
         return self.published
 
     async def dispatch(self, host, bridge, character, requested, operation, future):
-        epoch, _, actor = requested.partition("@") if isinstance(requested, str) else ("", "", "")
+        epoch, _, target = requested.partition("@") if isinstance(requested, str) else ("", "", "")
+        actor, separator, direction = target.partition("|")
+        if separator and direction not in {"open", "closed"}:
+            raise party.RuleError("stock_door_scope_unavailable")
         game = host.last_game
         area = game.get("map")
         player = host.party["players"].get(character)
@@ -349,19 +361,30 @@ class Interactions:
         if ((game.get("state"), game.get("map")) != ("hosting", area) or host.native_checkpoint_unsafe
                 or not member.get("connected") or host.party["wipe"] or player["downed"]):
             raise party.RuleError("stock_door_scope_unavailable")
+        key = character, operation
         for motion in self.pending.values():
-            if (motion.character, motion.operation) == (character, operation):
-                if motion.fingerprint != fingerprint:
+            if duplicate := motion.requests.get(key):
+                if duplicate.fingerprint != fingerprint:
                     raise party.RuleError("operation_id_conflict")
-                motion.replies[:] = [reply for reply in motion.replies if not reply.done()]
-                if len(motion.replies) >= 8:
+                duplicate.replies[:] = [reply for reply in duplicate.replies if not reply.done()]
+                if len(duplicate.replies) >= 8:
                     raise party.RuleError("stock_door_in_motion")
-                motion.replies.append(future)
+                duplicate.replies.append(future)
                 return None
-        if actor in self.pending or len(self.pending) >= 8:
+        requests = {key: DoorRequest(fingerprint, [future])}
+        if motion := self.pending.get(actor):
+            if not separator or motion.opens != (direction == "open") or len(motion.requests) >= 8:
+                raise party.RuleError("stock_door_in_motion")
+            motion.requests.update(requests)
+            return None
+        if len(self.pending) >= 8:
             raise party.RuleError("stock_door_in_motion")
-        motion, reply = await _start_motion(host, bridge, character, member["pawn"], area, epoch, actor, operation, fingerprint, future)
+        motion, reply = await _start_motion(host, bridge, member["pawn"], area, epoch, actor, direction, requests)
         if motion.settled(reply):
+            if reply.get("ack", {}).get("message") == UNCHANGED:
+                self._confirm_scope(area, epoch)
+                observed = reply[KEY][actor]
+                self.confirmed[actor] = observed.get(OBSERVED, reply["sequence"]), observed
             return motion.result(host, reply)
         self.pending[actor] = motion
 
@@ -419,15 +442,30 @@ class Interactions:
         self.published_source = None
 
 
-async def _start_motion(host, bridge, character, pawn, area, epoch, actor, operation, fingerprint, future):
+async def _start_motion(host, bridge, pawn, area, epoch, actor, direction, requests):
     try:
-        reply = await bridge.command(DISPATCH, actor, pawn, timeout=4)
+        reply = await bridge.command(DISPATCH, actor, pawn, *(direction,) if direction else (), timeout=4)
     except RuntimeError as error:
-        if str(error) == "stock_door_locked" or str(error).startswith("stock_door_guest_"):
+        if str(error) in {"stock_door_locked", "stock_door_in_motion"} or str(error).startswith("stock_door_guest_"):
             raise party.RuleError(str(error)) from error
         raise
 
     message, separator, end_pose = reply.get("ack", {}).get("message", "").partition("|")
+    sequence = reply.get("sequence")
+    if ((reply.get("state"), reply.get("map")) != ("hosting", area) or type(sequence) is not int or sequence <= 0):
+        raise RuntimeError("The host did not report the door state at dispatch")
+    if LOCAL_SCOPE in reply and (host.zone_epoch != epoch or not matches_local_scope(host.last_game, reply)):
+        raise party.RuleError("stock_door_scope_unavailable")
+    now = time.monotonic()
+    if message == UNCHANGED:
+        reading = reply.get(KEY, {}).get(actor, {})
+        settled_at = reading.get(OBSERVED, sequence)
+        if (not direction or separator or reading.get("open") is not (direction == "open")
+                or reading.get("locked") is not False or type(settled_at) is not int or not 0 < settled_at < 2**53):
+            raise RuntimeError("The host did not confirm the reported stock door outcome")
+        # The periodic command path reuses the exact door's standing state version.
+        reply = dict(reply, sequence=max(sequence, settled_at))
+        return DoorMotion(area, epoch, actor, settled_at, direction == "open", now, requests), reply
     prefix, _, before = message.rpartition(" ")
     axes = end_pose.split("|") if separator else []
     if separator:
@@ -440,21 +478,16 @@ async def _start_motion(host, bridge, character, pawn, area, epoch, actor, opera
         destination = dict(zip((*_ANGLES, *_OFFSET), pose, strict=True))
     else:
         destination = None
-    sequence = reply.get("sequence")
     if (prefix != "stock hinged door interaction dispatched" or before not in {"open", "closed"}
-            or (reply.get("state"), reply.get("map")) != ("hosting", area)
-            or type(sequence) is not int or sequence <= 0):
+            or direction and before == direction):
         raise RuntimeError("The host did not report the door state at dispatch")
-    now = time.monotonic()
     if LOCAL_SCOPE in reply:
-        if host.zone_epoch != epoch or not matches_local_scope(host.last_game, reply):
-            raise party.RuleError("stock_door_scope_unavailable")
         # The next published sample or native target-transform event confirms the motion.
         sequence += 1
     else:
         host.last_game, host.last_seen = reply, now
-    return DoorMotion(area, epoch, actor, character, operation, fingerprint, sequence,
-                      before == "closed", now + 2, [future], reply.get("ack", {}).get("id"), destination), reply
+    return DoorMotion(area, epoch, actor, sequence, before == "closed", now + 2, requests,
+                      reply.get("ack", {}).get("id"), destination), reply
 
 
 async def pry(host, bridge, character, requested, operation, kind):

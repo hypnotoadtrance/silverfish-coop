@@ -122,6 +122,8 @@ local function write_interaction(pawn, pickup_source, pressed_component, project
     if embedded and target then
         local ok, outcome = pcall(native_stock_switch.local_interaction, pawn, target, input_sequence)
         if ok and outcome then target = outcome end
+        local door_ok, door_outcome = pcall(native_stock_door.preview_input, pawn, target)
+        if door_ok and door_outcome then target = door_outcome end
     end
     local record = "interact\t" .. tostring(input_sequence) .. (target and "\t" .. target or "") .. "\n"
     if embedded then
@@ -131,7 +133,6 @@ local function write_interaction(pawn, pickup_source, pressed_component, project
         elseif SilverfishEnqueueLocalBridgeInput(record) ~= true then
             pending_interactions = {world = pawn:GetWorld(), expires = now(pawn) + 1.5, lines = {record}}
         end
-        native_stock_door.preview_input(pawn, target)
         if pickup_source then pcall(native_authored_pickup.preview_input, pawn, pickup_source, projected_actor) end
         return target
     end
@@ -929,10 +930,10 @@ function players.command(fields, state, phase)
             or type(SilverfishProbeNativeInteractInput) ~= "function" then
             error("stock_door_guest_input_fixture_unavailable", 0)
         end
-        return native_stock_door.input_fixture(state, phase, fields[3], pawn, function()
+        return native_stock_door.input_fixture(state, phase, fields[3], pawn, function(expected)
             local ok, reason = SilverfishProbeNativeInteractInput(native_interact_address)
             if not ok then error(reason, 0) end
-            if sync_native_interact(phase) ~= "stock-door:" .. fields[3] then
+            if sync_native_interact(phase) ~= expected then
                 error("stock_door_guest_input_fixture_not_published", 0)
             end
         end)

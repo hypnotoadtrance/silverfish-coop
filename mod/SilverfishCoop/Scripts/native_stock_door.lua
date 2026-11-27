@@ -13,7 +13,7 @@ local active_world, active_phase, scanned_at, actors, door_parts
 local sampler, pending_census, periodic_sampling
 local trace_report
 local tool_report
-local motions, confirmations = {}, {}
+local motions, confirmations, host_motions = {}, {}, {}
 local confirmation_sequence, confirmation_row
 local move_component = "/Script/Engine.KismetSystemLibrary:MoveComponentTo"
 local clock, math_library
@@ -214,16 +214,11 @@ local function animate(name, motion, now)
     if not motion.pivot and now >= motion.start + motion.duration + .15 then motions[name] = nil end
 end
 
-local function start_preview(name)
-    local actor = actors and actors[name]
-    if not valid(actor) then
-        local path = actor_path(name)
-        actor = path and StaticFindObject(path)
-    end
-    if identity(actor, active_world) ~= name or actor.Locked ~= false or motions[name] then return end
+local function start_preview(name, actor, opens)
+    if actor.Locked ~= false or motions[name] then return end
     local arrow, panel = components(actor)
     if not arrow or not panel:IsVisible() or panel.bHiddenInGame or not valid(panel.StaticMesh) then return end
-    local opens, duration = not actor.Open, actor["Over Time"]
+    local duration = actor["Over Time"]
     local transform = opens and actor.OpenTransform or actor.CloseTransform
     if not transform or not finite(duration, 3) or duration < .06 then return end
     local before = pose(actor, arrow)
@@ -255,13 +250,28 @@ end
 
 function doors.preview_input(pawn, target)
     local name = type(target) == "string" and target:match("^stock%-door:(.+)$")
-    if not name or previews[name] or active_phase ~= "connected" or not same(active_world, pawn:GetWorld())
-        or not valid(clock) or not valid(math_library) then return end
-    local count = 0
-    for _ in pairs(previews) do count = count + 1 end
-    if count >= 4 then return end
-    local ok, started = pcall(start_preview, name)
-    if not ok or not started then pcall(clear_preview, name) end
+    if not name or active_phase ~= "connected" or not same(active_world, pawn:GetWorld()) then return end
+    local actor = actors and actors[name]
+    if not valid(actor) then
+        local path = actor_path(name)
+        actor = path and StaticFindObject(path)
+    end
+    if identity(actor, active_world) ~= name or type(actor.Open) ~= "boolean" then return end
+    local preview, motion = previews[name], motions[name]
+    local opens = not actor.Open
+    if preview and same(preview.actor, actor) then
+        opens = preview.opens
+    elseif motion and same(motion.actor, actor) then
+        opens = motion.opens
+    elseif valid(clock) and valid(math_library) then
+        local count = 0
+        for _ in pairs(previews) do count = count + 1 end
+        if count < 4 then
+            local ok, started = pcall(start_preview, name, actor, opens)
+            if not ok or not started then pcall(clear_preview, name) end
+        end
+    end
+    return target .. (opens and "|open" or "|closed")
 end
 
 function doors.play_motion(state, pawn, fields)
@@ -430,10 +440,14 @@ end
 
 local function send_confirmations()
     if active_phase ~= "hosting" or not valid(active_world) then
-        confirmations = {}
+        confirmations, host_motions = {}, {}
         return
     end
     local now = os.clock()
+    for name, motion in pairs(host_motions) do
+        if now >= motion.expires or not same(motion.world, active_world)
+            or not world_path.visible_actor_level(motion.actor, active_world) then host_motions[name] = nil end
+    end
     for name, pending in pairs(confirmations) do
         local actor = pending.actor
         if now >= pending.expires or not same(pending.world, active_world)
@@ -477,12 +491,13 @@ function doors.start(report_motion, next_sequence, status_row)
                 if not (opens or call.Linkage == 15) or not same(call.CallbackTarget, actor) then return end
                 local duration, p, r = seconds:get(), location:get(), rotation:get()
                 if not finite(duration, 3) or duration < .06 or not p or not r then return end
+                if not finite(r.Pitch, 360) or not finite(r.Yaw, 360) or not finite(r.Roll, 360)
+                    or not finite(p.X, 10000) or not finite(p.Y, 10000) or not finite(p.Z, 10000) then return end
+                local goal = {r.Pitch, r.Yaw, r.Roll, p.X, p.Y, p.Z}
+                host_motions[name] = {actor = actor, world = active_world, opens = opens, goal = goal,
+                    expires = os.clock() + duration + .15}
                 local pending = confirmations[name]
-                if pending and pending.opens == opens and same(pending.actor, actor)
-                    and finite(r.Pitch, 360) and finite(r.Yaw, 360) and finite(r.Roll, 360)
-                    and finite(p.X, 10000) and finite(p.Y, 10000) and finite(p.Z, 10000) then
-                    pending.goal = {r.Pitch, r.Yaw, r.Roll, p.X, p.Y, p.Z}
-                end
+                if pending and pending.opens == opens and same(pending.actor, actor) then pending.goal = goal end
                 local ease = (in_ease:get() and 1 or 0) + (out_ease:get() and 2 or 0)
                 report_motion(active_world, name, opens and 1 or 0, duration, ease, shortest:get() and 1 or 0,
                     p.X, p.Y, p.Z, r.Pitch, r.Yaw, r.Roll)
@@ -512,7 +527,7 @@ function doors.start(report_motion, next_sequence, status_row)
                 end
             end
         end
-        if next(confirmations) then pcall(send_confirmations) end
+        if next(confirmations) or next(host_motions) then pcall(send_confirmations) end
         local deadline = os.clock() + .002
         if pending_census and not pcall(census_slice, pending_census, deadline) then pending_census = nil end
         local scan = sampler
@@ -621,7 +636,7 @@ function doors.input_fixture(state, phase, target, pawn, dispatch)
         if doors.focused_target(pawn) ~= "stock-door:" .. target then error("stock_door_fixture_missing_focus", 0) end
         motion_probe = {name = target, pressed = clock:GetRealTimeSeconds(state.world),
             before = pose(actor, actor.Arrow), collision = actor.DoorMesh:GetCollisionEnabled()}
-        dispatch()
+        dispatch("stock-door:" .. target .. (actor.Open and "|closed" or "|open"))
     end)
     return "stock door guest input dispatched"
 end
@@ -647,29 +662,42 @@ local function fixture(fields, state, phase)
     return "stock hinged door fixture dispatched"
 end
 
-local function interact(fields, state, phase)
-    local actor = target_door(state, phase, fields[3])
+local function interact(fields, state, phase, status_row)
+    local name, requested = fields[3], fields[5]
+    local actor = target_door(state, phase, name)
     local knob = valid(actor) and select(3, components(actor))
-    if #fields ~= 4 or phase ~= "hosting" or not knob
-        or type(actor.Locked) ~= "boolean" or type(actor.Open) ~= "boolean" then
+    if (#fields ~= 4 and (#fields ~= 5 or (requested ~= "open" and requested ~= "closed")))
+        or phase ~= "hosting" or not knob or type(actor.Locked) ~= "boolean" or type(actor.Open) ~= "boolean" then
         error("stock_door_guest_unavailable", 0)
     end
     if actor.Locked then error("stock_door_locked", 0) end
     local qualified, pawn = pcall(guest_save.exact_item_context, state, phase, fields[4])
     if not qualified or not valid(pawn) or pawn.Dead ~= false then error("stock_door_guest_unavailable", 0) end
-    -- The guest's stock press already captured the knob. Run the stock door
-    -- event on the host so its lock, obstruction, and movement rules still apply.
     local was_open, started = actor.Open, os.clock()
+    local opens = not was_open
+    if requested then opens = requested == "open" end
+    local moving = host_motions[name]
+    if moving and (not same(moving.actor, actor) or not same(moving.world, state.world)
+        or started >= moving.expires or was_open == moving.opens) then moving = nil end
+    if moving and moving.opens ~= opens then error("stock_door_in_motion", 0) end
+    if was_open == opens then
+        local sample = sample_door({actors = actors, world = state.world, phase = phase, map = state.map,
+            row = status_row or confirmation_row, confirmation = true}, name)
+        if not sample then error("stock_door_guest_readback_unavailable", 0) end
+        return "stock hinged door outcome unchanged", sample
+    end
     local pending
     if type(SilverfishEnqueueLocalBridgeInput) == "function" and confirmation_sequence and confirmation_row then
         pending = {id = fields[1], actor = actor, world = state.world, map = state.map,
-            opens = not was_open, start = started, expires = started + 2}
-        confirmations[fields[3]] = pending
+            opens = opens, start = started, expires = started + 2, goal = moving and moving.goal}
+        confirmations[name] = pending
     end
-    actor:SendInteractionToActor(pawn, knob)
+    -- The local press captured the knob and direction. Keep the stock world
+    -- movement and obstruction rules for the matching shared outcome.
+    if not moving then actor:SendInteractionToActor(pawn, knob) end
     local result = "stock hinged door interaction dispatched " .. (was_open and "open" or "closed")
     if pending and pending.goal then return result .. "|" .. table.concat(pending.goal, "|") end
-    confirmations[fields[3]] = nil
+    confirmations[name] = nil
     return result
 end
 
@@ -750,7 +778,7 @@ local function trace(fields, state, phase)
     return "stock door collision trace completed"
 end
 
-function doors.command(fields, state, phase)
+function doors.command(fields, state, phase, status_row)
     if fields[2] == "native-stock-door-lockpick-feedback" then
         local actor = phase == "connected" and #fields == 4 and target_door(state, phase, fields[3])
         if not valid(actor) or fields[4] == "picked" and actor.Locked ~= false then
@@ -760,7 +788,7 @@ function doors.command(fields, state, phase)
     end
     if fields[2] == "native-stock-door-project" then return project(fields, state, phase) end
     if fields[2] == "native-stock-door-fixture" then return fixture(fields, state, phase) end
-    if fields[2] == "native-stock-door-guest-interact" then return interact(fields, state, phase) end
+    if fields[2] == "native-stock-door-guest-interact" then return interact(fields, state, phase, status_row) end
     if fields[2] == "native-stock-door-guest-pry" then return tool_pry(fields, state, phase) end
     if fields[2] == "native-stock-door-trace" then return trace(fields, state, phase) end
 end

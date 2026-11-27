@@ -229,6 +229,66 @@ class StockDoorActionTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.command.assert_awaited_once()
         self.bridge.wait_for.assert_not_awaited()
 
+    async def test_reported_open_has_one_motion_and_one_receipt_per_request(self):
+        self.host.party["players"]["other"] = {"downed": False}
+        self.host.native_recipients = lambda: {seat: {"connected": True, "pawn": seat + " pawn"}
+                                               for seat in ("guest", "other")}
+        self.bridge.command.return_value = {**self.host.last_game, "sequence": 11,
+                                            "ack": {"message": "stock hinged door interaction dispatched closed"}}
+        target = f"{self.epoch}@{self.actor}|open"
+        self.assertEqual(door.target_actor(f"stock-door:{self.actor}|open"), self.actor)
+        self.assertIsNone(door.target_actor(f"stock-door:{self.actor}|toggle"))
+        first, second, opposite = (asyncio.get_running_loop().create_future() for _ in range(3))
+        self.assertIsNone(await self.actions.dispatch(self.host, self.bridge, "guest", target, self.operation, first))
+        operation = "d" * 32
+        self.assertIsNone(await self.actions.dispatch(self.host, self.bridge, "other", target, operation, second))
+        with self.assertRaisesRegex(party.RuleError, "^stock_door_in_motion$"):
+            await self.actions.dispatch(self.host, self.bridge, "other", target[:-4] + "closed", "e" * 32, opposite)
+        self.bridge.command.assert_awaited_once_with(door.DISPATCH, self.actor, "guest pawn", "open", timeout=4)
+        opened = dict(self.closed, open=True, yaw=90)
+        self.host.last_game.update(sequence=12, native_stock_doors={self.actor: opened})
+        self.actions.settle(self.host)
+        self.assertEqual(await first, await second)
+        replay = await self.actions.dispatch(self.host, self.bridge, "other", target, operation, opposite)
+        self.assertEqual(replay, {key: value for key, value in second.result().items() if key != "ok"})
+
+    async def test_matching_report_confirms_the_exact_readback_without_a_toggle(self):
+        self.host.last_game["pawns"] = {"local": {"name": "host pawn"}}
+        nonce = "e" * 32
+        target = f"{self.epoch}@{self.actor}|open"
+        self.bridge = runtime.Bridge(None, None)
+
+        async def readback(payload, timeout):
+            fields = payload.decode().strip().split("\t")
+            self.assertEqual(fields[1:4], [door.DISPATCH, self.actor, "guest pawn"])
+            self.assertIn(fields[4], {"open", "closed"})
+            return (f"native-stock-interaction-reply\t1\t{fields[0]}\thosting\t{CROSSROADS}\t8\thost pawn\taccepted\t{door.UNCHANGED}\n"
+                    f"{door.TAG}\t{CROSSROADS}\t{self.actor}\t0\t1\t1\t0\t90\t0\t0\t0\t0\t1\t2\t3\t4\t5\t6\t3\t9\n")
+
+        command = AsyncMock(side_effect=readback)
+        self.bridge.local_bridge = SimpleNamespace(command=command)
+        pending = asyncio.get_running_loop().create_future()
+        result = await self.actions.dispatch(self.host, self.bridge, "guest", target, self.operation, pending)
+        self.assertEqual(result[door.RESULT], {"actor": self.actor, "open": True})
+        self.assertEqual(result[door.DELTA]["doors"][self.actor][door.OBSERVED], 9)
+        self.assertFalse(self.actions.pending)
+        self.assertEqual(self.actions.world_frame(self.host.last_game, self.epoch), result[door.DELTA])
+        self.assertEqual(await self.actions.dispatch(self.host, self.bridge, "guest", target, self.operation, pending), result)
+        with self.assertRaisesRegex(RuntimeError, "did not confirm the reported stock door outcome"):
+            await self.actions.dispatch(self.host, self.bridge, "guest", target[:-4] + "closed", nonce, pending)
+
+    async def test_matching_report_can_reuse_an_unchanged_periodic_door_row(self):
+        opened = dict(self.closed, open=True, yaw=90, observed_at=9)
+        self.bridge.command.return_value = {
+            **self.host.last_game, "sequence": 12, door.KEY: {self.actor: opened}, "ack": {"message": door.UNCHANGED},
+        }
+        target = f"{self.epoch}@{self.actor}|open"
+        pending = asyncio.get_running_loop().create_future()
+        result = await self.actions.dispatch(self.host, self.bridge, "guest", target, self.operation, pending)
+        self.assertEqual(result[door.RESULT], {"actor": self.actor, "open": True})
+        self.assertEqual(result[door.DELTA], door.frame(self.bridge.command.return_value, self.epoch))
+        self.assertFalse(self.actions.pending)
+
     async def test_travel_refuses_pending_motion_before_it_can_confirm_in_another_visit(self):
         self.bridge.command.return_value = {**self.host.last_game, "sequence": 11,
                                             "ack": {"message": "stock hinged door interaction dispatched closed"}}

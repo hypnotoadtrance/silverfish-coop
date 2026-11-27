@@ -190,6 +190,10 @@ assert(doors.command(close, authority, "hosting") == "stock hinged door interact
     "host focus may disagree with the knob captured on the guest's stock press")
 assert(doors.command(close, authority, "hosting") == "stock hinged door interaction dispatched closed" and opened.Open,
     "the exact qualified door can reopen")
+local report_open = {"request", "native-stock-door-guest-interact", opened.name, "guest pawn", "open"}
+local message, observed = doors.command(report_open, authority, "hosting", row)
+assert(message == "stock hinged door outcome unchanged" and opened.Open and observed[3] == opened.name
+    and observed[6] == 1, "a matching result reads the actual hinge without toggling the door")
 opened.Locked = true
 local ok, reason = pcall(doors.command, close, authority, "hosting")
 assert(not ok and reason == "stock_door_locked" and opened.Open, "the host's live lock still prevents the toggle")

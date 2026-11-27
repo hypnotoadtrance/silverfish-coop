@@ -5943,7 +5943,8 @@ class Client:
                         hidden.append(path)
             if target and (action == native_stock_door.ACTION or action in native_stock_door.PRY_ACTIONS.values()
                            or action == native_loot.LOCKPICK and native_stock_door.DELTA in reply):
-                actor = target.split("@", 2)[1] if action == native_loot.LOCKPICK else target.rsplit("@", 1)[-1]
+                actor = (target.split("@", 2)[1] if action == native_loot.LOCKPICK
+                         else target.rsplit("@", 1)[-1].partition("|")[0])
                 if (self.last_game.get("map"), self.zone_epoch, self.host_session) == (area, epoch, session):
                     delta = self.stock_door_view.accept(self.gameplay, reply.get(native_stock_door.DELTA),
                                                         area, epoch, actor)
@@ -7353,8 +7354,8 @@ class Client:
             return result
         if native_ladder.target_parts(target):
             return await self.gameplay_action(native_ladder.ACTION, operation, f"{self.zone_epoch}@{target}")
-        if door := native_stock_door.target_actor(target):
-            return await self.gameplay_action(native_stock_door.ACTION, operation, door)
+        if native_stock_door.target_actor(target):
+            return await self.gameplay_action(native_stock_door.ACTION, operation, target.removeprefix(native_stock_door.TARGET_PREFIX))
         if critter := native_critters.target_id(target):
             result = await self.gameplay_action(native_critters.ACTION, operation, critter)
             if self.stock_interaction_scope() == scope:

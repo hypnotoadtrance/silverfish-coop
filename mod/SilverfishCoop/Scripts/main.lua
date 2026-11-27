@@ -1992,6 +1992,8 @@ local function tick(fields, pending, periodic)
             else
                 accepted, message = false, "stock_switch_readback_unavailable"
             end
+        elseif accepted and fields[2] == "native-stock-door-guest-interact" and target then
+            readback = target .. "\n"
         elseif accepted and interaction.command == native_stock_door.project_compact and #target > 0 then
             readback = table.concat(target, "\n") .. "\n"
         end
