@@ -87,11 +87,13 @@ function StaticFindObject(path)
     return statics
 end
 
+local scope_published = false
 function SilverfishNativeDeathReady() return true end
-function SilverfishClearNativeDeathScope() end
+function SilverfishClearNativeDeathScope() scope_published = false end
 function SilverfishSetNativeDeathScope(host, remote)
     assert(host == pawn:GetAddress() and remote == guest:GetAddress())
     token = token + 1
+    scope_published = true
     return true, token
 end
 function SilverfishTakeScopedNativeDeathHit(address, expected_token)
@@ -110,7 +112,19 @@ end
 
 package.loaded.zone_maps = { [map] = { entrance = "ShortRoad" } }
 package.loaded.vitals = {}
-package.loaded.guest_save = { matches = function(candidate) return candidate == guest end }
+local full_binding_reads, observed_binding_reads = 0, 0
+local observed_binding_live = true
+package.loaded.guest_save = {
+    matches = function(candidate)
+        full_binding_reads = full_binding_reads + 1
+        return candidate == guest
+    end,
+    status_context = function(state, phase, detail)
+        assert(phase == "hosting" and detail == state.guests[1])
+        observed_binding_reads = observed_binding_reads + 1
+        if observed_binding_live then return guest, detached end
+    end,
+}
 package.loaded.players = { is_downed = function(candidate) return projected and candidate == pawn end }
 package.loaded.native_host_save = {
     restored_save = function(state, phase, expected)
@@ -138,8 +152,21 @@ native.sync(state, "hosting")
 restore_kind = "captured"
 projected = true
 assert_refused("native_restored_host_revive_scope_unavailable")
-state.clients, state.pawns = 1, { local_pawn, guest_pawn }
+state.clients, state.pawns, state.guests = 1, { local_pawn, guest_pawn }, { guest_pawn }
 native.sync(state, "hosting")
+assert(scope_published and full_binding_reads == 1, "An unprepared observation needs exact fallback")
+
+state.status_guest_saves = {}
+native.sync(state, "hosting")
+assert(scope_published and full_binding_reads == 1 and observed_binding_reads == 1,
+    "A scoped death refresh must reuse this game's verified guest observation")
+observed_binding_live = false
+native.sync(state, "hosting")
+assert(not scope_published and full_binding_reads == 1 and observed_binding_reads == 2,
+    "A revoked observed binding must clear the native scope")
+state.status_guest_saves = nil
+native.sync(state, "hosting")
+assert(scope_published and full_binding_reads == 2, "A fresh exact observation can rearm the scope")
 
 projected = false
 native.project_host(state, "hosting", "standing")

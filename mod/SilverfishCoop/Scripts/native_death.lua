@@ -253,8 +253,8 @@ local function eligible_scope(current)
     return { guest = guest }
 end
 
-local function enrolled_scope(current, count)
-    local host = current["local"]
+local function enrolled_scope(current, state, phase)
+    local count, host = state.clients, current["local"]
     local host_save = host and host.pawn.Save
     if type(count) ~= "number" or not math.tointeger(count) or count < 1 or count > #guest_slots
         or not valid(host_save) or not finite(host_save.PlayerHealth) then
@@ -266,8 +266,18 @@ local function enrolled_scope(current, count)
     for index, slot in ipairs(guest_slots) do
         local record = current[slot]
         if index <= count then
-            if not record or not guest_save.matches(record.pawn) then return {} end
-            local save = record.pawn.Save
+            if not record then return {} end
+            local save
+            if state.status_guest_saves then
+                local detail = state.guests and state.guests[index]
+                if not detail or not same(detail.pawn, record.pawn) then return {} end
+                -- The same observation already qualified the detached save and its connection.
+                local pawn, detached = guest_save.status_context(state, phase, detail)
+                if not same(pawn, record.pawn) then return {} end
+                save = detached
+            elseif guest_save.matches(record.pawn) then
+                save = record.pawn.Save
+            end
             if not valid(save) or not finite(save.PlayerHealth) or used_saves[save:GetAddress()] then return {} end
             used_saves[save:GetAddress()] = true
             eligible[slot] = record
@@ -358,7 +368,7 @@ function native_death.sync(state, phase)
         clear_scope()
         hook_status, hook_failure = "arming", "Waiting for a fresh host heartbeat"
     else
-        local eligible = enrolled_scope(current, state.clients)
+        local eligible = enrolled_scope(current, state, phase)
         local published, failure = publish_scope(eligible)
         if not published then
             hook_status, hook_failure = "error", failure or "Could not clear the C++ death scope"
