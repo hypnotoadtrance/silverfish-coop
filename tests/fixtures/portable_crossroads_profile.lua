@@ -227,6 +227,54 @@ local function compare_switch_reads()
     return result
 end
 
+local function compare_placed_acid_reads()
+    local native = SilverfishReadNativePlacedAcidPhases
+    if type(native) ~= "function" then return "unavailable" end
+    local pools = require("native_acid_pools")
+    local state = inspect()
+    assert(phase(state) == "hosting")
+
+    local function read()
+        return assert(pools.rows(state, "hosting", status_row), "no placed acid pool row")
+    end
+
+    local function measure(reader)
+        SilverfishReadNativePlacedAcidPhases = reader
+        local heap, start = collectgarbage("count"), stamp()
+        for _ = 1, 16 do read() end
+        return (stamp() - start) / 1000, collectgarbage("count") - heap
+    end
+
+    local running = collectgarbage("isrunning")
+    local ok, result = pcall(function()
+        local batch, world_address, pool_addresses
+        SilverfishReadNativePlacedAcidPhases = function(world, addresses)
+            world_address, pool_addresses = world, addresses
+            batch = native(world, addresses)
+            return batch
+        end
+        local native_row = read()
+        assert(batch and batch:find("[afe]"), "no placed phases read natively")
+        assert(native(world_address + 1, pool_addresses) == nil, "native acid reader accepted another world")
+        SilverfishReadNativePlacedAcidPhases = nil
+        assert(read() == native_row, "placed acid status did not match Lua")
+
+        collectgarbage("stop")
+        local native_first, native_first_kib = measure(native)
+        local lua_first, lua_first_kib = measure(nil)
+        local lua_second, lua_second_kib = measure(nil)
+        local native_second, native_second_kib = measure(native)
+        local _, native_count = batch:gsub("[afe]", "")
+        return ("%d,%d,%.3f,%.3f,%.3f,%.3f"):format(#batch, native_count,
+            native_first + native_second, lua_first + lua_second,
+            native_first_kib + native_second_kib, lua_first_kib + lua_second_kib)
+    end)
+    SilverfishReadNativePlacedAcidPhases = native
+    if running then collectgarbage("restart") end
+    if not ok then error(result, 0) end
+    return result
+end
+
 local function compare_rows()
     local lua_status_row = status_publication.lua_row
     local samples = {
@@ -389,6 +437,9 @@ LoopInGameThreadWithDelay(50, function()
     elseif action == "switchreader" and not capture then
         local ok, value = pcall(compare_switch_reads)
         if ok then message = value else message = "switch comparison failed: " .. tostring(value) end
+    elseif action == "acidphasereader" and not capture then
+        local ok, value = pcall(compare_placed_acid_reads)
+        if ok then message = value else message = "acid phase comparison failed: " .. tostring(value) end
     elseif action == "readyroster" and not capture then
         if type(SilverfishProfileReadyRoster) == "function" then
             local ok, value = pcall(SilverfishProfileReadyRoster)

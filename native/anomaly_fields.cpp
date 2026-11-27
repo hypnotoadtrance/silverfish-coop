@@ -785,6 +785,91 @@ namespace
         }
     }
 
+    constexpr std::size_t placed_acid_limit = 64;
+
+    struct PlacedAcidReader
+    {
+        U::FWeakObjectPtr world, pool_type, component_type, timeline_type;
+        U::FBoolProperty* destroying{};
+        U::FBoolProperty* fizzled_out{};
+        U::FObjectProperty* component{};
+        U::FStructProperty* timeline{};
+        U::FBoolProperty* playing{};
+        std::unordered_map<std::uintptr_t, U::FWeakObjectPtr> actors;
+    };
+
+    thread_local PlacedAcidReader placed_acid_reader;
+
+    void remember_placed_acid_pool(U::UObject* actor, U::UWorld* world)
+    {
+        auto& reader = placed_acid_reader;
+        auto* pool_type = actor->GetClassPrivate();
+        if (reader.world.Get() != world || reader.pool_type.Get() != pool_type)
+        {
+            reader = {};
+            auto* destroying = property<U::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
+            auto* fizzled_out = property<U::FBoolProperty>(actor, STR("FizzledOut"));
+            auto* component = property<U::FObjectProperty>(actor, STR("FizzleOut_Mat"));
+            auto* component_type = component ? component->GetPropertyClass().Get() : nullptr;
+            auto* timeline = property<U::FStructProperty>(component_type, STR("TheTimeline"));
+            auto* timeline_type = timeline ? timeline->GetStruct().Get() : nullptr;
+            auto* playing = property<U::FBoolProperty>(timeline_type, STR("bPlaying"));
+            if (!destroying || destroying->GetArrayDim() != 1 || !fizzled_out || fizzled_out->GetArrayDim() != 1 ||
+                !component || component->GetArrayDim() != 1 || !component_type ||
+                component_type->GetPathName() != STR("/Script/Engine.TimelineComponent") ||
+                !timeline || timeline->GetArrayDim() != 1 || !timeline_type ||
+                timeline_type->GetPathName() != STR("/Script/Engine.Timeline") ||
+                !playing || playing->GetArrayDim() != 1) return;
+            reader = {world, pool_type, component_type, timeline_type, destroying, fizzled_out, component, timeline, playing, {}};
+        }
+        const auto address = reinterpret_cast<std::uintptr_t>(actor);
+        if (reader.actors.size() >= placed_acid_limit)
+            std::erase_if(reader.actors, [](const auto& entry) { return !entry.second.Get(); });
+        if (reader.actors.size() < placed_acid_limit || reader.actors.contains(address))
+            reader.actors.insert_or_assign(address, U::FWeakObjectPtr{actor});
+    }
+
+    char placed_acid_phase(const PlacedAcidReader& reader, std::uintptr_t address, U::UObject* world)
+    {
+        const auto entry = reader.actors.find(address);
+        auto* actor = entry == reader.actors.end() ? nullptr : entry->second.Get();
+        if (!actor || actor->GetClassPrivate() != reader.pool_type.Get() ||
+            static_cast<U::AActor*>(actor)->GetWorld() != world) return '?';
+        if (reader.destroying->GetPropertyValueInContainer(actor)) return '-';
+        if (reader.fizzled_out->GetPropertyValueInContainer(actor)) return 'e';
+        auto* component = reader.component->GetObjectPropertyValue(reader.component->ContainerPtrToValuePtr<void>(actor));
+        if (!component) return 'a';
+        constexpr auto destroyed = static_cast<U::EObjectFlags>(U::RF_BeginDestroyed | U::RF_FinishDestroyed);
+        if (component->GetClassPrivate() != reader.component_type.Get() || component->GetOuterPrivate() != actor ||
+            component->IsUnreachable() || component->HasAnyFlags(destroyed)) return '?';
+        const auto* timeline = reader.timeline->ContainerPtrToValuePtr<void>(component);
+        return reader.playing->GetPropertyValueInContainer(timeline) ? 'f' : 'a';
+    }
+
+    int read_placed_acid_phases(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        if (!U::IsInGameThreadRaw() || guest_session || lua_gettop(stack) != 2 || !lua_isinteger(stack, 1) ||
+            lua_type(stack, 2) != LUA_TTABLE) return 0;
+        const auto& reader = placed_acid_reader;
+        auto* world = reader.world.Get();
+        if (!world || reinterpret_cast<std::uintptr_t>(world) != static_cast<std::uintptr_t>(lua_tointeger(stack, 1)) ||
+            !reader.pool_type.Get() || !reader.component_type.Get() || !reader.timeline_type.Get()) return 0;
+
+        const auto count = lua_rawlen(stack, 2);
+        if (!count || count > placed_acid_limit) return 0;
+        std::array<char, placed_acid_limit> phases{};
+        for (std::size_t index = 0; index < count; ++index)
+        {
+            lua_rawgeti(stack, 2, static_cast<lua_Integer>(index + 1));
+            const auto address = lua_isinteger(stack, -1) ? static_cast<std::uintptr_t>(lua_tointeger(stack, -1)) : 0;
+            lua_pop(stack, 1);
+            phases[index] = placed_acid_phase(reader, address, world);
+        }
+        lua_pushlstring(stack, phases.data(), count);
+        return 1;
+    }
+
     int acid_pool_view(const Lua& lua)
     {
         const auto count = lua.get_stack_size();
@@ -800,6 +885,8 @@ namespace
         const bool guest = accepted && guest_world(world);
         if (count == 2)
         {
+            if (accepted && !guest && actor->HasAnyFlags(U::RF_WasLoaded))
+                remember_placed_acid_pool(actor, world);
             lua.set_bool(accepted);
             lua.set_bool(guest);
             return 2;
@@ -1691,6 +1778,7 @@ namespace silverfish::native_anomaly_fields
         lua.register_function("SilverfishQualifyNativePlacedTrap",
             [](const Lua& current) { return qualify_placed(current, trap_class); });
         lua.register_function("SilverfishNativeAcidPool", acid_pool_view);
+        lua.register_function("SilverfishReadNativePlacedAcidPhases", read_placed_acid_phases);
         lua.register_function("SilverfishQualifyNativePlacedCanister",
             [](const Lua& current) { return qualify_placed(current, canister_class, remember_canister); });
         lua.register_function("SilverfishReadNativePlacedCanister", read_placed_canister);

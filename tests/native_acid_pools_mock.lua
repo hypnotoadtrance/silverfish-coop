@@ -72,6 +72,17 @@ local function row(...) return {...} end
 assert(pools.rows(host, "hosting", row)[3] == first .. ":a|" .. second .. ":a")
 local unchanged = pools.rows(host, "hosting", row)
 assert(pools.rows(host, "hosting", row) == unchanged)
+local native_phases = "f?"
+SilverfishReadNativePlacedAcidPhases = function(world, addresses)
+    assert(world == host.world.address and #addresses == 2 and addresses[1] == 3 and addresses[2] == 4)
+    return native_phases
+end
+assert(pools.rows(host, "hosting", row)[3] == first .. ":f|" .. second .. ":a")
+native_phases = "-?"
+assert(pools.rows(host, "hosting", row)[3] == second .. ":a")
+native_phases = nil
+assert(pools.rows(host, "hosting", row)[3] == first .. ":a|" .. second .. ":a")
+SilverfishReadNativePlacedAcidPhases = nil
 host_first.FizzleOut_Mat.playing = true
 assert(pools.rows(host, "hosting", row)[3] == first .. ":f|" .. second .. ":a")
 host_first.FizzledOut = true

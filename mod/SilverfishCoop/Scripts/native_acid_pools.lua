@@ -108,8 +108,8 @@ local function census(state, phase)
                     current.complete = false
                     break
                 end
-                local entry = {actor = actor, path = path}
-                current.entries[id], current.addresses[actor:GetAddress()] = entry, entry
+                local entry = {actor = actor, path = path, address = actor:GetAddress()}
+                current.entries[id], current.addresses[entry.address] = entry, entry
                 current.ids[#current.ids + 1] = id
             elseif guest then
                 stop_sizzle(actor)
@@ -120,6 +120,10 @@ local function census(state, phase)
         end
     end
     table.sort(current.ids)
+    if not guest then
+        current.placed_addresses = {}
+        for index, id in ipairs(current.ids) do current.placed_addresses[index] = current.entries[id].address end
+    end
     visit = current
     return current
 end
@@ -144,10 +148,21 @@ local function transform(actor)
 end
 
 local function placed_states(current)
+    local read = SilverfishReadNativePlacedAcidPhases
+    local phases = type(read) == "function" and #current.ids > 0
+        and read(current.world:GetAddress(), current.placed_addresses)
     local changed = false
-    for _, id in ipairs(current.ids) do
+    for index, id in ipairs(current.ids) do
         local entry = current.entries[id]
-        local phase = not entry.ended and live(entry.actor) and stock_phase(entry.actor) or nil
+        local phase
+        if not entry.ended then
+            local sample = phases and phases:sub(index, index)
+            if sample == "a" or sample == "f" or sample == "e" then
+                phase = sample
+            elseif sample ~= "-" and live(entry.actor) then
+                phase = stock_phase(entry.actor)
+            end
+        end
         if entry.phase ~= phase then
             entry.phase, changed = phase, true
         end

@@ -470,6 +470,7 @@ def instrument_anomaly_work(source):
     calls = (
         "pyrogeist.apply", "shadows.project", "lamps.project", "observers.target", "observers.publish_rewards",
         "effects.observe_spatial_cues", "canisters.rows", "drum_fire.rows", "fixed.rows", "destructibles.rows", "acid_pools.rows",
+        "electrodes.observe",
     )
     start, separator, rest = source.partition("function fields.rows(")
     if not separator:
@@ -933,6 +934,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
     lean = await asyncio.gather(*(compare_lean_reader(seat, probe) for seat in seats.values()))
     journal = {}
     anomaly_samples = {}
+    placed_acid_phases = {}
     if area == CROSSROADS:
         reply = await command(host, "anomalysamples")
         if reply != "unavailable":
@@ -941,6 +943,14 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
             anomaly_samples = {"anomaly_sample_comparison": {"actors": int(count), "passes_per_reader": 32,
                                 "native_ms": native_ms, "lua_ms": lua_ms, "native_heap_growth_kib": native_kib,
                                 "lua_heap_growth_kib": lua_kib, "all_samples_matched": True}}
+        reply = await command(host, "acidphasereader")
+        if reply != "unavailable":
+            assert not reply.startswith("acid phase comparison failed"), reply
+            count, native_count, native_ms, lua_ms, native_kib, lua_kib = map(float, reply.split(","))
+            placed_acid_phases = {"placed_acid_phase_comparison": {
+                "pools": int(count), "native_phase_reads": int(native_count), "passes_per_reader": 32,
+                "native_ms": native_ms, "lua_ms": lua_ms, "native_heap_growth_kib": native_kib,
+                "lua_heap_growth_kib": lua_kib, "all_rows_matched": True}}
         async def journal_action(action, receipt):
             reply = await host.bridge.command("native-host-invite-fixture", action)
             assert reply["ack"]["message"] == receipt, reply
@@ -964,4 +974,4 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
                            for seat, frame in zip(seats, wall_status, strict=True)},
             "guest_roster": {slot: row["name"] for slot, row in settled["game"]["pawns"].items()},
             "vitals_comparison": dict(zip(seats, comparison, strict=True)), **heartbeat, **guest_binding,
-            **coarse, **journal, **anomaly_samples, **ready_roster}
+            **coarse, **journal, **anomaly_samples, **placed_acid_phases, **ready_roster}
