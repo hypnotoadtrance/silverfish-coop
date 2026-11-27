@@ -1112,8 +1112,8 @@ class Host:
                 view[native_enemy_shells.FRAME_KEY] = frame
         if drops := native_stock_enemy_drops.published(self.party, self.last_game, pinned=self.world_loot.moving):
             view[native_stock_enemy_drops.STATE] = drops
-        if self.world_loot.moving:
-            view[native_world_loot.MOVING] = sorted(self.world_loot.moving)
+        if moving := self.world_loot.moving_ids(area, self.zone_epoch):
+            view[native_world_loot.MOVING] = sorted(moving)
         if broker_cue := native_stock_enemy_drops.broker_cue_frame(self.last_game, self.zone_epoch):
             view[native_stock_enemy_drops.BROKER_CUE] = broker_cue
         if pending := pending_cube(self.party):
@@ -4735,9 +4735,10 @@ class Host:
                     door_flags[actor] = row["open"], row["locked"], row["broken"]
         switch_flags = {actor: (row["powered"], row.get("lamp"), row["lights"])
                         for actor, row in game.get(native_stock_switch.KEY, {}).items()}
-        # Crate opens and claims replace the ledger or its affected rows.
+        # Wake the guest for loot motion edges. Poses still use the existing motion relay.
         state = (door_flags, switch_flags, self.party.get(native_loot.STATE_KEY, {}),
-                 game.get("native_wallet"), tuple(sorted(self.guest_wallet_receipts.items())))
+                 game.get("native_wallet"), tuple(sorted(self.guest_wallet_receipts.items())),
+                 self.world_loot.moving_ids(*scope))
         if scope == self.gameplay_change_scope and state != self.gameplay_change_state:
             # Guests still fetch the authorized snapshot. A lost notice only delays that fetch.
             transport.send_gameplay_change(epoch)
@@ -5630,6 +5631,8 @@ class Client:
         return values
 
     async def open_game_link(self, *, timeout: float = 18, renew_endpoint: bool = False) -> None:
+        if self.stopping or self.check_host_end():
+            return
         visit = ()
         if self.invite.get("native_zones"):
             if not native_mindcore_carry.token(self.host_session) or not native_mindcore_carry.token(self.zone_epoch):
@@ -5642,6 +5645,8 @@ class Client:
             self.transport.reset_game_endpoint()
         self.needs_travel = True
         world_start = await self.guest_world_start(visit) if visit else ()
+        if self.stopping or self.check_host_end():
+            return
         if visit and visit != (self.host_session, self.zone_epoch, self.expected_zone):
             raise RuntimeError("The authenticated visit changed before native rejoin")
         if visit and not native_zone_rejoin.preserves_private_scope(self, self.bridge.snapshot()):
@@ -5653,18 +5658,22 @@ class Client:
         visit = self.host_session, self.zone_epoch, self.expected_zone
         try:
             connected = await self.bridge.wait_for(
-                lambda state: (state["state"], state["map"]) == ("connected", visit[2])
-                and (self.host_session, self.zone_epoch, self.expected_zone) == visit
-                and native_zone_rejoin.preserves_private_scope(self, state), timeout=timeout,
+                lambda state: self.stopping or self.check_host_end()
+                or ((state["state"], state["map"]) == ("connected", visit[2])
+                    and (self.host_session, self.zone_epoch, self.expected_zone) == visit
+                    and native_zone_rejoin.preserves_private_scope(self, state)), timeout=timeout,
             )
         except TimeoutError:
+            if self.stopping or self.check_host_end():
+                return
             self.last_game = self.bridge.snapshot() or self.last_game
             self.control.event("native_game_join_timeout", zone_epoch=self.zone_epoch,
                                phase=self.last_game.get("state"), map=self.last_game.get("map"),
                                sent=self.transport.game_packets_sent, received=self.transport.game_packets_received,
                                local_datagrams=self.transport.game_local_datagrams)
             raise
-        self._complete_game_link(connected)
+        if not self.stopping and not self.check_host_end():
+            self._complete_game_link(connected)
 
     def _complete_game_link(self, connected: dict) -> None:
         self.last_game = connected
@@ -5686,6 +5695,8 @@ class Client:
                                    covered=self.last_game.get("native_zone_loading_cover") == cover)
 
     async def reconcile_game(self) -> None:
+        if self.stopping or self.check_host_end():
+            return
         state = self.bridge.snapshot()
         if state is None:
             return
@@ -5720,6 +5731,8 @@ class Client:
             await self.leave_for_rejoin(state, destination)
         else:
             await self.leave_for_rejoin(state)
+        if self.stopping or self.check_host_end():
+            return
         reservation, epoch = self.native_return_reservation, self.zone_epoch
         return_visit = self.host_session, epoch, self.expected_zone
         early_retry = reservation is not None and self.native_return_retry_allowed

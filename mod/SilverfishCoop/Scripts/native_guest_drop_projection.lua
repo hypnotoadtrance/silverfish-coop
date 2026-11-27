@@ -226,6 +226,17 @@ local function same_pose(first, second)
     return true
 end
 
+local function start_drop_fall(id, entry)
+    local actor = projection.carry_actor(id)
+    local pose = valid(actor) and motion_pose(actor)
+    if not pose or SilverfishSetNativeWorldLootPhysics(entry.slot, entry.epoch, id, true) ~= true then
+        return
+    end
+    entry.motion = {actor = actor, pose = pose, quiet = 0, released = os.clock()}
+    -- Give the stock Box the same wake-up as an ordinary inventory drop.
+    pcall(function() actor.Box:WakeAllRigidBodies() end)
+end
+
 local function append_world_rows(rows, state, phase, row, pawn, epoch_filter)
     for id, item in pairs(world_items) do
         if item.map ~= state.map or not same(pawn, item.pawn) or not same(state.world, item.world) then
@@ -239,7 +250,7 @@ local function append_world_rows(rows, state, phase, row, pawn, epoch_filter)
             if active and epoch == item.epoch and observed == id then
                 if item.carryable then item.actor_name = name end
                 local fields = {"native-world-loot-item", item.map, epoch, id, pawn:GetFullName(), name, press, item.class}
-                if item.moving then fields[#fields + 1] = "moving" end
+                if phase == "connected" and item.moving then fields[#fields + 1] = "moving" end
                 rows[#rows + 1] = row(table.unpack(fields))
                 if phase == "hosting" and item.motion then
                     rows[#rows + 1] = motion_row(item, id, row)
@@ -283,7 +294,8 @@ local function item_frame(fields, state, phase)
         local id, class = values[1], values[2]
         local mode = #values == 13 and values[3]
         local snap, moving = mode == "ground" or mode == "carry-ground", mode == "moving"
-        local carryable = mode == "carry" or mode == "carry-ground"
+        local fall = mode == "fall" and phase == "hosting"
+        local carryable = mode == "carry" or mode == "carry-ground" or fall
         local stack_count = math.tointeger(values[#values])
         if (#values ~= 12 and not snap and not moving and not carryable) or not identifier(id) or incoming[id]
             or not stack_count or stack_count < 0 or stack_count > 2147483647
@@ -294,7 +306,7 @@ local function item_frame(fields, state, phase)
             if not coordinate(value) then error("world_loot_item_transform_invalid", 0) end
             transform[#transform + 1] = value
         end
-        incoming[id] = { class = class, transform = transform, snap = snap, moving = moving,
+        incoming[id] = { class = class, transform = transform, snap = snap, moving = moving, fall = fall,
             carryable = carryable, stack_count = stack_count }
     end
     local changed = false
@@ -322,7 +334,8 @@ local function item_frame(fields, state, phase)
                 pcall(LoadAsset, item.class)
             end
             local motion = previous and previous.motion
-            if motion and motion.settled and not item.snap and same_pose(motion.pose, item.transform) then motion = nil end
+            if motion and motion.settled and not item.fall and not item.snap
+                and same_pose(motion.pose, item.transform) then motion = nil end
             local t = motion and motion.pose or item.transform
             local visual_z = t[3]
             if item.snap and not motion then
@@ -332,15 +345,21 @@ local function item_frame(fields, state, phase)
             local ok, reason = SilverfishSyncNativeWorldLootItem(pawn:GetAddress(), epoch, id,
                 t[1], t[2], visual_z, visual_z, item.class, t[4], t[5], t[6], t[7], t[8], t[9], item.stack_count,
                 not item.moving, slot)
-            world_items[id] = { map = area, epoch = epoch, pawn = pawn, world = state.world,
+            local entry = { map = area, epoch = epoch, pawn = pawn, world = state.world,
                 class = item.class, slot = slot, visual_z = visual_z, x = t[1], y = t[2], z = t[3],
                 stack_count = item.stack_count, moving = item.moving, carryable = item.carryable, motion = motion,
                 actor_name = previous and previous.actor_name,
                 error = not ok and (reason or "stock_drop_projection_unavailable") or nil }
+            world_items[id] = entry
+            if ok and item.fall and not motion then
+                pcall(start_drop_fall, id, entry)
+                if not entry.motion then entry.error = "stock_drop_projection_fall_unavailable" end
+            end
+            if item.fall and entry.motion and not entry.motion.settled then entry.moving = true end
             local was_pickable = previous ~= nil and not previous.error and not previous.moving
-            local pickable = ok and not item.moving
+            local pickable = not entry.error and not entry.moving
             changed = changed or was_pickable ~= pickable or (was_pickable and previous.stack_count ~= item.stack_count)
-            if not ok then errors = errors + 1 end
+            if entry.error then errors = errors + 1 end
         end
     end
     if changed then pcall(projection.refresh_stock_inventory, state, false) end

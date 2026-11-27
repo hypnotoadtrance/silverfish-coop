@@ -23,9 +23,9 @@ class EmptyZoneRetryTests(IsolatedAsyncioTestCase):
         self.client = SimpleNamespace(
             host_session="session", zone_epoch="city-epoch", expected_zone=CITY, needs_travel=True,
             stopping=False, suspended=False, server_transitioning=False, native_return_reservation=None,
-            gameplay_seen=1, last_game=self.joining,
+            gameplay_seen=1, last_game=self.joining, session_stop_reason=None,
             transport=SimpleNamespace(game_access=True, game_packets_sent=0, game_packets_received=0,
-                                      game_local_datagrams=0),
+                                      game_local_datagrams=0, session_end=None),
             bridge=SimpleNamespace(snapshot=Mock(return_value=self.joining),
                                    process=SimpleNamespace(poll=lambda: None)),
             control=SimpleNamespace(event=Mock()),
@@ -33,6 +33,7 @@ class EmptyZoneRetryTests(IsolatedAsyncioTestCase):
             leave_for_rejoin=AsyncMock(side_effect=self.leave),
             open_game_link=AsyncMock(),
         )
+        self.client.check_host_end = Client.check_host_end.__get__(self.client)
         self.retry.note_transition("session", "city-epoch", CITY)
 
     def refresh(self):
@@ -189,6 +190,19 @@ class EmptyZoneRetryTests(IsolatedAsyncioTestCase):
         self.assertFalse(await self.retry.after_timeout(client, "city-epoch"))
         client.open_game_link.assert_not_awaited()
 
+    async def test_authenticated_end_during_title_reset_prevents_endpoint_rotation(self):
+        client = self.client
+
+        def leave_after_end(frame):
+            self.leave(frame)
+            client.transport.session_end = (client.host_session, 17)
+
+        client.leave_for_rejoin.side_effect = leave_after_end
+        self.assertFalse(await self.retry.after_timeout(client, "city-epoch"))
+        self.assertTrue(client.stopping)
+        client.open_game_link.assert_not_awaited()
+        client.control.event.assert_called_once_with("host_session_ended", revision=17)
+
     async def test_a_failed_rotation_does_not_repeat(self):
         client = self.client
         client.open_game_link.side_effect = TimeoutError
@@ -241,6 +255,19 @@ class ReservedReturnTests(IsolatedAsyncioTestCase):
         self.transport.request.assert_not_awaited()
         self.client.open_game_link.assert_awaited_once_with(timeout=10, renew_endpoint=True)
         self.assertTrue(self.client.needs_travel)
+
+    async def test_authentic_host_end_during_stock_leave_prevents_initial_rejoin(self):
+        async def leave_after_end(*args):
+            self.transport.session_end = (self.session, 17)
+
+        self.client.leave_for_rejoin.side_effect = leave_after_end
+        await self.client.reconcile_game()
+
+        self.client.leave_for_rejoin.assert_awaited_once_with(self.title, CITY)
+        self.client.open_game_link.assert_not_awaited()
+        self.transport.request.assert_not_awaited()
+        self.assertTrue(self.client.stopping)
+        self.assertEqual(self.client.session_stop_reason, "host_session_ended")
 
     async def test_reserved_timeout_does_not_accept_a_different_guest_on_the_same_map(self):
         def replace_scope():
@@ -308,6 +335,56 @@ class ReservedReturnTests(IsolatedAsyncioTestCase):
 
 
 class ZoneRejoinIntegrationTests(IsolatedAsyncioTestCase):
+    async def test_host_end_during_world_start_request_prevents_unreal_join(self):
+        session, epoch, scope = "a" * 32, "b" * 32, "c" * 32
+        title = {"state": "ready", "map": MENU, "save_scope": scope}
+        bridge = SimpleNamespace(local_bridge=object(), snapshot=lambda: title, command=AsyncMock(),
+                                 wait_for=AsyncMock(return_value={"state": "connected", "map": CITY}))
+        transport = SimpleNamespace(address=("127.0.0.1", 31000), game_access=True, session_end=None,
+                                    reset_game_endpoint=Mock(), request=AsyncMock())
+        client = Client(SimpleNamespace(event=Mock()), transport,
+                        {"character_id": "cccccccc-cccc-cccc-cccc-cccccccccccc", "native_zones": True},
+                        bridge, allowed_maps=frozenset({CITY}))
+        client.host_session, client.zone_epoch, client.expected_zone = client.game_visit = (session, epoch, CITY)
+
+        def end_after_snapshot(*args, **kwargs):
+            transport.session_end = (session, 17)
+            return {"ok": False}
+
+        transport.request.side_effect = end_after_snapshot
+        await client.open_game_link()
+
+        transport.request.assert_awaited_once()
+        self.assertTrue(client.stopping)
+        bridge.command.assert_not_awaited()
+        bridge.wait_for.assert_not_awaited()
+
+    async def test_host_end_stops_waiting_for_the_world_while_native_join_is_pending(self):
+        session, epoch, scope = "a" * 32, "b" * 32, "c" * 32
+        joining = {"state": "joining", "map": MENU, "save_scope": scope}
+        bridge = SimpleNamespace(local_bridge=object(), snapshot=lambda: joining, wait_for=AsyncMock())
+        transport = SimpleNamespace(address=("127.0.0.1", 31000), game_access=True, session_end=None)
+        client = Client(SimpleNamespace(event=Mock()), transport,
+                        {"character_id": "cccccccc-cccc-cccc-cccc-cccccccccccc", "native_zones": True}, bridge)
+        client.host_session, client.zone_epoch, client.expected_zone = client.game_visit = (session, epoch, CITY)
+        client.last_game = joining
+        client.needs_travel = True
+
+        def observe_joining(condition, *, timeout):
+            transport.session_end = ("d" * 32, 17)
+            self.assertFalse(condition(joining))
+            transport.session_end = (session, 17)
+            self.assertTrue(condition(joining))
+            return joining
+
+        bridge.wait_for.side_effect = observe_joining
+        await client.wait_game_link(18)
+
+        self.assertTrue(client.stopping)
+        self.assertTrue(client.needs_travel)
+        self.assertIs(client.last_game, joining)
+        client.control.event.assert_called_once_with("host_session_ended", revision=17)
+
     async def test_resident_rejoin_rechecks_save_scope_after_requesting_world_start(self):
         session, visit, scope = "a" * 32, "b" * 32, "c" * 32
         character = "cccccccc-cccc-cccc-cccc-cccccccccccc"
@@ -320,7 +397,7 @@ class ZoneRejoinIntegrationTests(IsolatedAsyncioTestCase):
             game["save_scope"] = None
             return {"ok": False}
 
-        transport = SimpleNamespace(address=("127.0.0.1", 31000), game_access=True,
+        transport = SimpleNamespace(address=("127.0.0.1", 31000), game_access=True, session_end=None,
                                     reset_game_endpoint=Mock(), request=AsyncMock(side_effect=change_scope))
         client = Client(SimpleNamespace(event=Mock()), transport, {"character_id": character, "native_zones": True},
                         bridge, allowed_maps=frozenset({CITY}))
@@ -345,7 +422,7 @@ class ZoneRejoinIntegrationTests(IsolatedAsyncioTestCase):
                             "active_map": CITY, "instance_seed": -123.0, "game_seconds": 113312.523,
                         }}}}
         reply = {**old_snapshot, WORLD_START: startup}
-        transport = SimpleNamespace(address=("127.0.0.1", 31000), game_access=True,
+        transport = SimpleNamespace(address=("127.0.0.1", 31000), game_access=True, session_end=None,
                                     reset_game_endpoint=Mock(), request=AsyncMock(return_value=reply))
         client = Client(SimpleNamespace(event=Mock()), transport, {"character_id": character, "native_zones": True},
                         bridge, allowed_maps=frozenset({CITY, BOROUGH}))

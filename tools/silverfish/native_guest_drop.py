@@ -477,6 +477,7 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         raise party.RuleError("operation_id_conflict")
     active = [row for row in drops.values() if row["claim_id"] is None]
     multiple = host.last_game.get(CAPABILITY, 0) >= SHARED_PICKUPS_VERSION
+    physics = getattr(host, "world_loot", None) if multiple else None
     if (len(drops) >= record.MAX_DROPS or len(active) >= record.MAX_ACTIVE
             or any(row["guid"] == guid or (not multiple and row["owner"] == character) for row in active)):
         raise party.RuleError("native_guest_stack_drop_capacity")
@@ -495,6 +496,8 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         receipts.append({"id": operation, "request": [action, target, None], "result": result})
         del receipts[:-party.RECENT_ACTIONS]
         host.party = candidate
+        if physics is not None:
+            physics.note_player_drop(scope, operation)
         if character == "host":
             host.pending_host_save = True
         host.control.event("native_guest_stack_drop_committed", phase="debit", revision=None, **result[RESULT])
@@ -519,5 +522,8 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
     candidate = party.load_party(host.party)
     candidate.setdefault(record.STATE, {})[operation] = dict(owner=character, guid=guid, quantity=count,
         class_path=item, map=area, location=location, claim_id=None, escrow=escrow)
-    return await _settle(host, bridge, character, action, target, operation, operation, source,
-                         prepared["replacement"], candidate, scope)
+    result = await _settle(host, bridge, character, action, target, operation, operation, source,
+                           prepared["replacement"], candidate, scope)
+    if physics is not None:
+        physics.note_player_drop(scope, operation)
+    return result

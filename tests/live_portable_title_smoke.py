@@ -22,10 +22,11 @@ from zipfile import ZipFile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bootstrap import install_stage
 from tools.silverfish import (
-    direct_ip, embedded_startup, native_finite_shop, native_guest_consumable, native_guest_drop, native_guest_melee,
+    direct_ip, embedded_startup, native_finite_shop, native_guest_consumable, native_guest_drop, native_guest_drop_record,
+    native_guest_melee,
     native_dialogue, native_host_save, native_inventory, native_loose_pickup, native_smg_hold,
     native_anomaly_effects, native_critters, native_destructibles, native_lantern, native_npc_barter, native_loot, native_prop_carry, native_stash, native_stock_switch, native_weapon_fire_view,
-    native_player_avatar, native_stock_door, native_stock_enemy_drops, native_world_loot, runtime,
+    native_host_stack_drop, native_player_avatar, native_stock_door, native_stock_enemy_drops, native_world_loot, runtime,
 )
 from tools.silverfish.authored_loot import GUARANTEED_CRATES
 from tools.silverfish import native_computer_board, native_dead_drop
@@ -7352,6 +7353,128 @@ async def verify_original_crossroads_crate(host: Seat, guest: Seat, pawn: str) -
             "input_source": pressed["input_source"], "checkpoints_unchanged": True}
 
 
+async def verify_stock_inventory_fall(host: Seat, guest: Seat, pawn: str) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    before = campaign_save_hashes(host.campaign)
+    scope = await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get(native_host_stack_drop.SCOPE))
+    host_pawn = scope["game"]["pawns"]["local"]["name"]
+    await guest.bridge.wait_for(lambda frame: frame.get("native_inventory_view_binding") == "ready")
+
+    async def contents(run):
+        result = await submit(run, "native-inventory-list")
+        assert result["ok"], result
+        return result["native_inventory"]["items"]
+
+    def selected(rows):
+        eligible = [row for row in rows if native_guest_drop.droppable(row, generic=True)]
+        assert eligible, rows
+        return next((row for row in eligible if not row["stackable"]), eligible[0])
+
+    async def drop_from_host(item):
+        result = await submit(host_run, native_host_stack_drop.FIXTURE,
+                              target=f"{item['guid']}|{item['quantity']}|context_menu")
+        assert result["ok"], result
+        while True:
+            events = await resident_events(host_run, scope)
+            matches = [event for event in events if event.get("event") == "native_host_stock_drop"
+                       and event.get(native_guest_drop.RESULT, {}).get("guid") == item["guid"]]
+            if matches:
+                event, = matches
+                assert event["entry"] == "context_menu" and event["refresh"] == "refreshed" and not event["error"], event
+                return event[native_guest_drop.RESULT]
+            await asyncio.sleep(.04)
+
+    async def drop_from_guest(item):
+        stocked = await submit(guest_run, "native-inventory-view-fixture", target="stock")
+        assert stocked["ok"], stocked
+        result = await submit(guest_run, native_guest_drop.STOCK_DROP_FIXTURE, target=item["guid"])
+        assert result["ok"] and result["stock_inventory_proof"].startswith("verified open stock backpack refresh"), result
+        return result[native_guest_drop.RESULT]
+
+    async def fall(role, item, press_drop):
+        actors = {seat: {} for seat in ("host", "guest")}
+        descent = {}
+        guest_motion = set()
+        async def sample():
+            while True:
+                for label, seat in (("host", host), ("guest", guest)):
+                    frame = seat.bridge.snapshot() or {}
+                    for identity, row in frame.get(native_world_loot.KEY, {}).items():
+                        actors[label].setdefault(identity, set()).add(row["actor"])
+                        if label == "guest" and row.get("moving"):
+                            guest_motion.add(identity)
+                    if label == "host":
+                        for identity, row in frame.get(native_world_loot.PHYSICS, {}).items():
+                            if row["state"] == "moving" and row["class_path"] == item["class_path"]:
+                                pose = row["transform"]["position"]
+                                seen = descent.setdefault(identity, [])
+                                if not seen or seen[-1] != pose:
+                                    seen.append(pose)
+                await asyncio.sleep(.025)
+
+        watcher = asyncio.create_task(sample())
+        try:
+            async with asyncio.timeout(12):
+                drop = await press_drop(item)
+            assert (drop["guid"], drop["class_path"], drop["quantity"], drop["state"]) == (
+                item["guid"], item["class_path"], item["quantity"], "dropped"), drop
+            identity = native_world_loot.player_drop_identity(drop["drop_id"])
+            host_state = await wait_resident_status(host_run, lambda frame:
+                frame.get("gameplay", {}).get(native_guest_drop_record.STATE, {}).get(drop["drop_id"], {}).get("transform"),
+                timeout=12)
+            settled = host_state["gameplay"][native_guest_drop_record.STATE][drop["drop_id"]]["transform"]
+            for label, seat in (("host", host), ("guest", guest)):
+                frame = await seat.bridge.wait_for(lambda state: identity in state.get(native_world_loot.KEY, {})
+                    and not state[native_world_loot.KEY][identity].get("moving"), timeout=8)
+                actors[label].setdefault(identity, set()).add(frame[native_world_loot.KEY][identity]["actor"])
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+        motion = descent.get(identity, [])
+        distance = drop["location"][2] - settled["position"][2]
+        assert motion and distance > 8, (role, drop["location"], motion, settled)
+        assert any(point[2] > settled["position"][2] + 2 for point in motion), (role, motion, settled)
+        assert all(len(rows[identity]) == 1 for rows in actors.values()), (role, actors)
+        return identity, {"drop": drop, "settled": settled, "host_moving_positions": motion, "fall_cm": distance,
+                          "host_actor": next(iter(actors["host"][identity])),
+                          "guest_actor": next(iter(actors["guest"][identity])),
+                          "guest_saw_motion": identity in guest_motion}
+
+    evidence = {}
+    for role, drop_run, press, receiver, receiver_run, receiver_pawn in (
+            ("guest", guest_run, drop_from_guest, host, host_run, host_pawn),
+            ("host", host_run, drop_from_host, guest, guest_run, pawn)):
+        item = selected(await contents(drop_run))
+        identity, proof = await fall(role, item, press)
+        if role == "host":
+            closed = await submit(host_run, native_host_stack_drop.CLOSE_FIXTURE, target=item["guid"])
+        else:
+            closed = await submit(guest_run, "native-inventory-view-fixture")
+        assert closed["ok"], closed
+        assert all(row["guid"] != item["guid"] for row in await contents(drop_run))
+        assert campaign_save_hashes(host.campaign) == before, f"The stock {role} drop wrote a save"
+        prior = sum(row["quantity"] for row in await contents(receiver_run)
+                    if row["class_path"] == item["class_path"] and row["source"] == "backpack")
+        approached = await host.bridge.command(native_world_loot.APPROACH, identity, receiver_pawn, timeout=5)
+        assert approached["ack"]["message"] == "stock loot height and line of sight verified", approached["ack"]
+        await receiver.bridge.wait_for(lambda frame:
+            math.dist(frame["pawns"]["local"]["location"], proof["settled"]["position"]) < 225, timeout=8)
+        pickup = await receiver.bridge.command(native_world_loot.FIXTURE, identity, timeout=5)
+        assert pickup["ack"]["message"] == "stock world loot interaction intercepted", pickup["ack"]
+        for seat in (host, guest):
+            await seat.bridge.wait_for(lambda frame: identity not in frame.get(native_world_loot.KEY, {}), timeout=8)
+        await wait_resident_status(host_run, lambda frame:
+            proof["drop"]["drop_id"] not in frame.get("gameplay", {}).get(native_guest_drop_record.STATE, {}),
+            timeout=8)
+        updated = sum(row["quantity"] for row in await contents(receiver_run)
+                      if row["class_path"] == item["class_path"] and row["source"] == "backpack")
+        assert updated - prior == item["quantity"], (role, prior, updated, item)
+        assert campaign_save_hashes(host.campaign) == before, f"Picking up the stock {role} drop wrote a save"
+        evidence[role] = {**proof, "picked_up_by": "host" if role == "guest" else "guest", "no_save_writes": True}
+    return {"stock_inventory_fall": evidence}
+
+
 async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: bool = False,
                           stock_split: bool = False, stock_equip: bool = False, stock_nearby: bool = False,
                           projected_nearby: bool = False) -> dict:
@@ -7978,6 +8101,7 @@ async def verify_stock_discovered_overlap(host, guest, pawn):
 
 async def verify(work: Path, first_game: Path, second_game: Path, original: Path,
                  second_legacy_work: Path | None = None, *, stock_drop: bool = False, stock_split: bool = False,
+                 stock_inventory_fall: bool = False,
                  stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False,
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
                  stock_use: bool = False, stock_food: bool = False, stock_campfire: bool = False, stock_cooked_meal: bool = False,
@@ -8145,6 +8269,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_streamed_prop_carry(host, guest, pawn, proof.setdefault("streamed_prop_carry", {}))),
         (stock_streamed_pickup, "streamed_loose_pickup", "streamed_loose_pickup", verify_streamed_loose_pickup),
         (stock_flashlights, "observatory", "stock_flashlights", verify_stock_flashlights),
+        (stock_inventory_fall, "inventory_fall", "stock_inventory_fall", verify_stock_inventory_fall),
         (stock_melee_edges, "observatory", "stock_melee_edges", verify_stock_melee_edges_only),
         (stock_avatar_tail, "observatory", "stock_avatar_tail", verify_stock_avatar_tail),
         (stock_avatar_binoculars, "observatory", "stock_avatar_binoculars", verify_stock_avatar_binoculars),
@@ -8916,7 +9041,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
 
                 before_join = {"storm": storm_trial.prepare} if storm_trial else {}
                 before_join["tutorial_dock_late_join"] = prepare_warehouse
-                create_character = {"stash": create_stock_bag_character, "stock_split": create_stock_split_character}
+                create_character = {"stash": create_stock_bag_character, "stock_split": create_stock_split_character,
+                                    "inventory_fall": create_stock_drop_character}
                 session = asyncio.create_task(start_pair(
                     host, second, "Gameplay scout", on_join=run_checks,
                     before_join=before_join.get(campaign),
@@ -9109,6 +9235,8 @@ if __name__ == "__main__":
     parser.add_argument("--stock-pause-exit", action="store_true",
                         help="exercise guest stock Quit to Menu and host Save and Quit in the same resident pair")
     parser.add_argument("--stock-drop", action="store_true", help="test stock guest backpack Sort, Drop, and Use actions")
+    parser.add_argument("--stock-inventory-fall", action="store_true",
+                        help="verify ordinary stock host and guest drops fall and remain collectible on the same pair")
     parser.add_argument("--stock-use", action="store_true", help="open a starter bag by stock drag and use a Bandage by stock click")
     parser.add_argument("--stock-food", action="store_true", help="verify the guest's Food stat after a meal, combinable with campfire and weapon cues")
     parser.add_argument("--stock-cooked-meal", action="store_true", help="verify the guest's stock cooking pot Eat All action")
@@ -9357,6 +9485,7 @@ if __name__ == "__main__":
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
     resident_check_options = {"guest_shop_lease", "stock_unequip", "stock_split", "projected_nearby", "manage_saves",
+                              "stock_inventory_fall",
                               "stock_food", "stock_personal_consumable", "stock_wipe_chooser",
                               "stock_campfire", "stock_npc_override", "stock_dock_population", "stock_streamed_npc",
                               "stock_dead_drops",
@@ -9468,6 +9597,7 @@ if __name__ == "__main__":
     asyncio.run(verify(args.work.resolve(strict=True), args.first_game.resolve(strict=True),
                        args.second_game.resolve(strict=True), args.vanilla_saved.resolve(strict=True), legacy,
                        stock_drop=args.stock_drop, stock_split=args.stock_split, stock_equip=args.stock_equip,
+                       stock_inventory_fall=args.stock_inventory_fall,
                        stock_unequip=args.stock_unequip,
                        stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby,
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,

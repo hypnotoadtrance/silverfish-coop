@@ -37,6 +37,7 @@ ENEMY_CLAIM = "native-enemy-loot-claim"
 _TARGET = re.compile(r"world-loot:([0-9a-f]{32}):([0-9a-f]{32})(?::([1-9][0-9]{0,15}))?\Z")
 _MAX_VISIBLE = 64
 _VISIBILITY_RADIUS = 1800
+_FALL_UNAVAILABLE = "stock_drop_projection_fall_unavailable"
 
 
 def target_parts(target):
@@ -186,7 +187,10 @@ def player_drop_identity(drop_id):
 
 
 def item_is_moving(host, identity):
-    return host.last_game.get(PHYSICS, {}).get(identity, {}).get("state") == "moving"
+    game = host.last_game
+    world_loot = getattr(host, "world_loot", None)
+    return (game.get(PHYSICS, {}).get(identity, {}).get("state") == "moving"
+            or world_loot is not None and identity in world_loot.moving_ids(game.get("map"), host.zone_epoch))
 
 
 def _player_items(drops, area):
@@ -304,6 +308,23 @@ class Projection:
         self.retired = set()
         self.moving = {}
         self.settled = {}
+        self._fall_scope = None
+        self._falling = {}
+
+    def note_player_drop(self, scope, drop_id):
+        """Simulate a newly committed drop on the host for this visit only."""
+        area, zone, _ = scope
+        if not (native_guest_drop_record.supported_map(area) and native_guest_drop_record.valid_id(zone)
+                and native_guest_drop_record.valid_id(drop_id)):
+            return
+        if self._fall_scope != (area, zone):
+            self._falling.clear()
+            self._fall_scope = area, zone
+        self._falling[player_drop_identity(drop_id)] = drop_id
+
+    def moving_ids(self, area, zone):
+        pending = self._falling if self._fall_scope == (area, zone) else ()
+        return self.moving.keys() | pending
 
     def observe_physics(self, state, game):
         latest = {}
@@ -317,6 +338,7 @@ class Projection:
             elif self.settled.get(identity) != physics["transform"]:
                 if self._settle(state, identity, item, physics["transform"]):
                     self.settled[identity] = physics["transform"]
+                    self._falling.pop(identity, None)
         self.moving = latest
 
     @staticmethod
@@ -350,6 +372,8 @@ class Projection:
             self.seat = None
             self.items = {}
             self.moving.clear()
+            self._falling.clear()
+            self._fall_scope = None
             return game
         area = game.get("map")
         epoch = uuid.uuid5(uuid.NAMESPACE_OID, f"{generation}:{zone}:{area}:world-loot").hex
@@ -358,16 +382,25 @@ class Projection:
             self.presses.clear()
             self.moving.clear()
             self.settled.clear()
+        if phase != "hosting" or self._fall_scope != (area, zone):
+            self._falling.clear()
+            self._fall_scope = None
+        elif self._falling:
+            drops = player_drops or {}
+            self._falling = {identity: drop_id for identity, drop_id in self._falling.items()
+                             if drop_id in drops and "transform" not in drops[drop_id]}
         self.items = nearby(game, rolls, zone, enemy_frame=enemy_frame, enemy_rolls=enemy_rolls,
                             player_drops=player_drops, stock_enemy_drops=stock_enemy_drops,
                             mushroom_frame=mushroom_frame, enemy_motion=enemy_motion, carried=carried,
                             quest_package=quest_package if phase == "connected" else None,
-                            pinned=self.moving) if active else {}
+                            pinned=self.moving_ids(area, zone)) if active else {}
         for identity in self.retired:
             self.items.pop(identity, None)
         def encode(identity, item):
             if item.claim_action is None:
                 mode = ("moving",)
+            elif identity in self._falling:
+                mode = ("fall",)
             elif item.carryable:
                 mode = ("carry-ground" if item.ground_snap else "carry",)
             else:
@@ -396,6 +429,9 @@ class Projection:
                 else:
                     merged.pop(key, None)
             snapshot = merged
+        for identity, error in snapshot.get(ERROR_KEY, {}).items():
+            if error["epoch"] == epoch and error["reason"] == _FALL_UNAVAILABLE:
+                self._falling.pop(identity, None)
         self.epoch = epoch
         self.seat = seat
         self.last_error = None
@@ -408,7 +444,7 @@ class Projection:
         seat = (game.get("state"), game.get("map"), pawn)
         if epoch != self.epoch or not item or item.claim_action is None or not pawn or seat != self.seat:
             raise party.RuleError("native_world_loot_intent_stale")
-        if identity in self.moving:
+        if identity in self.moving or identity in self._falling:
             raise party.RuleError("native_world_loot_item_in_motion")
         if len(target) == 3:
             # The game thread sends the native receipt with the press. The next
@@ -427,6 +463,7 @@ class Projection:
     def _remember_retirement(self, identity):
         self.retired.add(identity)
         self.items.pop(identity, None)
+        self._falling.pop(identity, None)
 
     @staticmethod
     def _after_retirement(game, snapshot, identity):

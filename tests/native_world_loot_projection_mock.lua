@@ -17,6 +17,8 @@ local state = {map = area, world = world, listening = true, server = true, local
 
 local active, reject = {}, true
 StaticFindObject = function() return world end
+local set_physics
+SilverfishSetNativeWorldLootPhysics = function(...) return set_physics(...) end
 SilverfishSyncNativeWorldLootItem = function(_, item_epoch, id, _, _, _, _, _, _, _, _, _, _, _, count, pickable, slot)
     assert(count == (id == good and 12 or 0) and pickable == true and type(slot) == 'number')
     if id == failed and reject then return false, "stock_drop_projection_stock_model_unavailable" end
@@ -115,3 +117,67 @@ assert(audio.command({"request", "native-sound-pickup", area, epoch, cue(other_o
     == other_operation)
 assert(play_count == 2)
 print("Host presentation never loads missing assets and each effect can complete independently")
+
+blocked = false
+local fall_id = string.rep("f", 32)
+local path = area .. ".City_01_P:PersistentLevel.Ammo_Magnum_BP_C_1"
+local name = "Ammo_Magnum_BP_C " .. path
+local drop_z, speed, now, wakes = 95, 300, 20, 0
+local box = {
+    WakeAllRigidBodies = function() wakes = wakes + 1 end,
+    GetPhysicsLinearVelocity = function() return {X = 0, Y = 0, Z = speed} end,
+    GetPhysicsAngularVelocityInDegrees = function() return {X = 0, Y = 0, Z = 0} end,
+}
+loaded[path] = object({
+    Box = box,
+    GetFullName = function() return name end,
+    GetWorld = function() return world end,
+    IsActorBeingDestroyed = function() return false end,
+    K2_GetActorLocation = function() return {X = 1, Y = 2, Z = drop_z} end,
+    K2_GetActorRotation = function() return {Pitch = 0, Yaw = 0, Roll = 0} end,
+    GetActorScale3D = function() return {X = 1, Y = 1, Z = 1} end,
+})
+os.clock = function() return now end
+FName = function(value) return value end
+EFindName = { FNAME_Find = 0 }
+
+local poses, physics = {}, {}
+SilverfishSyncNativeWorldLootItem = function(_, item_epoch, id, _, _, z, visual_z, class, _, _, _, _, _, _, count, pickable, slot)
+    assert(item_epoch == epoch and id == fall_id and class == ammo and count == 12 and pickable and z == visual_z)
+    poses[#poses + 1] = visual_z
+    active[slot] = {true, epoch, fall_id, name, 0}
+    return true
+end
+set_physics = function(slot, item_epoch, id, simulate)
+    assert(active[slot][3] == id and id == fall_id and item_epoch == epoch)
+    physics[#physics + 1] = simulate
+    return true
+end
+local fall = {"request", "native-world-loot-frame", area, epoch,
+    fall_id .. "|" .. ammo .. "|fall|1|2|95|0|0|0|1|1|1|12"}
+state.server = true
+assert(not pcall(projection.command, fall, state, "connected"))
+state.server = false
+assert(projection.frame_reply(fall, state, "hosting", function(...) return table.concat({...}, "\t") end)
+    :find("moving\t1\t2\t95", 1, true))
+assert(#physics == 1 and physics[1] and wakes == 1 and poses[1] == 95)
+now, drop_z = now + .1, 55
+local function read_pose()
+    for _, fields in ipairs(projection.rows(state, "hosting", function(...) return {...} end)) do
+        if fields[1] == "native-world-loot-physics" and fields[4] == fall_id then return fields end
+    end
+end
+local moving = read_pose()
+assert(moving[6] == "moving" and moving[9] == 55)
+assert(projection.command(fall, state, "hosting") == "stock world loot synchronized")
+assert(#physics == 1 and poses[2] == 55)
+drop_z, speed = 3, 0
+for _ = 1, 3 do
+    now = now + .1
+    read_pose()
+end
+local settled = read_pose()
+assert(settled[6] == "settled" and settled[9] == 3 and #physics == 2 and physics[2] == false)
+assert(projection.command(fall, state, "hosting") == "stock world loot synchronized")
+assert(#physics == 2 and poses[3] == 3)
+print("A committed drop falls from its release position once and reports its settled transform")

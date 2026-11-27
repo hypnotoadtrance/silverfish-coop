@@ -61,7 +61,7 @@ class EmptyZoneRetry:
                 and (client.host_session, client.zone_epoch, client.expected_zone) == target
                 and client.needs_travel and not client.stopping and not client.suspended
                 and not client.server_transitioning and client.native_return_reservation is None
-                and client.transport.game_access and client.bridge.process.poll() is None)
+                and not client.check_host_end() and client.transport.game_access and client.bridge.process.poll() is None)
 
     def _empty_title(self, client: "Client", snapshot: dict | None, phase: str, mode: str) -> bool:
         return bool(snapshot and snapshot.get("map") == MENU and snapshot.get("state") == phase

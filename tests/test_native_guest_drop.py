@@ -352,3 +352,65 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(projection.claim_target(game, (projection.epoch, first)), (drop.RECLAIM, DROP))
         with self.assertRaisesRegex(party.RuleError, "intent_stale"):
             projection.claim_target(game, (projection.epoch, second))
+
+    async def test_new_drop_falls_only_on_host_and_uses_settled_pose_for_claims(self):
+        host, _, _, _, _, row = self.make_world()
+        host.party[record.STATE] = {DROP: {**row, "location": [10., 20., 130.]}}
+        game = host.last_game
+        game["pawns"]["local"]["location"] = POS
+        projection = host.world_loot = native_world_loot.Projection()
+        bridge = SimpleNamespace(command=AsyncMock(return_value=game))
+        identity = native_world_loot.player_drop_identity(DROP)
+        projection.note_player_drop((MAP, host.zone_epoch, PAWN), DROP)
+        self.assertTrue(native_world_loot.item_is_moving(host, identity))
+        self.assertEqual(projection.moving_ids(MAP, host.zone_epoch), {identity})
+        self.assertEqual(projection.moving_ids(MAP, "7" * 32), set())
+        visible = drop.visible_drops(host.party, MAP)
+
+        await projection.sync(bridge, game, {}, "generation", host.zone_epoch, active=True, player_drops=visible)
+        self.assertIn("|fall|10.0|20.0|130.0|", bridge.command.await_args.args[3])
+        with self.assertRaisesRegex(party.RuleError, "item_in_motion"):
+            projection.claim_target(game, (projection.epoch, identity, 1))
+
+        guest = {**game, "state": "connected", "pawns": {"local": {"name": PAWN, "location": POS}}}
+        guest_bridge = SimpleNamespace(command=AsyncMock(return_value=guest))
+        guest_projection = native_world_loot.Projection()
+        await guest_projection.sync(guest_bridge, guest, {}, "generation", host.zone_epoch, active=True,
+                                    player_drops=visible, carried=list(projection.moving_ids(MAP, host.zone_epoch)))
+        self.assertIn("|moving|10.0|20.0|130.0|", guest_bridge.command.await_args.args[3])
+
+        transform = {"position": POS, "rotation": [0, 0, 0], "scale": [1, 1, 1]}
+        physics = dict(epoch=projection.epoch, class_path=record.ITEM, state="settled", transform=transform)
+        projection.observe_physics(host.party, {**game, native_world_loot.PHYSICS: {identity: physics}})
+        self.assertEqual(host.party[record.STATE][DROP]["transform"], transform)
+        self.assertFalse(native_world_loot.item_is_moving(host, identity))
+        self.assertEqual(projection.moving_ids(MAP, host.zone_epoch), set())
+        await projection.sync(bridge, game, {}, "generation", host.zone_epoch, active=True,
+                              player_drops=drop.visible_drops(host.party, MAP))
+        self.assertIn("|carry|10.0|20.0|30.0|", bridge.command.await_args.args[3])
+        self.assertEqual(projection.claim_target(game, (projection.epoch, identity, 1)), (drop.RECLAIM, DROP))
+
+    async def test_initial_drop_physics_failure_retries_as_a_grounded_item(self):
+        host, _, _, _, _, row = self.make_world()
+        host.party[record.STATE] = {DROP: row}
+        game = host.last_game
+        game["pawns"]["local"]["location"] = POS
+        projection = native_world_loot.Projection()
+        projection.note_player_drop((MAP, host.zone_epoch, PAWN), DROP)
+        identity = native_world_loot.player_drop_identity(DROP)
+
+        def frame(_action, area, epoch, encoded, *, timeout):
+            if "|fall|" in encoded:
+                return {**game, native_world_loot.ERROR_KEY: {identity: {
+                    "class_path": record.ITEM, "epoch": epoch, "map": area, "id": identity,
+                    "reason": "stock_drop_projection_fall_unavailable",
+                }}}
+            return game
+
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=frame))
+        visible = drop.visible_drops(host.party, MAP)
+        await projection.sync(bridge, game, {}, "generation", host.zone_epoch, active=True, player_drops=visible)
+        self.assertIn("|fall|", bridge.command.await_args.args[3])
+        self.assertEqual(projection.moving_ids(MAP, host.zone_epoch), set())
+        await projection.sync(bridge, game, {}, "generation", host.zone_epoch, active=True, player_drops=visible)
+        self.assertIn("|carry-ground|", bridge.command.await_args.args[3])

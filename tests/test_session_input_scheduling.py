@@ -847,13 +847,14 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(client.gameplay_change_ready())
             self.assertEqual(client.next_snapshot, 100.65)
 
-    def test_host_coalesces_door_switch_and_crate_visibility_changes_in_their_visit(self):
+    def test_host_coalesces_interaction_and_loot_motion_changes_in_their_visit(self):
         host = service.Host.__new__(service.Host)
         host.stopping = host.transitioning = host.native_checkpoint_unsafe = False
         host.gameplay_change_scope = host.gameplay_change_state = None
         host.game_link_connected = Mock(return_value=True)
         host.zone_epoch = "a" * 32
         host.stock_doors = native_stock_door.Interactions()
+        host.world_loot = service.native_world_loot.Projection()
         host.guest_wallet_receipts = {}
         doors = native_stock_door.KEY
         switches = service.native_stock_switch.KEY
@@ -871,6 +872,10 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         host.publish_gameplay_change(transport)
         transport.send_gameplay_change.assert_called_once_with("a" * 32)
         host.publish_gameplay_change(transport)
+        host.world_loot.note_player_drop((OBSERVATORY, host.zone_epoch, "host pawn"), "d" * 32)
+        host.publish_gameplay_change(transport)
+        self.assertEqual(transport.send_gameplay_change.call_count, 2)
+        host.publish_gameplay_change(transport)
         host.zone_epoch = "b" * 32
         host.publish_gameplay_change(transport)
-        transport.send_gameplay_change.assert_called_once_with("a" * 32)
+        self.assertEqual(transport.send_gameplay_change.call_count, 2)
