@@ -10,7 +10,7 @@ class StockSwitchResponseTests(unittest.IsolatedAsyncioTestCase):
         area = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
         prefix = area + ".CrossRoads_P:PersistentLevel."
         latch = "DoorLatch_BP_C " + prefix + "DoorLatch_BP_C_2"
-        door = "Door_Metal_03_Window_BP_C " + prefix + "Door_Metal_03_Window_BP_C_16"
+        door = "Door_Metal_03_BP_C " + prefix + "Door_Metal_03_Window_BP_C_16"
         other = door[:-2] + "17"
         ticket, epoch, local = "a" * 32, "b" * 32, "exact local pawn"
         shape = {"locked": True, "open": False, "yaw": 0}
@@ -43,6 +43,13 @@ class StockSwitchResponseTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "invalid state"):
             runtime.Bridge._local_stock_interaction_reply(raw.replace("door=" + door, "door=../wrong"),
                                                          (ticket, switches.ACTION, latch, "bound guest"))
+        bridge.command.reset_mock()
+        bridge.command.return_value = dict(captured, ack={"message": "stock latch interaction dispatched"})
+        operation = "c" * 32
+        pending = await switches.interact(host, bridge, "guest", f"{epoch}@{latch}", operation)
+        self.assertEqual(pending, {"native_stock_switch_interaction": {"actor": latch, "powered": False, "pending": True}})
+        self.assertEqual(await switches.interact(host, bridge, "guest", f"{epoch}@{latch}", operation), pending)
+        bridge.command.assert_awaited_once_with(switches.ACTION, latch, "bound guest", timeout=3)
 
     async def test_guest_power_report_applies_absolute_result_once(self):
         area = "/CommunityMaps/Shelter"

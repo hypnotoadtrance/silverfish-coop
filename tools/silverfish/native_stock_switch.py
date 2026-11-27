@@ -126,8 +126,10 @@ async def interact(host, bridge, character, requested, operation, action=ACTION)
             raise party.RuleError(str(error)) from error
         raise
     row = snapshot.get(KEY, {}).get(actor)
-    if ((snapshot.get("state"), snapshot.get("map"), snapshot.get("ack", {}).get("message"))
-            != ("hosting", game["map"], message) or row is None
+    acknowledgement = snapshot.get("ack", {}).get("message")
+    pending = action == ACTION and row and "door" in row and acknowledgement == "stock latch interaction dispatched"
+    if ((snapshot.get("state"), snapshot.get("map")) != ("hosting", game["map"]) or row is None
+            or (not pending and acknowledgement != message)
             or (power is not None and row.get("powered") is not (power == "1"))):
         raise RuntimeError("The stock switch interaction did not verify")
     if native_stock_door.LOCAL_SCOPE in snapshot:
@@ -138,10 +140,14 @@ async def interact(host, bridge, character, requested, operation, action=ACTION)
     else:
         host.last_game = snapshot
         host.last_seen = time.monotonic()
-    result = {"native_stock_switch_interaction": {"actor": actor, "powered": row["powered"]},
-              KEY: {"map": game["map"], "epoch": epoch, "switches": {actor: row}}}
+    interaction = {"actor": actor, "powered": row["powered"]}
+    result = {"native_stock_switch_interaction": interaction}
+    if pending:
+        interaction["pending"] = True
+    else:
+        result[KEY] = {"map": game["map"], "epoch": epoch, "switches": {actor: row}}
     if action == REPORT:
-        result["native_stock_switch_interaction"]["origin"] = "player"
+        interaction["origin"] = "player"
     receipts.append({"id": operation, "request": fingerprint, "result": result})
     del receipts[:-party.RECENT_ACTIONS]
     return result

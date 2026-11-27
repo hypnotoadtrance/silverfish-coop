@@ -527,7 +527,10 @@ function switches.command(fields, state, phase)
             local expected = before
             if not door.Open and not door.LockBroken then expected = not before end
             entry.actor:SendInteractionToActor(pawn, entry.box)
-            if not valid(door) or door.Locked ~= expected then error("stock_switch_toggle_unverified", 0) end
+            if not valid(door) or not same(entry.actor.Door, door) then error("stock_switch_unavailable", 0) end
+            -- The stock callback can publish its lock change after this bridge command returns.
+            -- Confirm the dispatch once and let the next world update carry the resulting state.
+            if door.Locked ~= expected then return "stock latch interaction dispatched", entry end
             stock_door.refresh_linked_lock(door, state.world)
             return "stock switch interaction dispatched", entry
         end

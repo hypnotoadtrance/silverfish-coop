@@ -268,4 +268,8 @@ assert(linked_door.Locked and latch.Switch_Mesh.RelativeRotation.Roll == 0)
 projection[9] = "door=" .. linked_door:GetFullName()
 assert(switches.command(projection, state, "connected") == "stock switch state projected")
 assert(not linked_door.Locked and latch.Switch_Mesh.RelativeRotation.Roll == 45)
+latch.SendInteractionToActor = function() end
+state.server = false
+assert(switches.command({"nonce", "native-stock-switch-interact", latch_name, "qualified guest"}, state, "hosting")
+    == "stock latch interaction dispatched" and not linked_door.Locked)
 print("Exact latch dispatch reaches a live actor outside the census and projects both dial and lock")
