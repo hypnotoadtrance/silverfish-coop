@@ -392,12 +392,14 @@ sample_door = function(scan, name, ready_pose)
         if not scan.confirmation and kind and name:sub(1, #stream_prefix) ~= stream_prefix then
             tag, scope, id = "native-stock-door-state", kind, object
         end
+        local version = scan.phase == "hosting" and confirmation_sequence and {confirmation_sequence()} or {}
         local encoded = scan.row(tag, scope, id,
             value[1] and 1 or 0, value[2] and 1 or 0, value[3] and 1 or 0,
             string.format("%.3f", value[4]), string.format("%.3f", value[5]), string.format("%.3f", value[6]),
             string.format("%.3f", value[7]), string.format("%.3f", value[8]), string.format("%.3f", value[9]),
             string.format("%.3f", center.X), string.format("%.3f", center.Y), string.format("%.3f", center.Z),
-            string.format("%.3f", grip.X), string.format("%.3f", grip.Y), string.format("%.3f", grip.Z), collision)
+            string.format("%.3f", grip.X), string.format("%.3f", grip.Y), string.format("%.3f", grip.Z),
+            collision, table.unpack(version))
         if scan.samples then
             value[10], value[11], value[12] = center.X, center.Y, center.Z
             value[13], value[14], value[15], value[16] = grip.X, grip.Y, grip.Z, collision
@@ -442,12 +444,14 @@ local function send_confirmations()
             local actual = parts and valid(parts[1]) and pose(actor, parts[1])
             local expected = actual and {false, actual[2], pending.opens, table.unpack(pending.goal)}
             local record = actual and matches(actual, expected)
-                and sample_door({actors = actors, world = active_world, map = pending.map, row = confirmation_row,
+                and sample_door({actors = actors, world = active_world, map = pending.map, phase = "hosting", row = confirmation_row,
                     confirmation = true}, name, actual)
             if record and SilverfishEnqueueLocalBridgeInput(
                 confirmation_row("stock-door-settled", pending.id, confirmation_sequence(),
                     string.format("%.1f", (now - pending.start) * 1000)) .. "\t" .. record .. "\n") then
-                if sampler and sampler.actors == actors then sampler.readings[name] = record end
+                if sampler and sampler.actors == actors then
+                    sampler.readings[name], sampler.samples[name] = record, nil
+                end
                 confirmations[name] = nil
             end
         end

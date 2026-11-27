@@ -4743,12 +4743,8 @@ class Host:
                 or not self.game_link_connected(transport)):
             return
         scope = game.get("map"), epoch
-        doors = game.get(native_stock_door.KEY, {})
+        _, doors = self.stock_doors.current_rows(game, epoch)
         door_flags = {actor: (row["open"], row["locked"], row["broken"]) for actor, row in doors.items()}
-        if self.stock_doors.confirmed_scope == scope:
-            for actor, (sequence, row) in self.stock_doors.confirmed.items():
-                if sequence >= game.get("sequence", 0):
-                    door_flags[actor] = row["open"], row["locked"], row["broken"]
         switch_flags = {actor: (row["powered"], row.get("lamp"), row["lights"])
                         for actor, row in game.get(native_stock_switch.KEY, {}).items()}
         if scope != self.gameplay_change_scope:

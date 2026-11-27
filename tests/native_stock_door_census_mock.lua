@@ -91,7 +91,7 @@ package.loaded.guest_save = {exact_item_context = function(_, phase, name)
 end}
 
 local doors = require("native_stock_door")
-doors.start()
+doors.start(nil, function() return frames end, row)
 local state = make_state("CrossRoads_P", 30)
 assert(#current_rows(doors, state) == 0 and qualifiers == 0, "dense census must not qualify every actor in status")
 tick()
@@ -193,6 +193,14 @@ assert(doors.command(close, authority, "hosting") == "stock hinged door interact
 opened.Locked = true
 local ok, reason = pcall(doors.command, close, authority, "hosting")
 assert(not ok and reason == "stock_door_locked" and opened.Open, "the host's live lock still prevents the toggle")
+local reading = doors.rows(authority, "hosting", row)[1]
+assert(reading[20] == frames)
+frames = frames + 1
+assert(doors.rows(authority, "hosting", row)[1] == reading,
+    "a new census must preserve the unchanged door's original row and observation version")
+opened.Locked = false
+local changed = doors.rows(authority, "hosting", row)[1]
+assert(changed[4] == 0 and changed[20] == frames, "a new lock reading must include its own version")
 
 local mounted = make_state("Campaign", 1, "/WorkshopPack/Maps/")
 local stock = mounted.world.doors[1]

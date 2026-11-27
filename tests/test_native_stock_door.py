@@ -38,6 +38,11 @@ class StockDoorActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decoded[door.KEY][self.actor]["knob_location"], [4, 5, 6])
         self.assertIsNone(bridge._parse_status(header + full + compact))
         self.assertIsNone(bridge._parse_status(header + compact.replace("1719", "../1719")))
+        host_header = header.replace("client\tconnected", "host\thosting")
+        stamped = compact.rstrip("\n") + "\t9\n"
+        self.assertEqual(bridge._parse_status(host_header + stamped)[door.KEY][self.actor][door.OBSERVED], 9)
+        self.assertIsNone(bridge._parse_status(header + stamped))
+        self.assertIsNone(bridge._parse_status(host_header + stamped.replace("\t9\n", "\t0\n")))
 
     async def test_streamed_identity_routes_in_active_visit(self):
         actor = "stream:Door_C /WorkshopPack/Rooms/Lab_copy.Lab:PersistentLevel.Door_C_11"
@@ -138,6 +143,56 @@ class StockDoorActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs((await completion)[door.RESULT]["open"], True)
         self.assertIs(self.host.last_game, game)
 
+    async def test_new_world_frame_preserves_confirmation_over_a_cached_door_reading(self):
+        dispatch, host_pawn = "c" * 32, "host pawn"
+        other = self.actor.replace("_1719", "_1720")
+        game = self.host.last_game
+        game.update(sequence=11, pawns={"local": {"name": host_pawn}})
+        self.bridge.command.return_value = {
+            "state": "hosting", "map": CROSSROADS, "sequence": 11, door.LOCAL_SCOPE: host_pawn,
+            "ack": {"id": dispatch, "message": "stock hinged door interaction dispatched closed|0|90|0|0|0|0"},
+        }
+        pending = asyncio.get_running_loop().create_future()
+        self.assertIsNone(await self.interact(pending))
+        cached = {**self.closed, door.OBSERVED: 10}
+        game.update(sequence=15, native_stock_doors={self.actor: cached, other: dict(self.closed, open=True, yaw=45)})
+        row = (door.TAG, CROSSROADS, self.actor, "0", "1", "1", "0", "90", *("0",) * 10, "1", "12")
+        record = ("stock-door-settled", dispatch, "12", "350", *row)
+        self.actions.settle(self.host, ["\t".join(record).encode()])
+        self.assertTrue(pending.done())
+        receipt = pending.result()[door.DELTA]["doors"][self.actor]
+        self.assertTrue(receipt["open"])
+        for world_sequence in (15, 22):
+            game["sequence"] = world_sequence
+            frame = self.actions.world_frame(game, self.epoch)
+            self.assertEqual(frame["doors"][self.actor], receipt)
+            self.assertEqual(frame["doors"][other]["yaw"], 45)
+            self.assertEqual(frame["doors"][self.actor][door.OBSERVED], 12)
+        game[door.KEY][self.actor] = {**cached, door.OBSERVED: 22}
+        self.assertFalse(self.actions.world_frame(game, self.epoch)["doors"][self.actor]["open"])
+        self.assertFalse(self.actions.confirmed)
+
+    def test_guest_accepts_matching_door_receipt_after_newer_unrelated_world_update(self):
+        view = door.GuestView()
+        other = self.actor.replace("_1719", "_1720")
+        before = dict(self.closed, observed_at=10)
+        opened = dict(before, open=True, yaw=90, observed_at=12)
+        scope = {"map": CROSSROADS, "epoch": self.epoch}
+        game = {door.KEY: {**scope, "sequence": 20,
+                          "doors": {self.actor: before, other: dict(self.closed, open=True, observed_at=20)}}}
+        view.reconcile(game, CROSSROADS, self.epoch)
+        receipt = {**scope, "sequence": 12, "doors": {self.actor: opened}}
+        self.assertEqual(view.accept(game, receipt, CROSSROADS, self.epoch, self.actor), receipt)
+        stale = {**scope, "sequence": 21, "doors": {self.actor: before, other: dict(self.closed, observed_at=21)}}
+        game = {door.KEY: stale}
+        view.reconcile(game, CROSSROADS, self.epoch)
+        self.assertEqual(game[door.KEY]["doors"][self.actor], opened)
+        self.assertEqual(game[door.KEY]["doors"][other], stale["doors"][other])
+        self.assertEqual(game[door.KEY]["sequence"], 21)
+        game = {door.KEY: {**stale, "sequence": 23, "doors": {self.actor: dict(before, observed_at=23)}}}
+        view.reconcile(game, CROSSROADS, self.epoch)
+        self.assertFalse(game[door.KEY]["doors"][self.actor]["open"])
+        self.assertIsNone(view.accept(game, receipt, CROSSROADS, self.epoch, self.actor))
     async def test_pending_motion_releases_dispatch_and_deduplicates_until_authoritative_frame(self):
         reply = {**self.host.last_game, "sequence": 11,
                  "ack": {"message": "stock hinged door interaction dispatched closed"}}

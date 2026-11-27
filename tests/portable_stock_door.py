@@ -97,6 +97,8 @@ async def toggle_door(host, guest, actor, pawn, expected_open, *, inspect_during
     authority = observed(authority_frame)
     replica = await wait_resident_status(guest_run, lambda frame: door.matches(observed(frame), authority))
     assert receipt[door.RESULT]["open"] is expected_open
+    observed_at = receipt[door.DELTA]["doors"][actor][door.OBSERVED]
+    assert current[door.OBSERVED] < observed_at <= authority[door.OBSERVED], (current, receipt, authority)
     if inspected:
         # Require an overlapping request on the wire. Where the two replies
         # fall depends on how much hinge travel was left when the runner sent it.

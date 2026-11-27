@@ -14,6 +14,7 @@ from .native_map_preflight import valid_campaign_package
 TAG = "native-stock-door"
 STATE_TAG = TAG + "-state"
 KEY = "native_stock_doors"
+OBSERVED = "observed_at"
 ACTION = "native-stock-door-interact"
 DISPATCH = TAG + "-guest-interact"
 PROJECT = TAG + "-project"
@@ -73,7 +74,7 @@ def matches_local_scope(game, receipt):
 
 
 def parse(fields, phase, area):
-    if (len(fields) != 19 or fields[:2] != [TAG, area] or not matches_area(fields[2], area)
+    if (len(fields) not in (19, 20) or fields[:2] != [TAG, area] or not matches_area(fields[2], area)
             or phase not in ("hosting", "connected") or any(flag not in ("0", "1") for flag in fields[3:6])
             or fields[18] not in ("0", "1", "2", "3", "4", "5")):
         raise ValueError("Invalid stock hinged door frame")
@@ -83,14 +84,19 @@ def parse(fields, phase, area):
     if (any(not -360 <= axis <= 360 for axis in angles) or any(not -10000 <= axis <= 10000 for axis in offsets)
             or any(not -1e7 <= axis <= 1e7 for axis in geometry)):
         raise ValueError("Invalid stock door pose")
-    return (dict(zip(_FLAGS, (flag == "1" for flag in fields[3:6]))) | dict(zip(_ANGLES, angles))
-            | dict(zip(_OFFSET, offsets))
-            | {"panel_location": geometry[:3], "knob_location": geometry[3:], "collision": int(fields[18])})
+    reading = (dict(zip(_FLAGS, (flag == "1" for flag in fields[3:6]))) | dict(zip(_ANGLES, angles))
+               | dict(zip(_OFFSET, offsets))
+               | {"panel_location": geometry[:3], "knob_location": geometry[3:], "collision": int(fields[18])})
+    if len(fields) == 20:
+        if phase != "hosting" or not re.fullmatch(r"[1-9][0-9]{0,15}", fields[19]) or int(fields[19]) >= 2**53:
+            raise ValueError("Invalid stock door observation version")
+        reading[OBSERVED] = int(fields[19])
+    return reading
 
 
 def parse_state(fields, phase, area):
     if fields[0] == STATE_TAG:
-        if len(fields) != 19 or not isinstance(area, str):
+        if len(fields) not in (19, 20) or not isinstance(area, str):
             raise ValueError("Invalid stock hinged door state")
         _, kind, object_name, *values = fields
         actor = f"{kind} {area}.{area.rsplit('/', 1)[-1]}:PersistentLevel.{object_name}"
@@ -119,9 +125,9 @@ def frame(game, epoch, actor=None):
     doors = game.get(KEY, {})
     if actor is not None:
         doors = {actor: doors[actor]} if actor in doors else {}
-    fields = (*_FLAGS, *_ANGLES, *_OFFSET)
+    fields = (*_FLAGS, *_ANGLES, *_OFFSET, OBSERVED)
     return {"map": game["map"], "epoch": epoch, "sequence": game.get("sequence", 0),
-            "doors": {name: {key: row[key] for key in fields} for name, row in doors.items()}} if doors else {}
+            "doors": {name: {key: row[key] for key in fields if key in row} for name, row in doors.items()}} if doors else {}
 
 
 class GuestView:
@@ -146,7 +152,8 @@ class GuestView:
         current = (previous.get("map"), previous.get("epoch")) == self.scope
         rows = previous["doors"] if current else {}
         version = self.receipts.get(actor, (0, None))[0]
-        if sequence < max(self.snapshot_sequence, version) or sequence == version and rows.get(actor) == doors[actor]:
+        observed = rows.get(actor, {}).get(OBSERVED, self.snapshot_sequence)
+        if sequence < max(observed, version) or sequence == version and rows.get(actor) == doors[actor]:
             return
         self.receipts[actor] = sequence, doors[actor]
         gameplay[KEY] = dict(delta, sequence=max(sequence, previous["sequence"]) if current else sequence,
@@ -163,18 +170,27 @@ class GuestView:
                 or type(sequence := snapshot.get("sequence")) is not int):
             return
         self.snapshot_sequence = max(self.snapshot_sequence, sequence)
-        self.receipts = {actor: receipt for actor, receipt in self.receipts.items() if receipt[0] > sequence}
+        rows = snapshot["doors"]
+        for actor, (settled_at, confirmed) in tuple(self.receipts.items()):
+            row = rows.get(actor, {})
+            if (observation_covers(row, settled_at, confirmed) if OBSERVED in row else sequence >= settled_at):
+                del self.receipts[actor]
         if self.receipts:
-            latest = max(version for version, _ in self.receipts.values())
-            rows = {actor: row for actor, (_, row) in self.receipts.items()}
+            latest = max(sequence, *(version for version, _ in self.receipts.values()))
+            kept = {actor: row for actor, (_, row) in self.receipts.items()}
             # Keep the decoded wire baseline intact for the next server delta.
-            gameplay[KEY] = dict(snapshot, sequence=latest, doors=snapshot["doors"] | rows)
+            gameplay[KEY] = dict(snapshot, sequence=latest, doors=rows | kept)
 
 
 def matches(report, desired):
     return (all(report.get(flag) is desired[flag] for flag in _FLAGS)
             and all(abs((report.get(key, math.inf) - desired[key] + 180) % 360 - 180) <= .05 for key in _ANGLES)
             and all(abs(report.get(key, math.inf) - desired[key]) <= .05 for key in _OFFSET))
+
+
+def observation_covers(row, settled_at, confirmed):
+    observed = row[OBSERVED]
+    return observed > settled_at or (observed == settled_at and matches(row, confirmed))
 
 
 async def project(bridge, game, frame, epoch):
@@ -239,7 +255,7 @@ class DoorMotion:
     def settled(self, game):
         row = game.get(KEY, {}).get(self.actor, {})
         return ((game.get("state"), game.get("map")) == ("hosting", self.area)
-                and game.get("sequence", 0) >= self.sequence and row.get("locked") is False
+                and row.get(OBSERVED, game.get("sequence", 0)) >= self.sequence and row.get("locked") is False
                 and row.get("open") is self.opens
                 and (self.destination is None or matches(row, row | self.destination)))
 
@@ -272,20 +288,24 @@ class Interactions:
             self.confirmed_scope = scope
             self.confirmed.clear()
 
-    def world_frame(self, game, epoch):
+    def current_rows(self, game, epoch):
         area = game.get("map")
         self._confirm_scope(area, epoch)
+        sequence, doors = game.get("sequence", 0), game.get(KEY, {})
         if self.confirmed and game.get("state") == "hosting":
-            sequence, doors = game.get("sequence", 0), game.get(KEY, {})
-            for actor, (settled_at, _) in tuple(self.confirmed.items()):
-                if sequence > settled_at:
+            for actor, (settled_at, confirmed) in tuple(self.confirmed.items()):
+                observed = doors.get(actor, {})
+                if (observation_covers(observed, settled_at, confirmed) if OBSERVED in observed else sequence > settled_at):
                     del self.confirmed[actor]
             if self.confirmed:
-                # A native settlement can precede the periodic world frame containing it.
-                latest = max(sequence, *(version for version, _ in self.confirmed.values()))
-                merged = doors | {actor: row for actor, (_, row) in self.confirmed.items()}
-                return frame({**game, KEY: merged, "sequence": latest}, epoch)
-        return frame(game, epoch)
+                # A later world frame may still reuse an earlier observation of this door.
+                sequence = max(sequence, *(version for version, _ in self.confirmed.values()))
+                doors = doors | {actor: row for actor, (_, row) in self.confirmed.items()}
+        return sequence, doors
+
+    def world_frame(self, game, epoch):
+        sequence, doors = self.current_rows(game, epoch)
+        return frame({**game, KEY: doors, "sequence": sequence}, epoch)
 
     async def dispatch(self, host, bridge, character, requested, operation, future):
         epoch, _, actor = requested.partition("@") if isinstance(requested, str) else ("", "", "")
@@ -332,13 +352,14 @@ class Interactions:
         by_dispatch = {motion.dispatch_id: motion for motion in self.pending.values() if motion.dispatch_id}
         for record in records:
             fields = record.decode("utf-8", errors="replace").split("\t")
-            if len(fields) != 23 or fields[0] != "stock-door-settled" or not fields[2].isascii() or not fields[2].isdigit():
+            if len(fields) not in (23, 24) or fields[0] != "stock-door-settled" or not fields[2].isascii() or not fields[2].isdigit():
                 continue
             motion = by_dispatch.get(fields[1])
             if motion is None or fields[6] != motion.actor or len(fields[2]) > 16:
                 continue
             sequence = int(fields[2])
-            if not max(motion.sequence, game.get("sequence", 0)) <= sequence < 2**53:
+            current = game.get(KEY, {}).get(motion.actor, {})
+            if not max(motion.sequence, current.get(OBSERVED, game.get("sequence", 0))) <= sequence < 2**53:
                 continue
             try:
                 elapsed = float(fields[3])
@@ -346,7 +367,7 @@ class Interactions:
             except ValueError:
                 continue
             sample = {"state": "hosting", "map": motion.area, "sequence": sequence, KEY: {motion.actor: observed}}
-            if 0 <= elapsed <= 2000 and motion.settled(sample):
+            if observed.get(OBSERVED, sequence) == sequence and 0 <= elapsed <= 2000 and motion.settled(sample):
                 completed[motion.actor] = sample, elapsed
         for actor, motion in tuple(self.pending.items()):
             in_visit = ((host.zone_epoch, game.get("state"), game.get("map")) == (motion.epoch, "hosting", motion.area)
