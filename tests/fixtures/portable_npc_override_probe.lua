@@ -1552,6 +1552,30 @@ local function track_pursuit()
     view.controller:SetControlRotation(heading(view.camera:K2_GetComponentLocation(), view.actor:K2_GetActorLocation()))
 end
 
+local function pursuit_lane(pawn, actor, weapon, camera)
+    local eye = camera:K2_GetComponentLocation()
+    local forward = camera:GetForwardVector()
+    local center = actor:K2_GetActorLocation()
+    local range = math.sqrt((center.X-eye.X)^2 + (center.Y-eye.Y)^2 + (center.Z-eye.Z)^2) + 100
+    local ahead = {X=eye.X+range*forward.X, Y=eye.Y+range*forward.Y, Z=eye.Z+range*forward.Z}
+    local ignored = {pawn, weapon}
+    local aim = line_hit(pawn, eye, ahead, ignored, 1)
+    local component = aim and aim.Component and aim.Component:Get()
+    if not valid(component) or not same(component:GetOwner(), actor) then return false, "worker outside sight" end
+
+    local muzzle = weapon.Arrow_Muzzle:K2_GetComponentLocation()
+    local point = aim.ImpactPoint
+    local dx, dy, dz = point.X-muzzle.X, point.Y-muzzle.Y, point.Z-muzzle.Z
+    local distance = math.sqrt(dx*dx + dy*dy + dz*dz)
+    if distance < 1 or dx*forward.X + dy*forward.Y + dz*forward.Z < 1 then return false, "worker behind muzzle" end
+    local scale = 1 + 100 / distance
+    local endpoint = {X=muzzle.X+scale*dx, Y=muzzle.Y+scale*dy, Z=muzzle.Z+scale*dz}
+    local contact = line_hit(pawn, muzzle, endpoint, ignored, 2)
+    component = contact and contact.Component and contact.Component:Get()
+    if not valid(component) or not same(component:GetOwner(), actor) then return false, "worker outside muzzle line" end
+    return true, ""
+end
+
 local function pursuit_frame(pawn, world, host, aim)
     local actor = dock_worker(world, live_worker)
     if not valid(actor) or not actor.Alive then return "absent" end
@@ -1587,6 +1611,10 @@ local function pursuit_frame(pawn, world, host, aim)
     local hit = line_hit(shooter, muzzle, target, {shooter, weapon}, 2)
     local component = hit and hit.Component and hit.Component:Get()
     local cover = valid(component) and not same(component:GetOwner(), actor) and component:GetFullName() or ""
+    if aim and cover == "" then
+        local _, lane = pursuit_lane(shooter, actor, weapon, camera)
+        cover = lane
+    end
     return table.concat({vector(point), vector(target), angles(desired), angles(controller:GetControlRotation()),
         angles(camera:K2_GetComponentRotation()), angles(barrel), weapon.Ammo, table.concat(blockers, ","), cover}, ";")
 end
@@ -1598,26 +1626,8 @@ local function fire_pursuing_worker(pawn, world)
     local weapon, camera = pawn.EquipedItem, pawn.Camera
     if not valid(weapon) or not valid(camera) or not valid(weapon.Arrow_Muzzle) then return "weapon unavailable" end
     track_pursuit()
-    local eye = camera:K2_GetComponentLocation()
-    local forward = camera:GetForwardVector()
-    local center = actor:K2_GetActorLocation()
-    local range = math.sqrt((center.X-eye.X)^2 + (center.Y-eye.Y)^2 + (center.Z-eye.Z)^2) + 100
-    local ahead = {X=eye.X+range*forward.X, Y=eye.Y+range*forward.Y, Z=eye.Z+range*forward.Z}
-    local ignored = {pawn, weapon}
-    local aim = line_hit(pawn, eye, ahead, ignored, 1)
-    local component = aim and aim.Component and aim.Component:Get()
-    if not valid(component) or not same(component:GetOwner(), actor) then return "worker outside sight" end
-
-    local muzzle = weapon.Arrow_Muzzle:K2_GetComponentLocation()
-    local point = aim.ImpactPoint
-    local dx, dy, dz = point.X-muzzle.X, point.Y-muzzle.Y, point.Z-muzzle.Z
-    local distance = math.sqrt(dx*dx + dy*dy + dz*dz)
-    if distance < 1 or dx*forward.X + dy*forward.Y + dz*forward.Z < 1 then return "worker behind muzzle" end
-    local scale = 1 + 100 / distance
-    local endpoint = {X=muzzle.X+scale*dx, Y=muzzle.Y+scale*dy, Z=muzzle.Z+scale*dz}
-    local contact = line_hit(pawn, muzzle, endpoint, ignored, 2)
-    component = contact and contact.Component and contact.Component:Get()
-    if not valid(component) or not same(component:GetOwner(), actor) then return "worker outside muzzle line" end
+    local clear, reason = pursuit_lane(pawn, actor, weapon, camera)
+    if not clear then return reason end
 
     local ok, status, sequence, wrappers = SilverfishProbeNativeGuestPrimaryInput(pawn:GetAddress())
     if not ok then return "stock refusal;" .. tostring(status) end

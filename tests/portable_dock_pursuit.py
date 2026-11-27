@@ -177,8 +177,14 @@ async def verify_dock_pursuit(host, guest, frame, command):
             record["attempts"].append(attempt)
             # Read the other seat without spending the guest's firing window waiting for its result.
             shot, authority = await asyncio.gather(trigger(remaining, attempt), command(host, "dock-pursuit-view"))
-            assert authority != "absent", ("The host lost the warehouse worker before the shot was witnessed", history)
-            record["host"] = view_frame(authority)
+            if authority == "absent":
+                # The shot and the live-target observation can arrive in either order.
+                death = await observe()
+                assert shot and not death["alive"] and death["health"] <= 0 and death["credited"], (death, history)
+                record["host"] = None
+                record["death_before_live_view"] = death
+            else:
+                record["host"] = view_frame(authority)
             if shot:
                 record["round"] = shot
                 return record
@@ -254,7 +260,8 @@ async def verify_dock_pursuit(host, guest, frame, command):
                 break
             view = await fire_round(remaining, 1 if remaining % 2 == 0 else -1)
             remaining = view["round"]["after"]
-            moved = moved or all(math.dist(history[0][seat]["seat"], view[seat]["seat"]) > 45 for seat in ("host", "guest"))
+            if view["host"]:
+                moved = moved or all(math.dist(history[0][seat]["seat"], view[seat]["seat"]) > 45 for seat in ("host", "guest"))
             before = current["health"]
             deadline = time.monotonic() + HOST_HIT_OBSERVATION_SECONDS
             while True:
