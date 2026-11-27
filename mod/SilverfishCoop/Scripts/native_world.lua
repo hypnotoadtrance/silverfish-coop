@@ -22,7 +22,6 @@ local max_offers_per_bucket = 24
 local gameplay_statics_path = "/Script/Engine.Default__GameplayStatics"
 local quest_library_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C"
 local quest_id = "Jmr_CrossRoads"
-local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local authored_routes = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
@@ -344,48 +343,9 @@ local function same_quest(first, second)
         and first.final_step == second.final_step and first.reward == second.reward
 end
 
-local function exact_actor(class, world, actor_name)
-    local match
-    for _, actor in ipairs(FindAllOf(class) or {}) do
-        if valid(actor) and actor:HasAuthority() and actor:GetFullName():match(":" .. "PersistentLevel%." .. actor_name .. "$") then
-            local actor_world = actor:GetWorld()
-            if valid(actor_world) and actor_world:GetAddress() == world:GetAddress() then
-                if match then error("The authored objective actor is ambiguous", 0) end
-                match = actor
-            end
-        end
-    end
-    return match
-end
-
-local function signal_authored_jammer(state, pawn)
-    if state.map ~= crossroads or not authored_routes then error("The CrossRoads objective is unavailable", 0) end
-    local world = pawn:GetWorld()
-    local trigger = exact_actor("Quest_Trigger_BP_C", world, "Quest_Trigger_BP_C_1")
-    local jammer = exact_actor("SignalJammer_BP_C", world, "SignalJammer_BP_C_1")
-    if not trigger or not jammer or not trigger.ForceComplete or trigger.Target_QuestStep ~= -1
-        or trigger.Add_QuestStep ~= 1 or trigger.TrackedQuest.RowName:ToString() ~= quest_id then
-        error("The authored jammer objective could not be qualified", 0)
-    end
-    local receivers = jammer.Activate_OnDeath
-    if #receivers ~= 1 or not valid(receivers[1]) or receivers[1]:GetAddress() ~= trigger:GetAddress() then
-        error("The stock jammer does not target this objective actor", 0)
-    end
-    trigger:Send_PowerSignal(true, jammer)
-end
-
 function native_world.command(fields, state, phase)
-    local action = fields[2]
-    if action ~= "quest-probe" and action ~= "native-quest-project" and action ~= "native-quest-turn-in"
-        and action ~= "native-quest-trigger" then
-        return nil
-    end
-    local target_step = action == "native-quest-project" and #fields == 3 and tonumber(fields[3])
-    if action == "native-quest-project" then
-        if target_step ~= 1 and target_step ~= 2 and target_step ~= -10 then error("Invalid quest projection", 0) end
-    elseif #fields ~= 2 then
-        error("Invalid native quest command", 0)
-    end
+    if fields[2] ~= "quest-probe" then return end
+    if #fields ~= 2 then error("Invalid native quest probe", 0) end
     local pawn = host_pawn(state, phase)
     if not pawn then error("Only the active test-map host can probe the stock quest", 0) end
 
@@ -397,28 +357,6 @@ function native_world.command(fields, state, phase)
     if not same_quest(before, live_quest(instance, key)) then
         error("Stock quest lookup disagrees with the authoritative quest map", 0)
     end
-    if action == "native-quest-turn-in" then
-        if before.state == "completed" then return "native quest already turned in" end
-        if before.step ~= before.final_step or before.step ~= 2 or before.reward ~= 200 then
-            error("The stock objective has not been completed", 0)
-        end
-        local result = {}
-        library:TurnIn_Quest(key, instance, true, pawn, result, result)
-        cached_rows = nil
-        if result.Success ~= true or live_quest(instance, key).state ~= "completed" then
-            error("The stock quest did not accept turn-in", 0)
-        end
-        return "native quest turned in and verified"
-    end
-
-    if action == "native-quest-trigger" then
-        if before.step ~= 1 then error("Start the authored quest before powering its objective", 0) end
-        signal_authored_jammer(state, pawn)
-        cached_rows = nil
-        if live_quest(instance, key).step ~= 2 then error("The authored objective did not advance", 0) end
-        return "authored objective signal advanced the stock quest"
-    end
-
     if before.state == "missing" then
         instance:AddQuest_ByName(key)
         before = live_quest(instance, key)
@@ -426,13 +364,10 @@ function native_world.command(fields, state, phase)
     if before.final_step ~= 2 or before.reward ~= 200 then
         error("The stock quest does not match the staged table row", 0)
     end
-    if target_step and target_step ~= before.step then
-        library:AddStep_ToQuest(key, target_step - before.step, instance, pawn)
-    end
     cached_rows = nil
     local after = reflected_quest(library, instance, pawn, key)
-    if not same_quest(after, live_quest(instance, key)) or (target_step and after.step ~= target_step) then
-        error("Native quest projection failed verification", 0)
+    if not same_quest(after, live_quest(instance, key)) then
+        error("Native quest probe failed verification", 0)
     end
     return "native quest state verified"
 end

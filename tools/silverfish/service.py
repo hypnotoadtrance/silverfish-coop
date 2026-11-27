@@ -2605,7 +2605,6 @@ class Host:
             await native_subway_valve.settle(self, bridge)
             if not self.fixtures:
                 return
-            await native_quest.project(self, bridge)
             if self.native_guest:
                 await self.native_pickup.restore(self, bridge)
             money = self.party["economy"]["wallet"]
@@ -3622,7 +3621,7 @@ class Host:
                     catalog = await self.read_quest_catalog(bridge)
                     result = {"native_quest_catalog": catalog} if action == "native-quest-catalog" else {
                         "native_quest_page": native_quest_catalog.page(catalog, request.get("target"))}
-                elif action in ("native-quest-start", "native-quest-objective", "native-quest-turnin"):
+                elif action in ("native-quest-start", "native-quest-turnin"):
                     result = await native_quest.action(self, bridge, "host", action, request.get("target"))
                 elif action == native_subway_valve.PREFLIGHT:
                     result = await native_subway_valve.preflight(self, bridge, "host", request.get("target"))

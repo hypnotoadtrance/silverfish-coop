@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock, call
 from tools.silverfish import native_authored_pickup as pickup
 from tools.silverfish import native_black_box as black_box
 from tools.silverfish import native_computer_board as collections
-from tools.silverfish import native_quest, native_rewards, native_wire_board, party
+from tools.silverfish import native_board_contract, native_quest, native_rewards, native_wire_board, party
 from tools.silverfish.runtime import Bridge
 from tools.silverfish.travel import BLACK_MARKET, OBSERVATORY
 
@@ -76,12 +76,15 @@ class BlackBoxSettlementTests(unittest.IsolatedAsyncioTestCase):
                               (black_box.MAP, "native_black_box_unavailable")):
             with self.subTest(area=area), self.assertRaisesRegex(party.RuleError, refusal):
                 await native_quest.action(scoped_host(area), bridge, OWNER, "native-quest-turnin", SPEC.quest_id)
-        host = scoped_host(OBSERVATORY)
-        host.fixtures = True
-        host.authoritative_pawns = lambda roles: {OWNER: PAWN}
-        with self.assertRaisesRegex(party.RuleError, "unknown_native_quest"):
-            await native_quest.action(host, bridge, OWNER, "native-quest-turnin", SPEC.quest_id + "_1")
         bridge.command.assert_not_awaited()
+        host = scoped_host(OBSERVATORY)
+        host.allowed_maps = {OBSERVATORY}
+        bridge.command.side_effect = RuntimeError("stock_board_contract_wrong_turnin")
+        lookalike = SPEC.quest_id + "_1"
+        with self.assertRaisesRegex(party.RuleError, "stock_board_contract_wrong_turnin"):
+            await native_quest.action(host, bridge, OWNER, "native-quest-turnin", lookalike)
+        bridge.command.assert_awaited_once_with(native_board_contract.COMMAND, "turnin", "inspect", PAWN,
+                                               collections.BOARDS[OBSERVATORY], lookalike, timeout=5)
 
     async def test_exact_placed_recording_is_consumed_once_and_guest_save_is_retained(self):
         host = scoped_host(OBSERVATORY)

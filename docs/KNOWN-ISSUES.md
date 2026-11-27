@@ -176,11 +176,12 @@ Build `rc-e78fc64` verified three successive guest Bandage grants over Direct IP
 
 ## Current priorities
 
-1. Improve the main-menu, hosting, and joining flow using stock controls. Verify the new Manage Saves flow and rendered navigation with players.
-2. Improve host and guest frame pacing, local interaction response, and network latency during play. Compare Observatory and Crossroads under load, track packet volume and queue delays, and work toward a 100 ms round trip where the connection allows it. Ordinary map loading time is a lower priority. Keep transition bugs that interrupt the session or leave the party behind in the functional backlog.
-3. Return to visual and animation polish after the performance and UI/UX passes. Gameplay regressions stay in the functional backlog.
-4. Expand compatibility through the stock game’s runtime discovery. Read live quest offers, progress, rewards, and map transitions from the game’s existing data and events. Discover items and interactables by their stock classes and supported interfaces. Keep standard behavior shared across maps and mod content, and document which custom scripts need explicit integration.
-5. Add an optional update check for the latest published GitHub release candidate.
+1. Audit quest, item, inventory, and world interactions for older paths superseded by the shared handlers. Remove redundant code together with its hooks and test fixtures after verifying the normal gameplay path. Keep dedicated handlers while they implement a distinct stock behavior.
+2. Improve the main-menu, hosting, and joining flow using stock controls. Verify the new Manage Saves flow and rendered navigation with players.
+3. Improve host and guest frame pacing, local interaction response, and network latency during play. Compare Observatory and Crossroads under load, track packet volume and queue delays, and work toward a 100 ms round trip where the connection allows it. Ordinary map loading time is a lower priority. Keep transition bugs that interrupt the session or leave the party behind in the functional backlog.
+4. Return to visual and animation polish after the performance and UI/UX passes. Gameplay regressions stay in the functional backlog.
+5. Expand compatibility through the stock game’s runtime discovery. Read live quest offers, progress, rewards, and map transitions from the game’s existing data and events. Discover items and interactables by their stock classes and supported interfaces. Keep standard behavior shared across maps and mod content, and document which custom scripts need explicit integration.
+6. Add an optional update check for the latest published GitHub release candidate.
 
 ### Compatibility with game updates and content mods
 

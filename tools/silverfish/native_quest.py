@@ -1,50 +1,15 @@
-"""Host-owned actions for the staged Signal Jammer quest."""
+"""Route stock board actions to the live contract and authored objective handlers."""
 
-from . import native_broker, native_computer_board, native_flood_jammer, native_meet_broker, native_wire_quest, native_rewards, native_turret_photo, party
+from . import native_broker, native_computer_board, native_flood_jammer, native_meet_broker, native_wire_quest, native_turret_photo, party
 from . import native_board_contract, native_mosby_tape, native_prototype_drill, native_subway_valve
-from .travel import CROSSROADS
 
-QUEST_ID = "Jmr_CrossRoads"
-STARTED = 1
-READY = 2
 COMPLETED = -10
-REWARD_CASH = 200
-REWARD_XP = 1
 
 AUTHORED_BOARD_ACTIONS = frozenset({
     native_subway_valve.QUEST, native_mosby_tape.MOSBY_QUEST, native_prototype_drill.QUEST_ID,
     native_meet_broker.QUEST_ID, native_wire_quest.QUEST_ID, native_turret_photo.QUEST_ID,
     *native_computer_board.CONTRACTS, *native_flood_jammer.CONTRACTS, *native_broker.QUESTS,
 })
-
-
-def _stock_step(snapshot: dict) -> int | None:
-    quest = snapshot.get("native_quest", {})
-    if quest.get("id") == QUEST_ID and quest.get("reward_cash") == str(REWARD_CASH):
-        try:
-            return int(quest["step"])
-        except (KeyError, TypeError, ValueError):
-            pass
-    return None
-
-
-def _record(host, actor: str, step: int, eligible: set[str]) -> dict:
-    candidate = party.load_party(host.party)
-    record = {"quest_id": QUEST_ID, "step": step, "actor": actor}
-    if step == COMPLETED:
-        recipients = sorted(eligible & candidate["players"].keys())
-        for character in recipients:
-            player = candidate["players"][character]
-            player["quest_xp"] = player.get("quest_xp", 0) + REWARD_XP
-            if character != "host":
-                native_rewards.queue(player, REWARD_XP)
-        candidate["economy"]["wallet"] += REWARD_CASH
-        record.update(recipients=recipients, xp=REWARD_XP, cash=REWARD_CASH,
-                      wallet=candidate["economy"]["wallet"])
-    candidate.setdefault("native_quests", {})[QUEST_ID] = record
-    host.checkpoint(candidate)
-    host.party = candidate
-    return record
 
 
 async def action(host, bridge, actor: str, verb: str, target: str | None) -> dict:
@@ -98,50 +63,4 @@ async def action(host, bridge, actor: str, verb: str, target: str | None) -> dic
     if native_board_contract.quest_id(target) and stock_verb:
         return await native_board_contract.perform(
             host, bridge, actor, verb.removeprefix("native-quest-"), target, board=board, visit=visit)
-    roles = host.roles()
-    player = host.party["players"].get(actor)
-    if (not host.fixtures or not player or actor not in host.authoritative_pawns(roles)
-            or host.party["wipe"] or host.transitioning):
-        raise party.RuleError("native_quest_unavailable")
-    if player["downed"]:
-        raise party.RuleError("actor_downed")
-    if target != QUEST_ID:
-        raise party.RuleError("unknown_native_quest")
-
-    current = host.party.get("native_quests", {}).get(QUEST_ID)
-    old_step = current["step"] if current else None
-    if verb == "native-quest-start":
-        step = old_step if current else STARTED
-        if current:
-            return {"effect": "native_quest_present", **current}
-        command = ("native-quest-project", str(step))
-    elif verb == "native-quest-objective" and actor == "host":
-        if old_step not in (STARTED, READY):
-            raise party.RuleError("native_quest_not_active")
-        step = READY
-        command = (("native-quest-trigger",) if host.last_game["map"] == CROSSROADS and old_step != READY
-                   else ("native-quest-project", str(step)))
-    elif verb == "native-quest-turnin":
-        if old_step == COMPLETED:
-            return {"effect": "native_quest_already_settled", **current}
-        if old_step != READY:
-            raise party.RuleError("native_quest_objective_incomplete")
-        step = COMPLETED
-        command = ("native-quest-turn-in",)
-    else:
-        raise party.RuleError("native_quest_action_unavailable")
-
-    snapshot = await bridge.command(*command, timeout=4)
-    if _stock_step(snapshot) != step:
-        raise RuntimeError("Stock quest read-back differs from the requested state")
-    return {"effect": "native_quest_changed", **_record(host, actor, step, set(roles.values()))}
-
-
-async def project(host, bridge) -> None:
-    quest = host.party.get("native_quests", {}).get(QUEST_ID)
-    observed = _stock_step(host.last_game)
-    if quest and observed != quest["step"]:
-        if (quest["step"], observed) in ((STARTED, READY), (READY, COMPLETED)):
-            _record(host, "world", observed, set(host.roles().values()))
-        else:
-            await bridge.command("native-quest-project", str(quest["step"]), timeout=4)
+    raise party.RuleError("unknown_native_quest")

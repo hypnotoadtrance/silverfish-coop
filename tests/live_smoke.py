@@ -90,7 +90,6 @@ options.add_argument("--native-loot-input", action="store_true", help="open the 
 options.add_argument("--native-loot-matrix", action="store_true", help="verify two CrossRoads crates and one in Dead Bridge")
 options.add_argument("--native-loot-nonempty", action="store_true", help="use a deterministic stock crate test draw")
 options.add_argument("--native-world-loot", action="store_true", help="claim a physical stock crate item through Interact")
-options.add_argument("--native-quest-flow", action="store_true", help="exercise stock quest turn-in and party rewards")
 options.add_argument("--native-quest-catalog", action="store_true", help="read the current native quest catalog")
 options.add_argument("--native-meet-broker", action="store_true", help="verify the stock Black Market board and personal starter rewards")
 options.add_argument("--native-broker", action="store_true", help="exercise the stock Manifest quest and Broker redemption")
@@ -167,8 +166,8 @@ if args.native_loot_nonempty and not args.native_loot:
     options.error("--native-loot-nonempty requires --native-loot")
 if args.native_world_loot and not (args.native_loot_nonempty and args.native_zones):
     options.error("--native-world-loot requires --native-zones and a deterministic native loot draw")
-if args.native_shop and not (args.native_guest and args.native_quest_flow):
-    options.error("--native-shop requires --native-guest and --native-quest-flow")
+if args.native_shop and not args.native_guest:
+    options.error("--native-shop requires --native-guest")
 broker_map = args.native_broker or args.native_meet_broker
 if broker_map and (not args.native_zones or any((args.authored_zone, args.native_door, args.observatory_zone,
                                                args.native_gold, args.native_blue, args.native_red,
@@ -1340,7 +1339,7 @@ async def smoke():
     try:
         fixture_test = any((args.gameplay, args.native_probe, args.native_quest, args.wipe,
                             args.native_death, args.native_damage, args.native_inventory, args.native_guest,
-                            args.native_zones, args.native_quest_flow))
+                            args.native_zones))
         fixtures = ["--fixtures"] if fixture_test else []
         if args.native_backend == "cpp-scoped" or args.native_guest:
             fixtures += ["--native-events"]
@@ -2008,35 +2007,18 @@ async def smoke():
                     await wait(run, lambda state: awarded["guid"] in state["gameplay"].get("native_inventory_projected", []))
                     note("native_wipe_removes_and_recovers_the_owner_item", {"bag": bag, "item": awarded["guid"],
                                                                              "native_health": native_health})
-        if args.native_quest_flow:
-            quest_target = ("--target", "Jmr_CrossRoads")
-            player = ("action", "--profile", profile)
-            authority = ("action", "--campaign", campaign)
-            started = await command(*player, "native-quest-start", *quest_target)
-            assert started["step"] == 1 and started["actor"] == chosen
-            refused = await command(*player, "native-quest-turnin", *quest_target, check=False)
-            assert refused["error"] == "native_quest_objective_incomplete", refused
-            progressed = await command(*authority, "native-quest-objective", *quest_target)
-            assert progressed["step"] == 2
-            settled = await command(*player, "native-quest-turnin", *quest_target)
-            assert settled["step"] == -10 and settled["wallet"] == 200
-            assert set(settled["recipients"]) == {"host", chosen}
-            duplicate = await command(*player, "native-quest-turnin", *quest_target)
-            assert duplicate["effect"] == "native_quest_already_settled" and duplicate["wallet"] == 200
-            await wait(client_run, lambda state: (state.get("gameplay", {}).get("native_quests", {})
-                                                  .get("Jmr_CrossRoads", {}).get("step")) == -10)
-            note("stock_quest_settled_once_for_whole_party", settled)
-            expected_wallet = 200
-            if args.native_shop:
-                shop_id = "Shop_BP_C_1"
-                await command(*authority, "native-shop-approach", "--target", shop_id)
-                purchase = (*player, "native-shop-buy", "--target", shop_id, "--operation-id", uuid.uuid4().hex)
-                bought = await command(*purchase)
-                assert bought["wallet"] == expected_wallet - bought["price"] and bought["item"]["ammo"] == 1
-                replay = await command(*purchase)
-                assert replay["guid"] == bought["guid"] and replay["wallet"] == bought["wallet"]
-                expected_wallet = bought["wallet"]
-                note("stock_merchant_checkout_uses_shared_wallet", bought)
+        if args.native_shop:
+            wallet = await wait(run, lambda state: type(state.get("game", {}).get("native_wallet")) is int)
+            balance = wallet["game"]["native_wallet"]
+            shop_id = "Shop_BP_C_1"
+            await command("action", "--campaign", campaign, "native-shop-approach", "--target", shop_id)
+            purchase = ("action", "--profile", profile, "native-shop-buy", "--target", shop_id,
+                        "--operation-id", uuid.uuid4().hex)
+            bought = await command(*purchase)
+            assert bought["wallet"] == balance - bought["price"] and bought["item"]["ammo"] == 1
+            replay = await command(*purchase)
+            assert replay["guid"] == bought["guid"] and replay["wallet"] == bought["wallet"]
+            note("stock_merchant_checkout_uses_shared_wallet", bought)
         if args.native_acid:
             await exercise_acid(command, wait, note, run, client_run, campaign, profile, chosen)
         winner = await gameplay_slice(host_status, chosen) if args.gameplay else None
@@ -2457,14 +2439,10 @@ async def smoke():
                 note("detached_guest_native_inventory_survives_in_its_own_save", {
                     "frame": detached_frame, "proof": proof, "item_guid": awarded["guid"],
                 })
-        if args.native_quest_flow:
-            restored_quest = await wait(run, lambda state: state["game"].get("native_quest", {})
-                                        .get("state") == "completed" and state["game"].get("native_wallet") == expected_wallet)
-            assert restored_quest["gameplay"]["players"]["guest"]["quest_xp"] == 1
-            note("stock_quest_and_rewards_restored_after_restart", restored_quest["game"]["native_quest"])
-            if args.native_shop:
-                assert bought["guid"] in restored_quest["gameplay"]["players"]["guest"]["native_inventory"]
-                await wait(run, lambda state: bought["guid"] in state["gameplay"].get("native_inventory_projected", []))
+        if args.native_shop:
+            restored_shop = await wait(run, lambda state: state["game"].get("native_wallet") == bought["wallet"])
+            assert bought["guid"] in restored_shop["gameplay"]["players"]["guest"]["native_inventory"]
+            await wait(run, lambda state: bought["guid"] in state["gameplay"].get("native_inventory_projected", []))
         if args.gameplay:
             restored_party = await wait(client_run, lambda state: state.get("gameplay", {}).get("loot", {})
                                         .get("claimed_by") and state["host_session"] == restored["generation"]

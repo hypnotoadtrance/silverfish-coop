@@ -33,7 +33,7 @@ The live check invokes native direct damage against a transient independent gues
 
 ```powershell
 & $sfPython tests/live_smoke.py --work $sfCppLab --native-inventory --native-damage --native-backend cpp-scoped --vanilla-saved "$env:LOCALAPPDATA\SilverFish\Saved"
-& $sfPython tests/live_smoke.py --work $sfCppLab --native-guest --native-pair --native-pickup --native-wipe --native-quest-flow --native-shop --vanilla-saved "$env:LOCALAPPDATA\SilverFish\Saved"
+& $sfPython tests/live_smoke.py --work $sfCppLab --native-guest --native-pair --native-pickup --native-wipe --native-shop --vanilla-saved "$env:LOCALAPPDATA\SilverFish\Saved"
 & $sfPython tests/live_smoke.py --work $sfCppLab --native-guest --native-pair --native-fall --native-roster --native-pickup --native-guest-save --zones --vanilla-saved "$env:LOCALAPPDATA\SilverFish\Saved"
 ```
 
