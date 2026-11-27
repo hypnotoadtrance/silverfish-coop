@@ -5528,6 +5528,7 @@ class Client:
         self.last_lockpick_result = 0
         self.pending_lockpick_unlocks = set()
         self.stock_door_requests = {}
+        self.stock_door_view = native_stock_door.GuestView()
         self.stock_pickup_slots = asyncio.Semaphore(_LOCAL_STOCK_PICKUP_REQUESTS)
         self.last_broker_intent = 0
         self.wire_board = native_wire_board.WireBoardView(bridge, control) if invite.get("native_wire_board") else None
@@ -5941,11 +5942,17 @@ class Client:
                            or action == native_loot.LOCKPICK and native_stock_door.DELTA in reply):
                 await self.cancel_gameplay_snapshot()
                 actor = target.split("@", 2)[1] if action == native_loot.LOCKPICK else target.rsplit("@", 1)[-1]
-                delta = native_stock_door.accept_delta(self.gameplay, reply.get(native_stock_door.DELTA),
-                                                       area, epoch, actor)
+                if (self.last_game.get("map"), self.zone_epoch, self.host_session) == (area, epoch, session):
+                    delta = self.stock_door_view.accept(self.gameplay, reply.get(native_stock_door.DELTA),
+                                                        area, epoch, actor)
+                else:
+                    delta = None
                 if delta and not self.needs_travel and not self.server_transitioning:
+                    game = self.last_game
                     try:
-                        self.last_game = await native_stock_door.project(self.bridge, self.last_game, delta, epoch)
+                        projected = await native_stock_door.project(self.bridge, game, delta, epoch)
+                        if self.last_game is game and (self.zone_epoch, self.host_session) == (epoch, session):
+                            self.last_game = projected
                     except (OSError, RuntimeError, TimeoutError) as error:
                         self.control.event("native_stock_door_projection_deferred", reason=str(error))
             if target and action in native_stock_switch.ACTIONS and action != native_stock_switch.REPORT:
@@ -6604,7 +6611,7 @@ class Client:
                 self.snapshot_request = None
                 if reply.get("ok"):
                     gameplay = self.gameplay_snapshots.read(reply)
-                    native_stock_door.preserve_newer_frame(self.gameplay, gameplay)
+                    self.stock_door_view.reconcile(gameplay, reply["zone"], reply["zone_epoch"])
                     self.gameplay = gameplay
                     viewer = reply.get("viewer_role")
                     if viewer in ("guest", "guest2", "guest3", "guest4"):

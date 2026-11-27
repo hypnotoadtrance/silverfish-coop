@@ -124,30 +124,48 @@ def frame(game, epoch, actor=None):
             "doors": {name: {key: row[key] for key in fields} for name, row in doors.items()}} if doors else {}
 
 
-def accept_delta(gameplay, delta, area, epoch, actor):
-    if (not isinstance(delta, dict) or (delta.get("map"), delta.get("epoch")) != (area, epoch)
-            or not isinstance(doors := delta.get("doors"), dict) or set(doors) != {actor}
-            or not matches_area(actor, area) or type(sequence := delta.get("sequence")) is not int or sequence <= 0):
-        return
-    previous = gameplay.get(KEY, {})
-    if (previous.get("map"), previous.get("epoch")) != (area, epoch):
-        gameplay[KEY] = delta
-    elif (sequence > previous.get("sequence", 0)
-          or sequence == previous.get("sequence") and previous["doors"].get(actor) != doors[actor]):
-        gameplay[KEY] = dict(delta, doors=previous["doors"] | doors)
-    else:
-        return
-    return delta
+class GuestView:
+    def __init__(self):
+        self.scope = None
+        self.snapshot_sequence = 0
+        self.receipts = {}
 
+    def _visit(self, area, epoch):
+        if (area, epoch) != self.scope:
+            self.scope = area, epoch
+            self.snapshot_sequence = 0
+            self.receipts.clear()
 
-def preserve_newer_frame(previous_gameplay, gameplay):
-    before, after = previous_gameplay.get(KEY), gameplay.get(KEY)
-    if (isinstance(before, dict) and isinstance(after, dict)
-            and (before.get("map"), before.get("epoch")) == (after.get("map"), after.get("epoch"))
-            and type(before.get("sequence")) is int and type(after.get("sequence")) is int
-            and before["sequence"] > after["sequence"]):
-        # Preserve the live door view while the snapshot decoder keeps its unmodified wire baseline.
-        gameplay[KEY] = before
+    def accept(self, gameplay, delta, area, epoch, actor):
+        if (not isinstance(delta, dict) or (delta.get("map"), delta.get("epoch")) != (area, epoch)
+                or not isinstance(doors := delta.get("doors"), dict) or doors.keys() != {actor}
+                or not matches_area(actor, area) or type(sequence := delta.get("sequence")) is not int or sequence <= 0):
+            return
+        self._visit(area, epoch)
+        previous = gameplay.get(KEY, {})
+        current = (previous.get("map"), previous.get("epoch")) == self.scope
+        rows = previous["doors"] if current else {}
+        version = self.receipts.get(actor, (0, None))[0]
+        if sequence < max(self.snapshot_sequence, version) or sequence == version and rows.get(actor) == doors[actor]:
+            return
+        self.receipts[actor] = sequence, doors[actor]
+        gameplay[KEY] = dict(delta, sequence=max(sequence, previous["sequence"]) if current else sequence,
+                             doors=rows | doors)
+        return delta
+
+    def reconcile(self, gameplay, area, epoch):
+        self._visit(area, epoch)
+        snapshot = gameplay.get(KEY)
+        if (not isinstance(snapshot, dict) or (snapshot.get("map"), snapshot.get("epoch")) != self.scope
+                or type(sequence := snapshot.get("sequence")) is not int):
+            return
+        self.snapshot_sequence = max(self.snapshot_sequence, sequence)
+        self.receipts = {actor: receipt for actor, receipt in self.receipts.items() if receipt[0] > sequence}
+        if self.receipts:
+            latest = max(version for version, _ in self.receipts.values())
+            rows = {actor: row for actor, (_, row) in self.receipts.items()}
+            # Keep the decoded wire baseline intact for the next server delta.
+            gameplay[KEY] = dict(snapshot, sequence=latest, doors=snapshot["doors"] | rows)
 
 
 def matches(report, desired):

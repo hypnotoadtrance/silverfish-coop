@@ -169,16 +169,34 @@ class StockDoorActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await pending, {"ok": False, "error": "stock_door_scope_unavailable"})
         self.assertFalse(self.host.party["receipts"]["guest"])
 
-    def test_same_host_frame_applies_both_door_receipts(self):
+    def test_receipts_are_ordered_per_door_and_reconciled_against_snapshots(self):
         other = self.actor.replace("_1719", "_1720")
-        delta = {"map": CROSSROADS, "epoch": self.epoch, "sequence": 9}
-        gameplay = {door.KEY: {**delta, "sequence": 8, "doors": {other: self.closed}}}
-        self.assertIsNotNone(door.accept_delta(gameplay, {**delta, "doors": {self.actor: self.closed}},
-                                               CROSSROADS, self.epoch, self.actor))
+        visit = {"map": CROSSROADS, "epoch": self.epoch}
+        view = door.GuestView()
+        baseline = {**visit, "sequence": 8, "doors": {self.actor: self.closed, other: self.closed}}
+        gameplay = {door.KEY: baseline}
+        view.reconcile(gameplay, CROSSROADS, self.epoch)
         opened = dict(self.closed, open=True, yaw=90)
-        self.assertIsNotNone(door.accept_delta(gameplay, {**delta, "doors": {other: opened}},
-                                               CROSSROADS, self.epoch, other))
-        self.assertEqual(gameplay[door.KEY]["doors"], {self.actor: self.closed, other: opened})
+        newer = {**visit, "sequence": 10, "doors": {self.actor: opened}}
+        earlier = {**visit, "sequence": 9, "doors": {other: opened}}
+        self.assertEqual(view.accept(gameplay, newer, CROSSROADS, self.epoch, self.actor), newer)
+        self.assertEqual(view.accept(gameplay, earlier, CROSSROADS, self.epoch, other), earlier)
+        self.assertEqual(gameplay[door.KEY]["doors"], {self.actor: opened, other: opened})
+        self.assertIsNone(view.accept(gameplay, {**earlier, "doors": {self.actor: self.closed}},
+                                      CROSSROADS, self.epoch, self.actor))
+
+        snapshot = {**baseline, "sequence": 9, "doors": {self.actor: self.closed, other: opened}}
+        gameplay = {door.KEY: snapshot}
+        view.reconcile(gameplay, CROSSROADS, self.epoch)
+        self.assertEqual(gameplay[door.KEY]["doors"], {self.actor: opened, other: opened})
+        self.assertEqual(snapshot["doors"][self.actor], self.closed)
+        self.assertNotIn(other, view.receipts)
+
+        snapshot = {**baseline, "sequence": 11}
+        gameplay = {door.KEY: snapshot}
+        view.reconcile(gameplay, CROSSROADS, self.epoch)
+        self.assertEqual(gameplay[door.KEY], snapshot)
+        self.assertIsNone(view.accept(gameplay, newer, CROSSROADS, self.epoch, self.actor))
 
     async def test_compact_projection_applies_only_verified_doors_and_keeps_other_world_state(self):
         other = self.actor.replace("_1719", "_1720")

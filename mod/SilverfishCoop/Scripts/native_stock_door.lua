@@ -17,7 +17,8 @@ local motions, confirmations = {}, {}
 local confirmation_sequence, confirmation_row
 local move_component = "/Script/Engine.KismetSystemLibrary:MoveComponentTo"
 local clock, math_library
-local motion_probe, preview
+local motion_probe
+local previews = {}
 
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -165,9 +166,9 @@ local function apply(actor, arrow, expected)
     actor.Locked, actor.LockBroken, actor.Open = expected[1], expected[2], expected[3]
 end
 
-local function clear_preview()
-    local prior = preview
-    preview = nil
+local function clear_preview(name)
+    local prior = previews[name]
+    previews[name] = nil
     if not prior or not valid(prior.actor) or prior.actor:IsActorBeingDestroyed() then return end
     if valid(prior.panel) and prior.hidden then prior.panel:SetVisibility(true, false) end
     if valid(prior.mesh) then prior.mesh:K2_DestroyComponent(prior.actor) end
@@ -237,7 +238,7 @@ local function start_preview(name)
             rotation = {Pitch = before[4], Yaw = before[5], Roll = before[6]}},
         goal = {location = {X = location.X, Y = location.Y, Z = location.Z},
             rotation = {Pitch = rotation.Pitch, Yaw = rotation.Yaw, Roll = rotation.Roll}}}
-    preview = entry
+    previews[name] = entry
     local root = actor.RootComponent
     local pivot = preview_component(entry, "pivot", stock_class("/Script/Engine.SceneComponent"), root,
         math_library:MakeRelativeTransform(arrow:K2_GetComponentToWorld(), root:K2_GetComponentToWorld()))
@@ -254,10 +255,13 @@ end
 
 function doors.preview_input(pawn, target)
     local name = type(target) == "string" and target:match("^stock%-door:(.+)$")
-    if not name or preview or active_phase ~= "connected" or not same(active_world, pawn:GetWorld())
+    if not name or previews[name] or active_phase ~= "connected" or not same(active_world, pawn:GetWorld())
         or not valid(clock) or not valid(math_library) then return end
+    local count = 0
+    for _ in pairs(previews) do count = count + 1 end
+    if count >= 4 then return end
     local ok, started = pcall(start_preview, name)
-    if not ok or not started then pcall(clear_preview) end
+    if not ok or not started then pcall(clear_preview, name) end
 end
 
 function doors.play_motion(state, pawn, fields)
@@ -279,13 +283,14 @@ function doors.play_motion(state, pawn, fields)
     if (listener.X - hinge.X)^2 + (listener.Y - hinge.Y)^2 + (listener.Z - hinge.Z)^2 > 12000^2 then return false end
     local before = pose(actor, arrow)
     if not before then return false end
-    if preview and preview.name == name then
+    local preview = previews[name]
+    if preview then
         local goal = preview.goal
         if preview.opens ~= opens or math.abs(goal.location.X - x) > .05 or math.abs(goal.location.Y - y) > .05
             or math.abs(goal.location.Z - z) > .05 or math.abs((goal.rotation.Pitch - pitch + 180) % 360 - 180) > .05
             or math.abs((goal.rotation.Yaw - yaw + 180) % 360 - 180) > .05
             or math.abs((goal.rotation.Roll - roll + 180) % 360 - 180) > .05 then
-            clear_preview()
+            clear_preview(name)
         else
             preview.deadline = math.max(preview.deadline, clock:GetRealTimeSeconds(state.world) + duration + .2)
         end
@@ -351,8 +356,9 @@ local function project(fields, state, phase, status_row)
         if row.record and sampler and sampler.actors == known then
             sampler.readings[name], sampler.samples[name] = row.record, nil
         end
-        if preview and preview.name == name and (row.expected[1] or row.expected[3] == preview.opens) then
-            clear_preview()
+        local preview = previews[name]
+        if preview and (row.expected[1] or row.expected[3] == preview.opens) then
+            clear_preview(name)
         end
     end
     return "stock door flags and hinge transform synchronized" .. (#deferred > 0 and "|" .. table.concat(deferred, "|") or ""), records
@@ -481,16 +487,16 @@ function doors.start(report_motion, next_sequence, status_row)
     end
     LoopInGameThreadWithDelay(16, function()
         if type(SilverfishNativeListenTravelPending) == "function" and SilverfishNativeListenTravelPending() then return end
-        if preview then
+        for name, preview in pairs(previews) do
             local ok, alive = pcall(function()
                 if active_phase ~= "connected" or not valid(active_world) or not valid(preview.pivot)
                     or not world_path.visible_actor_level(preview.actor, active_world) then return false end
                 local now = clock:GetRealTimeSeconds(active_world)
                 if now >= preview.deadline then return false end
-                if now <= preview.start + preview.duration + .05 then animate(preview.name, preview, now) end
+                if now <= preview.start + preview.duration + .05 then animate(name, preview, now) end
                 return true
             end)
-            if not ok or not alive then pcall(clear_preview) end
+            if not ok or not alive then pcall(clear_preview, name) end
         end
         if next(motions) then
             if active_phase ~= "connected" or not valid(active_world) then
