@@ -420,6 +420,89 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         settle.set()
         await client.stock_door_requests[actor]
 
+    async def test_projected_pickups_send_independently_of_a_pending_crate_roll(self):
+        client = self.guest(AsyncMock())
+        epoch = "a" * 32
+        scope = ("session", epoch, OBSERVATORY, "guest pawn")
+        client.stock_interaction_scope = Mock(return_value=scope)
+        client.prop_carry.poll_local_edges = Mock()
+        client.last_game = {"state": "connected", "map": OBSERVATORY,
+                            "pawns": {"local": {"name": scope[3]}}}
+        projection = client.world_loot
+        projection.epoch, projection.seat = epoch, ("connected", OBSERVATORY, scope[3])
+        projection.retire_claim = AsyncMock(return_value=client.last_game)
+        crate = "pending crate"
+        adoption = asyncio.get_running_loop().create_future()
+        client.provisional_crate_rolls[crate] = scope, {"id": "local roll"}, adoption
+
+        inputs = []
+        for index in range(6):
+            item = str(index) * 32
+            action = native_world_loot.CRATE_CLAIM if index < 3 else native_world_loot.ENEMY_CLAIM
+            target = f"{item}@{crate}" if index < 3 else item
+            projection.items[item] = native_world_loot.Item(item, "stock item", {}, action, target, 1)
+            inputs.append((f"press-{index}", f"world-loot:{epoch}:{item}:{index + 1}"))
+        inputs.insert(1, ("repeat-press-0", inputs[0][1].rsplit(":", 1)[0] + ":9"))
+        def read_inputs():
+            batch = inputs.copy()
+            inputs.clear()
+            return batch
+
+        client.bridge.stock_interaction_ready.side_effect = lambda **_: bool(inputs)
+        client.bridge.interactions.side_effect = read_inputs
+
+        second_sent, third_sent, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        both_outcomes = {f"press-{index}" for index in range(6)}
+        finished = asyncio.Event()
+        operations = []
+
+        async def send(_action, operation, _target):
+            operations.append(operation)
+            if operation == "press-4":
+                second_sent.set()
+            elif operation == "press-5":
+                third_sent.set()
+            if operation in {"press-3", "press-4"}:
+                await release.wait()
+            if set(operations) == both_outcomes:
+                finished.set()
+            return {}
+
+        client.gameplay_action = AsyncMock(side_effect=send)
+        task = asyncio.create_task(client.run_stock_interactions())
+        try:
+            await asyncio.wait_for(second_sent.wait(), 1)
+            self.assertEqual(operations, ["press-3", "press-4"])
+            self.assertFalse(third_sent.is_set())
+            release.set()
+            await asyncio.wait_for(third_sent.wait(), 1)
+            self.assertFalse(adoption.done())
+            adoption.set_result("local roll")
+            await asyncio.wait_for(finished.wait(), 1)
+            self.assertEqual(operations, ["press-3", "press-4", "press-5", "press-0", "press-1", "press-2"])
+        finally:
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+    async def test_pickup_waiting_for_a_request_slot_drops_input_after_travel(self):
+        client = self.guest(AsyncMock())
+        epoch, item = "a" * 32, "b" * 32
+        scope = ("session", epoch, OBSERVATORY, "guest pawn")
+        client.stock_interaction_scope = Mock(return_value=scope)
+        client.world_loot.claim_target = Mock(return_value=(native_world_loot.ENEMY_CLAIM, item))
+        client.gameplay_action = AsyncMock()
+        client.bridge.command = AsyncMock()
+        slots = client.stock_pickup_slots = asyncio.Semaphore(0)
+        task = asyncio.create_task(client.finish_stock_interaction(scope, "press", f"world-loot:{epoch}:{item}:2"))
+        await asyncio.sleep(0)
+        client.world_loot.claim_target.assert_called_once()
+        client.stock_interaction_scope.return_value = None
+        slots.release()
+        await task
+        client.gameplay_action.assert_not_awaited()
+        client.bridge.command.assert_not_awaited()
+
     async def test_queued_stock_interactions_dispatch_before_delayed_flashlight_projection(self):
         session, epoch, operation = "a" * 32, "b" * 32, "c" * 32
         pawn = f"Player_FP_C {OBSERVATORY}.Observitory_P:PersistentLevel.Player_FP_C_0"

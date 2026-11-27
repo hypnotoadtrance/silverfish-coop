@@ -89,6 +89,7 @@ _TIMED_INTERACTIONS = (frozenset({"native-loot-inspect", "native-loot-open", "na
 _NATIVE_REQUESTS_PER_PASS = 3
 _NATIVE_REQUEST_PASS_SECONDS = .025
 _LOCAL_STOCK_INPUT_BACKLOG = 64
+_LOCAL_STOCK_PICKUP_REQUESTS = 2
 # Cap early refreshes during bursts without changing the ordinary snapshot fallback.
 _GAMEPLAY_CHANGE_INTERVAL = link.STATE_INTERVAL
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
@@ -5527,6 +5528,7 @@ class Client:
         self.last_lockpick_result = 0
         self.pending_lockpick_unlocks = set()
         self.stock_door_requests = {}
+        self.stock_pickup_slots = asyncio.Semaphore(_LOCAL_STOCK_PICKUP_REQUESTS)
         self.last_broker_intent = 0
         self.wire_board = native_wire_board.WireBoardView(bridge, control) if invite.get("native_wire_board") else None
         self.dead_drop_projection = (None, 0.0)
@@ -7092,6 +7094,7 @@ class Client:
     async def run_stock_interactions(self) -> None:
         interact = asyncio.Queue(maxsize=_LOCAL_STOCK_INPUT_BACKLOG)
         controls = asyncio.Queue(maxsize=_LOCAL_STOCK_INPUT_BACKLOG)
+        pickups = {}
 
         workers = [asyncio.create_task(self.run_stock_input_queue(queue)) for queue in (interact, controls)]
         try:
@@ -7099,15 +7102,25 @@ class Client:
                 for worker in workers:
                     if worker.done():
                         await worker
-                for actor, request in tuple(self.stock_door_requests.items()):
-                    if request.done():
-                        del self.stock_door_requests[actor]
-                        await request
+                for requests in (self.stock_door_requests, pickups):
+                    for target, request in tuple(requests.items()):
+                        if request.done():
+                            del requests[target]
+                            await request
                 scope = self.stock_interaction_scope()
                 self.prop_carry.poll_local_edges(scope)
                 inputs = self.bridge.interactions() if self.bridge.stock_interaction_ready(crates=False) else ()
                 if scope is not None:
                     for operation, target in inputs:
+                        if loot := native_world_loot.target_parts(target):
+                            item = scope, loot[:2]
+                            if item in pickups:
+                                continue
+                            if len(pickups) >= _LOCAL_STOCK_INPUT_BACKLOG:
+                                self.control.event("interaction_rejected", operation_id=operation, reason="stock_input_queue_full")
+                            else:
+                                pickups[item] = asyncio.create_task(self.finish_stock_interaction(scope, operation, target))
+                            continue
                         # Keep linked controls in order, independently of pickups waiting on shared loot.
                         queue = controls if (native_stock_door.target_actor(target) or native_stock_switch.input_target(target)
                                              or native_stock_switch.local_outcome(target) or native_lantern.target_angles(target)
@@ -7121,9 +7134,10 @@ class Client:
             for worker in workers:
                 worker.cancel()
             await asyncio.gather(*workers, return_exceptions=True)
-            for request in self.stock_door_requests.values():
+            requests = (*self.stock_door_requests.values(), *pickups.values())
+            for request in requests:
                 request.cancel()
-            for request in self.stock_door_requests.values():
+            for request in requests:
                 with contextlib.suppress(asyncio.CancelledError):
                     await request
             self.stock_door_requests.clear()
@@ -7232,7 +7246,12 @@ class Client:
                     _, local_roll, settlement = pending
                     if await asyncio.shield(settlement) != local_roll["id"] or self.stock_interaction_scope() != scope:
                         raise ValueError("The party accepted a different stock crate roll")
-            result = await self.gameplay_action(action, operation, claim)
+            # A local crate can be visible before the host adopts its roll.
+            # Wait for that dependency before taking a network request slot.
+            async with self.stock_pickup_slots:
+                if self.stock_interaction_scope() != scope:
+                    raise ValueError("The stock pickup visit changed")
+                result = await self.gameplay_action(action, operation, claim)
             if self.stock_interaction_scope() == scope:
                 try:
                     game = self.last_game
