@@ -3250,10 +3250,29 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
     above = f"dock-garage-aim\t{high};{obstruction}"
     below = f"dock-garage-aim\t{low};{worker}" + (f";{family}" if family else "")
 
-    async def shoot(expected_health, *, should_hit, contact_required=False):
+    async def shoot(expected_health, *, should_hit, contact_required=False, turret_aim=None):
         started = time.time()
-        tap = await tap_dock_primary(host, guest, command)
-        sequence = tap["native_guest_primary_fixture"]["sequence"]
+        trigger_view = None
+        if turret_aim:
+            result = "no stock preflight reply"
+            try:
+                async with asyncio.timeout(4):
+                    while True:
+                        result = await command(guest, "dock-garage-turret-fire\t" + turret_aim)
+                        if result.startswith("captured;"):
+                            _, raw_sequence, muzzle, impact, component, contact = result.split(";")
+                            sequence = int(raw_sequence)
+                            trigger_view = {"muzzle": muzzle, "impact": impact, "component": component,
+                                            "native_target": contact}
+                            break
+                        assert result.startswith(("sight;", "muzzle;")) or result == (
+                            "stock refusal;native_guest_primary_fixture_scope_unavailable"), result
+                        await asyncio.sleep(.06)
+            except TimeoutError as error:
+                raise AssertionError({"turret_aim": turret_aim, "stock_preflight": result}) from error
+        else:
+            tap = await tap_dock_primary(host, guest, command)
+            sequence = tap["native_guest_primary_fixture"]["sequence"]
         async with asyncio.timeout(8):
             while not (events := [row for row in await resident_events(guest_run, frame)
                                   if row.get("sequence") == sequence and row["time_unix"] >= started
@@ -3265,7 +3284,10 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         assert shot["after"] == shot["before"] - 1 and shot["projectiles"] == pellets, event
         if contact_required:
             contact = event.get("native_guest_trigger_view", {}).get("contact", {})
-            assert contact.get("actor", "").endswith(contact_name), event
+            assert contact.get("actor", "").endswith(contact_name), (event, trigger_view)
+        if trigger_view:
+            assert trigger_view["native_target"] == contact_name, (event, trigger_view)
+            event["fixture_trigger_view"] = trigger_view
         try:
             async with asyncio.timeout(6):
                 while True:
@@ -3348,7 +3370,8 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
 
         assert await turret("view") == ["true,false,false,false"] * 2
         assert await turret("arm") == ["armed"] * 2
-    receipt, after_disagreement = await shoot(before_mismatch, should_hit=True, contact_required=True)
+    receipt, after_disagreement = await shoot(before_mismatch, should_hit=True, contact_required=True,
+                                             turret_aim=f"{low};{worker};turret" if family == "turret" else None)
     key = {None: "tutorial_dock_world_collision_mismatch", "bandit": "tutorial_dock_buckshot_mismatch",
            "drone": "tutorial_dock_drone_mismatch", "turret": "tutorial_dock_turret_mismatch"}[family]
     evidence[key] = {
@@ -3371,7 +3394,8 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
                                 await asyncio.sleep(.05)
                 except TimeoutError as error:
                     raise AssertionError(dict(lanes=lanes, target=target, health=after_disagreement)) from error
-                followup, after_disagreement = await shoot(after_disagreement, should_hit=True, contact_required=True)
+                followup, after_disagreement = await shoot(after_disagreement, should_hit=True, contact_required=True,
+                                                          turret_aim=f"{low};{target};turret")
                 shots.append(followup)
                 evidence[key]["health"].append(after_disagreement)
             assert after_disagreement <= 0, evidence[key]["health"]

@@ -1366,6 +1366,34 @@ local function set_garage_aim(pawn, world, host, specification)
     return valid(component) and component:GetFullName() or "clear"
 end
 
+local function fire_garage_turret(pawn, world, specification)
+    local from_text, to_text = specification:match("^([^;]+);([^;]+);turret$")
+    assert(from_text and pawn:IsLocallyControlled() and not pawn:HasAuthority())
+    -- Reapply the selected pose on the same game-thread callback as the stock press.
+    -- The shotgun animation can move its muzzle between two separate commands.
+    local lane = set_garage_aim(pawn, world, false, specification)
+    if lane ~= "worker" then return "sight;" .. lane end
+    local weapon = pawn.EquipedItem
+    local turret = garage_npc(world, position(to_text), "turret")
+    local muzzle, target = weapon.Arrow_Muzzle:K2_GetComponentLocation(), position(to_text)
+    local x, y, z = target.X-muzzle.X, target.Y-muzzle.Y, target.Z-muzzle.Z
+    local distance = math.sqrt(x*x+y*y+z*z)
+    assert(distance > 1)
+    local endpoint = {X=target.X+x*100/distance, Y=target.Y+y*100/distance, Z=target.Z+z*100/distance}
+    local hit = line_hit(pawn, muzzle, endpoint, {pawn, weapon}, 2)
+    local component = hit and hit.Component and hit.Component:Get()
+    if not valid(component) or not same(component:GetOwner(), turret) then
+        return "muzzle;" .. (valid(component) and component:GetFullName() or "clear")
+    end
+    local ok, state, sequence, wrappers = SilverfishProbeNativeGuestPrimaryInput(pawn:GetAddress())
+    if not ok then return "stock refusal;" .. tostring(state) end
+    assert(state == "stock_pressed" and wrappers == 2 and sequence >= 1)
+    local captured = table.pack(SilverfishPeekNativeGuestPrimaryIntent(pawn:GetAddress()))
+    assert(captured[1] == sequence, "stock turret trigger capture missing")
+    return table.concat({"captured", sequence, point_string(muzzle), point_string(hit.ImpactPoint),
+        component:GetFullName(), captured[18] or "-"}, ";")
+end
+
 local function stage_garage_plank(pawn, world, host, specification)
     local from_text, to_text, state = specification:match("^([^;]+);([^;]+);(%a+)$")
     assert(state == "in" or state == "out")
@@ -2223,6 +2251,9 @@ local function run(action, actor_path)
         return restore_garage_fixture()
     elseif action == "dock-garage-aim" then
         return set_garage_aim(pawn, world, host, actor_path)
+    elseif action == "dock-garage-turret-fire" then
+        assert(not host)
+        return fire_garage_turret(pawn, world, actor_path)
     elseif action == "dock-garage-occlude-camera" or action == "dock-garage-clear-camera" then
         assert(not host and garage_door and valid(garage_door.mesh))
         local raised = action == "dock-garage-clear-camera"
