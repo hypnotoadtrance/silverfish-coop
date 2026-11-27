@@ -20,16 +20,26 @@ local proof
 local next_view = 0
 local entries, numbered, pending = {}, {}, {}
 local installed, censused
+local retry_interval, registration_window = .125, 12
 
 local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
-local function live(actor)
+local function present(actor)
     return valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed()
-        and actor:GetLocalRole() ~= 0
+end
+
+local function live(actor)
+    return present(actor) and actor:GetLocalRole() ~= 0
+end
+
+local function is_critter(actor)
+    return valid(critter_class) and valid(actor) and actor:IsA(critter_class)
 end
 
 local function exact_critter(actor)
-    return valid(critter_class) and valid(actor) and actor:IsA(critter_class) and live(actor) and actor.Health > 0
+    if not is_critter(actor) or not live(actor) then return false end
+    local health = actor.Health
+    return type(health) == "number" and health > 0
 end
 
 local function cargo(actor)
@@ -52,11 +62,23 @@ local function enroll(actor)
 end
 
 local function observe(marker)
-    if not live(marker) or not same(marker:GetClass(), marker_class) or marker:HasAuthority() then return end
+    if not present(marker) or not same(marker:GetClass(), marker_class) or marker:HasAuthority() then return true end
     local number = reference.number(marker, "critter")
     local actor = marker:GetOwner()
-    if number and exact_critter(actor) and actor:GetLocalRole() == 1 then
-        entries[actor:GetAddress()] = {actor = actor, marker = marker, number = number}
+    if not number and not is_critter(actor) then return true end
+    -- Owner, movement and the owner's simulated role can arrive separately.
+    if not number or not live(marker) or not exact_critter(actor) or actor:GetLocalRole() ~= 1 then return false end
+    entries[actor:GetAddress()] = {actor = actor, marker = marker, number = number}
+    return true
+end
+
+local function queue_marker(marker)
+    local address, now = marker:GetAddress(), os.clock()
+    local registration = pending[address]
+    if registration and same(registration.marker, marker) then
+        registration.next_attempt = now
+    else
+        pending[address] = {marker = marker, next_attempt = now, expires = now + registration_window}
     end
 end
 
@@ -72,7 +94,7 @@ local function install()
     RegisterHook("/Script/Engine.Actor:OnRep_Owner", function(context)
         if phase ~= "connected" then return end
         local actor = context:get()
-        if valid(actor) and same(actor:GetClass(), marker_class) and live(actor) then pending[actor:GetAddress()] = actor end
+        if present(actor) and same(actor:GetClass(), marker_class) then queue_marker(actor) end
     end)
     RegisterEndPlayPreHook(function(context, reason)
         local actor = context:get()
@@ -111,16 +133,30 @@ function critters.sync(state, seat)
                 enroll(actor)
             end
         else
-            for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do observe(marker) end
+            for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
+                if not observe(marker) then queue_marker(marker) end
+            end
         end
         censused = true
     end
-    for address, actor in pairs(pending) do
-        pending[address] = nil
-        if phase == "hosting" then enroll(actor) else observe(actor) end
+    if phase == "hosting" then
+        for address, actor in pairs(pending) do
+            pending[address] = nil
+            enroll(actor)
+        end
+        return
     end
-    if phase ~= "connected" or os.clock() < next_view then return end
-    next_view = os.clock() + .05
+    local now = os.clock()
+    for address, registration in pairs(pending) do
+        if now >= registration.expires or not present(registration.marker) then
+            pending[address] = nil
+        elseif now >= registration.next_attempt then
+            if observe(registration.marker) then pending[address] = nil
+            else registration.next_attempt = now + retry_interval end
+        end
+    end
+    if now < next_view then return end
+    next_view = now + .05
     for address, entry in pairs(entries) do
         local actor = entry.actor
         if not exact_critter(actor) then
