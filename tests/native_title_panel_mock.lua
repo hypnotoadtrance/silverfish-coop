@@ -481,6 +481,18 @@ assert(files[join_request] == ("1\t%s\t%s\tdirect\t127.0.0.1\t28951\tWrong fixtu
     :format(steam_generation, operation_id()))
 steam_result("direct_wrong_password")
 assert(display.fields.password == "" and display.focus == "password" and display.note == "Incorrect password.")
+for _, failure in ipairs({"direct_host_unreachable", "direct_password_rate_limited"}) do
+    assert(surface.write(display, "password", "Correct fixture"))
+    next_guid = next_guid + 1
+    click("connect")
+    assert(files[join_request] == ("1\t%s\t%s\tdirect\t127.0.0.1\t28951\tCorrect fixture\n")
+        :format(steam_generation, operation_id()))
+    steam_result(failure)
+    assert(display.fields.password == "" and display.focus == "password"
+        and display.buttons.connect.label == "Join", "Keep the protected Steam retry on password entry after " .. failure)
+    click("connect")
+    assert(not files[join_request], "An empty password must not send another protected Steam request")
+end
 click("back")
 assert(display.title == "Multiplayer" and display.focus == "join"
     and files[steam_cancel] == "1\t" .. steam_nonce .. "\tcancel\n")

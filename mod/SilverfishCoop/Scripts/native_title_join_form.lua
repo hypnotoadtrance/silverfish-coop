@@ -334,8 +334,13 @@ function form.poll(draft, state, phase)
         draft.import, draft.characters, draft.retry = nil, nil, nil
         draft.creator, draft.photo = nil, nil
         if draft.steam_port then
-            local screen = pending.kind == "direct" and password_errors[draft.failure] and "steam_password" or "steam_retry"
-            render(draft, state, phase, screen, messages[draft.failure])
+            if pending.kind == "direct"
+                and (password_errors[draft.failure] or draft.failure == "direct_password_rate_limited") then
+                draft.steam_requires_password = true
+            end
+            local hint = draft.failure == "direct_host_unreachable" and "Could not reach the host through Steam."
+                or messages[draft.failure]
+            render(draft, state, phase, draft.steam_requires_password and "steam_password" or "steam_retry", hint)
         elseif draft.direct then
             if password_errors[draft.failure] then
                 draft.use_password = true
