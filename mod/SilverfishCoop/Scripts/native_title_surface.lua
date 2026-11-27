@@ -110,7 +110,7 @@ local function prompt(view, field, y)
     input:SetVisibility(0)
     place(cell(view.canvas, input), x, y, width - padding - x, control_height, 1)
     view.inputs[field.key] = {widget = input, limit = field.limit}
-    return input
+    return {key = field.key, widget = input, center = (x + width - padding) / 2}
 end
 
 local function checkbox(view, spec, y)
@@ -130,6 +130,7 @@ local function checkbox(view, spec, y)
     local toggle = {widget = widget, target = spec.target}
     view.toggles[spec.key] = toggle
     if spec.target then view.linked[spec.target] = toggle end
+    return {key = spec.key, widget = widget, center = width / 2}
 end
 
 local function toggle_attached(view, toggle)
@@ -149,14 +150,63 @@ local function reconcile(view, toggle)
         input.widget:SetIsEnabled(checked)
         if input.widget:GetIsEnabled() ~= checked then return nil end
         toggle.checked = checked
+        view.navigation_dirty = true
     end
     return checked
+end
+
+local function nearest(row, center)
+    local result, distance
+    for _, control in ipairs(row or {}) do
+        local offset = math.abs(control.center - center)
+        if not distance or offset < distance then result, distance = control, offset end
+    end
+    return result
+end
+
+local function navigation(view)
+    local rows, ordered = {}, {}
+    for _, row in ipairs(view.navigation_rows) do
+        local enabled = {}
+        for _, control in ipairs(row) do
+            if valid(control.widget) and control.widget:GetIsEnabled() == true then
+                enabled[#enabled + 1] = control
+                ordered[#ordered + 1] = control
+            end
+        end
+        if #enabled > 0 then rows[#rows + 1] = enabled end
+    end
+    view.ordered = ordered
+    if not exact(view.canvas, canvas_panel)
+        or not valid(StaticFindObject("/Script/UMG.Widget:SetNavigationRuleExplicit"))
+        or not valid(StaticFindObject("/Script/UMG.Widget:SetNavigationRuleBase")) then return end
+    local index = 0
+    local function link(widget, direction, destination)
+        if destination then widget:SetNavigationRuleExplicit(direction, destination.widget)
+        else widget:SetNavigationRuleBase(direction, 3) end -- EUINavigationRule::Stop
+    end
+    for row_index, row in ipairs(rows) do
+        for column, control in ipairs(row) do
+            index = index + 1
+            -- Slate order is Left, Right, Up, Down, Next, Previous.
+            link(control.widget, 0, row[column - 1])
+            link(control.widget, 1, row[column + 1])
+            link(control.widget, 2, nearest(rows[row_index - 1], control.center))
+            link(control.widget, 3, nearest(rows[row_index + 1], control.center))
+            link(control.widget, 4, ordered[index % #ordered + 1])
+            link(control.widget, 5, ordered[(index - 2) % #ordered + 1])
+        end
+    end
 end
 
 function surface.sync(view)
     if not view or not view.active then return false end
     for _, toggle in pairs(view.toggles) do
         if reconcile(view, toggle) == nil then return false end
+    end
+    if view.navigation_dirty then
+        view.navigation_dirty = false
+        navigation(view)
     end
     return true
 end
@@ -186,7 +236,8 @@ end
 function surface.mount(context, spec, on_action)
     local first = spec.note and 126 or 66
     local height = first + #spec.rows * (control_height + gap) + padding
-    local view = {buttons = {}, inputs = {}, toggles = {}, linked = {}, photos = {}, active = false}
+    local view = {buttons = {}, inputs = {}, toggles = {}, linked = {}, photos = {}, active = false,
+        navigation_rows = {}, navigation_dirty = true}
     local widget, metrics = display.mount(context, "",
         {width = width, height = height, center = spec.center ~= false, top_level = true,
             navigation = spec.navigation == true, navigation_width = navigation_width})
@@ -221,29 +272,34 @@ function surface.mount(context, spec, on_action)
             local note_width = spec.navigation and navigation_width or width - padding * 2
             text(view, spec.note, 17, pale_amber, padding, 63, note_width, 62, true)
         end
-        local input_order, first_button = {}, nil
+        local first_input
         for index, row in ipairs(spec.rows) do
             local y = first + (index - 1) * (control_height + gap)
+            local navigation_row = {}
+            view.navigation_rows[index] = navigation_row
             if row.field then
                 local input = prompt(view, row.field, y)
-                if row.field.key == spec.focus then
-                    table.insert(input_order, 1, input)
-                else
-                    input_order[#input_order + 1] = input
-                end
+                navigation_row[1] = input
+                first_input = first_input or input
             elseif row.toggle then
-                checkbox(view, row.toggle, y)
+                navigation_row[1] = checkbox(view, row.toggle, y)
             else
                 local button_area = spec.navigation and navigation_width or width - padding * 2
                 local w = math.floor((button_area - gap * (#row - 1)) / #row)
                 for column, action in ipairs(row) do
                     local x = padding + (column - 1) * (w + gap)
                     local caption = action.key:find(":", 1, true) and action.label or action.label:upper()
-                    local button = controls.create(context, canvas, caption, function()
-                        if view.active then on_action(action.key) end
+                    local button = controls.create(context, canvas, caption, function(record)
+                        if not view.active then return end
+                        on_action(action.key)
+                        -- Stock buttons may focus the viewport before dispatching.
+                        if view.active and valid(record.inner) and record.inner:GetIsEnabled() == true
+                            and not widget:HasUserFocusedDescendants(context.controller) then
+                            record.inner:SetUserFocus(context.controller)
+                        end
                     end, #row > 1 and 20 or 22)
                     view.buttons[action.key] = button
-                    first_button = first_button or button.inner
+                    navigation_row[column] = {key = action.key, widget = button.inner, center = x + w / 2}
                     place(button.slot, x, y, w, control_height, 1)
                     if action.detail then
                         button.widget.TextBlock_0:SetRenderOpacity(0)
@@ -257,15 +313,15 @@ function surface.mount(context, spec, on_action)
         widget:SetVisibility(4)
         view.active = true
         if not surface.sync(view) then error("title_surface_toggle_unavailable", 0) end
-        local preferred = view.buttons[spec.focus]
-        local focus = preferred and preferred.inner or first_button
-        for _, input in ipairs(input_order) do
-            if not preferred and input:GetIsEnabled() == true then
-                focus = input
+        local focus = first_input and first_input.widget:GetIsEnabled() == true and first_input
+            or view.ordered[1]
+        for _, control in ipairs(view.ordered) do
+            if control.key == spec.focus then
+                focus = control
                 break
             end
         end
-        if focus then focus:SetUserFocus(context.controller) end
+        if focus then focus.widget:SetUserFocus(context.controller) end
     end)
     if not ok then
         surface.remove(view)
