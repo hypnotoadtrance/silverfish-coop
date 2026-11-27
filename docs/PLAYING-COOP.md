@@ -34,6 +34,8 @@ Choose **Multiplayer** on the first screen, then **Host Game**. **New Game** ope
 
 Host container pickups take effect immediately. The live campaign writes a checkpoint at normal save boundaries such as resting, Save and Quit, or a level transition. A brief connection loss reserves the guest’s character in memory. If the host game closes unexpectedly before a save, the campaign resumes at the last saved checkpoint.
 
+Inventory drops fall from the game's stock release point. Either player can pick the item up after it lands.
+
 ### Manage multiplayer saves
 
 Open **Multiplayer → Host Game → Manage Saves** on the host PC. Select a campaign to open its details.
