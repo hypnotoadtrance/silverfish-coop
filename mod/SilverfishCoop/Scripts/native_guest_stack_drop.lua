@@ -279,6 +279,37 @@ function stack_drop.command(fields, state, phase)
     return "isolated stock inventory drop probe reported"
 end
 
+local function birth_row(proof, row)
+    local details = proof.location and {table.unpack(proof.location)} or {}
+    if proof.class then details[#details + 1] = proof.class end
+    return row(proof.command, proof.map, proof.pawn, proof.slot, proof.guid, proof.count, proof.ok and 1 or 0,
+        proof.status, proof.actor, proof.new_guid, table.unpack(details))
+end
+
+local function settlement_row(proof, row)
+    local merge = proof.stack_merge
+    local evidence = merge and {merge.source, merge.destination, merge.amount, merge.before, merge.after} or {}
+    return row(settle, proof.map, proof.operation, proof.pawn, proof.id, proof.source,
+        proof.replacement, proof.ok and 1 or 0, proof.status, proof.count, table.unpack(evidence))
+end
+
+function stack_drop.compact(fields)
+    return fields[2] == birth and fields[8] == "memory"
+        or fields[2] == settle and (fields[15] == "memory" or fields[15] == "pending")
+end
+
+function stack_drop.reply(fields, state, phase, row)
+    local old_observation, old_settlement = observation, settlement
+    observation, settlement = nil, nil
+    local ok, message = pcall(stack_drop.command, fields, state, phase)
+    local proof, format = observation, birth_row
+    if fields[2] == settle then proof, format = settlement, settlement_row end
+    observation, settlement = old_observation, old_settlement
+    local header = row("native-guest-stack-drop-reply", 1, fields[1], fields[2], phase, state.map,
+        ok and proof and "accepted" or "error", message or "") .. "\n"
+    return ok and proof and header .. format(proof, row) .. "\n" or header
+end
+
 function stack_drop.rows(state, phase, status_row)
     if not hosting_map(state, phase) or type(SilverfishProbeNativeGuestStackDrop) ~= "function" then return {} end
     local rows = {status_row(birth .. "-capability", 1)}
@@ -287,19 +318,8 @@ function stack_drop.rows(state, phase, status_row)
         rows[#rows + 1] = status_row("native-generic-inventory-drop", 1)
     end
     if fixtures and state.map == observatory then rows[#rows + 1] = status_row(action .. "-capability", 1) end
-    local row = observation
-    if row then
-        local details = row.location and {table.unpack(row.location)} or {}
-        if row.class then details[#details + 1] = row.class end
-        rows[#rows + 1] = status_row(row.command, row.map, row.pawn, row.slot, row.guid, row.count, row.ok and 1 or 0, row.status,
-            row.actor, row.new_guid, table.unpack(details))
-    end
-    if settlement then
-        local proof, merge = settlement, settlement.stack_merge
-        local evidence = merge and {merge.source, merge.destination, merge.amount, merge.before, merge.after} or {}
-        rows[#rows + 1] = status_row(settle, proof.map, proof.operation, proof.pawn, proof.id, proof.source,
-            proof.replacement, proof.ok and 1 or 0, proof.status, proof.count, table.unpack(evidence))
-    end
+    if observation then rows[#rows + 1] = birth_row(observation, status_row) end
+    if settlement then rows[#rows + 1] = settlement_row(settlement, status_row) end
     return rows
 end
 

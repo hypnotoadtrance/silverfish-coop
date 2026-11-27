@@ -5,6 +5,7 @@ import re
 import time
 
 from . import native_guest_drop_record, native_host_save, native_inventory, native_loot, party
+from .local_bridge import LocalCommandNotSubmitted
 from .native_gold import valid_guid
 from .travel import OBSERVATORY
 
@@ -16,6 +17,8 @@ CAPABILITY = KEY + "_capability"
 MEMORY_CAPABILITY = "native_guest_stack_drop_memory"
 SETTLE = "native-guest-stack-drop-settle"
 SETTLE_KEY = "native_guest_stack_drop_settle"
+REPLY = "native-guest-stack-drop-reply"
+REPLY_BYTES = "native_guest_stack_drop_reply_bytes"
 SUCCESS = "stock_spawn_verified_and_retired"
 REFUSAL = "native_guest_stack_drop_"
 UNSAFE = "mutation_unverified_native_guest_stack_drop_"
@@ -102,6 +105,32 @@ def parse_settlement(fields: list[str], state: str, area: str) -> dict:
     return proof
 
 
+def parse_memory_reply(raw, request):
+    rows = raw.splitlines() if len(raw) <= 4096 and raw.endswith("\n") else []
+    action = request[1]
+    birth = action == BIRTH
+    if not rows or len(request) != (8 if birth else 15):
+        raise RuntimeError("The local stock drop receipt was malformed")
+    area = request[6 if birth else 10]
+    header = rows[0].split("\t")
+    if len(header) != 8 or header[:6] != [REPLY, "1", request[0], action, "hosting", area]:
+        raise RuntimeError("The local stock drop receipt did not match the request")
+    if header[6] == "error" and len(rows) == 1:
+        raise RuntimeError(header[7] or "The game declined the stock drop command")
+    if header[6] != "accepted" or len(rows) != 2:
+        raise RuntimeError("The local stock drop receipt was incomplete")
+    row = rows[1].split("\t")
+    identity_end = 6 if birth else 7
+    if row[0] != action or row[2:identity_end] != list(request[2:identity_end]):
+        raise RuntimeError("The local stock drop outcome belongs to another transaction")
+    try:
+        proof = parse(row, "hosting", area)
+    except ValueError as error:
+        raise RuntimeError("The local stock drop result did not verify") from error
+    return {"state": "hosting", "map": area, KEY if birth else SETTLE_KEY: proof,
+            REPLY_BYTES: len(raw.encode("utf-8"))}
+
+
 async def perform(host, bridge, character: str, guid: str, count: int, *, fixture: bool = True,
                   memory_slot: str | None = None) -> dict:
     if not valid_guid(guid) or type(count) is not int or not 1 <= count <= 200:
@@ -138,7 +167,12 @@ async def perform(host, bridge, character: str, guid: str, count: int, *, fixtur
     host.native_checkpoint_unsafe = True
     try:
         try:
-            snapshot = await bridge.command(ACTION if fixture else BIRTH, *arguments, timeout=6)
+            compact = memory_slot is not None and getattr(bridge, "local_bridge", None) is not None
+            options = {"update_status": False} if compact else {}
+            snapshot = await bridge.command(ACTION if fixture else BIRTH, *arguments, timeout=6, **options)
+        except LocalCommandNotSubmitted as error:
+            host.native_checkpoint_unsafe = False
+            raise party.RuleError("native_guest_stack_drop_bridge_busy") from error
         except RuntimeError as error:
             if str(error).startswith(REFUSAL):
                 host.native_checkpoint_unsafe = False
@@ -149,7 +183,9 @@ async def perform(host, bridge, character: str, guid: str, count: int, *, fixtur
              proof.get("guid"), proof.get("quantity")) != ("hosting", area, area, pawn, slot, guid, count)
                 or type(proof.get("ok")) is not bool):
             raise RuntimeError("The stock stack drop returned a mismatched actor or frozen frame")
-        host.last_game, host.last_seen = snapshot, time.monotonic()
+        if REPLY_BYTES not in snapshot:
+            host.last_game = snapshot
+        host.last_seen = time.monotonic()
         if not proof["ok"]:
             reason = proof.get("status")
             if isinstance(reason, str) and reason.startswith(REFUSAL):
@@ -172,5 +208,7 @@ async def perform(host, bridge, character: str, guid: str, count: int, *, fixtur
 
     host.native_checkpoint_unsafe = False
     result = {**proof, "owner": character, "revision": revision}
+    if REPLY_BYTES in snapshot:
+        result["bridge_reply_bytes"] = snapshot[REPLY_BYTES]
     host.control.event("native_guest_stack_drop_probed", **result)
     return {KEY: result}

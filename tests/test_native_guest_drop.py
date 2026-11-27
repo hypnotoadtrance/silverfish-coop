@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record
 from tools.silverfish import native_guest_stack_drop as probe, native_host_save, native_world_loot, party
 from tools.silverfish import native_host_dig, native_host_dig_live
+from tools.silverfish.local_bridge import LocalCommandNotSubmitted
 
 
 MAP = record.OBSERVATORY
@@ -120,6 +121,30 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reclaimed[drop.RESULT]["guid"], GUID)
         self.assertEqual(host.party[native_host_dig_live.CUSTODY], {**custody, "owner": OTHER})
         self.assertNotIn("escrow", host.party[record.STATE][DROP])
+        host.checkpoint_native.assert_not_awaited()
+
+    async def test_reclaim_busy_bridge_preserves_the_claim_for_retry(self):
+        host, _, escrow, _, _, row = self.make_world()
+        host.last_game[probe.MEMORY_CAPABILITY] = True
+        host.party[record.STATE] = {DROP: row}
+        pawn = host.native_recipients()[OWNER]["pawn"]
+        request = ("receipt-id", probe.SETTLE, "reclaim", pawn, DROP, escrow["slot"], "-", "10", "20", "30",
+                   MAP, GUID, "9", record.ITEM, "memory")
+        raw = "\t".join((probe.REPLY, "1", request[0], probe.SETTLE, "hosting", MAP, "accepted", "reported")) + "\n"
+        raw += "\t".join((probe.SETTLE, MAP, *request[2:7], "1", "recovered", "1")) + "\n"
+        bridge = SimpleNamespace(local_bridge=object(), command=AsyncMock(side_effect=[
+            LocalCommandNotSubmitted("lane busy"), probe.parse_memory_reply(raw, request),
+        ]))
+        status = host.last_game
+        with patch.object(drop.native_inventory, "retain_guest_save", AsyncMock(return_value=True)):
+            with self.assertRaisesRegex(party.RuleError, "bridge_busy"):
+                await drop.perform(host, bridge, OWNER, drop.RECLAIM, DROP, CLAIM)
+            self.assertIsNone(host.party[record.STATE][DROP]["claim_id"])
+            self.assertFalse(host.native_checkpoint_unsafe or host.stopping)
+            await drop.perform(host, bridge, OWNER, drop.RECLAIM, DROP, CLAIM)
+        self.assertEqual(host.party[record.STATE][DROP]["claim_id"], CLAIM)
+        self.assertIs(host.last_game, status)
+        self.assertIs(bridge.command.await_args.kwargs["update_status"], False)
         host.checkpoint_native.assert_not_awaited()
 
     async def test_reclaim_refuses_inactive_guest_wrong_map_and_distance_before_bridge(self):

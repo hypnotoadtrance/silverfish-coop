@@ -4183,6 +4183,9 @@ class Bridge:
                 return _parse_local_stock_loot(raw, fields, opening=False)
             if action == "native-loot-open" and raw.startswith("native-loot-open-reply\t"):
                 return _parse_local_stock_loot(raw, fields, opening=True)
+            if action in (native_guest_stack_drop.BIRTH, native_guest_stack_drop.SETTLE) and raw.startswith(
+                    native_guest_stack_drop.REPLY + "\t"):
+                return native_guest_stack_drop.parse_memory_reply(raw, fields)
             if action in native_inventory.ACTION_KEYS and raw.startswith(native_inventory.ACTION_REPLY_HEADER):
                 return self._local_inventory_action_reply(raw, fields)
             if action in (native_loot.CLAIM, native_authored_pickup.ACTION, native_loose_pickup.CLAIM) and raw.startswith(

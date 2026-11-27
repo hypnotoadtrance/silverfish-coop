@@ -392,34 +392,6 @@ namespace
             static_cast<U::AActor*>(actor)->GetWorld() == world && byte(actor, STR("Role"), 3);
     }
 
-    struct Scene
-    {
-        std::array<U::FWeakObjectPtr, 256> actors{};
-        std::size_t count{};
-
-        bool collect(U::UClass* klass, U::UWorld* world)
-        {
-            bool complete = true;
-            U::UObjectGlobals::ForEachUObject([&](U::UObject* actor, int, int) {
-                if (!exact_actor(actor, klass, world) || boolean(actor, STR("bActorIsBeingDestroyed"), true))
-                    return RC::LoopAction::Continue;
-                if (count == actors.size())
-                {
-                    complete = false;
-                    return RC::LoopAction::Break;
-                }
-                actors[count++] = actor;
-                return RC::LoopAction::Continue;
-            });
-            return complete;
-        }
-
-        bool contains(U::UObject* actor) const
-        {
-            return std::any_of(actors.begin(), actors.begin() + count, [actor](const auto& saved) { return saved.Get() == actor; });
-        }
-    };
-
     bool lower_arrow(U::UObject* pawn, void* destination, Position& origin)
     {
         auto* arrow = object(pawn, STR("Arrow_Lower"));
@@ -610,35 +582,24 @@ namespace
         mode->SetPropertyValueInContainer(buffer, 0);
         instigator->SetObjectPropertyValue(instigator->ContainerPtrToValuePtr<void>(buffer), nullptr);
         actor_owner->SetObjectPropertyValue(actor_owner->ContainerPtrToValuePtr<void>(buffer), nullptr);
-        Scene before;
-        if (!before.collect(type, owner.world) || before.count == before.actors.size())
-            return reply(lua, false, "native_guest_stack_drop_scene_bounds");
         scope = {owner.game, owner.world, {}, type, spawn, tick, newborn, nullptr, true, false};
         const auto release_scope = [](ProbeScope* active) { *active = {}; };
         const std::unique_ptr<ProbeScope, decltype(release_scope)> guard(&scope, release_scope);
         owner.game->ProcessEvent(spawn, buffer);
         scope.frame = nullptr;
 
+        // The exact SpawnItemActor invocation records its deferred spawn in the
+        // Blueprint frame. Pair it with that invocation's returned actor before
+        // reading or retiring the item. Other actors can spawn during the call.
         auto* spawned = object_value(output, buffer);
         auto* birth = scope.actor.Get();
-        if (!birth && exact_actor(spawned, type, owner.world) && !before.contains(spawned)) scope.actor = spawned;
-        Scene after;
-        if (!after.collect(type, owner.world)) return reply(lua, false, "mutation_unverified_native_guest_stack_drop_stock_census");
-        U::UObject* added{};
-        for (std::size_t i = 0; i < after.count; ++i)
-        {
-            auto* actor = after.actors[i].Get();
-            if (!actor || before.contains(actor)) continue;
-            if (added) return reply(lua, false, "mutation_unverified_native_guest_stack_drop_multiple_births");
-            added = actor;
-        }
-        if (added) scope.actor = added;
+        const bool qualified_birth = exact_actor(birth, type, owner.world) &&
+            silverfish::native_guest_drop_maps::persistent_actor(static_cast<U::AActor*>(birth), owner.world);
         Position location{};
         std::string_view qualification;
-        if (!added) qualification = "native_guest_stack_drop_no_stock_birth";
-        else if (!scope.saw_stock_frame || spawned != added || birth != added
-                 || !silverfish::native_guest_drop_maps::persistent_actor(static_cast<U::AActor*>(added), owner.world))
-            qualification = "native_guest_stack_drop_stock_birth_frame_unqualified";
+        if (scope.saw_stock_frame && !spawned && !birth) qualification = "native_guest_stack_drop_no_stock_birth";
+        else if (!scope.saw_stock_frame || !qualified_birth || spawned != birth)
+            qualification = "mutation_unverified_native_guest_stack_drop_stock_birth_identity";
         else if (!near_arrow(spawned, origin, location)) qualification = "native_guest_stack_drop_stock_transform_unqualified";
         else if (object(spawned, STR("As Game Instance FP")) != owner.game || object(spawned, STR("Owner")) ||
             object(spawned, STR("Instigator")) || !byte(spawned, STR("Item_RespawnMode"), 0) ||
@@ -660,13 +621,8 @@ namespace
         if (qualification.empty() && !inventory.same_row(reflected.get(), row))
             qualification = "native_guest_stack_drop_stock_converter_payload_changed";
         const auto name = qualification.empty() ? RC::to_utf8_string(spawned->GetFullName()) : std::string{};
-        if (added && !retired(added, owner.world)) return reply(lua, false, "mutation_unverified_native_guest_stack_drop_retirement");
-        if ((live(spawned) && spawned != added) || (live(birth) && birth != added))
-            return reply(lua, false, "mutation_unverified_native_guest_stack_drop_birth_identity");
-        Scene final;
-        if (!final.collect(type, owner.world) || final.count != before.count ||
-            !std::all_of(final.actors.begin(), final.actors.begin() + final.count, [&](const auto& item) { return before.contains(item.Get()); }))
-            return reply(lua, false, "mutation_unverified_native_guest_stack_drop_scene_readback");
+        if (qualified_birth && !retired(birth, owner.world))
+            return reply(lua, false, "mutation_unverified_native_guest_stack_drop_retirement");
         scope = {};
         for (std::size_t i = 0; i < stores.size(); ++i)
         {

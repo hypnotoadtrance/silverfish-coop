@@ -11,6 +11,7 @@ from . import native_guest_drop_record as record
 from . import native_guest_armor, native_guest_consumable
 from . import native_guest_stack_drop as probe
 from . import native_host_save, native_inventory, native_inventory_death, native_loot, native_pickup_audio, party
+from .local_bridge import LocalCommandNotSubmitted
 from .native_gold import valid_guid
 
 
@@ -360,8 +361,13 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
     host.native_checkpoint_unsafe = True
     try:
         try:
+            compact = defer and getattr(bridge, "local_bridge", None) is not None
+            options = {"update_status": False} if compact else {}
             snapshot = await bridge.command(probe.SETTLE, verb, pawn, drop_id, source["slot"], replacement or "-",
-                                            *(str(axis) for axis in _position(row)), area, *merge_source, timeout=7)
+                                            *(str(axis) for axis in _position(row)), area, *merge_source, timeout=7, **options)
+        except LocalCommandNotSubmitted as error:
+            host.native_checkpoint_unsafe = False
+            raise party.RuleError("native_guest_stack_drop_bridge_busy") from error
         except RuntimeError as error:
             if str(error).startswith(probe.REFUSAL):
                 host.native_checkpoint_unsafe = False
@@ -373,7 +379,9 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
                     area, verb, pawn, drop_id, source["slot"], replacement)
                 or type(proof.get("ok")) is not bool):
             raise RuntimeError("The native stack drop settlement did not verify its exact recipient and frames")
-        host.last_game, host.last_seen = snapshot, time.monotonic()
+        if probe.REPLY_BYTES not in snapshot:
+            host.last_game = snapshot
+        host.last_seen = time.monotonic()
         status = proof.get("status", "")
         if not proof["ok"] and proof.get("count") == 0 and status.startswith(("native_inventory_wipe_", "native_loot_")):
             host.native_checkpoint_unsafe = False
@@ -400,7 +408,8 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
             host.stopping = True
         raise
     host.party, host.native_checkpoint_unsafe = candidate, False
-    host.control.event("native_guest_stack_drop_committed", phase=verb, revision=revision, **result[RESULT])
+    host.control.event("native_guest_stack_drop_committed", phase=verb, revision=revision,
+                       bridge_reply_bytes=snapshot.get(probe.REPLY_BYTES), **result[RESULT])
     if action == RECLAIM:
         native_pickup_audio.committed(host, pawn, operation, row["class_path"])
     return result

@@ -2015,6 +2015,14 @@ local function tick(fields, pending, periodic)
         if not periodic then return true end
         fields, pending = nil, nil
     end
+    if fields and pending and current_phase == "hosting" and native_guest_stack_drop.compact(fields)
+        and status_publication.steady(state, current_phase) then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        SilverfishPublishLocalBridgeReply(pending.ticket, native_guest_stack_drop.reply(fields, state, current_phase, status_row))
+        if not periodic then return true end
+        fields, pending = nil, nil
+    end
     local pickup_claim = fields and status_publication.pickup_claims[fields[2]]
     if pickup_claim and pending and current_phase == "hosting"
         and status_publication.steady(state, current_phase) then

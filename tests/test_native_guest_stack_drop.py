@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import native_guest_stack_drop as drop, native_guest_drop_record as record, native_host_save, party
 from tools.silverfish import native_guest_drop, native_host_stack_drop as menu_drop
+from tools.silverfish.local_bridge import LocalCommandNotSubmitted
 from tools.silverfish.runtime import Bridge
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
@@ -166,6 +167,29 @@ class GuestStackDropTests(unittest.IsolatedAsyncioTestCase):
                     await drop.perform(host, bridge, CHARACTER, GUID, 9)
                 self.assertEqual((host.stopping, host.native_checkpoint_unsafe), (stopping, stopping))
                 host.control.event.assert_not_called()
+
+    async def test_memory_birth_can_retry_after_the_native_command_was_never_claimed(self):
+        host, _ = self.make_host()
+        host.last_game.update({drop.MEMORY_CAPABILITY: True, record.CAPABILITY: 1})
+        status = host.last_game
+        request = ("receipt-id", drop.BIRTH, PAWN, SLOT, GUID, "9", OBSERVATORY, "memory")
+        header = "\t".join((drop.REPLY, "1", request[0], drop.BIRTH, "hosting", OBSERVATORY, "accepted", "reported"))
+        row = [drop.BIRTH, *stock_row()[1:], "1", "2", "3"]
+        raw = header + "\n" + "\t".join(row) + "\n"
+        proof = drop.parse_memory_reply(raw, request)
+        with self.assertRaisesRegex(RuntimeError, "another transaction"):
+            drop.parse_memory_reply(header + "\n" + "\t".join([*row[:4], NEW_GUID, *row[5:]]) + "\n", request)
+        command = AsyncMock(side_effect=[LocalCommandNotSubmitted("lane busy"), proof])
+        bridge = SimpleNamespace(command=command, local_bridge=object())
+        with self.assertRaisesRegex(party.RuleError, "bridge_busy"):
+            await drop.perform(host, bridge, CHARACTER, GUID, 9, fixture=False, memory_slot=SLOT)
+        self.assertFalse(host.native_checkpoint_unsafe or host.stopping)
+        result = await drop.perform(host, bridge, CHARACTER, GUID, 9, fixture=False, memory_slot=SLOT)
+        self.assertEqual(result[drop.KEY]["bridge_reply_bytes"], len(raw))
+        self.assertIs(host.last_game, status)
+        self.assertEqual(command.await_args_list[0], command.await_args_list[1])
+        self.assertIs(command.await_args.kwargs["update_status"], False)
+        host.checkpoint_native.assert_not_awaited()
 
     async def test_downed_guest_and_wrong_hash_do_not_reach_the_native_spawn(self):
         host, file = self.make_host()
