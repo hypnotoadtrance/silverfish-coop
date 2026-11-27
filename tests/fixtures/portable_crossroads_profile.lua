@@ -77,9 +77,14 @@ function probe.observers_end(started, started_cycles)
     record_call(capture, "delayed_observers", (now - started) / 1000, cycles - started_cycles)
 end
 
-function probe.status_size(rows)
-    local active = capture
-    if not active or active.status_sizes then return end
+function probe.keep_status_sample(rows)
+    if capture and not capture.status_sample then capture.status_sample = rows end
+end
+
+local function count_status_bytes(active)
+    local rows = active.status_sample
+    if not rows then return end
+    active.status_sample = nil
     local sizes = {}
     for _, row in ipairs(rows) do
         for line in row:gmatch("[^\n]+") do
@@ -144,6 +149,7 @@ local function percentiles(samples)
 end
 
 local function result()
+    count_status_bytes(complete)
     local rows = {}
     for tag, samples in pairs(complete.rows) do
         local p50, p95, p99, peak, total = percentiles(samples.wall)
@@ -283,6 +289,52 @@ local function compare_acid_reads(dynamic)
             native_first_kib + native_second_kib, lua_first_kib + lua_second_kib)
     end)
     _G[reader] = native
+    if running then collectgarbage("restart") end
+    if not ok then error(result, 0) end
+    return result
+end
+
+local function compare_inspection()
+    if type(observe_session_controllers) ~= "function" then return "unavailable" end
+
+    local function recheck_controllers(state)
+        local checked = 0
+        for _, details in ipairs(state.pawns) do
+            local controller = details.controller_object
+            if valid(controller) then
+                assert(controller_in_world(controller, state.world))
+                assert(controller:IsLocalController() == (details.kind == "local"))
+                assert(controller:GetFullName() == details.controller)
+                checked = checked + 1
+            end
+        end
+        return checked
+    end
+
+    local state = inspect()
+    local seat = phase(state)
+    assert(state.local_pawn and (seat == "hosting" or seat == "connected"))
+    local checked = recheck_controllers(state)
+    assert(checked > 0)
+    local function measure(recheck)
+        local heap, started = collectgarbage("count"), stamp()
+        for _ = 1, 16 do
+            local view = inspect()
+            if recheck then assert(recheck_controllers(view) == checked) end
+        end
+        return (stamp() - started) / 1000, collectgarbage("count") - heap
+    end
+
+    local running = collectgarbage("isrunning")
+    collectgarbage("stop")
+    local ok, result = pcall(function()
+        local fast_first, fast_kib_first = measure(false)
+        local repeated_first, repeated_kib_first = measure(true)
+        local repeated_second, repeated_kib_second = measure(true)
+        local fast_second, fast_kib_second = measure(false)
+        return ("%d,%d,%.3f,%.3f,%.3f,%.3f"):format(checked, 32, fast_first + fast_second,
+            repeated_first + repeated_second, fast_kib_first + fast_kib_second, repeated_kib_first + repeated_kib_second)
+    end)
     if running then collectgarbage("restart") end
     if not ok then error(result, 0) end
     return result
@@ -460,6 +512,9 @@ LoopInGameThreadWithDelay(50, function()
         else
             message = "unavailable"
         end
+    elseif action == "inspectcompare" and not capture then
+        local ok, value = pcall(compare_inspection)
+        if ok then message = value else message = "inspection comparison failed: " .. tostring(value) end
     elseif action == "anomalysamples" and not capture then
         local ok, value = pcall(SilverfishProfileAnomalySamples)
         if ok then message = value else message = "anomaly sample comparison failed: " .. tostring(value) end

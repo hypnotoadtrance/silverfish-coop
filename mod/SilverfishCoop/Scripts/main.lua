@@ -238,33 +238,8 @@ local function current_world()
 end
 
 local function controller_in_world(controller, world)
-    return valid(controller) and not controller:IsActorBeingDestroyed()
+    return not controller:IsActorBeingDestroyed()
         and same_object(controller:GetWorld(), world)
-end
-
-local function session_controllers(world, driver, server, statics)
-    local controller = valid(statics) and statics:GetPlayerController(world, 0) or nil
-    if not controller_in_world(controller, world) or not controller:IsLocalController()
-        or not controller:GetFullName():match("^PlayerControler_FP_C ") then
-        return FindAllOf("PlayerControler_FP_C") or {}
-    end
-
-    local controllers = { controller }
-    if valid(driver) and not server then
-        local clients = driver.ClientConnections
-        for index = 1, #clients do
-            local connection = clients[index]
-            local peer = valid(connection) and connection.PlayerController or nil
-            if controller_in_world(peer, world) and not peer:IsLocalController()
-                and peer:GetFullName():match("^PlayerControler_FP_C ") then
-                controllers[#controllers + 1] = peer
-            elseif valid(peer) then
-                -- During handoff the world may have a controller outside the stable NetDriver roster.
-                return FindAllOf("PlayerControler_FP_C") or {}
-            end
-        end
-    end
-    return controllers
 end
 
 local function get_pawn_health(pawn)
@@ -275,7 +250,7 @@ local function get_pawn_health(pawn)
     end
 end
 
-local function describe_pawn(pawn, name, local_player, controller, read_health)
+local function describe_pawn(pawn, name, local_player, controller, controller_name, read_health)
     local location = pawn:K2_GetActorLocation()
     local health, save
     if read_health then health, save = get_pawn_health(pawn) end
@@ -283,7 +258,7 @@ local function describe_pawn(pawn, name, local_player, controller, read_health)
         pawn = pawn,
         name = name,
         kind = local_player and "local" or "guest",
-        controller = valid(controller) and controller:GetFullName() or "",
+        controller = controller_name or "",
         controller_object = controller,
         x = location.X,
         y = location.Y,
@@ -292,6 +267,42 @@ local function describe_pawn(pawn, name, local_player, controller, read_health)
         max_health = pawn.MaxHealth,
         save = save,
     }
+end
+
+local function observe_controller(state, controller, is_local, controller_name, read_health, known_pawns)
+    local pawn = controller.Pawn
+    if is_local then state.controller = controller end
+    local name = valid(pawn) and not pawn:IsActorBeingDestroyed() and pawn:GetFullName()
+    if not name or not name:match("^Player_FP_C ") then return end
+    local details = describe_pawn(pawn, name, is_local, controller, controller_name or controller:GetFullName(), read_health)
+    state.pawns[#state.pawns + 1] = details
+    if is_local then state.local_pawn = details end
+    if known_pawns then known_pawns[pawn:GetAddress()] = true end
+end
+
+local function observe_session_controllers(state, statics, connections, read_health, known_pawns)
+    local world = state.world
+    local controller = valid(statics) and statics:GetPlayerController(world, 0) or nil
+    local name = valid(controller) and controller_in_world(controller, world)
+        and controller:IsLocalController() and controller:GetFullName()
+    if not name or not name:match("^PlayerControler_FP_C ") then return false end
+
+    observe_controller(state, controller, true, name, read_health, known_pawns)
+    if connections and not state.server then
+        for index = 1, #connections do
+            local connection = connections[index]
+            local peer = valid(connection) and connection.PlayerController or nil
+            if valid(peer) then
+                local peer_name = controller_in_world(peer, world) and not peer:IsLocalController() and peer:GetFullName()
+                if not peer_name or not peer_name:match("^PlayerControler_FP_C ") then
+                    -- During handoff, a controller can be outside the stable NetDriver roster.
+                    return false
+                end
+                observe_controller(state, peer, false, peer_name, read_health, known_pawns)
+            end
+        end
+    end
+    return true
 end
 
 function status_publication.find_player_pawns(world, driver, map, statics)
@@ -341,9 +352,11 @@ local function inspect()
     state.world = world
     state.map = map_package(world)
     local driver = world.NetDriver
+    local connections
     if valid(driver) then
         state.listening = true
-        state.clients = #driver.ClientConnections
+        connections = driver.ClientConnections
+        state.clients = #connections
         state.server = valid(driver.ServerConnection)
         local own_session = (role == "host" and state.map == expected_map and not state.server)
             or (role == "client" and state.server)
@@ -359,17 +372,12 @@ local function inspect()
     local statics = status_publication.gameplay_statics
     local read_health = not vitals.active()
     local known_pawns = role == "client" and state.server and {}
-    for _, controller in ipairs(session_controllers(world, driver, state.server, statics)) do
-        if controller_in_world(controller, world) then
-            local is_local = controller:IsLocalController()
-            local pawn = controller.Pawn
-            if is_local then state.controller = controller end
-            local name = valid(pawn) and not pawn:IsActorBeingDestroyed() and pawn:GetFullName()
-            if name and name:match("^Player_FP_C ") then
-                local details = describe_pawn(pawn, name, is_local, controller, read_health)
-                state.pawns[#state.pawns + 1] = details
-                if is_local then state.local_pawn = details end
-                if known_pawns then known_pawns[pawn:GetAddress()] = true end
+    if not observe_session_controllers(state, statics, connections, read_health, known_pawns) then
+        state.controller, state.local_pawn = nil, nil
+        for index = #state.pawns, 1, -1 do state.pawns[index] = nil end
+        for _, controller in ipairs(FindAllOf("PlayerControler_FP_C") or {}) do
+            if valid(controller) and controller_in_world(controller, world) then
+                observe_controller(state, controller, controller:IsLocalController(), nil, read_health, known_pawns)
             end
         end
     end
@@ -382,7 +390,7 @@ local function inspect()
                 and same_object(pawn:GetWorld(), world) then
                 local name = pawn:GetFullName()
                 if name:match("^Player_FP_C ") and not name:find("Default__", 1, true) then
-                    state.pawns[#state.pawns + 1] = describe_pawn(pawn, name, false, nil, read_health)
+                    state.pawns[#state.pawns + 1] = describe_pawn(pawn, name, false, nil, nil, read_health)
                 end
             end
         end

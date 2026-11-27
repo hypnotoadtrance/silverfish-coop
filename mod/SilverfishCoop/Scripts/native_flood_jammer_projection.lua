@@ -186,25 +186,41 @@ function jammer.command(fields, state, phase)
     return "stock authored jammer projection verified"
 end
 
+local function native_rows(state, phase, status_row, profile, ...)
+    local hosting = phase == "hosting"
+    local ok, result, x, y, z, pitch, yaw, roll, sx, sy, sz =
+        pcall(native_projection, profile.objective_world, state.world:GetAddress(), hosting, ...)
+    if ok and result == "omit" then return {} end
+    if ok and result == "pose" then
+        local pose_sample = status_row(profile.tag .. "-pose", profile.objective_map, profile.jammer_name,
+            x, y, z, pitch, yaw, roll, sx, sy, sz)
+        if hosting then return {pose_sample} end
+        return {status_row(profile.tag .. "-projection", profile.objective_map, profile.jammer_name,
+            "present", "-"), pose_sample}
+    end
+end
+
 function jammer.rows(state, phase, status_row)
+    local profile = profiles.by_map[state.map]
+    local hosting = phase == "hosting"
+    local detail, controller = state.local_pawn, state.controller
+    if not binding and type(native_projection) == "function" and enabled and profile
+        and (hosting or phase == "connected") and state.listening == true and state.server == (not hosting)
+        and valid(state.world) and detail and valid(detail.pawn) and same(detail.controller_object, controller) then
+        -- The native reader revalidates the current local pawn and network role.
+        local sampled = native_rows(state, phase, status_row, profile, detail.pawn:GetAddress(),
+            controller:GetAddress(), detail.name)
+        if sampled then return sampled end
+    end
     local checked, current = pcall(context, state, phase)
     if not checked or not current then
         jammer.clear()
         return {}
     end
-    local profile = current.profile
     if binding and not same_context(current, binding) then binding = nil end
     if not binding and type(native_projection) == "function" then
-        local ok, result, x, y, z, pitch, yaw, roll, sx, sy, sz =
-            pcall(native_projection, profile.objective_world, current.world:GetAddress(), phase == "hosting")
-        if ok and result == "omit" then return {} end
-        if ok and result == "pose" then
-            local pose_sample = status_row(profile.tag .. "-pose", profile.objective_map, profile.jammer_name,
-                x, y, z, pitch, yaw, roll, sx, sy, sz)
-            if phase == "hosting" then return {pose_sample} end
-            return {status_row(profile.tag .. "-projection", profile.objective_map, profile.jammer_name,
-                "present", "-"), pose_sample}
-        end
+        local sampled = native_rows(state, phase, status_row, profile)
+        if sampled then return sampled end
     end
     local found, actor, root = pcall(live_actor, current)
     if not found then

@@ -1,4 +1,5 @@
 #include "flood_jammer.hpp"
+#include "interaction_input.hpp"
 #include "shared_loot.hpp"
 
 #include <algorithm>
@@ -162,7 +163,7 @@ namespace
     struct ProjectionReader
     {
         const JammerProfile* profile{};
-        U::FWeakObjectPtr world{}, actor{}, capsule_type{};
+        U::FWeakObjectPtr world{}, level{}, actor{}, capsule_type{};
         U::FObjectProperty *capsule{}, *root{};
         U::FBoolProperty *destroying{}, *hidden{};
         U::FByteProperty* role{};
@@ -173,7 +174,10 @@ namespace
 
     int read_projection(const Lua& lua)
     {
-        if (!U::IsInGameThreadRaw() || lua.get_stack_size() != 3 ||
+        const auto argument_count = lua.get_stack_size();
+        const bool qualified = argument_count == 6;
+        if (!U::IsInGameThreadRaw() || (argument_count != 3 && !qualified) ||
+            (qualified && (!lua.is_integer(4) || !lua.is_integer(5) || !lua.is_string(6))) ||
             !lua.is_string(1) || !lua.is_integer(2) || !lua.is_bool(3)) return 0;
         const auto path = lua.get_string();
         if (path.size() > 128) return 0;
@@ -186,13 +190,38 @@ namespace
         auto* world = projection.world.Get();
         if (projection.profile != &*profile || reinterpret_cast<Address>(world) != requested_address)
         {
-            projection = {};
             world = find<U::UWorld>(profile->world);
             if (!live(world) || reinterpret_cast<Address>(world) != requested_address) return 0;
+            projection = {};
             projection.profile = &*profile;
             projection.world = world;
         }
         if (!live(world)) return 0;
+
+        auto* level = object(world, STR("PersistentLevel"));
+        if (!live(level)) return 0;
+        if (projection.level.Get() != level)
+        {
+            if (level->GetPathName() != requested_world + STR(":PersistentLevel")) return 0;
+            projection.level = level;
+            projection.actor.Reset();
+            projection.retry = {};
+        }
+        if (qualified)
+        {
+            const auto requested_pawn = static_cast<Address>(lua.get_integer());
+            const auto requested_controller = static_cast<Address>(lua.get_integer());
+            const auto requested_name = lua.get_string();
+            auto* pawn = silverfish::native_interaction_input::current_local_pawn(requested_pawn);
+            if (!pawn || static_cast<U::AActor*>(pawn)->GetWorld() != world ||
+                !equals<U::FByteProperty>(pawn, STR("Role"), hosting ? 3 : 2))
+                return 0;
+            auto* controller = object(pawn, STR("Controller"));
+            if (!live(controller) || reinterpret_cast<Address>(controller) != requested_controller ||
+                requested_name.empty() || requested_name.size() > 512 ||
+                pawn->GetFullName() != RC::to_generic_string(requested_name))
+                return 0;
+        }
 
         auto* actor = projection.actor.Get();
         if (!actor)
@@ -202,7 +231,7 @@ namespace
             projection.retry = now + std::chrono::milliseconds(750);
             actor = find<U::UObject>(profile->jammer);
             if (!exact(actor, jammer_type) || static_cast<U::AActor*>(actor)->GetWorld() != world ||
-                static_cast<U::AActor*>(actor)->GetLevel() != object(world, STR("PersistentLevel"))) return 0;
+                static_cast<U::AActor*>(actor)->GetLevel() != level) return 0;
             projection.capsule = field<U::FObjectProperty>(actor, STR("Capsule"));
             projection.root = field<U::FObjectProperty>(actor, STR("RootComponent"));
             projection.destroying = field<U::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
@@ -212,7 +241,9 @@ namespace
                 !projection.hidden || !projection.role) return 0;
             projection.actor = actor;
         }
-        if (!live(actor) || projection.destroying->GetPropertyValueInContainer(actor))
+        auto* jammer = static_cast<U::AActor*>(actor);
+        if (!live(actor) || projection.destroying->GetPropertyValueInContainer(actor) ||
+            jammer->GetWorld() != world || jammer->GetLevel() != level)
         {
             projection.actor.Reset();
             return 0;
@@ -230,7 +261,6 @@ namespace
         if (!live(capsule) || capsule != component(projection.root) ||
             capsule->GetOuterPrivate() != actor || !capsule_type || capsule->GetClassPrivate() != capsule_type) return 0;
 
-        auto* jammer = static_cast<U::AActor*>(actor);
         if (hosting && (projection.role->GetPropertyValueInContainer(actor) != 3 ||
             (projection.hidden->GetPropertyValueInContainer(actor) && !jammer->GetActorEnableCollision())))
         {

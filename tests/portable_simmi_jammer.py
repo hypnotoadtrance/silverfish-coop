@@ -16,39 +16,61 @@ from tools.silverfish.travel import CROSSROADS, LAKE, OBSERVATORY
 
 
 def instrument_jammer_sampler(source):
-    anchor = '        if ok and result == "pose" then\n'
+    anchor = '    if ok and result == "pose" then\n'
     if source.count(anchor) != 1:
         raise ValueError("The native jammer pose anchor changed")
-    return source.replace(anchor, anchor + """            local key = "SilverfishPortableJammerSampler:" .. profile.tag
-            if not ModRef:GetSharedVariable(key) then
-                local measured, evidence = pcall(function()
-                    local address = current.world:GetAddress()
-                    local hosting = phase == "hosting"
-                    local function native_sample() return native_projection(profile.objective_world, address, hosting) end
-                    local function reflected_sample()
-                        local actor = assert(live_actor(current))
-                        return assert(pose(actor))
-                    end
-                    local stock = reflected_sample()
-                    local observed = {x, y, z, pitch, yaw, roll, sx, sy, sz}
-                    for index = 1, 9 do
-                        assert(stock[index] == observed[index], "pose field " .. index .. " differs")
-                    end
-                    assert(native_projection(profile.objective_world, address + 1, hosting) == nil, "wrong world accepted")
-                    assert(native_sample() == "pose", "binding did not recover after the mismatched world")
-                    local rounds = 512
-                    local function measure(sample)
-                        local started = os.clock()
-                        for index = 1, rounds do sample() end
-                        return (os.clock() - started) * 1000
-                    end
-                    local native_first, reflected_first = measure(native_sample), measure(reflected_sample)
-                    local reflected_second, native_second = measure(reflected_sample), measure(native_sample)
-                    return ("%d,%.3f,%.3f"):format(rounds * 2,
-                        native_first + native_second, reflected_first + reflected_second)
-                end)
-                ModRef:SetSharedVariable(key, measured and evidence or "failed: " .. tostring(evidence))
+    return source.replace(anchor, anchor + """        local key = "SilverfishPortableJammerSampler:" .. profile.tag
+        if select("#", ...) == 3 and not ModRef:GetSharedVariable(key) then
+            local address, pawn, controller = state.world:GetAddress(), ...
+            local name = state.local_pawn.name
+            local function native_sample()
+                return native_projection(profile.objective_world, state.world:GetAddress(), hosting,
+                    state.local_pawn.pawn:GetAddress(), state.controller:GetAddress(), name)
             end
+            local function lua_scope_sample()
+                local current = assert(context(state, phase))
+                return native_projection(profile.objective_world, current.world:GetAddress(), hosting)
+            end
+            local function compare()
+                local current = assert(context(state, phase))
+                local actor = assert(live_actor(current))
+                local stock = assert(pose(actor))
+                local observed = {x, y, z, pitch, yaw, roll, sx, sy, sz}
+                for index = 1, 9 do
+                    assert(stock[index] == observed[index], "pose field " .. index .. " differs")
+                end
+                assert(native_projection(profile.objective_world, address + 1, hosting, pawn, controller, name)
+                    == nil, "wrong world accepted")
+                assert(native_projection(profile.objective_world, address, hosting, pawn + 1, controller, name)
+                    == nil, "wrong pawn accepted")
+                assert(native_projection(profile.objective_world, address, hosting, pawn, controller + 1, name)
+                    == nil, "wrong controller accepted")
+                assert(native_projection(profile.objective_world, address, hosting, pawn, controller, name .. "_other")
+                    == nil, "wrong pawn name accepted")
+                assert(native_projection(profile.objective_world, address, not hosting, pawn, controller, name)
+                    == nil, "wrong role accepted")
+                assert(native_sample() == "pose", "binding did not recover after scope mismatches")
+                assert(lua_scope_sample() == "pose", "full Lua context disagrees with native scope")
+                local rounds = 64
+                local function measure(sample)
+                    local started, before = os.clock(), collectgarbage("count")
+                    for _ = 1, rounds do sample() end
+                    return (os.clock() - started) * 1000, collectgarbage("count") - before
+                end
+                collectgarbage("stop")
+                local native_first, native_kib_first = measure(native_sample)
+                local lua_first, lua_kib_first = measure(lua_scope_sample)
+                local lua_second, lua_kib_second = measure(lua_scope_sample)
+                local native_second, native_kib_second = measure(native_sample)
+                return ("%d,%.3f,%.3f,%.3f,%.3f"):format(rounds * 2,
+                    native_first + native_second, lua_first + lua_second,
+                    native_kib_first + native_kib_second, lua_kib_first + lua_kib_second)
+            end
+            local running = collectgarbage("isrunning")
+            local measured, evidence = pcall(compare)
+            if running then collectgarbage("restart") end
+            ModRef:SetSharedVariable(key, measured and evidence or "failed: " .. tostring(evidence))
+        end
 """)
 
 
@@ -236,10 +258,15 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe, *, flood_objectiv
         )))["game"][POSE]
         samples = {}
         for role, seat in (("host", host), ("guest", guest)):
-            raw = await command(seat, "sampler")
-            calls, native_ms, reflected_ms = map(float, raw.split(","))
-            samples[role] = {"calls_per_path": int(calls), "native_ms": native_ms, "lua_ms": reflected_ms,
-                             "all_pose_fields_matched": True, "wrong_world_refused": True}
+            async with asyncio.timeout(4):
+                while (raw := await command(seat, "sampler")) == "waiting":
+                    await asyncio.sleep(.06)
+            assert not raw.startswith("failed: "), raw
+            calls, native_ms, lua_ms, native_kib, lua_kib = map(float, raw.split(","))
+            samples[role] = {"calls_per_path": int(calls), "native_ms": native_ms, "lua_ms": lua_ms,
+                             "native_heap_growth_kib": native_kib, "lua_heap_growth_kib": lua_kib,
+                             "all_pose_fields_matched": True, "wrong_world_refused": True,
+                             "wrong_pawn_controller_name_and_role_refused": True}
         return {"host_pose": authority, "guest_pose": guest_pose, "sampler": samples}
 
     async def confirm_weapon(ammo):

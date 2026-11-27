@@ -57,8 +57,7 @@ def instrument_profile(source, *, stock_receipts=False):
         assert status_code.count(needle) == 1, needle
         if call is None:
             status_code = status_code.replace(needle, needle + f'    {mark}("status_concat", #rows - 1, frame and #frame or nil)\n'
-                                              '    status_publication.profile.status_size(rows)\n'
-                                              f'    {mark}("status_diagnostic_sizing")\n')
+                                              '    status_publication.profile.keep_status_sample(rows)\n')
         else:
             status_code = status_code.replace(needle, call + needle)
     status_code = status_code.replace(native_reply, 'published = ' + wrapper
@@ -476,6 +475,19 @@ def instrument_flashlight_scope(source):
         raise ValueError("The flashlight scope timing anchor changed")
     return previous + boundary + body.replace(
         anchor, 'SilverfishProfileCrossroadsCall("flashlight_sync_scope", scope, state, phase)') + next_function + rest
+
+
+def instrument_avatar_observer(source):
+    start, boundary, rest = source.partition("function avatar.animate_head(")
+    observer, end, after = rest.partition("local function create(entry)")
+    if not boundary or not end:
+        raise ValueError("The remote avatar observer timing anchors changed")
+    for call in ("read_base_aim", "aim_head", "character_view.align_tail", "gait.advance", "weapon_view.rifle_idle"):
+        anchor = call + "("
+        if observer.count(anchor) != 1:
+            raise ValueError(f"The remote avatar observer call changed: {call}")
+        observer = observer.replace(anchor, f'SilverfishProfileCrossroadsCall("avatar.{call}", {call}, ')
+    return start + boundary + observer + end + after
 
 
 def instrument_anomaly_work(source):
@@ -947,7 +959,17 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
     journal = {}
     anomaly_samples = {}
     dynamic_acid_samples = {}
+    controller_inspection = {}
     if area == CROSSROADS:
+        inspections = await asyncio.gather(*(command(seat, "inspectcompare") for seat in seats.values()))
+        for seat, reply in zip(seats, inspections, strict=True):
+            if reply == "unavailable":
+                continue
+            assert not reply.startswith("inspection comparison failed"), reply
+            count, passes, scoped, repeated, scoped_kib, repeated_kib = map(float, reply.split(","))
+            controller_inspection[seat] = {"controllers": int(count), "passes_per_path": int(passes),
+                                           "scoped_ms": scoped, "rechecked_ms": repeated,
+                                           "scoped_heap_growth_kib": scoped_kib, "rechecked_heap_growth_kib": repeated_kib}
         reply = await command(host, "anomalysamples")
         if reply != "unavailable":
             assert not reply.startswith("anomaly sample comparison failed"), reply
@@ -979,4 +1001,5 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
                            for seat, frame in zip(seats, wall_status, strict=True)},
             "guest_roster": {slot: row["name"] for slot, row in settled["game"]["pawns"].items()},
             "vitals_comparison": dict(zip(seats, comparison, strict=True)), **heartbeat, **guest_binding,
-            **coarse, **journal, **anomaly_samples, **dynamic_acid_samples, **ready_roster}
+            **coarse, **journal, **anomaly_samples, **dynamic_acid_samples, **ready_roster,
+            "controller_inspection_comparison": controller_inspection}

@@ -8449,7 +8449,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 ))
         if crossroads_profile:
             from portable_crossroads_profile import (
-                instrument_anomaly_work, instrument_avatar_lean, instrument_death_poll, instrument_flashlight_scope,
+                instrument_anomaly_work, instrument_avatar_lean, instrument_avatar_observer, instrument_death_poll,
+                instrument_flashlight_scope,
                 instrument_guest_status_binding, instrument_host_drop_context, instrument_inline_crate_scan,
                 instrument_input_mappings, instrument_journal_context,
                 instrument_loose_discovery, instrument_npc_class_discovery, instrument_profile,
@@ -8480,6 +8481,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(portable_script_overlay(game, "zone_wall.lua", instrument_zone_walls))
                 probes.enter_context(portable_script_overlay(game, "native_stash_view.lua", instrument_stash_binding))
                 probes.enter_context(portable_script_overlay(game, "native_avatar_lean_bridge.lua", instrument_avatar_lean))
+                probes.enter_context(portable_script_overlay(game, "native_player_avatar.lua", instrument_avatar_observer))
                 probes.enter_context(portable_script_overlay(game, "native_roster.lua", instrument_ready_roster))
             proof["crossroads_input_overlays"] = [
                 probes.enter_context(portable_script_overlay(game, "players.lua", instrument_input_mappings))
