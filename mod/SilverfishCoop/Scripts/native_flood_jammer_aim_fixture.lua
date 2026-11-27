@@ -201,9 +201,9 @@ function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule
     context.trace, context.target_capsule, context.target_mesh = StaticFindObject(trace_path), target_capsule, target_mesh
     context.fixed_ranges = fixed and fixed_ranges(actor)
     context.ignored = {context.pawn, context.weapon, actor}
-    local rooftop = tag == "native-crossroads-jammer"
-    context.floor_depth, context.aim_range, context.aim_pitch = (rooftop or fixed) and 1800 or 330,
-        rooftop and 1600 or 550, rooftop and 70 or 56
+    local wide_search = tag == "native-crossroads-jammer" or tag == "native-flood-jammer"
+    context.floor_depth, context.aim_range, context.aim_pitch = (wide_search or fixed) and 1800 or 330,
+        wide_search and 1600 or 550, wide_search and 70 or 56
     local center
     if fixed then
         center = mesh_center(target_mesh)
@@ -239,7 +239,7 @@ function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule
         if exact_hit then return current_distance, exact_hit end
         local bearing = math.atan(original.point.Y - center.Y, original.point.X - center.X)
         local ranges = context.fixed_ranges
-            or rooftop and {175, 245, 320, 410, 540, 670, 800, 1000, 1220} or {175, 245, 320, 410}
+            or wide_search and {105, 135, 175, 245, 320, 410, 540, 670, 800, 1000, 1220} or {175, 245, 320, 410}
         for _, range in ipairs(ranges) do
             for _, offset in ipairs({0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180}) do
                 local direction = bearing + math.rad(offset)

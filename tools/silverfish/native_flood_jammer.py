@@ -224,10 +224,9 @@ async def act(host, bridge, actor, action, *, selected_board=None):
     if not starting and current.get("step") == -10:
         return {"effect": "native_quest_already_settled", **current}
     expected = (None, 1, 0, 0) if starting else (2, -10, spec.cash, 1)
-    # Older stock saves can already carry one of these two authored jammer
-    # bounties. The exact host row can qualify a turn-in when no party record
-    # exists, while a recorded co-op objective still needs its typed proof.
-    legacy_stock = not current and spec in (BLACK_LAKE, CROSSROADS_JAMMER)
+    # A stock journal can already carry a jammer bounty when co-op first
+    # sees the campaign. Qualify its exact row before applying the payout.
+    legacy_stock = not current and isinstance(spec, JammerProfile)
     if not starting and not legacy_stock and not _objective_ready(current, spec):
         raise party.RuleError(f"{spec.key}_objective_incomplete")
     host.transitioning = True
@@ -286,7 +285,7 @@ async def observe(host, bridge):
     if not expected:
         return
     current = host.party.get("native_quests", {}).get(spec.quest, {})
-    legacy_active = not current and expected[0] == 1 and spec in (BLACK_LAKE, CROSSROADS_JAMMER)
+    legacy_active = not current and expected[0] == 1 and isinstance(spec, JammerProfile)
     if current.get("step") != expected[0] and not legacy_active:
         return
     if (any(type(proof.get(key)) is not int for key in ("xp_before", "xp_after"))

@@ -8814,7 +8814,7 @@ if __name__ == "__main__":
     parser.add_argument("--stock-streamed-board", action="store_true",
                         help="accept and redeem a live custom quest at a streamed stock board with a large host journal")
     parser.add_argument("--stock-simmi-jammers", action="store_true",
-                        help="Complete both stock Simmi jammer bounties through the installed title")
+                        help="Complete all three stock Simmi jammer bounties through the installed title")
     parser.add_argument("--stock-eye-stacks", action="store_true",
                         help="redeem ShopKeep's Eye contract from one of two stock guest inventory stacks")
     parser.add_argument("--stock-lingering-teleport", action="store_true",

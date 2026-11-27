@@ -217,9 +217,11 @@ local function select_pistol(pawn, slot)
     return "waiting"
 end
 
+local jammer_maps = {CrossRoads_P = "crossroads", Lake_01_P = "lake", RuinFeilds_P = "flood"}
+
 local function aim_jammer(state)
-    local leaf = state.map:match("/(CrossRoads_P)$") or state.map:match("/(Lake_01_P)$")
-    assert(leaf, "Scoped jammer map required")
+    local leaf = state.map:match("/([^/]+)$")
+    assert(jammer_maps[leaf], "Scoped jammer map required")
     local actor = StaticFindObject(state.map .. "." .. leaf .. ":PersistentLevel.SignalJammer_BP_C_1")
     local pawn = state.local_pawn.pawn
     local weapon, camera = pawn.EquipedItem, pawn.Camera
@@ -275,7 +277,7 @@ local function sync(state, phase)
         if portable and phase == "connected" and operation == "aimjammer" then return aim_jammer(state) end
         if portable and operation == "sampler" then
             local objective = state.map:match("/([^/]+)$")
-            local profile = ({CrossRoads_P = "crossroads", Lake_01_P = "lake"})[objective]
+            local profile = jammer_maps[objective]
             assert(profile, "Jammer sampler expects an objective map")
             return ModRef:GetSharedVariable("SilverfishPortableJammerSampler:native-" .. profile .. "-jammer") or "waiting"
         end

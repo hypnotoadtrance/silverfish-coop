@@ -1,4 +1,4 @@
-"""Run both stock Simmi jammer jobs from the installed Observatory title."""
+"""Run the three stock Simmi jammer jobs from the installed Observatory title."""
 
 import asyncio
 import math
@@ -104,12 +104,13 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
 
         return (await state(seat, match))["gameplay"]["native_quests"][spec.quest]
 
-    async def journal(expected):
+    async def journal(expected, flood_step):
         async with asyncio.timeout(9):
             while True:
                 values = await asyncio.gather(*(command(seat, "journal") for seat in peers))
-                if values == [expected] * 2:
-                    return dict(zip(journal_rows, expected.split(",")))
+                flood = await asyncio.gather(*(command(seat, "floodjournal") for seat in peers))
+                if values == [expected] * 2 and flood == [str(flood_step)] * 2:
+                    return {**dict(zip(journal_rows, expected.split(","))), FLOOD.quest: str(flood_step)}
                 await asyncio.sleep(.14)
 
     async def movement_arrived(seat, location):
@@ -194,10 +195,7 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
         await accept(seat, spec)
         await asyncio.gather(*(quest_on(peer, spec, 1) for peer in peers))
         await close(seat)
-    accepted_journal = await journal("1,1")
-    async with asyncio.timeout(9):
-        while (flood_journal := await asyncio.gather(*(command(seat, "floodjournal") for seat in peers))) != ["1", "1"]:
-            await asyncio.sleep(.14)
+    accepted_journal = await journal("1,1", 1)
     remaining = await board(guest, physical=True)
     assert remaining == offers - expected_offers, (offers, remaining)
     await close(guest, physical=True)
@@ -288,20 +286,25 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
     restored = await confirm_weapon(7)
     assert restored["pawn"] != before_travel["pawn"], restored
     magazine, lake_completion = await destroy_jammer(BLACK_LAKE, 7)
-    await journal("1,2")
+    await journal("1,2", 1)
     lake_return = await cross(LAKE, CROSSROADS, "Lake_Cave")
     await observe_jammer(CROSSROADS_JAMMER)
     await confirm_weapon(magazine)
     magazine, crossroads_completion = await destroy_jammer(CROSSROADS_JAMMER, magazine)
+    flood_out = await cross(CROSSROADS, FLOOD.objective_map, "CR_RF")
+    flood = await observe_jammer(FLOOD)
+    await confirm_weapon(magazine)
+    magazine, flood_completion = await destroy_jammer(FLOOD, magazine)
+    flood_return = await cross(FLOOD.objective_map, CROSSROADS, "CR_RF")
     final_visit = await cross(CROSSROADS, OBSERVATORY, "Obsv_Etr")
     await confirm_weapon(magazine)
-    completed_journal = await journal("2,2")
+    completed_journal = await journal("2,2", 2)
 
     payout_checkpoint = campaign_save_hashes(host.campaign)
     wallet = (await state(host, lambda frame: type(frame.get("game", {}).get("native_wallet")) is int))["game"]["native_wallet"]
     guest_id = (await state(guest, lambda frame: frame.get("state") == "connected"))["character_id"]
     payouts = []
-    for seat, spec, owner in ((host, CROSSROADS_JAMMER, "host"), (guest, BLACK_LAKE, guest_id)):
+    for seat, spec, owner in ((host, CROSSROADS_JAMMER, "host"), (guest, BLACK_LAKE, guest_id), (guest, FLOOD, guest_id)):
         await board(seat)
         actual_board, _, ready = (await command(seat, "ready")).split(";")
         assert actual_board == SIMMI_BOARD and spec.quest in ready.split(","), ready
@@ -319,17 +322,18 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
         repeated = await action(guest, "native-quest-turnin", target=spec.quest)
         assert repeated["effect"] == "native_quest_already_settled" and repeated["wallet"] == wallet, repeated
         payouts.append(paid)
-    final_journal = await journal("-10,-10")
-    await state(host, lambda frame: all(row.get("quest_xp") == 2 and not row.get("native_quest_xp_pending")
+    final_journal = await journal("-10,-10", -10)
+    await state(host, lambda frame: all(row.get("quest_xp") == 3 and not row.get("native_quest_xp_pending")
                      for row in (frame.get("gameplay", {}).get("players", {}).get(role, {}) for role in ("host", "guest"))))
     assert campaign_save_hashes(host.campaign) == payout_checkpoint, "Stock turn-in wrote a save before the normal checkpoint"
     return {"stock_simmi_jammers": {
         "offered": sorted(offers), "remaining": sorted(remaining), "initial_journals": accepted_journal,
-        "flood_plains_journals_after_simmi_acceptance": flood_journal,
-        "crossroads": crossroads, "lake": lake, "visits": [outbound, lake_out, lake_return, final_visit],
+        "crossroads": crossroads, "lake": lake, "flood_plains": flood,
+        "visits": [outbound, lake_out, lake_return, flood_out, flood_return, final_visit],
         "visits_verified_after_fixture_timeout": travel_receipts,
         "weapon_before_travel": before_travel, "weapon_after_travel": restored,
         "objective_journals": completed_journal, "paid_journals": final_journal,
         "lake_completion": lake_completion, "crossroads_completion": crossroads_completion,
+        "flood_plains_completion": flood_completion,
         "payouts": payouts, "shared_wallet": wallet, "no_gameplay_checkpoints": True,
     }}

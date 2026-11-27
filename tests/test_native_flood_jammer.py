@@ -188,15 +188,36 @@ class FloodJammerObjectiveTests(unittest.IsolatedAsyncioTestCase):
         ])
         host.checkpoint_native.assert_not_awaited()
 
-    async def test_crossroads_can_adopt_an_authored_objective_accepted_in_an_older_host_save(self):
-        spec = jammer.CROSSROADS_JAMMER
-        host = self.host(1, spec=spec)
-        del host.party["native_quests"]
-        await jammer.observe(host, object())
-        await jammer.observe(host, object())
-        record = host.party["native_quests"][spec.quest]
-        self.assertEqual((record["step"], record["actor"]), (2, "guest-character"))
-        self.assertEqual(host.party["economy"]["wallet"], 0)
+    async def test_adopts_an_authored_jammer_accepted_in_the_stock_journal(self):
+        for spec in jammer.OBJECTIVES.values():
+            with self.subTest(quest=spec.quest):
+                host = self.host(1, spec=spec)
+                del host.party["native_quests"]
+                await jammer.observe(host, object())
+                await jammer.observe(host, object())
+                record = host.party["native_quests"][spec.quest]
+                self.assertEqual((record["step"], record["actor"]), (2, "guest-character"))
+                self.assertEqual(host.party["economy"]["wallet"], 0)
+                host.checkpoint_native.assert_not_awaited()
+
+    async def test_flood_turnin_can_resume_a_completed_stock_objective_without_a_coop_record(self):
+        spec, area = jammer.FLOOD, jammer.OBSERVATORY
+        host = self.host(None, spec=spec)
+        host.last_game = {"state": "hosting", "map": area}
+        proof = dict(map=area, pawn="exact guest pawn", board=spec.board_at(area), quest=spec.quest,
+                     cash_before=10, xp_before=2, step_before=2,
+                     reputation={faction: {"before": 0, "after": 0} for faction in spec.factions})
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=(
+            {**host.last_game, spec.key: dict(proof, operation=spec.command("preflight"),
+                                             step_after=2, cash_after=10, xp_after=2)},
+            {**host.last_game, spec.key: dict(proof, operation=spec.command("turn-in"),
+                                             step_after=-10, cash_after=10 + spec.cash, xp_after=3)},
+        )))
+        paid = await jammer.act(host, bridge, "guest-character", spec.command("turn-in"))
+        replay = await jammer.act(host, bridge, "guest-character", spec.command("turn-in"))
+        self.assertEqual((paid["step"], paid["cash"], paid["wallet"]), (-10, spec.cash, 10 + spec.cash))
+        self.assertEqual(replay["effect"], "native_quest_already_settled")
+        self.assertEqual(bridge.command.await_count, 2)
         host.checkpoint_native.assert_not_awaited()
 
     async def test_live_pose_matches_the_current_exact_host_actor(self):
