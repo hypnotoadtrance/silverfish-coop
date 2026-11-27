@@ -1,3 +1,4 @@
+import asyncio
 import time
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
@@ -269,6 +270,19 @@ class ReservedReturnTests(IsolatedAsyncioTestCase):
         self.assertTrue(self.client.stopping)
         self.assertEqual(self.client.session_stop_reason, "host_session_ended")
 
+    async def test_a_new_visit_during_stock_leave_prevents_dialing_the_old_reservation(self):
+        async def leave(*args):
+            self.client.zone_epoch = "f" * 32
+            self.client.expected_zone = BOROUGH
+
+        self.client.leave_for_rejoin.side_effect = leave
+        await self.client.reconcile_game()
+
+        self.client.leave_for_rejoin.assert_awaited_once_with(self.title, CITY)
+        self.client.open_game_link.assert_not_awaited()
+        self.transport.request.assert_not_awaited()
+        self.assertTrue(self.client.needs_travel)
+
     async def test_reserved_timeout_does_not_accept_a_different_guest_on_the_same_map(self):
         def replace_scope():
             self.frame = dict(map=CITY, state="connected", mode="client", save_scope="d" * 32)
@@ -335,6 +349,37 @@ class ReservedReturnTests(IsolatedAsyncioTestCase):
 
 
 class ZoneRejoinIntegrationTests(IsolatedAsyncioTestCase):
+    async def test_active_join_follows_a_new_visit_and_ignores_the_old_connection(self):
+        session, epoch, successor = "a" * 32, "b" * 32, "c" * 32
+        joining = {"state": "joining", "map": MENU, "sequence": 50}
+        stale_connected = {"state": "connected", "map": CITY, "sequence": 49}
+        late_connected = dict(stale_connected, sequence=51)
+        snapshot = {"ok": True, "gameplay": {}, "zone_epoch": successor, "zone": BOROUGH}
+        bridge = SimpleNamespace(snapshot=lambda: joining, wait_for=AsyncMock(), wake_guest_update=Mock())
+        transport = SimpleNamespace(address=("127.0.0.1", 31000), connected=True, game_access=True,
+                                    session_end=None, request=AsyncMock(return_value=snapshot))
+        client = Client(SimpleNamespace(event=Mock()), transport, {"character_id": "guest"}, bridge)
+        self.addAsyncCleanup(client.cancel_gameplay_snapshot)
+        client.host_session, client.zone_epoch, client.expected_zone = session, epoch, CITY
+        client.last_game, client.needs_travel = joining, True
+
+        async def wait_for_world(condition, *, timeout):
+            self.assertFalse(condition(stale_connected))
+            async with asyncio.timeout(1):
+                while not condition(joining):
+                    await asyncio.sleep(.01)
+            return late_connected
+
+        bridge.wait_for.side_effect = wait_for_world
+        await client.wait_game_link(18, visit=(session, epoch, CITY), after_sequence=50)
+
+        transport.request.assert_awaited_once_with({"action": "snapshot"}, timeout=2)
+        self.assertEqual((client.zone_epoch, client.expected_zone), (successor, BOROUGH))
+        self.assertIs(client.last_game, joining)
+        self.assertTrue(client.needs_travel)
+        self.assertIsNone(client.game_visit)
+        client.control.event.assert_called_once_with("zone_rejoin_requested", zone_epoch=successor)
+
     async def test_host_end_during_world_start_request_prevents_unreal_join(self):
         session, epoch, scope = "a" * 32, "b" * 32, "c" * 32
         title = {"state": "ready", "map": MENU, "save_scope": scope}

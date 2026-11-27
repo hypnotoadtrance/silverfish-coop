@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, call, patch
 
-from tools.silverfish import native_enemy_loot
+from tools.silverfish import native_enemy_loot, native_loot
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.link import HostLink
 from tools.silverfish.native_roster import RosterEnrollment
@@ -448,6 +448,7 @@ class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
                 host.internal_port = 17000
                 host.last_game["native_zone_loading_support"] = True
                 host.zone_epoch = "source"
+                host.crate_publication = native_loot.RollPublication()
                 host.public_gameplay = Mock(return_value={})
                 host.relay = host.prop_carry_bridge = None
                 transport = HostLink(("127.0.0.1", 17000), Mock(), None)

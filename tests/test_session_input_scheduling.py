@@ -1168,6 +1168,7 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
                 if scenario == "same visit":
                     reply.update(zone_epoch=prior, zone=source)
                 client = self.guest(AsyncMock(return_value=reply))
+                client.transport.game_access = True
                 client.host_session = "d" * 32 if scenario == "new host" else session
                 client.zone_epoch, client.expected_zone = prior, source
                 client.game_visit = None if scenario == "initial" else source_visit

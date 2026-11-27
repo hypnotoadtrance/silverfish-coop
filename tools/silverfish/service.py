@@ -5669,40 +5669,54 @@ class Client:
         return values
 
     async def open_game_link(self, *, timeout: float = 18, renew_endpoint: bool = False) -> None:
-        if self.stopping or self.check_host_end():
+        visit = self.host_session, self.zone_epoch, self.expected_zone
+        if not native_zone_rejoin.may_join(self, visit):
             return
-        visit = ()
+        arguments = ()
         if self.invite.get("native_zones"):
             if not native_mindcore_carry.token(self.host_session) or not native_mindcore_carry.token(self.zone_epoch):
                 raise RuntimeError("The native client requires an authenticated host and zone")
-            visit = (self.host_session, self.zone_epoch, self.expected_zone)
+            arguments = visit
         if renew_endpoint:
             await self.transport.renew_game_endpoint()
             self.endpoint = f"127.0.0.1:{self.transport.address[1]}"
         else:
             self.transport.reset_game_endpoint()
         self.needs_travel = True
-        world_start = await self.guest_world_start(visit) if visit else ()
-        if self.stopping or self.check_host_end():
+        world_start = await self.guest_world_start(visit) if arguments else ()
+        if not native_zone_rejoin.may_join(self, visit):
             return
-        if visit and visit != (self.host_session, self.zone_epoch, self.expected_zone):
-            raise RuntimeError("The authenticated visit changed before native rejoin")
-        if visit and not native_zone_rejoin.preserves_private_scope(self, self.bridge.snapshot()):
+        if not native_zone_rejoin.preserves_private_scope(self, self.bridge.snapshot()):
             raise RuntimeError("The private guest save scope changed before native rejoin")
-        self.last_game = await self.bridge.command("join", self.endpoint, *visit, *world_start)
-        await self.wait_game_link(timeout)
+        started = await self.bridge.command("join", self.endpoint, *arguments, *world_start)
+        if not native_zone_rejoin.may_join(self, visit):
+            return
+        self.last_game = started
+        await self.wait_game_link(timeout, visit=visit, after_sequence=started.get("sequence"))
 
-    async def wait_game_link(self, timeout: float) -> None:
-        visit = self.host_session, self.zone_epoch, self.expected_zone
+    async def wait_game_link(self, timeout: float, *, visit=None, after_sequence=None) -> None:
+        visit = visit or (self.host_session, self.zone_epoch, self.expected_zone)
+
+        def joined(state):
+            return ((state["state"], state["map"]) == ("connected", visit[2])
+                    and (after_sequence is None or state.get("sequence", -1) >= after_sequence)
+                    and native_zone_rejoin.preserves_private_scope(self, state))
+
+        async def follow_host():
+            while native_zone_rejoin.may_join(self, visit):
+                await self.refresh_gameplay(project=False, wait=False)
+                await asyncio.sleep(.15)
+
+        # The main session loop is parked in Unreal travel. Keep reading the
+        # host's control state so another travel can supersede this attempt.
+        watcher = asyncio.create_task(follow_host()) if getattr(self.transport, "connected", False) else None
         try:
-            connected = await self.bridge.wait_for(
-                lambda state: self.stopping or self.check_host_end()
-                or ((state["state"], state["map"]) == ("connected", visit[2])
-                    and (self.host_session, self.zone_epoch, self.expected_zone) == visit
-                    and native_zone_rejoin.preserves_private_scope(self, state)), timeout=timeout,
-            )
+            connected = await self.bridge.wait_for(lambda state: not native_zone_rejoin.may_join(self, visit)
+                                                   or joined(state), timeout=timeout)
+            if native_zone_rejoin.may_join(self, visit) and joined(connected):
+                self._complete_game_link(connected)
         except TimeoutError:
-            if self.stopping or self.check_host_end():
+            if not native_zone_rejoin.may_join(self, visit):
                 return
             self.last_game = self.bridge.snapshot() or self.last_game
             self.control.event("native_game_join_timeout", zone_epoch=self.zone_epoch,
@@ -5710,8 +5724,11 @@ class Client:
                                sent=self.transport.game_packets_sent, received=self.transport.game_packets_received,
                                local_datagrams=self.transport.game_local_datagrams)
             raise
-        if not self.stopping and not self.check_host_end():
-            self._complete_game_link(connected)
+        finally:
+            if watcher is not None:
+                watcher.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await watcher
 
     def _complete_game_link(self, connected: dict) -> None:
         self.last_game = connected
@@ -5743,6 +5760,9 @@ class Client:
             return
         if not native_zone_rejoin.preserves_private_scope(self, state):
             return
+        return_visit = self.host_session, self.zone_epoch, self.expected_zone
+        if not native_zone_rejoin.may_join(self, return_visit):
+            return
         self.empty_zone_retry.note_title_ejection(self, state)
         previous = self.game_visit
         if (previous and self.needs_travel and self.host_session == previous[0] and self.zone_epoch != previous[1]
@@ -5769,10 +5789,9 @@ class Client:
             await self.leave_for_rejoin(state, destination)
         else:
             await self.leave_for_rejoin(state)
-        if self.stopping or self.check_host_end():
+        if not native_zone_rejoin.may_join(self, return_visit):
             return
         reservation, epoch = self.native_return_reservation, self.zone_epoch
-        return_visit = self.host_session, epoch, self.expected_zone
         early_retry = reservation is not None and self.native_return_retry_allowed
         try:
             await self.open_game_link(timeout=10 if early_retry else 18, renew_endpoint=reservation is not None)

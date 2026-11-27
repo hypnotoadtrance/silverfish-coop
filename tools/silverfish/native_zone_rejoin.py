@@ -17,10 +17,14 @@ def preserves_private_scope(client: "Client", snapshot: dict | None) -> bool:
     return bool(len(scope) == 32 and snapshot and snapshot.get("save_scope") == scope)
 
 
+def may_join(client: "Client", visit: tuple[str | None, str | None, str | None]) -> bool:
+    return (not client.stopping and not client.check_host_end() and not client.suspended
+            and not client.server_transitioning and client.transport.game_access
+            and (client.host_session, client.zone_epoch, client.expected_zone) == visit)
+
+
 def reserved_return_frame(client: "Client", visit: tuple[str | None, str | None, str | None]) -> dict | None:
-    if (client.stopping or client.suspended or client.server_transitioning or not client.transport.game_access
-            or client.check_host_end() or client.bridge.process.poll() is not None
-            or (client.host_session, client.zone_epoch, client.expected_zone) != visit):
+    if not may_join(client, visit) or client.bridge.process.poll() is not None:
         return None
     snapshot = client.bridge.snapshot()
     return snapshot if preserves_private_scope(client, snapshot) else None

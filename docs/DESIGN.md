@@ -54,6 +54,7 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 - Tie a local container roll and its provisional pickups to the visit, container, replenishment cycle, and opening operation. The opening report carries the original stock item identities and any pickups already made from that roll. A replay returns the existing result. A losing opener removes the provisional products and receives the accepted roll. Keep any later transfer of a provisional item pending until its originating roll is accepted.
 - Order accepted rolls and claims against world snapshots within the same visit. Keep a recent confirmation through older snapshots while applying unrelated world changes. A newer snapshot can replace the roll or retire it when the container replenishes.
 - Give gameplay traffic and action receipts priority over bulky snapshots and diagnostics. Use short-lived messages for replaceable visual and audio effects. Keep each character's latest accepted state and the shared ledger consistent through a delay or disconnect.
+- Keep host control snapshots flowing during a stock Unreal join. If the host starts another transition or authorizes a newer visit, finish waiting on the previous attempt and follow the newer visit. Accept the local join only from the selected guest save scope and a game frame at or after the join command's acknowledgement.
 - Keep routine campaign changes in memory until the next checkpoint. Save on rest, travel, Save and Quit, or an explicit save request.
 
 ## Gameplay path audit
