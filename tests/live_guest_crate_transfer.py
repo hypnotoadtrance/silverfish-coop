@@ -140,16 +140,16 @@ async def verify_runtime_transfer(host, guest, pawn):
         while (crate := await command(host, "identity")) == "pending":
             await asyncio.sleep(.08)
     assert native_loot.runtime_crate(crate) and native_loot.crate_area(crate) == OBSERVATORY, crate
-    await suite.wait(guest_run, lambda frame:
-        frame["game"].get("native_loot_crates", {}).get(crate, {}).get("state") == "ready")
-    guest_name, authority, opened = (await command(guest, "observe", crate)).split(";")
-    assert authority == opened == "false"
-    assert await command(host, "observe", crate) == f"{host_name};true;false"
     approached = await host.bridge.command("native-loot-approach", pawn, crate, timeout=5)
     position, = [row["location"] for row in approached["pawns"].values() if row["name"] == pawn]
     await suite.wait(guest_run, lambda frame:
         (point := frame["game"]["pawns"]["local"].get("location"))
         and sum((a - b) ** 2 for a, b in zip(point, position)) < 50**2)
+    await suite.wait(guest_run, lambda frame:
+        frame["game"].get("native_loot_crates", {}).get(crate, {}).get("state") == "ready")
+    guest_name, authority, opened = (await command(guest, "observe", crate)).split(";")
+    assert authority == opened == "false"
+    assert await command(host, "observe", crate) == f"{host_name};true;false"
     assert await command(guest, "interact", crate) == "pressed"
     frames = await asyncio.gather(*(suite.wait(run, lambda frame:
         frame["game"].get("native_loot_crates", {}).get(crate, {}).get("state") == "exhausted"
@@ -163,7 +163,7 @@ async def verify_runtime_transfer(host, guest, pawn):
     assert suite.campaign_save_hashes(host.campaign) == before
     saved = await suite.submit(host_run, "checkpoint")
     assert saved["ok"], saved
-    checkpoint = json.loads((host.campaign / "campaign.json").read_text(encoding="utf-8"))
+    checkpoint = json.loads((host.campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
     assert crate not in checkpoint["world"]["party"].get(native_loot.STATE_KEY, {})
     assert (await command(guest, "observe", crate)).endswith(";false;true")
     return {"crate": crate, "host_actor": host_name, "guest_actor": guest_name, "items": len(roll["items"]),
