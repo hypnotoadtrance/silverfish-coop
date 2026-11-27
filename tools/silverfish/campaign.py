@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,8 @@ SCHEMA_VERSION = 2
 DEFAULT_RECONNECT_GRACE = 90.0
 _CREDENTIAL_RE = re.compile(r"[A-Za-z0-9_-]{43}")
 _DIGEST_RE = re.compile(r"[a-f0-9]{64}")
+_WINDOWS_REPLACE_RETRY_DELAYS = (0.025, 0.05, 0.1, 0.2)
+_WINDOWS_REPLACE_RETRY_ERRORS = frozenset({5, 32, 33})  # Access denied, sharing violation, lock violation.
 
 
 DELETED = "coop_deleted"
@@ -381,11 +384,24 @@ class CampaignStore:
                 temp.write(body)
                 temp.flush()
                 os.fsync(temp.fileno())
-            os.replace(temp_path, path)
-            temp_path = None
+            # A Windows reader can temporarily block replacement. Keep the
+            # flushed sibling file and retry only the atomic publication.
+            for delay in (*_WINDOWS_REPLACE_RETRY_DELAYS, None):
+                try:
+                    os.replace(temp_path, path)
+                except OSError as error:
+                    if delay is None or getattr(error, "winerror", None) not in _WINDOWS_REPLACE_RETRY_ERRORS:
+                        raise
+                    time.sleep(delay)
+                else:
+                    temp_path = None
+                    break
         finally:
             if temp_path is not None:
-                temp_path.unlink(missing_ok=True)
+                # A temporary file held by the same scanner may also resist
+                # cleanup. Preserve the original write or replacement error.
+                with suppress(OSError):
+                    temp_path.unlink(missing_ok=True)
 
     def _commit(self, candidate, *, verify_content=True, discard_previous=False):
         # The caller holds _writer through publication. The prior checkpoint

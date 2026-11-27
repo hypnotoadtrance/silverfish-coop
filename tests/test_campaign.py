@@ -255,14 +255,51 @@ class CampaignStoreTests(unittest.TestCase):
                     raise OSError("simulated storage failure")
                 return replace(source, target)
 
-            with patch("tools.silverfish.campaign.os.replace", side_effect=reject_primary):
+            with patch("tools.silverfish.campaign.os.replace", side_effect=reject_primary) as attempted:
                 with self.assertRaises(OSError):
                     store.save_world({"day": 2})
+            self.assertEqual(attempted.call_count, 2)
             self.assertEqual(store.path.read_bytes(), before)
             self.assertEqual(store.status()["world"], {"day": 1})
             self.assertFalse(list(self.directory.glob("*.tmp")))
         with self.open_store() as store:
             self.assertEqual(store.status()["world"], {"day": 1})
+
+    def test_windows_access_denied_reuses_prepared_file_and_stops_retrying(self):
+        for blocking_attempts, succeeds in ((2, True), (5, False)):
+            with self.subTest(blocking_attempts=blocking_attempts), self.open_store() as store:
+                original = store.save_world({"day": 1})
+                before = store.path.read_bytes()
+                real_replace = os.replace
+                attempts = []
+                failure = PermissionError("simulated access denied")
+                failure.winerror = 5
+
+                def replace(source, target):
+                    if target == store.path:
+                        attempts.append((source, source.read_bytes()))
+                        self.assertEqual(source.parent, target.parent)
+                        if len(attempts) <= blocking_attempts:
+                            raise failure
+                    return real_replace(source, target)
+
+                with (patch("tools.silverfish.campaign.os.replace", side_effect=replace),
+                      patch("tools.silverfish.campaign.time.sleep") as delay):
+                    if succeeds:
+                        self.assertEqual(store.save_world({"day": 2}), original + 1)
+                    else:
+                        with self.assertRaises(PermissionError) as refused:
+                            store.save_world({"day": 2})
+                        self.assertIs(refused.exception, failure)
+                self.assertEqual(len(attempts), blocking_attempts + int(succeeds))
+                self.assertEqual(delay.call_count, len(attempts) - 1)
+                self.assertEqual(len(set(attempts)), 1)
+                self.assertEqual(store.previous_path.read_bytes(), before)
+                self.assertEqual(store.status()["revision"], original + int(succeeds))
+                self.assertEqual(store.status()["world"], {"day": 2 if succeeds else 1})
+                if not succeeds:
+                    self.assertEqual(store.path.read_bytes(), before)
+                self.assertFalse(list(self.directory.glob("*.tmp")))
 
     def test_corrupt_primary_recovers_previous_but_unsupported_schema_is_preserved(self):
         with self.open_store() as store:
@@ -362,6 +399,45 @@ class AsyncCampaignCheckpointTests(unittest.IsolatedAsyncioTestCase):
             finish.set()
         self.assertEqual(await first, 1)
         self.assertEqual(await second, 2)
+
+    @unittest.skipUnless(os.name == "nt", "Windows file-sharing semantics")
+    async def test_checkpoint_retries_real_windows_sharing_failure_on_worker(self):
+        self.resume.set()
+        real_replace = os.replace
+        main_thread = threading.get_ident()
+        first_failure, released = threading.Event(), threading.Event()
+        failures, sources = [], []
+        # The CRT read handle allows other readers but does not share deletion.
+        reader = self.store.path.open("rb")
+
+        def observe_replace(source, target):
+            if target == self.store.path:
+                self.assertNotEqual(threading.get_ident(), main_thread)
+                sources.append(source)
+            try:
+                return real_replace(source, target)
+            except PermissionError as error:
+                if target == self.store.path and not failures:
+                    failures.append(error.winerror)
+                    first_failure.set()
+                    if not released.wait(3):
+                        raise TimeoutError("test did not release the destination handle") from error
+                raise
+
+        with patch("tools.silverfish.campaign.os.replace", side_effect=observe_replace):
+            checkpoint = asyncio.create_task(self.store.checkpoint_async({"visit": 1}, {}))
+            try:
+                self.assertTrue(await asyncio.to_thread(first_failure.wait, 2))
+                self.assertEqual(self.store.status()["revision"], 0)
+            finally:
+                reader.close()
+                released.set()
+            self.assertEqual(await asyncio.wait_for(checkpoint, 3), 1)
+        self.assertIn(failures[0], (5, 32, 33))
+        self.assertEqual(len(sources), 2)
+        self.assertEqual(sources[0], sources[1])
+        self.assertEqual(self.store.status()["world"], {"visit": 1})
+        self.assertFalse(list(self.store.path.parent.glob("*.tmp")))
 
     async def test_cancellation_drains_commit_before_allowing_another_write(self):
         first = asyncio.create_task(self.store.checkpoint_async({"visit": 1}, {}))
