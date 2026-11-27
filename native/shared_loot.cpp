@@ -134,8 +134,13 @@ namespace
             if (actor->GetWorld() != world) return false;
         }
         else if (!silverfish::native_zone::visible_actor_level(actor, world)) return false;
-        if (guest) return read_bool(crate, STR("bReplicates"), false);
         auto* role = field<Unreal::FByteProperty>(crate, STR("Role"));
+        if (guest)
+        {
+            const auto* profile = silverfish::shared_loot::authored_profile(crate);
+            if (profile && profile->runtime_id) return role && role->GetPropertyValueInContainer(crate) == 1;
+            return read_bool(crate, STR("bReplicates"), false);
+        }
         return role && role->GetPropertyValueInContainer(crate) == 3;
     }
 
@@ -1582,12 +1587,25 @@ namespace silverfish::shared_loot
         struct DiscoveredContainer
         {
             Path world, path, class_path;
-            Unreal::FWeakObjectPtr type;
+            Unreal::FWeakObjectPtr type, runtime_actor;
             authored_loot::Profile profile;
         };
 
         std::deque<DiscoveredContainer> discovered;
         std::unordered_map<Path, std::size_t> discovery_index;
+        std::unordered_map<Unreal::UObject*, std::size_t> runtime_index;
+
+        const authored_loot::Profile* runtime_profile(Unreal::UObject* crate)
+        {
+            const auto match = runtime_index.find(crate);
+            if (match != runtime_index.end())
+            {
+                const auto& known = discovered[match->second];
+                if (known.runtime_actor.Get() == crate && known.type.Get() == crate->GetClassPrivate())
+                    return &known.profile;
+            }
+            return nullptr;
+        }
 
         const authored_loot::StockClass* container_family(Unreal::UClass* type)
         {
@@ -1636,7 +1654,8 @@ namespace silverfish::shared_loot
             auto* world = crate_level_world(actor);
             if (world && actor->GetLevel() == object_field(world, STR("PersistentLevel"))) return match->second;
         }
-        if (!Unreal::IsInGameThreadRaw() || !crate->HasAnyFlags(Unreal::RF_WasLoaded)) return nullptr;
+        if (!Unreal::IsInGameThreadRaw()) return nullptr;
+        if (!crate->HasAnyFlags(Unreal::RF_WasLoaded)) return runtime_profile(crate);
         auto* type = crate->GetClassPrivate();
         const auto* family = container_family(type);
         if (!family) return nullptr;
@@ -1663,13 +1682,41 @@ namespace silverfish::shared_loot
         if (!native_zone::visible_actor_level(actor, world)) return nullptr;
         const auto index = discovered.size();
         auto& placed = discovered.emplace_back(DiscoveredContainer{
-            std::move(world_path), path, std::move(class_path), Unreal::FWeakObjectPtr(type), {}});
+            std::move(world_path), path, std::move(class_path), Unreal::FWeakObjectPtr(type), {}, {}});
         placed.profile = {placed.world.c_str(), placed.path.c_str(), salt->GetPropertyValueInContainer(crate)};
         placed.profile.stock_class = family;
         placed.profile.guarantee_spawn = placed.class_path != family->actor_class &&
             guarantee->GetPropertyValueInContainer(crate);
         placed.profile.discovery_index = index + 1;
         discovery_index.emplace(std::move(key), index);
+        return &placed.profile;
+    }
+
+    const authored_loot::Profile* bind_runtime_crate(Unreal::UObject* crate, Unreal::UWorld* world, std::uint16_t id)
+    {
+        if (!id || !live(crate) || !live(world) || !Unreal::IsInGameThreadRaw() ||
+            crate->HasAnyFlags(Unreal::RF_WasLoaded) || !read_bool(crate, STR("bActorIsBeingDestroyed"), false))
+            return nullptr;
+        auto* actor = Unreal::Cast<Unreal::AActor>(crate);
+        if (!actor || actor->GetWorld() != world || actor->GetLevel() != object_field(world, STR("PersistentLevel")))
+            return nullptr;
+        if (const auto* profile = runtime_profile(crate)) return profile->runtime_id == id ? profile : nullptr;
+        auto* type = crate->GetClassPrivate();
+        const auto* family = container_family(type);
+        auto* salt = field<Unreal::FIntProperty>(crate, STR("SpawnSalt"));
+        auto* guarantee = field<Unreal::FBoolProperty>(crate, STR("GuaranteeSpawn"));
+        auto class_path = type->GetPathName();
+        if (!family || !salt || !guarantee ||
+            !content_paths::item_class(std::basic_string_view<Unreal::TCHAR>(class_path))) return nullptr;
+        const auto index = discovered.size();
+        auto& placed = discovered.emplace_back(DiscoveredContainer{world->GetPathName(), crate->GetPathName(),
+            std::move(class_path), Unreal::FWeakObjectPtr(type), Unreal::FWeakObjectPtr(crate), {}});
+        placed.profile = {placed.world.c_str(), placed.path.c_str(), salt->GetPropertyValueInContainer(crate)};
+        placed.profile.stock_class = family;
+        placed.profile.guarantee_spawn = guarantee->GetPropertyValueInContainer(crate);
+        placed.profile.discovery_index = index + 1;
+        placed.profile.runtime_id = id;
+        runtime_index.insert_or_assign(crate, index);
         return &placed.profile;
     }
 
@@ -1716,7 +1763,7 @@ namespace silverfish::shared_loot
         };
         const auto* profile = authored_profile(crate);
         if (!profile) return refuse("crate_settings_profile");
-        if (profile->discovery_index &&
+        if (profile->discovery_index && !profile->runtime_id &&
             !read_bool(crate, STR("bReplicates"), false)) return refuse("crate_settings_replication");
         if (!read_bool(crate, STR("GuaranteeSpawn"), profile->guarantee_spawn)) return refuse("crate_settings_guarantee");
         if (!read_bool(crate, STR("IgnoreKarma"), profile->stock_class->armor_first)) return refuse("crate_settings_ignore_karma");

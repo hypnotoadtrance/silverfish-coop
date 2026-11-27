@@ -1,3 +1,32 @@
+    if fields[2] == "fixture-runtime-crate" and title_fixtures and os.getenv("SILVERFISH_COOP_HEADLESS") == "1" then
+        local mode, name = fields[3], fields[4]
+        if mode == "spawn" then
+            assert(phase == "hosting" and not valid_object(actions.fixture_runtime_crate))
+            local source = StaticFindObject("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.LootCrate_Small_BP_C_1")
+            assert(valid_object(source) and source:HasAuthority())
+            local point, forward = source:K2_GetActorLocation(), source:GetActorForwardVector()
+            local crate = state.world:SpawnActor(source:GetClass(),
+                {X = point.X + 180 * forward.X, Y = point.Y + 180 * forward.Y, Z = point.Z}, source:K2_GetActorRotation())
+            assert(valid_object(crate) and crate:HasAuthority() and not crate:HasAnyFlags(0x00080000))
+            actions.fixture_runtime_crate = crate
+            return crate:GetFullName()
+        elseif mode == "identity" and phase == "hosting" then
+            local crate = actions.fixture_runtime_crate
+            for _, profile in ipairs(loot.profiles(state.map)) do
+                if valid_object(crate) and profile.full_name == crate:GetFullName() then return profile.name end
+            end
+            return "pending"
+        end
+        local profile = assert(loot.profile(state.map, name))
+        local crate = StaticFindObject(profile.path)
+        assert(loot.matches_crate(crate, state.world, profile))
+        if mode == "observe" then
+            return table.concat({crate:GetFullName(), tostring(crate:HasAuthority()), tostring(crate.Looted)}, ";")
+        end
+        assert(mode == "interact" and phase == "connected" and not crate:HasAuthority() and crate.Looted == false)
+        assert(require("native_loot_crate_input").stock_focus(state.local_pawn.pawn, crate.Box))
+        return "pressed"
+    end
     if fields[2] == "fixture-streamed-crate" and title_fixtures and os.getenv("SILVERFISH_COOP_HEADLESS") == "1" then
         local mode, world = fields[3], state.world
         local stream = actions.crate_stream

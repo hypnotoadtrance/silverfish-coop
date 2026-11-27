@@ -1,7 +1,7 @@
 local reference = {}
 -- Native TargetPoints transfer owner references and quantized integer positions.
 -- Each purpose has its own height interval outside the playable maps.
-local heights = {barter = 262144, critter = 327680}
+local heights = {barter = 262144, critter = 327680, crate = 393216}
 reference.class = "/Script/Engine.TargetPoint"
 reference.limit = 65535
 
@@ -17,7 +17,7 @@ end
 
 function reference.is_reference(marker)
     local point = marker:K2_GetActorLocation()
-    return id_at(point, "barter") ~= nil or id_at(point, "critter") ~= nil
+    return id_at(point, "barter") ~= nil or id_at(point, "critter") ~= nil or id_at(point, "crate") ~= nil
 end
 
 function reference.spawn(world, class, purpose, owner, id)

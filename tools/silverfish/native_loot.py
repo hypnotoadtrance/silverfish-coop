@@ -6,7 +6,7 @@ import uuid
 
 from . import native_host_save, native_pickup_audio, native_stock_door, party
 from .authored_cash import CASH_RANGES
-from .authored_loot import (CRATES, DEFERRED_PRY_CLASSES, LEGACY_CRATE, crate_area, key_unlock_only, lockable_container, loot_capacity, random_lid,
+from .authored_loot import (CRATES, DEFERRED_PRY_CLASSES, LEGACY_CRATE, crate_area, key_unlock_only, lockable_container, loot_capacity, random_lid, runtime_crate,
                             valid_lid_angle, valid_loot_trait_calls)
 from .local_bridge import LocalCommandNotSubmitted
 from .native_gold import valid_guid
@@ -94,7 +94,8 @@ async def flush_pending_escrows(host, bridge, state):
     pending = {(ledger, identity): roll["escrow"]
                for ledger in ledgers
                for identity, roll in state.get(ledger, {}).items()
-               if (roll.get("escrow") or {}).get("pending") is True}
+               if (roll.get("escrow") or {}).get("pending") is True
+               and (ledger != STATE_KEY or not runtime_crate(identity))}
     for ledger in (native_wire_quest.REWARD_KEY, native_meet_broker.REWARDS.key, native_mosby_tape.REWARDS,
                    native_prototype_drill.REWARDS, native_subway_valve.PENDING):
         escrow = state.get(ledger, {}).get("escrow", {})
@@ -123,6 +124,15 @@ async def flush_pending_escrows(host, bridge, state):
         else:
             updated[ledger][identity] = dict(state[ledger][identity], escrow=frame)
     return updated, records
+
+
+def checkpoint_party(state):
+    """Save authored loot and player ownership. Runtime actors belong to the live world."""
+    if not any(runtime_crate(crate) for crate in state.get(STATE_KEY, {})) and not any(
+            runtime_crate(crate) for crate in state.get(RETIRED, {}).values()):
+        return state
+    return {**state, STATE_KEY: {crate: roll for crate, roll in state.get(STATE_KEY, {}).items() if not runtime_crate(crate)},
+            RETIRED: {key: crate for key, crate in state.get(RETIRED, {}).items() if not runtime_crate(crate)}}
 
 
 def pry_defers_unlock(crate: str) -> bool:
@@ -959,7 +969,8 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
     elif action == "open":
         arguments = (native_host_save.new_slot(),)
         capability = SPECIAL_MEMORY_CAPABILITY if pried or power_sequence is not None else "native_guest_save_retention"
-        memory_escrow = defer_save and not fixture_nonempty and host.last_game.get(capability) is True
+        memory_escrow = not fixture_nonempty and (runtime_crate(crate)
+                                                 or defer_save and host.last_game.get(capability) is True)
         if fixture_nonempty:
             arguments += ("fixture-nonempty",)
         elif pried:

@@ -512,6 +512,7 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
                    "        const RC::CharType* key_class_name{};",
                    "        bool extra_open_ping{};",
                    "        std::size_t discovery_index{};",
+                   "        std::uint16_t runtime_id{};",
                    "    };", "", "    inline constexpr std::array worlds{"))
     for area in dict.fromkeys((*[area for area, _, _, _ in CRATE_PROFILES], SMALL_CABINET_PROFILE[0], OFFICE_DESK_PROFILE[0],
                                *(area for _, area, *_ in families))):

@@ -47,7 +47,7 @@ end
 
 local function discover(map, target)
     if type(SilverfishDiscoverNativeLootCrate) ~= "function" then return end
-    local index, full_name, stock_class, salt, capacity, owner, streamed, class, guaranteed =
+    local index, full_name, stock_class, salt, capacity, owner, streamed, class, guaranteed, runtime_id =
         SilverfishDiscoverNativeLootCrate(target)
     if not index or owner ~= map then return end
     local family, path = full_name:match("^(%S+) (%S+)$")
@@ -56,15 +56,28 @@ local function discover(map, target)
     local source = streamed and (map .. "|" .. path) or path
     local stock_family = stock_class:match("%.([^%.]+)$")
     if not family or not stock_family then return end
-    local name = class == stock_class and (family .. " " .. source)
-        or (stock_family .. " " .. class .. " " .. source)
-    if names[name] then return names[name] end
+    local name
+    if runtime_id and runtime_id > 0 then
+        name = ("%s %s runtime:%s:%d"):format(stock_family, class, map, runtime_id)
+    else
+        name = class == stock_class and (family .. " " .. source) or (stock_family .. " " .. class .. " " .. source)
+    end
+    local previous = names[name]
+    if previous and previous.index == index then return previous end
     local profile = {index = index, name = name, full_name = full_name, path = path, world = map .. "." .. leaf, map = map,
         actor_class = class, salt = salt, capacity = capacity, discovered = true, streamed = streamed,
         guarantee_spawn = guaranteed}
     for key, value in pairs(layouts[stock_class] or {}) do profile[key] = value end
+    local profiles = loot.profiles(map)
+    if previous then
+        discovered[previous.index] = nil
+        for position, row in ipairs(profiles) do
+            if row == previous then profiles[position] = profile break end
+        end
+    else
+        table.insert(profiles, profile)
+    end
     discovered[index], names[name] = profile, profile
-    table.insert(loot.profiles(map), profile)
     return profile
 end
 

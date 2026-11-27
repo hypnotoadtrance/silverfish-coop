@@ -222,6 +222,7 @@ namespace silverfish::authored_loot
         const RC::CharType* key_class_name{};
         bool extra_open_ping{};
         std::size_t discovery_index{};
+        std::uint16_t runtime_id{};
     };
 
     inline constexpr std::array worlds{

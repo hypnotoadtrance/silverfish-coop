@@ -135,3 +135,21 @@ class CrateOutcomeTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(party.RuleError, "outcome_invalid"):
                 transfer.decode_report(transfer.report_body(self.epoch, invalid, self.outcome), OBSERVATORY)
         self.bridge.command.assert_awaited_once()
+
+    async def test_runtime_container_uses_the_live_ledger_without_a_durable_escrow(self):
+        actor_class = "/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C"
+        self.crate = f"LootCrate_Small_BP_C {actor_class} runtime:{OBSERVATORY}:3"
+        body = transfer.report_body(self.epoch, self.crate, self.outcome)
+        accepted = await transfer.accept(self.host, self.bridge, "guest", body, "a" * 32)
+        state = self.host.party
+        self.assertEqual(native_loot.published(state[native_loot.STATE_KEY], OBSERVATORY), {
+            self.crate: accepted["native_loot_roll"],
+        })
+        self.assertNotIn(self.crate, native_loot.checkpoint_party(state)[native_loot.STATE_KEY])
+        self.assertIn(self.crate, state[native_loot.STATE_KEY])
+        self.bridge.command.reset_mock()
+        pending, saves = await native_loot.flush_pending_escrows(self.host, self.bridge, state)
+        self.assertIs(pending, state)
+        self.assertEqual(saves, {})
+        self.bridge.command.assert_not_awaited()
+        self.assertIsNone(native_loot.crate_area(self.crate.rsplit(":", 1)[0] + ":65536"))

@@ -151,7 +151,7 @@ def crate_identity(roll_id, guid):
 
 def _crate_items(rolls, area, observed):
     for crate, roll in native_loot.rolls_in_area(rolls, area).items():
-        if "|" in crate and observed.get(crate, {}).get("state") != "exhausted":
+        if ("|" in crate or native_loot.runtime_crate(crate)) and observed.get(crate, {}).get("state") != "exhausted":
             continue
         roll_id = roll.get("id")
         if not isinstance(roll_id, str) or not party.REQUEST_ID.fullmatch(roll_id):

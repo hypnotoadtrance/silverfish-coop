@@ -664,7 +664,29 @@ namespace
         lua.set_bool(streamed);
         lua.set_string(RC::to_utf8_string(crate->GetClassPrivate()->GetPathName()));
         lua.set_bool(profile->guarantee_spawn);
-        return 9;
+        lua.set_integer(profile->runtime_id);
+        return 10;
+    }
+
+    int bind_runtime(const Lua& lua)
+    {
+        if (!ready() || lua.get_stack_size() != 3 || !lua.is_string(1) ||
+            !lua.is_integer(2) || !lua.is_integer(3)) return 0;
+        const auto path = lua.get_string();
+        const auto pawn = lua.get_integer();
+        const auto id = lua.get_integer();
+        if (path.size() > 384 || pawn <= 0 || id <= 0 || id > 65535) return 0;
+        const auto actor_path = RC::to_generic_string(path);
+        auto* crate = U::Cast<U::AActor>(find<U::UObject>(actor_path.c_str()));
+        auto* world = live(crate) ? crate->GetWorld() : nullptr;
+        if (!live(world)) return 0;
+        const auto local = local_owner(world);
+        if (reinterpret_cast<std::intptr_t>(local.pawn) != pawn ||
+            !has_role(crate, local.host ? 3 : 1)) return 0;
+        const auto* profile = silverfish::shared_loot::bind_runtime_crate(crate, world, static_cast<std::uint16_t>(id));
+        if (!profile || !ready_profile(crate, world)) return 0;
+        lua.set_integer(static_cast<std::int64_t>(silverfish::shared_loot::profile_index(*profile) + 1));
+        return 1;
     }
 
     int arm_guest_pry(const Lua& lua)
@@ -813,6 +835,7 @@ namespace silverfish::native_loot_crate_input
         lua.register_function("SilverfishReadNativeLootCrateInput", status);
         lua.register_function("SilverfishReadNativeLootCrateReceipts", receipts);
         lua.register_function("SilverfishDiscoverNativeLootCrate", discovered_profile);
+        lua.register_function("SilverfishBindNativeRuntimeLootCrate", bind_runtime);
         lua.register_function("SilverfishReadNativeLockpickResults", read_lockpicks);
         lua.register_function("SilverfishClearNativeLootCrateInput", clear);
         lua.register_function("SilverfishArmNativeGuestVehiclePry", arm_guest_pry);

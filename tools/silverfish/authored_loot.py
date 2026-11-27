@@ -1,12 +1,14 @@
 """Exact stock persistent-level small crates qualified for shared loot."""
 
 import math
+import re
 
 from .authored_container_placements import (ARMOR_FIRST_CLASSES, CLASS_CAPACITIES, CONTAINER_PLACEMENTS,
                                             DEFERRED_PRY_CLASSES, KEY_UNLOCK_ONLY_CLASSES,
                                             KEYED_LOCK_CLASSES, KEYLESS_LOCK_CLASSES, MIXED_GUARANTEE_CLASSES, RANDOM_LID_CLASSES)
 from .travel import CITY, CISTERN, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, RAIL_YARD
 from .content_paths import actor_source_map, item_class_name
+from .native_map_preflight import valid_campaign_package
 
 
 PLACEMENTS = (
@@ -526,6 +528,13 @@ DISCOVERED_CAPACITIES = {"LootCrate_Small_BP_C": 2, **{
     family: capacity for family, capacity in CLASS_CAPACITIES.items()
     if family not in LOCKABLE_CONTAINER_CLASSES and family not in RANDOM_LID_CLASSES
 }}
+_RUNTIME_SOURCE = re.compile(r"runtime:(/[A-Za-z0-9_/]+):([1-9][0-9]{0,4})")
+
+
+def runtime_crate(crate: object) -> bool:
+    return isinstance(crate, str) and crate.rsplit(" ", 1)[-1].startswith("runtime:")
+
+
 def crate_area(crate: object) -> str | None:
     if not isinstance(crate, str) or len(crate) > 896:
         return None
@@ -538,6 +547,9 @@ def crate_area(crate: object) -> str | None:
     if separator:
         if not item_class_name(actual_class):
             return None
+        if runtime := _RUNTIME_SOURCE.fullmatch(actor_source):
+            area, number = runtime.groups()
+            return area if int(number) <= 65535 and valid_campaign_package(area) else None
         source = actor_source
     return actor_source_map(source)
 

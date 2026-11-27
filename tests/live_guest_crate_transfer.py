@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 from contextlib import ExitStack
+import json
 from pathlib import Path
 
 import live_portable_title_smoke as suite
@@ -122,7 +123,51 @@ async def verify_streamed_transfer(host, guest, pawn):
 
 async def verify_crates(host, guest, pawn):
     return {"persistent": await verify_transfer(host, guest, pawn),
-            "streamed": await verify_streamed_transfer(host, guest, pawn)}
+            "streamed": await verify_streamed_transfer(host, guest, pawn),
+            "runtime": await verify_runtime_transfer(host, guest, pawn)}
+
+
+async def verify_runtime_transfer(host, guest, pawn):
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    before = suite.campaign_save_hashes(host.campaign)
+
+    async def command(seat, mode, *args):
+        frame = await seat.bridge.command("fixture-runtime-crate", mode, *args, update_status=False)
+        return frame["ack"]["message"]
+
+    host_name = await command(host, "spawn")
+    async with asyncio.timeout(12):
+        while (crate := await command(host, "identity")) == "pending":
+            await asyncio.sleep(.08)
+    assert native_loot.runtime_crate(crate) and native_loot.crate_area(crate) == OBSERVATORY, crate
+    await suite.wait(guest_run, lambda frame:
+        frame["game"].get("native_loot_crates", {}).get(crate, {}).get("state") == "ready")
+    guest_name, authority, opened = (await command(guest, "observe", crate)).split(";")
+    assert authority == opened == "false"
+    assert await command(host, "observe", crate) == f"{host_name};true;false"
+    approached = await host.bridge.command("native-loot-approach", pawn, crate, timeout=5)
+    position, = [row["location"] for row in approached["pawns"].values() if row["name"] == pawn]
+    await suite.wait(guest_run, lambda frame:
+        (point := frame["game"]["pawns"]["local"].get("location"))
+        and sum((a - b) ** 2 for a, b in zip(point, position)) < 50**2)
+    assert await command(guest, "interact", crate) == "pressed"
+    frames = await asyncio.gather(*(suite.wait(run, lambda frame:
+        frame["game"].get("native_loot_crates", {}).get(crate, {}).get("state") == "exhausted"
+        and crate in frame.get("gameplay", {}).get(native_loot.STATE_KEY, {})) for run in (host_run, guest_run)))
+    roll, peer = (frame["gameplay"][native_loot.STATE_KEY][crate] for frame in frames)
+    assert roll == peer and roll["opener"] != "host"
+    accepted = [row for row in await suite.resident_events(host_run, frames[0])
+                if row["event"] == "native_loot_roll_accepted" and row["id"] == roll["id"]]
+    assert len(accepted) == 1 and accepted[0].get("origin") == "player", accepted
+    pickup = await suite.claim_stock_crate_item(host, guest, pawn, crate, roll, *frames) if roll["items"] else None
+    assert suite.campaign_save_hashes(host.campaign) == before
+    saved = await suite.submit(host_run, "checkpoint")
+    assert saved["ok"], saved
+    checkpoint = json.loads((host.campaign / "campaign.json").read_text(encoding="utf-8"))
+    assert crate not in checkpoint["world"]["party"].get(native_loot.STATE_KEY, {})
+    assert (await command(guest, "observe", crate)).endswith(";false;true")
+    return {"crate": crate, "host_actor": host_name, "guest_actor": guest_name, "items": len(roll["items"]),
+            "pickup": pickup, "checkpoint_unchanged_before_save": True, "runtime_roll_excluded_from_checkpoint": True}
 
 
 async def exercise(work, first, second, saved):

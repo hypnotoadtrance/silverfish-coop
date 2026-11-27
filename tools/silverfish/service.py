@@ -640,7 +640,8 @@ class Host:
         current_map = self.last_game["map"]
         checkpoint_party = self.party if proposed_party is None else proposed_party
         status = self.store.status()
-        world = {**status["world"], "map": current_map, "host": _pawn(self.last_game, "local"), "party": checkpoint_party}
+        world = {**status["world"], "map": current_map, "host": _pawn(self.last_game, "local"),
+                 "party": native_loot.checkpoint_party(checkpoint_party)}
         if isinstance(self.native_profile, native_host_save.SaveScope):
             world[native_host_save.SCOPE_FIELD] = self.native_profile.id
         verify_travel_checkpoint(world)

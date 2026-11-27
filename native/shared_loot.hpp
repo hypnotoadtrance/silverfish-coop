@@ -37,6 +37,8 @@ namespace silverfish::shared_loot
     };
 
     const authored_loot::Profile* authored_profile(RC::Unreal::UObject* crate);
+    const authored_loot::Profile* bind_runtime_crate(RC::Unreal::UObject* crate, RC::Unreal::UWorld* world,
+                                                    std::uint16_t id);
     std::size_t profile_index(const authored_loot::Profile& profile);
     const authored_loot::Profile* profile_at(std::size_t index);
     RC::Unreal::UWorld* authored_crate_world(RC::Unreal::UObject* crate, std::string_view* reason = nullptr);
