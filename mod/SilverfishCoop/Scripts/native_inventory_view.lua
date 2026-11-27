@@ -1,6 +1,7 @@
 local inventory_view = {}
 local world_path = require("world_path")
 local guest_weapon = require("native_guest_weapon")
+local weapon_profiles = require("guest_weapon_registry")
 local save_scope = require("native_save_scope")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_INVENTORY_VIEW") == "1"
