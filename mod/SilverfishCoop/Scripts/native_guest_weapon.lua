@@ -40,6 +40,10 @@ local function same(left, right)
     return left and right and left:IsValid() and right:IsValid() and left:GetAddress() == right:GetAddress()
 end
 
+local function live_actor(actor)
+    return actor and actor:IsValid() and not actor:IsActorBeingDestroyed()
+end
+
 local function item_identity(row)
     local identity = row and row[guid_field]
     if not identity then return end
@@ -63,8 +67,8 @@ local function selected_row(save)
 end
 
 local function owned_hold(pawn, save, held)
-    return held and held:IsValid() and same(pawn.Save, save) and held:HasAuthority()
-        and not held:IsActorBeingDestroyed() and same(held:GetWorld(), pawn:GetWorld())
+    return live_actor(pawn) and live_actor(held) and same(pawn.Save, save)
+        and held:HasAuthority() and same(held:GetWorld(), pawn:GetWorld())
         and same(held:GetOwner(), pawn) and same(held.Instigator, pawn)
         and same(held.User, pawn) and held.HeldByPlayer == true
 end
@@ -81,8 +85,9 @@ function guest_weapon.local_projected_selection(pawn, save, projected)
 end
 
 local function equipped_guid(pawn, save, world)
+    if not live_actor(pawn) then return end
     local held = pawn.EquipedItem
-    if not held or not held:IsValid() then return nil end
+    if not live_actor(held) then return end
     local held_class = held:GetClass()
     if not held_class or not held_class:IsValid() then return nil end
     local row = selected_row(save)
@@ -94,8 +99,7 @@ local function equipped_guid(pawn, save, world)
     local melee_path = class_name and class_name:sub(1, #melee_folder) == melee_folder
     if world and (class_name == blowtorch_path or class_name == camera_path
         or melee_path or class_name == spade_path)
-        and held:HasAuthority() and not held:IsActorBeingDestroyed()
-        and same(held:GetWorld(), world) and same(held:GetOwner(), pawn) and same(held.Instigator, pawn)
+        and held:HasAuthority() and same(held:GetWorld(), world) and same(held:GetOwner(), pawn) and same(held.Instigator, pawn)
         and same(held.User, pawn) and held.HeldByPlayer == true and pawn.IsWeaponBlocked == false then
         if class_name == camera_path then return guid, "camera" end
         if class_name == blowtorch_path and math.type(held.Ammo) == "integer" and 0 <= held.Ammo and held.Ammo <= 3
@@ -276,11 +280,16 @@ local function acknowledge_mode(fields, state, phase)
 end
 
 function guest_weapon.clear_empty_slot_hold(pawn, save)
+    if not live_actor(pawn) then return end
     local held, row = pawn.EquipedItem, selected_row(save)
     if not row or item_identity(row)
         or (row[class_field] and row[class_field]:IsValid()) then return end
     if not owned_hold(pawn, save, held) then return end
-    if pawn.Aiming then pawn:CancelScope() end
+    if pawn.Aiming then
+        pawn:CancelScope()
+        -- Stock scope cancellation can replace or retire the original actor.
+        if not owned_hold(pawn, save, held) then return end
+    end
     if same(pawn.EquipedItem, held) then pawn.EquipedItem = nil end
     held:K2_DestroyActor()
 end

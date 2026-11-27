@@ -3,7 +3,10 @@ local area = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local pawn_type = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_type = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 local pawn_name = "Player_FP_C " .. area .. ".Observitory_P:PersistentLevel.Player_FP_C_1"
-local registry = dofile("mod/SilverfishCoop/Scripts/guest_weapon_registry.lua")
+local modules = {
+    guest_weapon_registry = dofile("mod/SilverfishCoop/Scripts/guest_weapon_registry.lua"),
+    guest_shot_view = dofile("mod/SilverfishCoop/Scripts/guest_shot_view.lua"),
+}
 
 local function object(address)
     return {IsValid = function() return true end, GetAddress = function() return address end}
@@ -30,7 +33,7 @@ for _, memory in ipairs({true, false}) do
     local writes, taps, held = {}, {{11, 2, guid, kind}}, {{4, 2, guid, "press", 4}, {5, 2, guid, "release", 4}}
     local drain, commits, full = nil, 0, memory
     local env = setmetatable({os = {getenv = function(key) return settings[key] end}}, {__index = _G})
-    env.require = function(name) return name == "guest_weapon_registry" and registry or {} end
+    env.require = function(name) return modules[name] or {} end
     env.StaticFindObject = function(name) return ({[pawn_type] = pawn_class, [controller_type] = controller_class})[name] end
     env.LoopInGameThreadWithDelay = function(_, callback) drain = callback end
     env.SilverfishSetNativeGuestPrimaryScope = function() return true, "stock_held" end
