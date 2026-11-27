@@ -173,7 +173,7 @@ Invitations from a current matched native stage also enable the guest's stock in
 | `--native-authored-enemy-loot` | Enables shared stock shotgun-shell loot for the qualified CQC encounters. Look at the shell stack and press Interact. Automation can inspect nearby item actors in `game.native_world_loot_items` and use `native-enemy-loot-claim --target GUID` with the GUID shown in `gameplay.native_enemy_loot_rolls`. |
 | `--native-extraction-keep N` | Starts a separate fresh authored native campaign with stock extraction mode and `N` retained inventory rows. Add `--native-extraction-backpacks` and optionally `--native-extraction-lose-slot`. The host save retains those settings, so omit these switches when resuming. |
 | `--native-shop-view` | Enables guest trading at qualified cash merchants. Staged guests can use `--native-guest-inventory-view` with Join to open the stock shop. Other staged guests can use Up and Down to choose an overlay offer, Enter to confirm, and Backspace to close. |
-| Guest `--native-guest-inventory-view` | Enables the stock backpack on a matched native stage. Use its normal item controls for food, medicine, and packages. Older development stages can still show a limited text view for equipment, ammo splits, and drops. |
+| Guest `--native-guest-inventory-view` | Enables the stock backpack on a matched native stage. Use its normal controls to equip or use items. Older development stages can still show a limited text view for ammo splits and drops. |
 | Guest `--native-guest-primary-input --native-guest-reload-input` | Enables qualified stock primary and reload controls explicitly. The standard firearm path handles one shot per press. Dead Bridge also has a scoped Old Pipe equip and primary path. |
 
 In the supported stock wipe picker, Page Up and Page Down move the selection, Space toggles an entire row, and Home twice submits the selection. An empty selection is allowed. Backpack recovery uses the local action shown below.
@@ -188,7 +188,7 @@ At a supported cash merchant, use Interact to open the stock shop. Buy offers or
 
 At the Observatory workbench, equip your Hazard Suit and bring a Computer Board. Use Interact to review the supported recipe and Interact again to exchange the Board for one Electron Scrap.
 
-The Scientist's cash counter offers the stock camera through the same guest shop overlay. Buying one adds a separate camera to the guest's inventory. The inventory overlay can equip the camera.
+The Scientist's cash counter offers the stock camera through the same guest shop overlay. Buying one adds a separate camera to the guest's inventory. Equip it from the stock backpack, then select its quick slot.
 
 At ShopKeep, use Interact at the reception and choose the cash-shop response to open the finite stock overlay.
 
