@@ -47,6 +47,18 @@ def camera_aim(value):
     return angles if all(abs(angle) <= 360 for angle in angles) else None
 
 
+def request_target(value, epoch):
+    from . import native_guest_melee
+
+    guid, separator, aim = value.partition("@") if isinstance(value, str) else (value, "", "")
+    scoped = native_guest_melee.request_target(guid, epoch)
+    if not separator:
+        return scoped
+    if camera_aim(aim) is None:
+        raise ValueError("stock_guest_dig_camera_unqualified")
+    return f"{scoped}@{aim}"
+
+
 async def guest_dig(host, bridge, character, target, operation):
     from . import native_guest_melee
 

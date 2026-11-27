@@ -5861,8 +5861,10 @@ class Client:
         elif ((action == native_loose_pickup.CLAIM and native_loose_pickup.target_path(target))
               or (action == native_mushrooms.CLAIM and isinstance(target, str) and party.REQUEST_ID.fullmatch(target))):
             target = f"{target}@{self.zone_epoch}"
-        elif action in (native_guest_melee.SWING, native_host_dig_live.GUEST_ACTION):
+        elif action == native_guest_melee.SWING:
             target = native_guest_melee.request_target(target, self.zone_epoch)
+        elif action == native_host_dig_live.GUEST_ACTION:
+            target = native_host_dig_live.request_target(target, self.zone_epoch)
         elif (action in native_loot.PRY_TOOL_ACTIONS.values()
               or action in (native_stock_door.ACTION, *native_stock_switch.ACTIONS, native_critters.ACTION,
                             native_host_dig_live.COLLECT)
@@ -6160,7 +6162,7 @@ class Client:
                     if not extra:
                         continue
                     selection = f"{event_guid}@{self.zone_epoch}@{extra[0]}"
-                elif extra and (event_kind in native_guest_weapon.FIRE_CLASSES or event_kind == native_host_dig_live.GUEST_KIND):
+                elif extra and event_kind in native_guest_weapon.FIRE_CLASSES:
                     selection = f"{event_guid}@{self.zone_epoch}@{extra[0]}"
                 else:
                     selection = f"{event_guid}@{extra[0]}" if extra else event_guid
