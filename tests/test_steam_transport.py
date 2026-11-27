@@ -216,6 +216,10 @@ class SteamTransportTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TimeoutError):
             await asyncio.wait_for(game_inbox.packets.get(), .1)
         self.assertNotIn(OUTSIDER, host_api.accepted)
+        request_bytes = 2 * _HEADER.size + len(b"catalogue") + len(b"game packet")
+        reply_bytes = 2 * _HEADER.size + len(b"catalogue reply") + len(b"game reply")
+        self.assertEqual(host.traffic_counters(), (2, reply_bytes, 2, request_bytes, 2))
+        self.assertEqual(guest.traffic_counters(), (2, request_bytes, 2, reply_bytes, 2))
         guest.leave()
         host.leave()
         self.assertIn(GUEST, host_api.closed_channels)

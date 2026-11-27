@@ -146,6 +146,13 @@ class SteamTransport:
         self._running = False
         self._generation = 0
         self._roster_at = 0.0
+        self.sent_messages = self.sent_bytes = 0
+        self.received_messages = self.received_bytes = 0
+
+    def traffic_counters(self) -> tuple[int, int, int, int, int]:
+        """Steam message counts and bytes, including this tunnel's header."""
+        return (self.sent_messages, self.sent_bytes, self.received_messages, self.received_bytes,
+                len(self._members))
 
     async def _lobby_call(self, requested: int | None, *, access: str = "friends") -> int:
         if self._closed or self._opening or self.lobby is not None:
@@ -382,7 +389,10 @@ class SteamTransport:
 
     def _send(self, peer: int, token: int, payload: bytes) -> None:
         if self._allowed(peer) and 0 < len(payload) <= _MAX_PACKET:
-            if self.api.send_datagram(peer, _HEADER.pack(_MAGIC, self.lobby, token) + payload):
+            packet = _HEADER.pack(_MAGIC, self.lobby, token) + payload
+            if self.api.send_datagram(peer, packet):
+                self.sent_messages += 1
+                self.sent_bytes += len(packet)
                 self._sessions.add(peer)
 
     def _remove_guest_flow(self, token: int) -> None:
@@ -413,6 +423,8 @@ class SteamTransport:
         magic, lobby, token = _HEADER.unpack_from(packet)
         if magic != _MAGIC or lobby != self.lobby or token == 0:
             return
+        self.received_messages += 1
+        self.received_bytes += len(packet)
         payload = packet[_HEADER.size:]
         now = time.monotonic()
         if self._host is not None:

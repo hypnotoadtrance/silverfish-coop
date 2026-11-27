@@ -66,6 +66,16 @@ The group confirms Steam joining and Public lobby discovery in its playtests. Au
 
 The network worker targets a 20 Hz heartbeat on active Steam and Direct IP connections. It also checks host world changes every 50 ms. Requests and action cues can still send as soon as they are ready. Unreal applies gameplay changes on its game thread, so low frame rates can still delay when an update appears in the world.
 
+For a Steam bandwidth playtest, enable the report on the PCs you want to measure. Before hosting or joining, run this in PowerShell.
+
+```powershell
+$sfCoopWorkspace = Join-Path $env:LOCALAPPDATA 'SilverfishCoop\Resident'
+New-Item -ItemType Directory -Path $sfCoopWorkspace -Force | Out-Null
+New-Item -ItemType File -Path (Join-Path $sfCoopWorkspace 'capture-steam-network') -Force | Out-Null
+```
+
+After leaving the session normally, attach `steam-network-report.json` from that folder to the issue and mention the map where you noticed the spike. Keep a copy before the next measured session replaces it. Remove `capture-steam-network` to stop collecting reports. The report counts this mod's Steam messages, including its tunnel headers. It gives average and peak rates by map and lobby size and includes sampled heartbeat RTT when available. Steam relay overhead and other apps' traffic contribute separately to the Windows adapter total. The report contains no player identities, lobby IDs, addresses, or packet contents.
+
 ### Steam Cloud backups
 
 The installed mod mirrors each hosted campaign as a complete backup under `%LOCALAPPDATA%\SilverFish\Saved\SaveGames\SilverfishCoopCloud`. The backup includes the world, host and guest characters, and the campaign’s private host identity so returning guests can use their existing characters. Keep the backup files within the host’s Steam account. Steam Auto-Cloud uploads these files on exit and downloads them on launch when Steam Cloud is enabled for Project Silverfish. The mod reads downloaded backups when you open the Host campaign picker. The same Steam account and a compatible mod build are required on the other PC.

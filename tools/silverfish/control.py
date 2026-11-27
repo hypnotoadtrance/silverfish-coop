@@ -139,9 +139,14 @@ class Control:
         path.unlink(missing_ok=True)
 
 
-def status(run: Path) -> dict:
+def resident_status(run: Path) -> dict | None:
     frame = _resident_snapshots.get(run.absolute())
-    result = frame.copy() if frame is not None else read_json(run / "status.json")
+    return frame.copy() if frame is not None else None
+
+
+def status(run: Path) -> dict:
+    frame = resident_status(run)
+    result = frame if frame is not None else read_json(run / "status.json")
     result["stale"] = time.time() - result["updated_unix"] > 12
     return result
 

@@ -20,7 +20,7 @@ class EmbeddedTitlePlanTests(unittest.IsolatedAsyncioTestCase):
         steam_roles = []
 
         @asynccontextmanager
-        async def playing(*, role):
+        async def playing(*, role, network_run=None):
             steam_roles.append(role)
             yield
 

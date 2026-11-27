@@ -11,7 +11,7 @@ import time
 import uuid
 import zlib
 
-from . import runtime, steam_browser
+from . import runtime, steam_browser, steam_network_report
 from .campaign import valid_steam_account
 from .embedded_engine import _exact_existing
 from .steam_transport import SteamBuildMismatch
@@ -71,8 +71,9 @@ def _avatar_hex(pixels: bytes) -> str:
 class SteamSession:
     """Own at most one Steam lobby for this resident game's lifetime."""
 
-    def __init__(self, transport, title_bridge: Path, pump: asyncio.Task):
+    def __init__(self, transport, title_bridge: Path, pump: asyncio.Task, *, work: Path | None = None):
         self.transport, self.title_bridge, self.pump = transport, title_bridge, pump
+        self.work = work
         self._lock = asyncio.Lock()
         self._role = None
         self._route = None
@@ -165,15 +166,19 @@ class SteamSession:
                 return False
 
     @asynccontextmanager
-    async def playing(self, address: str = "", port: int = 0, *, role: str):
+    async def playing(self, address: str = "", port: int = 0, *, role: str, network_run: Path | None = None):
         self._role = role
         try:
             async with self._lock:
                 route = self._route
-                if role != "guest" or route is None or (route.host, route.port) != (address, port):
+                guest_route = role == "guest" and route is not None and (route.host, route.port) == (address, port)
+                if not guest_route:
                     self._leave()
+                if role == "guest" and not guest_route:
+                    network_run = None
                 _remove(self.title_bridge, JOIN_OFFER, JOIN_CANCEL, JOIN_OPENED)
-            yield
+            async with steam_network_report.capture(self.work, network_run, self.transport, role):
+                yield
         finally:
             self._leave()
             self._role = None
@@ -271,7 +276,7 @@ async def installed_steam(work: Path, bridge: Path, argv, *, enabled: bool):
 
     transport = SteamTransport(api, build=build, version=version)
     pump = asyncio.create_task(transport.run())
-    session = SteamSession(transport, bridge, pump)
+    session = SteamSession(transport, bridge, pump, work=work)
     try:
         cold_lobby = parse_launch_lobby(argv)
         with suppress(OSError, ValueError, RuntimeError):

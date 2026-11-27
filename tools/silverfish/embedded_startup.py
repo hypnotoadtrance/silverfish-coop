@@ -458,7 +458,8 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
             await engine.observe_title()
             async with AsyncExitStack() as scope:
                 if steam is not None:
-                    await scope.enter_async_context(steam.playing(role="host"))
+                    await scope.enter_async_context(steam.playing(
+                        role="host", network_run=selected / "run" if steam_access is not None else None))
                 session = service.host_game(
                     work, selected, bind, port, headless, resident_engine=engine,
                     direct_password=password, stock_creator=use_creator, resume_existing=resume_area is not None,
@@ -610,7 +611,8 @@ def _resident_direct_join_plan(work, directory, mailbox, saved, headless, *, ava
             async with AsyncExitStack() as scope:
                 if steam is not None:
                     endpoint = connection.session()
-                    await scope.enter_async_context(steam.playing(endpoint["host"], endpoint["port"], role="guest"))
+                    await scope.enter_async_context(steam.playing(
+                        endpoint["host"], endpoint["port"], role="guest", network_run=directory / "run"))
                 engine = EmbeddedEngine(os.getpid(), mailbox, saved, None, session_directory=directory)
                 await engine.observe_title()
                 await service.join_game(work, directory, connection, headless, character, resident_engine=engine)

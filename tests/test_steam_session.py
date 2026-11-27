@@ -9,7 +9,9 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 import zlib
 
-from tools.silverfish import direct_ip, embedded_startup, link, native_title_entry, runtime, service, steam_browser, steam_session
+from tools.silverfish import (
+    direct_ip, embedded_startup, link, native_title_entry, runtime, service, steam_browser, steam_network_report, steam_session,
+)
 from tools.silverfish.campaign import CampaignStore
 from tools.silverfish.control import Control, status as control_status
 from tools.silverfish.steam_transport import SteamTransport, _BUILD_KEY, _CALLBACK_FRIEND_JOIN, _CALLBACK_INVITE
@@ -44,6 +46,62 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         size, = struct.unpack_from("!I", png, 33)
         scanlines = zlib.decompress(png[41:41 + size])
         self.assertEqual(scanlines, b"".join(b"\0" + pixels[i:i + 128] for i in range(0, len(pixels), 128)))
+
+    def test_network_report_groups_stable_samples_and_keeps_travel_traffic_in_totals(self):
+        report = steam_network_report._Report()
+        field = {"link_connected": True, "game": {"map": OBSERVATORY},
+                 "transport": {"keepalive_probes_acked": 7, "keepalive_rtt_us": 42_000}}
+        report.sample(10, field, (10, 100, 5, 500, 3))
+        report.sample(11, field, (20, 300, 10, 1400, 3))
+        report.sample(11.25, {}, (21, 350, 13, 1650, 3))
+        result = report.result("guest", VERSION)
+        self.assertEqual(result["overall"]["sent_bytes"], 250)
+        self.assertEqual(result["overall"]["received_bytes"], 1150)
+        self.assertEqual(result["overall"]["mean_receive_bps"], 7360)
+        self.assertEqual(result["overall"]["peak_receive_bps"], 7200)
+        self.assertEqual(result["overall"]["peak_heartbeat_rtt_us"], 42_000)
+        stable, travel = result["by_map_and_lobby_size"]
+        self.assertEqual((stable["map"], stable["lobby_members"], stable["received_bytes"]), (OBSERVATORY, 3, 900))
+        self.assertEqual((travel["map"], travel["lobby_members"], travel["received_bytes"]), (None, None, 250))
+        self.assertIsNone(travel["peak_receive_bps"])
+
+    async def test_opt_in_steam_report_writes_once_at_session_exit_and_skips_direct_ip(self):
+        _, session, _ = await self.start(HOST)
+        _, client, _ = await self.start(GUEST)
+        session.work = self.directory
+        client.work = self.directory / "guest"
+        client.work.mkdir()
+        output = self.directory / steam_network_report.REPORT_FILE
+        guest_output = client.work / steam_network_report.REPORT_FILE
+        (self.directory / steam_network_report.ENABLE_FILE).touch()
+        (client.work / steam_network_report.ENABLE_FILE).touch()
+        game, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+            asyncio.DatagramProtocol, local_addr=("127.0.0.1", 0))
+        self.addCleanup(game.close)
+        with Control(self.directory / "run", resident=True) as control, Control(client.work / "run", resident=True) as guest:
+            control.status(active=True, state="hosting", game={"map": OBSERVATORY}, link_connected=True)
+            guest.status(active=True, state="connected", game={"map": OBSERVATORY}, link_connected=True)
+            async with session.playing(role="host", network_run=control.run):
+                await session.transport.host(game.get_extra_info("sockname")[1], fingerprint="e" * 64)
+                route = client._route = await client.transport.join(LOBBY)
+                with patch.object(steam_network_report, "capture", wraps=steam_network_report.capture) as capture:
+                    async with client.playing(route.host, route.port + 1, role="guest", network_run=guest.run):
+                        self.assertIsNone(client.transport.lobby)
+                    capture.assert_called_once_with(client.work, None, client.transport, "guest")
+                route = client._route = await client.transport.join(LOBBY)
+                payload = b"test packet"
+                async with client.playing(route.host, route.port, role="guest", network_run=guest.run):
+                    client.transport._guest_udp(payload, ("127.0.0.1", 32125))
+                    await self.ready(lambda: session.transport.received_messages)
+                    self.assertFalse(output.exists())
+                    self.assertFalse(guest_output.exists())
+        report = runtime.read_json(output)
+        guest_report = runtime.read_json(guest_output)
+        self.assertEqual(report["overall"]["received_messages"], 1)
+        self.assertEqual(report["overall"]["received_bytes"], len(payload) + struct.calcsize("!4sQQ"))
+        self.assertEqual(report["overall"]["received_bytes"], guest_report["overall"]["sent_bytes"])
+        self.assertNotIn(str(HOST), output.read_text())
+        self.assertNotIn(str(GUEST), output.read_text())
 
     async def start(self, peer):
         api = self.platform.client(peer)
