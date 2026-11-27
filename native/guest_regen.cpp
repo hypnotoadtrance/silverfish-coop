@@ -79,24 +79,101 @@ namespace
     bool exact(U::UObject* object, U::UClass* type) { return type && live(object) && object->GetClassPrivate() == type; }
     Address address(U::UObject* object) { return reinterpret_cast<Address>(object); }
 
-    bool authority(U::UObject* actor, U::UWorld* world)
-    {
-        auto* role = field<U::FByteProperty>(actor, STR("Role"));
-        return live(actor) && role && role->GetPropertyValueInContainer(actor) == 3 &&
-            is_false(actor, STR("bActorIsBeingDestroyed")) && static_cast<U::AActor*>(actor)->GetWorld() == world;
-    }
-
     U::FObjectProperty* object_inner(U::FArrayProperty* property)
     {
         return property ? U::CastField<U::FObjectProperty>(property->GetInner()) : nullptr;
     }
 
+    struct RosterFields
+    {
+        struct Property
+        {
+            // All keys are static field-name literals. Separate call sites
+            // can have distinct addresses for a name that spells the same.
+            const U::TCHAR* name{};
+            U::FProperty* field{};
+        };
+
+        struct ClassFields
+        {
+            U::FWeakObjectPtr lifetime;
+            U::UClass* type{};
+            std::array<Property, 8> properties{};
+        };
+
+        // One synchronous regeneration call can run several stock steps.
+        // Reuse their reflected fields while the declaring classes stay live.
+        std::array<ClassFields, 8> classes{};
+        U::FWeakObjectPtr local_type{find<U::UClass>(STR("/Script/Engine.LocalPlayer"))};
+        U::FWeakObjectPtr remote_type{find<U::UClass>(STR("/Script/Engine.NetConnection"))};
+
+        void discard_unloaded_classes()
+        {
+            for (auto& fields : classes)
+                if (fields.type && fields.lifetime.Get() != fields.type) fields = {};
+        }
+
+        template <typename T>
+        T* get(U::UObject* owner, const U::TCHAR* name)
+        {
+            if (!owner) return nullptr;
+            auto* type = owner->GetClassPrivate();
+            ClassFields* available{};
+            for (auto& fields : classes)
+            {
+                if (!fields.type)
+                {
+                    if (!available) available = &fields;
+                    continue;
+                }
+                if (fields.type == type)
+                {
+                    available = &fields;
+                    break;
+                }
+            }
+            if (!available) return field<T>(owner, name);
+            if (!available->type)
+            {
+                available->type = type;
+                available->lifetime = type;
+            }
+            for (auto& candidate : available->properties)
+            {
+                if (candidate.name == name) return U::CastField<T>(candidate.field);
+                if (!candidate.name)
+                {
+                    auto* property = field<T>(owner, name);
+                    candidate = {name, property};
+                    return property;
+                }
+            }
+            return field<T>(owner, name);
+        }
+
+        U::UObject* object(U::UObject* owner, const U::TCHAR* name)
+        {
+            auto* property = get<U::FObjectProperty>(owner, name);
+            return property ? property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(owner)) : nullptr;
+        }
+
+        bool authority(U::UObject* actor, U::UWorld* world)
+        {
+            if (!live(actor)) return false;
+            auto* role = get<U::FByteProperty>(actor, STR("Role"));
+            auto* destroying = get<U::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
+            return role && role->GetPropertyValueInContainer(actor) == 3 && destroying &&
+                !destroying->GetPropertyValueInContainer(actor) && static_cast<U::AActor*>(actor)->GetWorld() == world;
+        }
+    };
+
     struct Scope
     {
         U::FWeakObjectPtr pawn, save, stock, world, instance, controller, driver, connection;
 
-        bool current() const
+        bool current(RosterFields& fields) const
         {
+            fields.discard_unloaded_classes();
             auto* player = pawn.Get();
             auto* detached = save.Get();
             auto* canonical = stock.Get();
@@ -105,36 +182,39 @@ namespace
             auto* control = controller.Get();
             auto* net = driver.Get();
             auto* remote = connection.Get();
-            if (!live(current_world) || !authority(player, current_world) || !authority(control, current_world) ||
+            if (!live(current_world) || !fields.authority(player, current_world) || !fields.authority(control, current_world) ||
                 !live(detached) || !live(canonical) || detached == canonical || !live(game) || !live(net) || !live(remote) ||
-                object(player, STR("Save")) != detached || object(player, STR("Controller")) != control ||
-                object(player, STR("As Game Instance FP")) != game || object(control, STR("Pawn")) != player ||
-                object(control, STR("Player")) != remote || object(current_world, STR("OwningGameInstance")) != game ||
-                object(game, STR("SaveSlot_Ref")) != canonical || object(current_world, STR("NetDriver")) != net ||
-                !field<U::FObjectProperty>(net, STR("ServerConnection")) || object(net, STR("ServerConnection")) ||
-                object(net, STR("World")) != current_world || object(remote, STR("Driver")) != net ||
-                object(remote, STR("OwningActor")) != control || object(remote, STR("PlayerController")) != control)
+                fields.object(player, STR("Save")) != detached || fields.object(player, STR("Controller")) != control ||
+                fields.object(player, STR("As Game Instance FP")) != game || fields.object(control, STR("Pawn")) != player ||
+                fields.object(control, STR("Player")) != remote || fields.object(current_world, STR("OwningGameInstance")) != game ||
+                fields.object(game, STR("SaveSlot_Ref")) != canonical || fields.object(current_world, STR("NetDriver")) != net ||
+                fields.object(net, STR("World")) != current_world || fields.object(remote, STR("Driver")) != net ||
+                fields.object(remote, STR("OwningActor")) != control || fields.object(remote, STR("PlayerController")) != control)
                 return false;
 
-            auto* local = field<U::FArrayProperty>(game, STR("LocalPlayers"));
-            auto* clients = field<U::FArrayProperty>(net, STR("ClientConnections"));
+            auto* server = fields.get<U::FObjectProperty>(net, STR("ServerConnection"));
+            if (!server || server->GetObjectPropertyValue(server->ContainerPtrToValuePtr<void>(net))) return false;
+
+            auto* local = fields.get<U::FArrayProperty>(game, STR("LocalPlayers"));
+            auto* clients = fields.get<U::FArrayProperty>(net, STR("ClientConnections"));
             auto* local_entry = object_inner(local);
             auto* client_entry = object_inner(clients);
-            auto* local_class = find<U::UClass>(STR("/Script/Engine.LocalPlayer"));
-            auto* remote_class = find<U::UClass>(STR("/Script/Engine.NetConnection"));
+            auto* local_class = static_cast<U::UClass*>(fields.local_type.Get());
+            auto* remote_class = static_cast<U::UClass*>(fields.remote_type.Get());
             if (!local_entry || !client_entry || !local_class || !remote_class || !remote->IsA(remote_class))
                 return false;
 
             U::FScriptArrayHelper locals(local, local->ContainerPtrToValuePtr<void>(game));
             if (locals.Num() != 1) return false;
             auto* local_player = local_entry->GetObjectPropertyValue(locals.GetRawPtr());
-            auto* host_controller = object(local_player, STR("PlayerController"));
-            auto* host_pawn = object(host_controller, STR("Pawn"));
-            if (!live(local_player) || !local_player->IsA(local_class) ||
-                !exact(host_controller, control->GetClassPrivate()) || !authority(host_controller, current_world) ||
-                object(host_controller, STR("Player")) != local_player ||
-                !exact(host_pawn, player->GetClassPrivate()) || !authority(host_pawn, current_world) ||
-                object(host_pawn, STR("Controller")) != host_controller || object(host_pawn, STR("Save")) != canonical)
+            if (!live(local_player) || !local_player->IsA(local_class)) return false;
+            auto* host_controller = fields.object(local_player, STR("PlayerController"));
+            if (!exact(host_controller, control->GetClassPrivate()) || !fields.authority(host_controller, current_world) ||
+                fields.object(host_controller, STR("Player")) != local_player)
+                return false;
+            auto* host_pawn = fields.object(host_controller, STR("Pawn"));
+            if (!exact(host_pawn, player->GetClassPrivate()) || !fields.authority(host_pawn, current_world) ||
+                fields.object(host_pawn, STR("Controller")) != host_controller || fields.object(host_pawn, STR("Save")) != canonical)
                 return false;
 
             U::FScriptArrayHelper remotes(clients, clients->ContainerPtrToValuePtr<void>(net));
@@ -147,14 +227,21 @@ namespace
                 if (!live(client) || !client->IsA(remote_class) || std::ranges::find(seen, client) != seen.end())
                     return false;
                 seen[static_cast<std::size_t>(index)] = client;
-                if (client == remote) found = true;
-                else if (object(object(object(client, STR("PlayerController")), STR("Pawn")), STR("Save")) == detached)
-                    return false;
+                if (client == remote)
+                {
+                    found = true;
+                    continue;
+                }
+                auto* other_controller = fields.object(client, STR("PlayerController"));
+                if (!other_controller) continue;
+                if (!live(other_controller)) return false;
+                auto* other_pawn = fields.object(other_controller, STR("Pawn"));
+                if (other_pawn && (!live(other_pawn) || fields.object(other_pawn, STR("Save")) == detached)) return false;
             }
             return found;
         }
 
-        bool bind_player(U::UObject* player, Address detached, Address canonical)
+        bool bind_player(U::UObject* player, Address detached, Address canonical, RosterFields& fields)
         {
             auto* save_class = find<U::UClass>(save_path);
             auto* instance_class = find<U::UClass>(instance_path);
@@ -176,10 +263,10 @@ namespace
             controller = control;
             driver = object(actual_world, STR("NetDriver"));
             connection = object(control, STR("Player"));
-            return current();
+            return current(fields);
         }
 
-        bool bind(Address requested, Address detached, Address canonical)
+        bool bind(Address requested, Address detached, Address canonical, RosterFields& fields)
         {
             U::UObject* player{};
             U::UObjectGlobals::ForEachUObject([&](U::UObject* candidate, int, int) {
@@ -187,7 +274,7 @@ namespace
                 player = candidate;
                 return RC::LoopAction::Break;
             });
-            return bind_player(player, detached, canonical);
+            return bind_player(player, detached, canonical, fields);
         }
     };
 
@@ -389,12 +476,14 @@ namespace
         struct TemporaryInputs
         {
             const Health& health;
+            U::FWeakObjectPtr pawn{health.pawn};
             double previous_delta = health.delta->GetPropertyValueInContainer(health.pawn);
             double previous_boost = health.boost->GetPropertyValueInContainer(health.pawn);
             int previous_hunger = health.hunger->GetPropertyValueInContainer(health.pawn);
 
             ~TemporaryInputs()
             {
+                if (pawn.Get() != health.pawn) return;
                 health.delta->SetPropertyValueInContainer(health.pawn, previous_delta);
                 health.boost->SetPropertyValueInContainer(health.pawn, previous_boost);
                 health.hunger->SetPropertyValueInContainer(health.pawn, previous_hunger);
@@ -445,7 +534,7 @@ namespace
 
     std::array<Entry, max_guests> entries{};
 
-    Entry* qualify(Address requested, Address save, Address canonical)
+    Entry* qualify(Address requested, Address save, Address canonical, RosterFields& fields)
     {
         Entry* available{};
         for (auto& entry : entries)
@@ -453,7 +542,7 @@ namespace
             if (entry.requested == requested && address(entry.scope.pawn.Get()) == requested &&
                 address(entry.scope.save.Get()) == save && address(entry.scope.stock.Get()) == canonical)
             {
-                if (entry.scope.current()) return &entry;
+                if (entry.scope.current(fields)) return &entry;
                 entry.last = -1.0;
                 return nullptr;
             }
@@ -463,7 +552,7 @@ namespace
                 available = &entry;
             }
         }
-        if (!available || !available->scope.bind(requested, save, canonical)) return nullptr;
+        if (!available || !available->scope.bind(requested, save, canonical, fields)) return nullptr;
         available->requested = requested;
         return available;
     }
@@ -524,7 +613,8 @@ namespace
         const auto save = lua.get_integer();
         const auto canonical = lua.get_integer();
         if (requested <= 0 || save <= 0 || canonical <= 0 || save == canonical) return reply(lua, "refused_identity");
-        auto* entry = qualify(requested, save, canonical);
+        RosterFields fields;
+        auto* entry = qualify(requested, save, canonical, fields);
         if (!entry) return reply(lua, "refused_exact_detached_save");
         if (entry->blocked) return reply(lua, "refused_unverified_prior_pulse");
 
@@ -541,7 +631,7 @@ namespace
             return reply(lua, "paused_pawn_gate");
         }
         pulse_radiation(*entry, pawn, now);
-        if (!is_false(pawn, STR("Dead")) || !is_false(pawn, STR("IsWeaponBlocked")) ||
+        if (entry->scope.pawn.Get() != pawn || !is_false(pawn, STR("Dead")) || !is_false(pawn, STR("IsWeaponBlocked")) ||
             !is_false(pawn, STR("UsingItem")))
         {
             entry->last = -1.0;
@@ -582,7 +672,7 @@ namespace
         for (int i = 0; i < steps; ++i)
         {
             health.step(step, boost, owned.hunger_count);
-            const bool exact_scope = entry->scope.current();
+            const bool exact_scope = entry->scope.current(fields);
             const bool host_unchanged = exact_scope && health.read(health.stock) == host;
             if (host_unchanged && health.maximum->GetPropertyValueInContainer(pawn) == maximum)
             {
@@ -625,7 +715,9 @@ namespace
 bool silverfish::native_guest_regen::qualifies_detached_guest(RC::Unreal::UObject* pawn, RC::Unreal::UObject* detached,
                                                              RC::Unreal::UObject* stock)
 {
-    return U::IsInGameThreadRaw() && Scope{}.bind_player(pawn, address(detached), address(stock));
+    if (!U::IsInGameThreadRaw()) return false;
+    RosterFields fields;
+    return Scope{}.bind_player(pawn, address(detached), address(stock), fields);
 }
 
 void silverfish::native_guest_regen::register_lua(RC::LuaMadeSimple::Lua& lua)
