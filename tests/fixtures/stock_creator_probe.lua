@@ -211,6 +211,7 @@ function actions.guestrename(menu, switch)
     page_is(switch, 1)
     local field = menu.EditableTextBox_Name
     assert(valid(field), "stock guest character name field unavailable")
+    assert(field:GetText():ToString() == "Management scout", "stock guest editor did not prefill the suggested name")
     field:SetText(FText("Changed in the editor"))
     assert(field:GetText():ToString() == "Changed in the editor", "stock guest editor did not accept the name")
     return "name entered"

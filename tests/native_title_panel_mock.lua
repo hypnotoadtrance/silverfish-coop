@@ -372,7 +372,7 @@ assert(host("campaign", "title-host-settings-1234abcd"))
 assert(surface.read(display, "campaign") == "title-host-settings-1234abcd")
 assert(surface.set_checked(display, "require_password", true))
 click("submit")
-assert(not files[request] and display.note and surface.checked(display, "require_password"))
+assert(not files[request] and display.note and display.focus == "password" and surface.checked(display, "require_password"))
 assert(host("password") and surface.read(display, "password") == "Fixture co-op pass")
 assert(surface.set_checked(display, "require_password", false) and surface.read(display, "password") == "")
 click("submit")
@@ -430,13 +430,34 @@ next_guid = 11
 click("connect")
 assert(files[join_request] == ("1\t%s\t%s\tdirect\t127.0.0.1\t28951\t\n")
     :format(steam_generation, operation_id()))
-files[join_request] = nil
-files[join_response] = ("1\t%s\t%s\terror\tdirect_password_required\t0\n"):format(steam_generation, operation_id())
-tick()
+local function steam_result(failure)
+    files[join_request] = nil
+    files[join_response] = ("1\t%s\t%s\terror\t%s\t0\n"):format(steam_generation, operation_id(), failure)
+    tick()
+end
+
+steam_result("direct_host_unreachable")
+assert(display.title == "Join via Steam" and display.buttons.connect.label == "Retry join"
+    and not display.fields.password and not display.fields.address)
+next_guid = next_guid + 1
+click("connect")
+assert(files[join_request] == ("1\t%s\t%s\tdirect\t127.0.0.1\t28951\t\n")
+    :format(steam_generation, operation_id()))
+steam_result("direct_password_required")
 assert(display.title == "Join via Steam" and not display.toggles.use_password
-    and display.fields.password and display.focus == "password")
+    and display.fields.password == "" and display.focus == "password" and display.buttons.connect.label == "Join")
+click("connect")
+assert(not files[join_request] and display.focus == "password")
+assert(surface.write(display, "password", "Wrong fixture"))
+next_guid = next_guid + 1
+click("connect")
+assert(files[join_request] == ("1\t%s\t%s\tdirect\t127.0.0.1\t28951\tWrong fixture\n")
+    :format(steam_generation, operation_id()))
+steam_result("direct_wrong_password")
+assert(display.fields.password == "" and display.focus == "password" and display.note == "Incorrect password.")
 click("back")
-assert(display.title == "Multiplayer" and files[steam_cancel] == "1\t" .. steam_nonce .. "\tcancel\n")
+assert(display.title == "Multiplayer" and display.focus == "join"
+    and files[steam_cancel] == "1\t" .. steam_nonce .. "\tcancel\n")
 now = 103
 tick()
 assert(display.title == "Multiplayer" and not files[steam_opened], "Do not reopen the consumed Steam invite")

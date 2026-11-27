@@ -94,7 +94,7 @@ function form.selection(view, draft, resident, saved_name, show_name)
         if not invalid and (not value or not valid(field.key, value)) then invalid = field end
         if not invalid and field.secret and draft.require_password and value == "" then invalid = field end
     end
-    if invalid then return nil, "title_host_form_invalid_" .. invalid.key, invalid.error end
+    if invalid then return nil, "title_host_form_invalid_" .. invalid.key, invalid.error, invalid.key end
     local name = saved_name or (show_name and draft.campaign) or ""
     if draft.steam_access then return {name, draft.steam_access, draft.password} end
     return {name, draft.bind, draft.port, resident and draft.password or nil}

@@ -142,17 +142,18 @@ local function render_surface(draft, screen, hint, initial)
     local rows = {}
     local note = hint
     local back = button("back", "Back")
-    if endpoint_screens[screen] then
-        if not draft.steam_port then
-            rows[#rows + 1] = field("address", "Host IP", "IPv4 or IPv6 address", 45, draft.address)
-            rows[#rows + 1] = field("port", "UDP port", "", 5, draft.port)
-            rows[#rows + 1] = {toggle = {key = "use_password", label = "Use password", target = "password",
-                checked = draft.use_password}}
-        end
-        rows[#rows + 1] = field("password", "Password", "", 512, nil, true)
-        rows[#rows + 1] = {button("connect", "Connect"), back}
+    if screen == "steam_password" then
+        rows = {field("password", "Lobby password", "", 512, nil, true), {button("connect", "Join"), back}}
     elseif screen == "steam_retry" then
-        rows = {{button("connect", "Retry connection"), back}}
+        rows = {{button("connect", "Retry join"), back}}
+    elseif endpoint_screens[screen] and not draft.steam_port then
+        rows = {
+            field("address", "Host IP", "IPv4 or IPv6 address", 45, draft.address),
+            field("port", "UDP port", "", 5, draft.port),
+            {toggle = {key = "use_password", label = "Use password", target = "password", checked = draft.use_password}},
+            field("password", "Password", "", 512, nil, true),
+            {button("connect", "Connect"), back},
+        }
     elseif screen == "trust_host" then
         title = draft.host_trust.changed and "Host identity changed" or "Trust this host?"
         local endpoint = draft.steam_port and "Steam invitation" or draft.address .. " · UDP " .. draft.port
@@ -193,10 +194,13 @@ local function render_surface(draft, screen, hint, initial)
         title = "Join with " .. short_name(draft.character_name)
         rows = {{button("confirm", "Join"), back}}
     else
-        note = note or "Waiting for the host…"
+        local pending = draft.pending and draft.pending.kind
+        note = note or (pending == "create" and "Creating character…"
+            or draft.steam_port and pending == "direct" and "Connecting through Steam…" or "Waiting for the host…")
         rows = {{back}}
     end
-    local focus = screen == "password" and password_errors[draft.failure] and "password" or nil
+    local focus = (screen == "steam_password" or screen == "password" and password_errors[draft.failure])
+        and "password" or nil
     draft.view = draft.surface.mount(draft.context, {title = title, note = note, rows = rows, focus = focus}, draft.on_action)
 end
 
@@ -322,8 +326,8 @@ function form.poll(draft, state, phase)
         draft.import, draft.characters, draft.retry = nil, nil, nil
         draft.creator, draft.photo = nil, nil
         if draft.steam_port then
-            draft.use_password = password_errors[draft.failure] == true
-            render(draft, state, phase, draft.use_password and "password" or "steam_retry", messages[draft.failure])
+            local screen = pending.kind == "direct" and password_errors[draft.failure] and "steam_password" or "steam_retry"
+            render(draft, state, phase, screen, messages[draft.failure])
         elseif draft.direct then
             if password_errors[draft.failure] then
                 draft.use_password = true
@@ -351,11 +355,21 @@ local function write_field(draft, key, value, state, phase)
     return true
 end
 
-local function connect(draft, state, phase)
-    local address = draft.steam_port and "127.0.0.1" or draft.surface.read(draft.view, "address")
-    local port = draft.steam_port or draft.surface.read(draft.view, "port")
+local function submit_steam_password(draft, state, phase)
     local password = draft.surface.read(draft.view, "password")
-    draft.use_password = draft.steam_port ~= nil or draft.surface.checked(draft.view, "use_password") == true
+    local length = password and utf8.len(password)
+    if not length or length == 0 or length > 128 then
+        render(draft, state, phase, "steam_password", "Enter the host's password (up to 128 characters).")
+        return false, "title_join_form_password_required"
+    end
+    return queue(draft, state, phase, "direct", password)
+end
+
+local function connect(draft, state, phase)
+    local address = draft.surface.read(draft.view, "address")
+    local port = draft.surface.read(draft.view, "port")
+    local password = draft.surface.read(draft.view, "password")
+    draft.use_password = draft.surface.checked(draft.view, "use_password") == true
     draft.address, draft.port = address or draft.address, port or draft.port
     if not address_valid(address) or not port_valid(port) or not password or utf8.len(password) > 128 then
         local hint = not address_valid(address) and "Enter a numeric IPv4 or IPv6 address."
@@ -365,8 +379,7 @@ local function connect(draft, state, phase)
         return false, "title_join_form_invalid_endpoint"
     end
     if draft.use_password and password == "" then
-        render(draft, state, phase, draft.screen, draft.steam_port and "Enter the host’s password."
-            or "Enter the host’s password or clear Use password.")
+        render(draft, state, phase, draft.screen, "Enter the host’s password or clear Use password.")
         return false, "title_join_form_password_required"
     end
     return queue(draft, state, phase, "direct", draft.use_password and password or "")
@@ -398,9 +411,15 @@ function form.press(draft, action, state, phase)
         if accepted then draft.host_trust = nil end
         return accepted, failure
     end
+    if draft.steam_port and (screen == "steam_retry" or screen == "steam_password") then
+        if action ~= "connect" then return false, "title_join_form_selection_unavailable" end
+        if screen == "steam_password" then return submit_steam_password(draft, state, phase) end
+        return queue(draft, state, phase, "direct", "")
+    end
     if action == "connect" then
-        if screen == "steam_retry" and draft.steam_port then return queue(draft, state, phase, "direct", "") end
-        if draft.view and draft.direct and endpoint_screens[screen] then return connect(draft, state, phase) end
+        if draft.view and draft.direct and not draft.steam_port and endpoint_screens[screen] then
+            return connect(draft, state, phase)
+        end
         if screen ~= "invite" then return false, "title_join_form_selection_unavailable" end
         action = "host"
     elseif action == "confirm" then
@@ -524,10 +543,12 @@ function form.fixture(draft, operation, value, state, phase)
         if not write_field(draft, operation, value, state, phase) then return false, "title_join_form_fixture_arguments" end
         return form.press(draft, "host", state, phase)
     end
-    if draft.direct and draft.screen == "password" then
+    if draft.direct and (draft.screen == "password" or draft.screen == "steam_password") then
         local passwords = {password = "Fixture co-op pass", wrong_password = "Wrong fixture", no_password = ""}
         if passwords[operation] then
-            if draft.view then draft.surface.set_checked(draft.view, "use_password", operation ~= "no_password") end
+            if draft.view and not draft.steam_port then
+                draft.surface.set_checked(draft.view, "use_password", operation ~= "no_password")
+            end
             write_field(draft, "password", passwords[operation], state, phase)
             return form.press(draft, draft.view and "connect" or "host", state, phase)
         end

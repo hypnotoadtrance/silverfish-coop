@@ -462,10 +462,10 @@ local function handle_host_form(action, context)
     if form.screen ~= "settings" or action ~= "submit" and action ~= "creator" then
         return false, "title_host_form_unavailable"
     end
-    local values, failure, hint = form.api.selection(session.view, form.values, resident, form.saved_name,
+    local values, failure, hint, focus = form.api.selection(session.view, form.values, resident, form.saved_name,
         not form.saved_name and (resident or form.fixture))
     if not values then
-        host_settings(form, hint)
+        host_settings(form, hint, focus)
         return false, failure
     end
     if form.values.steam_access then values[4] = form.saved_name and "resume" or "creator"
@@ -485,7 +485,8 @@ local function handle_join_form(action, state, phase, context, steam_invite)
         local owner = session
         local draft = api.open(state, phase, context, bridge_path, offer.generation, request_id, direct_join,
             function(key) if session == owner then dispatch(key) end end, offer.defaults, steam_invite and steam_invite.port)
-        session.form = {role = "join", api = api, draft = draft, steam_nonce = steam_invite and steam_invite.nonce}
+        session.form = {role = "join", api = api, draft = draft, steam_nonce = steam_invite and steam_invite.nonce,
+            back_focus = steam_invite and session.browser and "steam-public" or "join"}
         report = {state = "ready", choices = offer.choices}
         return true
     end
@@ -518,7 +519,7 @@ local function handle_join_form(action, state, phase, context, steam_invite)
     end
     if failure == "title_join_form_back_to_title" then
         close_form(session)
-        multiplayer(offer, "join")
+        multiplayer(offer, form.back_focus)
         return true
     end
     return accepted, failure

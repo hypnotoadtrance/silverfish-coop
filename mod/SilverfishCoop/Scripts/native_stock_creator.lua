@@ -63,10 +63,30 @@ local function clean_guest(record)
         and statics:DoesSaveGameExist(record.slot, 0) == false
 end
 
+local function guest_editor_callback(context)
+    local menu = context:get()
+    if record and record.attempt and record.state == "creating" and same(menu, record.editor) then
+        return record, menu
+    end
+end
+
+local function prefill_guest_name(context)
+    local active, menu = guest_editor_callback(context)
+    if not active or active.named or not active.name or menu.WidgetSwitcher_0:GetActiveWidgetIndex() ~= 1 then return end
+    local field = menu.EditableTextBox_Name
+    if not valid(field) then return end
+    active.named = true
+    field:SetText(FText(active.name))
+end
+
 local function remember_route(route)
     return function(context)
-        local menu = context:get()
-        if record and record.attempt and same(menu, record.editor) then record.route = route end
+        local active, menu = guest_editor_callback(context)
+        if not active then return end
+        active.route = route
+        if route == "custom" and valid(menu.EditableTextBox_Name) then
+            active.confirmed_name = character_name(text(menu.EditableTextBox_Name:GetText()))
+        end
     end
 end
 
@@ -80,6 +100,9 @@ local function observe_guest_editor(state)
     if not same(record.editor, menu) then
         record.editor = menu
         if not guest_buttons_hooked then
+            RegisterHook(editor_class ..
+                ":BndEvt__Character_Editor_Widget_Button_Class_1_K2Node_ComponentBoundEvent_45_Pressed__DelegateSignature",
+                prefill_guest_name)
             RegisterHook(editor_class ..
                 ":BndEvt__Character_Editor_Widget_Button_Confirm_1_K2Node_ComponentBoundEvent_35_Pressed__DelegateSignature",
                 remember_route("custom"))
@@ -102,10 +125,6 @@ local function observe_guest_editor(state)
     end
     local page = menu.WidgetSwitcher_0:GetActiveWidgetIndex()
     if page == 1 then
-        if record.name and not record.named then
-            record.named = true
-            menu.EditableTextBox_Name:SetText(FText(record.name))
-        end
         record.route = "custom"
     elseif page == 4 then
         record.route = "preset"
@@ -123,9 +142,11 @@ local function captured_profile(record)
         recipe = "kit" .. tostring(menu.Setting_Selector_Kit.IndexOutput)
     end
     local name
-    if record.route == "custom" and valid(menu.EditableTextBox_Name) then
-        -- Read the visible field even when Confirm follows typing without a text commit.
-        name = character_name(text(menu.EditableTextBox_Name:GetText()))
+    if record.route == "custom" then
+        name = record.confirmed_name
+        if not name and valid(menu.EditableTextBox_Name) then
+            name = character_name(text(menu.EditableTextBox_Name:GetText()))
+        end
     end
     return appearance.observe(character), guest_profile.observe(character, recipe),
         name or character_name(text(character[guest_profile.name_field]))
