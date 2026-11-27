@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock
 
 from tools.silverfish import native_crate_outcome as transfer, native_loot, party
-from tools.silverfish.runtime import split_crate_input_outcomes
+from tools.silverfish.runtime import _read_crate_state, split_crate_input_outcomes
 from tools.silverfish.travel import OBSERVATORY
 
 
@@ -81,3 +81,25 @@ class CrateOutcomeTests(unittest.IsolatedAsyncioTestCase):
             presses, outcomes = split_crate_input_outcomes(game, [changed_press + b"\n" + changed_reply])
             self.assertEqual(presses, [changed_press])
             self.assertEqual(outcomes, {})
+
+    async def test_discovered_placement_participates_in_the_same_roll_ledger(self):
+        crate = f"LootCrate_Small_BP_C {OBSERVATORY}.Observitory_P:PersistentLevel.NewShedCrate"
+        self.assertNotIn(crate, native_loot.CRATES)
+        game = {"state": "connected", "map": OBSERVATORY, "pawns": {"local": {"name": "guest pawn"}}}
+        self.assertEqual(native_loot._opening_arguments(game, crate, None, None), ())
+        _read_crate_state(game, ["native-loot-crate-state", crate, "ready", "0", "-", "-"])
+        self.assertEqual(game["native_loot_crates"][crate]["state"], "ready")
+        self.crate = crate
+        self.outcome["trait_calls"] = 1
+        body = transfer.report_body(self.epoch, crate, self.outcome)
+        operation = "a" * 32
+        accepted = await transfer.accept(self.host, self.bridge, "guest", body, operation)
+        self.assertEqual(native_loot.published(self.host.party[native_loot.STATE_KEY], OBSERVATORY),
+                         {crate: accepted["native_loot_roll"]})
+        self.assertEqual(await transfer.accept(self.host, self.bridge, "guest", body, operation), accepted)
+        self.bridge.command.assert_awaited_once()
+        with self.assertRaisesRegex(party.RuleError, "outcome_invalid"):
+            transfer.decode_report(body, "/Game/Mods/OtherMap")
+        with self.assertRaisesRegex(ValueError, "Invalid stock crate state"):
+            _read_crate_state(game, ["native-loot-crate-state", crate.replace("NewShedCrate", "Invalid@Crate"),
+                                     "ready", "0", "-", "-"])

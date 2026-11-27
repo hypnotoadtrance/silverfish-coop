@@ -12,7 +12,7 @@ import uuid
 from . import native_stock_enemy_drops
 from .campaign import CampaignFormatError
 from .content_paths import item_class_name
-from .authored_loot import CRATES, loot_capacity, random_lid, valid_item_transform, valid_lid_angle, valid_loot_trait_calls
+from .authored_loot import CRATES, crate_area, loot_capacity, random_lid, valid_item_transform, valid_lid_angle, valid_loot_trait_calls
 from .enemy_loot_profiles import BY_MAP as ENEMY_LOOT_ZONES, SHELLS, for_roll as enemy_loot_profile
 from .native_gold import valid_guid
 from .native_map_preflight import valid_campaign_package
@@ -188,7 +188,7 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
         raise CampaignFormatError("The campaign's native loot records are invalid")
     retired = party.get("native_loot_retired_rolls", {})
     if (type(retired) is not dict or any(not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{32}", key)
-            or not isinstance(crate, str) or crate not in CRATES for key, crate in retired.items())
+            or not crate_area(crate) for key, crate in retired.items())
             or any(isinstance(roll.get("id"), str) and roll["id"] in retired for roll in rolls.values())):
         raise CampaignFormatError("The campaign's retired crate roll identities are invalid")
     enemy_rolls = party.get("native_enemy_loot_rolls", {})
@@ -197,7 +197,9 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
     members = {"host", *checkpoint["characters"]}
     for container, roll in rolls.items():
         items = roll.get("items")
-        capacity = loot_capacity(container) or 2
+        area, capacity = crate_area(container), loot_capacity(container)
+        if area is None:
+            raise CampaignFormatError("The stock container identity is invalid")
         if isinstance(items, list) and len(items) > capacity:
             raise CampaignFormatError("A stock container exceeds its exact escrow capacity")
         if isinstance(items, list) and any(type(item) is dict and "transform" in item
@@ -207,11 +209,11 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
         if ((lid and not valid_lid_angle(lid, roll.get(lid[0])))
                 or (roll.keys() & {"lid_pitch", "lid_roll"}) - ({lid[0]} if lid else set())):
             raise CampaignFormatError("The stock loot lid pose is invalid")
-        if capacity == 2:
+        if capacity == 2 and container in CRATES:
             continue
         calls = roll.get("trait_calls")
-        if (not isinstance(items, list) or (roll.get("crate"), roll.get("map")) != (container, CRATES[container])
-                or type(roll.get("escrow")) is not dict or roll["escrow"].get("map") != CRATES[container]
+        if (not isinstance(items, list) or (roll.get("crate"), roll.get("map")) != (container, area)
+                or type(roll.get("escrow")) is not dict or roll["escrow"].get("map") != area
                 or not isinstance(roll.get("opener"), str) or roll["opener"] not in members
                 or not valid_loot_trait_calls(container, calls)
                 or any(type(item) is not dict or not valid_guid(item.get("guid"))

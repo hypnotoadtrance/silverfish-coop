@@ -73,7 +73,7 @@ from . import native_host_dig, native_host_dig_live, native_package_handoff_jour
 from . import native_title_entry
 from .native_host_landmine import parse as parse_host_landmine
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
-from .authored_loot import (CRATES as AUTHORED_CRATES, CRATE_NAMES_BY_INDEX, loot_capacity, random_lid,
+from .authored_loot import (CRATES as AUTHORED_CRATES, CRATE_NAMES_BY_INDEX, crate_area, loot_capacity, random_lid,
                             valid_item_transform, valid_lid_angle, lockable_container)
 from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
 from .native_quest_catalog import parse as parse_quest_catalog
@@ -746,11 +746,15 @@ def _store_crate_state(data: dict, area: str, crate: str, state: str, angle_text
 
 def _read_crate_state(data: dict, fields: list[str]) -> None:
     _, raw_index, state, replenished, locked, angle = fields
-    index, area = int(raw_index), data.get("map")
-    if not 0 < index < len(CRATE_NAMES_BY_INDEX):
-        raise ValueError("Unknown stock crate index")
-    crate = CRATE_NAMES_BY_INDEX[index]
-    if (data.get("state") not in ("hosting", "connected") or AUTHORED_CRATES[crate] != area
+    area = data.get("map")
+    if raw_index.isascii() and raw_index.isdecimal():
+        index = int(raw_index)
+        if not 0 < index < len(CRATE_NAMES_BY_INDEX):
+            raise ValueError("Unknown stock crate index")
+        crate = CRATE_NAMES_BY_INDEX[index]
+    else:
+        crate = raw_index
+    if (not area or data.get("state") not in ("hosting", "connected") or crate_area(crate) != area
             or state not in ("ready", "exhausted") or replenished not in {"0", "1"}
             or locked not in {"-", "0", "1"} or locked != "-" and not lockable_container(crate, area)
             or crate in data.get("native_loot_crates", {})):
@@ -767,7 +771,7 @@ def _read_crate_state(data: dict, fields: list[str]) -> None:
 
 def _parse_stock_loot_receipt(fields: list[str]) -> dict:
     count = int(fields[12])
-    if AUTHORED_CRATES.get(fields[3]) != fields[2] or not 0 <= count <= loot_capacity(fields[3]):
+    if crate_area(fields[3]) != fields[2] or not 0 <= count <= loot_capacity(fields[3]):
         raise ValueError("Stock container receipt has an unqualified map or item count")
     result = {
         "action": fields[1], "map": fields[2], "crate": fields[3], "pawn": fields[4],
@@ -807,7 +811,7 @@ def _parse_crate_outcome(raw: str, request: tuple[str, ...]) -> dict:
     adopter = request[1] == native_crate_outcome.ADOPT
     crate, scope = request[3:5] if adopter else request[2:4]
     phase = "hosting" if adopter else "connected"
-    area = AUTHORED_CRATES.get(crate)
+    area = crate_area(crate)
     if (not rows or len(rows[0]) != 9 or rows[0][:7] != [
             native_crate_outcome.REPLY, "1", request[0], phase, area, crate, scope,
     ]):
@@ -2659,7 +2663,7 @@ class Bridge:
                     data[native_loot.CROWBAR_RESULT] = dict(map=fields[1], crate=fields[2], pawn=fields[3], guid=fields[4],
                                                            before=-1, after=-1)
                 elif (fields[0] == native_loot.CRATE_DIAGNOSTIC and len(fields) == 10
-                      and AUTHORED_CRATES.get(fields[2]) == fields[1]):
+                      and crate_area(fields[2]) == fields[1]):
                     row = {"map": fields[1], "crate": fields[2], "phase": fields[3],
                            "scope": fields[4], "door": fields[5], "box": fields[6],
                            "looted": None if fields[7] == "-" else fields[7] == "1",

@@ -6,7 +6,7 @@ import uuid
 
 from . import native_host_save, native_pickup_audio, native_stock_door, party
 from .authored_cash import CASH_RANGES
-from .authored_loot import (CRATES, DEFERRED_PRY_CLASSES, LEGACY_CRATE, key_unlock_only, lockable_container, loot_capacity, random_lid,
+from .authored_loot import (CRATES, DEFERRED_PRY_CLASSES, LEGACY_CRATE, crate_area, key_unlock_only, lockable_container, loot_capacity, random_lid,
                             valid_lid_angle, valid_loot_trait_calls)
 from .local_bridge import LocalCommandNotSubmitted
 from .native_gold import valid_guid
@@ -45,9 +45,6 @@ CLAIM_REPLY_HEADER = "native-pickup-claim-reply\t1\n"
 CLAIM_REPLY_BYTES = "native_pickup_claim_reply_bytes"
 
 
-_CRATES_BY_MAP = {}
-for _crate, _map in CRATES.items():
-    _CRATES_BY_MAP.setdefault(_map, []).append(_crate)
 
 
 def copy_pending_loot(state, *ledgers, character=None, cash=False):
@@ -146,7 +143,7 @@ def interactions(game: dict, last_sequence: int) -> list[tuple[int, str, str]]:
     pending = {}
     for proof in proofs:
         crate, sequence, entry = (proof.get(key) for key in ("crate", "sequence", "entry"))
-        if (isinstance(crate, str) and crate in CRATES and CRATES[crate] == area and pawn
+        if (area and crate_area(crate) == area and pawn
                 and type(sequence) is int and last_sequence < sequence < 2**53
                 and (proof.get("map"), proof.get("pawn")) == (area, pawn)
                 and (entry in ("stock", "fixture") or (entry == "pried"
@@ -175,7 +172,7 @@ class OpenIntents:
                 if len(fields) != 5:
                     continue
                 tag, source, crate, owner, raw_sequence = fields
-                if (tag != "loot-crate-open" or source != area or owner != pawn or CRATES.get(crate) != area
+                if (tag != "loot-crate-open" or source != area or owner != pawn or crate_area(crate) != area
                         or not 0 < len(raw_sequence) <= 16 or not raw_sequence.isdigit()):
                     continue
                 sequence = int(raw_sequence)
@@ -206,8 +203,8 @@ def interaction(game: dict, last_sequence: int) -> tuple[int, str] | None:
 
 
 def rolls_in_area(rolls: dict, area: str) -> dict:
-    return {crate: roll for crate in _CRATES_BY_MAP.get(area, ())
-            if (roll := rolls.get(crate)) and (roll.get("crate"), roll.get("map")) == (crate, area)}
+    return {crate: roll for crate, roll in rolls.items()
+            if area and (roll.get("crate"), roll.get("map")) == (crate, area) and crate_area(crate) == area}
 
 
 def published(rolls: dict, area: str, *, game=None) -> dict:
@@ -257,7 +254,7 @@ class GuestRollView:
         if not isinstance(roll, dict) or type(revision) is not int or revision <= self.snapshot_revision:
             return False
         crate, area = roll.get("crate"), scope[2]
-        if not isinstance(crate, str) or CRATES.get(crate) != area or roll.get("map") != area:
+        if crate_area(crate) != area or roll.get("map") != area:
             return False
         if crate in self.receipts and revision <= self.receipts[crate][0]:
             return False
@@ -286,7 +283,7 @@ def _replenished(game, rolls):
     if not pawn or area is None:
         return {}
     return {crate: roll for crate, proof in observed.items()
-            if CRATES.get(crate) == area and (roll := rolls.get(crate))
+            if crate_area(crate) == area and (roll := rolls.get(crate))
             and (roll.get("crate"), roll.get("map")) == (crate, area)
             and proof == dict(map=area, crate=crate, pawn=pawn)
             and stock.get(crate, {}).get("state") == "ready"}
@@ -338,7 +335,7 @@ def fixture_selection(target: str | None, area: str) -> tuple[str, str | None]:
     role, separator, crate = target.partition("@")
     if separator:
         return role, crate
-    if target in CRATES:
+    if area and crate_area(target) == area:
         return "guest", target
     return target, default_crate(area)
 
@@ -348,7 +345,7 @@ async def crate_diagnostic(bridge, game, crate) -> dict:
     phase, area = game.get("state"), game.get("map")
     pawn = game.get("pawns", {}).get("local", {}).get("name")
     if (phase not in ("hosting", "connected") or not isinstance(pawn, str) or not pawn or not area
-            or not isinstance(crate, str) or CRATES.get(crate) != area):
+            or crate_area(crate) != area):
         raise ValueError("Select an exact authored crate in the active local map")
     snapshot = await bridge.command(CRATE_DIAGNOSTIC, area, pawn, crate, timeout=2, update_status=False)
     row = snapshot.get(CRATE_DIAGNOSTICS, {}).get(crate, {})
@@ -360,6 +357,9 @@ async def crate_diagnostic(bridge, game, crate) -> dict:
 
 def _opening_arguments(game, crate, lid, angle):
     scope = game.get("native_loot_crates", {}).get(crate, {})
+    if not scope and not lid and crate not in CRATES and crate_area(crate) == game.get("map"):
+        # A remote result may be the first reference to a newly discovered placement.
+        return ()
     if ((scope.get("map"), scope.get("crate")) != (game.get("map"), crate)
             or scope.get("state") not in {"ready", "exhausted"}):
         return None
@@ -389,7 +389,12 @@ async def project_opened(bridge, game: dict, rolls: dict) -> dict:
         arguments = _opening_arguments(game, crate, lid, angle)
         if arguments is None:
             continue
-        snapshot = await bridge.command("native-loot-crate-project", "exhausted", crate, *arguments, timeout=4)
+        try:
+            snapshot = await bridge.command("native-loot-crate-project", "exhausted", crate, *arguments, timeout=4)
+        except RuntimeError as error:
+            if crate in CRATES or str(error) != "native_loot_crate_input_scope_unavailable":
+                raise
+            continue
         _verify_opened(snapshot, area, crate, lid, angle)
         game = snapshot
     return game
@@ -854,7 +859,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
     epoch = getattr(host, "zone_epoch", None)
     if (not host.native_zones or not (host.fixtures or host.native_loot_input) or host.native_profile is None
             or host.stopping or host.transitioning or (host.native_checkpoint_unsafe and tool_receipt is None)
-            or host.last_game.get("state") != "hosting" or area not in CRATES.values()
+            or host.last_game.get("state") != "hosting" or not area
             or time.monotonic() - host.last_seen > 3):
         raise party.RuleError("native_loot_scope_unavailable")
     if (action in ("approach", "seed") or fixture_nonempty) and not host.fixtures:
@@ -884,7 +889,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             if not matches:
                 raise party.RuleError("native_loot_item_unavailable")
             crate, = matches
-    if not isinstance(crate, str) or crate not in CRATES or CRATES[crate] != area:
+    if crate_area(crate) != area:
         raise party.RuleError("native_loot_requires_exact_crate_and_operation")
     if pried and (action != "open" or (character != "host" and tool_receipt is None) or fixture_nonempty or not lockable_container(crate, area)):
         raise party.RuleError("native_loot_pry_receipt_unavailable")

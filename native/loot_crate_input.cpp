@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <utility>
 #include <cstdlib>
+#include <deque>
 #include <string_view>
 #include <vector>
 
@@ -242,6 +243,7 @@ namespace
         Clock::time_point tool_deadline{}, recheck_at{};
     };
     std::array<Scope, profiles.size()> scopes;
+    std::deque<Scope> discovered_scopes;
     std::vector<std::size_t> pending_receipts;
     std::uint64_t sequence{};
     std::atomic<bool> installed{};
@@ -260,6 +262,14 @@ namespace
     std::vector<LockpickResult> lockpick_results;
 
     bool ready() { return U::IsInGameThreadRaw() && installed.load(std::memory_order_acquire); }
+
+    Scope& scope_for(std::size_t index)
+    {
+        if (index < scopes.size()) return scopes[index];
+        index -= scopes.size();
+        if (index >= discovered_scopes.size()) discovered_scopes.resize(index + 1);
+        return discovered_scopes[index];
+    }
 
     bool stock_function(U::UObject* crate, U::UFunction* method, int count, int size)
     {
@@ -412,8 +422,8 @@ namespace
         if (!world) return;
         const auto local = local_owner(world);
         if (!local.pawn) return;
-        const auto index = static_cast<std::size_t>(profile - profiles.data());
-        auto& active = scopes[index];
+        const auto index = silverfish::shared_loot::profile_index(*profile);
+        auto& active = scope_for(index);
         const auto now = Clock::now();
         // Stock input qualifies the live target even before the background crate scan reaches it.
         if (!ready_profile(crate, world)) return;
@@ -495,14 +505,16 @@ namespace
                 const auto pawn = lua.get_integer();
                 const bool host = lua.get_bool();
                 const auto profile_index = lua.get_integer();
-                if (profile_index <= 0 || profile_index > static_cast<std::int64_t>(profiles.size()))
+                const auto* profile = profile_index > 0 ?
+                    silverfish::shared_loot::profile_at(static_cast<std::size_t>(profile_index - 1)) : nullptr;
+                if (!profile)
                 {
                     lua.set_bool(false);
                     lua.set_string(status);
                     return 2;
                 }
                 const auto index = static_cast<std::size_t>(profile_index - 1);
-                auto& scope = scopes[index];
+                auto& scope = scope_for(index);
                 const auto now = Clock::now();
                 auto* cached_pawn = scope.pawn.Get();
                 // The periodic observer may reuse a recent live scope. The input
@@ -515,7 +527,7 @@ namespace
                     lua.set_string("bound");
                     return 2;
                 }
-                auto* crate = find<U::AActor>(profiles[index].actor);
+                auto* crate = find<U::AActor>(profile->actor);
                 auto* world = silverfish::shared_loot::authored_crate_world(crate, &status);
                 if (world)
                 {
@@ -544,8 +556,8 @@ namespace
         const auto count = lua.get_stack_size();
         const auto index = count >= 1 && count <= 2 && lua.is_integer(1) ? lua.get_integer() : 0;
         const bool snapshot = count == 2 && lua.is_bool(2) && lua.get_bool();
-        const auto* scope = ready() && index > 0 && index <= static_cast<std::int64_t>(scopes.size())
-            ? &scopes[static_cast<std::size_t>(index - 1)] : nullptr;
+        const auto* scope = ready() && index > 0 && index <= static_cast<std::int64_t>(scopes.size() + discovered_scopes.size())
+            ? &scope_for(static_cast<std::size_t>(index - 1)) : nullptr;
         auto* crate = scope ? scope->crate.Get() : nullptr;
         const auto now = Clock::now();
         bool active = false;
@@ -574,7 +586,8 @@ namespace
         const bool guest_pry = observed && scope->pried && scope->tool_deadline != Clock::time_point{};
         auto* guest = guest_pry ? scope->pry_guest.Get() : nullptr;
         lua.set_integer(guest ? reinterpret_cast<std::intptr_t>(guest) : guest_pry ? -1 : 0);
-        const auto powered = active && scope->host && boolean(crate, STR("Looted"), false)
+        const auto powered = active && index <= static_cast<std::int64_t>(profiles.size()) &&
+            scope->host && boolean(crate, STR("Looted"), false)
             ? silverfish::electronic_locker::pending_power_open(crate, profiles[static_cast<std::size_t>(index - 1)]) : 0;
         lua.set_integer(static_cast<std::int64_t>(powered));
         return 7;
@@ -587,12 +600,12 @@ namespace
         const auto now = Clock::now();
         int values = 0;
         std::erase_if(pending_receipts, [now](std::size_t index) {
-            const auto& scope = scopes[index];
+            const auto& scope = scope_for(index);
             return !scope.observed || now >= scope.receipt || !scope.pawn.Get() || !scope.crate.Get();
         });
         for (const auto index : pending_receipts)
         {
-            const auto& scope = scopes[index];
+            const auto& scope = scope_for(index);
             if (reinterpret_cast<std::uintptr_t>(scope.pawn.Get()) != pawn) continue;
             const bool guest_pry = scope.pried && scope.tool_deadline != Clock::time_point{};
             auto* guest = guest_pry ? scope.pry_guest.Get() : nullptr;
@@ -603,6 +616,36 @@ namespace
             values += 4;
         }
         return values;
+    }
+
+    int discovered_profile(const Lua& lua)
+    {
+        if (!ready() || lua.get_stack_size() != 1) return 0;
+        const silverfish::authored_loot::Profile* profile{};
+        if (lua.is_integer(1))
+        {
+            const auto index = lua.get_integer();
+            if (index > static_cast<std::int64_t>(profiles.size()))
+                profile = silverfish::shared_loot::profile_at(static_cast<std::size_t>(index - 1));
+        }
+        else if (lua.is_string(1))
+        {
+            const auto value = lua.get_string();
+            if (value.size() > 440) return 0;
+            const auto path = RC::to_generic_string(value);
+            profile = silverfish::shared_loot::authored_profile(find<U::UObject>(path.c_str()));
+            if (profile && silverfish::shared_loot::profile_index(*profile) < profiles.size()) return 0;
+        }
+        if (!profile) return 0;
+        auto* crate = find<U::UObject>(profile->actor);
+        if (!silverfish::shared_loot::authored_crate_world(crate) ||
+            !silverfish::shared_loot::qualified_crate_settings(crate)) return 0;
+        lua.set_integer(static_cast<std::int64_t>(silverfish::shared_loot::profile_index(*profile) + 1));
+        lua.set_string(RC::to_utf8_string(crate->GetFullName()));
+        lua.set_string(RC::to_utf8_string(profile->stock_class->actor_class));
+        lua.set_integer(profile->salt);
+        lua.set_integer(profile->stock_class->slots);
+        return 5;
     }
 
     int arm_guest_pry(const Lua& lua)
@@ -680,7 +723,7 @@ namespace silverfish::native_loot_crate_input
         if (!ready() || !requested) return false;
         const auto* profile = shared_loot::authored_profile(crate);
         if (!profile) return false;
-        auto& scope = scopes[static_cast<std::size_t>(profile - profiles.data())];
+        auto& scope = scope_for(shared_loot::profile_index(*profile));
         if (scope.host || scope.pried || scope.observed != requested || scope.pawn.Get() != pawn ||
             scope.crate.Get() != crate || Clock::now() >= scope.receipt) return false;
         scope.observed = 0;
@@ -750,6 +793,7 @@ namespace silverfish::native_loot_crate_input
         lua.register_function("SilverfishSetNativeLootCrateInputScope", set_scope);
         lua.register_function("SilverfishReadNativeLootCrateInput", status);
         lua.register_function("SilverfishReadNativeLootCrateReceipts", receipts);
+        lua.register_function("SilverfishDiscoverNativeLootCrate", discovered_profile);
         lua.register_function("SilverfishReadNativeLockpickResults", read_lockpicks);
         lua.register_function("SilverfishClearNativeLootCrateInput", clear);
         lua.register_function("SilverfishArmNativeGuestVehiclePry", arm_guest_pry);
@@ -761,6 +805,7 @@ namespace silverfish::native_loot_crate_input
         if (U::IsInGameThreadRaw())
         {
             scopes = {};
+            discovered_scopes.clear();
             pending_receipts.clear();
             pending_lockpick = {};
             lockpick_results.clear();

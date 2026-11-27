@@ -24,26 +24,55 @@ local max_inventory, max_effects = 4096, 256
 local crate_fixture_trace_color = {R = 0, G = 0, B = 0, A = 1}
 local docks_map = "/Game/Classes/Maps/Maps_OverWorld/Docks_01_P"
 
-local maps, names = {}, {}
+local maps, names, discovered, layouts = {}, {}, {}, {}
+local layout_fields = {"paired_doors", "spawner_names", "stock_alarm", "open_pitch", "open_roll", "open_yaw",
+    "lid_ignores_channel", "door_locations"}
 for _, profile in ipairs(registry) do
     maps[profile.map] = maps[profile.map] or {}
     table.insert(maps[profile.map], profile)
     names[profile.name] = profile
     profile.world = profile.path:match("^(.-):PersistentLevel%.")
     profile.capacity = profile.capacity or ((profile.small_cabinet or profile.office_desk) and 4 or 2)
+    if profile.actor_class and not layouts[profile.actor_class] then
+        layouts[profile.actor_class] = {}
+        for _, name in ipairs(layout_fields) do layouts[profile.actor_class][name] = profile[name] end
+    end
 end
 
 function loot.profiles(map)
+    if map then maps[map] = maps[map] or {} end
     return maps[map] or {}
 end
 
+local function discover(map, target)
+    if type(SilverfishDiscoverNativeLootCrate) ~= "function" then return end
+    local index, name, class, salt, capacity = SilverfishDiscoverNativeLootCrate(target)
+    if not index then return end
+    local path = name:match("^%S+ (%S+)$")
+    local world = path and path:match("^(.-):PersistentLevel%.")
+    local leaf = map and map:match("/([^/]+)$")
+    if not world or not leaf or world ~= map .. "." .. leaf then return end
+    if names[name] then return names[name] end
+    local profile = {index = index, name = name, path = path, world = world, map = map,
+        actor_class = class, salt = salt, capacity = capacity, discovered = true}
+    for key, value in pairs(layouts[class] or {}) do profile[key] = value end
+    discovered[index], names[name] = profile, profile
+    table.insert(loot.profiles(map), profile)
+    return profile
+end
+
 function loot.profile_at(map, index)
-    local profile = registry[index]
+    local profile = registry[index] or discovered[index] or discover(map, index)
     return profile and profile.map == map and profile or nil
 end
 
 function loot.profile(map, name)
     local profile = name == nil and loot.profiles(map)[1] or names[name]
+    if not profile and type(name) == "string" and map then
+        local path = name:match("^%S+ (%S+)$")
+        if path and path:sub(1, #map + 1) == map .. "." then profile = discover(map, path) end
+        if profile and profile.name ~= name then return nil end
+    end
     return profile and profile.map == map and profile or nil
 end
 

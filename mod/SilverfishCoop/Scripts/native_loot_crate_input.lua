@@ -785,7 +785,8 @@ local function sample_profile(state, phase, status_row, profile, diagnostic_only
             local verified, active = pcall(loot.temporary_activation, current.crate, current.pawn)
             replenished = verified and active == false
         end
-        rows[#rows + 1] = status_row("native-loot-crate-state", profile.index, spent and "exhausted" or "ready",
+        rows[#rows + 1] = status_row("native-loot-crate-state", profile.discovered and profile.name or profile.index,
+            spent and "exhausted" or "ready",
             replenished and 1 or 0, locked, spent and angle or "-")
     end
     if active and profile.stock_alarm then
@@ -981,7 +982,7 @@ end
 function input.rows(state, phase, status_row, fields, separate_details, requested)
     local profiles = loot.profiles(state.map)
     local detail = state.local_pawn
-    if not enabled or #profiles == 0 or not state.listening or not detail or not valid(detail.pawn)
+    if not enabled or not state.listening or not detail or not valid(detail.pawn)
         or phase ~= "hosting" and phase ~= "connected" then
         receipt_frame = nil
         if active_world then input.clear() end

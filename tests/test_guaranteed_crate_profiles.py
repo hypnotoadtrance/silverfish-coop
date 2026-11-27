@@ -16,8 +16,7 @@ PERMANENT = "RespawnSetting_Enum::NewEnumerator2"
 class GuaranteedCrateProfilesTests(unittest.TestCase):
     def test_append_exact_settings_without_changing_prior_native_indices(self):
         existing = tuple((*placement, None) for placement in PLACEMENTS) + OVERRIDDEN_PLACEMENTS
-        self.assertEqual(len(existing), 342)
-        self.assertEqual(CRATE_PROFILES[:342], existing)
+        self.assertEqual(CRATE_PROFILES[:len(existing)], existing)
         additional = {full_name(area, actor, family) for family, area, actor, *_ in CONTAINER_PLACEMENTS}
         self.assertEqual(set(CRATES) - {full_name(*row[:2]) for row in CRATE_PROFILES},
                          {SMALL_CABINET, OFFICE_DESK} | additional)

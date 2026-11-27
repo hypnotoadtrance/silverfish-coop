@@ -7116,7 +7116,7 @@ end
     for needle, replacement in (
         ("pcall(inspect, state, phase", 'pcall(profiled, "qualify", inspect, state, phase'),
         ("table.pack(SilverfishOpenNativeLootCrate(", 'table.pack(profiled("open", SilverfishOpenNativeLootCrate,'),
-        ("return loot.results(scope, outputs)", 'return profiled("describe", loot.results, scope, outputs)'),
+        ("return outputs, loot.results(scope, outputs)", 'return outputs, profiled("describe", loot.results, scope, outputs)'),
         ("pending and actions.create_pending_escrow(scope.stock",
          'pending and profiled("retain", actions.create_pending_escrow, scope.stock'),
         ("table.pack(SilverfishCaptureNativeLootEscrow(", 'table.pack(profiled("capture", SilverfishCaptureNativeLootEscrow,'),
@@ -7406,8 +7406,10 @@ async def verify_compact_crate_status(host: Seat, guest: Seat, pawn: str) -> dic
     return {"stock_crate": crate, "host": inspections[0], "guest": inspections[1], "stock_open": stock_open}
 
 
-async def verify_original_crossroads_crate(host: Seat, guest: Seat, pawn: str) -> dict:
-    crate = native_loot.CRATE
+async def verify_original_crossroads_crate(host: Seat, guest: Seat, pawn: str, *, discovered=False) -> dict:
+    crate = native_loot.CRATE.rsplit("_", 1)[0] + "_8" if discovered else native_loot.CRATE
+    if discovered:
+        assert crate not in native_loot.CRATES and native_loot.crate_area(crate) == CROSSROADS
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     approached = await host.bridge.command("native-loot-approach", pawn, crate, timeout=5)
     position, = [row["location"] for row in approached["pawns"].values() if row["name"] == pawn]
@@ -7416,11 +7418,12 @@ async def verify_original_crossroads_crate(host: Seat, guest: Seat, pawn: str) -
         return frame.get("game", {}).get("native_loot_crates", {}).get(crate, {}).get("state") == state
 
     await wait(host_run, lambda frame: crate_state(frame, "ready"))
-    ready = await wait(guest_run, lambda frame: crate_state(frame, "ready")
+    ready = await wait(guest_run, lambda frame: (discovered or crate_state(frame, "ready"))
                        and (point := frame["game"].get("pawns", {}).get("local", {}).get("location"))
                        and math.dist(point, position) < 50)
     checkpoint = campaign_save_hashes(host.campaign)
-    guest_actor = (await portable_probe_command(guest.bridge, "portable-crate", "crossroads")).partition("|")[0]
+    mode = "discovered" if discovered else "crossroads"
+    guest_actor = (await portable_probe_command(guest.bridge, "portable-crate", mode)).partition("|")[0]
     assert guest_actor == crate, guest_actor
     observed = await asyncio.gather(*(wait(run, lambda frame: crate_state(frame, "exhausted")
         and crate in frame.get("gameplay", {}).get(native_loot.STATE_KEY, {})) for run in (host_run, guest_run)))
@@ -7429,6 +7432,10 @@ async def verify_original_crossroads_crate(host: Seat, guest: Seat, pawn: str) -
     pressed, = [row for row in await resident_events(guest_run, ready)
                 if row.get("event") == "native_stock_crate_interaction" and row.get("crate") == crate]
     assert pressed["input_source"] == "memory_input" and pressed["operation_id"] == host_roll["id"], pressed
+    if discovered:
+        accepted, = [row for row in await resident_events(host_run, observed[0])
+                     if row.get("event") == "native_loot_roll_accepted" and row.get("id") == host_roll["id"]]
+        assert accepted.get("origin") == "player", accepted
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"crate": crate, "roll_id": host_roll["id"], "item_count": len(host_roll["items"]),
             "input_source": pressed["input_source"], "checkpoints_unchanged": True}
@@ -8469,6 +8476,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stardust_handoff_check, "stardust_handoff", "stock_stardust_handoff", stardust_handoff_check),
         (stock_crate_ring and crossroads_profile, "crossroads", "stock_crate_ring",
          lambda host, guest, pawn: verify_stock_crate_ring(host, guest, pawn, memory_positions=True, cold=True)),
+        (stock_crate_ring and crossroads_profile, "crossroads", "stock_discovered_crossroads_crate",
+         lambda host, guest, pawn: verify_original_crossroads_crate(host, guest, pawn, discovered=True)),
         (stock_weather_travel, "crossroads", "stock_weather_travel",
          lambda host, guest, pawn: verify_weather_travel(host, guest, pawn, portable_probe_command,
                                                         profile=crossroads_profile, gc_trial=crossroads_gc_trial,

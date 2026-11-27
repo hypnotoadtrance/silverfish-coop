@@ -63,8 +63,10 @@ local function sample_motion()
 end
 
 local function press(mode)
-    local map = mode == "crossroads" and crossroads or observatory
-    local path = map .. ":PersistentLevel.LootCrate_Small_BP_C_" .. (mode == "crossroads" and "3" or "1")
+    local stock_crossroads = mode == "crossroads" or mode == "discovered"
+    local map = stock_crossroads and crossroads or observatory
+    local suffix = mode == "discovered" and "8" or stock_crossroads and "3" or "1"
+    local path = map .. ":PersistentLevel.LootCrate_Small_BP_C_" .. suffix
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
     local driver = valid(world) and world.NetDriver
@@ -83,7 +85,7 @@ local function press(mode)
         assert(valid(input) and valid(action), "stock Interact is unavailable")
         local started = input:MakeInputActionValueOfType(1, 0, 0, 0)
         local completed = input:MakeInputActionValueOfType(0, 0, 0, 0)
-        if mode == "coldpress" or mode == "crossroads" then SilverfishClearNativeLootCrateInput() end
+        if mode == "coldpress" or stock_crossroads then SilverfishClearNativeLootCrateInput() end
         local panel = crate.SM_Prop_Cabinet_Small_Door_01
         local mesh_class = StaticFindObject("/Script/Engine.StaticMeshComponent")
         assert(valid(panel) and valid(mesh_class), "stock crate lid probe unavailable")
@@ -114,7 +116,8 @@ LoopInGameThreadWithDelay(25, function()
     request:close()
     local ticket, mode
     if line then ticket, mode = line:match("^(%x+)\t(%a+)$") end
-    if mode ~= "press" and mode ~= "coldpress" and mode ~= "motion" and mode ~= "crossroads" then return end
+    if mode ~= "press" and mode ~= "coldpress" and mode ~= "motion" and mode ~= "crossroads"
+        and mode ~= "discovered" then return end
     if not ticket or #ticket ~= 32 or last == ticket then return end
     last = ticket
     local ok, result

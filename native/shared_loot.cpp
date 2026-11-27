@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <numeric>
 #include <span>
 #include <string>
@@ -1566,6 +1567,19 @@ namespace
 
 namespace silverfish::shared_loot
 {
+    namespace
+    {
+        using Path = std::basic_string<Unreal::TCHAR>;
+        struct DiscoveredContainer
+        {
+            Path world, path;
+            authored_loot::Profile profile;
+        };
+
+        std::deque<DiscoveredContainer> discovered;
+        std::unordered_map<std::basic_string_view<Unreal::TCHAR>, std::size_t> discovery_index;
+    }
+
     const authored_loot::Profile* authored_profile(Unreal::UObject* crate)
     {
         if (!live(crate)) return nullptr;
@@ -1577,9 +1591,47 @@ namespace silverfish::shared_loot
         }();
         const auto path = crate->GetPathName();
         const auto match = profiles_by_path.find(path);
-        return match != profiles_by_path.end() &&
-                crate->GetClassPrivate() == find<Unreal::UClass>(match->second->stock_class->actor_class)
-            ? match->second : nullptr;
+        if (match != profiles_by_path.end())
+            return crate->GetClassPrivate() == find<Unreal::UClass>(match->second->stock_class->actor_class)
+                ? match->second : nullptr;
+        if (!Unreal::IsInGameThreadRaw() || !crate->HasAnyFlags(Unreal::RF_WasLoaded)) return nullptr;
+        const auto type = crate->GetClassPrivate()->GetPathName();
+        if (const auto cached = discovery_index.find(path); cached != discovery_index.end())
+        {
+            const auto& profile = discovered[cached->second].profile;
+            return type == profile.stock_class->actor_class ? &profile : nullptr;
+        }
+        const auto family = std::ranges::find_if(authored_loot::stock_classes, [&](const auto* stock) {
+            return type == stock->actor_class;
+        });
+        if (family == authored_loot::stock_classes.end() || (*family)->pry_entry ||
+            *family == &authored_loot::dumpster) return nullptr;
+        auto* actor = static_cast<Unreal::AActor*>(crate);
+        auto* world = actor->GetWorld();
+        auto* salt = field<Unreal::FIntProperty>(crate, STR("SpawnSalt"));
+        if (!live(world) || !salt || !read_bool(crate, STR("bActorIsBeingDestroyed"), false) ||
+            !read_bool(crate, STR("bReplicates"), false) || !object_field(world, STR("PersistentLevel")) ||
+            actor->GetLevel() != object_field(world, STR("PersistentLevel"))) return nullptr;
+        const auto index = discovered.size();
+        auto& placed = discovered.emplace_back(DiscoveredContainer{world->GetPathName(), path, {}});
+        placed.profile = {placed.world.c_str(), placed.path.c_str(), salt->GetPropertyValueInContainer(crate)};
+        placed.profile.stock_class = *family;
+        discovery_index.emplace(placed.path, index);
+        return &placed.profile;
+    }
+
+    std::size_t profile_index(const authored_loot::Profile& profile)
+    {
+        if (const auto match = discovery_index.find(profile.actor); match != discovery_index.end())
+            return authored_loot::profiles.size() + match->second;
+        return static_cast<std::size_t>(&profile - authored_loot::profiles.data());
+    }
+
+    const authored_loot::Profile* profile_at(std::size_t index)
+    {
+        if (index < authored_loot::profiles.size()) return &authored_loot::profiles[index];
+        index -= authored_loot::profiles.size();
+        return index < discovered.size() ? &discovered[index].profile : nullptr;
     }
 
     Unreal::UWorld* authored_crate_world(Unreal::UObject* crate, std::string_view* failure)
@@ -1611,6 +1663,8 @@ namespace silverfish::shared_loot
         };
         const auto* profile = authored_profile(crate);
         if (!profile) return refuse("crate_settings_profile");
+        if (profile_index(*profile) >= authored_loot::profiles.size() &&
+            !read_bool(crate, STR("bReplicates"), false)) return refuse("crate_settings_replication");
         if (!read_bool(crate, STR("GuaranteeSpawn"), profile->guarantee_spawn)) return refuse("crate_settings_guarantee");
         if (!read_bool(crate, STR("IgnoreKarma"), profile->stock_class->armor_first)) return refuse("crate_settings_ignore_karma");
         if (profile->stock_class->armor_first && !read_bool(crate, STR("Seeded"), true)) return refuse("crate_settings_seeded");

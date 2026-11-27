@@ -95,7 +95,7 @@ class AuthoredCrateRegistryTests(unittest.TestCase):
 
     def test_first_three_profiles_and_rollout_counts_match_generated_files(self):
         self.assertEqual(tuple(CRATES)[:3], (LEGACY_CRATE, OTHER_CRATE, BRIDGE_CRATE))
-        self.assertEqual(len(PLACEMENTS), 287)
+        self.assertEqual(len(PLACEMENTS), 286)
         self.assertEqual(len(OVERRIDDEN_PLACEMENTS), 55)
         self.assertEqual({area: sum(row[0] == area for row in PLACEMENTS) for area in (CITY, RAIL_YARD, CISTERN)},
                          {CITY: 7, RAIL_YARD: 7, CISTERN: 5})

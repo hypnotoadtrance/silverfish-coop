@@ -1,11 +1,13 @@
 """Exact stock persistent-level small crates qualified for shared loot."""
 
 import math
+import re
 
 from .authored_container_placements import (ARMOR_FIRST_CLASSES, CLASS_CAPACITIES, CONTAINER_PLACEMENTS,
                                             DEFERRED_PRY_CLASSES, KEY_UNLOCK_ONLY_CLASSES,
                                             KEYED_LOCK_CLASSES, KEYLESS_LOCK_CLASSES, MIXED_GUARANTEE_CLASSES, RANDOM_LID_CLASSES)
 from .travel import CITY, CISTERN, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, RAIL_YARD
+from .native_map_preflight import valid_campaign_package
 
 
 PLACEMENTS = (
@@ -147,7 +149,6 @@ _ADDITIONAL_DEFAULTS = {
     ),
     "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P": (
         (1, -956877376),
-        (8, -565569024),
         (15, -1105258368),
         (18, -1108127040),
         (21, -1015350848),
@@ -522,10 +523,31 @@ GUARANTEED_CRATES |= {full_name(area, actor, family) for family, area, actor, _,
                       if guaranteed}
 LEGACY_CRATE = full_name(*PLACEMENTS[0][:2])
 LOCKABLE_CONTAINER_CLASSES = KEYLESS_LOCK_CLASSES | KEYED_LOCK_CLASSES
+DISCOVERED_CAPACITIES = {"LootCrate_Small_BP_C": 2, **{
+    family: capacity for family, capacity in CLASS_CAPACITIES.items()
+    if family not in LOCKABLE_CONTAINER_CLASSES and family not in RANDOM_LID_CLASSES
+}}
+_PLACED_CONTAINER = re.compile(
+    r"([A-Za-z0-9_]+) (/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):PersistentLevel\.[A-Za-z0-9_]+")
+
+
+def crate_area(crate: object) -> str | None:
+    if not isinstance(crate, str) or len(crate) > 440:
+        return None
+    if area := CRATES.get(crate):
+        return area
+    if match := _PLACED_CONTAINER.fullmatch(crate):
+        family, area, world = match.groups()
+        if (family in DISCOVERED_CAPACITIES and valid_campaign_package(area)
+                and area.rsplit("/", 1)[-1] == world):
+            return area
+    return None
 
 
 def loot_capacity(container: str) -> int:
-    return CONTAINER_CAPACITIES.get(container, 2 if container in CRATES else 0)
+    if container in CRATES:
+        return CONTAINER_CAPACITIES.get(container, 2)
+    return DISCOVERED_CAPACITIES[container.partition(" ")[0]] if crate_area(container) else 0
 
 
 def valid_loot_trait_calls(container: str, calls: object) -> bool:

@@ -5,7 +5,7 @@ import time
 from hashlib import sha256
 
 from . import native_host_save, native_inventory_grant, native_loot, party
-from .authored_loot import valid_item_transform
+from .authored_loot import crate_area, valid_item_transform
 from .content_paths import item_class_name
 
 
@@ -22,7 +22,7 @@ class Refused(RuntimeError):
 
 
 def supported(crate, area):
-    return (isinstance(crate, str) and isinstance(area, str) and native_loot.CRATES.get(crate) == area
+    return (isinstance(crate, str) and isinstance(area, str) and crate_area(crate) == area
             and not native_loot.lockable_container(crate, area) and not native_loot.random_lid(crate)
             and not crate.startswith("ElectronicLocker_01_BP_C "))
 

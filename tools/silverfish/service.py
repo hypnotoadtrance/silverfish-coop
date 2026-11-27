@@ -3652,7 +3652,7 @@ class Host:
                 elif action == "native-loot-crate-fixture" and self.native_loot_input and self.fixtures:
                     area = self.last_game.get("map")
                     crate = request.get("target") or native_loot.default_crate(area)
-                    if native_loot.CRATES.get(crate) != area or not crate:
+                    if not area or native_loot.crate_area(crate) != area:
                         raise ValueError("Select an exact authored crate on the current map")
                     self.last_game = await bridge.command(action, crate, timeout=5)
                     self.last_seen = time.monotonic()
@@ -7055,7 +7055,7 @@ class Client:
                 elif action == "native-loot-crate-fixture" and self.invite.get("native_loot_input"):
                     area = self.last_game.get("map")
                     crate = request.get("target") or native_loot.default_crate(area)
-                    if native_loot.CRATES.get(crate) != area or not crate:
+                    if not area or native_loot.crate_area(crate) != area:
                         raise ValueError("Select an exact authored crate on the current map")
                     self.last_game = await self.bridge.command(action, crate, timeout=5)
                     result = {"native_loot_crate_interaction": self.last_game.get("native_loot_crate_interaction", {})}
