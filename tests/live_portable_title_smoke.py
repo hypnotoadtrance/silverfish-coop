@@ -7871,7 +7871,16 @@ async def verify_container_pickup(host: Seat, guest: Seat, pawn: str, *, memory_
     opened = await submit(host_run, "native-loot-open", target=crate)
     assert opened["ok"], opened
     roll = opened["native_loot_roll"]
-    item = next((row for row in roll["items"] if row["class_path"] not in native_loot.CASH_RANGES), None)
+    stack = stack_class = None
+    if memory_ui:
+        candidates = [row["class_path"] for row in roll["items"] if row.get("ammo", 0) > 0
+                      and row["class_path"] not in native_loot.CASH_RANGES]
+        assert len(candidates) >= 2, roll
+        seeded = await host.bridge.command("fixture-stock-crate-merge-seed", *candidates)
+        stack, _, stack_class = seeded["ack"]["message"].partition("|")
+        assert re.fullmatch(r"[0-9A-F]{32}", stack) and stack_class in candidates, seeded["ack"]
+    item = next((row for row in roll["items"] if row["class_path"] not in native_loot.CASH_RANGES
+                 and row["class_path"] != stack_class), None)
     assert item is not None and "ammo" in item, roll
     identity = uuid.uuid5(uuid.NAMESPACE_OID, f"{roll['id']}:{item['guid']}").hex
     await host.bridge.wait_for(lambda frame: identity in frame.get(native_world_loot.KEY, {}))
@@ -7933,6 +7942,28 @@ async def verify_container_pickup(host: Seat, guest: Seat, pawn: str, *, memory_
         assert combined["guid"] == inventory_guid and combined["item_bytes"] > 0, combined
         assert save_state() == before
         memory_proof = {"resident_ui_projection": combined, "saves_unchanged_before_checkpoint": True}
+        rounds = next(row for row in roll["items"] if row["class_path"] == stack_class)
+        stack_identity = native_world_loot.crate_identity(roll["id"], rounds["guid"])
+        await host.bridge.wait_for(lambda frame: stack_identity in frame.get(native_world_loot.KEY, {}))
+        await host.bridge.command(native_world_loot.APPROACH, stack_identity, pawn, timeout=5)
+        visible = await guest.bridge.wait_for(lambda frame: stack_identity in frame.get(native_world_loot.KEY, {})
+            and math.dist(frame["pawns"]["local"]["location"], rounds["transform"]["position"]) < 225)
+        actor_path = visible[native_world_loot.KEY][stack_identity]["actor"].split(" ", 1)[1]
+        picked = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, target=actor_path)
+        assert picked["ok"], picked
+        async with asyncio.timeout(8):
+            while not (merged := [row for row in inventory_events()[events_before:]
+                                  if row["event"] == "native_pickup_inventory_applied" and row["guid"] == stack]):
+                await asyncio.sleep(.05)
+        proof, = merged
+        assert proof["outcome"] == "merged", proof
+        display = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, target=f"{actor_path}@{stack}")
+        assert display["ok"] and display["proof"] == "verified stock Nearby Items transfer", display
+        updated = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
+        merged_stack, = [row for row in updated if row["class_path"] == stack_class]
+        assert (merged_stack["guid"], merged_stack["quantity"]) == (stack, 3 + rounds["ammo"]), updated
+        assert save_state() == before
+        memory_proof["merged_inventory"] = {**proof, "quantity": merged_stack["quantity"]}
     checkpoint = await submit(host_run, "checkpoint")
     assert checkpoint["ok"], checkpoint
     saved = json.loads((host.campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
@@ -8672,9 +8703,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(portable_script_overlay(game, "native_dream.lua", lambda script:
                     script.replace('local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"',
                                    'local fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"', 1)))
-        if stock_split:
+        if stock_split or guest_ui_memory:
             proof["stock_split_overlay"] = [probes.enter_context(
                 guest_weapon_fixture_overlay(game, "portable_stock_split_probe.lua")) for game in games]
+        if stock_split:
             proof["stock_split_refusal_overlays"] = [
                 probes.enter_context(stock_split_refusal_overlay(game)) for game in games
             ]
