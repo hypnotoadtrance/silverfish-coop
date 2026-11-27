@@ -15,7 +15,7 @@ from tools.silverfish import (
 from tools.silverfish.campaign import CampaignStore
 from tools.silverfish.control import Control, status as control_status
 from tools.silverfish.steam_transport import (
-    SteamTransport, _BUILD_KEY, _CALLBACK_FRIEND_JOIN, _CALLBACK_INVITE, _CALLBACK_MATCH_LIST,
+    SteamTransport, _BUILD_KEY, _CALLBACK_ENTER, _CALLBACK_FRIEND_JOIN, _CALLBACK_INVITE, _CALLBACK_MATCH_LIST,
 )
 from tools.silverfish.title_handoff import DESCRIPTOR_FILE, REQUEST_FILE
 from tools.silverfish.title_session import STATUS_FILE, SessionPlan, TitleSession
@@ -367,9 +367,8 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         offer = bridge / steam_session.JOIN_OFFER
         self.platform.metadata[_BUILD_KEY] = f"rc-abc1234:{'2' * 64}"
         await exchange("1", "unavailable\t0\n")
-        notice, nonce, local, remote, expiry = offer.read_text().split()
-        self.assertEqual((notice, local, remote), ("2", VERSION, "rc-abc1234"))
-        self.assertEqual(len(nonce), 32)
+        notice, nonce, local, remote, expiry, source = offer.read_text().split()
+        self.assertEqual((notice, nonce, local, remote, source), ("2", token, VERSION, "rc-abc1234", "browser"))
         self.assertGreater(int(expiry), time.time())
         self.assertIsNone(guest.transport.lobby)
 
@@ -378,8 +377,19 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         await exchange("1", "joined\t0\n")
         await self.ready(offer.exists)
         self.assertEqual(guest_api.lobby_owner(LOBBY), HOST)
-        _, _, port, _ = offer.read_text().split()
+        _, nonce, port, _, source = offer.read_text().split()
+        self.assertEqual((nonce, source), (token, "browser"))
         self.assertEqual(guest.fingerprint_for("127.0.0.1", int(port)), fingerprint)
+
+        cancel = bridge / steam_session.BROWSER_CANCEL
+        runtime.write_text(cancel, f"1\t{'c' * 32}\tcancel\n", newline="\n")
+        await self.ready(lambda: not cancel.exists())
+        self.assertEqual(guest.transport.lobby, LOBBY)
+        self.assertTrue(offer.exists())
+        runtime.write_text(cancel, f"1\t{token}\tcancel\n", newline="\n")
+        await self.ready(lambda: guest.transport.lobby is None)
+        self.assertFalse(offer.exists())
+        self.assertEqual(host.transport.lobby, LOBBY)
 
     @staticmethod
     async def stop_browser(browser):
@@ -424,6 +434,51 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
             submit(latest, "1")
             await self.ready(lambda: result.read_text() == f"2\t{generation}\t{latest}\tjoined\t0\n")
             self.assertEqual(guest.transport.lobby, LOBBY)
+
+    async def test_public_join_back_discards_a_delayed_steam_callback_without_cancelling_invites(self):
+        _, host, _ = await self.start(HOST)
+        guest_api, guest, bridge = await self.start(GUEST)
+        await host.transport.host(32124, fingerprint="e" * 64, access="public")
+        browser = asyncio.create_task(steam_browser.serve(bridge, guest.transport, guest.open_lobby, guest.pump))
+        self.addAsyncCleanup(self.stop_browser, browser)
+        await asyncio.sleep(0)
+        generation, token, wrong_token = "a" * 32, "b" * 32, "c" * 32
+        runtime.write_text(bridge / DESCRIPTOR_FILE, f"1\t{generation}\thost,join\t{int(time.time()) + 8}\n")
+        request, response = bridge / steam_browser.REQUEST, bridge / steam_browser.RESPONSE
+        cancel, offer = bridge / steam_session.BROWSER_CANCEL, bridge / steam_session.JOIN_OFFER
+        command, result = f"1\t{generation}\t{token}\t", f"2\t{generation}\t{token}\t"
+        runtime.write_text(request, command + "search\n", newline="\n")
+        await self.ready(lambda: response.exists() and response.read_text().startswith(result + "ready\t1\n"))
+
+        handle = 81
+        with patch.object(guest_api, "join_lobby", return_value=handle) as join:
+            runtime.write_text(request, command + "1\n", newline="\n")
+            await self.ready(lambda: join.call_count == 1)
+
+            runtime.write_text(cancel, f"1\t{wrong_token}\tcancel\n", newline="\n")
+            await self.ready(lambda: not cancel.exists())
+            self.assertFalse(guest.transport._calls[handle].result.done())
+            self.assertFalse(offer.exists())
+
+            runtime.write_text(cancel, f"1\t{token}\tcancel\n", newline="\n")
+            await self.ready(lambda: response.read_text() == result + "unavailable\t0\n")
+            self.assertFalse(offer.exists())
+            self.assertIsNone(guest.transport.lobby)
+            self.assertEqual(runtime.read_json(bridge / steam_session.STATUS)["state"], "ready")
+
+            self.platform.members.add(GUEST)
+            guest_api.callbacks.append((_CALLBACK_ENTER, struct.pack("<QIB3xI4x", LOBBY, 0, 0, 1), handle))
+            await self.ready(lambda: guest_api.left == [LOBBY])
+            self.assertNotIn(GUEST, self.platform.members)
+            self.assertFalse(offer.exists())
+
+        guest_api.callbacks.append((_CALLBACK_INVITE, struct.pack("<QQ", LOBBY, HOST), 0))
+        await self.ready(offer.exists)
+        kind, invite_nonce, _, _ = offer.read_text().split()
+        self.assertEqual(kind, "1")
+        self.assertNotIn(invite_nonce, {token, wrong_token})
+        self.assertEqual(guest.transport.lobby, LOBBY)
+        self.assertEqual(host.transport.lobby, LOBBY)
 
     async def test_cancel_releases_only_the_current_join_offer_and_allows_a_fresh_invite(self):
         _, host, _ = await self.start(HOST)

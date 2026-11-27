@@ -11,7 +11,8 @@ local actions = {
 }
 local bridge_path, session_path, request_path, loop, current, session, report
 local steam_join_path, steam_cancel_path, steam_opened_path, last_steam_invite, steam_polled_at
-local steam_handoff, steam_cancel_retry
+local steam_handoff, steam_browser_cancel_path
+local steam_cancel_retries = {}
 local dismissed, submitted
 local singleplayer_title
 local startup_seen
@@ -107,9 +108,13 @@ local function publish_steam_join_state(path, nonce, action)
     os.remove(temporary)
 end
 
-local function cancel_steam_form(nonce)
-    if nonce and not publish_steam_join_state(steam_cancel_path, nonce, "cancel") then
-        steam_cancel_retry = {nonce = nonce, at = os.time() + 1, attempts = 3}
+local function cancel_steam_form(nonce, path)
+    if not nonce then return end
+    path = path or steam_cancel_path
+    if publish_steam_join_state(path, nonce, "cancel") then
+        steam_cancel_retries[path] = nil
+    else
+        steam_cancel_retries[path] = {nonce = nonce, at = os.time() + 1, attempts = 3}
     end
 end
 
@@ -504,7 +509,7 @@ local function handle_join_form(action, state, phase, context, steam_invite)
             function(key) if session == owner then dispatch(key) end end, offer.defaults, steam_invite and steam_invite.port)
         local browser = session.browser
         session.form = {role = "join", api = api, draft = draft, steam_nonce = steam_invite and steam_invite.nonce,
-            browser_selection = steam_invite and browser and browser.state == "joining" and browser.selection}
+            browser_selection = steam_invite and steam_invite.browser and browser and browser.selection}
         report = {state = "ready", choices = offer.choices}
         return true
     end
@@ -560,12 +565,20 @@ local function poll_steam_invite(context)
     local record = file:read(193)
     file:close()
     if not record or #record > 192 then return end
+    local browser_offer = record:match("^([^\n]+)\tbrowser\n$")
+    if browser_offer then record = browser_offer .. "\n" end
     local nonce, local_version, host_version, stamp = record:match("^2\t([0-9a-f]+)\t([^\t]+)\t([^\t]+)\t([0-9]+)\n$")
     local port
     if not nonce then nonce, port, stamp = record:match("^1\t([0-9a-f]+)\t([1-9][0-9]*)\t([0-9]+)\n$") end
     local expiry = stamp and #stamp <= 10 and tonumber(stamp)
     if not nonce or #nonce ~= 32 or not nonce:find("[^0]") or nonce == last_steam_invite
         or not expiry or expiry < now or expiry > now + 60 then return end
+    local browser = session.browser
+    if browser_offer and not (browser and browser.selection and nonce == browser.token) then
+        last_steam_invite = nonce
+        if port then cancel_steam_form(nonce, steam_browser_cancel_path) end
+        return
+    end
     if local_version then
         if not valid_version(local_version) or host_version ~= "-" and not valid_version(host_version) then return end
         last_steam_invite = nonce
@@ -578,7 +591,8 @@ local function poll_steam_invite(context)
         return
     end
     if #port > 5 or tonumber(port) > 65535 then return end
-    if handle_join_form("join", current.state, current.phase, context, {nonce = nonce, port = port}) then
+    if handle_join_form("join", current.state, current.phase, context,
+        {nonce = nonce, port = port, browser = browser_offer ~= nil}) then
         last_steam_invite = nonce
         session.browser = nil
         controls.remove(session.solo_back)
@@ -613,12 +627,14 @@ local function show_public_lobbies(browser)
         if first + 3 < #browser.lobbies then pages[#pages + 1] = button("steam-next", "Next") end
         if #pages > 0 then rows[#rows + 1] = pages end
     end
-    if browser.state == "returning" then
+    local focus = browser.focus
+    if browser.state == "returning" or browser.state == "joining" then
         rows[#rows + 1] = {button("steam-back", "Back")}
-    elseif browser.state ~= "joining" then
+        focus = "steam-back"
+    else
         rows[#rows + 1] = {button("steam-public", "Refresh"), button("steam-back", "Back")}
     end
-    present({title = "Public Steam Lobbies", note = note, rows = rows, focus = browser.focus})
+    present({title = "Public Steam Lobbies", note = note, rows = rows, focus = focus})
     browser.focus = nil
 end
 
@@ -651,6 +667,9 @@ end
 local function browser_action(action)
     local browser = session.browser
     if action == "steam-back" then
+        if browser and browser.state == "joining" then
+            cancel_steam_form(browser.token, steam_browser_cancel_path)
+        end
         multiplayer(session.offer, "steam-public")
         return
     end
@@ -683,6 +702,10 @@ local function poll_public_lobbies(browser)
     if browser.state ~= "searching" and browser.state ~= "joining" and browser.state ~= "returning" then return end
     local now = os.time()
     if now > browser.expires then
+        if browser.state == "joining" then
+            cancel_steam_form(browser.token, steam_browser_cancel_path)
+            browser.selection = nil
+        end
         browser.state = "unavailable"
         show_public_lobbies(browser)
         return
@@ -693,7 +716,7 @@ local function poll_public_lobbies(browser)
         -- Steam will reject a new search until the previous lobby route closes.
         -- If the route already closed, the cancel request may never be read.
         if now <= browser.release_until then
-            if steam_cancel_retry then return end
+            if steam_cancel_retries[steam_cancel_path] then return end
             local cancel = io.open(steam_cancel_path, "rb")
             if cancel then
                 cancel:close()
@@ -1097,12 +1120,13 @@ end
 function panel.sync(state, phase)
     current = nil
     if not session_path then return end
-    local retry = steam_cancel_retry
-    if retry and os.time() >= retry.at then
-        if publish_steam_join_state(steam_cancel_path, retry.nonce, "cancel") or retry.attempts == 1 then
-            steam_cancel_retry = nil
-        else
-            retry.at, retry.attempts = os.time() + 1, retry.attempts - 1
+    for path, retry in pairs(steam_cancel_retries) do
+        if os.time() >= retry.at then
+            if publish_steam_join_state(path, retry.nonce, "cancel") or retry.attempts == 1 then
+                steam_cancel_retries[path] = nil
+            else
+                retry.at, retry.attempts = os.time() + 1, retry.attempts - 1
+            end
         end
     end
     local context = title.probe(state, phase)
@@ -1212,6 +1236,7 @@ function panel.start(bridge)
     request_path = bridge .. "/title-handoff-request.tsv"
     steam_join_path = bridge .. "/steam-coop-join.tsv"
     steam_cancel_path = bridge .. "/steam-coop-join-cancel.tsv"
+    steam_browser_cancel_path = bridge .. "/steam-coop-browser-cancel.tsv"
     steam_opened_path = bridge .. "/steam-coop-join-opened.tsv"
     loop = LoopInGameThreadWithDelay(16, function()
         if not pcall(update_title) then unavailable() end

@@ -12,6 +12,8 @@ from .party import REQUEST_ID
 
 KEY = "native_avatar_outfits"
 RECEIPT = "native_avatar_outfits_receipt"
+PROJECT = "native-avatar-outfits"
+REPLY = "native-avatar-outfits-reply"
 HOST_AIM_RECEIPT = "native_avatar_host_aim_receipt"
 LOCAL_AIM = "native_avatar_local_aim"
 LOCAL_LIGHTER = "native_avatar_local_lighter"
@@ -311,4 +313,7 @@ async def project(bridge, game, incoming, epoch):
         motion = row.get("moving")
         arguments.extend((player_id, *(row[key] for key in _OUTFIT[:-2]), str(int(row["sprinting"])),
                           "-" if motion is None else str(int(motion))))
-    return await bridge.command("native-avatar-outfits", area, receipt, *arguments, timeout=4)
+    snapshot = await bridge.command(PROJECT, area, receipt, *arguments, timeout=4)
+    if snapshot.get(REPLY):
+        return bridge.remember_local_avatar_outfits(game, snapshot)
+    return snapshot

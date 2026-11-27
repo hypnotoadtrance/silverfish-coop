@@ -72,6 +72,7 @@ local store = object({ActiveQuests = map({}), PlayerBackpack = array({}), Player
 local mounted_recipe = quest(2, nil, 70)
 local stock_templates = {[eye] = eye_recipe, [kill] = kill_recipe, [multi_reward] = complex_recipe, [followup] = followup_recipe}
 local stock_table_available = true
+local unreadable_row
 local player = object({Save = store})
 local bag = object({PlayerBackpack = array({}), PlayerEquipment = array({})})
 local guest = object({Save = bag})
@@ -102,7 +103,15 @@ package.loaded.native_wire_quest = {
     stock_quest_key = function(key) return key end,
     stock_quest_table = function()
         assert(stock_table_available, "Base quest table is unavailable")
-        return {FindRow = function(_, key) return stock_templates[key] end}
+        return {
+            FindRow = function(_, key) return stock_templates[key] end,
+            GetRowNames = function()
+                local names = {}
+                for key in pairs(stock_templates) do names[#names + 1] = key end
+                if unreadable_row then names[#names + 1] = unreadable_row end
+                return names
+            end,
+        }
     end,
     live_stock_board_context = function(state, phase, pawn, board_name, key)
         assert(state.world == world and phase == "hosting" and pawn == "Guest" and board_name == "Board")
@@ -131,8 +140,8 @@ local function stock_finalize(_, key, instance, no_confirmation, host, out)
     for _, number in pairs(contract[rep]) do host_flags.Rep_Freelancer = host_flags.Rep_Freelancer + number * 2 end
     if contract[ping] ~= "None" then stock_pings[#stock_pings + 1] = contract[ping] end
     for _, next_quest in ipairs(contract[chained]) do
-        if not store.ActiveQuests[next_quest] and next_quest == followup then
-            store.ActiveQuests[next_quest] = followup_recipe
+        if not store.ActiveQuests[next_quest] and stock_templates[next_quest] then
+            store.ActiveQuests[next_quest] = stock_templates[next_quest]
         end
     end
     out.Success = true
@@ -257,6 +266,7 @@ denied("objective_not_complete", "turnin", "inspect", kill)
 host_flags.TrackedKills = 1
 denied("objective_not_complete", "turnin", "inspect", kill)
 host_flags.TrackedKills = 3
+stock_templates[kill] = quest(0, nil, 3000, {BountyDone = 1}, {[8] = 20})
 kill_recipe[chained] = array({"Unloaded_Quest"})
 assert(catalog()[8] == "-")
 denied("followup_template_unavailable", "turnin", "inspect", kill)
@@ -407,6 +417,33 @@ local reserved = quest(2, nil, 5, {player_cash = 100})
 reserved[step] = 2
 store.ActiveQuests["Frontier.Reserved-Flag"] = reserved
 denied("effect_unqualified", "turnin", "inspect", "Frontier.Reserved-Flag")
+
+local stock_parent, absent_child = "Stock.Parent-Contract", "Stock.Absent-Contract"
+local parent_template, parent_active = quest(2, nil, 170), quest(2, nil, 170)
+parent_template[chained], parent_active[chained] = array({absent_child}), array({absent_child})
+parent_active[step] = 2
+stock_templates[stock_parent], store.ActiveQuests[stock_parent] = parent_template, parent_active
+stock_table_available = false
+denied("followup_table_unavailable", "turnin", "inspect", stock_parent)
+stock_table_available = true
+unreadable_row = absent_child
+denied("followup_template_unavailable", "turnin", "inspect", stock_parent)
+unreadable_row = nil
+assert(catalog()[8]:find(stock_parent, 1, true))
+action("turnin", "inspect", stock_parent)
+assert(proof()[8] == "qualified" and proof()[24] == "-" and store.ActiveQuests[absent_child] == nil)
+local cash_before_missing, xp_before_missing = host_flags.Player_Cash, host_flags.Player_Xp
+stock_templates[absent_child] = quest(2, nil, 0)
+denied("inspection_changed", "turnin", "apply", stock_parent, "-")
+assert(parent_active[step] == 2 and host_flags.Player_Cash == cash_before_missing)
+stock_templates[absent_child] = nil
+action("turnin", "apply", stock_parent, "-")
+assert(proof()[8] == "applied" and proof()[10] == -10 and proof()[24] == "-")
+assert(store.ActiveQuests[absent_child] == nil
+    and host_flags.Player_Cash == cash_before_missing + 170 and host_flags.Player_Xp == xp_before_missing + 1)
+action("turnin", "apply", stock_parent, "-")
+assert(proof()[8] == "already" and store.ActiveQuests[absent_child] == nil
+    and host_flags.Player_Cash == cash_before_missing + 170 and host_flags.Player_Xp == xp_before_missing + 1)
 
 local mod_offer = {
     ForEach = function(_, visit) visit(ref(FName(multi_reward)), ref(complex_recipe)) end,

@@ -8383,7 +8383,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["loose_revisit_overlays"] = [probes.enter_context(loose_revisit_overlay(game)) for game in games]
         if stock_shovel or stock_buried_placements:
             proof["stock_shovel_overlays"] = [probes.enter_context(stock_shovel_overlay(game)) for game in games]
-        if stock_shovel_quest or stock_dead_drops:
+        if stock_shovel_quest or stock_dead_drops or stock_authored_quest_placement:
             for game in games:
                 probes.enter_context(stock_board_approach_overlay(game))
         if stock_dead_drops:
@@ -9163,7 +9163,7 @@ if __name__ == "__main__":
     parser.add_argument("--stock-discovered-overlap", action="store_true",
                         help="verify discovery, wall gating, and arrival for a streamed stock exit")
     parser.add_argument("--stock-authored-quest-placement", action="store_true",
-                        help="verify native discovery of the stock Smuggler quest placement")
+                        help="verify the stock Smuggler briefcase pickup and Magpie board turn-in")
     parser.add_argument("--crossroads-profile", action="store_true",
                         help="measure co-op frame and subsystem times around the stock weather travel check")
     parser.add_argument("--rendered", action="store_true",

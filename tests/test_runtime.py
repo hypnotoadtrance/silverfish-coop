@@ -111,6 +111,55 @@ class BridgeWalkTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_avatar_outfit_receipt_preserves_full_status_and_expires_with_its_scope(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        avatar = runtime.native_player_avatar
+        area, pawn, visit = "/Game/Maps/Camp", "Player_FP_C guest", "b" * 32
+        incoming = {"map": area, "epoch": visit, "outfits": {}}
+        mode = "compact"
+
+        def full(sequence, who=pawn, ack="previous", readback=""):
+            return (f"schema\t1\nseq\t{sequence}\nack\t{ack}\taccepted\tfull\n"
+                    f"session\tclient\tconnected\t{area}\t0\t1\npawn\tlocal\t{who}\t10\t1\t2\t3\tPC\n{readback}")
+
+        async def reply(request, timeout):
+            nonce, action, target, digest = request.decode().strip().split("\t")
+            self.assertEqual((action, target, timeout), (avatar.PROJECT, area, 4))
+            if mode == "full":
+                return full(11, ack=nonce, readback=f"native-avatar-outfits-receipt\t{digest}\n")
+            owner = pawn + "_new" if mode == "wrong pawn" else pawn
+            received = "f" * 32 if mode == "wrong outfit" else digest
+            target = "/Game/Maps/Depot" if mode == "wrong map" else area
+            return f"{avatar.REPLY}\t1\t{nonce}\tconnected\t{target}\t{owner}\t9\t{received}\taccepted\tapplied\n"
+
+        bridge.local_bridge = Mock(command=AsyncMock(side_effect=reply))
+        bridge.local_bridge.read_status.return_value = full(9)
+        initial = bridge.snapshot()
+        view = await avatar.project(bridge, initial, incoming, visit)
+        self.assertEqual(set(view) - set(initial), {avatar.RECEIPT})
+        self.assertEqual(view["ack"], initial["ack"])
+        self.assertIsNone(bridge._local_status)
+        self.assertEqual(bridge.snapshot(), view)
+        await avatar.project(bridge, bridge.snapshot(), incoming, visit)
+        bridge.local_bridge.command.assert_awaited_once()
+
+        bridge.local_bridge.read_status.return_value = full(9, who=pawn + "_new")
+        self.assertNotIn(avatar.RECEIPT, bridge.snapshot())
+        bridge.local_bridge.read_status.return_value = full(9)
+        await avatar.project(bridge, initial, incoming, visit)
+        bridge.local_bridge.read_status.return_value = full(10)
+        self.assertNotIn(avatar.RECEIPT, bridge.snapshot())
+        for mode, expected in (("wrong pawn", "current guest"), ("wrong map", "match the request"),
+                               ("wrong outfit", "requested outfit")):
+            with self.subTest(mode=mode), self.assertRaisesRegex(RuntimeError, expected):
+                await avatar.project(bridge, initial, incoming, visit)
+
+        mode = "full"
+        successor = await avatar.project(bridge, initial, incoming, visit)
+        self.assertEqual(successor[avatar.RECEIPT], view[avatar.RECEIPT])
+        self.assertEqual(successor["sequence"], 11)
+        self.assertIs(bridge._local_status, successor)
+
     async def test_travel_receipt_is_bound_to_departure_without_replacing_the_world_snapshot(self):
         bridge = runtime.Bridge(Path("unused"), None)
         source, destination = "/Game/Maps/Camp", "/Game/Maps/Depot"

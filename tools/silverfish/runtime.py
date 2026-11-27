@@ -929,6 +929,7 @@ class Bridge:
         self._local_status = None
         self._file_command_lock = asyncio.Lock()
         self._local_world_view = None
+        self._local_avatar_outfit = None
         self._local_wallet = None
         self._local_guest_weapon = None
 
@@ -1499,6 +1500,14 @@ class Bridge:
                 frame = self._with_guest_weapon(frame, pawn, weapon)
             else:
                 self._local_guest_weapon = None
+        if self._local_avatar_outfit is not None and frame is not None:
+            sequence, area, pawn, receipt = self._local_avatar_outfit
+            if (self.local_bridge is not None and frame.get("sequence", 0) <= sequence
+                    and (frame.get("state"), frame.get("map"), frame.get("pawns", {}).get("local", {}).get("name"))
+                    == ("connected", area, pawn)):
+                frame = {**frame, native_player_avatar.RECEIPT: receipt}
+            else:
+                self._local_avatar_outfit = None
         if self._local_world_view is not None and frame is not None:
             at_sequence, pawn, proof = self._local_world_view
             if (self.local_bridge is not None and frame.get("sequence", 0) <= at_sequence
@@ -3788,6 +3797,30 @@ class Bridge:
         return {**game, "native_world_view": proof}
 
     @staticmethod
+    def _local_avatar_outfit_reply(raw: str, fields: tuple[str, ...]) -> dict:
+        row = raw[:-1].split("\t") if len(raw) <= 2048 and raw.endswith("\n") and "\n" not in raw[:-1] else []
+        tag = native_player_avatar.REPLY
+        if (len(row) != 10 or len(fields) < 4 or row[:5] != [tag, "1", fields[0], "connected", fields[2]]
+                or not 0 < len(row[5]) <= 512 or not (sequence := _held_input_sequence(row[6]))):
+            raise RuntimeError("The resident avatar outfit receipt did not match the request")
+        _, _, _, _, area, pawn, _, receipt, result, message = row
+        if result != "accepted":
+            raise RuntimeError(message or "The resident avatar outfit update was refused")
+        if receipt != fields[3] or not native_player_avatar.REQUEST_ID.fullmatch(receipt):
+            raise RuntimeError("The resident avatar outfit receipt did not verify the requested outfit")
+        return {tag: True, "sequence": sequence, "map": area, "pawn": pawn, native_player_avatar.RECEIPT: receipt}
+
+    def remember_local_avatar_outfits(self, game: dict, snapshot: dict) -> dict:
+        sequence, area, pawn = snapshot["sequence"], snapshot["map"], snapshot["pawn"]
+        if (game.get("sequence", 0) > sequence
+                or (game.get("state"), game.get("map"), game.get("pawns", {}).get("local", {}).get("name"))
+                != ("connected", area, pawn)):
+            raise RuntimeError("The resident avatar outfit receipt did not match the current guest")
+        receipt = snapshot[native_player_avatar.RECEIPT]
+        self._local_avatar_outfit = sequence, area, pawn, receipt
+        return {**game, native_player_avatar.RECEIPT: receipt}
+
+    @staticmethod
     def _local_storm_ambience_reply(raw: str, fields: tuple[str, ...]) -> dict:
         rows = [line.split("\t") for line in raw.splitlines()] if len(raw) <= 4096 and raw.endswith("\n") else []
         if (not 2 <= len(rows) <= 4 or len(rows[0]) != 5
@@ -4079,6 +4112,8 @@ class Bridge:
                 return native_world_loot.parse_frame_reply(raw, fields)
             if action == native_weather_view.LOCAL_APPLY and raw.startswith("native-world-view-reply\t"):
                 return self._local_world_view_reply(raw, fields)
+            if action == native_player_avatar.PROJECT and raw.startswith(native_player_avatar.REPLY + "\t"):
+                return self._local_avatar_outfit_reply(raw, fields)
             if action == native_storm_ambience.COMMAND and raw.startswith(native_storm_ambience.REPLY + "\t"):
                 return self._local_storm_ambience_reply(raw, fields)
             if action == native_weather_view.SIREN_PLAY and raw.startswith(native_weather_view.SIREN_REPLY + "\t"):

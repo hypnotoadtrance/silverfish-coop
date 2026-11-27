@@ -26,6 +26,7 @@ HOST_INVITE = "steam-coop-invite-request.tsv"
 AVAILABLE = "steam-coop-available"
 JOIN_OFFER = "steam-coop-join.tsv"
 JOIN_CANCEL = "steam-coop-join-cancel.tsv"
+BROWSER_CANCEL = "steam-coop-browser-cancel.tsv"
 JOIN_OPENED = "steam-coop-join-opened.tsv"
 
 
@@ -78,6 +79,7 @@ class SteamSession:
         self._role = None
         self._route = None
         self._nonce = None
+        self._browser_nonce = None
         self._expires = 0
 
     def fingerprint_for(self, address: str, port: int) -> str | None:
@@ -106,14 +108,22 @@ class SteamSession:
         return avatars
 
     def _leave(self):
-        self._route = self._nonce = None
+        self._route = self._nonce = self._browser_nonce = None
         self._expires = 0
         _remove(self.title_bridge, JOIN_OFFER, JOIN_CANCEL, JOIN_OPENED)
         with suppress(OSError, RuntimeError):
             self.transport.leave()
 
+    def _browser_cancelled(self, nonce: str) -> bool:
+        cancel = _read(self.title_bridge, BROWSER_CANCEL, take=True)
+        return cancel == f"1\t{nonce}\tcancel\n".encode("ascii")
+
     async def receive_invites(self):
+        deferred_invite = None
         while not self.pump.done():
+            if self._browser_nonce and not self._role and self._browser_cancelled(self._browser_nonce):
+                self._leave()
+                _status(self.title_bridge, "ready")
             if self._nonce is not None and not self._role:
                 opened = _read(self.title_bridge, JOIN_OPENED, take=True)
                 cancel = _read(self.title_bridge, JOIN_CANCEL, take=True)
@@ -125,42 +135,64 @@ class SteamSession:
                         or self.transport.lobby != self._route.lobby):
                     self._leave()
                     _status(self.title_bridge, "ready")
-            try:
-                lobby = await asyncio.wait_for(self.transport.pending_invites.get(), .2)
-            except TimeoutError:
-                continue
             if self._role or self._nonce:
+                deferred_invite = None
+            if deferred_invite is not None and not self._browser_nonce:
+                lobby, deferred_invite = deferred_invite, None
+            else:
+                try:
+                    lobby = await asyncio.wait_for(self.transport.pending_invites.get(), .2)
+                except TimeoutError:
+                    continue
+            if self._role or self._nonce:
+                continue
+            if self._browser_nonce:
+                # Keep polling cancel while Steam finishes the browser join.
+                deferred_invite = lobby
                 continue
             await self.open_lobby(lobby)
 
-    async def open_lobby(self, lobby: int) -> bool:
+    async def open_lobby(self, lobby: int, *, browser_nonce: str | None = None) -> bool:
         async with self._lock:
             if self._role or self._nonce or self.pump.done():
                 return False
+            if browser_nonce and self._browser_cancelled(browser_nonce):
+                return False
             self._leave()
+            self._browser_nonce = browser_nonce
+            source = "\tbrowser" if browser_nonce else ""
             _status(self.title_bridge, "joining_lobby")
             try:
                 route = await self.transport.join(lobby)
                 if self._role or self.pump.done():
                     self._leave()
                     return False
-                self._route, self._nonce = route, uuid.uuid4().hex
+                if browser_nonce and self._browser_cancelled(browser_nonce):
+                    self._leave()
+                    _status(self.title_bridge, "ready")
+                    return False
+                self._route, self._nonce = route, browser_nonce or uuid.uuid4().hex
                 self._expires = int(time.time()) + 60
                 runtime.write_text(self.title_bridge / JOIN_OFFER,
-                                   f"1\t{self._nonce}\t{route.port}\t{self._expires}\n", newline="\n")
+                                   f"1\t{self._nonce}\t{route.port}\t{self._expires}{source}\n", newline="\n")
                 _status(self.title_bridge, "invite_ready")
                 return True
             except SteamBuildMismatch as error:
                 self._leave()
-                nonce, expires = uuid.uuid4().hex, int(time.time()) + 60
+                if browser_nonce and self._browser_cancelled(browser_nonce):
+                    _status(self.title_bridge, "ready")
+                    return False
+                nonce, expires = browser_nonce or uuid.uuid4().hex, int(time.time()) + 60
                 with suppress(OSError):
                     runtime.write_text(self.title_bridge / JOIN_OFFER,
-                                       f"2\t{nonce}\t{self.transport.version}\t{error.host_version or '-'}\t{expires}\n",
+                                       f"2\t{nonce}\t{self.transport.version}\t{error.host_version or '-'}\t{expires}{source}\n",
                                        newline="\n")
                 _status(self.title_bridge, "incompatible_build", mod_version=self.transport.version,
                         host_version=error.host_version)
                 return False
             except (OSError, ValueError, RuntimeError):
+                if browser_nonce and self._browser_nonce is None:
+                    return False
                 self._leave()
                 _status(self.title_bridge, "invite_unavailable")
                 return False
@@ -285,6 +317,7 @@ async def installed_steam(work: Path, bridge: Path, argv, *, enabled: bool):
                 cold_lobby = steam_lobby if cold_lobby in (None, steam_lobby) else None
         if cold_lobby is not None:
             transport.pending_invites.put_nowait(cold_lobby)
+        _remove(bridge, BROWSER_CANCEL)
         _status(bridge, "ready")
         with suppress(OSError):
             runtime.write_text(bridge / AVAILABLE, "1\n", newline="\n")
@@ -300,7 +333,7 @@ async def installed_steam(work: Path, bridge: Path, argv, *, enabled: bool):
             with suppress(asyncio.CancelledError):
                 await browser
     finally:
-        _remove(bridge, AVAILABLE)
+        _remove(bridge, AVAILABLE, BROWSER_CANCEL)
         session._leave()
         pump.cancel()
         with suppress(asyncio.CancelledError, OSError, RuntimeError, ValueError):

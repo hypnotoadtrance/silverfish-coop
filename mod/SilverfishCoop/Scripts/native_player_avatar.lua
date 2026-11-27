@@ -1074,6 +1074,20 @@ function avatar.command(fields, state, phase)
     return "Remote avatar outfits received"
 end
 
+function avatar.outfit_reply(fields, state, phase, sequence, row)
+    local accepted, message = pcall(avatar.command, fields, state, phase)
+    if accepted then
+        local synced, failure = pcall(avatar.sync, state, phase)
+        if not synced then accepted, message = false, failure end
+    end
+    local receipt = accepted and client_receipt or "-"
+    if accepted and receipt ~= fields[4] then
+        accepted, message = false, "Remote avatar outfit readback changed"
+    end
+    return row("native-avatar-outfits-reply", 1, fields[1], phase, state.map, state.local_pawn.name,
+        sequence, accepted and receipt or "-", accepted and "accepted" or "error", message) .. "\n"
+end
+
 local function read_head_roll(pivot)
     return pivot:K2_GetComponentRotation().Roll
 end

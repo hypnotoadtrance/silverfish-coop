@@ -70,7 +70,7 @@ async def serve(bridge, transport, open_lobby, pump):
                             result = "incompatible"
                         else:
                             lookup = None
-                            if await open_lobby(selected.lobby):
+                            if await open_lobby(selected.lobby, browser_nonce=token.decode("ascii")):
                                 result = "joined"
                     _publish(bridge, generation, token, result)
             if search is not None and search[2].done():

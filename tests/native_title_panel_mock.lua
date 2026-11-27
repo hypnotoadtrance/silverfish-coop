@@ -5,6 +5,7 @@ local steam_join, steam_cancel = "bridge/steam-coop-join.tsv", "bridge/steam-coo
 local steam_opened = "bridge/steam-coop-join-opened.tsv"
 local browse_request = "bridge/steam-coop-browser-request.tsv"
 local browse_response = "bridge/steam-coop-browser-response.tsv"
+local browse_cancel = "bridge/steam-coop-browser-cancel.tsv"
 local host_catalog = "bridge/title-host-campaigns.tsv"
 local save_request = "bridge/title-save-request.tsv"
 local save_response = "bridge/title-save-response.tsv"
@@ -163,7 +164,8 @@ env = setmetatable({
         end
         assert(mode == "wb" and (path:sub(1, #request) == request or path:sub(1, #join_request) == join_request
             or path:sub(1, #steam_cancel) == steam_cancel or path:sub(1, #steam_opened) == steam_opened
-            or path:sub(1, #browse_request) == browse_request or path:sub(1, #save_request) == save_request))
+            or path:sub(1, #browse_request) == browse_request or path:sub(1, #browse_cancel) == browse_cancel
+            or path:sub(1, #save_request) == save_request))
         return {write = function(_, ...) files[path] = table.concat({...}); writes = writes + 1; return true end,
             close = function() return true end}
     end},
@@ -171,7 +173,7 @@ env = setmetatable({
         remove = function(path) files[path] = nil end,
         rename = function(source, target)
             assert(target == request or target == join_request or target == steam_cancel or target == steam_opened
-                or target == browse_request or target == save_request)
+                or target == browse_request or target == browse_cancel or target == save_request)
             if refuse_rename or files[target] then return false end
             files[target], files[source] = files[source], nil
             return true
@@ -535,10 +537,10 @@ click("steam-pick:6")
 assert(files[browse_request] == prefix .. "6\n")
 
 files[steam_cancel], files[steam_join], files[steam_opened] = nil, nil, nil
-local public_nonce = generation("b")
+local public_nonce = operation_id()
 now = 104
 files[browse_request] = nil
-files[steam_join] = ("1\t%s\t28951\t159\n"):format(public_nonce)
+files[steam_join] = ("1\t%s\t28951\t159\tbrowser\n"):format(public_nonce)
 tick()
 assert(display.title == "Join via Steam" and not display.fields.password)
 assert(files[steam_opened] == "1\t" .. public_nonce .. "\topened\n")
@@ -568,9 +570,9 @@ offer("host,join", 117, browse_generation, defaults)
 click("steam-pick:6")
 assert(files[browse_request] == refreshed_prefix .. "6\n")
 files[browse_request] = nil
-local closed_nonce = generation("1")
+local closed_nonce = operation_id()
 now = 108
-files[steam_join] = ("1\t%s\t28951\t159\n"):format(closed_nonce)
+files[steam_join] = ("1\t%s\t28951\t159\tbrowser\n"):format(closed_nonce)
 tick()
 assert(display.title == "Join via Steam" and not display.fields.password)
 files[steam_join], files[steam_opened], files[join_request] = nil, nil, nil
@@ -750,3 +752,22 @@ now = now + 18
 offer("host,join", now + 8, reopened_generation, defaults)
 tick()
 assert(display.buttons["steam-pick:1"].label == "New Host", "Accept the latest search through Steam's search deadline")
+click("steam-pick:1")
+assert(display.note == "Connecting through Steam…" and display.focus == "steam-back")
+click("steam-back")
+assert(display.title == "Multiplayer" and display.focus == "steam-public")
+assert(files[browse_cancel] == ("1\t%s\tcancel\n"):format(latest_search))
+files[browse_request], files[browse_cancel], files[join_request], files[steam_opened] = nil, nil, nil, nil
+now = now + 1
+files[steam_join] = ("1\t%s\t28951\t%d\tbrowser\n"):format(latest_search, now + 20)
+tick()
+assert(display.title == "Multiplayer" and display.focus == "steam-public")
+assert(not files[join_request] and not files[steam_opened], "A late browser offer must not open the join form")
+assert(files[browse_cancel] == ("1\t%s\tcancel\n"):format(latest_search))
+
+now = now + 1
+local next_invite = generation("e")
+files[steam_join] = ("1\t%s\t28952\t%d\n"):format(next_invite, now + 20)
+tick()
+assert(display.title == "Join via Steam" and not display.fields.password)
+assert(files[steam_opened] == ("1\t%s\topened\n"):format(next_invite))

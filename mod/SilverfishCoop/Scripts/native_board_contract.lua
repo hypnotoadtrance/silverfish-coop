@@ -57,13 +57,31 @@ local function offer_step(row)
     if int(step) and int(final) and step >= 1 and step <= final then return step end
 end
 
+local function stock_chain_rows(templates, parent, chain, count)
+    local template = templates:FindRow(parent)
+    local stock_chain = template and template[keys.chained]
+    if len(stock_chain) ~= count then return end
+    for index = 1, count do
+        if wire.stock_quest_id(name(stock_chain[index])) ~= wire.stock_quest_id(name(chain[index])) then return end
+    end
+    local names = templates:GetRowNames()
+    if type(names) ~= "table" or #names == 0 or #names > journal_limit then return end
+    local rows = {}
+    for index = 1, #names do
+        local row = name(names[index])
+        if type(row) ~= "string" or row == "" or rows[row:lower()] then return end
+        rows[row:lower()] = true
+    end
+    if rows[parent:lower()] then return rows end
+end
+
 local function followups(context, row, parent)
     local list = row[keys.chained]
     local count = len(list)
     if not int(count) or count < 0 or count > 16 then refuse("followup_list_unqualified") end
-    local result = {}
-    if count == 0 then return result end
-    local templates
+    local result, missing = {}, {}
+    if count == 0 then return result, missing end
+    local templates, stock_rows
     local active = context.save.ActiveQuests
     local seen = {[parent:lower()] = true}
     for index = 1, count do
@@ -83,18 +101,29 @@ local function followups(context, row, parent)
                 available, templates = pcall(wire.stock_quest_table)
                 if not available then refuse("followup_table_unavailable") end
             end
-            local found, starting = pcall(function()
-                local template = templates:FindRow(name(key))
-                return template and offer_step(template)
-            end)
-            if not found or not starting then refuse("followup_template_unavailable") end
-            expected = starting
+            local found, template = pcall(function() return templates:FindRow(name(key)) end)
+            if not found then refuse("followup_template_unavailable") end
+            if template then
+                expected = offer_step(template)
+                if not expected then refuse("followup_template_unavailable") end
+            else
+                if not stock_rows then
+                    local qualified
+                    qualified, stock_rows = pcall(stock_chain_rows, templates, parent, list, count)
+                    if not qualified or not stock_rows then refuse("followup_template_unavailable") end
+                end
+                if stock_rows[id:lower()] then refuse("followup_template_unavailable") end
+                -- Stock AddQuest_ByName leaves a missing table row absent after the parent payout.
+                missing[#missing + 1] = key
+            end
         end
-        if not int(expected) then refuse("followup_step_unqualified") end
-        result[index] = {key = key, id = id, step = expected, present = current ~= nil}
+        if current or expected then
+            if not int(expected) then refuse("followup_step_unqualified") end
+            result[#result + 1] = {key = key, id = id, step = expected, present = current ~= nil}
+        end
         seen[id:lower()] = true
     end
-    return result
+    return result, missing
 end
 
 local function followup_proof(result)
@@ -124,9 +153,10 @@ local function shape(context, row, quest)
         or not row[keys.flags] or #row[keys.flags] > 16 or not row[keys.rep] or #row[keys.rep] > 16 then
         refuse("specialized_recipe")
     end
+    local expected_followups, missing_followups = followups(context, row, quest)
     local result = {step = step, final = final, cash = cash, xp = xp, objectives = {}, by_class = {},
         empty_consumption = quantity == 0 and consumed, rewards = {}, reward_paths = {},
-        followups = followups(context, row, quest)}
+        followups = expected_followups, missing_followups = missing_followups}
     for index = 1, quantity do
         local class = row[keys.objective][index]
         if not valid(class) then refuse("objective_class_unqualified") end
@@ -568,6 +598,9 @@ function board_contract.command(fields, state, phase)
             for _, followup in ipairs(contract.followups) do
                 local observed = wire.stock_row(context.save.ActiveQuests, followup.key)
                 if not observed or observed[keys.step] ~= followup.step then return end
+            end
+            for _, key in ipairs(contract.missing_followups) do
+                if wire.stock_row(context.save.ActiveQuests, key) ~= nil then return end
             end
         end
         local after = wire.stock_row(context.save.ActiveQuests, context.key)

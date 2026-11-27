@@ -1,16 +1,32 @@
     if fields[2] == "fixture-stock-quest-placement" and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
-        local map = "/Game/Classes/Maps/Maps_SafeZones/Shop_Smuggler_P"
-        local world_path = map .. ".Shop_Smuggler_P"
+        local operation = fields[3]
+        local shop = operation == "handoff-journal" and "Shop_ScavBar_P" or "Shop_Smuggler_P"
+        local map = "/Game/Classes/Maps/Maps_SafeZones/" .. shop
+        local world_path = map .. "." .. shop
         local source = world_path .. ":PersistentLevel.Case_HandOff_01_C_1"
         local class = "/Game/Classes/Items/Key_Items/Case_HandOff_01.Case_HandOff_01_C"
         local quest = "Clct_HandOff_01"
-        local operation = fields[3]
         local inventory = operation == "guest-item"
         assert(#fields == (inventory and 4 or 3) and state.listening and state.map == map and valid(state.world)
-            and state.world:GetFullName() == "World " .. world_path, "expected joined Smuggler Shop")
+            and state.world:GetFullName() == "World " .. world_path, "expected joined quest location")
         local pawn = state.local_pawn and state.local_pawn.pawn
         assert(valid(pawn) and pawn:IsLocallyControlled() and same(pawn:GetWorld(), state.world))
+        if operation == "handoff-journal" then
+            assert(phase == "connected" and state.server == true
+                or phase == "hosting" and state.server == false and pawn:HasAuthority())
+            local instance = state.world.OwningGameInstance
+            assert(valid(instance) and valid(pawn.Save) and same(instance.SaveSlot_Ref, pawn.Save))
+            local parent_step, child_step = "-", "-"
+            pawn.Save.ActiveQuests:ForEach(function(key, row)
+                local name = key:get():ToString()
+                if name == quest or name == "Magpie_GotIntel" then
+                    local step = tostring(row:get().Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A)
+                    if name == quest then parent_step = step else child_step = step end
+                end
+            end)
+            return parent_step .. "|" .. child_step
+        end
         assert(type(SilverfishReadNativeAuthoredQuestPlacements) == "function", "native placement observer unavailable")
         local client = phase == "connected" and state.server == true
         if client then
