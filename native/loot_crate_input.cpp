@@ -271,9 +271,9 @@ namespace
         return discovered_scopes[index];
     }
 
-    bool stock_function(U::UObject* crate, U::UFunction* method, int count, int size)
+    bool stock_function(U::UClass* owner, U::UFunction* method, int count, int size)
     {
-        return method->GetOuterPrivate() == crate->GetClassPrivate() && method->GetNumParms() == count &&
+        return owner && method->GetOuterPrivate() == owner && method->GetNumParms() == count &&
             method->GetParmsSize() == size && !method->GetReturnProperty() &&
             !method->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net);
     }
@@ -284,7 +284,8 @@ namespace
         static const U::FName standard{STR("ExecuteUbergraph_Eqp_LockPick")};
         static const U::FName heavy{STR("ExecuteUbergraph_Eqp_LockPick_Hev")};
         const auto name = method->GetFName();
-        if (!args || (name != standard && name != heavy) || !stock_function(tool, method, 1, sizeof(std::int32_t))) return false;
+        if (!args || (name != standard && name != heavy) ||
+            !stock_function(tool->GetClassPrivate(), method, 1, sizeof(std::int32_t))) return false;
         const auto path = name == standard ? STR("/Game/Classes/Equipment/Eqp_LockPick.Eqp_LockPick_C") :
             STR("/Game/Classes/Equipment/Eqp_LockPick_Hev.Eqp_LockPick_Hev_C");
         auto* entry = parameter<U::FIntProperty>(method, STR("EntryPoint"), 0);
@@ -418,6 +419,7 @@ namespace
         if (name != open_name && !script) return;
         const auto* profile = silverfish::shared_loot::authored_profile(crate);
         if (!profile || method != find<U::UFunction>(script ? profile->stock_class->script : profile->stock_class->input)) return;
+        auto* owner = find<U::UClass>(profile->stock_class->actor_class);
         auto* world = silverfish::shared_loot::authored_crate_world(crate);
         if (!world) return;
         const auto local = local_owner(world);
@@ -431,7 +433,7 @@ namespace
         if (script)
         {
             auto* entry = parameter<U::FIntProperty>(method, STR("EntryPoint"), 0);
-            if (!stock_function(crate, method, 1, sizeof(std::int32_t)) || !entry ||
+            if (!stock_function(owner, method, 1, sizeof(std::int32_t)) || !entry ||
                 silverfish::shared_loot::permits_stock_script(crate, method)) return;
             arm_scope(active, crate, world, local, now);
             const auto point = entry->GetPropertyValueInContainer(args);
@@ -475,7 +477,7 @@ namespace
         }
         auto* player = parameter<U::FObjectProperty>(method, STR("Player"), 0);
         auto* component = parameter<U::FObjectProperty>(method, STR("HitComponent"), sizeof(void*));
-        if (!stock_function(crate, method, 2, 2 * sizeof(void*)) || !player || !component ||
+        if (!stock_function(owner, method, 2, 2 * sizeof(void*)) || !player || !component ||
             player->GetPropertyClass().Get() != find<U::UClass>(pawn_path) ||
             component->GetPropertyClass().Get() != find<U::UClass>(STR("/Script/Engine.SceneComponent"))) return;
         auto* pawn = read(player, args);
@@ -529,6 +531,11 @@ namespace
                 }
                 auto* crate = find<U::AActor>(profile->actor);
                 auto* world = silverfish::shared_loot::authored_crate_world(crate, &status);
+                if (world && silverfish::shared_loot::authored_profile(crate) != profile)
+                {
+                    status = "crate_identity_changed";
+                    world = nullptr;
+                }
                 if (world)
                 {
                     status = "local_owner";
@@ -655,7 +662,9 @@ namespace
         lua.set_integer(profile->stock_class->slots);
         lua.set_string(RC::to_utf8_string(area));
         lua.set_bool(streamed);
-        return 7;
+        lua.set_string(RC::to_utf8_string(crate->GetClassPrivate()->GetPathName()));
+        lua.set_bool(profile->guarantee_spawn);
+        return 9;
     }
 
     int arm_guest_pry(const Lua& lua)

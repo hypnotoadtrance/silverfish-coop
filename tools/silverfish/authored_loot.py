@@ -6,7 +6,7 @@ from .authored_container_placements import (ARMOR_FIRST_CLASSES, CLASS_CAPACITIE
                                             DEFERRED_PRY_CLASSES, KEY_UNLOCK_ONLY_CLASSES,
                                             KEYED_LOCK_CLASSES, KEYLESS_LOCK_CLASSES, MIXED_GUARANTEE_CLASSES, RANDOM_LID_CLASSES)
 from .travel import CITY, CISTERN, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, RAIL_YARD
-from .content_paths import actor_source_map
+from .content_paths import actor_source_map, item_class_name
 
 
 PLACEMENTS = (
@@ -527,12 +527,19 @@ DISCOVERED_CAPACITIES = {"LootCrate_Small_BP_C": 2, **{
     if family not in LOCKABLE_CONTAINER_CLASSES and family not in RANDOM_LID_CLASSES
 }}
 def crate_area(crate: object) -> str | None:
-    if not isinstance(crate, str) or len(crate) > 640:
+    if not isinstance(crate, str) or len(crate) > 896:
         return None
     if area := CRATES.get(crate):
         return area
     family, _, source = crate.partition(" ")
-    return actor_source_map(source) if family in DISCOVERED_CAPACITIES else None
+    if family not in DISCOVERED_CAPACITIES:
+        return None
+    actual_class, separator, actor_source = source.partition(" ")
+    if separator:
+        if not item_class_name(actual_class):
+            return None
+        source = actor_source
+    return actor_source_map(source)
 
 
 def loot_capacity(container: str) -> int:
@@ -550,6 +557,8 @@ def valid_loot_trait_calls(container: str, calls: object) -> bool:
         # The first gun slot can run one independent karma query even when
         # the container guarantees its fallback items.
         return 0 <= calls <= int(container.partition(" ")[0] in MIXED_GUARANTEE_CLASSES)
+    if container.count(" ") == 2 and crate_area(container):
+        return 0 <= calls <= 1 + loot_capacity(container)
     return 1 <= calls <= 1 + loot_capacity(container)
 
 

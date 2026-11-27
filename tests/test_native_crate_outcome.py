@@ -118,3 +118,20 @@ class CrateOutcomeTests(unittest.IsolatedAsyncioTestCase):
         self.outcome["items"][0]["actor"] = f"Item_Bandage_C {level.replace('CoopSublevel', 'OtherSublevel')}Item_Bandage_C_11"
         with self.assertRaisesRegex(party.RuleError, "outcome_invalid"):
             transfer.decode_report(transfer.report_body(self.epoch, crate, self.outcome), OBSERVATORY)
+
+    async def test_inherited_container_carries_its_class_through_the_shared_ledger(self):
+        source = f"{OBSERVATORY}.Observitory_P:PersistentLevel.SupplyCrate_1"
+        variant = "/ExampleMod/Containers/SupplyCrate.SupplyCrate_C"
+        self.crate = f"LootCrate_Small_BP_C {variant} {source}"
+        self.assertEqual(native_loot.loot_capacity(self.crate), 2)
+        operation = "a" * 32
+        body = transfer.report_body(self.epoch, self.crate, self.outcome)
+        accepted = await transfer.accept(self.host, self.bridge, "guest", body, operation)
+        roll = accepted["native_loot_roll"]
+        self.assertEqual(roll["crate"], self.crate)
+        self.assertEqual(native_loot.published(self.host.party[native_loot.STATE_KEY], OBSERVATORY), {self.crate: roll})
+        for invalid in (self.crate.replace(variant, variant.removesuffix("_C")),
+                        self.crate.replace("LootCrate_Small_BP_C ", "LootLocker_Secure_BP_C ")):
+            with self.assertRaisesRegex(party.RuleError, "outcome_invalid"):
+                transfer.decode_report(transfer.report_body(self.epoch, invalid, self.outcome), OBSERVATORY)
+        self.bridge.command.assert_awaited_once()

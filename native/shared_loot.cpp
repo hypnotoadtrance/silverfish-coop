@@ -459,13 +459,15 @@ namespace
         schema.spawn = find<Unreal::UFunction>(spawn_path);
         schema.roll = find<Unreal::UFunction>(roll_path);
         schema.passive = find<Unreal::UFunction>(passive_path);
-        auto* crate_type = context.crate->GetClassPrivate();
+        auto* stock_type = find<Unreal::UClass>(context.profile->stock_class->actor_class);
         auto* spawner_type = context.spawners.front()->GetClassPrivate();
         auto* container_type = find<Unreal::UClass>(parent_class);
         auto* scene_type = find<Unreal::UClass>(STR("/Script/Engine.SceneComponent"));
         schema.item_type = find<Unreal::UClass>(item_class);
         schema.actor_type = find<Unreal::UClass>(STR("/Script/Engine.Actor"));
-        if (!blueprint(schema.open, crate_type, 2) || !blueprint(schema.script, crate_type, 1) ||
+        if (!blueprint(schema.open, stock_type, 2) || !blueprint(schema.script, stock_type, 1) ||
+            context.crate->GetFunctionByNameInChain(schema.open->GetFName()) != schema.open ||
+            context.crate->GetFunctionByNameInChain(schema.script->GetFName()) != schema.script ||
             !blueprint(schema.karma, container_type, 0) || !blueprint(schema.roll, spawner_type, 2) ||
             !blueprint(schema.spawn, spawner_type, 10) ||
             !blueprint(schema.passive, context.instance->GetClassPrivate(), 4) ||
@@ -1579,12 +1581,32 @@ namespace silverfish::shared_loot
         using Path = std::basic_string<Unreal::TCHAR>;
         struct DiscoveredContainer
         {
-            Path world, path;
+            Path world, path, class_path;
+            Unreal::FWeakObjectPtr type;
             authored_loot::Profile profile;
         };
 
         std::deque<DiscoveredContainer> discovered;
         std::unordered_map<Path, std::size_t> discovery_index;
+
+        const authored_loot::StockClass* container_family(Unreal::UClass* type)
+        {
+            static const auto families = [] {
+                std::unordered_map<std::basic_string_view<Unreal::TCHAR>, const authored_loot::StockClass*> result;
+                for (const auto* stock : authored_loot::stock_classes) result.emplace(stock->actor_class, stock);
+                return result;
+            }();
+            for (auto* current = type; live(current); current = current->GetSuperClass())
+            {
+                if (const auto family = families.find(current->GetPathName()); family != families.end())
+                    return family->second->pry_entry || family->second == &authored_loot::dumpster ? nullptr : family->second;
+                // A data-only child can change defaults and meshes while retaining the stock graph.
+                const Unreal::TFieldRange<Unreal::UFunction> functions(current, Unreal::EFieldIterationFlags::None);
+                if (!current->HasAnyClassFlags(Unreal::CLASS_CompiledFromBlueprint) ||
+                    begin(functions) != end(functions)) return nullptr;
+            }
+            return nullptr;
+        }
 
         Unreal::UWorld* crate_level_world(Unreal::AActor* actor)
         {
@@ -1607,35 +1629,45 @@ namespace silverfish::shared_loot
         }();
         const auto path = crate->GetPathName();
         const auto match = profiles_by_path.find(path);
-        if (match != profiles_by_path.end())
+        if (match != profiles_by_path.end() &&
+            crate->GetClassPrivate() == find<Unreal::UClass>(match->second->stock_class->actor_class))
         {
-            if (crate->GetClassPrivate() != find<Unreal::UClass>(match->second->stock_class->actor_class)) return nullptr;
             auto* actor = static_cast<Unreal::AActor*>(crate);
             auto* world = crate_level_world(actor);
             if (world && actor->GetLevel() == object_field(world, STR("PersistentLevel"))) return match->second;
         }
         if (!Unreal::IsInGameThreadRaw() || !crate->HasAnyFlags(Unreal::RF_WasLoaded)) return nullptr;
-        const auto type = crate->GetClassPrivate()->GetPathName();
-        const auto family = std::ranges::find_if(authored_loot::stock_classes, [&](const auto* stock) {
-            return type == stock->actor_class;
-        });
-        if (family == authored_loot::stock_classes.end() || (*family)->pry_entry ||
-            *family == &authored_loot::dumpster) return nullptr;
-        auto* actor = static_cast<Unreal::AActor*>(crate);
-        auto* world = crate_level_world(actor);
+        auto* type = crate->GetClassPrivate();
+        const auto* family = container_family(type);
+        if (!family) return nullptr;
+        auto* actor = Unreal::Cast<Unreal::AActor>(crate);
+        auto* world = actor ? crate_level_world(actor) : nullptr;
         auto* salt = field<Unreal::FIntProperty>(crate, STR("SpawnSalt"));
         if (!live(world) || !salt || !read_bool(crate, STR("bActorIsBeingDestroyed"), false) ||
             !read_bool(crate, STR("bReplicates"), false)) return nullptr;
         auto world_path = world->GetPathName();
         auto key = world_path + STR("|") + path;
+        auto* guarantee = field<Unreal::FBoolProperty>(crate, STR("GuaranteeSpawn"));
+        if (!guarantee) return nullptr;
         if (const auto cached = discovery_index.find(key); cached != discovery_index.end())
-            return discovered[cached->second].profile.stock_class == *family
-                ? &discovered[cached->second].profile : nullptr;
+        {
+            auto& known = discovered[cached->second];
+            if (known.type.Get() == type) return &known.profile;
+            if (known.class_path != type->GetPathName() ||
+                known.profile.stock_class != family) return nullptr;
+            known.type = Unreal::FWeakObjectPtr(type);
+            return &known.profile;
+        }
+        auto class_path = type->GetPathName();
+        if (!content_paths::item_class(std::basic_string_view<Unreal::TCHAR>(class_path))) return nullptr;
         if (!native_zone::visible_actor_level(actor, world)) return nullptr;
         const auto index = discovered.size();
-        auto& placed = discovered.emplace_back(DiscoveredContainer{std::move(world_path), path, {}});
+        auto& placed = discovered.emplace_back(DiscoveredContainer{
+            std::move(world_path), path, std::move(class_path), Unreal::FWeakObjectPtr(type), {}});
         placed.profile = {placed.world.c_str(), placed.path.c_str(), salt->GetPropertyValueInContainer(crate)};
-        placed.profile.stock_class = *family;
+        placed.profile.stock_class = family;
+        placed.profile.guarantee_spawn = placed.class_path != family->actor_class &&
+            guarantee->GetPropertyValueInContainer(crate);
         placed.profile.discovery_index = index + 1;
         discovery_index.emplace(std::move(key), index);
         return &placed.profile;
@@ -1704,9 +1736,10 @@ namespace silverfish::shared_loot
         if (!defaults || defaults->GetClassPrivate() != crate->GetClassPrivate()) return refuse("crate_settings_defaults");
         if (!read_bool(crate, STR("Ping_IfOpened"), profile->stock_class->stock_ping || profile->extra_open_ping))
             return refuse("crate_settings_ping");
-        if (profile->stock_class != &authored_loot::small_crate)
+        auto* opened = field<Unreal::FMulticastInlineDelegateProperty>(crate, STR("On_Opened"));
+        if (profile->stock_class != &authored_loot::small_crate ||
+            (opened && crate->GetClassPrivate() != find<Unreal::UClass>(profile->stock_class->actor_class)))
         {
-            auto* opened = field<Unreal::FMulticastInlineDelegateProperty>(crate, STR("On_Opened"));
             if (!opened || opened->GetSize() != sizeof(Unreal::FMulticastScriptDelegate))
                 return refuse("container_opened_delegate_schema");
             if (opened->ContainerPtrToValuePtr<Unreal::FMulticastScriptDelegate>(crate)->IsBound())
@@ -1816,7 +1849,8 @@ namespace silverfish::shared_loot
             }
             spawners[index] = child;
         }
-        if (&stock != &authored_loot::small_crate)
+        if (&stock != &authored_loot::small_crate ||
+            crate->GetClassPrivate() != find<Unreal::UClass>(stock.actor_class))
         {
             const auto children = static_cast<Unreal::AActor*>(crate)->K2_GetComponentsByClass(type);
             if (children.Num() != stock.slots) return refuse("crate_children_count");

@@ -47,16 +47,22 @@ end
 
 local function discover(map, target)
     if type(SilverfishDiscoverNativeLootCrate) ~= "function" then return end
-    local index, full_name, class, salt, capacity, owner, streamed = SilverfishDiscoverNativeLootCrate(target)
+    local index, full_name, stock_class, salt, capacity, owner, streamed, class, guaranteed =
+        SilverfishDiscoverNativeLootCrate(target)
     if not index or owner ~= map then return end
     local family, path = full_name:match("^(%S+) (%S+)$")
     local leaf = world_path.leaf(map)
     if not leaf or not world_path.level_actor_package(path) then return end
-    local name = streamed and (family .. " " .. map .. "|" .. path) or full_name
+    local source = streamed and (map .. "|" .. path) or path
+    local stock_family = stock_class:match("%.([^%.]+)$")
+    if not family or not stock_family then return end
+    local name = class == stock_class and (family .. " " .. source)
+        or (stock_family .. " " .. class .. " " .. source)
     if names[name] then return names[name] end
     local profile = {index = index, name = name, full_name = full_name, path = path, world = map .. "." .. leaf, map = map,
-        actor_class = class, salt = salt, capacity = capacity, discovered = true, streamed = streamed}
-    for key, value in pairs(layouts[class] or {}) do profile[key] = value end
+        actor_class = class, salt = salt, capacity = capacity, discovered = true, streamed = streamed,
+        guarantee_spawn = guaranteed}
+    for key, value in pairs(layouts[stock_class] or {}) do profile[key] = value end
     discovered[index], names[name] = profile, profile
     table.insert(loot.profiles(map), profile)
     return profile
@@ -70,7 +76,7 @@ end
 function loot.profile(map, name)
     local profile = name == nil and loot.profiles(map)[1] or names[name]
     if not profile and type(name) == "string" and map then
-        local source = name:match("^%S+ (%S+)$")
+        local source = name:match("^%S+ %S+ (%S+)$") or name:match("^%S+ (%S+)$")
         local parent, path = (source or ""):match("^([^|]+)|([^|]+)$")
         if parent == map and world_path.level_actor_package(path) then
             profile = discover(map, path)
