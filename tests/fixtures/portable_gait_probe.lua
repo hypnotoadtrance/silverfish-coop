@@ -145,12 +145,12 @@ local function observe(action, world, pawn, weapon)
     elseif action == "posed" then
         assert(observer and observer.posture)
         local hand, body, socket = hand_copy(pawn, weapon)
-        if not valid(hand) or not valid(body) then return "pending" end
+        if not valid(hand) or not valid(body) then return "pending weapon attachment" end
         local instance = body:GetAnimInstance()
         local asset = valid(instance) and instance.CurrentAsset
-        if not valid(asset) then return "pending" end
+        if not valid(asset) then return "pending animation asset" end
         local neck_gap, tail_gap = attachment_gaps(pawn, body)
-        if not neck_gap then return "pending" end
+        if not neck_gap then return "pending head or tail attachment " .. asset:GetFullName() end
         local point = body:GetSocketTransform(socket, 2).Translation
         return table.concat({body:GetAddress(), instance:GetAddress(), hand:GetAddress(), asset:GetFullName(),
             point.X, point.Y, point.Z, bit(pawn.bIsCrouched), bit(pawn.CharacterMovement:IsFalling()),

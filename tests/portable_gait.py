@@ -32,7 +32,7 @@ async def verify_postures(command, host, guest, baseline):
             async with asyncio.timeout(6):
                 while True:
                     report = await command(host, "posed")
-                    if report != "pending":
+                    if not report.startswith("pending"):
                         b, i, h, asset, x, y, z, crouch, air, neck, tail, samples = report.split(";")
                         if asset.endswith("." + destination) and (crouch == "1", air == "1") == (crouched, falling):
                             assert (int(b), int(i), int(h)) == (body, instance, hand), report
