@@ -13,9 +13,14 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
+#include <LuaType/LuaUObject.hpp>
+#include <Unreal/UObject.hpp>
+#include <Unreal/UObjectHashTables.hpp>
+#include <Unreal/UnrealInitializer.hpp>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -88,6 +93,49 @@ namespace
         std::string pawn;
     };
     GuestInteractionLease guest_interaction_lease;
+
+    int find_object_by_path(const Lua& lua)
+    {
+        namespace Unreal = RC::Unreal;
+        if (!Unreal::IsInGameThreadRaw() || !Unreal::UnrealInitializer::ShouldUseHashTables()) return 0;
+        auto* stack = lua.get_lua_state();
+        if (lua_gettop(stack) != 1 || lua_type(stack, 1) != LUA_TSTRING) return 0;
+        std::size_t size{};
+        const auto* raw = lua_tolstring(stack, 1, &size);
+        constexpr int path_limit = 1024;
+        if (!raw || size == 0 || size > path_limit) return 0;
+        const std::string_view path{raw, size};
+        const auto mount_end = path.find('/', 1);
+        const auto package_end = path.find('.');
+        if (!path.starts_with('/') || mount_end == std::string_view::npos || mount_end < 2 ||
+            (package_end != std::string_view::npos &&
+                (package_end <= mount_end + 1 || path.find('/', package_end) != std::string_view::npos)) ||
+            path.substr(0, package_end).find(':') != std::string_view::npos) return 0;
+
+        bool has_component = false;
+        for (const unsigned char byte : path.substr(1))
+        {
+            if (byte <= ' ' || byte == 0x7f || byte == '\\' || byte == '\'' || byte == '"') return 0;
+            if (byte == '/' || byte == '.' || byte == ':')
+            {
+                if (!has_component) return 0;
+                has_component = false;
+            }
+            else has_component = true;
+        }
+        if (!has_component) return 0;
+
+        std::array<wchar_t, path_limit + 1> wide{};
+        if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, raw, static_cast<int>(size), wide.data(), path_limit))
+            return 0;
+        // The general UE4SS FindObject walks all UObjects after a hash miss.
+        // A path to an unloaded object may legitimately miss around travel.
+        auto* object = Unreal::FUObjectHashTables::StaticFindObjectByPath(nullptr, wide.data(), false, true);
+        constexpr auto destroyed = static_cast<Unreal::EObjectFlags>(Unreal::RF_BeginDestroyed | Unreal::RF_FinishDestroyed);
+        if (object && (object->HasAnyFlags(destroyed) || object->IsUnreachable())) object = nullptr;
+        RC::LuaType::auto_construct_object(lua, object);
+        return 1;
+    }
 
     void clear()
     {
@@ -815,6 +863,7 @@ namespace silverfish::local_bridge
 
     void register_lua(RC::LuaMadeSimple::Lua& lua)
     {
+        lua.register_function("SilverfishFindObjectByPath", find_object_by_path);
         lua.register_function("SilverfishTakeLocalBridgeCommand", take);
         lua.register_function("SilverfishClaimLocalBridgeCommand", claim_command);
         lua.register_function("SilverfishLocalBridgeStashBodyLimit", stash_body_limit);

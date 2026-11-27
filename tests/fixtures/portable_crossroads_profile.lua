@@ -355,6 +355,20 @@ LoopInGameThreadWithDelay(50, function()
         local actual = collectgarbage(expected)
         if actual ~= expected then collectgarbage(actual) end
         message = (original or "unscoped") .. "," .. actual
+    elseif action == "objectpath" and not capture then
+        local lookup, world = SilverfishFindObjectByPath, current_world()
+        if type(lookup) ~= "function" then
+            message = "unavailable"
+        elseif valid(world) then
+            local path = world:GetFullName():match("^World (/.+)$")
+            local found = path and lookup(path)
+            local absent = path and lookup(path .. ":SilverfishMissingObjectFixture")
+            local package = lookup("/Script/Engine")
+            if valid(found) and found:GetAddress() == world:GetAddress() and valid(package)
+                and absent ~= nil and not absent:IsValid() then
+                message = "matched world and package, returned an invalid object for the missing path"
+            end
+        end
     elseif (action == "incremental" or action == "generational") and not capture then
         local started, before = stamp(), collectgarbage("count")
         local old = collectgarbage(action)

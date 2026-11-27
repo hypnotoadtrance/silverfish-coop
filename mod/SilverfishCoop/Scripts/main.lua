@@ -2,6 +2,8 @@ local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 if not bridge or bridge == "" then return end
 local resident_title = os.getenv("SILVERFISH_COOP_RESIDENT_TITLE") == "1"
 
+require("native_object_lookup").install()
+
 local guest_save = require("guest_save")
 local loot = require("loot")
 local native_player_avatar = require("native_player_avatar")

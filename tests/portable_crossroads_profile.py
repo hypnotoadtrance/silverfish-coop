@@ -721,6 +721,9 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
         run, lambda frame: frame.get("game", {}).get("map") == area
         and frame["game"].get("native_zone_wall", {}).get("state") == "ready"
         and not frame["game"]["native_zone_wall"]["failure"]) for run in runs.values()))
+    object_paths = await asyncio.gather(*(command(seat, "objectpath") for seat in seats.values()))
+    verified_lookup = "matched world and package, returned an invalid object for the missing path"
+    assert all(result in ("unavailable", verified_lookup) for result in object_paths), object_paths
     collector_modes = await read_collector_modes(host, guest, probe)
     before = await transport()
     await arm()
@@ -874,7 +877,8 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
         await journal_action("close", "native_host_invite_journal_closed")
         await wait_resident_status(runs["host"], lambda frame: "native_host_invite_journal" not in frame["game"])
         journal = {"journal_open_and_close": view["game"][native_package_handoff_journal.JOURNAL]}
-    return {"collector_modes": collector_modes, "idle": idle, "guest_walking": moving,
+    return {"collector_modes": collector_modes, "exact_object_lookup": dict(zip(seats, object_paths, strict=True)),
+            "idle": idle, "guest_walking": moving,
             "guest_max_displacement_cm": displacement,
             "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(before_movement, after_movement),
             "pawn_replication_rates": pawn_rates,
