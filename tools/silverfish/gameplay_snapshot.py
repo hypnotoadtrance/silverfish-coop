@@ -120,7 +120,7 @@ class _Snapshot:
 
 class HostSnapshots:
     def __init__(self):
-        self._peers: OrderedDict[tuple[str, str], _Snapshot] = OrderedDict()
+        self._peers: OrderedDict[tuple[str, str], tuple[_Snapshot, ...]] = OrderedDict()
 
     def encode(self, guest: str, character: str, base: object, reply: dict, *, row_updates=False) -> dict:
         reply[ROW_UPDATES] = True
@@ -131,9 +131,10 @@ class HostSnapshots:
         current = reply["gameplay"]
         scope = _scope(reply)
         key = guest, character
-        previous = self._peers.get(key)
+        previous = next((snapshot for snapshot in self._peers.get(key, ())
+                         if snapshot.revision == base and snapshot.scope == scope), None)
         cached = None
-        if previous and base == previous.revision and scope == previous.scope:
+        if previous:
             old = previous.gameplay
             changed, removed = _difference(old, current)
             rows = {}
@@ -151,7 +152,10 @@ class HostSnapshots:
                     reply[DELTA][ROW_CHANGES] = rows
                 del reply["gameplay"]
         revision = reply[REVISION] = uuid.uuid4().hex
-        self._peers[key] = _Snapshot(revision, scope, deepcopy(current) if cached is None else cached)
+        latest = _Snapshot(revision, scope, deepcopy(current) if cached is None else cached)
+        # Interactions can cancel an in-flight reply. Keep the acknowledged
+        # base available until the guest confirms a newer one.
+        self._peers[key] = (latest, previous) if previous else (latest,)
         self._peers.move_to_end(key)
         if len(self._peers) > _MAX_PEERS:
             self._peers.popitem(last=False)

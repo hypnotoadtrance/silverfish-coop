@@ -60,8 +60,12 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.gameplay, {"players": {}})
         self.assertEqual(client.gameplay_seen, 100.0)
 
-    async def test_snapshot_delta_preserves_host_state_and_recovers_from_a_missed_reply(self):
+    async def test_snapshot_delta_preserves_host_state_across_cancelled_replies(self):
         gameplay = {"host_world": {"clock": 8}, "actors": {"door": False}, "players": {}, "cue": "old"}
+        gameplay[native_stock_door.KEY] = {"map": OBSERVATORY, "epoch": "epoch", "sequence": 10, "doors": {
+            f"{OBSERVATORY}.Observitory_P:PersistentLevel.Door_Wood_C_{index}": {"open": False, "yaw": index * 15}
+            for index in range(128)
+        }}
         host = SimpleNamespace(stopping=False, native_guest=False, transitioning=False, zone_epoch="epoch",
                                map_preflight=None, gameplay_snapshots=gameplay_snapshot.HostSnapshots(),
                                authenticated_guest=Mock(return_value=("guest", "character")))
@@ -99,12 +103,26 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.gameplay, gameplay)
         self.assertFalse(client.gameplay["actors"]["door"])
 
-        lose_next = True
+        base = client.gameplay_snapshots.base
+        for clock in (10, 11):
+            gameplay["host_world"]["clock"] = clock
+            lose_next = True
+            await refresh()
+            self.assertEqual(replies[-1][gameplay_snapshot.BASE], base)
+            self.assertEqual(client.gameplay_snapshots.base, base)
+
         await refresh()
+        self.assertEqual(replies[-1][gameplay_snapshot.BASE], base)
         self.assertIn(gameplay_snapshot.DELTA, replies[-1])
+        self.assertEqual(client.gameplay, gameplay)
+        recovered_size = len(service.link._encode_response(replies[-1], snapshot=True))
+
+        client.gameplay_snapshots.base = "f" * 32
         await refresh()
         self.assertIn("gameplay", replies[-1])
         self.assertEqual(client.gameplay, gameplay)
+        refresh_size = len(service.link._encode_response(replies[-1], snapshot=True))
+        self.assertLess(recovered_size, refresh_size / 2)
 
         host.zone_epoch = "new"
         await refresh()
