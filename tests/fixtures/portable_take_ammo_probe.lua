@@ -103,10 +103,14 @@
         assert(phase == "hosting" and allowed_map and (#fields == 4 or #fields == 5))
         local pawn, save = guest_save.exact_item_context(state, phase, fields[3])
         assert(pawn and save and not same(save, state.world.OwningGameInstance.SaveSlot_Ref))
-        local path = lockpick and "/Game/Classes/Equipment/" .. lockpick .. "." .. lockpick .. "_C"
+        local cap = fields[4] == "fur-cap"
+        local flashbang = fields[4] == "flashbang"
+        local path = cap and "/Game/Classes/Armor_Items/Helm_FurCap.Helm_FurCap_C"
+            or flashbang and "/Game/Classes/Equipment/Gren_FlashBang.Gren_FlashBang_C"
+            or lockpick and "/Game/Classes/Equipment/" .. lockpick .. "." .. lockpick .. "_C"
             or weapon_profiles.paths[fields[4]]
         local rounds = #fields == 4 and 1 or math.tointeger(fields[5])
-        local capacity = lockpick and 16 or path and weapon_profiles.magazine_capacity[path]
+        local capacity = cap and 1 or flashbang and 2 or lockpick and 16 or path and weapon_profiles.magazine_capacity[path]
         assert(capacity and rounds and rounds >= 1 and rounds <= capacity)
         local class = StaticFindObject(path)
         if not class or not class:IsValid() then LoadAsset(path) class = StaticFindObject(path) end
@@ -116,7 +120,7 @@
         converter:ItemActorToStruct(defaults, pawn, converted)
         local row = converted.Item or converted
         assert(same(row[class_field], class))
-        row[ammo_field] = rounds
+        if not cap then row[ammo_field] = rounds end
         local index = save.PlayerBackpack:GetArrayNum() + 1
         save.PlayerBackpack[index] = row
         save.PlayerBackpack[index]["DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"] = defaults.DataStruct

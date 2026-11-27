@@ -202,7 +202,7 @@ local function census(state, phase)
                                 entries[name] = {actor = actor, address = actor:GetAddress(), level = level,
                                     class = actor:GetClass(), power = entry.power,
                                     path = path, candle = entry.candle, lantern = entry.lantern, gas_lamp = entry.gas_lamp,
-                                    light = entry.light, flame = entry.flame}
+                                    light = entry.light}
                             else
                                 if not entry.latch then refresh_lights(entry, world, actor.Powered) end
                                 entries[name] = entry
@@ -260,10 +260,6 @@ local function suppress_candle_overlap(name, sphere)
     end
 end
 
-local function gas_flame_missing(entry, powered)
-    return powered and valid(entry.flame) and not entry.flame:IsActive()
-end
-
 function switches.read_row(entry, name, state, phase, row, native_world_address)
     if entry.latch then
         if qualified(entry.actor, state.world, entry.level) and qualified(entry.door, state.world)
@@ -292,8 +288,7 @@ function switches.read_row(entry, name, state, phase, row, native_world_address)
             end
             local replacement = parts(actor, state.world)
             if not replacement then return end
-            entry.actor, entry.address = actor, actor:GetAddress()
-            entry.light, entry.flame = replacement.light, replacement.flame
+            entry.actor, entry.address, entry.light = actor, actor:GetAddress(), replacement.light
         end
         if powered == nil then
             powered = actor[entry.power]
@@ -311,7 +306,7 @@ function switches.read_row(entry, name, state, phase, row, native_world_address)
                 if lamp_state ~= "intact" then powered = false end
             end
             if phase == "connected" and (entry.gas_lamp or lamp_state == "intact") and valid(entry.light)
-                and (entry.light:IsVisible() ~= powered or entry.gas_lamp and gas_flame_missing(entry, powered)) then
+                and entry.light:IsVisible() ~= powered then
                 panel = "lamp-visual-mismatch"
             end
             if entry.row_power ~= powered or entry.row_lamp ~= lamp_state or entry.row_panel ~= panel
@@ -402,7 +397,7 @@ local function project(entry, powered, angles, lights)
     local actor, lever = entry.actor, entry.lever
     if entry.candle then
         if entry.gas_lamp then
-            if actor.Lit ~= powered or entry.light:IsVisible() ~= powered or gas_flame_missing(entry, powered) then
+            if actor.Lit ~= powered or entry.light:IsVisible() ~= powered then
                 actor:Set_LitUnlit(powered, false)
             end
         elseif actor.Lit ~= powered or entry.lantern and entry.light:IsVisible() ~= powered then

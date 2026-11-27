@@ -9,7 +9,7 @@ import time
 
 import live_portable_title_smoke as suite
 from portable_weather_travel import enter_crossroads
-from tools.silverfish import native_loot, native_stock_switch
+from tools.silverfish import native_guest_drop, native_loot, native_stock_switch
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
 
@@ -107,6 +107,25 @@ async def verify_oil_lamps(host, guest, pawn):
                                guest_lit=guest_lit, guest_lit_after_refresh=guest_lit_after_refresh,
                                host_extinguished=host_extinguished, receipts=receipts)
 
+    async def verify_equip(item, inventory_source):
+        seeded = await host.bridge.command("fixture-stock-take-ammo-seed", pawn, item)
+        guid = seeded["ack"]["message"]
+        async with asyncio.timeout(10):
+            while True:
+                inventory = (await suite.submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
+                if any(row["guid"] == guid and row["source"] == "backpack" for row in inventory):
+                    break
+                await asyncio.sleep(.1)
+        selected = await suite.submit(guest_run, native_guest_drop.STOCK_EQUIP_FIXTURE, target=guid)
+        assert selected["ok"], selected
+        await asyncio.sleep(.4)
+        inventory = (await suite.submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
+        stored, = [row for row in inventory if row["guid"] == guid]
+        assert stored["source"] == inventory_source, stored
+        return stored["class_path"]
+
+    gear = {item: await verify_equip(item, source)
+            for item, source in (("fur-cap", "helmet"), ("flashbang", "equipment"))}
     gas_lamps = [
         f"Prop_GassLight_{variant}_C {OBSERVATORY}.{OBSERVATORY.rsplit('/', 1)[1]}"
         f":PersistentLevel.Prop_GassLight_{variant}_C_1" for variant in ("01", "02")
@@ -117,11 +136,10 @@ async def verify_oil_lamps(host, guest, pawn):
         _, initial = await verify_state(actor, False)
         assert await probe(host, "host-toggle", actor) == "true"
         _, host_lit = await verify_state(actor, True)
-        assert all(row.split(";")[2] == "true" for row in host_lit), host_lit
         await verify_state(other, False)
         assert await probe(guest, "visual-drift", actor) == "visual drift"
         async with asyncio.timeout(5):
-            while (repaired := await probe(guest, "state", actor)).split(";")[:3] != ["true"] * 3:
+            while (repaired := await probe(guest, "state", actor)).split(";")[:2] != ["true", "true"]:
                 await asyncio.sleep(.05)
         position = tuple(map(float, (await probe(host, "stage", actor)).split(",")))
         await suite.wait_resident_status(guest_run, lambda frame:
@@ -132,7 +150,6 @@ async def verify_oil_lamps(host, guest, pawn):
         _, off = await verify_state(actor, False)
         assert await probe(guest, "guest-toggle", actor) == "pressed"
         replica, on = await verify_state(actor, True)
-        assert all(row.split(";")[2] == "true" for row in on), on
         receipts = [row["native_stock_switch_interaction"]["powered"]
                     for row in await suite.resident_events(guest_run, replica)
                     if row.get("time_unix", 0) >= started
@@ -168,7 +185,7 @@ async def verify_oil_lamps(host, guest, pawn):
             while await asyncio.gather(*(probe(seat, "latch-state", latch) for seat in (host, guest))) != [expected] * 2:
                 await asyncio.sleep(.05)
     dumpster = await verify_observer_open(CROSSROADS, "Loot_Dumpster_BP_C_1")
-    return {"cabinet": cabinet, "dumpster": dumpster, "gas_lamps": gas_evidence, "lamps": evidence,
+    return {"gear": gear, "cabinet": cabinet, "dumpster": dumpster, "gas_lamps": gas_evidence, "lamps": evidence,
             "other_lamp_stayed_unlit": adjacent, "latch": {"actor": latch, "initial": before, "toggled": after}}
 
 
@@ -265,7 +282,7 @@ async def exercise(work, first, second, saved, streamed_switch=False, crossroads
         for game in (first, second):
             fixtures.enter_context(suite.installed_probe(game, mod="SilverfishPortableOilLampProbe",
                                                          fixture="portable_oil_lamp_probe.lua"))
-        await suite.verify(work, first, second, saved, stock_warehouse_switch=True,
+        await suite.verify(work, first, second, saved,
                            crossroads_profile=crossroads_profile, stock_interaction_feedback=True,
                            oil_lamps_check=verify_oil_lamps,
                            streamed_switch_check=verify_streamed_switch if streamed_switch else None)

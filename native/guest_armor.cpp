@@ -393,9 +393,14 @@ namespace
                 vox_property->GetPropertyClass().Get() != chain_type ||
                 (profile.vox ? !exact(voice, chain_type) || voice->GetPathName() != profile.vox : voice != nullptr))
                 return nullptr;
+            // Stock reputation queries read this class map when gear is worn.
+            // Equipping it changes the worn row and leaves the campaign's faction scores alone.
+            auto* rep_faction = U::CastField<U::FByteProperty>(reputation->GetKeyProp());
+            auto* rep_points = U::CastField<U::FIntProperty>(reputation->GetValueProp());
+            const auto rep_entries = reputation->ContainerPtrToValuePtr<U::FScriptMap>(cdo)->Num();
+            if (!faction_property(rep_faction) || !rep_points || rep_entries < 0 || rep_entries > 256) return nullptr;
             U::FScriptArrayHelper list(factions, factions->ContainerPtrToValuePtr<void>(cdo));
-            if (list.Num() < 0 || list.Num() > 256 || reputation->ContainerPtrToValuePtr<U::FScriptMap>(cdo)->Num())
-                return nullptr;
+            if (list.Num() < 0 || list.Num() > 256) return nullptr;
             if (profile.disguise_faction || list.Num())
             {
                 auto* faction = U::CastField<U::FByteProperty>(factions->GetInner());

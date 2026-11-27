@@ -227,7 +227,6 @@ local function run(action,id)
         assert(not pawn:HasAuthority() and lamp.Lit == true and lamp.PointLight:IsVisible(),
             "fixture requires a lit guest oil lamp")
         lamp.PointLight:SetVisibility(false, false)
-        if id:match("^Prop_GassLight_") then lamp.FX_CandleFlame_01_Converted:Deactivate() end
         assert(lamp.Lit == true and not lamp.PointLight:IsVisible(), "fixture did not isolate the lamp visuals")
         return "visual drift"
     end

@@ -2937,10 +2937,12 @@ namespace
             return base && type->IsChildOf(base) && category &&
                 category->GetPropertyValueInContainer(defaults) == 5 && boolean(defaults, STR("Stacks"), true);
         }
-        const auto* throwable = throwable_profile(type);
-        auto* projectile = throwable ? object(defaults, STR("Projectile")) : nullptr;
-        return throwable && boolean(defaults, STR("Stacks"), true) && live(projectile) &&
-            projectile->GetPathName() == throwable->projectile;
+        // Quick slots only need the stock equipment schema. Networked throwing has its own dispatch.
+        auto* grenade = find<Unreal::UClass>(grenade_base_path);
+        auto* projectile = Unreal::Cast<Unreal::UClass>(object(defaults, STR("Projectile")));
+        auto* actor = find<Unreal::UClass>(STR("/Script/Engine.Actor"));
+        return grenade && type != grenade && type->IsChildOf(grenade) && boolean(defaults, STR("Stacks"), true) &&
+            live(projectile) && actor && projectile != actor && projectile->IsChildOf(actor);
     }
 
     struct ThrowableCall
