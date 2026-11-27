@@ -31,12 +31,14 @@ def instrument_profile(source, *, stock_receipts=False):
     status_code, boundary, after_status = rest.partition("\nlocal function observe_session()")
     assert boundary
     mark = "status_publication.profile.status_mark"
+    native_reply = "published = SilverfishPublishLocalBridgeReplyRows(pending.ticket, rows, periodic_due)"
+    lua_join_guard = "(join_in_native or reply_in_native)" if native_reply in status_code else "join_in_native"
     for needle, call in (
         ("    sequence = sequence + 1\n", f"    {mark}()\n"),
         ("    if not failure then\n", f'    {mark}("status_base_rows")\n'),
         ("        local crate_rows\n", f'        {mark}("status_gameplay_rows")\n'),
         ('    rows[#rows + 1] = ""\n', f'    {mark}("status_world_rows")\n'),
-        ('    local frame = not join_in_native and table.concat(rows, "\\n") or nil\n', None),
+        (f'    local frame = not {lua_join_guard} and table.concat(rows, "\\n") or nil\n', None),
         ("    if resident_title and status_publication.installed and status_publication.memory_live",
          f'    {mark}("status_native_publish")\n'),
     ):
@@ -46,6 +48,9 @@ def instrument_profile(source, *, stock_receipts=False):
                                               '    status_publication.profile.status_size(rows)\n')
         else:
             status_code = status_code.replace(needle, call + needle)
+    status_code = status_code.replace(native_reply, 'published = ' + wrapper
+                                      + '("status_native_reply", SilverfishPublishLocalBridgeReplyRows, '
+                                        'pending.ticket, rows, periodic_due)')
     rest = status_code + boundary + after_status
     if stock_receipts:
         native_publish = "        status_publication.memory_live = SilverfishPublishLocalBridgeStatusRows(rows)\n"
@@ -78,6 +83,13 @@ def instrument_profile(source, *, stock_receipts=False):
     final_write = '    status_publication.profile.call("write_status", write_status, state, current_phase, not projected'
     assert rest.count(final_write) == 1
     rest = rest.replace(final_write, '    status_publication.profile.command(profile_fields, periodic, true)\n' + final_write)
+    first_observer = "    pcall(" + wrapper + ', "native_zone_loading.refresh", native_zone_loading.refresh, current_world)\n'
+    last_observer = '    if not leaving then pcall(' + wrapper + ', "native_player_avatar.animate_use", native_player_avatar.animate_use, current_world) end\n'
+    assert rest.count(first_observer) == rest.count(last_observer) == 1
+    rest = rest.replace(first_observer, '    local profile_at, profile_cycles = '
+                        'status_publication.profile.observers_begin()\n' + first_observer)
+    rest = rest.replace(last_observer, last_observer
+                        + '    status_publication.profile.observers_end(profile_at, profile_cycles)\n')
     mailbox = 'io.open(command_path, "rb")'
     assert before.count(mailbox) == 1
     before = before.replace(mailbox, f'{wrapper}("command_mailbox", io.open, command_path, "rb")')
@@ -535,7 +547,7 @@ def read_comparison(raw):
         assert all(value >= 0 for value in cpu.values()), (name, cpu)
     assert float(duration) >= 3 and totals["frame"]["count"] > 10 and totals["write_status"]["count"] > 3
     peak, *calls = slow_frame.split(";")
-    elapsed, peak_cycles = peak.split(",")
+    elapsed, peak_cycles, peak_heap_delta = peak.split(",")
     slow_calls, call_cycles = {}, {}
     for entry in calls:
         name, wall, cycles = entry.split(",")
@@ -569,7 +581,8 @@ def read_comparison(raw):
             "max_status_bytes": int(max_bytes), "max_status_rows": int(max_rows), "lua_heap": heap,
             "heap_calls": heap_calls, "sample_status_bytes_by_tag": status_bytes_by_tag, "tick_sources": tick_sources,
             "slowest_interval": {"elapsed_ms": float(elapsed), "inclusive_calls_ms": slow_calls,
-                                 "thread_cycles": int(peak_cycles), "inclusive_call_cycles": call_cycles}}
+                                 "thread_cycles": int(peak_cycles), "inclusive_call_cycles": call_cycles,
+                                 "lua_heap_delta_kib": float(peak_heap_delta)}}
 
 
 async def capture_rendered_frame(seat, probe):
@@ -602,8 +615,11 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
                 "snapshot_encoded_bytes", "snapshot_plaintext_bytes", "snapshot_responses_decoded", "snapshot_received_bytes")
 
     async def transport():
-        frames = await asyncio.gather(*(current_status(run) for run in runs.values()))
-        return {seat: frame.get("transport", {}) for seat, frame in zip(runs, frames, strict=True)}
+        async def sample(run):
+            frame = await current_status(run)
+            return frame.get("transport", {}), asyncio.get_running_loop().time()
+
+        return dict(zip(runs, await asyncio.gather(*(sample(run) for run in runs.values())), strict=True))
 
     async with asyncio.timeout(8):
         while True:
@@ -615,11 +631,16 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
     assert all(0 < entry["cap_hz"] <= 20 for entry in pawn_rates.values()), pawn_rates
 
     def traffic(before, after):
-        return {seat: {**{key: after[seat][key] - before[seat][key] for key in counters
-                          if key in before[seat] and key in after[seat] and before[seat][key] <= after[seat][key]},
-                       "keepalive_rtt_us": after[seat].get("keepalive_rtt_us"),
-                       "relay_queue_wait_max_ns": after[seat].get("relay_queue_wait_max_ns")}
-                for seat in runs}
+        measurements = {}
+        for seat in runs:
+            first, started = before[seat]
+            last, finished = after[seat]
+            measurements[seat] = {key: last[key] - first[key] for key in counters
+                                  if key in first and key in last and first[key] <= last[key]}
+            measurements[seat].update(sample_seconds=round(finished - started, 6),
+                                      keepalive_rtt_us=last.get("keepalive_rtt_us"),
+                                      relay_queue_wait_max_ns=last.get("relay_queue_wait_max_ns"))
+        return measurements
 
     async def command(seat, action):
         response = await probe(seat.bridge, "crossroads-profile", action, reply_end="|end")
@@ -697,21 +718,19 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
     idle = await collect()
     after_idle = await transport()
     heartbeat = {}
-    if area == CROSSROADS and "keepalive_probes_queued" in after_idle["guest"]:
-        clock = asyncio.get_running_loop().time
+    if area == CROSSROADS and "keepalive_probes_queued" in after_idle["guest"][0]:
         try:
             assert await asyncio.gather(*(command(seat, "lowfps") for seat in seats.values())) == ["lowfps", "lowfps"]
-            start = clock()
             heartbeat_before = await transport()
             await arm()
             low_fps = await collect()
             heartbeat_after = await transport()
-            seconds = clock() - start
         finally:
             assert await asyncio.gather(*(command(seat, "uncap") for seat in seats.values())) == ["uncap", "uncap"]
         frame_ms = {seat: profile["timings"]["frame"]["p50_ms"] for seat, profile in low_fps.items()}
         rates = traffic(heartbeat_before, heartbeat_after)
         guest_pulses = rates["guest"]
+        seconds = guest_pulses["sample_seconds"]
         queued = guest_pulses["keepalive_probes_queued"]
         acked = guest_pulses["keepalive_probes_acked"]
         heartbeat = {"low_fps_heartbeat": {"seconds": seconds, "median_frame_interval_ms": frame_ms,
@@ -732,6 +751,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
         assert movement and max(movement) >= 40, movement
         return max(movement)
 
+    before_movement = await transport()
     await arm()
     displacement = await walk(1)
     moving = await collect()
@@ -835,7 +855,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
         journal = {"journal_open_and_close": view["game"][native_package_handoff_journal.JOURNAL]}
     return {"collector_modes": collector_modes, "idle": idle, "guest_walking": moving,
             "guest_max_displacement_cm": displacement,
-            "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(after_idle, after_movement),
+            "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(before_movement, after_movement),
             "pawn_replication_rates": pawn_rates,
             "row_format_comparison": dict(zip(seats, rows, strict=True)),
             "switch_reader_comparison": dict(zip(seats, switches, strict=True)),

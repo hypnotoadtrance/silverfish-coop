@@ -5135,11 +5135,64 @@ async def verify_stock_streamed_npc(host: Seat, guest: Seat, _pawn: str) -> dict
     identity = native_world_loot.stock_enemy_identity(banked["guid"], banked.get("visual_id"))
     for run in (host_run, guest_run):
         await wait_resident_status(run, lambda status: identity in status["game"].get(native_world_loot.KEY, {}), timeout=8)
+
+    async def plank_view(seat):
+        path, member, reason, hidden, colliding = (await command(seat, "plank")).split(";")
+        return {"path": path, "level_member": member == "true", "end_play": None if reason == "-" else int(reason),
+                "hidden": None if hidden == "-" else hidden == "true",
+                "collision": None if colliding == "-" else colliding == "true"}
+
+    async def both_planks():
+        return dict(zip(("host", "guest"), await asyncio.gather(plank_view(host), plank_view(guest))))
+
+    diagnostics = host.bridge.directory / "portable-streamed-plank-proof.json"
+    plank_proof = {}
+    try:
+        before = plank_proof["before"] = await both_planks()
+        plank = before["host"]["path"]
+        scope = plank.rsplit(".", 1)[0]
+        assert before["host"] == before["guest"] == {"path": plank, "level_member": True, "end_play": None,
+                                                   "hidden": False, "collision": True}, before
+
+        def scope_members(stage, status):
+            roster = status.get("game", {}).get(native_destructibles.KEY)
+            members = None if roster is None else [row for row in roster if row == scope or row.startswith(scope + ".")]
+            stage["host_scope"] = members
+            return members
+
+        await wait_resident_status(host_run, lambda status: plank in (scope_members(before, status) or ()), timeout=8)
+        assert scope in before["host_scope"], before
+        assert await command(guest, "plank-break") == "stock plank break requested"
+        guest_attempt = plank_proof["after_guest_attempt"] = await both_planks()
+        assert all(guest_attempt[seat] == before[seat] for seat in ("host", "guest")), guest_attempt
+        await wait_resident_status(host_run, lambda status:
+            scope_members(guest_attempt, status) == before["host_scope"], timeout=8)
+
+        assert await command(host, "plank-break") == "stock plank break requested"
+        plank_proof["immediately_after_host_break"] = await both_planks()
+        authority = plank_proof["authority"] = {}
+        await wait_resident_status(host_run, lambda status: scope in (
+            members := scope_members(authority, status) or ()) and plank not in members, timeout=8)
+
+        try:
+            async with asyncio.timeout(8):
+                while True:
+                    projection = plank_proof["projection"] = await both_planks()
+                    source, replica = projection["host"], projection["guest"]
+                    if ((source["end_play"] == 0 or not source["level_member"])
+                            and replica == {"path": plank, "level_member": True, "end_play": None,
+                                            "hidden": True, "collision": False}):
+                        break
+                    await asyncio.sleep(.2)
+        except TimeoutError as error:
+            raise AssertionError(f"Streamed plank destruction and projection did not agree. See {diagnostics}") from error
+    finally:
+        runtime.write_text(diagnostics, json.dumps(plank_proof, indent=2))
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"actor": actor, "world_lookup": ownership, "guest_before": observed, "final_states": after,
             "guest_local_damage_denied": True, "retargeted_when_guest_downed": True,
             "guest_contact": contact, "stock_shot": receipt,
-            "streamed_stock_drop": banked,
+            "streamed_stock_drop": banked, "streamed_plank": plank_proof,
             "campaign_checkpoint_unchanged": True}
 
 

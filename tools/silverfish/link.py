@@ -689,7 +689,9 @@ class _LinkProtocol(QuicConnectionProtocol):
         stats.game_packets_compressed += bool(flag)
         stats.game_fragments_queued += count
         stats.relay_queue_max_frames = max(stats.relay_queue_max_frames, len(pending))
-        self.transmit()
+        # Let packets from the same event-loop turn share a QUIC datagram.
+        # Control streams and heartbeats can still transmit immediately.
+        self._transmit_soon()
 
     def _forward_presentation(self, header: bytes, data: bytes) -> bool:
         if not self._queue_presentation(header, data):

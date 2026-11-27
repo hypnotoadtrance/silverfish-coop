@@ -13,6 +13,7 @@ weapon_class.GetFullName = function() return "BlueprintGeneratedClass " .. firea
 local aim = {Pitch = 15, Yaw = 25, Roll = 42}
 local pawn = object({
     GetWorld = function() return world end,
+    IsActorBeingDestroyed = function() return false end,
     IsLocallyControlled = function(self) return self.local_control == true end,
     GetBaseAimRotation = function() return aim end,
     K2_GetActorRotation = function() return {Yaw = 10} end,
@@ -21,7 +22,7 @@ local pawn = object({
 local actor = object({
     ItemType = 3,
     GetWorld = pawn.GetWorld,
-    IsActorBeingDestroyed = function() return false end,
+    IsActorBeingDestroyed = function(self) return self.retiring == true end,
     GetClass = function() return weapon_class end,
     GetAttachParentActor = function() return pawn end,
     GetOwner = function() return pawn end,
@@ -29,7 +30,7 @@ local actor = object({
 local root_transform, muzzle_transform = {}, {}
 actor.RootComponent = object({GetOwner = function() return actor end,
     K2_GetComponentToWorld = function() return root_transform end})
-local muzzle = object({GetOwner = function() return actor end,
+local muzzle = object({GetOwner = function() assert(not actor.retiring, "Do not probe a retiring stock muzzle"); return actor end,
     IsA = function(_, class) return class == arrow_class end,
     K2_GetComponentToWorld = function() return muzzle_transform end})
 actor.Arrow_Muzzle = muzzle
@@ -114,6 +115,12 @@ muzzle.alive = false
 handgun.update(entry, api)
 assert(not outer.absolute, "A retired muzzle left the hardpoint pinned")
 muzzle.alive = true
+handgun.update(entry, api)
+assert(outer.absolute)
+actor.retiring = true
+handgun.update(entry, api)
+assert(not outer.absolute and outer.relative_rotation.Yaw == 0, "A still-valid retiring weapon must release its aim pivot")
+actor.retiring = false
 handgun.sync(entry, false, attach)
 assert(not entry.handgun_view.requested and parent == outer)
 entry.weapon_stance, entry.weapon_anchor = "rifle", object({})

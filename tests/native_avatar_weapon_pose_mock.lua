@@ -124,13 +124,13 @@ local function stock_component(owner, owner_only)
     })
 end
 
-local function reconcile(actor_path, firearm)
+local function reconcile(actor_path, firearm, retiring)
     local scans = 0
     local remote = object({})
     local held_class = object({GetFullName = fixed("BlueprintGeneratedClass " .. actor_path)})
     local stock = object({
         User = remote, GetOwner = fixed(remote), GetClass = fixed(held_class), IsA = fixed(true),
-        IsActorBeingDestroyed = fixed(false), GetAttachParentActor = fixed(remote),
+        IsActorBeingDestroyed = function(self) return self.retiring == true end, GetAttachParentActor = fixed(remote),
         K2_GetComponentsByClass = function(self, component_class)
             assert(component_class == mesh_component)
             scans = scans + 1
@@ -177,12 +177,16 @@ local function reconcile(actor_path, firearm)
         "Reconcile replacement equipment even when its projected model is unchanged")
     assert(entry.weapon_parts[1] == projection and not projection.writes)
 
+    replacement.retiring = retiring
     view.clear(entry)
-    assert(not replacement_frame.bOnlyOwnerSee and replacement_frame.writes == 2 and authored_owner_only.bOnlyOwnerSee
-        and not authored_owner_only.writes and not unrelated.writes and projection.destroyed)
+    assert(replacement_frame.bOnlyOwnerSee == (retiring == true))
+    assert(replacement_frame.writes == (retiring and 1 or 2), "Do not dirty the render state of a retiring stock mesh")
+    assert(authored_owner_only.bOnlyOwnerSee and not authored_owner_only.writes and not unrelated.writes
+        and projection.destroyed and not entry.stock_weapon_masks)
 end
 
 reconcile("/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C", true)
+reconcile("/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C", true, true)
 reconcile("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C", false)
 local wire_mesh = "s@/Game/Classes/Weapons/WeaponMeshes/Nagant.Nagant@0.00@0.00@0.00@0.00@0.00@0.00@1.00@1.00@1.00"
 local parts, _, _, grip = view.decode(wire_mesh .. "^29.51,-10.54,10.65")

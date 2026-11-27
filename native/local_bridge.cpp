@@ -202,16 +202,10 @@ namespace
         return 1;
     }
 
-    int publish(const Lua& lua)
+    void publish_reply_frame(std::int64_t ticket, const std::shared_ptr<const std::string>& snapshot)
     {
-        if (lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_string(2)) return 0;
-        // UE4SS removes each argument as it is read.
-        const auto ticket = lua.get_integer();
-        const auto frame = lua.get_string();
-        const auto snapshot = !frame.empty() && frame.size() <= reply_limit
-            ? std::make_shared<const std::string>(frame) : nullptr;
         std::lock_guard lock(mutex);
-        if (state != State::running || ticket != active_ticket) return 0;
+        if (state != State::running || ticket != active_ticket) return;
         if (!snapshot)
         {
             state = State::too_large;
@@ -222,13 +216,21 @@ namespace
             state = State::replied;
         }
         changed.notify_all();
+    }
+
+    int publish(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_string(2)) return 0;
+        // UE4SS removes each argument as it is read.
+        const auto ticket = lua.get_integer();
+        const auto frame = lua.get_string();
+        publish_reply_frame(ticket, !frame.empty() && frame.size() <= reply_limit
+            ? std::make_shared<const std::string>(frame) : nullptr);
         return 0;
     }
 
-    int publish_status_frame(const Lua& lua, std::string frame)
+    int publish_status_frame(const Lua& lua, std::shared_ptr<const std::string> snapshot)
     {
-        auto snapshot = !frame.empty() && frame.size() <= reply_limit
-            ? std::make_shared<const std::string>(std::move(frame)) : nullptr;
         bool published{};
         {
             // Snapshot publication should not wait for gameplay ticket or input queue work.
@@ -249,33 +251,52 @@ namespace
     {
         if (lua.get_stack_size() != 1 || !lua.is_string()) return 0;
         const auto frame = lua.get_string();
-        return publish_status_frame(lua, frame.size() <= reply_limit ? std::string{frame} : std::string{});
+        return publish_status_frame(lua, !frame.empty() && frame.size() <= reply_limit
+            ? std::make_shared<const std::string>(frame) : nullptr);
+    }
+
+    std::shared_ptr<const std::string> join_status_rows(lua_State* stack, int index)
+    {
+        const auto count = lua_rawlen(stack, index);
+        if (count > reply_limit + 1) return {};
+        std::string frame;
+        frame.reserve((std::min)(count * 160, std::size_t{65536}));
+        for (std::size_t row_index = 1; row_index <= count; ++row_index)
+        {
+            lua_rawgeti(stack, index, static_cast<lua_Integer>(row_index));
+            std::size_t size{};
+            const auto* row = lua_type(stack, -1) == LUA_TSTRING ? lua_tolstring(stack, -1, &size) : nullptr;
+            const std::size_t separator = row_index != 1;
+            if (!row || size + separator > reply_limit - frame.size())
+            {
+                lua_pop(stack, 1);
+                return {};
+            }
+            if (separator) frame.push_back('\n');
+            frame.append(row, size);
+            lua_pop(stack, 1);
+        }
+        return !frame.empty() ? std::make_shared<const std::string>(std::move(frame)) : nullptr;
     }
 
     int publish_status_rows(const Lua& lua)
     {
         auto* stack = lua.get_lua_state();
         if (lua_gettop(stack) != 1 || lua_type(stack, 1) != LUA_TTABLE) return 0;
-        const auto count = lua_rawlen(stack, 1);
-        if (count > reply_limit + 1) return publish_status_frame(lua, {});
-        std::string frame;
-        frame.reserve((std::min)(count * 160, std::size_t{65536}));
-        for (std::size_t index = 1; index <= count; ++index)
-        {
-            lua_rawgeti(stack, 1, static_cast<lua_Integer>(index));
-            std::size_t size{};
-            const auto* row = lua_type(stack, -1) == LUA_TSTRING ? lua_tolstring(stack, -1, &size) : nullptr;
-            const std::size_t separator = index != 1;
-            if (!row || size + separator > reply_limit - frame.size())
-            {
-                lua_pop(stack, 1);
-                return publish_status_frame(lua, {});
-            }
-            if (separator) frame.push_back('\n');
-            frame.append(row, size);
-            lua_pop(stack, 1);
-        }
-        return publish_status_frame(lua, std::move(frame));
+        return publish_status_frame(lua, join_status_rows(stack, 1));
+    }
+
+    int publish_reply_rows(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        if (lua_gettop(stack) != 3 || !lua_isinteger(stack, 1) ||
+            lua_type(stack, 2) != LUA_TTABLE || lua_type(stack, 3) != LUA_TBOOLEAN) return 0;
+        const auto ticket = lua_tointeger(stack, 1);
+        const auto periodic = lua_toboolean(stack, 3);
+        auto frame = join_status_rows(stack, 2);
+        publish_reply_frame(ticket, frame);
+        if (periodic) return publish_status_frame(lua, std::move(frame));
+        return 0;
     }
 
     int read_heartbeat(const Lua& lua, const std::int64_t& mailbox)
@@ -801,6 +822,7 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishPublishLocalBridgeReply", publish);
         lua.register_function("SilverfishPublishLocalBridgeStatus", publish_status);
         lua.register_function("SilverfishPublishLocalBridgeStatusRows", publish_status_rows);
+        lua.register_function("SilverfishPublishLocalBridgeReplyRows", publish_reply_rows);
         lua.register_function("SilverfishEnqueueLocalBridgeInput", enqueue_input);
         lua.register_function("SilverfishTakeLocalPropPoses", take_prop_poses);
         lua.register_function("SilverfishPublishLocalPropPose", publish_local_prop_pose);

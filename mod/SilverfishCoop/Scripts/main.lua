@@ -1734,13 +1734,18 @@ local function write_status(state, current_phase, failure, fields, pending, crat
     if not reply_due and not periodic_due then return end
 
     rows[#rows + 1] = ""
+    local view = reply_due and pending.guest_view_reply
+    local reply_in_native = compact_crates and reply_due and not view and not crate_diagnostic
+        and type(SilverfishPublishLocalBridgeReplyRows) == "function"
     local join_in_native = periodic_due and not reply_due and not file_command
         and resident_title and status_publication.installed and status_publication.memory_live
         and type(SilverfishPublishLocalBridgeStatusRows) == "function"
-    local frame = not join_in_native and table.concat(rows, "\n") or nil
+    local frame = not (join_in_native or reply_in_native) and table.concat(rows, "\n") or nil
+    local published
     if reply_due then
-        local view = pending.guest_view_reply
-        if view then
+        if reply_in_native then
+            published = SilverfishPublishLocalBridgeReplyRows(pending.ticket, rows, periodic_due)
+        elseif view then
             pending.guest_view_reply = nil
             SilverfishPublishLocalBridgeReply(pending.ticket, frame .. "native-guest-ui-body\t" .. #view .. "\n" .. view)
         elseif compact_crates and crate_diagnostic then
@@ -1752,9 +1757,10 @@ local function write_status(state, current_phase, failure, fields, pending, crat
 
     if not periodic_due then return end
     status_publication.next_frame = now + 0.25
-    -- Ordinary resident frames are joined in C++. Only explicit replies and
-    -- private file mirrors need the joined snapshot in the Lua heap.
-    if join_in_native then
+    -- Share the native buffer with the reply when both need the same rows.
+    if reply_in_native then
+        status_publication.memory_live = published
+    elseif join_in_native then
         status_publication.memory_live = SilverfishPublishLocalBridgeStatusRows(rows)
     else
         status_publication.memory_live = type(SilverfishPublishLocalBridgeStatus) == "function"

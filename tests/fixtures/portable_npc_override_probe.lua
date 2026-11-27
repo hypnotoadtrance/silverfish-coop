@@ -1832,13 +1832,51 @@ end
 
 local streamed_npc_fixture
 
+RegisterEndPlayPreHook(function(context, reason)
+    local watch = streamed_npc_fixture and streamed_npc_fixture.plank
+    if not watch then return end
+    local actor = context:get()
+    if valid(actor) and actor:GetAddress() == watch.address then watch.end_reason = reason:get() end
+end)
+
+local function streamed_plank(fixture, level, action)
+    local path = level:GetFullName():match("^%S+ (.+)$") .. ".Dest_WoodPlank_BP_C_1"
+    local paths = assert(require("world_path").actor_paths(fixture.world, "destructible"),
+        "streamed destructible membership unavailable")
+    local member = false
+    for _, current in ipairs(paths) do
+        if current == path then member = true break end
+    end
+    local watch = fixture.plank
+    local hidden, collision = "-", "-"
+    if member and (not watch or watch.end_reason == nil) then
+        local plank = StaticFindObject(path)
+        local placed, remote = SilverfishQualifyNativePlacedDestructible(path, fixture.world:GetAddress())
+        assert(valid(plank) and placed and remote == not fixture.host and same(plank:GetOuter(), level),
+            "streamed plank scope unavailable")
+        watch = watch or {address = plank:GetAddress()}
+        assert(watch.address == plank:GetAddress(), "streamed plank instance changed")
+        fixture.plank = watch
+        hidden, collision = tostring(plank.bHidden), tostring(plank:GetActorEnableCollision())
+        if action == "stream-npc-plank-break" then
+            assert(hidden == "false" and collision == "true", "streamed plank is already broken")
+            local point = plank.StaticMesh:K2_GetComponentLocation()
+            plank:Damage_Feedback(true, {Location = point, ImpactPoint = point})
+            return "stock plank break requested"
+        end
+    else
+        assert(action == "stream-npc-plank", "the loaded level no longer contains the stock plank")
+    end
+    return table.concat({path, tostring(member), tostring(watch and watch.end_reason or "-"), hidden, collision}, ";")
+end
+
 local function streamed_npc(world, pawn, host, action)
     if action == "stream-npc-load" then
         local loading = StaticFindObject("/Script/Engine.Default__LevelStreamingDynamic")
         local stream = loading:LoadLevelInstance(world, "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P",
             {X=45000,Y=45000,Z=2000}, {Pitch=0,Yaw=0,Roll=0}, {}, "CoopNpcSublevel", nil, false)
         assert(valid(stream), "could not load the NPC test sublevel")
-        streamed_npc_fixture = {world=world, stream=stream}
+        streamed_npc_fixture = {world=world, stream=stream, host=host}
         return "loading"
     end
     local fixture = streamed_npc_fixture
@@ -1846,6 +1884,9 @@ local function streamed_npc(world, pawn, host, action)
     if not fixture.stream:IsLevelVisible() then return "waiting" end
     local level = fixture.stream:GetLoadedLevel()
     assert(valid(level) and not same(level, world.PersistentLevel))
+    if action == "stream-npc-plank" or action == "stream-npc-plank-break" then
+        return streamed_plank(fixture, level, action)
+    end
     local actor = fixture.actor
     if not valid(actor) then
         local path = level:GetFullName():match("^%S+ (.+)$")

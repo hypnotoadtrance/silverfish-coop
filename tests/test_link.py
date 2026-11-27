@@ -205,6 +205,33 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client_after["game_packets_queued"], 0)
         self.assertEqual(host_after["game_packets_queued"], 0)
 
+    async def test_game_udp_burst_reuses_the_next_turn_flush_and_keeps_order(self):
+        self.assertTrue((await self.connect_guest())["accepted"])
+        protocol = self.client._protocol
+        before = self.client.statistics()
+        packets = [bytes([index + 1]) + bytes(47) for index in range(24)]
+        first = None
+        for packet in packets:
+            protocol.forward_game_packet(packet)
+            if first is None:
+                first = protocol._transmit_task
+            self.assertIs(protocol._transmit_task, first)
+        self.assertIsNotNone(first)
+        self.assertEqual(self.client.statistics()["quic_datagrams_sent"], before["quic_datagrams_sent"])
+
+        await asyncio.sleep(0)
+        self.assertIsNone(protocol._transmit_task)
+        self.assertGreater(self.client.statistics()["quic_datagrams_sent"], before["quic_datagrams_sent"])
+        self.assertEqual([(await self.host_inbox.next())[0] for _ in packets], packets)
+        self.assertLess(self.client.statistics()["quic_datagrams_sent"] - before["quic_datagrams_sent"], len(packets))
+
+        for packet in packets:
+            self.game_client.sendto(packet[::-1], self.client.address)
+        self.assertEqual([(await self.host_inbox.next())[0] for _ in packets], [packet[::-1] for packet in packets])
+        after = self.client.statistics()
+        self.assertEqual(after["relay_queue_evicted_frames"], before["relay_queue_evicted_frames"])
+        self.assertEqual(after["relay_queue_expired_frames"], before["relay_queue_expired_frames"])
+
     async def test_relay_statistics_count_overflow_and_expiry(self):
         self.assertTrue((await self.connect_guest())["accepted"])
         protocol = self.client._protocol
@@ -737,7 +764,20 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
 
         self.application_handler = open_door
         queue_without_sending(guest_protocol, guest_packets)
-        self.assertEqual(await self.client.request({"action": "open-door"}), {"ok": True, "opened": True})
+
+        def immediate_send(protocol):
+            send = protocol._send_action_stream
+
+            def assert_immediate(*args, **kwargs):
+                sent = protocol._stats.quic_datagrams_sent
+                send(*args, **kwargs)
+                self.assertGreater(protocol._stats.quic_datagrams_sent, sent)
+
+            return assert_immediate
+
+        with (patch.object(guest_protocol, "_send_action_stream", side_effect=immediate_send(guest_protocol)),
+              patch.object(host_protocol, "_send_action_stream", side_effect=immediate_send(host_protocol))):
+            self.assertEqual(await self.client.request({"action": "open-door"}), {"ok": True, "opened": True})
         self.assertGreater(self.client.statistics()["interaction_priority_passes"], 0)
         self.assertGreater(self.host.statistics()["interaction_priority_passes"], 0)
         self.assertCountEqual([(await self.host_inbox.next())[0] for _ in guest_packets], guest_packets)

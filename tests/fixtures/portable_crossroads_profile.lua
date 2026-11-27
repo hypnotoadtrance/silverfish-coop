@@ -18,6 +18,16 @@ local function record(active, tag, wall_ms, cycles)
     rows.cycles[#rows.cycles + 1] = cycles
 end
 
+local function record_call(active, tag, wall_ms, used_cycles)
+    record(active, tag, wall_ms, used_cycles)
+    local call = active.calls[tag]
+    if call then
+        call.wall, call.cycles = call.wall + wall_ms, call.cycles + used_cycles
+    else
+        active.calls[tag] = {wall = wall_ms, cycles = used_cycles}
+    end
+end
+
 local function measured(active, tag, started, started_cycles, heap_before, ...)
     local now, cycles = stamp()
     local wall_ms, used_cycles = (now - started) / 1000, cycles - started_cycles
@@ -36,21 +46,26 @@ local function measured(active, tag, started, started_cycles, heap_before, ...)
             sample.drops = sample.drops + 1
         end
     end
-    record(active, tag, wall_ms, used_cycles)
-    local call = active.calls[tag]
-    if call then
-        call.wall, call.cycles = call.wall + wall_ms, call.cycles + used_cycles
-    else
-        active.calls[tag] = {wall = wall_ms, cycles = used_cycles}
-    end
+    record_call(active, tag, wall_ms, used_cycles)
     return ...
 end
 
 function probe.call(tag, operation, ...)
-    if not capture or capture.coarse and tag ~= "write_status" and tag ~= "tick" then return operation(...) end
+    if not capture or capture.coarse and tag ~= "write_status" and tag ~= "tick"
+        and tag ~= "status_native_reply" then return operation(...) end
     local heap_before = not capture.coarse and collectgarbage("count")
     local started, started_cycles = stamp()
     return measured(capture, tag, started, started_cycles, heap_before, operation(...))
+end
+
+function probe.observers_begin()
+    if capture then return stamp() end
+end
+
+function probe.observers_end(started, started_cycles)
+    if not started or not capture then return end
+    local now, cycles = stamp()
+    record_call(capture, "delayed_observers", (now - started) / 1000, cycles - started_cycles)
 end
 
 function probe.status_size(rows)
@@ -127,7 +142,7 @@ local function result()
             p99, peak, total, percentiles(samples.cycles))
     end
     table.sort(rows)
-    local peak = {("!%.4f,%d"):format(complete.peak, complete.peak_cycles)}
+    local peak = {("!%.4f,%d,%.3f"):format(complete.peak, complete.peak_cycles, complete.peak_heap_delta)}
     for tag, call in pairs(complete.peak_calls) do
         if call.wall >= .5 then
             peak[#peak + 1] = (";%s,%.4f,%d"):format(tag, call.wall, call.cycles)
@@ -257,6 +272,7 @@ LoopInGameThreadWithDelay(1, function()
         end
         if duration > active.peak then
             active.peak, active.peak_cycles, active.peak_calls = duration, used_cycles, active.calls
+            active.peak_heap_delta = -collected
             active.calls = {}
         else
             for tag in pairs(active.calls) do active.calls[tag] = nil end

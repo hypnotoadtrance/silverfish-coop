@@ -96,11 +96,12 @@ end
 
 function handgun.update(entry, api)
     local view, pawn = entry.handgun_view, entry.pawn
-    if not view or not view.requested then return end
-    if not valid(view.muzzle) or not valid(view.outer)
-        or not same(view.actor, entry.stock_weapon_actor) or not same(view.muzzle:GetOwner(), view.actor)
+    if not view or not view.requested or not valid(pawn) or pawn:IsActorBeingDestroyed() then return end
+    local actor = view.actor
+    if not same(actor, entry.stock_weapon_actor) or actor:IsActorBeingDestroyed()
+        or not valid(view.muzzle) or not valid(view.outer) or not same(view.muzzle:GetOwner(), actor)
         or not same(view.inner, entry.weapon_anchor) or not same(view.inner:GetAttachParent(), view.outer)
-        or not same(view.actor:GetAttachParentActor(), pawn) or pawn:IsLocallyControlled() or pawn.Dead
+        or not same(actor:GetAttachParentActor(), pawn) or pawn:IsLocallyControlled() or pawn.Dead
         or pawn.CharacterMovement:IsFalling() then
         lower(view)
         return

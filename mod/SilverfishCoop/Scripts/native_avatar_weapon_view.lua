@@ -273,8 +273,12 @@ local function restore_mask(stock, component)
 end
 
 local function restore_stock(entry)
-    for _, component in pairs(entry.stock_weapon_masks or {}) do
-        restore_mask(entry.stock_weapon_actor, component)
+    local stock = entry.stock_weapon_actor
+    -- Stock can start destroying the old actor before Unreal invalidates its components.
+    if valid(stock) and not stock:IsActorBeingDestroyed() then
+        for _, component in pairs(entry.stock_weapon_masks or {}) do
+            restore_mask(stock, component)
+        end
     end
     entry.stock_weapon_actor, entry.stock_weapon_masks = nil, nil
 end
