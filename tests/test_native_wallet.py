@@ -39,6 +39,25 @@ class NativeWalletTests(unittest.IsolatedAsyncioTestCase):
             await native_wallet.settle(host, bridge, CHARACTER, target, OPERATION)
         self.assertEqual(host.party["economy"]["wallet"], 145)
 
+    async def test_debt_changes_are_applied_even_when_cash_stays_the_same(self):
+        wallet = native_wallet.GuestWallet()
+        scope = (SESSION, VISIT, OBSERVATORY, "exact pawn")
+        client = SimpleNamespace(
+            bridge=SimpleNamespace(local_bridge=object(), command=AsyncMock(), snapshot=dict),
+            stock_interaction_scope=lambda: scope,
+            gameplay={"shared_wallet": 20, native_wallet.ACK: [], native_wallet.DEBT: 3_000_000},
+            gameplay_seen=time.monotonic(), last_game={}, gameplay_action=AsyncMock(),
+        )
+        await wallet.sync(client)
+        await wallet.sync(client)
+        client.gameplay[native_wallet.DEBT] = 2_000_000
+        await wallet.sync(client)
+        self.assertEqual([call.args for call in client.bridge.command.await_args_list], [
+            (native_wallet.SYNC, SESSION, wallet.stream, "20", "0", "0", "3000000"),
+            (native_wallet.SYNC, SESSION, wallet.stream, "20", "0", "0", "2000000"),
+        ])
+        client.gameplay_action.assert_not_awaited()
+
     async def test_guest_ignores_an_older_wallet_frame_after_acknowledgement(self):
         wallet = native_wallet.GuestWallet()
         scope = (SESSION, VISIT, OBSERVATORY, "exact pawn")
