@@ -7371,16 +7371,15 @@ async def verify_stock_inventory_fall(host: Seat, guest: Seat, pawn: str) -> dic
         return next((row for row in eligible if not row["stackable"]), eligible[0])
 
     async def drop_from_host(item):
-        result = await submit(host_run, native_host_stack_drop.FIXTURE,
-                              target=f"{item['guid']}|{item['quantity']}|context_menu")
-        assert result["ok"], result
+        await host.bridge.command(native_host_stack_drop.FIXTURE, item["guid"], str(item["quantity"]),
+                                  "context_menu", timeout=5)
         while True:
             events = await resident_events(host_run, scope)
             matches = [event for event in events if event.get("event") == "native_host_stock_drop"
                        and event.get(native_guest_drop.RESULT, {}).get("guid") == item["guid"]]
             if matches:
                 event, = matches
-                assert event["entry"] == "context_menu" and event["refresh"] == "refreshed" and not event["error"], event
+                assert event["entry"] == "context_menu" and event["refresh"] == "refreshed" and not event.get("error"), event
                 return event[native_guest_drop.RESULT]
             await asyncio.sleep(.04)
 
@@ -7448,10 +7447,10 @@ async def verify_stock_inventory_fall(host: Seat, guest: Seat, pawn: str) -> dic
         item = selected(await contents(drop_run))
         identity, proof = await fall(role, item, press)
         if role == "host":
-            closed = await submit(host_run, native_host_stack_drop.CLOSE_FIXTURE, target=item["guid"])
+            await host.bridge.command(native_host_stack_drop.CLOSE_FIXTURE, item["guid"], timeout=5)
         else:
             closed = await submit(guest_run, "native-inventory-view-fixture")
-        assert closed["ok"], closed
+            assert closed["ok"], closed
         assert all(row["guid"] != item["guid"] for row in await contents(drop_run))
         assert campaign_save_hashes(host.campaign) == before, f"The stock {role} drop wrote a save"
         prior = sum(row["quantity"] for row in await contents(receiver_run)
@@ -8811,7 +8810,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             crate_probe = (Path(__file__).with_name("fixtures") / "portable_crate_input_probe.lua").read_text(encoding="utf-8")
             probes.enter_context(portable_main_overlay(second_game, lambda script:
                 script + "\n;(function()\n" + crate_probe + "\nend)()\n"))
-        if (stock_use or stock_drop or stock_split or stock_equip or stock_nearby or container_nearby
+        if (stock_use or stock_drop or stock_inventory_fall or stock_split or stock_equip or stock_nearby or container_nearby
                 or guest_stash_memory or nonmirrored_startup or manage_saves):
             for game in games:
                 probes.enter_context(installed_probe(game))
