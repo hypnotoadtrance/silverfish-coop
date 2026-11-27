@@ -711,6 +711,19 @@ function pickup.command(fields, state, phase)
         if cleared ~= true then error(status, 0) end
         return "cleared local stock Dead Drop presentation"
     end
+    if action == "native-quest-placement-renew" then
+        local detail = state.local_pawn
+        local generation = tonumber(fields[#fields])
+        if #fields < 5 or #fields > 36 or not generation or phase ~= "connected"
+            or not state.listening or state.server ~= true or not detail or not valid(detail.pawn)
+            or type(SilverfishRenewNativeAuthoredQuestPlacements) ~= "function" then
+            error("quest_placement_projection_scope_unavailable", 0)
+        end
+        local applied, reason = SilverfishRenewNativeAuthoredQuestPlacements(
+            detail.pawn:GetAddress(), fields[3], generation, table.unpack(fields, 4, #fields - 1))
+        if applied ~= true then error(reason or "quest_placement_projection_refused", 0) end
+        return reason
+    end
     if action == "native-quest-placement-project" or action == "native-quest-placement-clear" then
         local projecting = action == "native-quest-placement-project"
         local native = SilverfishClearNativeAuthoredQuestPlacement

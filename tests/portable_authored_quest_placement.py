@@ -159,6 +159,17 @@ async def verify_authored_quest_placement(host, guest, pawn):
         assert math.dist(guest_visible["transform"][component], after["transform"][component]) < .03, guest_visible
         assert math.dist(active["transform"][component], after["transform"][component]) < .03, active
 
+    scoped = await wait_resident_status(guest_run, lambda frame: projected(frame)
+                                        and type(frame["game"].get(loose.VIEW_SCOPE)) is int)
+    generation = scoped["game"][loose.VIEW_SCOPE]
+    renewed = await guest.bridge.command(loose.QUEST_RENEW, epoch, SOURCE, str(generation), timeout=4, update_status=False)
+    assert renewed["ack"]["message"] == "1", renewed
+    lease_start = asyncio.get_running_loop().time()
+    while asyncio.get_running_loop().time() - lease_start < 3.1:
+        current = parse_stock_state(await command(guest, "stock-state"))
+        assert not current.get("absent") and not current["hidden"] and current["collision"], current
+        await asyncio.sleep(.13)
+
     host_inventory, guest_inventory = await asyncio.gather(
         stock_inventory(host_run), stock_inventory(guest_run, guest=True))
     assert all(item["class_path"] != ITEM_CLASS for item in host_inventory + guest_inventory)
@@ -226,6 +237,7 @@ async def verify_authored_quest_placement(host, guest, pawn):
     handoff = await verify_briefcase_handoff(host, guest, reached, claim, command, save_fingerprints)
     return {"route": passages, "near_retries": near_retries, "dormant": before, "active": after,
             "guest_scope_rejected": True, "guest_projection": guest_visible, "stock_interact": pressed["ack"]["message"],
+            "lease_renewal": {"receipt": renewed["ack"]["message"], "visible_for_seconds": 3.1},
             "claim": claim, "guarded_actor_views": retired, "guest_item": item, "stock_guest_card": card,
             "host_inventory_unchanged": True,
             "replay_verified": True, "duplicate_refusals": [reply["error"] for reply in duplicates],

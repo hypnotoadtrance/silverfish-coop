@@ -1882,6 +1882,7 @@ status_publication.placed_view_actions = {
     ["native-dead-drop-clear"] = native_authored_pickup.dead_drop_reply,
     ["native-quest-placement-project"] = native_authored_pickup.quest_placement_reply,
     ["native-quest-placement-clear"] = native_authored_pickup.quest_placement_reply,
+    ["native-quest-placement-renew"] = native_authored_pickup.quest_placement_reply,
 }
 
 status_publication.prop_carry_actions = {

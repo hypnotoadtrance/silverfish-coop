@@ -35,6 +35,8 @@ QUEST_HEADER = "native-authored-quest-sources"
 QUEST_ROW = "native-authored-quest-placement"
 QUEST_PROJECT = "native-quest-placement-project"
 QUEST_CLEAR = "native-quest-placement-clear"
+QUEST_RENEW = "native-quest-placement-renew"
+QUEST_ACTIONS = (QUEST_PROJECT, QUEST_CLEAR, QUEST_RENEW)
 QUEST_REPLY = "native-quest-placement-reply"
 QUEST_LIMIT = 32
 _QUEST_RENEWAL = .65
@@ -96,6 +98,8 @@ def parse_quest_reply(raw, request):
         raise RuntimeError("The stock quest projection reply did not match its local request")
     if fields[7] != "accepted":
         raise RuntimeError(fields[8] or "The stock quest projection was refused")
+    if request[1] == QUEST_RENEW and (len(fields[8]) != len(request) - 4 or set(fields[8]) - {"0", "1"}):
+        raise RuntimeError("The stock quest renewal reply did not match its sources")
     return {"state": "connected", "map": fields[4],
             "ack": {"id": fields[2], "result": fields[7], "message": fields[8]}}
 
@@ -279,7 +283,7 @@ class QuestPlacementView:
 
     async def _apply(self, client, action, scope, path, *arguments):
         if self._scope(client) != scope or time.monotonic() - client.gameplay_seen >= _QUEST_MAX_AGE:
-            return False
+            return None
         _, epoch, area, _ = scope
         prior = self.refused.get(path)
         try:
@@ -291,9 +295,9 @@ class QuestPlacementView:
             self.refused[path] = time.monotonic(), reason
             if not prior or prior[1] != reason:
                 client.control.event("native_quest_placement_projection_unavailable", actor=path, reason=reason)
-            return False
+            return None
         self.refused.pop(path, None)
-        return self._scope(client) == scope
+        return reply if self._scope(client) == scope else None
 
     async def project(self, client):
         scope = self._scope(client)
@@ -303,7 +307,7 @@ class QuestPlacementView:
             self.refused.clear()
         if scope is None or time.monotonic() - client.gameplay_seen >= _QUEST_MAX_AGE:
             return
-        _, epoch, area, _ = scope
+        _, epoch, area, generation = scope
         frame = client.gameplay.get(QUEST_FRAME)
         if not isinstance(frame, dict) or (frame.get("map"), frame.get("epoch")) != (area, epoch):
             return
@@ -324,6 +328,7 @@ class QuestPlacementView:
             del self.refused[path]
         now = time.monotonic()
         due = []
+        renew = []
         for path in tracked:
             refused_at, _ = self.refused.get(path, (-float("inf"), None))
             if now - refused_at < _QUEST_RENEWAL:
@@ -333,18 +338,37 @@ class QuestPlacementView:
                 continue
             previous, at = self.leases.get(path, (None, -float("inf")))
             row = items[path]
-            if (previous is None or now - at >= _QUEST_RENEWAL or previous["quest"] != row["quest"]
-                    or previous["class_path"] != row["class_path"]
+            if (previous is None or previous["quest"] != row["quest"] or previous["class_path"] != row["class_path"]
                     or not same_pose(previous["transform"], row["transform"])):
                 # An unavailable level still counts as a recent attempt. Other
                 # placements should get a turn even if every refusal can retry.
                 due.append((max(at, refused_at), True, path))
+            elif now - at >= _QUEST_RENEWAL:
+                renew.append(path)
+        if renew:
+            renew.sort()
+            reply = await self._apply(client, QUEST_RENEW, scope, *renew, str(generation))
+            if reply:
+                renewed_at = time.monotonic()
+                for path, renewed in zip(renew, reply["ack"]["message"], strict=True):
+                    row, at = self.leases[path]
+                    if renewed == "1":
+                        self.leases[path] = row, renewed_at
+                    else:
+                        due.append((at, True, path))
         for _, show, path in sorted(due)[:4]:
+            current = client.gameplay.get(QUEST_FRAME)
+            if not isinstance(current, dict) or (current.get("map"), current.get("epoch")) != (area, epoch):
+                break
+            current_items = current.get("items")
+            if not isinstance(current_items, dict):
+                break
+            claimed = path in (client.gameplay.get(STATE) or ())
             if not show:
-                if await self._apply(client, QUEST_CLEAR, scope, path):
-                    del self.leases[path]
+                if (claimed or path not in current_items) and await self._apply(client, QUEST_CLEAR, scope, path):
+                    self.leases.pop(path, None)
                 continue
-            if path in (client.gameplay.get(STATE) or ()):
+            if claimed or current_items.get(path) != items[path]:
                 continue
             row = items[path]
             pose = row["transform"]

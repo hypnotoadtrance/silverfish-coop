@@ -144,9 +144,13 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             loose.parse_quest_placement(fields, "connected", area)
         status = {"state": "connected", "map": area, loose.VIEW_SCOPE: 1, loose.CAPABILITY: 1}
+
+        async def project(action, *_arguments, **_options):
+            return {**status, "ack": {"message": "1"}} if action == loose.QUEST_RENEW else status
+
         client = SimpleNamespace(last_game=status, zone_epoch=epoch, host_session="live host", needs_travel=False,
                                  server_transitioning=False, gameplay_seen=10, control=Mock(),
-                                 bridge=SimpleNamespace(command=AsyncMock(return_value=status)))
+                                 bridge=SimpleNamespace(command=AsyncMock(side_effect=project)))
         view = loose.QuestPlacementView()
         frame = {"map": area, "epoch": epoch, "items": {source: row}}
         client.gameplay = {loose.STATE: [], loose.QUEST_FRAME: frame}
@@ -158,6 +162,8 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
             clock.return_value = 10.7
             await view.project(client)
             self.assertEqual(client.bridge.command.await_count, 2)
+            client.bridge.command.assert_awaited_with(
+                loose.QUEST_RENEW, epoch, path, "1", timeout=1.5, update_status=False)
             clock.return_value = 12
             await view.project(client)
             client.gameplay_seen = 12
@@ -168,6 +174,72 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
             await view.project(client)
         client.bridge.command.assert_awaited_with(loose.QUEST_CLEAR, epoch, path, timeout=1.5, update_status=False)
         self.assertFalse(view.leases)
+
+    async def test_full_quest_frame_keeps_live_sources_and_retires_only_invalid_entries(self):
+        loose = native_loose_pickup
+        area, epoch = CROSSROADS, "1" * 32
+        world = f"{area}.{area.rsplit('/', 1)[-1]}"
+        sources = [f"{world}:PersistentLevel.Item_Bandage_C_{index:02d}" for index in range(loose.QUEST_LIMIT)]
+        row = {"quest": "Collect_Test", "class_path": ITEM["class_path"],
+               "transform": {"position": [12, 15, 17], "rotation": [0, 90, 0], "scale": [1, 1, 1]}}
+        items = dict.fromkeys(sources, row)
+        status = {"state": "connected", "map": area, loose.VIEW_SCOPE: 7, loose.CAPABILITY: 1}
+        now, expires = [10.0], {}
+        missed = set()
+
+        async def project(action, visit, source, *arguments, **_options):
+            now[0] += .1
+            self.assertEqual(visit, epoch)
+            if action == loose.QUEST_PROJECT:
+                self.assertIn(source, items)
+                expires[source] = now[0] + 2.6
+            elif action == loose.QUEST_CLEAR:
+                expires.pop(source, None)
+            else:
+                self.assertEqual(action, loose.QUEST_RENEW)
+                *other_sources, generation = arguments
+                self.assertEqual(generation, "7")
+                mask = ""
+                for path in (source, *other_sources):
+                    self.assertIn(path, items)
+                    self.assertNotIn(path, client.gameplay[loose.STATE])
+                    if path in missed or expires[path] <= now[0]:
+                        mask += "0"
+                    else:
+                        expires[path] = now[0] + 2.6
+                        mask += "1"
+                request = ["command", action, visit, source, *arguments]
+                fields = [loose.QUEST_REPLY, "1", request[0], "connected", area, visit, source, "accepted", mask]
+                return loose.parse_quest_reply("\t".join(fields) + "\n", request)
+            return status
+
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=project))
+        client = SimpleNamespace(last_game=status, zone_epoch=epoch, host_session="live host", needs_travel=False,
+                                 server_transitioning=False, gameplay_seen=now[0], control=Mock(), bridge=bridge,
+                                 gameplay={loose.STATE: [], loose.QUEST_FRAME: {"map": area, "epoch": epoch, "items": items}})
+        view = loose.QuestPlacementView()
+        with patch.object(loose.time, "monotonic", side_effect=lambda: now[0]):
+            for _ in range(16):
+                client.gameplay_seen = now[0]
+                await view.project(client)
+                now[0] += .25
+                self.assertTrue(all(expiry > now[0] for expiry in expires.values()))
+            self.assertEqual(set(expires), set(sources))
+            omitted, claimed, moved, unavailable = sources[:4]
+            del items[omitted]
+            client.gameplay[loose.STATE].append(claimed)
+            items[moved] = {**row, "transform": {**row["transform"], "position": [100, 200, 300]}}
+            missed.add(unavailable)
+            client.gameplay_seen = now[0] = now[0] + .65
+            prior_count = bridge.command.await_count
+            await view.project(client)
+
+        requests = [call.args for call in bridge.command.await_args_list[prior_count:]]
+        self.assertEqual([args[0] for args in requests].count(loose.QUEST_RENEW), 1)
+        self.assertNotIn(omitted, expires)
+        self.assertNotIn(claimed, expires)
+        self.assertEqual(view.leases[moved][0], items[moved])
+        self.assertTrue(any(args[:3] == (loose.QUEST_PROJECT, epoch, unavailable) for args in requests))
 
     async def test_missing_streamed_quest_placements_do_not_starve_visible_sources(self):
         loose = native_loose_pickup
@@ -215,6 +287,8 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
             if action == loose.QUEST_CLEAR:
                 self.assertNotEqual(source, visible)
                 raise RuntimeError("quest_placement_clear_scope_unavailable")
+            if action == loose.QUEST_RENEW:
+                return {**status, "ack": {"message": "1"}}
             return status
 
         bridge = SimpleNamespace(command=AsyncMock(side_effect=project))

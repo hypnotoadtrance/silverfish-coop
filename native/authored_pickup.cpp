@@ -3086,18 +3086,24 @@ namespace
             std::ranges::all_of(epoch, [](char digit) { return (digit >= '0' && digit <= '9') || (digit >= 'a' && digit <= 'f'); });
     }
 
-    bool guest_quest_request(Address pointer, std::string_view source, std::string_view epoch)
+    std::string guest_quest_world(Address pointer, std::string_view epoch)
     {
         auto* pawn = loose_pawn.Get();
         auto* world = loose_world.Get();
         if (loose_host || !live(pawn) || address(pawn) != pointer || !live(world) ||
             !valid_drop_epoch(epoch) || (!guest_quest_epoch.empty() && guest_quest_epoch != epoch))
-            return false;
+            return {};
         const auto path = world->GetPathName();
         const Profile profile{.world = path.c_str()};
         const Scope seat{world, pawn, nullptr, nullptr, object(pawn, STR("Controller")),
             object(world, STR("NetDriver")), &profile, false};
-        return local_scope(seat) && !loose_actor_path(source, RC::to_utf8_string(path)).empty();
+        return local_scope(seat) ? RC::to_utf8_string(path) : std::string{};
+    }
+
+    bool guest_quest_request(Address pointer, std::string_view source, std::string_view epoch)
+    {
+        const auto world = guest_quest_world(pointer, epoch);
+        return !world.empty() && !loose_actor_path(source, world).empty();
     }
 
     int project_quest_placement(const Lua& lua)
@@ -3156,6 +3162,45 @@ namespace
         view.expires = Clock::now() + quest_placement_lease;
         guest_quest_epoch = epoch;
         return result(lua, true, renewing ? "renewed" : "projected");
+    }
+
+    int renew_quest_placements(const Lua& lua)
+    {
+        const auto count = lua.get_stack_size();
+        if (!ready() || !quest_placement_enabled() || count < 4 ||
+            static_cast<std::size_t>(count - 3) > quest_placement_limit || !lua.is_integer(1) ||
+            !lua.is_string(2) || !lua.is_integer(3))
+            return result(lua, false, "quest_placement_renew_arguments");
+        const auto pointer = static_cast<Address>(lua.get_integer());
+        const std::string epoch{lua.get_string()};
+        const auto generation = lua.get_integer();
+        const auto world = guest_quest_world(pointer, epoch);
+        if (world.empty() || guest_quest_epoch != epoch || generation <= 0 ||
+            static_cast<std::uint64_t>(generation) != loose_generation)
+            return result(lua, false, "quest_placement_scope_unavailable");
+
+        const auto now = Clock::now();
+        std::string renewed(count - 3, '0');
+        for (int index = 4; index <= count; ++index)
+        {
+            if (!lua.is_string()) break;
+            const std::string source{lua.get_string()};
+            if (loose_actor_path(source, world).empty() || loose_hidden.contains(source)) continue;
+            const auto found = loose_sources.find(source);
+            if (found == loose_sources.end()) continue;
+            auto& loose = found->second;
+            auto& view = loose.quest_view;
+            const auto& scope = loose.scope;
+            if (!view || !view->applied || now >= view->expires || scope.claimed ||
+                scope.world.Get() != loose_world.Get() || scope.pawn.Get() != loose_pawn.Get() ||
+                !quest_placement_identity(scope)) continue;
+            auto* placed = static_cast<U::AActor*>(scope.actor.Get());
+            if (!same_placement_pose(read_drop_pose(placed), *view->applied) ||
+                !boolean(placed, STR("bHidden"), false) || !placed->GetActorEnableCollision()) continue;
+            view->expires = now + quest_placement_lease;
+            renewed[index - 4] = '1';
+        }
+        return result(lua, true, renewed);
     }
 
     int clear_quest_placement(const Lua& lua)
@@ -3551,6 +3596,7 @@ namespace silverfish::native_authored_pickup
         lua.register_function("SilverfishDiscoverLoosePickups", discover_loose);
         lua.register_function("SilverfishReadNativeAuthoredQuestPlacements", read_quest_placements);
         lua.register_function("SilverfishProjectNativeAuthoredQuestPlacement", project_quest_placement);
+        lua.register_function("SilverfishRenewNativeAuthoredQuestPlacements", renew_quest_placements);
         lua.register_function("SilverfishClearNativeAuthoredQuestPlacement", clear_quest_placement);
         lua.register_function("SilverfishReadHostLooseRespawnHidden", read_host_respawn_hidden);
         lua.register_function("SilverfishAcknowledgeLooseCarry", acknowledge_loose_carry);

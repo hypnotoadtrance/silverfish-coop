@@ -4153,7 +4153,7 @@ class Bridge:
             if (action in (native_dead_drop.PROJECT, native_dead_drop.CLEAR)
                     and raw.startswith(native_dead_drop.REPLY + "\t")):
                 return native_dead_drop.parse_projection_reply(raw, fields)
-            if (action in (native_loose_pickup.QUEST_PROJECT, native_loose_pickup.QUEST_CLEAR)
+            if (action in native_loose_pickup.QUEST_ACTIONS
                     and raw.startswith(native_loose_pickup.QUEST_REPLY + "\t")):
                 return native_loose_pickup.parse_quest_reply(raw, fields)
             if action in native_prop_carry.COMPACT_ACTIONS and raw.startswith(native_prop_carry.REPLY + "\t"):
