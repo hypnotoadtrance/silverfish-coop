@@ -121,6 +121,7 @@ class GuestView:
         self.inventory_lock = asyncio.Lock()
         self.inventory_visit = None
         self.full_revision = self.pickup_revision = 0
+        self.pickup_revisions = {}
 
     async def close(self, *, preserve_stock=False):
         pending = (self.pending_stock_refresh or self.request_for_stock) if preserve_stock else None
@@ -165,6 +166,7 @@ class GuestView:
         if scope != self.inventory_visit:
             self.inventory_visit = scope
             self.full_revision = self.pickup_revision = 0
+            self.pickup_revisions.clear()
 
     async def present_pickup(self, client, scope, operation, claim, row, present):
         owner = client.invite["character_id"]
@@ -189,8 +191,8 @@ class GuestView:
             if client.stock_interaction_scope() != scope or self.inventory_scope(client) != scope:
                 return None, False
             self._visit_revisions(scope)
-            if revision <= self.pickup_revision or revision <= self.full_revision:
-                return None, revision <= self.full_revision
+            if revision <= max(self.full_revision, self.pickup_revisions.get(guid, 0)):
+                return None, True
             args = guid, item_class, text, "-" if previous is None else str(previous)
             projected = await present(inventory=args)
             if projected is None or "pickup_inventory_result" not in projected:
@@ -198,7 +200,10 @@ class GuestView:
             outcome = projected.pop("pickup_inventory_result")
             if client.stock_interaction_scope() != scope or self.inventory_scope(client) != scope:
                 return None, False
-            self.pickup_revision = revision
+            # Independent items can arrive in either order. Full views still
+            # need to include every applied pickup.
+            self.pickup_revisions[guid] = revision
+            self.pickup_revision = max(revision, self.pickup_revision)
             self.digest = "-"
             client.control.event("native_pickup_inventory_applied", operation_id=operation, outcome=outcome,
                                  guid=guid, revision=revision, item_bytes=len(text.encode("utf-8")))
@@ -332,6 +337,7 @@ class GuestView:
             projected = await self._receive(client, result, area, epoch, character, layout_sequence, refresh_stock)
             if projected and scope == self.inventory_scope(client):
                 self.full_revision = revision
+                self.pickup_revisions.clear()
             return projected
 
     async def _receive(self, client, result, area, epoch, character, layout_sequence, refresh_stock):

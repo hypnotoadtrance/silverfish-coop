@@ -430,20 +430,29 @@ class NativeGuestStockPickupViewTests(unittest.IsolatedAsyncioTestCase):
         self.client.bridge.command.assert_not_awaited()
         self.view.receive.assert_not_awaited()
 
-    async def test_exact_pickup_rejects_an_older_full_view(self):
+    async def test_out_of_order_pickups_reject_old_rows_for_the_same_item_and_older_full_views(self):
         del self.view.receive
         client, owner = self.client, str(self.character)
         scope = self.view.inventory_scope(client)
         guid, item_class = "A" * 32, "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
         operation = "b" * 32
         client.stock_interaction_scope = lambda: scope
-        present = AsyncMock(return_value={"pickup_inventory_result": "merged"})
+        present = AsyncMock(side_effect=({"pickup_inventory_result": "merged"}, {"pickup_inventory_result": "added"}))
         claim = {"guid": "C" * 32, "inventory_guid": guid, "class_path": item_class,
                  "claimed_by": owner, "stack_merge": {"before": 3}}
         row = dict(owner=owner, map=self.area, epoch=self.epoch, revision=4, guid=guid, text="(Item=Bandage)")
         _, applied = await self.view.present_pickup(client, scope, operation, claim, row, present)
         self.assertTrue(applied)
         present.assert_awaited_once_with(inventory=(guid, item_class, row["text"], "3"))
+        other_guid = "F" * 32
+        other_claim = {"guid": other_guid, "class_path": item_class, "owner": owner}
+        other_row = dict(row, revision=3, guid=other_guid)
+        _, applied = await self.view.present_pickup(self.client, scope, operation, other_claim, other_row, present)
+        self.assertTrue(applied)
+        present.assert_awaited_with(inventory=(other_guid, item_class, other_row["text"], "-"))
+        _, applied = await self.view.present_pickup(self.client, scope, operation, claim, dict(row, revision=2), present)
+        self.assertTrue(applied)
+        self.assertEqual(present.await_count, 2)
         self.assertFalse(await self.view.receive(client, {"revision": 3}, self.area, self.epoch, owner))
         client.bridge.command.assert_not_awaited()
         self.assertEqual(self.view.pickup_revision, 4)

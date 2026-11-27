@@ -420,7 +420,7 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         settle.set()
         await client.stock_door_requests[actor]
 
-    async def test_projected_pickups_send_independently_of_a_pending_crate_roll(self):
+    async def test_loose_and_projected_pickups_send_independently_of_a_pending_crate_roll(self):
         client = self.guest(AsyncMock())
         epoch = "a" * 32
         scope = ("session", epoch, OBSERVATORY, "guest pawn")
@@ -437,6 +437,12 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
 
         inputs = []
         for index in range(6):
+            if index in (3, 5):
+                target = f"loose:{OBSERVATORY}.Observitory_P:PersistentLevel.Item_Test_C_{index}"
+                inputs.append((f"press-{index}", target))
+                if index == 3:
+                    inputs.append(("repeat-press-3", target))
+                continue
             item = str(index) * 32
             action = native_world_loot.CRATE_CLAIM if index < 3 else native_world_loot.ENEMY_CLAIM
             target = f"{item}@{crate}" if index < 3 else item
@@ -456,8 +462,10 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         finished = asyncio.Event()
         operations = []
 
-        async def send(_action, operation, _target, *, defer_pickup_cue):
+        async def send(action, operation, _target, *, defer_pickup_cue):
             self.assertTrue(defer_pickup_cue)
+            if operation in ("press-3", "press-5"):
+                self.assertEqual(action, service.native_loose_pickup.CLAIM)
             operations.append(operation)
             if operation == "press-4":
                 second_sent.set()

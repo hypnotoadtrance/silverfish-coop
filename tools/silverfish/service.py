@@ -7116,8 +7116,10 @@ class Client:
                 inputs = self.bridge.interactions() if self.bridge.stock_interaction_ready(crates=False) else ()
                 if scope is not None:
                     for operation, target in inputs:
-                        if loot := native_world_loot.target_parts(target):
-                            item = scope, loot[:2]
+                        loot = native_world_loot.target_parts(target)
+                        loose = native_loose_pickup.target_path(target)
+                        if loot or loose:
+                            item = scope, loot[:2] if loot else loose
                             if item in pickups:
                                 continue
                             if len(pickups) >= _LOCAL_STOCK_INPUT_BACKLOG:
@@ -7337,7 +7339,10 @@ class Client:
             target = self.zone_epoch
         if action != native_loose_pickup.CLAIM:
             return await self.gameplay_action(action, operation, target)
-        result = await self.gameplay_action(action, operation, target, defer_pickup_cue=True)
+        async with self.stock_pickup_slots:
+            if self.stock_interaction_scope() != scope:
+                raise ValueError("The stock pickup visit changed")
+            result = await self.gameplay_action(action, operation, target, defer_pickup_cue=True)
         claimed = result.get(native_loose_pickup.PROOF)
         inventory = result.pop(native_inventory_grant.PICKUP, None)
         cue = result.pop(native_pickup_audio.KEY, None)
