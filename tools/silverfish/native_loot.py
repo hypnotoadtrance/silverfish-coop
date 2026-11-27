@@ -1,14 +1,13 @@
 """Commit and share host-authoritative rolls for qualified stock crates."""
 
 import asyncio
-import math
 import time
 import uuid
 
 from . import native_host_save, native_pickup_audio, native_stock_door, party
 from .authored_cash import CASH_RANGES
 from .authored_loot import (CRATES, DEFERRED_PRY_CLASSES, LEGACY_CRATE, key_unlock_only, lockable_container, loot_capacity, random_lid,
-                            valid_item_transform, valid_lid_angle, valid_loot_trait_calls)
+                            valid_lid_angle, valid_loot_trait_calls)
 from .native_gold import valid_guid
 
 
@@ -34,9 +33,7 @@ LOCKPICK_INPUTS = "native_loot_lockpick_inputs"
 LOCKPICK_RESULT = "native_loot_lockpick_result"
 PRY_TOOL_ACTIONS = {"blowtorch": TORCH_USE, "crowbar": CROWBAR_USE}
 PRY_TOOL_RESULTS = {"blowtorch": TORCH_RESULT, "crowbar": CROWBAR_RESULT}
-PLACEMENT = "native-loot-placement"
 STACK_MERGE_TAG = "native-loot-stack-merge"
-PLACEMENT_KEY = "native_loot_placement"
 FORCED_ROLL_STATUS = "opened_fixture_seeded"
 SPECIAL_MEMORY_CAPABILITY = "native_loot_special_memory"
 INSPECTION_BYTES = "native_loot_inspection_reply_bytes"
@@ -252,39 +249,6 @@ async def retire_replenished(host, bridge):
     host.party = candidate
     for crate, roll in expired.items():
         host.control.event("native_loot_roll_replenished", crate=crate, roll_id=roll["id"])
-
-
-async def restore_legacy_placement(host, bridge) -> None:
-    area = host.last_game.get("map")
-    rolls = rolls_in_area(host.party.get(STATE_KEY, {}), area)
-    for crate, roll in rolls.items():
-        if not any(not row.get("claimed_by") and "transform" not in row for row in roll["items"]):
-            continue
-        snapshot = await bridge.command(PLACEMENT, crate, timeout=3)
-        report = snapshot.get(PLACEMENT_KEY, {})
-        positions = report.get("positions", {})
-        if ((snapshot.get("state"), snapshot.get("map"), report.get("map"), report.get("crate"))
-                != ("hosting", area, area, crate)
-                or set(positions) != set(range(1, loot_capacity(crate) + 1))
-                or not all(valid_item_transform(value) for value in positions.values())
-                or len({tuple(value["position"]) for value in positions.values()}) != len(positions)):
-            raise RuntimeError("The stock crate did not report distinct positions for its exact spawner slots")
-        candidate = party.load_party(host.party)
-        items = candidate[STATE_KEY][crate]["items"]
-        available = dict(sorted(positions.items()))
-        for row in items:
-            if "transform" in row:
-                nearest = min(available, key=lambda slot: math.dist(
-                    available[slot]["position"], row["transform"]["position"]))
-                del available[nearest]
-        for row in items:
-            if "transform" not in row:
-                row["transform"] = available.pop(min(available))
-        host.last_game, host.last_seen = snapshot, time.monotonic()
-        host.pending_host_save = bool(host.pending_host_save)
-        host.party = candidate
-        host.control.event("native_loot_legacy_placement_restored", crate=crate, map=area)
-        return
 
 
 def default_crate(area: str) -> str | None:
@@ -816,7 +780,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             request = receipt["request"]
             if len(request) != 3 or request[:2] != ["native-loot-claim", guid]:
                 raise party.RuleError("operation_id_conflict")
-            crate = request[2] or LEGACY_CRATE
+            crate = request[2]
         elif not separator:
             matches = [key for key, roll in rolls.items() if any(row.get("guid") == guid for row in roll["items"])]
             if len(matches) > 1:
@@ -869,8 +833,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
     if action == "claim":
         fingerprint = ["native-loot-claim", guid, crate]
         if receipt:
-            legacy = crate == LEGACY_CRATE and receipt["request"] == ["native-loot-claim", guid, None]
-            if receipt["request"] != fingerprint and not legacy:
+            if receipt["request"] != fingerprint:
                 raise party.RuleError("operation_id_conflict")
             return receipt["result"]
         item = next((row for row in saved.get("items", ()) if row.get("guid") == guid), None) if saved else None

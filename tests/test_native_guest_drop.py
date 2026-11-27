@@ -238,16 +238,15 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await drop.perform(host, bridge, "host", drop.DROP, GUID + "|9", DROP), result)
         bridge.command.assert_awaited_once()
 
-    async def test_legacy_durable_and_recent_claim_replays_fill_original_claimant(self):
+    async def test_claim_replays_keep_the_explicit_claimant_after_cache_eviction(self):
         host, _, _, _, _, row = self.make_world()
         row.pop("escrow")
-        row["claim_id"] = CLAIM
+        row.update(claim_id=CLAIM, claimed_by=OWNER)
         host.party[record.STATE] = {DROP: row}
-        old = {drop.RESULT: {**record.visible(row, DROP), "state": "reclaimed"}}
-        host.party["receipts"][OWNER] = [{"id": CLAIM, "request": [drop.RECLAIM, DROP, None], "result": old}]
+        expected = {drop.RESULT: {**record.visible(row, DROP), "state": "reclaimed", "claimed_by": OWNER}}
+        host.party["receipts"][OWNER] = [{"id": CLAIM, "request": [drop.RECLAIM, DROP, None], "result": expected}]
         bridge = SimpleNamespace(command=AsyncMock())
         self.assertEqual(record.active_frames(host.party, {OWNER}), [])
-        expected = {drop.RESULT: {**old[drop.RESULT], "claimed_by": OWNER}}
         self.assertEqual(await drop.perform(host, bridge, OWNER, drop.RECLAIM, DROP, CLAIM), expected)
         host.party["receipts"].clear()
         self.assertEqual(await drop.perform(host, bridge, OWNER, drop.RECLAIM, DROP, CLAIM), expected)

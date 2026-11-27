@@ -26,10 +26,8 @@ class DirectIPCampaignSwitchTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await listener.close()
 
-        legacy = direct_ip._new_identity_record()
         with CampaignStore(first / "save") as store:
-            runtime.write_json(first / "save/host-identity.json", legacy)
-            first_identity = link.load_server_identity(legacy["certificate"], legacy["private_key"])
+            first_identity = direct_ip.resident_host_identity(work, first)
             with self.assertRaises(direct_ip.HostTrustRequired) as prompt:
                 await connect(store, first_identity, require_trust=True)
             self.assertFalse(prompt.exception.changed)
@@ -42,10 +40,10 @@ class DirectIPCampaignSwitchTests(unittest.IsolatedAsyncioTestCase):
                                      require_trust=True)
             store.create_linked_character(existing.details["guest_id"], "Scout", uuid.uuid4().hex)
         with CampaignStore(second / "save") as store:
-            identity = direct_ip.resident_host_identity(work, second, guest_count=0)
+            identity = direct_ip.resident_host_identity(work, second)
             self.assertEqual(identity.certificate_pem, first_identity.certificate_pem)
             first.rename(work / "old-campaign")
-            identity = direct_ip.resident_host_identity(work, second, guest_count=0)
+            identity = direct_ip.resident_host_identity(work, second)
             guest = await connect(store, identity, require_trust=True)
             self.assertNotEqual(guest.details["guest_id"], existing.details["guest_id"])
             self.assertEqual(store.linked_character_catalog(guest.details["guest_id"]), [])

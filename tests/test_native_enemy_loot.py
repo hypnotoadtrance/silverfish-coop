@@ -79,11 +79,7 @@ class DeadBridgeEnemyLootTests(unittest.TestCase):
         item, = items.values()
         self.assertEqual(item.claim_target, f"enemy-shell:{zone}:{guid}")
         self.assertEqual(item.class_path, drop["class_path"])
-        self.assertTrue(item.ground_snap)
-        landed, = native_world_loot.nearby(
-            game, {}, zone, enemy_frame=frame, enemy_rolls={guid: dict(drop, settled=True)},
-        ).values()
-        self.assertFalse(landed.ground_snap)
+        self.assertFalse(item.ground_snap)
         for unqualified in (None, dict(frame, epoch="c" * 32), dict(frame, shells={guid: [8, 1, 2, 99]})):
             with self.subTest(frame=unqualified):
                 self.assertEqual(native_world_loot.nearby(
@@ -459,7 +455,7 @@ class OrdinaryDeadBridgeLootTests(unittest.IsolatedAsyncioTestCase):
             claimed = await native_enemy_loot.claim(self.host, bridge, self.first, selected, "b" * 32)
             replay = await native_enemy_loot.claim(self.host, bridge, self.first, selected, "b" * 32)
         bridge.command.assert_awaited_with(
-            native_enemy_loot.CLAIM, self.first_pawn, self.slot, self.guid, "1", "2", "3", "stock-world-focus-ground", self.ammo,
+            native_enemy_loot.CLAIM, self.first_pawn, self.slot, self.guid, "1", "2", "3", "stock-world-focus", self.ammo,
             timeout=7,
         )
         self.assertEqual(claimed, replay)

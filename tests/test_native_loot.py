@@ -133,25 +133,6 @@ class AuthoredCrateRegistryTests(unittest.TestCase):
 
 
 class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
-    async def test_old_named_food_claim_projects_through_stock_loose_visibility(self):
-        from tools.silverfish import native_authored_pickup as authored
-
-        loose = native_loose_pickup
-        source = authored.CROSSROADS_MUSHROOM
-        area, name, item_class = authored.LEGACY_LOOSE_SOURCES[source]
-        path = name.split(" ", 1)[1]
-        self.assertNotIn(source, authored.SOURCES)
-        game = {"state": "hosting", "map": area, loose.CAPABILITY: 1, loose.VIEW_SCOPE: 2}
-        claim = dict(source=source, map=area, actor=name, class_path=item_class, owner="host", guid=ITEM["guid"])
-        host = SimpleNamespace(last_game=game, zone_epoch="d" * 32, transitioning=False,
-                               native_checkpoint_unsafe=False, party={authored.STATE_KEY: {source: claim}})
-        bridge = SimpleNamespace(command=AsyncMock(return_value=game))
-        view = loose.Visibility()
-        await view.refresh(host, bridge)
-        self.assertEqual(view.hidden(host), [path])
-        self.assertEqual(host.party, {authored.STATE_KEY: {source: claim}})
-        bridge.command.assert_awaited_once_with(loose.PROJECT, "2", "hide", path, timeout=4)
-
     async def test_streamed_claim_uses_the_owning_campaign_and_survives_missing_local_actor(self):
         loose = native_loose_pickup
         raw = "/FrontierPack/Maps/StockroomInstance.Stockroom:PersistentLevel.Item_Bandage_C_1"
@@ -388,25 +369,6 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(identity, native_world_loot.nearby(game, rolls, OPERATION))
         transform["scale"] = [0., 1., 1.]
         self.assertEqual(native_world_loot.nearby(game, rolls, OPERATION, pinned={identity}), {})
-
-    async def test_legacy_crate_uses_the_unoccupied_stock_slot_without_rerolling(self):
-        claimed = {"position": [21., 20., 30.], "rotation": [0., 0., 0.], "scale": [1., 1., 1.]}
-        restored = dict(claimed, position=[40., 40., 30.])
-        roll = self.roll(CROSSROADS, OTHER_CRATE, "1" * 32)
-        unclaimed = dict(ITEM, actor="another stock Bandage", guid="B" * 32)
-        roll["items"] = [dict(ITEM, transform=claimed, claimed_by="host"), unclaimed]
-        host = self.host(CROSSROADS, {OTHER_CRATE: roll})
-        slots = {1: restored, 2: dict(claimed, position=[20., 20., 30.])}
-        bridge = SimpleNamespace(command=AsyncMock(return_value=self.game(CROSSROADS, native_loot_placement={
-            "map": CROSSROADS, "crate": OTHER_CRATE, "positions": slots})))
-        await native_loot.restore_legacy_placement(host, bridge)
-        expected = {**roll, "items": [roll["items"][0], dict(unclaimed, transform=restored)]}
-        self.assertEqual(host.party[native_loot.STATE_KEY][OTHER_CRATE], expected)
-        bridge.command.assert_awaited_once_with(native_loot.PLACEMENT, OTHER_CRATE, timeout=3)
-        host.checkpoint_native.assert_not_awaited()
-        self.assertIs(host.pending_host_save, False)
-        await native_loot.restore_legacy_placement(host, bridge)
-        bridge.command.assert_awaited_once()
 
     async def test_only_authority_replenishment_retires_the_exact_saved_roll(self):
         expired = self.roll(CROSSROADS, OTHER_CRATE, "1" * 32)
@@ -674,12 +636,6 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(party.RuleError, "operation_id_conflict"):
             await native_loot.perform(host, bridge, "host", "claim", f"{guid}@{LEGACY_CRATE}", OPERATION)
         bridge.command.assert_awaited_once_with("native-loot-claim", PAWN, OTHER_CRATE, guid, slot, timeout=6)
-
-        legacy_result = {"native_loot_claim": dict(ITEM, claimed_by="host")}
-        host.party["receipts"]["host"].append({"id": "e" * 32, "request": ["native-loot-claim", guid, None],
-                                               "result": legacy_result})
-        self.assertEqual(await native_loot.perform(host, bridge, "host", "claim", guid, "e" * 32), legacy_result)
-        bridge.command.assert_awaited_once()
 
     def test_escrow_merge_frames_bind_distinct_exact_guids_and_quantities(self):
         guid, destination, slot = ITEM["guid"], "B" * 32, native_host_save.new_slot()

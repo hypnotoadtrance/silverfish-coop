@@ -2919,18 +2919,6 @@ class Bridge:
                     data[native_loot.SPECIAL_MEMORY_CAPABILITY] = True
                 elif fields[0] == "native-loot" and len(fields) in (14, 15, 16, 17):
                     data["native_loot"] = _parse_stock_loot_receipt(fields)
-                elif fields[0] == native_loot.PLACEMENT and len(fields) == 13:
-                    _, area, crate, index, *axes = fields
-                    transform = dict(zip(("position", "rotation", "scale"),
-                                         (list(map(_finite, axes[i:i+3])) for i in (0, 3, 6))))
-                    placement = data.setdefault(native_loot.PLACEMENT_KEY, dict(map=area, crate=crate, positions={}))
-                    slot = int(index)
-                    if (data.get("state") != "hosting" or area != data.get("map")
-                            or AUTHORED_CRATES.get(crate) != area or not 1 <= slot <= loot_capacity(crate)
-                            or (area, crate) != (placement["map"], placement["crate"])
-                            or slot in placement["positions"] or not valid_item_transform(transform)):
-                        raise ValueError("Invalid stock crate placement slot")
-                    placement["positions"][slot] = transform
                 elif fields[0] == "native-world-loot-capability" and len(fields) == 2 and fields[1] in {"1", "2"}:
                     data[native_world_loot.CAPABILITY] = int(fields[1])
                 elif fields == ["native-world-loot-host-presentation", "1"] and data.get("state") == "hosting":

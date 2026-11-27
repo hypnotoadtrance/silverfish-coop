@@ -295,8 +295,6 @@ class Host:
         self.guest_pawn = None
         self.last_game = {}
         self.stopping = False
-        self.next_crate_placement = 0.0
-        self.crate_placement_error = None
         self.last_seen = 0.0
         self.fixtures = fixtures
         self.native_backend = native_backend
@@ -4600,15 +4598,6 @@ class Host:
             if self.native_loot_input or world_items:
                 can_project = not (self.stopping or self.transitioning or self.party.get("wipe")
                                    or self.native_checkpoint_unsafe)
-                if shared_pickups and self.native_loot_input and can_project and now >= self.next_crate_placement:
-                    self.next_crate_placement = now + 3
-                    try:
-                        await native_loot.restore_legacy_placement(self, bridge)
-                        self.crate_placement_error = None
-                    except (OSError, RuntimeError, ValueError) as error:
-                        if self.crate_placement_error != str(error):
-                            self.crate_placement_error = str(error)
-                            self.control.event("native_loot_legacy_placement_unavailable", reason=str(error))
                 rolls = native_loot.published(self.party.get(native_loot.STATE_KEY, {}), self.last_game.get("map"),
                                               game=self.last_game)
                 try:
@@ -4984,7 +4973,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             or entry_map != (dream["source"] if dream["phase"] == "departing" else dream["destination"])
         )):
             raise ValueError("The campaign's Stardust visit does not match its saved zone")
-        if dream and dream["effects"] != "legacy" and (not native_profile or not native_record):
+        if dream and (not native_profile or not native_record):
             raise ValueError("The campaign's Stardust visit is missing its paired stock host save")
         process = transport = embedded = None
         controller = None
@@ -4992,7 +4981,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
         stop_reason = None
         try:
             control.status(active=True, role="host", state="starting")
-            identity = (direct_ip.resident_host_identity(work, directory, campaign["guest_count"])
+            identity = (direct_ip.resident_host_identity(work, directory)
                         if resident_engine is not None and direct_password is not None else _identity(directory / "save"))
             internal_port = embedded_port if embedded_port is not None else spare_udp_port()
             game_options = dict(native_events=native_events, native_guest=native_guest, native_zones=native_zones,

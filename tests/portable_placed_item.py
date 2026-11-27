@@ -3,16 +3,17 @@
 import asyncio
 import math
 
+from placed_food_sources import CROSSROADS_MUSHROOM, PLACED_FOOD
 from portable_guest_world_start import resident_events, wait_resident_status
 from portable_pickup_preview import PREVIEW_FIXTURE, read_preview
 from portable_stock_shovel import stock_inventory
-from tools.silverfish import native_authored_pickup as authored, native_loose_pickup as loose, native_prop_carry as carry
+from tools.silverfish import native_loose_pickup as loose, native_prop_carry as carry
 from tools.silverfish.control import submit
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
 
 async def verify_stock_placed_food(host, guest, pawn):
-    _, name, item_class = authored.LEGACY_LOOSE_SOURCES[authored.CROSSROADS_MUSHROOM]
+    _, name, item_class = PLACED_FOOD[CROSSROADS_MUSHROOM]
     path = name.split(" ", 1)[1]
     target = f"loose:{path}"
     host_run, guest_run = host.campaign / "run", guest.client / "run"

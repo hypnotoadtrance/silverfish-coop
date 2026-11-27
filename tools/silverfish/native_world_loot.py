@@ -178,7 +178,7 @@ def _enemy_items(frame, rolls, area, zone):
         identity = uuid.uuid5(uuid.NAMESPACE_OID, f"enemy-loot:{guid}").hex
         transform = {"position": row["position"], "rotation": [0, 0, 0], "scale": [1, 1, 1]}
         yield Item(identity, row.get("class_path"), transform, ENEMY_CLAIM, f"{native_enemy_shells.PREFIX}{zone}:{guid}",
-                   _display_count(row.get("quantity")), ground_snap=not row.get("settled"))
+                   _display_count(row.get("quantity")))
 
 
 def player_drop_identity(drop_id):

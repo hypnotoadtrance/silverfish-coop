@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.silverfish.guest_weapon_profiles import FIREARMS, NINE_MM_BALL, STOCK_AMMO
 from tools.silverfish.control import submit
+from placed_food_sources import BOROUGH_MRE, CITY_BEANS, CITY_PEACHES, CROSSROADS_MUSHROOM, PLACED_FOOD
 from tools.silverfish import native_authored_pickup as pickup
 from tools.silverfish import native_guest_stack_drop as stack_drop
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as drop_record, native_host_save
@@ -25,7 +26,7 @@ from tools.silverfish import native_loose_pickup as loose
 
 OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 DROP_AMMO = {ammo.symbol: ammo for ammo in STOCK_AMMO}
-DROP_FOOD = (pickup.BOROUGH_MRE, pickup.CITY_PEACHES, pickup.CITY_BEANS, pickup.CROSSROADS_MUSHROOM)
+DROP_FOOD = (BOROUGH_MRE, CITY_PEACHES, CITY_BEANS, CROSSROADS_MUSHROOM)
 DROP_ITEMS = (pickup.POCKET_WATCH, pickup.CITY_WIRE, pickup.SOURCE)
 
 
@@ -36,7 +37,7 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
     item_class = ammo.item_path
     expected_quantity = ammo.fixture_units
     if item_source:
-        placements = pickup.LEGACY_LOOSE_SOURCES if food_source else pickup.SOURCES
+        placements = PLACED_FOOD if food_source else pickup.SOURCES
         drop_map, source_actor, item_class = placements[item_source]
         expected_quantity = 1
     area = drop_map or (drop_record.CROSSROADS if crossroads_drop else OBSERVATORY)

@@ -6,7 +6,7 @@ Use a gameplay-time disk write only when an operation requires durable storage t
 
 # Retiring superseded code
 
-When a shared gameplay path replaces a specialized patch, trace both paths through the normal game entry point before removing the old code. Retire superseded dispatch cases, hooks, fixtures, and documentation together. Keep coverage for the original report through the shared path. Keep a dedicated handler only when it still implements distinct stock behavior or supports a documented compatibility path.
+When a shared gameplay path replaces a specialized patch, trace both paths through the normal game entry point before removing the old code. Retire superseded dispatch cases, hooks, fixtures, and documentation together. Keep coverage for the original report through the shared path. Keep a dedicated handler only when it still implements distinct stock behavior or supports a documented compatibility path. Development candidates may drop support for earlier co-op save schemas. When changing the schema, reject unsupported checkpoints, keep the existing files intact, and document which builds require a fresh campaign. Begin maintaining save compatibility with the first official release.
 
 # Automated testing
 

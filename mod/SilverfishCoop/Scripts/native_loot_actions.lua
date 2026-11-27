@@ -6,7 +6,7 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_LOOT") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local title_fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
     and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
-local observation, placement, daily_update
+local observation, daily_update
 local escrow_cache, escrow_order = {}, {}
 local cache_world, cache_save
 local pending_escrows = {}
@@ -225,14 +225,6 @@ function actions.command(fields, state, phase)
         return "stock daily update expired the temporary activation"
     end
     local action = fields[2]:match("^native%-loot%-(%l+)$")
-    if action == "placement" then
-        local crate = fields[3]
-        if not enabled or phase ~= "hosting" or #fields ~= 3 or not loot.profile(state.map, crate) then
-            error("native_loot_child_placement_unavailable", 0)
-        end
-        placement = { map = state.map, crate = crate, positions = loot.placement(state, phase, crate) }
-        return "stock crate child placements reported"
-    end
     if action ~= "inspect" and action ~= "open" and action ~= "approach" and action ~= "seed" and action ~= "claim" then
         return
     end
@@ -403,7 +395,7 @@ function actions.command(fields, state, phase)
 end
 
 function actions.reset()
-    observation, placement, daily_update = nil, nil, nil
+    observation, daily_update = nil, nil
 end
 
 local function result_row(row, status_row)
@@ -485,12 +477,6 @@ function actions.rows(state, phase, status_row)
     if daily_update and daily_update.map == state.map then
         records[#records + 1] = status_row("native-loot-replenishment-fixture", daily_update.map,
             daily_update.crate, daily_update.days)
-    end
-    if placement and placement.map == state.map then
-        for index, position in ipairs(placement.positions) do
-            records[#records + 1] = status_row("native-loot-placement", placement.map, placement.crate,
-                index, table.unpack(position))
-        end
     end
     if not row or row.map ~= state.map then return records end
     records[#records + 1] = result_row(row, status_row)

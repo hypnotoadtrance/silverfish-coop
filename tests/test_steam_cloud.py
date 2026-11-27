@@ -1,5 +1,6 @@
 """Round-trip scoped host checkpoints through the Steam Auto-Cloud backup format."""
 
+import json
 from pathlib import Path
 import shutil
 from tempfile import TemporaryDirectory
@@ -63,11 +64,29 @@ class CloudBackupTests(unittest.TestCase):
         shutil.copyfile(self.backup, self.download)
         self.second.restore()
         self.assertEqual(self.checkpoint(self.second, self.restored), self.checkpoint(self.first, self.campaign))
-        destination_cert = direct_ip.resident_host_identity(self.second.campaigns.parent, self.restored, 1).certificate_pem
+        destination_cert = direct_ip.resident_host_identity(self.second.campaigns.parent, self.restored).certificate_pem
         self.assertEqual(destination_cert, self.identity["certificate"])
         with CampaignStore(self.restored / "save", require_existing=True) as store:
             self.assertEqual(store.list_characters(**self.guest)[0]["character_id"], self.character)
         self.assertEqual([path.name for path in self.second.root.glob("*.sav")], ["20260101-101010.sav"])
+        self.assertEqual((self.second.root / "20260101-101010.sav").read_bytes(), b"unchanged solo slot")
+
+    def test_old_campaign_schema_is_skipped_without_modifying_the_backup(self):
+        self.first.publish(self.campaign)
+        with ZipFile(self.backup) as archive, ZipFile(self.download, "w") as downloaded:
+            for name in archive.namelist():
+                payload = archive.read(name)
+                if name == "campaign.json":
+                    checkpoint = json.loads(payload)
+                    checkpoint["schema_version"] = 1
+                    payload = json.dumps(checkpoint).encode()
+                downloaded.writestr(name, payload)
+
+        received = self.download.read_bytes()
+        with self.assertLogs("tools.silverfish.steam_cloud", level="WARNING"):
+            self.second.restore()
+        self.assertFalse(self.restored.exists())
+        self.assertEqual(self.download.read_bytes(), received)
         self.assertEqual((self.second.root / "20260101-101010.sav").read_bytes(), b"unchanged solo slot")
 
     def test_older_backup_never_overwrites_higher_local_revision_even_if_native_data_is_missing(self):

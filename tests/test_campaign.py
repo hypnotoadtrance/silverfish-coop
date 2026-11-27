@@ -280,6 +280,20 @@ class CampaignStoreTests(unittest.TestCase):
             self.open_store()
         self.assertEqual((self.directory / "campaign.json").read_bytes(), future_save)
 
+    def test_development_schema_one_is_rejected_without_changing_checkpoint(self):
+        with self.open_store() as store:
+            store.save_world({"day": 1})
+            checkpoint = json.loads(store.path.read_bytes())
+            checkpoint["schema_version"] = 1
+            old_primary = json.dumps(checkpoint).encode()
+            store.path.write_bytes(old_primary)
+            old_previous = store.previous_path.read_bytes()
+
+        with self.assertRaisesRegex(CampaignVersionError, "Start a new co-op campaign"):
+            self.open_store()
+        self.assertEqual((self.directory / "campaign.json").read_bytes(), old_primary)
+        self.assertEqual((self.directory / "campaign.previous.json").read_bytes(), old_previous)
+
     def test_second_writer_cannot_open_same_save(self):
         with self.open_store():
             with self.assertRaises(StoreBusyError):

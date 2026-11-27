@@ -15,7 +15,8 @@ from live_multi_smoke import saved_hashes
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-from tools.silverfish import native_authored_pickup as pickup, native_guest_consumable as consume, native_host_save
+from placed_food_sources import BOROUGH_MRE, PLACED_FOOD
+from tools.silverfish import native_guest_consumable as consume, native_host_save
 from tools.silverfish import native_loose_pickup as loose
 from tools.silverfish.control import submit
 from tools.silverfish.travel import BOROUGH
@@ -87,7 +88,7 @@ async def verify(work: Path, original: Path):
         character = invitation["character_id"]
         guest = await launch(guest_run, "guest", "join", *client, "--invite", invitation["invite_file"], *guest_flags)
         initial, attached = await paired(character)
-        actor = pickup.LEGACY_LOOSE_SOURCES[pickup.BOROUGH_MRE][1].split(" ", 1)[1]
+        actor = PLACED_FOOD[BOROUGH_MRE][1].split(" ", 1)[1]
         target = f"loose:{actor}"
         prepared = await action(host_run, loose.APPROACH, target=f"guest@{target}")
         assert prepared["actor"] == actor, prepared

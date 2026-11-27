@@ -349,7 +349,6 @@ async def bank(host, bridge, target: str | None) -> dict:
                  await asyncio.to_thread(native_host_save.record, host.native_profile, slot, area, flush=True))
         roll = {"map": area, "epoch": host.zone_epoch, "bandit": target, "actor": proof["actor"], "guid": guid,
                 "class_path": SHELLS, "quantity": proof["units"], "position": at, "killer": killer, "claimed_by": None,
-                "settled": True,
                 "escrow": frame}
         if cqc:
             roll["profile"] = profile.id
@@ -398,11 +397,9 @@ async def claim(host, bridge, character: str, target: str | None, operation: str
     location = next((row.get("location") for row in host.last_game.get("pawns", {}).values()
                      if row.get("name") == pawn), None)
     world_focus = focus and host.last_game.get(native_world_loot.CAPABILITY, 0) >= 1
-    legacy_ground = world_focus and not roll.get("settled")
     if not location or any(axis is None for axis in location):
         raise party.RuleError("native_enemy_loot_out_of_reach")
-    reach = math.dist(location[:2], roll["position"][:2]) if legacy_ground else math.dist(location, roll["position"])
-    if reach > party.INTERACT_RANGE:
+    if math.dist(location, roll["position"]) > party.INTERACT_RANGE:
         raise party.RuleError("native_enemy_loot_out_of_reach")
     frame = roll["escrow"]
     deferred = _ordinary(host, area) and host.last_game.get(MEMORY_CAPABILITY) is True
@@ -418,7 +415,7 @@ async def claim(host, bridge, character: str, target: str | None, operation: str
         try:
             mode = "stock-exact"
             if focus:
-                mode = "stock-world-focus-ground" if legacy_ground else "stock-world-focus" if world_focus else "stock-focus"
+                mode = "stock-world-focus" if world_focus else "stock-focus"
             check = (mode, roll["actor"]) if _ordinary(host, area) else ()
             snapshot = await bridge.command(CLAIM, pawn, frame["slot"], guid,
                                             *(str(axis) for axis in roll["position"]), *check, timeout=7)

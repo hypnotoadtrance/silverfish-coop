@@ -5,11 +5,10 @@ import time
 
 from . import native_black_box, native_dead_drop, native_dust_cabinet, native_host_save, native_loot, native_pickup_audio, native_savlo_locker, party
 from .authored_cash import BY_SOURCE as STOCK_CASH
-from .authored_supply import BY_SOURCE as STOCK_SUPPLIES, CRASH_SITE
+from .authored_supply import BY_SOURCE as STOCK_SUPPLIES
 from .native_dialogue import PROTOTYPE_QUEST
 from .native_gold import valid_guid
-from .native_guest_consumable import BROWN_MUSHROOM_CLASS, CANNED_BEANS_CLASS
-from .travel import BOROUGH, CISTERN, CITY, CROSSROADS, FOREST, LAB_E206, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD, SCAV_BAR, SCIENTIST_SHOP, SCI_TUNNEL
+from .travel import CISTERN, CITY, CROSSROADS, FOREST, LAB_E206, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD, SCAV_BAR, SCIENTIST_SHOP, SCI_TUNNEL
 
 
 SOURCE = "observatory-comp-board"
@@ -17,10 +16,6 @@ ACTOR = f"Item_CompBoard_C {OBSERVATORY}.Observitory_P:PersistentLevel.Item_Comp
 ITEM_CLASS = "/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C"
 CITY_WIRE = "city-copper-wire"
 CITY_BRANDY = "city-paladin-brandy"
-CITY_PEACHES = "city-canned-peaches"
-CITY_BEANS = "city-canned-beans"
-CRASH_SITE_BEANS = "crash-site-canned-beans"
-CROSSROADS_MUSHROOM = "crossroads-brown-mushroom"
 DEAD_END = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
 COUP_REPORT = "dead-end-coup-report"
 GOLD_BAG = "scav-bar-gold-bag"
@@ -38,7 +33,6 @@ OLD_PIPE = "crossroads-old-pipe"
 CROSSROADS_LOCKPICK = "crossroads-lockpick"
 SAVLO_ESTATE = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P"
 SAVLO_RING = "savlo-estate-evil-eye-ring"
-BOROUGH_MRE = "borough-mre"
 DUST_FILTER = "railyard-dust-filter"
 MOLASSES = "northeast-rail-molasses"
 SAVLO_KEYCARD = "trench-savlo-keycard"
@@ -49,18 +43,6 @@ FORT_LETO = "/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P"
 FORT_LETO_LOCKER_KEY = "fort-leto-locker-key-543"
 STOLEN_BAG = "forest-brokers-artifacts-bag"
 DEAD_DROP = native_dead_drop.SOURCE
-# Previously claimed food keeps its original saved identity and inventory GUID.
-LEGACY_LOOSE_SOURCES = {
-    CITY_PEACHES: (CITY, f"Item_CannedPeaches_C {CITY}.City_01_P:PersistentLevel.Item_CannedPeaches_C_1",
-                   "/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C"),
-    CITY_BEANS: (CITY, f"Item_CannedBeans_C {CITY}.City_01_P:PersistentLevel.Item_CannedBeans_C_1", CANNED_BEANS_CLASS),
-    CRASH_SITE_BEANS: (CRASH_SITE, f"Item_CannedBeans_C {CRASH_SITE}.CrashSite_01_P:PersistentLevel.Item_CannedBeans_C_1",
-                      CANNED_BEANS_CLASS),
-    CROSSROADS_MUSHROOM: (CROSSROADS, f"Item_BrownMushroom_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Item_BrownMushroom_C_3",
-                          BROWN_MUSHROOM_CLASS),
-    BOROUGH_MRE: (BOROUGH, f"Item_MRE_C {BOROUGH}.Borough:PersistentLevel.Item_MRE_C_1",
-                  "/Game/Classes/Items/Item_MRE.Item_MRE_C"),
-}
 SOURCES = {
     SOURCE: (OBSERVATORY, ACTOR, ITEM_CLASS),
     CITY_WIRE: (CITY, f"Item_CopperWire_C {CITY}.City_01_P:PersistentLevel.Item_CopperWire_C_3",
@@ -295,7 +277,7 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
     is_supply = target in STOCK_SUPPLIES
     is_cash = target in STOCK_CASH
     bound_epoch = _needs_epoch(target)
-    placement = SOURCES.get(target) or LEGACY_LOOSE_SOURCES.get(target)
+    placement = SOURCES.get(target)
     if not placement or (has_epoch and not bound_epoch):
         raise party.RuleError("invalid_authored_pickup_request")
     if bound_epoch:
@@ -316,8 +298,6 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
             return receipt["result"]
     if target in host.party.get(STATE_KEY, {}):
         raise party.RuleError("native_authored_pickup_already_claimed")
-    if target in LEGACY_LOOSE_SOURCES:
-        raise party.RuleError("native_authored_pickup_unavailable")
     if target in native_dead_drop.BY_SOURCE and not native_dead_drop.frame(host):
         raise party.RuleError("authored_pickup_dead_drop_inactive")
     if target == SAVLO_KEYCARD and not native_savlo_locker.observed(host.last_game, "opened"):

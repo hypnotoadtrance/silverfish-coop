@@ -15,17 +15,17 @@ from live_multi_smoke import saved_hashes
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-from tools.silverfish import native_authored_pickup as pickup
+from placed_food_sources import CITY_BEANS, CITY_PEACHES, CRASH_SITE_BEANS, CROSSROADS_MUSHROOM, PLACED_FOOD
 from tools.silverfish import native_loose_pickup as loose
 from tools.silverfish import native_guest_consumable as consumable, native_host_save
 from tools.silverfish.control import submit
 
-FOOD_SOURCES = (pickup.CITY_PEACHES, pickup.CITY_BEANS, pickup.CRASH_SITE_BEANS, pickup.CROSSROADS_MUSHROOM)
+FOOD_SOURCES = (CITY_PEACHES, CITY_BEANS, CRASH_SITE_BEANS, CROSSROADS_MUSHROOM)
 
 
-async def verify(work: Path, original: Path, source=pickup.CITY_PEACHES, *, pickup_only=False):
+async def verify(work: Path, original: Path, source=CITY_PEACHES, *, pickup_only=False):
     name = source + "-" + uuid.uuid4().hex[:8]
-    area, name_in_world, item_class = pickup.LEGACY_LOOSE_SOURCES[source]
+    area, name_in_world, item_class = PLACED_FOOD[source]
     actor = name_in_world.split(" ", 1)[1]
     pickup_target = f"loose:{actor}"
     use_action = consumable.COMMANDS[item_class]
@@ -169,7 +169,7 @@ async def verify(work: Path, original: Path, source=pickup.CITY_PEACHES, *, pick
             revision_after = (await action(host_run, "checkpoint"))["revision"]
             assert revision_after > revision_before and save_fingerprints() != after_pickup
             evidence["explicit_checkpoint"] = {"revision_before": revision_before, "revision_after": revision_after}
-        elif source == pickup.CRASH_SITE_BEANS:
+        elif source == CRASH_SITE_BEANS:
             # A guest can take lethal damage beside this pickup. Eat at the checked tunnel door.
             for target in ("host", "guest"):
                 await action(host_run, "native-door-position", target=target, entrance="Crash_Tut", exit_position="near")
@@ -251,7 +251,7 @@ async def verify(work: Path, original: Path, source=pickup.CITY_PEACHES, *, pick
                         await asyncio.wait_for(process.wait(), 15)
         evidence["original_saves_verified"] = saved_hashes(original) == originals
         evidence["original_file_count"] = len(originals)
-        proof = "live-city-peaches-verification.json" if source == pickup.CITY_PEACHES else f"live-{source}-verification.json"
+        proof = "live-city-peaches-verification.json" if source == CITY_PEACHES else f"live-{source}-verification.json"
         if pickup_only:
             proof = f"live-{source}-pickup-only-verification.json"
         (host_run / proof).write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
@@ -263,7 +263,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
-    parser.add_argument("--source", choices=FOOD_SOURCES, default=pickup.CITY_PEACHES)
+    parser.add_argument("--source", choices=FOOD_SOURCES, default=CITY_PEACHES)
     parser.add_argument("--pickup-only", action="store_true", help="Verify the stock pickup and replay without eating the item")
     args = parser.parse_args()
     asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve(), args.source, pickup_only=args.pickup_only))

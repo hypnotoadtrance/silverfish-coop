@@ -21,8 +21,9 @@ TAROT_DESTINATIONS = {
     "Tarot_Rook": THE_ROOK,
 }
 _NEXT_DREAM = {EXCHANGE: THE_ROOK, THE_ROOK: PYROCLAST, PYROCLAST: SLATE, SLATE: BLACK_OCEAN, BLACK_OCEAN: NOTHING}
-LEGACY_KEYS = {
+VISIT_FIELDS = {
     "id", "guid", "before", "payload", "phase", "deadline", "source", "destination", "return_map", "return_bed",
+    "kind", "tarot", "effects",
 }
 
 
@@ -74,9 +75,7 @@ def visit(state: dict) -> dict | None:
         return None
     if type(saved) is not dict:
         raise ValueError("Invalid saved Stardust visit")
-    if set(saved) == LEGACY_KEYS and saved["source"] == CROSSROADS and saved["destination"] == EXCHANGE:
-        saved = dict(saved, kind="stardust", tarot="", effects="legacy")
-    if set(saved) != LEGACY_KEYS | {"kind", "tarot", "effects"}:
+    if saved.keys() != VISIT_FIELDS:
         raise ValueError("Invalid saved Stardust visit")
     phase = saved["phase"]
     deadline = saved["deadline"]
@@ -89,9 +88,7 @@ def visit(state: dict) -> dict | None:
             or (before > 1 and saved["payload"] != STACK_PAYLOADS[saved["kind"]])
             or destination is None or saved["destination"] != destination
             or not native_blue.valid_rest(saved["source"], saved["return_map"], saved["return_bed"])
-            or saved["effects"] not in ("legacy", "pending", "applied")
-            or (saved["effects"] == "legacy" and (saved["kind"] != "stardust" or saved["tarot"] != ""
-                                                     or saved["source"] != CROSSROADS))
+            or saved["effects"] not in ("pending", "applied")
             or (saved["effects"] == "pending" and phase != "departing")
             or phase not in ("departing", "visiting", "returning")
             or ((phase == "departing" or destination == NOTHING) and deadline is not None)

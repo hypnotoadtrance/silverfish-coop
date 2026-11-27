@@ -121,16 +121,6 @@ def validate_records(data, members):
                 raise ValueError("Invalid placed stock pickup stack merge") from error
 
 
-def _legacy_claim_paths(party_state, area):
-    from .native_authored_pickup import LEGACY_LOOSE_SOURCES, STATE_KEY
-
-    for source, (zone, name, item_class) in LEGACY_LOOSE_SOURCES.items():
-        if zone == area:
-            row = party_state.get(STATE_KEY, {}).get(source, {})
-            if isinstance(row, dict) and (row.get("map"), row.get("actor"), row.get("class_path")) == (zone, name, item_class):
-                yield name.split(" ", 1)[1]
-
-
 class Visibility:
     def __init__(self):
         self.epoch = None
@@ -160,16 +150,14 @@ class Visibility:
                 raise RuntimeError("The placed stock replenishment reply did not match the requested map and sources")
             self.replenished.update(path for path, available in observed.items() if available)
             host.last_game, host.last_seen = snapshot, time.monotonic()
-        placed = set(_legacy_claim_paths(host.party, game.get("map")))
-        placed.update(path for path in self.hidden(host) if "|" in path)
-        await self.host_view.project(host, bridge, sorted(placed))
+        placed = [path for path in self.hidden(host) if "|" in path]
+        await self.host_view.project(host, bridge, placed)
 
     def hidden(self, host):
         area, epoch = host.last_game.get("map"), host.zone_epoch
         replenished = self.replenished if self.epoch == epoch else ()
         claimed = {path for path, row in host.party.get(STATE, {}).items()
                    if row["map"] == area and (row["epoch"] == epoch or row["mode"] == 2 or path not in replenished)}
-        claimed.update(_legacy_claim_paths(host.party, area))
         claimed.update(host.last_game.get(RESPAWN_HIDDEN, ()))
         return sorted(claimed)
 

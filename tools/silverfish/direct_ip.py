@@ -179,7 +179,7 @@ def read_resident_identity(work: Path, campaign: Path) -> dict | None:
     return restored if restored is not None else _record(work / WORKSPACE_IDENTITY)
 
 
-def resident_host_identity(work: Path, campaign: Path, guest_count: int) -> link.ServerIdentity:
+def resident_host_identity(work: Path, campaign: Path) -> link.ServerIdentity:
     """Keep a restored campaign's identity and share one identity for new campaigns."""
     restored = _record(campaign / "save" / RESTORED_IDENTITY)
     if restored is not None:
@@ -187,31 +187,7 @@ def resident_host_identity(work: Path, campaign: Path, guest_count: int) -> link
     path = work / WORKSPACE_IDENTITY
     shared = _record(path)
     if shared is None:
-        legacy = _record(campaign / "save/host-identity.json")
-        seed = legacy
-        if not (guest_count and legacy):
-            # If there is one legacy identity already used by guests, retain it.
-            prior = {}
-            for sibling in campaign.parent.iterdir():
-                if sibling == campaign or not sibling.is_dir() or sibling.resolve() != sibling:
-                    continue
-                try:
-                    record = _record(sibling / "save/host-identity.json")
-                    if record is None:
-                        continue
-                    checkpoint = CampaignStore.read_existing(sibling / "save", max_read_bytes=8 * 1024**2)
-                    if checkpoint and checkpoint["guests"]:
-                        identity = link.load_server_identity(record["certificate"], record["private_key"])
-                        prior[identity.certificate_pem] = record
-                except (OSError, CampaignError, KeyError, ValueError):
-                    continue
-                if len(prior) > 1:
-                    break
-            if len(prior) == 1:
-                seed = next(iter(prior.values()))
-        if seed is not None:
-            link.load_server_identity(seed["certificate"], seed["private_key"])
-        shared = _record(path, seed or _new_identity_record())
+        shared = _record(path, _new_identity_record())
     return link.load_server_identity(shared["certificate"], shared["private_key"])
 
 

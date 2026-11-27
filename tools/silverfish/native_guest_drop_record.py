@@ -125,8 +125,7 @@ def valid_quantity(path, count) -> bool:
 def claimed_by(row: dict) -> str | None:
     if row["claim_id"] is None:
         return None
-    # Earlier campaign saves only allowed the original dropper to reclaim.
-    return row.get("claimed_by", row["owner"])
+    return row["claimed_by"]
 
 
 def active_frames(data: dict, members) -> list[dict]:
@@ -146,7 +145,7 @@ def active_frames(data: dict, members) -> list[dict]:
             if not valid_item_transform(row["transform"]):
                 raise ValueError("Invalid stock stack drop settled transform")
             fields |= {"transform"}
-        if claim_id is not None and "claimed_by" in row:
+        if claim_id is not None:
             fields |= {"claimed_by"}
         if claim_id is not None and _MERGE_FIELDS.intersection(row):
             fields |= _MERGE_FIELDS
@@ -162,7 +161,7 @@ def active_frames(data: dict, members) -> list[dict]:
 
                 merge, destination = row["stack_merge"], row["inventory_guid"]
                 if (type(merge) is not dict or merge.keys() != {"amount", "before", "after"}
-                        or "claimed_by" not in row or STACKABLE.get(row["class_path"]) is False):
+                        or STACKABLE.get(row["class_path"]) is False):
                     raise ValueError("Invalid stock stack drop merge")
                 try:
                     native_loot.verified_stack_merge(

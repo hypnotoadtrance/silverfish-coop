@@ -71,13 +71,6 @@ class StardustVisitTests(unittest.TestCase):
                 self.assertFalse(native_dream.return_due(active, deadline + 1.99))
                 self.assertTrue(native_dream.return_due(active, deadline + 2))
 
-    def test_old_exchange_departure_can_finish_without_replaying_new_effects(self):
-        legacy = native_dream.begin(party.new_party(), "AB" * 16, 2, native_dream.STOCK_PAYLOAD, OBSERVATORY, "")
-        legacy["stardust_visit"] = {key: legacy["stardust_visit"][key] for key in native_dream.LEGACY_KEYS}
-        self.assertEqual(native_dream.visit(legacy)["effects"], "legacy")
-        active = native_dream.arrived(legacy, 100)
-        self.assertEqual(native_dream.visit(active)["deadline"], 193)
-
     def test_stock_next_dream_and_tarot_priority(self):
         for source, destination in ((CROSSROADS, EXCHANGE), (EXCHANGE, THE_ROOK), (THE_ROOK, PYROCLAST),
                                     (PYROCLAST, SLATE), (SLATE, BLACK_OCEAN), (BLACK_OCEAN, NOTHING)):

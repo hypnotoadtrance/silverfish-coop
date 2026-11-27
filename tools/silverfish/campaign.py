@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_RECONNECT_GRACE = 90.0
 _CREDENTIAL_RE = re.compile(r"[A-Za-z0-9_-]{43}")
 _DIGEST_RE = re.compile(r"[a-f0-9]{64}")
@@ -329,7 +329,7 @@ class CampaignStore:
         if type(data) is not dict or type(data.get("schema_version")) is not int:
             raise CampaignFormatError("The campaign schema version is missing or invalid.")
         if data["schema_version"] != SCHEMA_VERSION:
-            raise CampaignVersionError(f"Unsupported campaign schema {data['schema_version']}.")
+            raise CampaignVersionError(f"Unsupported co-op campaign schema {data['schema_version']}. Start a new co-op campaign.")
         if set(data) != {"schema_version", "campaign_id", "revision", "world", "guests", "characters"}:
             raise CampaignFormatError("The campaign save fields do not match the schema.")
         if not _is_uuid(data["campaign_id"]) or type(data["revision"]) is not int or data["revision"] < 0:

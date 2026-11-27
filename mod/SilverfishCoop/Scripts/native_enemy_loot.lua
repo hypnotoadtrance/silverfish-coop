@@ -351,8 +351,7 @@ local function claim(state, phase, fields)
     if not cqc then host, guest = participants(state, phase) end
     local name, slot, guid = fields[3], fields[4], fields[5]
     local x, y, z = tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8])
-    local legacy_ground = fields[9] == "stock-world-focus-ground"
-    local physical = legacy_ground or fields[9] == "stock-world-focus"
+    local physical = fields[9] == "stock-world-focus"
     local focused = physical or fields[9] == "stock-focus"
     local guarded = cqc and #fields == 10 and (focused or fields[9] == "stock-exact")
     if (not guarded and (#fields ~= 8 or cqc)) or not is_slot(slot) or not is_guid(guid)
@@ -363,9 +362,6 @@ local function claim(state, phase, fields)
     local pawn = cqc and member(state, phase, host, name)
         or host:GetFullName() == name and host or valid(guest) and guest:GetFullName() == name and guest or nil
     if not pawn or pawn.Dead ~= false then error("native_enemy_loot_claimant_unavailable", 0) end
-    if legacy_ground then
-        z = require("native_guest_drop_projection").floor_z(state, {x, y, z})
-    end
     local at, reach = pawn:K2_GetActorLocation(), pawn.InteractionRange
     if not at or not finite(reach) or reach <= 0 or reach > 1000 or
         (at.X - x)^2 + (at.Y - y)^2 + (at.Z - z)^2 > math.min(reach, 250)^2 then
