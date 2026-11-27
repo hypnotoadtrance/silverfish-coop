@@ -34,7 +34,7 @@ class StockFlareReceiptTests(unittest.TestCase):
     def test_pipe_bomb_requires_its_stock_remaining_fuse(self):
         row = [native_flare.INPUT, OBSERVATORY, "guest", "77", "C" * 32, "0", native_flare.PIPE_BOMB]
         self.assertEqual(native_flare.parse([*row, "0"], "connected", OBSERVATORY)["fuse_ms"], 0)
-        for extra in ([], ["-1"], ["0001"], ["5001"]):
+        for extra in ([], ["-1"], ["0001"], ["60001"]):
             with self.subTest(extra=extra), self.assertRaises(ValueError):
                 native_flare.parse(row + extra, "connected", OBSERVATORY)
         row[-1] = "/Game/Classes/Equipment/Eqp_Bolt.Eqp_Bolt_C"

@@ -49,7 +49,7 @@ package.loaded.players = {is_standing_guest = function(pawn) return pawn == auth
 
 local function projectile(path, server, world, derived)
     if not world then
-        world = object()
+        world = object({PersistentLevel = object()})
         world.NetDriver = object({World = world, ServerConnection = not server and object() or nil})
     end
     local class = path == base_path and grenade_base or object()
@@ -58,6 +58,7 @@ local function projectile(path, server, world, derived)
     function actor:GetClass() return class end
     function actor:IsA(wanted) return wanted == grenade_base and (derived or class == grenade_base) end
     function actor:GetWorld() return world end
+    function actor:GetOuter() return world.PersistentLevel end
     function actor:GetLocalRole() return server and 3 or 1 end
     function actor:HasAuthority() return server end
     function actor:IsActorBeingDestroyed() return false end
@@ -118,6 +119,10 @@ local function pawn(host)
     function player.Camera:K2_SetRelativeRotation() end
     function grip:GetOwner() return player end
     function grip:GetGrabbedComponent() return self.grabbed end
+    function grip:GetTargetLocationAndRotation(position, rotation)
+        position.X, position.Y, position.Z = center.X, center.Y, center.Z
+        rotation.Pitch, rotation.Yaw, rotation.Roll = 0, 0, 0
+    end
     function player:Grab_Release_Object(throwing, dropping, pickup)
         assert(pickup == false, "Flare is a physics carry, never an inventory claim")
         if throwing or dropping then
@@ -198,7 +203,8 @@ guest:Grab_Release_Object(false, false, false)
 local false_parameter = {get = function() return false end}
 grab_hook({get = function() return guest end}, false_parameter, false_parameter)
 local rows = carry.rows(client, "connected", function(...) return {...} end)
-assert(#rows == 1 and rows[1][1] == "native-prop-carry-input" and rows[1][5] == "grab" and rows[1][6] == fixture_class)
+assert(#rows == 2 and rows[1][1] == "native-prop-carry-input" and rows[1][5] == "grab" and rows[1][6] == fixture_class)
+assert(rows[2][1] == "native-prop-carry-target" and rows[2][3] == rows[1][3])
 flare.sync(client, "disconnected")
 assert(replica.collision == false and not flare.carry_root(replica, client.world), "inactive copy left targetable")
 

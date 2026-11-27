@@ -33,9 +33,7 @@ def _parse_fuse(raw):
 
 def _fuse_field(item_class, extra):
     if len(extra) == 1 and (item_class == PIPE_BOMB or item_class not in CLASSES):
-        fuse_ms = _parse_fuse(extra[0])
-        if item_class != PIPE_BOMB or fuse_ms <= 5000:
-            return {"fuse_ms": fuse_ms}
+        return {"fuse_ms": _parse_fuse(extra[0])}
     if item_class == PIPE_BOMB or extra:
         raise ValueError("Wrong fuse field for stock throwable")
     return {}
