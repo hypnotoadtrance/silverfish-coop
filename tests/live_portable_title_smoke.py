@@ -6114,6 +6114,17 @@ async def verify_stock_unequip(first, second, evidence):
                 await asyncio.sleep(.05)
         evidence["guest_backpack_sort"] = {"receipt": sort, "local_move": await local_move(sort, "sort", "-", -1)}
         assert saves() == before, "The guest stock inventory moves wrote a save before a checkpoint"
+
+        async def wait_for_drop_to_land(receipt):
+            drop_id = receipt["drop_id"]
+            identity = native_world_loot.player_drop_identity(drop_id)
+            await wait_resident_status(host_run, lambda frame:
+                frame.get("gameplay", {}).get(native_guest_drop_record.STATE, {}).get(drop_id, {}).get("transform"))
+            for run in (host_run, guest_run):
+                await wait_resident_status(run, lambda frame:
+                    (row := frame.get("game", {}).get(native_world_loot.KEY, {}).get(identity)) and not row.get("moving"))
+            return identity
+
         evidence["guest_worn_world_drop"] = []
         for (key, slot, equip, _), guid in zip(worn, worn_guids, strict=True):
             started = time.time()
@@ -6124,9 +6135,7 @@ async def verify_stock_unequip(first, second, evidence):
             accepted = await witness("native_stock_inventory_action", native_guest_drop.RESULT, guid)
             assert accepted["stock_inventory_proof"] == f"verified stock world drop from slot {slot}", accepted
             receipt = accepted[native_guest_drop.RESULT]
-            identity = native_world_loot.player_drop_identity(receipt["drop_id"])
-            for run in (host_run, guest_run):
-                await wait_resident_status(run, lambda frame: identity in frame.get("game", {}).get(native_world_loot.KEY, {}))
+            identity = await wait_for_drop_to_land(receipt)
             assert (await portable_probe_command(guest.bridge, probe, "guest-worn-state")) == "-,-"
             guest_items = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
             assert all(row["guid"] != guid for row in guest_items), guest_items
@@ -6161,9 +6170,7 @@ async def verify_stock_unequip(first, second, evidence):
                     assert dropped["guid"] == mask, dropped
                     break
                 await asyncio.sleep(.08)
-        marker = native_world_loot.player_drop_identity(dropped["drop_id"])
-        for run in (host_run, guest_run):
-            await wait_resident_status(run, lambda frame: marker in frame.get("game", {}).get(native_world_loot.KEY, {}))
+        marker = await wait_for_drop_to_land(dropped)
         evidence["host_face_mask_drop"] = dropped
         assert saves() == before, "The worn Face Mask drop wrote a save before a checkpoint"
         assert await portable_probe_command(host.bridge, probe, "host-close-inventory") == "closed"
@@ -6211,10 +6218,7 @@ async def verify_stock_unequip(first, second, evidence):
             accepted = await witness("native_stock_inventory_action", native_guest_drop.RESULT, guid)
             assert accepted["stock_inventory_proof"] == f"verified stock world drop from slot {slot}", accepted
             receipt = accepted[native_guest_drop.RESULT]
-            identity = native_world_loot.player_drop_identity(receipt["drop_id"])
-            for run in (host_run, guest_run):
-                await wait_resident_status(run, lambda frame:
-                    identity in frame.get("game", {}).get(native_world_loot.KEY, {}))
+            identity = await wait_for_drop_to_land(receipt)
             remaining = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
             assert all(row["guid"] != guid for row in remaining)
             if gesture == "active":

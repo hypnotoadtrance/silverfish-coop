@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 import time
 import unittest
@@ -87,6 +88,30 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(client.gameplay_action.await_count, 2)
                 for request in client.gameplay_action.await_args_list:
                     self.assertEqual(request.args, (drop.DROP, operation, f"{GUID}|9"))
+
+    async def test_cancelled_backpack_preview_sends_no_action_or_screen_command(self):
+        started = asyncio.Event()
+
+        async def close(*, preserve_stock):
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                pass
+
+        client = self.client()
+        client.guest_ui = SimpleNamespace(close=close)
+        visit = client.host_session, client.zone_epoch, MAP, PAWN
+        client.stock_interaction_scope = lambda: visit
+        request = asyncio.create_task(drop.settle_stock_action(
+            client, MAP, client.zone_epoch, "d" * 32, "drop", "context_menu", GUID, 9, "5", None, None, "dropped",
+            visit=visit))
+        await asyncio.wait_for(started.wait(), .5)
+        request.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await request
+        client.gameplay_action.assert_not_awaited()
+        client.bridge.command.assert_not_awaited()
 
     def test_native_eligibility_replaces_the_list_for_stock_backpack_items(self):
         stock = "/Game/Classes/Items/Item_PocketWatch.Item_PocketWatch_C"

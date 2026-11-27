@@ -143,9 +143,11 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
     finish = ("native-inventory-stock-drop-finish", epoch, sequence)
 
     def current():
-        return visit is None or client.stock_interaction_scope() == visit
+        return visit is None or (not client.suspended and client.stock_interaction_scope() == visit)
 
     def check_visit():
+        if asyncio.current_task().cancelling():
+            raise asyncio.CancelledError
         if not current():
             raise RuntimeError("The stock inventory action belongs to an earlier visit")
 
