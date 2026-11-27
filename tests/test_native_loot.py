@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call, patch
 
 from tools.silverfish import (
-    native_host_save, native_loose_pickup, native_loot, native_stock_enemy_drops, native_world_loot, party, runtime,
+    link, native_host_save, native_loose_pickup, native_loot, native_stock_enemy_drops, native_world_loot, party, runtime,
 )
 from tools.silverfish.authored_loot import (CRATES, CRATE_NAMES_BY_INDEX, LEGACY_CRATE, OFFICE_DESK,
                                            PLACEMENTS, OVERRIDDEN_PLACEMENTS, SMALL_CABINET, full_name,
@@ -188,6 +188,10 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
         text = "".join("\t".join(record) + "\n" for record in records)
         items = runtime.Bridge(None, None)._parse_status(text)[loose.QUEST_SOURCES]
         self.assertEqual(items, dict.fromkeys(sources, row))
+        frame = {"map": area, "epoch": epoch, "items": items}
+        snapshot = {"ok": True, "gameplay": {loose.STATE: [], loose.QUEST_FRAME: frame}}
+        decoded = link._decode_response(link._encode_response(snapshot, snapshot=True))["result"]
+        self.assertEqual(decoded, snapshot)
         status = {"state": "connected", "map": area, loose.VIEW_SCOPE: 7, loose.CAPABILITY: 1}
         now, expires = [10.0], {}
         missed = set()
@@ -222,7 +226,8 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
         bridge = SimpleNamespace(command=AsyncMock(side_effect=project))
         client = SimpleNamespace(last_game=status, zone_epoch=epoch, host_session="live host", needs_travel=False,
                                  server_transitioning=False, gameplay_seen=now[0], control=Mock(), bridge=bridge,
-                                 gameplay={loose.STATE: [], loose.QUEST_FRAME: {"map": area, "epoch": epoch, "items": items}})
+                                 gameplay=decoded["gameplay"])
+        items = client.gameplay[loose.QUEST_FRAME]["items"]
         view = loose.QuestPlacementView()
         with patch.object(loose.time, "monotonic", side_effect=lambda: now[0]):
             for _ in range((len(sources) + 3) // 4 + 8):
