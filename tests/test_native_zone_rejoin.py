@@ -207,6 +207,106 @@ class EmptyZoneRetryTests(IsolatedAsyncioTestCase):
                          (0, 0, 0))
 
 
+class ReservedReturnTests(IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.session, self.epoch, self.scope = "a" * 32, "b" * 32, "c" * 32
+        self.character = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        self.title = dict(map=MENU, state="ready", mode="idle", save_scope=self.scope)
+        self.frame = self.title
+        self.bridge = SimpleNamespace(local_bridge=object(), snapshot=lambda: self.frame,
+                                      process=SimpleNamespace(poll=lambda: None))
+        self.transport = SimpleNamespace(address=("127.0.0.1", 31000), game_access=True, session_end=None,
+                                         request=AsyncMock(return_value={"ok": True}))
+        self.client = Client(SimpleNamespace(event=Mock()), self.transport,
+                             {"character_id": self.character, "native_zones": True}, self.bridge,
+                             allowed_maps=frozenset({CITY, BOROUGH}))
+        self.client.game_visit = (self.session, "e" * 32, BOROUGH)
+        self.client.host_session, self.client.zone_epoch, self.client.expected_zone = self.session, self.epoch, CITY
+        self.client.needs_travel = True
+        self.client.native_return_reservation = 7
+        self.client.native_return_retry_allowed = True
+        self.client.open_game_link = AsyncMock(side_effect=[TimeoutError, None])
+        self.client.leave_for_rejoin = AsyncMock()
+        self.client.wait_game_link = AsyncMock()
+        self.client.refresh_gameplay = AsyncMock()
+
+    async def test_reserved_timeout_does_not_leave_or_rearm_a_released_title_scope(self):
+        def release_scope():
+            self.frame = dict(self.title, save_scope=None)
+
+        self.client.refresh_gameplay.side_effect = release_scope
+        await self.client.reconcile_game()
+
+        self.client.leave_for_rejoin.assert_awaited_once_with(self.title, CITY)
+        self.transport.request.assert_not_awaited()
+        self.client.open_game_link.assert_awaited_once_with(timeout=10, renew_endpoint=True)
+        self.assertTrue(self.client.needs_travel)
+
+    async def test_reserved_timeout_does_not_accept_a_different_guest_on_the_same_map(self):
+        def replace_scope():
+            self.frame = dict(map=CITY, state="connected", mode="client", save_scope="d" * 32)
+
+        self.client.refresh_gameplay.side_effect = replace_scope
+        await self.client.reconcile_game()
+
+        self.assertTrue(self.client.needs_travel)
+        self.assertNotEqual(self.client.last_game, self.frame)
+        self.client.wait_game_link.assert_not_awaited()
+        self.transport.request.assert_not_awaited()
+
+    async def test_reserved_timeout_records_the_exact_guest_who_connected_as_it_expired(self):
+        def connect():
+            self.frame = dict(map=CITY, state="connected", mode="client", save_scope=self.scope)
+
+        self.client.refresh_gameplay.side_effect = connect
+        self.client.loading_zone = CITY
+        self.client.source_fade = (self.client.game_visit, CITY, time.monotonic())
+        await self.client.reconcile_game()
+
+        self.assertFalse(self.client.needs_travel)
+        self.assertEqual(self.client.last_game, self.frame)
+        self.assertEqual(self.client.game_visit, (self.session, self.epoch, CITY))
+        self.assertIsNone(self.client.loading_zone)
+        self.assertIsNone(self.client.source_fade)
+        self.transport.request.assert_not_awaited()
+
+    async def test_reserved_timeout_rechecks_visit_after_stock_leave_and_host_retry_reply(self):
+        async def leave(frame, cover=None):
+            if cover is None:
+                self.frame = dict(self.title, save_scope=None)
+
+        self.client.leave_for_rejoin.side_effect = leave
+        await self.client.reconcile_game()
+        self.transport.request.assert_not_awaited()
+        self.client.open_game_link.assert_awaited_once_with(timeout=10, renew_endpoint=True)
+
+        self.frame = self.title
+        self.client.leave_for_rejoin.side_effect = None
+        self.client.open_game_link.reset_mock(side_effect=True)
+        self.client.open_game_link.side_effect = [TimeoutError, None]
+
+        def replace_reservation(*args, **kwargs):
+            self.client.native_return_reservation = 8
+            return {"ok": True}
+
+        self.transport.request.side_effect = replace_reservation
+        await self.client.reconcile_game()
+
+        self.transport.request.assert_awaited_once_with({"action": "retry-native-return", "zone_epoch": self.epoch,
+                                                        "reservation": 7}, timeout=6)
+        self.client.open_game_link.assert_awaited_once_with(timeout=10, renew_endpoint=True)
+        self.assertTrue(self.client.native_return_retry_allowed)
+
+    async def test_reserved_timeout_rearms_a_qualified_reservation_once(self):
+        await self.client.reconcile_game()
+
+        self.transport.request.assert_awaited_once_with({"action": "retry-native-return", "zone_epoch": self.epoch,
+                                                        "reservation": 7}, timeout=6)
+        self.assertEqual([call.kwargs for call in self.client.open_game_link.await_args_list],
+                         [{"timeout": 10, "renew_endpoint": True}, {"timeout": 12, "renew_endpoint": True}])
+        self.assertFalse(self.client.native_return_retry_allowed)
+
+
 class ZoneRejoinIntegrationTests(IsolatedAsyncioTestCase):
     async def test_resident_rejoin_rechecks_save_scope_after_requesting_world_start(self):
         session, visit, scope = "a" * 32, "b" * 32, "c" * 32

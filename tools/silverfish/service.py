@@ -5622,27 +5622,32 @@ class Client:
         return values
 
     async def open_game_link(self, *, timeout: float = 18, renew_endpoint: bool = False) -> None:
+        visit = ()
+        if self.invite.get("native_zones"):
+            if not native_mindcore_carry.token(self.host_session) or not native_mindcore_carry.token(self.zone_epoch):
+                raise RuntimeError("The native client requires an authenticated host and zone")
+            visit = (self.host_session, self.zone_epoch, self.expected_zone)
         if renew_endpoint:
             await self.transport.renew_game_endpoint()
             self.endpoint = f"127.0.0.1:{self.transport.address[1]}"
         else:
             self.transport.reset_game_endpoint()
         self.needs_travel = True
-        visit = ()
-        if self.invite.get("native_zones"):
-            if not native_mindcore_carry.token(self.host_session) or not native_mindcore_carry.token(self.zone_epoch):
-                raise RuntimeError("The native client requires an authenticated host and zone")
-            visit = (self.host_session, self.zone_epoch, self.expected_zone)
         world_start = await self.guest_world_start(visit) if visit else ()
+        if visit and visit != (self.host_session, self.zone_epoch, self.expected_zone):
+            raise RuntimeError("The authenticated visit changed before native rejoin")
         if visit and not native_zone_rejoin.preserves_private_scope(self, self.bridge.snapshot()):
             raise RuntimeError("The private guest save scope changed before native rejoin")
         self.last_game = await self.bridge.command("join", self.endpoint, *visit, *world_start)
         await self.wait_game_link(timeout)
 
     async def wait_game_link(self, timeout: float) -> None:
+        visit = self.host_session, self.zone_epoch, self.expected_zone
         try:
-            self.last_game = await self.bridge.wait_for(
-                lambda state: state["state"] == "connected" and state["map"] == self.expected_zone, timeout=timeout,
+            connected = await self.bridge.wait_for(
+                lambda state: (state["state"], state["map"]) == ("connected", visit[2])
+                and (self.host_session, self.zone_epoch, self.expected_zone) == visit
+                and native_zone_rejoin.preserves_private_scope(self, state), timeout=timeout,
             )
         except TimeoutError:
             self.last_game = self.bridge.snapshot() or self.last_game
@@ -5651,6 +5656,10 @@ class Client:
                                sent=self.transport.game_packets_sent, received=self.transport.game_packets_received,
                                local_datagrams=self.transport.game_local_datagrams)
             raise
+        self._complete_game_link(connected)
+
+    def _complete_game_link(self, connected: dict) -> None:
+        self.last_game = connected
         self.needs_travel = False
         self.loading_zone = None
         self.source_fade = None
@@ -5704,6 +5713,7 @@ class Client:
         else:
             await self.leave_for_rejoin(state)
         reservation, epoch = self.native_return_reservation, self.zone_epoch
+        return_visit = self.host_session, epoch, self.expected_zone
         early_retry = reservation is not None and self.native_return_retry_allowed
         try:
             await self.open_game_link(timeout=10 if early_retry else 18, renew_endpoint=reservation is not None)
@@ -5713,18 +5723,25 @@ class Client:
                     return
                 raise
             await self.refresh_gameplay()
-            if (self.native_return_reservation != reservation or self.zone_epoch != epoch
-                    or not self.native_return_retry_allowed):
+            current = native_zone_rejoin.reserved_return_frame(self, return_visit)
+            if current is None:
+                return
+            if current.get("state") == "connected" and current.get("map") == return_visit[2]:
+                self._complete_game_link(current)
+                return
+            if self.native_return_reservation != reservation or not self.native_return_retry_allowed:
                 # A visible stock connection may still be waiting for its exact pawn.
                 await self.wait_game_link(8)
                 return
-            current = self.bridge.snapshot() or self.last_game
-            if current.get("state") == "connected" and current.get("map") == self.expected_zone:
-                self.last_game, self.needs_travel = current, False
-                return
             await self.leave_for_rejoin(current)
+            if (self.native_return_reservation != reservation or not self.native_return_retry_allowed
+                    or native_zone_rejoin.reserved_return_frame(self, return_visit) is None):
+                return
             reply = await self.transport.request({"action": "retry-native-return", "zone_epoch": epoch,
                                                   "reservation": reservation}, timeout=6)
+            if (self.native_return_reservation != reservation
+                    or native_zone_rejoin.reserved_return_frame(self, return_visit) is None):
+                return
             self.native_return_retry_allowed = False
             if reply.get("ok") is not True:
                 raise RuntimeError("The host could not refresh this native return route")
