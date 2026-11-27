@@ -6238,49 +6238,6 @@ class Client:
                 self.last_game = await self.bridge.command("native-inventory-view-unavailable", str(sequence), area,
                                                            str(offset), timeout=2)
 
-    async def service_inventory_equip(self, active: bool) -> None:
-        entries = self.bridge.native_inventory_equip_requests()
-        if (not entries or not active or self.stopping or not self.host_session or not self.zone_epoch
-                or time.monotonic() - self.gameplay_seen >= 3):
-            return
-        sequence, area, pawn, guid, item_class = entries[-1]
-        view = self.last_game.get("native_guest_inventory_equip_view", {})
-        armor = native_guest_armor.equip_action(item_class)
-        stack_equipment = item_class in native_flare.CLASSES or item_class in native_inventory.LOCKPICKS
-        if (view != {"sequence": sequence, "map": area, "pawn": pawn, "guid": guid, "state": "equipping"}
-                or area != self.last_game.get("map") or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name")
-                or not native_gold.valid_guid(guid)
-                or not (armor or stack_equipment or item_class in native_guest_weapon.CLASS_PATHS)):
-            return
-        epoch = self.host_session, self.zone_epoch
-        identifier = f"{epoch[0]}:{epoch[1]}:{pawn}:inventory-equip:{sequence}"
-        operation = uuid.uuid5(self.bridge.input_namespace, identifier).hex
-        outcome = "refused"
-        try:
-            offset = native_inventory.displayed_offset(self.last_game, sequence, area, pawn)
-            if offset is None:
-                raise ValueError("The inventory equip confirmation expired")
-            page = await native_inventory.read_view_page(self, operation, offset)
-            if not any(row["guid"] == guid and row["class_path"] == item_class
-                       and (not armor or row["source"] == "backpack") for row in page["items"]):
-                raise ValueError("The selected stock item is no longer on the authenticated inventory page")
-            current = self.bridge.snapshot() or {}
-            if ((self.host_session, self.zone_epoch) != epoch or current.get("native_guest_inventory_equip_view") != view
-                    or native_inventory.displayed_offset(current, sequence, area, pawn) != offset):
-                raise ValueError("The inventory equip confirmation expired")
-            action = armor or (native_inventory.STORE_EQUIPMENT if stack_equipment else "native-guest-weapon-equip")
-            equipped = await self.gameplay_action(action, operation, guid)
-            key = "native_guest_helmet" if action == native_guest_armor.HELMET_ACTION else "native_guest_armor"
-            if armor and equipped.get(key, {}).get("class_path") != item_class:
-                raise ValueError("The host did not verify the exact selected stock armor class")
-            outcome = "equipped"
-            self.control.event("native_guest_inventory_equipped", operation_id=operation, view_sequence=sequence, **equipped)
-        except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
-            self.control.event("native_guest_inventory_equip_rejected", operation_id=operation, view_sequence=sequence,
-                               reason=str(error))
-        with contextlib.suppress(OSError, RuntimeError):
-            self.last_game = await self.bridge.command("native-inventory-view-equip-result", str(sequence), area, guid, outcome, timeout=2)
-
     async def renew_native_interactions(self) -> None:
         features = (
             (GUEST_INTERACTION_SHOP, self.invite.get("native_shop_view"),
@@ -6845,7 +6802,7 @@ class Client:
                         raise ValueError("Select an input for the current staged inventory page")
                     self.last_game = await self.bridge.command(action, str(view["sequence"]), view["map"], key, timeout=5)
                     result = {key: self.last_game.get(key, {}) for key in (
-                        "native_guest_inventory_equip_view", native_inventory.SPLIT_VIEW,
+                        native_inventory.SPLIT_VIEW,
                         native_guest_drop_record.VIEW,
                     )}
                 elif action == "native-shop-view-fixture" and self.invite.get("native_shop_view"):
@@ -7350,7 +7307,6 @@ class Client:
             else:
                 await self.guest_ui.sync(self, active)
             await native_stash.service_view(self, active)
-            await self.service_inventory_equip(active)
             await native_flare.service_input(self, active)
             await native_inventory.service_split_view(self, active)
             await native_guest_drop.service_view(self, active)

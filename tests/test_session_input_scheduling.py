@@ -247,7 +247,6 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         client.bridge.native_crate_inputs.return_value = [f"loot-crate-open\t{OBSERVATORY}\t{crate}\t{pawn}\t12".encode()]
         client.bridge.interactions.return_value = [(operation, native_stock_door.TARGET_PREFIX + door)]
         client.bridge.native_inventory_view_requests.return_value = []
-        client.bridge.native_inventory_equip_requests.return_value = []
         client.bridge.native_cooked_meals.return_value = []
         client.control.requests.return_value = []
         client.control.gameplay_status_due.return_value = False
@@ -721,7 +720,6 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
             ("native-guest-primary-events", "primary_input_offset"),
             ("native-guest-held-fire-events", "held_fire_offset"),
             ("native-inventory-view-events", "inventory_view_offset"),
-            ("native-guest-inventory-equip-events", "inventory_equip_offset"),
             ("native-shop-view-events", "shop_view_offset"),
             ("native-wire-board-events", "wire_board_offset"),
             ("native-dialogue-events", "dialogue_offset"),

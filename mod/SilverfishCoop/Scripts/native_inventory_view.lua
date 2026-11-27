@@ -1,8 +1,6 @@
 local inventory_view = {}
 local world_path = require("world_path")
-local weapon_profiles = require("guest_weapon_registry")
 local guest_weapon = require("native_guest_weapon")
-local throwables = require("native_flare").equipment
 local drop_map_leaf = require("native_guest_drop_maps")
 local drop_items = require("native_guest_drop_items")
 local save_scope = require("native_save_scope")
@@ -33,19 +31,11 @@ local starter_bags = {
 }
 local meals = require("native_guest_mre")
 local mre_enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MRE") == "1"
-local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
-local pry_tool_paths = {
-    ["/Game/Classes/Equipment/Eqp_BlowTorch.Eqp_BlowTorch_C"] = true,
-    ["/Game/Classes/Equipment/Eqp_LockPick.Eqp_LockPick_C"] = true,
-    ["/Game/Classes/Equipment/Eqp_LockPick_Hev.Eqp_LockPick_Hev_C"] = true,
-    ["/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Crowbar.MeleeWep_Crowbar_C"] = true,
-}
-local body_armor = require("native_guest_armor")
 local sources = {backpack = "Backpack", equipment = "Equipment", armor = "Armor", helmet = "Helmet"}
 local keys = {up = "PageUp", down = "PageDown", confirm = "Home", back = "End", drop = "Delete"}
 local input_keys, held = {}, {}
 local page_size, max_items = 16, 8194
-local event_path, equip_path, is_downed, binding, observation, display
+local event_path, is_downed, binding, observation, display
 local binding_state, stock_drop, stock_session, sync_stock
 local stock_context_hook
 local stock_layout, max_stock_layout = {}, 8
@@ -218,10 +208,6 @@ local function page(fields)
         if slots[position] then error("The authenticated inventory view repeats a stock inventory position", 0) end
         slots[position] = true
         seen[guid] = true
-        local equippable = ((source == "backpack" or source == "equipment")
-            and (weapon_profiles.kinds[class] ~= nil or class == camera_path or pry_tool_paths[class] or throwables[class]
-                or class == "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"))
-            or (source == "backpack" and (body_armor.is_body_path(class) or body_armor.is_helmet_path(class)))
         local name = actor_class:sub(1, -3):gsub("_", " ")
         local splittable = options == "split" or options == "split,drop"
         if splittable and (source ~= "backpack" or not drop_items.stock_actor_class(class) or quantity <= 1) then
@@ -234,8 +220,7 @@ local function page(fields)
             error("The authenticated inventory drop row did not qualify", 0)
         end
         if droppable and drop_profile then name = drop_profile.label end
-        records[#records + 1] = {guid = guid, class = class, equippable = equippable,
-            droppable = droppable, name = name, quantity = quantity, splittable = splittable,
+        records[#records + 1] = {guid = guid, class = class, droppable = droppable, name = name, quantity = quantity, splittable = splittable,
             label = string.format("%s   %d x %s", sources[source], quantity, name)}
     end
     return offset, total, records
@@ -270,22 +255,11 @@ local function show()
         lines[#lines + 1] = "Ammo stack split. Reopen inventory to refresh."
     elseif row.split_state == "refused" then
         lines[#lines + 1] = "Ammo stack split unavailable. Reopen inventory to refresh."
-    elseif selected and selected.droppable and (not selected.equippable or row.equip_state == "selecting") then
-        local other = selected.splittable and " Home splits half the stack."
-            or selected.equippable and " Home equips the selected item." or ""
+    elseif selected and selected.droppable then
+        local other = selected.splittable and " Home splits half the stack." or ""
         lines[#lines + 1] = "Page Up / Page Down selects. Delete prepares a drop." .. other .. " End closes."
     elseif selected and selected.splittable then
         lines[#lines + 1] = "Page Up / Page Down selects. Home splits half the stack. End closes."
-    elseif row.equip_state == "confirming" then
-        lines[#lines + 1] = "Equip " .. selected.name .. "? Home confirms. End cancels."
-    elseif row.equip_state == "equipping" then
-        lines[#lines + 1] = "Equip pending"
-    elseif row.equip_state == "equipped" then
-        lines[#lines + 1] = "Item equipped. Reopen inventory to refresh."
-    elseif row.equip_state == "refused" or row.equip_state == "error" then
-        lines[#lines + 1] = "Equip unavailable. Reopen inventory to refresh."
-    elseif selected and selected.equippable then
-        lines[#lines + 1] = "Page Up / Page Down selects. Home equips. End closes."
     elseif selected then
         lines[#lines + 1] = "Read-only item. Page Up / Page Down selects. End closes."
     end
@@ -324,8 +298,6 @@ local function ready(current, close)
 end
 
 local function select_item()
-    local selected = observation.records[observation.selection]
-    observation.equip_state = selected and selected.equippable and "selecting" or "read_only"
     observation.split_state = nil
     observation.drop_state = nil
     observation.confirm_guid = nil
@@ -336,12 +308,12 @@ local function choose(current, action)
     local row = observation
     local selected = row.records[row.selection]
     if action == "back" then
-        if row.equip_state == "confirming" or row.split_state == "confirming"
+        if row.split_state == "confirming"
             or row.drop_state == "confirming" then
             select_item()
         elseif ready(current, true) then
             remove_display()
-            row.state, row.equip_state, row.split_state, row.drop_state = "closed", nil, nil, nil
+            row.state, row.split_state, row.drop_state = "closed", nil, nil
             row.pending_offset = nil
             emit(current, row.sequence, "closed")
             return true
@@ -371,14 +343,6 @@ local function choose(current, action)
                 row.request_guid, row.split_state = selected.guid, "splitting"
             else
                 row.split_state, row.confirm_guid = "confirming", selected.guid
-            end
-        elseif action == "confirm" and selected.equippable then
-            if row.equip_state == "confirming" and row.confirm_guid == selected.guid then
-                row.request_guid = selected.guid
-                row.equip_state = emit_line(equip_path, {"native-guest-inventory-equip", row.sequence,
-                    current.map, current.name, selected.guid, selected.class}) and "equipping" or "error"
-            else
-                row.equip_state, row.confirm_guid = "confirming", selected.guid
             end
         end
     end
@@ -604,6 +568,9 @@ local function stock_action_fixture(screen, current, save, epoch, item, use, spl
     stock_drop = {context = current, screen = screen, save = save, epoch = epoch, guid = guid, sequence = sequence,
         split = split, expected = expected, equip = equip}
     if split then return ("stock guest split %s %d %d %d"):format(guid, quantity, sequence, expected) end
+    if equip and expected and expected > 0 then
+        return ("stock guest equip %s %d %d %d"):format(guid, quantity, sequence, expected)
+    end
     return ("stock guest %s %s %d %d"):format(entry, guid, quantity, sequence)
 end
 
@@ -1026,7 +993,6 @@ function inventory_view.command(fields, state, phase)
         and operation ~= "native-inventory-stock-split-click-fixture"
         and operation ~= "native-inventory-stock-merge-click-fixture"
         and operation ~= "native-inventory-stock-personal-preview"
-        and operation ~= "native-inventory-view-equip-result"
         and operation ~= "native-inventory-view-split-result"
         and operation ~= "native-inventory-view-drop-result" then return end
     local current = context(state, phase)
@@ -1259,7 +1225,7 @@ function inventory_view.command(fields, state, phase)
         return fixture(current, state, phase, fields[3] == "stock")
     end
     if operation == "native-inventory-view-fixture" and #fields == 5
-        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
+        and (fields[3] == "stock-equip" or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1")
         and #fields[4] == 32 and fields[4]:match("^[0-9a-f]+$") then
         if fields[3] == "stock-sort" and fields[5] == "-" then
             return fixture(current, state, phase, true, fields[4], fields[5])
@@ -1285,14 +1251,6 @@ function inventory_view.command(fields, state, phase)
             error("The staged inventory keyboard action requires the exact displayed sequence", 0)
         end
         return "qualified stock inventory input observed"
-    elseif operation == "native-inventory-view-equip-result" then
-        if #fields ~= 6 or observation.equip_state ~= "equipping" or fields[5] ~= observation.request_guid
-            or (fields[6] ~= "equipped" and fields[6] ~= "refused") or not ready(current, false) then
-            error("The authenticated inventory equip result does not match the pending request", 0)
-        end
-        observation.equip_state = fields[6]
-        show()
-        return "verified inventory equip result displayed"
     elseif operation == "native-inventory-view-drop-result" then
         if #fields ~= 6 or observation.drop_state ~= "dropping" or fields[5] ~= observation.request_guid
             or (fields[6] ~= "dropped" and fields[6] ~= "refused") or not ready(current, false) then
@@ -1359,11 +1317,6 @@ function inventory_view.rows(state, phase, status_row)
     if not observation or not same_context(current, observation.context) then return rows end
     rows[#rows + 1] = status_row("native-inventory-view", observation.state, observation.sequence, current.map, current.name,
         observation.offset or 0, observation.total or 0, observation.count or 0)
-    if observation.state == "rendered" and observation.equip_state then
-        local selected = observation.records[observation.selection]
-        rows[#rows + 1] = status_row("native-guest-inventory-equip-view", observation.sequence, current.map,
-            current.name, selected and selected.guid or "-", observation.equip_state)
-    end
     if observation.drop_state and ready(current, false) then
         local selected = observation.records[observation.selection]
         rows[#rows + 1] = status_row("native-guest-inventory-drop-view", observation.sequence, current.map,
@@ -1379,7 +1332,6 @@ end
 
 function inventory_view.start(bridge, downed)
     event_path = enabled and bridge and bridge ~= "" and bridge .. "/native-inventory-view-events" or nil
-    equip_path = event_path and bridge .. "/native-guest-inventory-equip-events" or nil
     is_downed = downed
     if not event_path then return end
     LoopInGameThreadWithDelay(16, function()

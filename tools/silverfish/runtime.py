@@ -894,7 +894,6 @@ class Bridge:
         self.authored_zone_offset = 0
         self.rest_offset = 0
         self.inventory_view_offset = 0
-        self.inventory_equip_offset = 0
         self.primary_input_offset = 0
         self.held_fire_offset = self.held_fire_sequence = 0
         self.host_camera_input_offset = 0
@@ -955,7 +954,6 @@ class Bridge:
                                 ("native-shop-view-events", self.shop_view_offset),
                                 ("native-wire-board-events", self.wire_board_offset)))
             streams.extend((
-                ("native-guest-inventory-equip-events", self.inventory_equip_offset),
                 ("native-mosby-station-events", self.mosby_station_offset),
             ))
         while (remaining := deadline - time.monotonic()) > 0:
@@ -1222,26 +1220,6 @@ class Bridge:
                     and 0 < len(fields[2]) <= 256 and 0 < len(fields[3]) <= 512
                     and valid_guid(fields[4])):
                 events.append((sequence, fields[2], fields[3], fields[4]))
-        return events
-
-    def native_inventory_equip_requests(self) -> list[tuple[int, str, str, str, str]]:
-        try:
-            with (self.directory / "native-guest-inventory-equip-events").open("rb") as stream:
-                stream.seek(self.inventory_equip_offset)
-                batch = stream.read(4096)
-        except OSError:
-            return []
-        end = batch.rfind(b"\n") + 1
-        self.inventory_equip_offset += end if end else len(batch) if len(batch) == 4096 else 0
-        events = []
-        for line in batch[:end].splitlines():
-            fields = line.decode("utf-8", errors="replace").split("\t")
-            if (len(fields) != 6 or fields[0] != "native-guest-inventory-equip"
-                    or not fields[1].isascii() or not fields[1].isdigit() or len(fields[1]) > 16
-                    or not 0 < (sequence := int(fields[1])) < 2**53
-                    or len(fields[2]) > 256 or any(len(value) > 512 for value in fields[3:])):
-                continue
-            events.append((sequence, *fields[2:]))
         return events
 
     def native_shop_view_requests(self) -> list[tuple[int, int, str, str, str, str, str, str]]:
@@ -2769,9 +2747,6 @@ class Bridge:
                     if key in data:
                         raise ValueError("Duplicate stock inventory drop view")
                     data[key] = native_guest_drop_record.parse_view(fields, data.get("state"), data.get("map"))
-                elif fields[0] == "native-guest-inventory-equip-view" and len(fields) == 6:
-                    data["native_guest_inventory_equip_view"] = {"sequence": int(fields[1]), "map": fields[2],
-                                                                 "pawn": fields[3], "guid": fields[4], "state": fields[5]}
                 elif fields[0] == "native-bag-projection" and len(fields) == 7:
                     data["native_bag_projection"] = {"map": fields[1], "epoch": fields[2], "owner": fields[3],
                                                      "count": int(fields[4]), "requested": int(fields[5]), "status": fields[6]}

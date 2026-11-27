@@ -5989,6 +5989,16 @@ async def verify_stock_unequip(first, second, evidence):
             evidence["guest_quick_drop"].append({"entry": gesture, "slot": slot, "receipt": receipt, "ammo": rounds})
         assert saves() == before, "Quick-slot drops or pickup wrote a save before a checkpoint"
         await close_stock()
+        evidence["stock_context_equip"] = []
+        for (key, slot, _, _), guid in zip(worn, replacements, strict=True):
+            equipped = await submit(guest_run, native_guest_drop.STOCK_EQUIP_FIXTURE, target=guid)
+            assert equipped["ok"] and equipped["stock_inventory_proof"] == f"verified stock equipment slot {slot}", equipped
+            assert equipped[key]["guid"] == guid, equipped
+            if slot == 8:
+                assert equipped[key]["replaced_guid"] == mask, equipped
+            evidence["stock_context_equip"].append(equipped)
+        assert (await portable_probe_command(guest.bridge, probe, "guest-worn-state")).split(",") == replacements
+        assert saves() == before, "Stock context-menu equip wrote a save before a checkpoint"
         action = "native-guest-save-collection-fixture"
         response = await host.bridge.command(action, "start")
         assert response["ack"]["message"] == "requested save collection"

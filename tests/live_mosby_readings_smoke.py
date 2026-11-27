@@ -425,24 +425,10 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
             **original_inventory, jacket_guid: (armor.CLASS_PATH, "armor", 1),
         }
 
-        await action(client, "native-inventory-view-fixture")
-        rendered = await wait(client_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
-        pane = rendered["game"]["native_inventory_view"]
-        selection = rendered["game"]["native_guest_inventory_equip_view"]
-        for _ in range(pane["count"]):
-            if selection["guid"] == reward_guid:
-                break
-            selection = (await action(client, "native-inventory-view-key-fixture", "--target", "down"))["native_guest_inventory_equip_view"]
-        assert (selection["guid"], selection["state"], selection["sequence"]) == (reward_guid, "selecting", pane["sequence"]), selection
-        confirmation = (await action(client, "native-inventory-view-key-fixture", "--target", "confirm"))["native_guest_inventory_equip_view"]
-        assert (confirmation["guid"], confirmation["state"], confirmation["sequence"]) == (reward_guid, "confirming", pane["sequence"])
-        await action(client, "native-inventory-view-key-fixture", "--target", "confirm")
-        await wait(client_run, lambda state: (row := state.get("game", {}).get("native_guest_inventory_equip_view", {})).get("state") == "equipped"
-                   and (row.get("guid"), row.get("sequence")) == (reward_guid, pane["sequence"]))
-        journal = (await command("events", *client, "--tail", "60"))["events"]
-        receipt, = [event for event in journal if event.get("event") == "native_guest_inventory_equipped"
-                    and event.get("view_sequence") == pane["sequence"] and event.get("native_guest_armor", {}).get("guid") == reward_guid]
+        receipt = await action(client, "native-inventory-stock-equip-fixture", "--target", reward_guid)
+        assert receipt["stock_inventory_proof"] == "verified stock equipment slot 9", receipt
         final = receipt["native_guest_armor"]
+        assert final["guid"] == reward_guid, final
         assert (final["status"], final["class_path"], final["replaced_guid"], final["replaced_class_path"], final["minimum"]) == (
             "swapped", armor.HAZOP_CLASS_PATH, jacket_guid, armor.CLASS_PATH, 32.0), final
         assert armor.effects(final)

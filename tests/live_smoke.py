@@ -22,6 +22,7 @@ from stock_acid_fixture import exercise_acid, stage_acid_probe
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.silverfish.native_host_save import slot_path
+from tools.silverfish.control import submit
 from tools.silverfish.native_loot import CRATE as NATIVE_LOOT_CRATE
 from tools.silverfish.authored_loot import PLACEMENTS as AUTHORED_CRATES, full_name as crate_name
 
@@ -1664,23 +1665,20 @@ async def smoke():
                 unavailable = await command(*guest_fire[:4], "--target", uuid.uuid4().hex.upper(), check=False)
                 assert unavailable["ok"] is False, unavailable
                 if args.native_inventory_equip:
-                    local_inventory = ("action", "--profile", profile)
-                    await command(*local_inventory, "native-inventory-view-fixture")
-                    selected = await wait(client_run, lambda state: state.get("game", {}).get("native_guest_inventory_equip_view", {})
-                                          .get("guid") == weapon_guid)
-                    selection = selected["game"]["native_guest_inventory_equip_view"]
-                    assert selection["state"] == "selecting", selection
-                    confirm = (*local_inventory, "native-inventory-view-key-fixture", "--target", "confirm")
-                    armed = (await command(*confirm))["native_guest_inventory_equip_view"]
-                    assert armed["state"] == "confirming", armed
-                    requested = (await command(*confirm))["native_guest_inventory_equip_view"]
-                    assert requested["state"] == "equipping", requested
-                    verified = await wait(client_run, lambda state: state.get("game", {}).get("native_guest_inventory_equip_view", {})
-                                          .get("state") == "equipped")
-                    assert verified["game"]["native_guest_inventory_equip_view"]["guid"] == weapon_guid, verified
-                    equipped = (await command(*guest_inspect))["native_guest_weapon"]
-                    await command(*local_inventory, "native-inventory-view-key-fixture", "--target", "back")
-                    note("stock_inventory_keys_equip_the_authenticated_weapon", {"selection": selection, "weapon": equipped})
+                    stored = await command("action", "--profile", profile, "native-inventory-stock-equip-fixture",
+                                           "--target", weapon_guid)
+                    selection = stored["native_inventory_store_equipment"]
+                    assert selection["guid"] == weapon_guid and stored["stock_inventory_proof"] == (
+                        f"verified stock equipment slot {selection['slot']}"), stored
+                    connected = await wait(client_run, lambda state: state.get("state") == "connected" and state.get("zone_epoch"))
+                    activated = await submit(client_run, "native-guest-weapon-select",
+                                             target=f"{connected['zone_epoch']}@{weapon_guid}")
+                    assert activated["ok"], activated
+                    equipped = activated["native_guest_weapon"]
+                    inspected = (await command(*guest_inspect))["native_guest_weapon"]
+                    assert inspected["guid"] == equipped["guid"] == weapon_guid, (equipped, inspected)
+                    assert inspected["stored_ammo"] == equipped["stored_ammo"] == 7, (equipped, inspected)
+                    note("stock_inventory_equip_preserves_the_authenticated_weapon", {"selection": selection, "weapon": equipped})
                 else:
                     equipped = (await command("action", "--profile", profile, "native-guest-weapon-equip",
                                               "--target", weapon_guid))["native_guest_weapon"]

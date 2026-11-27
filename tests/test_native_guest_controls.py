@@ -560,7 +560,6 @@ class NativeGuestInventoryViewTests(unittest.IsolatedAsyncioTestCase):
         self.area = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
         self.pawn = "Player_FP_C Guest"
         self.guid = "ABCD" * 8
-        self.equip = {"sequence": 3, "map": self.area, "pawn": self.pawn, "guid": self.guid, "state": "equipping"}
         self.displayed = {"state": "rendered", "sequence": 3, "map": self.area, "pawn": self.pawn, "offset": 0,
                           "total": 1, "count": 1}
         self.game = {"state": "connected", "map": self.area, "pawns": {"local": {"name": self.pawn}},
@@ -624,22 +623,6 @@ class NativeGuestInventoryViewTests(unittest.IsolatedAsyncioTestCase):
                 self.bridge.command.assert_awaited_once_with("native-inventory-stock-open", "3", "zone", timeout=5)
                 self.assertEqual(self.client.gameplay_action.await_count, 0 if already_pending else 1)
                 self.assertTrue(self.client.guest_ui.inventory_needs_refresh(self.client))
-
-    async def test_qualified_equipment_reads_exact_row_on_current_page(self):
-        self.displayed.update(offset=16, total=17)
-        item_class = sorted(native_guest_weapon.CLASS_PATHS)[0]
-        self.page.update(offset=16, total=17)
-        self.page["items"][0]["class_path"] = item_class
-        self.game["native_guest_inventory_equip_view"] = self.equip
-        self.bridge.native_inventory_equip_requests = Mock(return_value=[(3, self.area, self.pawn, self.guid, item_class)])
-        self.client.gameplay_action = AsyncMock(side_effect=[{"native_inventory": self.page}, {"ok": True}])
-        await self.client.service_inventory_equip(True)
-        operation = uuid.uuid5(self.bridge.input_namespace, f"session:zone:{self.pawn}:inventory-equip:3").hex
-        self.assertEqual(self.client.gameplay_action.await_args_list, [
-            call("native-inventory-list", operation, "16"), call("native-guest-weapon-equip", operation, self.guid),
-        ])
-        self.bridge.command.assert_awaited_once_with("native-inventory-view-equip-result", "3", self.area, self.guid,
-                                                     "equipped", timeout=2)
 
     def test_stock_open_close_and_valid_page_events_preserve_fragmented_rows(self):
         with TemporaryDirectory() as directory:

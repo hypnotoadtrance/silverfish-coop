@@ -91,24 +91,12 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, g
         assert result["guid"] == guid and result["status"] == "seeded", result
         return guid
 
-    async def equip_from_overlay(guid, key):
-        await act(client, "native-inventory-view-fixture")
-        rendered = await wait(client_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
-        selected = rendered["game"].get("native_guest_inventory_equip_view", {})
-        for _ in range(rendered["game"]["native_inventory_view"]["count"]):
-            if selected.get("guid") == guid:
-                break
-            response = await act(client, "native-inventory-view-key-fixture", "--target", "down")
-            selected = response.get("native_guest_inventory_equip_view", {})
-        assert selected.get("guid") == guid, selected
-        for expected in ("confirming", "equipped"):
-            await act(client, "native-inventory-view-key-fixture", "--target", "confirm")
-            await wait(client_run, lambda state: state.get("game", {}).get("native_guest_inventory_equip_view", {}).get(
-                "state") == expected)
-        journal = (await ask("events", *client, "--tail", "30"))["events"]
-        event, = [row for row in journal if row["event"] == "native_guest_inventory_equipped" and row.get(key, {}).get("guid") == guid]
-        await act(client, "native-inventory-view-key-fixture", "--target", "back")
-        return event
+    async def equip_stock(guid, key):
+        receipt = await act(client, "native-inventory-stock-equip-fixture", "--target", guid)
+        slot = 8 if key == "native_guest_helmet" else 9
+        assert receipt["stock_inventory_proof"] == f"verified stock equipment slot {slot}", receipt
+        assert receipt[key]["guid"] == guid, receipt
+        return dict(receipt, operation_id=receipt["id"])
 
     def projection(state, guid, *, head=False, torso=None):
         key = "native_guest_helmet_projection" if head else "native_guest_armor_projection"
@@ -122,6 +110,7 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, g
     client_flags = ("--headless", "--native-zones")
     if dust_filter or state_disguise:
         host_flags += ("--native-expanded-zones",)
+    if stock_input or dust_filter or state_disguise:
         client_flags += ("--native-guest-inventory-view",)
     try:
         authority = await launch(host, "host", "host", *host, "--port", "0", "--start-zone", area, *host_flags)
@@ -175,10 +164,10 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, g
             uniform = await seed("conscript-uniform")
             helmet = await seed("standard-infantry-helmet")
             goggles = await seed("goggles")
-            await equip_from_overlay(uniform, "native_guest_armor")
+            await equip_stock(uniform, "native_guest_armor")
             armor_only = await recognition()
             assert armor_only["guest"]["configured"] == 0, armor_only
-            await equip_from_overlay(helmet, "native_guest_helmet")
+            await equip_stock(helmet, "native_guest_helmet")
             active = await recognition()
             assert active["host"] == before["host"] and active["guest"]["configured"] == 4, active
             assert (active["guest"]["recognized"], active["guest"]["compromised"]) == (4, False), active
@@ -217,7 +206,7 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, g
             assert restored["npc"] == active["npc"] and restored["pawn"] != active["pawn"], restored
             assert await inventory(client, character) == saved and await inventory(host, "host") == host_before
             evidence["avatar_outfits"]["restored"] = await visible_outfit(CONSCRIPT_UNIFORM_PATH, STANDARD_INFANTRY_HELMET_PATH)
-            await equip_from_overlay(goggles, "native_guest_helmet")
+            await equip_stock(goggles, "native_guest_helmet")
             broken = await recognition()
             assert (broken["guest"], broken["host"]) == (before["guest"], before["host"]), broken
             assert (broken["npc"], broken["pawn"]) == (restored["npc"], restored["pawn"]), broken
@@ -283,7 +272,7 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, g
             assert (back["source"], back["quantity"], back["stackable"]) == ("backpack", 1, False), back
             wrong = await act(client, HELMET_ACTION, "--target", "A" * 32, success=False)
             assert wrong["error"] == "native_guest_armor_exact_owned_row_required", wrong
-            input_receipt = await equip_from_overlay(helmet_guid, "native_guest_helmet")
+            input_receipt = await equip_stock(helmet_guid, "native_guest_helmet")
             head_applied = input_receipt["native_guest_helmet"]
             assert helmet_effects(head_applied) and head_applied["torso_profile"] is None, head_applied
             replay = (HELMET_ACTION, "--target", helmet_guid, "--operation-id", input_receipt["operation_id"])
@@ -292,7 +281,7 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, g
             torso = "hunter-jacket" if gear_profiles else "bomber"
             body_guid = await seed(torso if gear_profiles else None)
             if gear_profiles:
-                body_input = await equip_from_overlay(body_guid, "native_guest_armor")
+                body_input = await equip_stock(body_guid, "native_guest_armor")
                 body_operation_id, body_applied = body_input["operation_id"], body_input["native_guest_armor"]
             else:
                 body_operation_id = uuid.uuid4().hex
@@ -314,7 +303,7 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, g
                 body_row = gear_row(saved, body_guid, "armor", SEED_PROFILES[torso].class_path)
                 for profile, previous_path in (("basic-helmet", DUST_FILTER_PATH), ("goggles", BASIC_HELMET_PATH)):
                     new_helmet = await seed(profile)
-                    input_event = await equip_from_overlay(new_helmet, "native_guest_helmet")
+                    input_event = await equip_stock(new_helmet, "native_guest_helmet")
                     proof = input_event["native_guest_helmet"]
                     operation = (HELMET_ACTION, "--target", new_helmet, "--operation-id", input_event["operation_id"])
                     assert (proof["profile"], proof["status"], proof["replaced_guid"], proof["replaced_class_path"],
@@ -364,16 +353,7 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, g
         wrong = await act(client, ACTION, "--target", "A" * 32, success=False)
         assert wrong["error"] == "native_guest_armor_exact_owned_row_required", wrong
         if stock_input:
-            await act(client, "native-inventory-view-fixture")
-            await wait(client_run, lambda state: state.get("game", {}).get("native_guest_inventory_equip_view", {}).get(
-                "guid") == guid)
-            for expected in ("confirming", "equipped"):
-                await act(client, "native-inventory-view-key-fixture", "--target", "confirm")
-                await wait(client_run, lambda state: state.get("game", {}).get("native_guest_inventory_equip_view", {}).get(
-                    "state") == expected)
-            journal = (await ask("events", *client, "--tail", "20"))["events"]
-            identified, = [event for event in journal if event["event"] == "native_guest_inventory_equipped"
-                           and event.get("native_guest_armor", {}).get("guid") == guid]
+            identified = await equip_stock(guid, "native_guest_armor")
             operation = identified["operation_id"]
             evidence["stock_inventory_input"] = identified
         else:
