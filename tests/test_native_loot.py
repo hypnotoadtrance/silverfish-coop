@@ -208,6 +208,55 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
         host.checkpoint_native.assert_not_awaited()
         self.assertFalse(host.native_checkpoint_unsafe)
 
+    async def test_streamed_quest_projection_and_tombstone_use_the_exact_occurrence(self):
+        loose = native_loose_pickup
+        area, epoch = OBSERVATORY, "1" * 32
+        world = f"{area}.Observitory_P"
+        level = "/FrontierPack/Maps/HideoutA.Hideout:PersistentLevel."
+        raw = level + "Item_Case_C_1"
+        source = f"{area}|{raw}"
+        sibling = source.replace("/HideoutA.", "/HideoutB.")
+        other_world = "/Game/OtherMap/Elsewhere"
+        quest, kind = "Collect_Test", ITEM["class_path"]
+        axes = ["12", "15", "17", "0", "90", "0", "1", "1", "1"]
+        for unqualified in (raw, f"{other_world}|{raw}"):
+            fields = [loose.QUEST_ROW, world, unqualified, quest, kind, *axes]
+            with self.subTest(source=unqualified), self.assertRaises(ValueError):
+                loose.parse_quest_placement(fields, "hosting", area)
+        placements = dict(loose.parse_quest_placement([loose.QUEST_ROW, world, path, quest, kind, *axes],
+                                                     "hosting", area) for path in (source, sibling))
+        status = {"state": "connected", "map": area, loose.VIEW_SCOPE: 1, loose.CAPABILITY: 1}
+        bridge = SimpleNamespace(command=AsyncMock(return_value=status))
+        client = SimpleNamespace(last_game=status, zone_epoch=epoch, host_session="live host", needs_travel=False,
+                                 server_transitioning=False, gameplay_seen=10, control=Mock(), bridge=bridge)
+        view = loose.QuestPlacementView()
+        frame = {"map": area, "epoch": epoch, "items": placements}
+        client.gameplay = {loose.STATE: [], loose.QUEST_FRAME: frame}
+        with patch.object(loose.time, "monotonic", return_value=10):
+            await view.project(client)
+            bridge.command.assert_any_await(loose.QUEST_PROJECT, epoch, source, quest, kind,
+                                            *map(str, map(float, axes)), timeout=1.5, update_status=False)
+            self.assertEqual(set(view.leases), {source, sibling})
+            client.gameplay[loose.STATE] = [source]
+            await view.project(client)
+        bridge.command.assert_awaited_with(loose.QUEST_CLEAR, epoch, source, timeout=1.5, update_status=False)
+        self.assertEqual(set(view.leases), {sibling})
+
+        state = party.new_party()
+        receipt = [loose.CLAIM, area, source, kind, "2", PAWN, "SFCoop_" + "b" * 32, "claimed", "1", "1",
+                   ITEM["guid"], "0", "0", "0", "memory", quest]
+        proof = loose.parse_claim(receipt, "hosting", area)
+        row = {field: proof[field] for field in ("map", "actor", "class_path", "mode", "guid", "quest")}
+        state[loose.STATE] = {source: dict(row, owner="host", epoch=epoch)}
+        saved = party.load_party(state)
+        visibility = loose.Visibility()
+        later = "2" * 32
+        visibility.epoch = later
+        visibility.replenished.add(source)
+        host = SimpleNamespace(last_game={"map": area}, party=saved, zone_epoch=later)
+        self.assertEqual(visibility.hidden(host), [source])
+        self.assertEqual(saved[loose.STATE][source]["quest"], quest)
+
     async def test_streamed_claim_uses_the_owning_campaign_and_survives_missing_local_actor(self):
         loose = native_loose_pickup
         raw = "/FrontierPack/Maps/StockroomInstance.Stockroom:PersistentLevel.Item_Bandage_C_1"

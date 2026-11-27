@@ -836,7 +836,7 @@ namespace
         auto* world = scope.world.Get();
         if (!live(actor) || !live(world) || !scope.profile || scope.profile->quest_id.empty() ||
             !actor->HasAnyFlags(U::RF_WasLoaded) || !boolean(actor, STR("bActorIsBeingDestroyed"), false) ||
-            actor->GetWorld() != world || actor->GetLevel() != object(world, STR("PersistentLevel")) ||
+            !in_loose_level(actor, world) ||
             !live(scope.box.Get()) || source_box(actor) != scope.box.Get() ||
             actor->GetPathName() != scope.profile->actor) return false;
         auto* type = actor->GetClassPrivate();
@@ -1009,15 +1009,16 @@ namespace
 
     bool authored_path(std::basic_string_view<U::TCHAR> path);
 
-    bool quest_placement_fence(U::UObject* source)
+    U::UObject* quest_placement_fence(U::UObject* source)
     {
-        if (!live(source) || !source->HasAnyFlags(U::RF_WasLoaded) || !quest_placement_id(source)) return false;
+        if (!live(source) || !source->HasAnyFlags(U::RF_WasLoaded) || !quest_placement_id(source)) return nullptr;
         auto* actor = static_cast<U::AActor*>(source);
-        auto* world = actor->GetWorld();
-        if (!live(world) || actor->GetLevel() != object(world, STR("PersistentLevel")) ||
+        U::UObject* world = actor->GetWorld();
+        if (auto* active = loose_world.Get(); active != world && in_loose_level(actor, active)) world = active;
+        if (!in_loose_level(actor, world) ||
             !boolean(actor, STR("bActorIsBeingDestroyed"), false) || !networked_placement_world(world) ||
-            authored_path(actor->GetPathName()) || !source_box(actor)) return false;
-        return !generic_payload_fault(actor, false);
+            authored_path(actor->GetPathName()) || !source_box(actor)) return nullptr;
+        return generic_payload_fault(actor, false) ? nullptr : world;
     }
 
     bool settle_drop_projection()
@@ -1079,7 +1080,7 @@ namespace
     bool quest_placement_active(const Scope& scope)
     {
         if (scope.profile->quest_id.empty()) return true;
-        if (!quest_placement_identity(scope)) return false;
+        if (loose_hidden.contains(scope.profile->source) || !quest_placement_identity(scope)) return false;
         if (scope.host)
         {
             auto* save = object(object(scope.world.Get(), STR("OwningGameInstance")), STR("SaveSlot_Ref"));
@@ -1403,9 +1404,9 @@ namespace
             if (function != find<U::UFunction>(add_path)) return;
             auto* item = read(parameter<U::FObjectProperty>(function, STR("Item"), 0), args);
             const auto* scope = actor_scope(item);
-            if ((scope && context == object(scope->world.Get(), STR("OwningGameInstance"))) ||
-                ((drop_fence(item) || quest_placement_fence(item)) &&
-                    context == object(static_cast<U::AActor*>(item)->GetWorld(), STR("OwningGameInstance"))))
+            auto* world = scope ? scope->world.Get() : quest_placement_fence(item);
+            if (!world && drop_fence(item)) world = static_cast<U::AActor*>(item)->GetWorld();
+            if (world && context == object(world, STR("OwningGameInstance")))
                 call.PreventOriginalFunctionCall();
             return;
         }
@@ -2429,7 +2430,8 @@ namespace
             if (found == loose_sources.end() || !found->second.quest_view) return false;
             auto& loose = found->second;
             scope.claimed = hidden;
-            if (!hidden && Clock::now() < loose.quest_view->expires) return true;
+            if (!hidden && Clock::now() < loose.quest_view->expires &&
+                (!path.contains('|') || (live(actor) && boolean(actor->GetLevel(), STR("bIsVisible"), true)))) return true;
             return retire_quest_view(loose);
         }
         if (!live(actor) || (scope.host && !path.contains('|') && !hidden)) return true;
@@ -2464,6 +2466,8 @@ namespace
         {
             if (existing->carry_candidate && !existing->carry_enrolled)
                 loose_carry_pending.emplace(existing->profile.source);
+            if (seat.host && !existing->profile.quest_id.empty())
+                apply_loose_view(existing->profile.source, existing->scope);
             return existing;
         }
         auto* box = source_box(actor);
@@ -2472,7 +2476,7 @@ namespace
         const bool streamed = actor->GetLevel() != object(world, STR("PersistentLevel"));
         const auto source = loose_source_key(path, seat.profile->world, streamed);
         if (loose_actor_path(source, RC::to_utf8_string(seat.profile->world)).empty()) return nullptr;
-        const auto quest = streamed ? std::optional<U::FName>{} : quest_placement_id(actor);
+        const auto quest = quest_placement_id(actor);
         const bool collision = actor->GetActorEnableCollision();
         const bool hidden = boolean(actor, STR("bHidden"), true);
         if (!quest && (!collision || !boolean(actor, STR("bHidden"), false)) &&
@@ -2727,6 +2731,9 @@ namespace
         auto* scope = found != loose_sources.end() ? &found->second.scope : nullptr;
         if (!scope || !live(scope->actor.Get()))
         {
+            // A remote streamed key can outlive that level's current load. Wait
+            // for the local census to enroll it rather than searching by path.
+            if (requested.contains('|')) return 0;
             const auto path = RC::to_wstring(raw);
             scope = loose_actor_scope(find<U::UObject>(path.c_str()));
         }
@@ -3084,7 +3091,7 @@ namespace
         auto* pawn = loose_pawn.Get();
         auto* world = loose_world.Get();
         if (loose_host || !live(pawn) || address(pawn) != pointer || !live(world) ||
-            !valid_drop_epoch(epoch) || (!guest_quest_epoch.empty() && guest_quest_epoch != epoch) || source.contains('|'))
+            !valid_drop_epoch(epoch) || (!guest_quest_epoch.empty() && guest_quest_epoch != epoch))
             return false;
         const auto path = world->GetPathName();
         const Profile profile{.world = path.c_str()};

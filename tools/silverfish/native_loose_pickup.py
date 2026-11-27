@@ -69,7 +69,7 @@ def _stock_source(area, path, class_path, mode):
 
 
 def _quest_source(area, path, class_path, quest):
-    return (_stock_source(area, path, class_path, 2) and "|" not in path
+    return (_stock_source(area, path, class_path, 2)
             and class_path not in native_loot.CASH_RANGES and quest_id(quest))
 
 
