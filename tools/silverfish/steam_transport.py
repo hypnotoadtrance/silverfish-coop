@@ -165,12 +165,16 @@ class SteamTransport:
         """Cumulative SDK send rejections and local receive-poll pressure."""
         return self._pressure.copy()
 
+    def waiting_for_lobby_callback(self, requested: int | None) -> bool:
+        pending = next(iter(self._calls.values()), None)
+        return pending is not None and (requested is None or pending.lobby != requested or not pending.result.done())
+
     async def _lobby_call(self, requested: int | None, *, access: str = "friends") -> int:
         if self._closed or self._opening or self.lobby is not None:
             raise SteamTransportError("A Steam lobby is already active or opening.")
-        pending = next(iter(self._calls.values()), None)
-        if pending is not None and (requested is None or pending.lobby != requested or not pending.result.done()):
+        if self.waiting_for_lobby_callback(requested):
             raise SteamTransportError("Steam is still finishing a previous lobby request.")
+        pending = next(iter(self._calls.values()), None)
         future = asyncio.get_running_loop().create_future()
         if pending is not None:
             # Steam gives the user one regular lobby membership. A retry for

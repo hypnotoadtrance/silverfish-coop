@@ -28,6 +28,7 @@ JOIN_OFFER = "steam-coop-join.tsv"
 JOIN_CANCEL = "steam-coop-join-cancel.tsv"
 BROWSER_CANCEL = "steam-coop-browser-cancel.tsv"
 JOIN_OPENED = "steam-coop-join-opened.tsv"
+_DEFERRED_INVITE_TIMEOUT = 12.0
 
 
 def _status(bridge: Path, state: str, **details):
@@ -137,20 +138,23 @@ class SteamSession:
                     _status(self.title_bridge, "ready")
             if self._role or self._nonce:
                 deferred_invite = None
-            if deferred_invite is not None and not self._browser_nonce:
-                lobby, deferred_invite = deferred_invite, None
-            else:
-                try:
-                    lobby = await asyncio.wait_for(self.transport.pending_invites.get(), .2)
-                except TimeoutError:
+            elif deferred_invite is not None:
+                lobby, expires = deferred_invite
+                if time.monotonic() >= expires:
+                    deferred_invite = None
+                    if not self._browser_nonce:
+                        _status(self.title_bridge, "invite_unavailable")
+                elif not self._browser_nonce and not self.transport.waiting_for_lobby_callback(lobby):
+                    deferred_invite = None
+                    await self.open_lobby(lobby)
                     continue
-            if self._role or self._nonce:
+            try:
+                lobby = await asyncio.wait_for(self.transport.pending_invites.get(), .2)
+            except TimeoutError:
                 continue
-            if self._browser_nonce:
-                # Keep polling cancel while Steam finishes the browser join.
-                deferred_invite = lobby
-                continue
-            await self.open_lobby(lobby)
+            if not self._role and not self._nonce:
+                # Keep checking cancellation while Steam retires a previous lobby request.
+                deferred_invite = lobby, time.monotonic() + _DEFERRED_INVITE_TIMEOUT
 
     async def open_lobby(self, lobby: int, *, browser_nonce: str | None = None) -> bool:
         async with self._lock:

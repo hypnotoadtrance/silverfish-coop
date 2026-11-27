@@ -511,18 +511,20 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(guest.transport.lobby)
             self.assertEqual(runtime.read_json(bridge / steam_session.STATUS)["state"], "ready")
 
-            self.platform.members.add(GUEST)
-            guest_api.callbacks.append((_CALLBACK_ENTER, struct.pack("<QIB3xI4x", LOBBY, 0, 0, 1), handle))
-            await self.ready(lambda: guest_api.left == [LOBBY])
-            self.assertNotIn(GUEST, self.platform.members)
-            self.assertFalse(offer.exists())
+        fresh_lobby = LOBBY + 1
+        guest_api.callbacks.append((_CALLBACK_INVITE, struct.pack("<QQ", fresh_lobby, HOST), 0))
+        await self.ready(lambda: not guest_api.callbacks and guest.transport.pending_invites.empty())
+        self.assertFalse(offer.exists())
+        self.assertEqual(runtime.read_json(bridge / steam_session.STATUS)["state"], "ready")
 
-        guest_api.callbacks.append((_CALLBACK_INVITE, struct.pack("<QQ", LOBBY, HOST), 0))
+        self.platform.members.add(GUEST)
+        guest_api.callbacks.append((_CALLBACK_ENTER, struct.pack("<QIB3xI4x", LOBBY, 0, 0, 1), handle))
         await self.ready(offer.exists)
         kind, invite_nonce, _, _ = offer.read_text().split()
         self.assertEqual(kind, "1")
         self.assertNotIn(invite_nonce, {token, wrong_token})
-        self.assertEqual(guest.transport.lobby, LOBBY)
+        self.assertEqual(guest_api.left, [LOBBY])
+        self.assertEqual(guest.transport.lobby, fresh_lobby)
         self.assertEqual(host.transport.lobby, LOBBY)
 
     async def test_cancel_releases_only_the_current_join_offer_and_allows_a_fresh_invite(self):
