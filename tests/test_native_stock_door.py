@@ -193,6 +193,7 @@ class StockDoorActionTests(unittest.IsolatedAsyncioTestCase):
         view.reconcile(game, CROSSROADS, self.epoch)
         self.assertFalse(game[door.KEY]["doors"][self.actor]["open"])
         self.assertIsNone(view.accept(game, receipt, CROSSROADS, self.epoch, self.actor))
+        self.assertIsNone(view.accept(game, dict(receipt, sequence=24), CROSSROADS, self.epoch, self.actor))
     async def test_pending_motion_releases_dispatch_and_deduplicates_until_authoritative_frame(self):
         reply = {**self.host.last_game, "sequence": 11,
                  "ack": {"message": "stock hinged door interaction dispatched closed"}}

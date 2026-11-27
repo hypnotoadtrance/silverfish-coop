@@ -127,7 +127,8 @@ def frame(game, epoch, actor=None):
         doors = {actor: doors[actor]} if actor in doors else {}
     fields = (*_FLAGS, *_ANGLES, *_OFFSET, OBSERVED)
     return {"map": game["map"], "epoch": epoch, "sequence": game.get("sequence", 0),
-            "doors": {name: {key: row[key] for key in fields if key in row} for name, row in doors.items()}} if doors else {}
+            "doors": {name: {key: row[key] for key in fields if key != OBSERVED or key in row}
+                      for name, row in doors.items()}} if doors else {}
 
 
 class GuestView:
@@ -147,15 +148,18 @@ class GuestView:
                 or not isinstance(doors := delta.get("doors"), dict) or doors.keys() != {actor}
                 or not matches_area(actor, area) or type(sequence := delta.get("sequence")) is not int or sequence <= 0):
             return
+        settled_at = doors[actor].get(OBSERVED, sequence)
+        if type(settled_at) is not int or not 0 < settled_at < 2**53:
+            return
         self._visit(area, epoch)
         previous = gameplay.get(KEY, {})
         current = (previous.get("map"), previous.get("epoch")) == self.scope
         rows = previous["doors"] if current else {}
         version = self.receipts.get(actor, (0, None))[0]
         observed = rows.get(actor, {}).get(OBSERVED, self.snapshot_sequence)
-        if sequence < max(observed, version) or sequence == version and rows.get(actor) == doors[actor]:
+        if settled_at < max(observed, version) or settled_at == version and rows.get(actor) == doors[actor]:
             return
-        self.receipts[actor] = sequence, doors[actor]
+        self.receipts[actor] = settled_at, doors[actor]
         gameplay[KEY] = dict(delta, sequence=max(sequence, previous["sequence"]) if current else sequence,
                              doors=rows | doors)
         return delta
