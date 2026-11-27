@@ -404,15 +404,22 @@ async def _resident_host(work: Path, campaign: Path, mailbox: Path, saved: Path,
     await _resident_title(mailbox, saved, campaign, {"host": plan}, host_campaign=campaign, host_defaults=defaults)
 
 
-def _reserve_campaign(work: Path, campaign_root: Path) -> Path:
+def _reserve_campaign(work: Path, campaign_root: Path, name: str = "") -> Path:
     if campaign_root != work / "campaigns":
         raise ValueError("The co-op campaign directory is redirected")
+    if name and not NAME.fullmatch(name):
+        raise ValueError("Invalid co-op campaign name")
     _exact_existing(work)
     campaign_root.mkdir(exist_ok=True)
     _assert_no_reparse(campaign_root.lstat())
     _exact_existing(campaign_root)
-    for _ in range(8):
-        directory = campaign_root / f"campaign-{uuid.uuid4().hex}"
+    for attempt in range(1, 101 if name else 9):
+        if name:
+            suffix = f"-{attempt}" if attempt > 1 else ""
+            selected = name[:64 - len(suffix)] + suffix
+        else:
+            selected = f"campaign-{uuid.uuid4().hex}"
+        directory = campaign_root / selected
         try:
             directory.mkdir()
         except FileExistsError:
@@ -440,8 +447,6 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
     def host_plan(selected, bind, port, password="", *, creator_requested=False, resume_area=None,
                   steam_access=None, friendly_fire=False):
         if steam_access is not None:
-            if steam is None or steam.pump.done():
-                raise ValueError("Steam networking is unavailable")
             bind, port = "127.0.0.1", 0
         mode, area = (("resume", resume_area) if resume_area is not None
                       else service.menu_host_start(selected, profile=saved.parent))
@@ -499,14 +504,18 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
         if claim.host_settings is None:
             return host_plan(campaign, default_bind, default_port)
         name, address, port_text = claim.host_settings
+        if claim.steam_access is not None and (steam is None or steam.pump.done()):
+            raise ValueError("Steam networking is unavailable")
         bind, port = endpoint(address or default_bind, int(port_text) if port_text else default_port)
         if claim.stock_resume:
             selected, area = saved_campaign(campaign, saved, name)
             return host_plan(selected, bind, port, claim.direct_password or "", resume_area=area,
                              steam_access=claim.steam_access, friendly_fire=claim.friendly_fire)
         selected = campaign
-        if not name and claim.stock_creator and automatic_campaigns:
-            selected = _reserve_campaign(work, campaign.parent)
+        if claim.stock_creator and automatic_campaigns:
+            # New Game always creates an independent campaign. A name may already
+            # be occupied by an older, incompatible checkpoint or a cloud restore.
+            selected = _reserve_campaign(work, campaign.parent, name)
         elif name and name != campaign.name:
             if saved.parent == campaign / "game-user":
                 raise ValueError("The resident title has a different campaign profile")

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import threading
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import uuid
@@ -200,6 +201,38 @@ class SavedCampaignTests(unittest.TestCase):
         self.assertEqual(selected_path(named), directory.parent / "legacy-fixture")
         self.assertEqual(existing.read_bytes(), before)
         self.assertEqual([entry.name for entry in campaign_entries(self.campaign, self.saved)], ["Default"])
+
+    def test_named_new_steam_campaign_can_reuse_a_legacy_display_name(self):
+        legacy = self.campaign.parent / "Testing" / "save" / "campaign.json"
+        legacy.parent.mkdir(parents=True)
+        legacy_data = b'{"schema_version":1}\n'
+        legacy.write_bytes(legacy_data)
+        occupied, slot = self.checkpoint("Testing-2")
+        occupied_data = (occupied / "save" / "campaign.json").read_bytes()
+        slot_data = slot.read_bytes()
+
+        handoff = TitleHandoff(self.root)
+        steam = SimpleNamespace(pump=SimpleNamespace(done=lambda: False))
+        plan = embedded_startup._resident_host_plan(
+            self.root, self.campaign, self.root, self.saved, True, "0.0.0.0", 7777,
+            automatic_campaigns=True, steam=steam,
+        )
+        self.assertTrue(handoff.refresh(ready(), {"host": plan}))
+        generation = handoff.generation
+        handoff.request_path.write_bytes(f"6\t{generation}\t{'e' * 32}\thost\tTesting\tinvite\t\tcreator\n".encode("ascii"))
+        self.assertIsNone(handoff.poll(ready(2)))
+        claim = handoff.poll(ready(3))
+        self.assertTrue(claim.stock_creator)
+        self.assertEqual(claim.steam_access, "invite")
+        start = plan.resolve_claim(claim)
+        with self.assertRaises(FileNotFoundError) as missing:
+            start.read_status()
+        created = Path(missing.exception.filename).parents[1]
+        self.assertEqual(created, self.campaign.parent / "Testing-3")
+        self.assertEqual(list(created.iterdir()), [])
+        self.assertEqual(legacy.read_bytes(), legacy_data)
+        self.assertEqual((occupied / "save" / "campaign.json").read_bytes(), occupied_data)
+        self.assertEqual(slot.read_bytes(), slot_data)
 
     def test_reservation_retries_a_collision_without_touching_the_existing_run(self):
         collision, free = uuid.UUID(int=1), uuid.UUID(int=2)
