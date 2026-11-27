@@ -2317,32 +2317,45 @@ if resident_title and status_publication.installed then
     end)
 end
 
+function status_publication.get_observer_world()
+    if not status_publication.observer_world_read then
+        status_publication.observer_world = current_world()
+        status_publication.observer_world_read = true
+    end
+    return status_publication.observer_world
+end
+
 LoopInGameThreadWithDelay(25, function()
     -- Keep delayed observers off the source world until the native listen handoff finishes.
     if status_publication.listen_departing() then return end
     pcall(native_zone_loading.refresh, current_world)
-    if not leaving and role == "host" then pcall(native_mushrooms.update, current_world) end
-    if not leaving and role == "host" then pcall(native_stock_enemy_drops.update_motion, current_world, status_row) end
+    -- Only these synchronous observers share a viewport read. Command dispatch
+    -- can initiate travel and always resolves its own current world.
+    status_publication.observer_world_read = false
+    local observer_world = status_publication.get_observer_world
+    if not leaving and role == "host" then pcall(native_mushrooms.update, observer_world) end
+    if not leaving and role == "host" then pcall(native_stock_enemy_drops.update_motion, observer_world, status_row) end
     if not leaving and (role == "host" or role == "client") then
-        pcall(native_anomaly_fields.update_destructibles, current_world)
-        pcall(native_authored_pickup.refresh_loose, current_world)
-        pcall(native_weapon_fire_view.update_npc_melee, current_world)
+        pcall(native_anomaly_fields.update_destructibles, observer_world)
+        pcall(native_authored_pickup.refresh_loose, observer_world)
+        pcall(native_weapon_fire_view.update_npc_melee, observer_world)
     end
     if not leaving then pcall(native_prop_carry.update) end
-    if role == "client" and not leaving then pcall(native_corpse_view.animate, current_world) end
-    if role == "host" and not leaving then pcall(native_corpse_view.update_host_grip, current_world) end
-    if role == "host" and not leaving then pcall(native_zone.update_exit, current_world) end
-    if role == "host" and not leaving then pcall(native_weapon_fire_view.flush, current_world) end
-    pcall(native_weapon_fire_view.animate_bolts, (role == "client" or role == "host") and not leaving and current_world or nil)
-    pcall(native_world_view.animate_lightning, role == "client" and not leaving and current_world or nil)
-    if not leaving then pcall(native_voice.footsteps.update, current_world) end
-    if native_avatar_lean_bridge.enabled then pcall(native_avatar_lean_bridge.update, current_world, role, leaving) end
-    if not leaving then pcall(native_player_avatar.animate_head, current_world) end
-    if not leaving then pcall(native_flashlight.animate, current_world) end
-    if not leaving then pcall(native_player_avatar.animate_melee, current_world) end
-    if not leaving then pcall(native_player_avatar.animate_recoil, current_world) end
-    if not leaving then pcall(native_player_avatar.animate_cycle, current_world) end
-    if not leaving then pcall(native_player_avatar.animate_use, current_world) end
+    if role == "client" and not leaving then pcall(native_corpse_view.animate, observer_world) end
+    if role == "host" and not leaving then pcall(native_corpse_view.update_host_grip, observer_world) end
+    if role == "host" and not leaving then pcall(native_zone.update_exit, observer_world) end
+    if role == "host" and not leaving then pcall(native_weapon_fire_view.flush, observer_world) end
+    pcall(native_weapon_fire_view.animate_bolts, (role == "client" or role == "host") and not leaving and observer_world or nil)
+    pcall(native_world_view.animate_lightning, role == "client" and not leaving and observer_world or nil)
+    if not leaving then pcall(native_voice.footsteps.update, observer_world) end
+    if native_avatar_lean_bridge.enabled then pcall(native_avatar_lean_bridge.update, observer_world, role, leaving) end
+    if not leaving then pcall(native_player_avatar.animate_head, observer_world) end
+    if not leaving then pcall(native_flashlight.animate, observer_world) end
+    if not leaving then pcall(native_player_avatar.animate_melee, observer_world) end
+    if not leaving then pcall(native_player_avatar.animate_recoil, observer_world) end
+    if not leaving then pcall(native_player_avatar.animate_cycle, observer_world) end
+    if not leaving then pcall(native_player_avatar.animate_use, observer_world) end
+    status_publication.observer_world = nil
     local now = os.clock()
     local periodic = now >= status_publication.next_snapshot or now >= status_publication.next_frame
     local fields, pending = read_command(periodic)

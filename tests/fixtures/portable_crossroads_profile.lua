@@ -52,10 +52,19 @@ end
 
 function probe.call(tag, operation, ...)
     if not capture or capture.coarse and tag ~= "write_status" and tag ~= "tick"
-        and tag ~= "status_native_reply" then return operation(...) end
+        and tag ~= "status_native_reply" and tag ~= "observer_world_lookup" then return operation(...) end
     local heap_before = not capture.coarse and collectgarbage("count")
     local started, started_cycles = stamp()
     return measured(capture, tag, started, started_cycles, heap_before, operation(...))
+end
+
+function probe.read_observer_world()
+    return probe.call("observer_world_lookup", current_world)
+end
+
+function probe.observer_resolver(cached)
+    if capture and capture.uncached_world then return probe.read_observer_world end
+    return cached
 end
 
 function probe.observers_begin()
@@ -300,7 +309,9 @@ LoopInGameThreadWithDelay(50, function()
     local ticket, action = text:match("^(%x+)\t([a-z]+)$")
     if not ticket or #ticket ~= 32 then return end
     local message
-    if (action == "arm" or action == "coarse" or action == "gcbaseline"
+    if action == "coarseraw" and type(status_publication.get_observer_world) ~= "function" then
+        message = "unavailable"
+    elseif (action == "arm" or action == "coarse" or action == "coarseraw" or action == "gcbaseline"
         or action == "gctuned" or action == "gcmode") and not capture then
         local now, cycles
         if type(stamp) == "function" then now, cycles = stamp() end
@@ -311,6 +322,7 @@ LoopInGameThreadWithDelay(50, function()
             capture, previous, previous_cycles, complete = {
                 rows = {}, calls = {}, peak = 0, peak_calls = {}, started = now,
                 coarse = coarse, deadline = now + (gc_trial and gc_window_us or coarse and coarse_window_us or window_us),
+                uncached_world = action == "coarseraw",
                 gc_mode_trial = action == "gcmode",
                 status_peaks = {}, heap_calls = {}, tick_sources = {}, snapshot_sources = {},
                 max_status_rows = 0, max_status_bytes = 0,

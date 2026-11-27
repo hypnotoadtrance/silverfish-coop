@@ -84,12 +84,21 @@ def instrument_profile(source, *, stock_receipts=False):
     assert rest.count(final_write) == 1
     rest = rest.replace(final_write, '    status_publication.profile.command(profile_fields, periodic, true)\n' + final_write)
     first_observer = "    pcall(" + wrapper + ', "native_zone_loading.refresh", native_zone_loading.refresh, current_world)\n'
-    last_observer = '    if not leaving then pcall(' + wrapper + ', "native_player_avatar.animate_use", native_player_avatar.animate_use, current_world) end\n'
+    cache = "local observer_world = status_publication.get_observer_world"
+    observer_world = "observer_world" if cache in rest else "current_world"
+    last_observer = ('    if not leaving then pcall(' + wrapper + ', "native_player_avatar.animate_use", '
+                     f'native_player_avatar.animate_use, {observer_world}) end\n')
     assert rest.count(first_observer) == rest.count(last_observer) == 1
     rest = rest.replace(first_observer, '    local profile_at, profile_cycles = '
                         'status_publication.profile.observers_begin()\n' + first_observer)
     rest = rest.replace(last_observer, last_observer
                         + '    status_publication.profile.observers_end(profile_at, profile_cycles)\n')
+    if cache in rest:
+        lookup = 'status_publication.observer_world = ' + wrapper + '("current_world", current_world)'
+        assert rest.count(cache) == rest.count(lookup) == 1
+        rest = rest.replace(lookup, "status_publication.observer_world = status_publication.profile.read_observer_world()")
+        rest = rest.replace(cache, "local observer_world = status_publication.profile.observer_resolver("
+                            "status_publication.get_observer_world)")
     mailbox = 'io.open(command_path, "rb")'
     assert before.count(mailbox) == 1
     before = before.replace(mailbox, f'{wrapper}("command_mailbox", io.open, command_path, "rb")')
@@ -764,6 +773,18 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
         assert all(sample["seconds"] >= 5 for sample in samples), samples
         coarse = {"coarse_guest_walking": dict(zip(seats, samples, strict=True)),
                   "coarse_guest_displacement_cm": coarse_displacement}
+        baseline_world = await asyncio.gather(*(command(seat, "coarseraw") for seat in seats.values()))
+        if baseline_world != ["unavailable", "unavailable"]:
+            assert baseline_world == ["armed", "armed"], baseline_world
+            raw_displacement = await walk(2)
+            raw_samples = await asyncio.gather(*(read(seat) for seat in seats.values()))
+            for sample, uncached in zip(samples, raw_samples, strict=True):
+                assert uncached["seconds"] >= 5
+                for readback in (sample, uncached):
+                    assert readback["timings"]["observer_world_lookup"]["count"] > 20, readback
+                assert sample["timings"]["observer_world_lookup"]["count"] <= sample["timings"]["delayed_observers"]["count"]
+            coarse["uncached_world_walking"] = dict(zip(seats, raw_samples, strict=True))
+            coarse["uncached_world_displacement_cm"] = raw_displacement
         if gc_trial == "generational":
             results, switches = {}, {}
             original, = {entry["active"] for entry in collector_modes.values()}
