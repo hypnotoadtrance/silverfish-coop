@@ -86,82 +86,59 @@ function arrival.prepare_time(state, phase, step)
     return step
 end
 
-local function same_world_actor(actor, world)
-    return valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed()
+local function tag_name(value)
+    return type(value) ~= "string" and value and value:ToString() or value
 end
 
-local function marker_level(statics, marker, world)
-    local level = marker:GetOuter()
-    if same(level, world.PersistentLevel) then return "arrow" end
-    if not valid(level) or level.bIsVisible ~= true then return end
-    local subworld = level:GetOuter()
-    local package = valid(subworld) and subworld:GetOuter()
-    local name = valid(package) and package:GetFullName():match("^Package (/.+)$")
-    local streaming = name and statics:GetStreamingLevel(world, FName(name))
-    if valid(streaming) and streaming:IsLevelVisible() and same(streaming:GetLoadedLevel(), level) then
-        return "streamed-arrow"
+local function marker_owner(marker, level, world, tag, kind, door_class_type, expected)
+    local component = marker:GetParentComponent()
+    if kind == "overlap" then
+        if valid(component) then return nil, "entrance-not-standalone" end
+        return marker
     end
+    local door = valid(component) and component:GetOwner()
+    if not valid(door) or not valid(door_class_type) or not door:IsA(door_class_type) or not door:HasAuthority()
+        or not same(world_path.visible_actor_level(door, world), level)
+        or not same(door.LevelExit_Spawn_BP, component) or not same(component.ChildActor, marker)
+        or tag_name(door["Entrance Tag"]) ~= tag
+        or (expected and (not same(level, world.PersistentLevel) or door:GetFullName() ~= expected)) then
+        return nil, "arrival-door-unavailable"
+    end
+    return door
 end
 
-local function marker_for_tag(world, tag, kind)
-    local match, placement
+local function arrival_for_tag(world, tag, kind, expected)
+    local match, refusal = nil, "entrance-unavailable"
     local statics, class = StaticFindObject(statics_path), StaticFindObject(spawn_type)
     if not valid(statics) or not valid(class) then error("The stock entrance marker class is unavailable", 0) end
+    local door_class_type = kind == "door" and StaticFindObject(door_type)
+    local arrow_type = StaticFindObject("/Script/Engine.ArrowComponent")
     local found = {}
     statics:GetAllActorsOfClass(world, class, found)
     for _, candidate in ipairs(found.OutActors or found) do
         local marker = candidate
         if type(marker.type) == "function" and marker:type() == "RemoteUnrealParam" then marker = marker:get() end
-        if valid(marker) and not marker:IsActorBeingDestroyed() and marker:IsA(class) then
-            local name = marker.EntranceTag
-            if type(name) ~= "string" and name then name = name:ToString() end
-            if name == tag and name ~= "None" then
-                local position
-                if kind == "door" then
-                    position = same_world_actor(marker, world) and "arrow"
-                else
-                    position = marker_level(statics, marker, world)
-                end
-                if position then
-                    if match then return nil, "duplicate-entrance-tag" end
-                    match, placement = marker, position
+        if valid(marker) and marker:IsA(class) and marker:HasAuthority()
+            and tag ~= "None" and tag_name(marker.EntranceTag) == tag then
+            local level = world_path.visible_actor_level(marker, world)
+            if level then
+                local actor, reason = marker_owner(marker, level, world, tag, kind, door_class_type, expected)
+                if actor then
+                    local arrow = marker.Arrow
+                    if valid(arrow) and same(arrow:GetClass(), arrow_type) and same(arrow:GetOwner(), marker) then
+                        if match then return nil, "duplicate-entrance-tag" end
+                        match = {actor = actor, arrow = arrow,
+                            placement = same(level, world.PersistentLevel) and "arrow" or "streamed-arrow"}
+                    else
+                        refusal = "arrival-arrow-unavailable"
+                    end
+                elseif refusal == "entrance-unavailable" then
+                    refusal = reason
                 end
             end
         end
     end
-    if not match or not match:HasAuthority() then return nil, "entrance-unavailable" end
-    return match, placement
-end
-
-local function door_for_marker(world, expected, marker, tag)
-    local match
-    for _, door in ipairs(FindAllOf(door_class) or {}) do
-        if same_world_actor(door, world) and door:GetFullName() == expected then
-            if match then error("The authored arrival door is ambiguous", 0) end
-            match = door
-        end
-    end
-    local component = match and match.LevelExit_Spawn_BP
-    local parent_tag = match and match["Entrance Tag"]
-    if type(parent_tag) ~= "string" and parent_tag then parent_tag = parent_tag:ToString() end
-    if not match or not match:HasAuthority() or parent_tag ~= tag or not valid(component)
-        or not same(component:GetOwner(), match) or not same(component.ChildActor, marker)
-        or not same(marker:GetParentComponent(), component) then
-        error("The exact authored door does not own this stock arrival marker", 0)
-    end
-    return match
-end
-
-local function discovered_door_for_marker(marker, tag)
-    local component = marker:GetParentComponent()
-    local door = valid(component) and component:GetOwner()
-    local class = StaticFindObject(door_type)
-    if not valid(door) or not valid(class) or not door:IsA(class) or door:IsActorBeingDestroyed()
-        or not door:HasAuthority() or not same(door:GetOuter(), marker:GetOuter())
-        or not same(door.LevelExit_Spawn_BP, component) or not same(component.ChildActor, marker) then return end
-    local door_tag = door["Entrance Tag"]
-    if type(door_tag) ~= "string" and door_tag then door_tag = door_tag:ToString() end
-    if door_tag == tag then return door end
+    return match, refusal
 end
 
 local function keep_stock_spawn(map, pawn, reason)
@@ -181,8 +158,7 @@ function arrival.place(state, phase, tag, kind, actor_name)
     local map = state.map
     local basename = world_path.leaf(map)
     local class = kind == "overlap" and spawn_class or kind == "door" and door_class
-    local discovered_door = kind == "door" and actor_name == "-"
-    local exact_door = kind == "door" and not discovered_door
+    local exact_door = kind == "door" and actor_name ~= "-"
     if not basename or type(tag) ~= "string" or #tag > 64 or not tag:match("^[A-Za-z0-9_%-]+$")
         or not class or type(actor_name) ~= "string"
         or (exact_door and not actor_name:match("^" .. door_class .. "_%d+$"))
@@ -192,35 +168,21 @@ function arrival.place(state, phase, tag, kind, actor_name)
 
     local destination = map .. "." .. basename
     local pawn, controller, world = host_context(state, phase, destination)
-    local expected = class .. " " .. destination .. ":PersistentLevel." .. actor_name
-    local marker, placement = marker_for_tag(world, tag, exact_door and "door" or "overlap")
-    if not marker then
-        if not exact_door then return keep_stock_spawn(map, pawn, placement) end
-        error("The door arrival marker is unavailable or ambiguous", 0)
-    end
-    local actor = marker
-    if exact_door then
-        actor = door_for_marker(world, expected, marker, tag)
-    elseif discovered_door then
-        actor = discovered_door_for_marker(marker, tag)
-        if not actor then return keep_stock_spawn(map, pawn, "arrival-door-unavailable") end
-    elseif valid(marker:GetParentComponent()) then
-        return keep_stock_spawn(map, pawn, "entrance-not-standalone")
-    end
-    local arrow = marker.Arrow
-    if not valid(arrow) or not same(arrow:GetClass(), StaticFindObject("/Script/Engine.ArrowComponent"))
-        or not same(arrow:GetOwner(), marker) then
-        if not exact_door then return keep_stock_spawn(map, pawn, "arrival-arrow-unavailable") end
-        error("The exact authored entrance has no stock Arrow component", 0)
+    local expected = exact_door and class .. " " .. destination .. ":PersistentLevel." .. actor_name
+    local match, refusal = arrival_for_tag(world, tag, kind, expected)
+    if not match then
+        if not exact_door then return keep_stock_spawn(map, pawn, refusal) end
+        error("The exact door arrival is unavailable: " .. refusal, 0)
     end
 
+    local arrow = match.arrow
     local target, rotation = arrow:K2_GetComponentLocation(), arrow:K2_GetComponentRotation()
     local location = bed.place_host(pawn, controller, world, target, rotation, "arrow")
     local x, y, z = location.X - target.X, location.Y - target.Y, location.Z - target.Z
     if x * x + y * y + z * z > max_placement_error * max_placement_error then
         error("The stock arrival could not be placed within two meters of its Arrow", 0)
     end
-    return { destination = map, actor = actor:GetFullName(), placement = placement,
+    return { destination = map, actor = match.actor:GetFullName(), placement = match.placement,
         x = location.X, y = location.Y, z = location.Z }
 end
 

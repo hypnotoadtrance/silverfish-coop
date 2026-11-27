@@ -96,17 +96,58 @@ sublevel.bIsVisible = true
 streaming.GetLoadedLevel = function() return level end
 assert(arrival.place(state, "hosting", "Mod-Entrance", "overlap", "-").actor == candidates[2]:GetFullName())
 
-local entrance = marker("DoorMarker_13")
-local door = object("ModDoor_C " .. destination .. ":PersistentLevel.Door_83", {
-    GetOuter = entrance.GetOuter, IsA = function(_, class) return class == door_type end,
-    ["Entrance Tag"] = "Mod-Entrance",
-})
-local component = object("ChildActorComponent", {GetOwner = function() return door end, ChildActor = entrance})
-entrance.GetParentComponent = function() return component end
-door.LevelExit_Spawn_BP = component
+local function doorway(name, marker_name, map_world, map_level)
+    local entrance = marker(marker_name)
+    entrance.GetOuter = function() return map_level end
+    entrance.GetWorld = function() return map_world end
+    local door = object(name, {
+        GetOuter = entrance.GetOuter, GetWorld = entrance.GetWorld,
+        IsA = function(_, class) return class == door_type end,
+        ["Entrance Tag"] = "Mod-Entrance",
+    })
+    local component = object("ChildActorComponent", {GetOwner = function() return door end, ChildActor = entrance})
+    entrance.GetParentComponent = function() return component end
+    door.LevelExit_Spawn_BP = component
+    return door, entrance
+end
+
+local door, entrance = doorway("ModDoor_C " .. destination .. ":PersistentLevel.Door_83", "DoorMarker_13", world, level)
 candidates = {entrance}
 local discovered = arrival.place(state, "hosting", "Mod-Entrance", "door", "-")
 assert(discovered.actor == door:GetFullName() and discovered.placement == "arrow")
 door.LevelExit_Spawn_BP = nil
 local wrong_owner = arrival.place(state, "hosting", "Mod-Entrance", "door", "-")
 assert(wrong_owner.actor == host:GetFullName() and wrong_owner.placement == "stock-spawn:arrival-door-unavailable")
+
+local exact_door_name = "Dungeon_TransitionDoor_BP_C_17"
+local exact_door, stock_child = doorway("Dungeon_TransitionDoor_BP_C " .. destination .. ":PersistentLevel." .. exact_door_name,
+    "DoorMarker_17", world, level)
+local open_marker = marker("StandaloneMarker_18")
+candidates = {entrance, open_marker, stock_child}
+local host_arrivals = location_calls
+assert(arrival.place(state, "hosting", "Mod-Entrance", "overlap", "-").actor == open_marker:GetFullName())
+assert(arrival.place(state, "hosting", "Mod-Entrance", "door", "-").actor == exact_door:GetFullName())
+assert(location_calls == host_arrivals + 2)
+
+local _, other_child = doorway("ModDoor_C " .. destination .. ":PersistentLevel.OtherDoor_18", "OtherChild_18", world, level)
+candidates[4] = other_child
+local ambiguous_door = arrival.place(state, "hosting", "Mod-Entrance", "door", "-")
+assert(ambiguous_door.actor == host:GetFullName() and ambiguous_door.placement == "stock-spawn:duplicate-entrance-tag")
+assert(location_calls == host_arrivals + 2)
+assert(arrival.place(state, "hosting", "Mod-Entrance", "door", exact_door_name).actor == exact_door:GetFullName())
+
+local invalid_arrow = marker("InvalidArrow_19")
+invalid_arrow.Arrow = open_marker.Arrow
+candidates[5] = invalid_arrow
+assert(arrival.place(state, "hosting", "Mod-Entrance", "overlap", "-").actor == open_marker:GetFullName())
+
+streaming.GetLoadedLevel = function() return sublevel end
+local streamed_door, streamed_child = doorway("ModDoor_C " .. package_name .. ".Streamed:PersistentLevel.Door_22",
+    "StreamedChild_22", subworld, sublevel)
+candidates = {open_marker, streamed_child}
+local streamed_arrival = arrival.place(state, "hosting", "Mod-Entrance", "door", "-")
+assert(streamed_arrival.actor == streamed_door:GetFullName() and streamed_arrival.placement == "streamed-arrow")
+sublevel.bIsVisible = false
+assert(arrival.place(state, "hosting", "Mod-Entrance", "door", "-").actor == host:GetFullName())
+
+print("Arrival matches route kind, exact owner, visible stream and valid Arrow before checking ambiguity")
