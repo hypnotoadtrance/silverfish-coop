@@ -14,6 +14,9 @@ KEY = "native_avatar_outfits"
 RECEIPT = "native_avatar_outfits_receipt"
 PROJECT = "native-avatar-outfits"
 REPLY = "native-avatar-outfits-reply"
+HOST_AIM = "native-avatar-host-aims"
+GUEST_SPRINTS = "player-guest-sprints"
+HOST_CONTROL_REPLY = "native-host-control-reply"
 HOST_AIM_RECEIPT = "native_avatar_host_aim_receipt"
 LOCAL_AIM = "native_avatar_local_aim"
 LOCAL_LIGHTER = "native_avatar_local_lighter"
@@ -272,8 +275,14 @@ async def project_host(host, bridge):
     if game.get(HOST_AIM_RECEIPT) == receipt:
         return game
     arguments = [value for pair in sorted(aims.items()) for value in pair]
-    return await bridge.command("native-avatar-host-aims", incoming["map"], receipt,
-                                *_visor_arguments(visors), *arguments, timeout=2)
+    snapshot = await bridge.command(HOST_AIM, incoming["map"], receipt, *_visor_arguments(visors), *arguments, timeout=2)
+    current = host.last_game
+    if ((host.zone_epoch, current.get("state"), current.get("map")) != (incoming["epoch"], "hosting", incoming["map"])
+            or snapshot.get("sequence", 0) < current.get("sequence", 0)):
+        return current
+    if snapshot.get(HOST_CONTROL_REPLY):
+        return bridge.remember_local_avatar_receipt(current, snapshot, hosted=True)
+    return snapshot
 
 
 async def project(bridge, game, incoming, epoch):
@@ -315,5 +324,5 @@ async def project(bridge, game, incoming, epoch):
                           "-" if motion is None else str(int(motion))))
     snapshot = await bridge.command(PROJECT, area, receipt, *arguments, timeout=4)
     if snapshot.get(REPLY):
-        return bridge.remember_local_avatar_outfits(game, snapshot)
+        return bridge.remember_local_avatar_receipt(game, snapshot)
     return snapshot

@@ -1074,18 +1074,27 @@ function avatar.command(fields, state, phase)
     return "Remote avatar outfits received"
 end
 
-function avatar.outfit_reply(fields, state, phase, sequence, row)
+local function apply_pose_frame(fields, state, phase)
     local accepted, message = pcall(avatar.command, fields, state, phase)
     if accepted then
         local synced, failure = pcall(avatar.sync, state, phase)
         if not synced then accepted, message = false, failure end
     end
-    local receipt = accepted and client_receipt or "-"
-    if accepted and receipt ~= fields[4] then
-        accepted, message = false, "Remote avatar outfit readback changed"
+    local receipt = phase == "hosting" and host_aim_receipt or phase == "connected" and client_receipt
+    if accepted and (not receipt or receipt ~= fields[4]) then
+        return false, "Avatar pose readback changed", "-"
     end
+    return accepted, message, accepted and receipt or "-"
+end
+
+function avatar.host_aim_reply(fields, state, phase)
+    return apply_pose_frame(fields, state, phase)
+end
+
+function avatar.outfit_reply(fields, state, phase, sequence, row)
+    local accepted, message, receipt = apply_pose_frame(fields, state, phase)
     return row("native-avatar-outfits-reply", 1, fields[1], phase, state.map, state.local_pawn.name,
-        sequence, accepted and receipt or "-", accepted and "accepted" or "error", message) .. "\n"
+        sequence, receipt, accepted and "accepted" or "error", message) .. "\n"
 end
 
 local function read_head_roll(pivot)

@@ -2265,7 +2265,15 @@ class Host:
         states = tuple(sorted((record[1], "1" if record[2] else "0") for record in active.values()))
         receipt = (self.zone_epoch, states)
         if receipt != self.applied_guest_sprints:
-            await bridge.command("player-guest-sprints", area, *(value for state in states for value in state), timeout=2)
+            view = await bridge.command(native_player_avatar.GUEST_SPRINTS, area,
+                                        *(value for state in states for value in state), timeout=2)
+            if ((self.zone_epoch, self.last_game.get("map")) != (receipt[0], area)
+                    or self.last_game.get("state") != "hosting"):
+                return
+            if view.get(native_player_avatar.HOST_CONTROL_REPLY):
+                pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
+                if view["pawn"] != pawn or view["sequence"] < self.last_game.get("sequence", 0):
+                    raise RuntimeError("The resident guest sprint receipt did not match the current host")
             self.applied_guest_sprints = receipt
 
     def receive_prop_pose(self, guest_id: str, frame: bytes) -> None:

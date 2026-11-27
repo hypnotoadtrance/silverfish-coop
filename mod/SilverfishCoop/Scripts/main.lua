@@ -2049,6 +2049,22 @@ local function tick(fields, pending, periodic)
             native_player_avatar.outfit_reply(fields, state, current_phase, sequence, status_row))
         return true
     end
+    if fields and pending and (fields[2] == "native-avatar-host-aims" or fields[2] == "player-guest-sprints")
+        and not periodic and current_phase == "hosting" and status_publication.compact()
+        and status_publication.steady(state, current_phase) and os.clock() < status_publication.next_frame then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        local accepted, message, receipt
+        if fields[2] == "native-avatar-host-aims" then
+            accepted, message, receipt = native_player_avatar.host_aim_reply(fields, state, current_phase)
+        else
+            accepted, message = pcall(players.command, fields, state, current_phase)
+        end
+        local reply = status_row("native-host-control-reply", 1, fields[1], fields[2], state.map, state.local_pawn.name,
+            sequence, receipt or "-", accepted and "accepted" or "error", message)
+        SilverfishPublishLocalBridgeReply(pending.ticket, reply .. "\n")
+        return true
+    end
     if fields and pending and fields[2] == "native-weather-siren-play" and not periodic
         and current_phase == "connected" and world_view_enabled
         and status_publication.compact() and status_publication.steady(state, current_phase) then

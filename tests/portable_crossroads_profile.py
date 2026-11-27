@@ -77,6 +77,17 @@ def instrument_profile(source, *, stock_receipts=False):
         rest = rest.replace(gate, admission)
         rest = rest.replace(publish, "        if accepted then status_publication.profile.stock_receipt("
                             "fields[2], #reply + (readback and #readback or 0)) end\n" + publish)
+        host_control = ('and not periodic and current_phase == "hosting" and status_publication.compact()\n'
+                        '        and status_publication.steady(state, current_phase) and os.clock() < status_publication.next_frame')
+        if 'status_row("native-host-control-reply"' in rest:
+            assert rest.count(host_control) == 1
+            rest = rest.replace(host_control, host_control.replace(
+                "status_publication.compact()", "resident_title and status_publication.installed "
+                "and status_publication.memory_live"))
+            host_receipt = 'sequence, receipt or "-", accepted and "accepted" or "error", message)\n'
+            assert rest.count(host_receipt) == 1
+            rest = rest.replace(host_receipt, host_receipt
+                                + '        if accepted then status_publication.profile.stock_receipt(fields[2], #reply + 1) end\n')
     tick = "local function tick(fields, pending, periodic)\n"
     assert rest.count(tick) == 1
     rest = rest.replace(tick, tick + "    local profile_fields = fields\n"

@@ -111,6 +111,77 @@ class BridgeWalkTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_host_aim_reply_does_not_replace_a_newer_checkpoint_observation(self):
+        avatar = runtime.native_player_avatar
+        area, epoch = "/Game/Maps/Camp", "a" * 32
+        game = {"sequence": 9, "state": "hosting", "map": area,
+                "pawns": {"local": {"name": "Player_FP_C host"}}}
+        newer = {**game, "sequence": 10, "checkpoint_revision": 2}
+        host = SimpleNamespace(last_game=game, zone_epoch=epoch, guest_avatar_aims={"guest": "rifle"})
+        incoming = {"map": area, "epoch": epoch, "outfits": {}, "lighter_modes": {}, "visor_players": []}
+        bridge = runtime.Bridge(Path("unused"), None)
+
+        async def complete(action, _area, digest, **kwargs):
+            self.assertEqual(action, avatar.HOST_AIM)
+            host.last_game = newer
+            return {avatar.HOST_CONTROL_REPLY: True, avatar.HOST_AIM_RECEIPT: digest,
+                    "state": "hosting", "sequence": sequence, "map": area, "pawn": "Player_FP_C host"}
+
+        bridge.command = AsyncMock(side_effect=complete)
+        with patch.object(avatar, "frame", return_value=incoming):
+            sequence = 9
+            self.assertIs(await avatar.project_host(host, bridge), newer)
+            sequence = 10
+            result = await avatar.project_host(host, bridge)
+            self.assertEqual(result["checkpoint_revision"], 2)
+            self.assertEqual(result["sequence"], 10)
+            self.assertIn(avatar.HOST_AIM_RECEIPT, result)
+
+    async def test_host_control_receipts_preserve_full_status(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        avatar = runtime.native_player_avatar
+        area, pawn, digest = "/Game/Maps/Camp", "Player_FP_C host", "a" * 32
+        mode = "valid"
+
+        def full(sequence, owner=pawn):
+            return (f"schema\t1\nseq\t{sequence}\nack\tprevious\taccepted\tfull\n"
+                    f"session\thost\thosting\t{area}\t1\t0\npawn\tlocal\t{owner}\t10\t1\t2\t3\tPC\n")
+
+        async def reply(payload, _timeout):
+            nonce, action, target, *arguments = payload.decode().rstrip("\n").split("\t")
+            marker = arguments[0] if action == avatar.HOST_AIM else "-"
+            if mode == "wrong marker":
+                marker = "b" * 32
+            if mode == "wrong command":
+                action = avatar.PROJECT
+            owner = "Player_FP_C replacement" if mode == "wrong pawn" else pawn
+            return (f"{avatar.HOST_CONTROL_REPLY}\t1\t{nonce}\t{action}\t{target}\t{owner}"
+                    f"\t9\t{marker}\taccepted\tapplied\n")
+
+        bridge.local_bridge = Mock(command=AsyncMock(side_effect=reply))
+        bridge.local_bridge.read_status.return_value = full(9)
+        initial = bridge.snapshot()
+        aim = await bridge.command(avatar.HOST_AIM, area, digest, "5", "rifle")
+        self.assertEqual(aim[avatar.HOST_AIM_RECEIPT], digest)
+        confirmed = bridge.remember_local_avatar_receipt(initial, aim, hosted=True)
+        self.assertEqual(confirmed, {**initial, avatar.HOST_AIM_RECEIPT: digest})
+        self.assertEqual(bridge.snapshot(), confirmed)
+        sprint = await bridge.command(avatar.GUEST_SPRINTS, area, "Player_FP_C teammate", "1")
+        self.assertEqual((sprint["map"], sprint["pawn"], sprint["sequence"]), (area, pawn, 9))
+        self.assertLess(sprint["local_reply_bytes"], 256)
+        self.assertEqual(bridge.snapshot(), confirmed)
+        self.assertIsNone(bridge._local_status)
+
+        bridge.local_bridge.read_status.return_value = full(10)
+        self.assertNotIn(avatar.HOST_AIM_RECEIPT, bridge.snapshot())
+        for mode, failure in (("wrong marker", "requested pose"), ("wrong command", "match the request")):
+            with self.subTest(mode=mode), self.assertRaisesRegex(RuntimeError, failure):
+                await bridge.command(avatar.HOST_AIM, area, digest)
+        mode = "wrong pawn"
+        aim = await bridge.command(avatar.HOST_AIM, area, digest)
+        with self.assertRaisesRegex(RuntimeError, "current host"):
+            bridge.remember_local_avatar_receipt(initial, aim, hosted=True)
+
     async def test_avatar_outfit_receipt_preserves_full_status_and_expires_with_its_scope(self):
         bridge = runtime.Bridge(Path("unused"), None)
         avatar = runtime.native_player_avatar

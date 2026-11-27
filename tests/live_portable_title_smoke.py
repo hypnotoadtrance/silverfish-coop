@@ -25,7 +25,7 @@ from tools.silverfish import (
     direct_ip, embedded_startup, native_finite_shop, native_guest_consumable, native_guest_drop, native_guest_melee,
     native_dialogue, native_host_save, native_inventory, native_loose_pickup, native_smg_hold,
     native_anomaly_effects, native_critters, native_destructibles, native_lantern, native_npc_barter, native_loot, native_prop_carry, native_stash, native_stock_switch, native_weapon_fire_view,
-    native_stock_door, native_stock_enemy_drops, native_world_loot, runtime,
+    native_player_avatar, native_stock_door, native_stock_enemy_drops, native_world_loot, runtime,
 )
 from tools.silverfish.authored_loot import GUARANTEED_CRATES
 from tools.silverfish import native_computer_board, native_dead_drop
@@ -8333,7 +8333,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
 
             def crossroads_overlay(source):
                 profiled = instrument_profile(source, stock_receipts=bool(
-                    stock_crossroads_door or stock_warehouse_switch or oil_lamps_check))
+                    stock_crossroads_door or stock_warehouse_switch or oil_lamps_check or tutorial_dock_gait))
                 # Native globals are registered on the co-op Lua state.
                 return (profiled + "\nstatus_publication.cold_crate_probe = function()\n" + crate_probe
                         + "\nend\nstatus_publication.cold_crate_probe()\n") if crate_probe else profiled
@@ -8821,6 +8821,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     gameplay.update(await run_resident_checks(checks, host, guest, finish_check, skip_check))
                     if crossroads_profile and ((campaign == "crossroads" and stock_crossroads_door)
                                                or (campaign == "tutorial_dock" and stock_warehouse_switch)
+                                               or (campaign == "tutorial_dock_combat" and tutorial_dock_gait)
                                                or (campaign == "oil_lamps" and oil_lamps_check)):
                         from portable_crossroads_profile import read_stock_receipts
 
@@ -8833,6 +8834,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                         if campaign == "tutorial_dock" and results["stock_warehouse_switch"]["passed"]:
                             assert host_receipts.get(native_stock_switch.ACTION, {}).get("count", 0) > 0, evidence
                             assert guest_receipts.get(native_stock_switch.PROJECT, {}).get("count", 0) > 0, evidence
+                        if campaign == "tutorial_dock_combat" and results["stock_grounded_gait"]["passed"]:
+                            for action in (native_player_avatar.HOST_AIM, native_player_avatar.GUEST_SPRINTS):
+                                assert host_receipts.get(action, {}).get("count", 0) > 0, evidence
                         if campaign == "oil_lamps" and results["stock_oil_lamps"]["passed"]:
                             assert host_receipts.get(native_stock_switch.IGNITE, {}).get("count", 0) > 0, evidence
                     return gameplay
