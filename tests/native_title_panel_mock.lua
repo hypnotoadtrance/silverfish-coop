@@ -585,18 +585,19 @@ click("steam-public")
 local prefix = ("1\t%s\t%s\t"):format(browse_generation, operation_id())
 assert(files[browse_request] == prefix .. "search\n")
 files[browse_request] = nil
-local function public_list(count)
+local function lobby_id(index) return "1844674407370955160" .. index end
+local function public_list(order)
     local rows = {}
-    for index = 1, count do rows[index] = ("Fixture Host %d\trc-abcdef0\t1\n"):format(index) end
-    return ("2\t%s\t%s\tready\t%d\n%s"):format(browse_generation, operation_id(), #rows, table.concat(rows))
+    for index, id in ipairs(order) do rows[index] = ("%s\tFixture Host\trc-abcdef0\t1\n"):format(lobby_id(id)) end
+    return ("3\t%s\t%s\tready\t%d\n%s"):format(browse_generation, operation_id(), #rows, table.concat(rows))
 end
-files[browse_response] = public_list(6)
+files[browse_response] = public_list({1, 2, 3, 4, 5, 6})
 tick()
-assert(display.buttons["steam-pick:1"].label == "Fixture Host 1")
+assert(display.buttons["steam-pick:1"].label == "Fixture Host")
 click("steam-next")
-assert(display.buttons["steam-pick:6"].label == "Fixture Host 6" and not display.buttons["steam-pick:1"])
+assert(display.buttons["steam-pick:6"].label == "Fixture Host" and not display.buttons["steam-pick:1"])
 click("steam-pick:6")
-assert(files[browse_request] == prefix .. "6\n")
+assert(files[browse_request] == prefix .. lobby_id(6) .. "\n")
 
 files[steam_cancel], files[steam_join], files[steam_opened] = nil, nil, nil
 local public_nonce = operation_id()
@@ -624,13 +625,13 @@ local refreshed_prefix = ("1\t%s\t%s\t"):format(browse_generation, operation_id(
 assert(refreshed_prefix ~= prefix and files[browse_request] == refreshed_prefix .. "search\n")
 assert(display.note == "Looking for public lobbies…")
 files[browse_request] = nil
-files[browse_response] = public_list(6)
+files[browse_response] = public_list({1, 2, 6, 3, 4, 5})
 now = 107
 tick()
-assert(display.focus == "steam-pick:6" and display.buttons["steam-pick:6"] and not display.buttons["steam-pick:1"])
+assert(display.focus == "steam-pick:3" and display.buttons["steam-pick:3"] and not display.buttons["steam-pick:6"])
 offer("host,join", 117, browse_generation, defaults)
-click("steam-pick:6")
-assert(files[browse_request] == refreshed_prefix .. "6\n")
+click("steam-pick:3")
+assert(files[browse_request] == refreshed_prefix .. lobby_id(6) .. "\n")
 files[browse_request] = nil
 local closed_nonce = operation_id()
 now = 108
@@ -646,10 +647,10 @@ now = 112
 tick()
 assert(files[browse_request] == ("1\t%s\t%s\tsearch\n"):format(browse_generation, operation_id()))
 files[browse_request], files[steam_cancel] = nil, nil
-files[browse_response] = public_list(2)
+files[browse_response] = public_list({1, 2})
 now = 113
 tick()
-assert(display.buttons["steam-pick:1"] and display.buttons["steam-pick:2"] and not display.focus)
+assert(display.buttons["steam-pick:1"] and display.buttons["steam-pick:2"] and display.focus == "steam-public")
 click("steam-back")
 assert(display.title == "Multiplayer" and display.focus == "steam-public")
 
@@ -815,14 +816,14 @@ local latest_search = operation_id()
 assert(display.note == "Looking for public lobbies…", "Stay in search while its request file is briefly busy")
 assert(files[browse_request]:find(previous_search, 1, true))
 files[browse_request] = nil
-files[browse_response] = ("2\t%s\t%s\tready\t1\nOld Host\trc-abcdef0\t1\n")
+files[browse_response] = ("3\t%s\t%s\tready\t1\n101\tOld Host\trc-abcdef0\t1\n")
     :format(reopened_generation, previous_search)
 now = now + 1
 tick()
 assert(files[browse_request] == ("1\t%s\t%s\tsearch\n"):format(reopened_generation, latest_search))
 assert(display.note == "Looking for public lobbies…" and not display.buttons["steam-pick:1"])
 files[browse_request] = nil
-files[browse_response] = ("2\t%s\t%s\tready\t1\nNew Host\trc-abcdef0\t1\n")
+files[browse_response] = ("3\t%s\t%s\tready\t1\n102\tNew Host\trc-abcdef0\t1\n")
     :format(reopened_generation, latest_search)
 now = now + 18
 offer("host,join", now + 8, reopened_generation, defaults)
@@ -884,7 +885,7 @@ click("steam-public")
 local searching = display
 assert(button("steam-back"))
 files[browse_request] = nil
-files[browse_response] = ("2\t%s\t%s\tready\t1\nLate Host\trc-abcdef0\t1\n")
+files[browse_response] = ("3\t%s\t%s\tready\t1\n103\tLate Host\trc-abcdef0\t1\n")
     :format(recovery_generation, operation_id())
 tick()
 assert(display == searching, "A search response must leave a queued Back available")
@@ -897,7 +898,7 @@ next_guid = next_guid + 1
 click("steam-public")
 display.focus = "steam-back"
 files[browse_request] = nil
-files[browse_response] = ("2\t%s\t%s\tready\t1\nAvailable Host\trc-abcdef0\t1\n")
+files[browse_response] = ("3\t%s\t%s\tready\t1\n104\tAvailable Host\trc-abcdef0\t1\n")
     :format(recovery_generation, operation_id())
 tick()
 assert(display.buttons["steam-pick:1"] and display.focus == "steam-back",
@@ -928,12 +929,12 @@ local function pick_retiring_lobby(owner)
     click("steam-public")
     local token = operation_id()
     files[browse_request] = nil
-    files[browse_response] = ("2\t%s\t%s\tready\t1\nRetiring Host\trc-abcdef0\t1\n"):format(owner, token)
+    files[browse_response] = ("3\t%s\t%s\tready\t1\n105\tRetiring Host\trc-abcdef0\t1\n"):format(owner, token)
     now = now + 1
     tick()
     click("steam-pick:1")
     assert(display.note == "Connecting through Steam…")
-    assert(files[browse_request] == ("1\t%s\t%s\t1\n"):format(owner, token))
+    assert(files[browse_request] == ("1\t%s\t%s\t105\n"):format(owner, token))
     sync()
     files[browse_request], files[steam_cancel] = nil, nil
     return token
@@ -962,7 +963,7 @@ assert(display.title == "Project Silverfish" and report()[3] == "ready")
 click("multiplayer")
 local live_generation = generation("3")
 local expired_lobby = pick_retiring_lobby(live_generation)
-files[browse_response] = ("2\t%s\t%s\texpired\t0\n"):format(live_generation, expired_lobby)
+files[browse_response] = ("3\t%s\t%s\texpired\t0\n"):format(live_generation, expired_lobby)
 next_guid, now = next_guid + 1, now + 1
 tick()
 assert(display.title == "Public Steam Lobbies" and display.note == "The lobby list expired. Refreshing…")
@@ -981,14 +982,14 @@ now = now + 1
 tick()
 assert(files[browse_request] == ("1\t%s\t%s\tsearch\n"):format(live_generation, renewed))
 files[browse_request] = nil
-files[browse_response] = ("2\t%s\t%s\tready\t1\nFresh Host\trc-abcdef0\t1\n"):format(live_generation, renewed)
+files[browse_response] = ("3\t%s\t%s\tready\t1\n106\tFresh Host\trc-abcdef0\t1\n"):format(live_generation, renewed)
 now = now + 1
 offer("host,join", now + 8, live_generation, defaults)
 tick()
 assert(display.buttons["steam-pick:1"].label == "Fresh Host")
 click("steam-pick:1")
 files[browse_request] = nil
-files[browse_response] = ("2\t%s\t%s\tunavailable\t0\n"):format(live_generation, renewed)
+files[browse_response] = ("3\t%s\t%s\tunavailable\t0\n"):format(live_generation, renewed)
 next_guid, now = next_guid + 1, now + 1
 tick()
 assert(display.title == "Public Steam Lobbies" and display.note == "Could not join that lobby. Refreshing…")

@@ -708,9 +708,9 @@ local function browser_action(action)
         local lobby = selected and session.view.buttons[action] and browser.lobbies[tonumber(selected)]
         if lobby then
             if lobby.compatible then
-                if browser_request(browser, selected) then
+                if browser_request(browser, lobby.id) then
                     browser.state, browser.note, browser.expires = "joining", nil, os.time() + steam_join_timeout
-                    browser.selection = {first = browser.first, index = tonumber(selected), name = lobby.name, version = lobby.version}
+                    browser.selection = {first = browser.first, index = tonumber(selected), id = lobby.id}
                 else
                     browser.note, browser.focus = "Steam is finishing the previous request. Try again.", action
                 end
@@ -774,10 +774,10 @@ local function poll_public_lobbies(browser)
     end
     local file = io.open(bridge_path .. "/steam-coop-browser-response.tsv", "rb")
     if not file then return end
-    local data = file:read(2201)
+    local data = file:read(2561)
     file:close()
-    if not data or #data > 2200 or data:sub(-1) ~= "\n" then return end
-    local generation, token, result, count, start = data:match("^2\t([0-9a-f]+)\t([0-9a-f]+)\t([a-z]+)\t([0-9][0-9]?)\n()")
+    if not data or #data > 2560 or data:sub(-1) ~= "\n" then return end
+    local generation, token, result, count, start = data:match("^3\t([0-9a-f]+)\t([0-9a-f]+)\t([a-z]+)\t([0-9][0-9]?)\n()")
     if generation ~= browser.generation or token ~= browser.token or not count or tonumber(count) > 12 then return end
     if browser.state == "joining" and (result == "expired" or result == "unavailable") then
         recover_browser_join(browser, result == "expired" and "The lobby list expired." or "Could not join that lobby.")
@@ -788,22 +788,26 @@ local function poll_public_lobbies(browser)
         browser.state, browser.note = "ready", "Install the same mod release as the host to join."
         browser.focus, browser.selection = "steam-pick:" .. browser.selection.index, nil
     elseif result == "ready" and browser.state == "searching" then
-        local lobbies = {}
+        local lobbies, indices = {}, {}
         for row in data:sub(start):gmatch("([^\n]*)\n") do
-            local name, version, compatible = row:match("^([^\t]+)\t([^\t]+)\t([01])$")
-            if not name or #name > 104 or name:find("[%c]") or not utf8.len(name)
+            local id, name, version, compatible = row:match("^([1-9][0-9]*)\t([^\t]+)\t([^\t]+)\t([01])$")
+            if not id or #id > 20 or indices[id] or #name > 104 or name:find("[%c]") or not utf8.len(name)
                 or (version == "-" and compatible ~= "0") or (version ~= "-" and not valid_version(version)) then return end
-            lobbies[#lobbies + 1] = {name = name, version = version, compatible = compatible == "1"}
+            lobbies[#lobbies + 1] = {id = id, name = name, version = version, compatible = compatible == "1"}
+            indices[id] = #lobbies
         end
         if #lobbies ~= tonumber(count) then return end
         browser.state, browser.lobbies = "ready", lobbies
         local previous = browser.previous_selection
         if previous then
             browser.previous_selection = nil
-            browser.first = math.min(previous.first, math.max(1, (#lobbies - 1) // 4 * 4 + 1))
-            local lobby = lobbies[previous.index]
-            if lobby and lobby.name == previous.name and lobby.version == previous.version then
-                browser.focus = "steam-pick:" .. previous.index
+            local index = indices[previous.id]
+            if index then
+                browser.first = (index - 1) // 4 * 4 + 1
+                browser.focus = "steam-pick:" .. index
+            else
+                browser.first = math.min(previous.first, math.max(1, (#lobbies - 1) // 4 * 4 + 1))
+                browser.focus = "steam-public"
             end
         end
     else

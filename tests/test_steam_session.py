@@ -421,24 +421,30 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         generation, token = "a" * 32, "b" * 32
         runtime.write_text(bridge / DESCRIPTOR_FILE, f"1\t{generation}\thost,join\t{int(time.time()) + 8}\n")
         request, result = bridge / steam_browser.REQUEST, bridge / steam_browser.RESPONSE
-        prefix, response = f"1\t{generation}\t{token}\t", f"2\t{generation}\t{token}\t"
+        prefix, response = f"1\t{generation}\t{token}\t", f"3\t{generation}\t{token}\t"
+        selection = str(LOBBY)
 
         async def exchange(action, expected):
             runtime.write_text(request, prefix + action + "\n", newline="\n")
             await self.ready(lambda: result.exists() and result.read_text() == response + expected)
 
         del self.platform.metadata[_BUILD_KEY]
-        await exchange("search", "ready\t1\nFixture Host\t-\t0\n")
-        await exchange("1", "incompatible\t0\n")
+        await exchange("search", f"ready\t1\n{LOBBY}\tFixture Host\t-\t0\n")
+        await exchange(selection, "incompatible\t0\n")
         self.platform.metadata[_BUILD_KEY] = f"rc-abc1234:{'2' * 64}"
-        await exchange("search", "ready\t1\nFixture Host\trc-abc1234\t0\n")
-        await exchange("1", "incompatible\t0\n")
+        await exchange("search", f"ready\t1\n{LOBBY}\tFixture Host\trc-abc1234\t0\n")
+        await exchange(selection, "incompatible\t0\n")
         self.platform.metadata[_BUILD_KEY] = f"{VERSION}:{BUILD}"
-        await exchange("search", f"ready\t1\nFixture Host\t{VERSION}\t1\n")
+        await exchange("search", f"ready\t1\n{LOBBY}\tFixture Host\t{VERSION}\t1\n")
+        with patch.object(guest_api, "join_lobby", wraps=guest_api.join_lobby) as join:
+            await exchange(str(LOBBY + 1), "unavailable\t0\n")
+            join.assert_not_called()
         self.assertEqual(guest_api.lobby_owner(LOBBY), 0)
         offer = bridge / steam_session.JOIN_OFFER
         self.platform.metadata[_BUILD_KEY] = f"rc-abc1234:{'2' * 64}"
-        await exchange("1", "unavailable\t0\n")
+        # A previously returned error frame can have the same contents.
+        result.unlink()
+        await exchange(selection, "unavailable\t0\n")
         notice, nonce, local, remote, expiry, source = offer.read_text().split()
         self.assertEqual((notice, nonce, local, remote, source), ("2", token, VERSION, "rc-abc1234", "browser"))
         self.assertGreater(int(expiry), time.time())
@@ -448,17 +454,17 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         self.platform.metadata[_BUILD_KEY] = f"{VERSION}:{BUILD}"
         discovery_time = [time.monotonic()]
         with patch.object(steam_browser, "time", SimpleNamespace(time=time.time, monotonic=lambda: discovery_time[0])):
-            await exchange("search", f"ready\t1\nFixture Host\t{VERSION}\t1\n")
+            await exchange("search", f"ready\t1\n{LOBBY}\tFixture Host\t{VERSION}\t1\n")
             discovery_time[0] += steam_browser._LIST_LIFETIME
             with patch.object(guest_api, "join_lobby", wraps=guest_api.join_lobby) as join:
-                await exchange("1", "expired\t0\n")
+                await exchange(selection, "expired\t0\n")
                 join.assert_not_called()
             self.assertEqual(offer.read_bytes(), mismatch_notice)
 
         fresh = "d" * 32
-        prefix, response = f"1\t{generation}\t{fresh}\t", f"2\t{generation}\t{fresh}\t"
-        await exchange("search", f"ready\t1\nFixture Host\t{VERSION}\t1\n")
-        await exchange("1", "joined\t0\n")
+        prefix, response = f"1\t{generation}\t{fresh}\t", f"3\t{generation}\t{fresh}\t"
+        await exchange("search", f"ready\t1\n{LOBBY}\tFixture Host\t{VERSION}\t1\n")
+        await exchange(selection, "joined\t0\n")
         await self.ready(offer.exists)
         self.assertEqual(guest_api.lobby_owner(LOBBY), HOST)
         _, nonce, port, _, source = offer.read_text().split()
@@ -508,15 +514,15 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
                 (_CALLBACK_MATCH_LIST, struct.pack("<I", 0), 81),
                 (_CALLBACK_MATCH_LIST, struct.pack("<I", 1), 82),
             ])
-            listing = f"2\t{generation}\t{latest}\tready\t1\nFixture Host\t{VERSION}\t1\n"
+            listing = f"3\t{generation}\t{latest}\tready\t1\n{LOBBY}\tFixture Host\t{VERSION}\t1\n"
             await self.ready(lambda: result.exists() and result.read_text() == listing)
-            submit(previous, "1")
+            submit(previous, str(LOBBY))
             await self.ready(lambda: not request.exists())
             self.assertEqual(result.read_text(), listing)
             self.assertIsNone(guest.transport.lobby)
 
-            submit(latest, "1")
-            await self.ready(lambda: result.read_text() == f"2\t{generation}\t{latest}\tjoined\t0\n")
+            submit(latest, str(LOBBY))
+            await self.ready(lambda: result.read_text() == f"3\t{generation}\t{latest}\tjoined\t0\n")
             self.assertEqual(guest.transport.lobby, LOBBY)
 
     async def test_public_join_back_discards_a_delayed_steam_callback_without_cancelling_invites(self):
@@ -530,13 +536,13 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         runtime.write_text(bridge / DESCRIPTOR_FILE, f"1\t{generation}\thost,join\t{int(time.time()) + 8}\n")
         request, response = bridge / steam_browser.REQUEST, bridge / steam_browser.RESPONSE
         cancel, offer = bridge / steam_session.BROWSER_CANCEL, bridge / steam_session.JOIN_OFFER
-        command, result = f"1\t{generation}\t{token}\t", f"2\t{generation}\t{token}\t"
+        command, result = f"1\t{generation}\t{token}\t", f"3\t{generation}\t{token}\t"
         runtime.write_text(request, command + "search\n", newline="\n")
         await self.ready(lambda: response.exists() and response.read_text().startswith(result + "ready\t1\n"))
 
         handle = 81
         with patch.object(guest_api, "join_lobby", return_value=handle) as join:
-            runtime.write_text(request, command + "1\n", newline="\n")
+            runtime.write_text(request, command + f"{LOBBY}\n", newline="\n")
             await self.ready(lambda: join.call_count == 1)
 
             runtime.write_text(cancel, f"1\t{wrong_token}\tcancel\n", newline="\n")

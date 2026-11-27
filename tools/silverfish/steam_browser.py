@@ -11,7 +11,7 @@ from .title_handoff import DESCRIPTOR_FILE
 
 REQUEST = "steam-coop-browser-request.tsv"
 RESPONSE = "steam-coop-browser-response.tsv"
-_REQUEST = re.compile(rb"1\t([0-9a-f]{32})\t([0-9a-f]{32})\t(search|[1-9][0-9]?)\n")
+_REQUEST = re.compile(rb"1\t([0-9a-f]{32})\t([0-9a-f]{32})\t(search|[1-9][0-9]{0,19})\n")
 _TITLE = re.compile(rb"[12]\t([0-9a-f]{32})\t(?:join|host,join)\t([0-9]{1,10})(?:\t[^\r\n]+)?\r?\n")
 _LIST_LIFETIME = 60.0
 
@@ -33,8 +33,8 @@ def _take(path: Path):
 
 
 def _publish(bridge, generation, token, result, rows=()):
-    header = f"2\t{generation.decode()}\t{token.decode()}\t{result}\t{len(rows)}\n"
-    listing = "".join(f"{row.host_name}\t{row.version or '-'}\t{int(row.compatible)}\n" for row in rows)
+    header = f"3\t{generation.decode()}\t{token.decode()}\t{result}\t{len(rows)}\n"
+    listing = "".join(f"{row.lobby}\t{row.host_name}\t{row.version or '-'}\t{int(row.compatible)}\n" for row in rows)
     with suppress(OSError):
         runtime.write_text(bridge / RESPONSE, header + listing, newline="\n")
 
@@ -63,12 +63,10 @@ async def serve(bridge, transport, open_lobby, pump):
                     lookup = None
                     search = generation, token, asyncio.create_task(transport.public_lobbies())
                 elif search is None and (lookup is None or lookup[:2] == (generation, token)):
-                    index = int(action) - 1
                     result = "unavailable"
                     if lookup is None or time.monotonic() >= lookup[2]:
                         result = "expired"
-                    elif index < len(lookup[3]):
-                        selected = lookup[3][index]
+                    elif selected := lookup[3].get(int(action)):
                         if not selected.compatible:
                             result = "incompatible"
                         else:
@@ -87,7 +85,7 @@ async def serve(bridge, transport, open_lobby, pump):
                     if rows is None:
                         _publish(bridge, generation, token, "unavailable")
                     else:
-                        lookup = generation, token, time.monotonic() + _LIST_LIFETIME, rows
+                        lookup = generation, token, time.monotonic() + _LIST_LIFETIME, {row.lobby: row for row in rows}
                         _publish(bridge, generation, token, "ready", rows)
             await asyncio.sleep(.15)
     finally:
