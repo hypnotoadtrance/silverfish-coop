@@ -14,10 +14,10 @@ Use the same release candidate on all PCs. Builds before `rc-ad3c9da` used an ol
 
 | Issue | Current status |
 | --- | --- |
-| Steam join screens | Automated checks cover open and protected lobbies, retry, and returning to the previous Public lobby page on `rc-a82232c`. Confirm on two Steam accounts. |
+| Steam join screens | Automated checks cover open and protected lobbies, retry, and returning to the previous Public lobby page. `rc-77cc90a` also keeps the join form open through a brief title-offer read interruption. Confirm on two Steam accounts. |
 | Oil lantern state | `rc-5a157fb` passed ignition and extinguishing from both seats and a guest joining after the host broke a lamp in isolated Direct IP. Check gold and gray lanterns in a Steam playtest. |
 | Concurrent trader menus | On `rc-5d08fc1`, the roaming barter window stayed open and refreshed after the host bought the guest's selected item in isolated Direct IP. Verify concurrent purchases over Steam and at other trader types. |
-| Interaction delay and frame hitches | The saved cabinet pickup left saves untouched and the longest nearby frame was 23 ms. On `rc-a82232c`, an offscreen Direct IP Crossroads walk measured 15.6 ms P99 and 16.7 ms maximum host game-thread frame intervals over five seconds. Foreground Steam timing and larger-party traffic measurements remain open. [Timing details](NATIVE-INTEGRATION.md#replication-and-travel-pacing) · [Enable the Steam report](PLAYING-COOP.md#network-timing) |
+| Interaction delay and frame hitches | The saved cabinet pickup left saves untouched and the longest nearby frame was 23 ms. On `rc-77cc90a`, native anomaly sampling matched the existing reads and took 0.46 ms across 32 passes. An offscreen Direct IP Crossroads walk reached 15.1 ms P99 and 40.2 ms maximum host game-thread frame intervals. Foreground Steam timing and larger-party traffic measurements remain open. [Timing details](NATIVE-INTEGRATION.md#replication-and-travel-pacing) · [Enable the Steam report](PLAYING-COOP.md#network-timing) |
 | Crash and disconnect recovery | `rc-68f74c6` recovered a guest's inventory and unsaved character state after a forced exit in isolated Direct IP. The host and second guest stayed in play. Replacement took 113 seconds. Repeat over Steam. On `rc-5d08fc1`, verified enemy-loot capture and claim refusals leave the host active. Enemy-loot crashes, the aimed weapon swap, and the singleplayer crash remain regression checks. |
 
 <a id="current-playtest-checks"></a>
@@ -32,7 +32,7 @@ Use the same release candidate on all PCs. Builds before `rc-ad3c9da` used an ol
 | Intro warehouse | Let the guest fight moving enemies with melee and ranged weapons, including a shot under the garage door. Check repeat swings, damage and death on both seats, then loot an enemy drop. Spot-check guest reload, alternate ammo, and magazine counts across weapon swaps and travel. |
 | Simmi and travel | On `rc-5d08fc1`, the guest completed the Flood Plains, Black Lake, and Crossroads jammer objectives. Both journals reflected all three turn-ins and the shared wallet received $950 in isolated Direct IP. Repeat over Steam and check transition sound, fade, weather, and randomized objective locations. |
 
-Other development fixes awaiting broader play include door, gate, switch, ladder, and lockpick interactions, carried and breakable props, placed loot on revisits, spawned NPCs and moving anomalies, consumables and cooking, and guest damage feedback. Use those checks when they come up during ordinary play. [Native verification](NATIVE-INTEGRATION.md)
+Other development fixes awaiting broader play include door, gate, switch, ladder, and lockpick interactions, carried and breakable props, destructibles in streamed sublevels, placed loot on revisits, spawned NPCs and moving anomalies, consumables and cooking, and guest damage feedback. Use those checks when they come up during ordinary play. [Native verification](NATIVE-INTEGRATION.md)
 
 ## Resolved in two-PC playtests
 
