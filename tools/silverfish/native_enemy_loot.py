@@ -330,7 +330,8 @@ async def bank(host, bridge, target: str | None) -> dict:
     try:
         try:
             options = ("memory-escrow",) if memory else ()
-            snapshot = await bridge.command(BANK, target, slot, ammo, *options, timeout=7)
+            snapshot = await native_loot.submit_loot_command(host, bridge, BANK, None, target, slot, ammo,
+                                                             *options, timeout=7)
         except RuntimeError as error:
             if str(error) != "native_enemy_loot_drop_settling":
                 raise
@@ -352,7 +353,7 @@ async def bank(host, bridge, target: str | None) -> dict:
                 "escrow": frame}
         if cqc:
             roll["profile"] = profile.id
-        candidate = party.load_party(host.party)
+        candidate = native_loot.copy_pending_loot(host.party, STATE_KEY) if memory else party.load_party(host.party)
         records = candidate.setdefault(STATE_KEY, {})
         if guid in records:
             raise RuntimeError("The stock enemy drop identity already exists")
@@ -417,8 +418,8 @@ async def claim(host, bridge, character: str, target: str | None, operation: str
             if focus:
                 mode = "stock-world-focus" if world_focus else "stock-focus"
             check = (mode, roll["actor"]) if _ordinary(host, area) else ()
-            snapshot = await bridge.command(CLAIM, pawn, frame["slot"], guid,
-                                            *(str(axis) for axis in roll["position"]), *check, timeout=7)
+            snapshot = await native_loot.submit_loot_command(host, bridge, CLAIM, operation, pawn, frame["slot"], guid,
+                                                             *(str(axis) for axis in roll["position"]), *check, timeout=7)
         except RuntimeError as error:
             reason = str(error)
             # These checks run before the game's inventory transaction mutates anything.
@@ -437,7 +438,11 @@ async def claim(host, bridge, character: str, target: str | None, operation: str
             raise RuntimeError("The typed stock enemy claim did not match its exact participant")
         merge = (native_loot.verified_stack_merge(proof.get("merge", {}), guid, roll["quantity"])
                  if proof["state"] == "merged" else {})
-        candidate = party.load_party(host.party)
+        if deferred:
+            candidate = native_loot.copy_pending_loot(host.party, STATE_KEY, character=character)
+            candidate[STATE_KEY][guid] = roll.copy()
+        else:
+            candidate = party.load_party(host.party)
         committed = candidate[STATE_KEY][guid]
         committed["claimed_by"] = character
         committed.pop("escrow")

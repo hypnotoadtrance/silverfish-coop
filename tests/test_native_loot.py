@@ -14,6 +14,7 @@ from tools.silverfish.authored_loot import (CRATES, CRATE_NAMES_BY_INDEX, LEGACY
                                            PLACEMENTS, OVERRIDDEN_PLACEMENTS, SMALL_CABINET, full_name,
                                            lockable_container, loot_capacity, random_lid)
 from tools.silverfish.campaign import CampaignFormatError
+from tools.silverfish.local_bridge import LocalCommandNotSubmitted
 from tools.silverfish.service import Host
 from tools.silverfish.generate_authored_loot_registry import outputs, survey
 from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, OBSERVATORY, RAIL_YARD
@@ -991,11 +992,19 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         proof = {"action": "claim", "map": CROSSROADS, "pawn": PAWN, "crate": OTHER_CRATE,
                  "escrow_slot": roll["escrow"]["slot"], "ok": True, "invoked": True, "status": "merged",
                  "merge": dict(guid=item["guid"], inventory_guid="B" * 32, amount=4, before=7, after=11)}
-        bridge = SimpleNamespace(command=AsyncMock(return_value=self.game(CROSSROADS, native_loot=proof)))
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+            LocalCommandNotSubmitted("expired before claim"), self.game(CROSSROADS, native_loot=proof),
+        ]))
         args = (host, bridge, "host", "claim", f"{item['guid']}@{OTHER_CRATE}")
         original = host.party
         unaffected = self.roll(CROSSROADS, LEGACY_CRATE, "2" * 32)
         original[native_loot.STATE_KEY][LEGACY_CRATE] = unaffected
+        with self.assertRaisesRegex(party.RuleError, "^native_loot_bridge_busy$"):
+            await native_loot.perform(*args, OPERATION, defer_save=True)
+        self.assertIs(host.party, original)
+        self.assertFalse(host.stopping or host.native_checkpoint_unsafe)
+        host.control.event.assert_any_call("native_loot_command_not_submitted", action=native_loot.CLAIM,
+                                           operation_id=OPERATION, reason="expired before claim")
         result = await native_loot.perform(*args, OPERATION, defer_save=True)
         self.assertNotIn("claimed_by", original[native_loot.STATE_KEY][OTHER_CRATE]["items"][0])
         self.assertNotIn("host", original["receipts"])
@@ -1008,7 +1017,8 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(party.RuleError, "native_loot_already_claimed"):
             await native_loot.perform(*args, "2" * 32, defer_save=True)
         host.checkpoint_native.assert_not_awaited()
-        bridge.command.assert_awaited_once()
+        self.assertEqual(bridge.command.await_count, 2)
+        self.assertEqual(bridge.command.await_args_list[0], bridge.command.await_args_list[1])
 
     async def test_compact_guest_claim_preserves_world_cache_and_queues_exact_retained_pawn(self):
         guest, pawn = "guest", "exact guest pawn"
@@ -1074,6 +1084,7 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
                     "native_loot_cash_payload_unqualified")
         bridge = SimpleNamespace(command=AsyncMock(side_effect=[
             *(RuntimeError(reason) for reason in refusals),
+            LocalCommandNotSubmitted("stock pickup not taken"),
             self.game(CROSSROADS, **{enemy.CLAIM_KEY: proof}),
         ]))
 
@@ -1088,8 +1099,17 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(host.party["receipts"], {})
                     host.control.event.assert_any_call("native_stock_enemy_loot_claim_refused", operation_id=OPERATION,
                                                        guid=guid, reason=reason)
-            result = await enemy.claim(host, bridge, "host", guid, OPERATION)
+            before = host.party
+            with self.assertRaisesRegex(party.RuleError, "^native_loot_bridge_busy$"):
+                await enemy.claim(host, bridge, "host", guid, OPERATION)
+            self.assertIs(host.party, before)
+            self.assertFalse(host.stopping or host.native_checkpoint_unsafe)
+            with patch.object(party, "load_party", side_effect=AssertionError("pending claim copied the whole campaign")):
+                result = await enemy.claim(host, bridge, "host", guid, OPERATION)
             verify.assert_not_called()
+        self.assertIs(host.party["players"], before["players"])
+        self.assertIs(before[enemy.STATE][guid], item)
+        self.assertIsNone(item["claimed_by"])
         self.assertEqual(result[enemy.CLAIM_KEY]["claimed_by"], "host")
         self.assertNotIn("escrow", host.party[enemy.STATE][guid])
         self.assertIsNotNone(host.pending_host_save)

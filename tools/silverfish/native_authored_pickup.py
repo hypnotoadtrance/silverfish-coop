@@ -338,7 +338,8 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
     host.native_checkpoint_unsafe = True
     try:
         receipt = ("stock-input",) if local_input and character == "host" else ()
-        snapshot = await bridge.command(ACTION, pawn, slot, target, *receipt, timeout=7)
+        snapshot = await native_loot.submit_loot_command(host, bridge, ACTION, operation_id, pawn, slot, target,
+                                                         *receipt, timeout=7)
         report = snapshot.get("native_authored_pickup_claim", {})
         if (snapshot.get("state") != "hosting" or snapshot.get("map") != area
                 or tuple(report.get(key) for key in ("source", "map", "pawn", "slot")) != (target, area, pawn, slot)):

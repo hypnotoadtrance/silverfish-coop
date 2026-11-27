@@ -397,6 +397,7 @@ def _available(host):
 
 async def observe(host, bridge, *, interaction_ready=None):
     from . import native_host_save, native_loot
+    from .local_bridge import LocalCommandNotSubmitted
 
     if not _available(host):
         return
@@ -429,6 +430,10 @@ async def observe(host, bridge, *, interaction_ready=None):
             try:
                 options = ("memory-escrow",) if memory else ()
                 snapshot = await bridge.command(BANK, str(seq), slot, *options, timeout=7)
+            except LocalCommandNotSubmitted as error:
+                host.native_checkpoint_unsafe = bool(committed)
+                host.control.event("native_stock_enemy_loot_capture_deferred", sequence=seq, actor=actor, reason=str(error))
+                break
             except RuntimeError as error:
                 reason = str(error)
                 # Native capture only reads the world drop and writes to detached scratch escrow.
@@ -517,12 +522,11 @@ async def claim(host, bridge, character, guid, operation):
     host.native_checkpoint_unsafe = True
     try:
         try:
-            snapshot = await bridge.command(CLAIM, pawn, frame["slot"], guid,
-                                            *(str(axis) for axis in roll["transform"]["position"]),
-                                            stock_enemy_identity(guid, roll.get("visual_id")),
-                                            *(() if roll.get("settled") else ("legacy-ground",)),
-                                            *(("memory-escrow",) if frame.get("pending") else ()),
-                                            timeout=7)
+            snapshot = await native_loot.submit_loot_command(
+                host, bridge, CLAIM, operation, pawn, frame["slot"], guid,
+                *(str(axis) for axis in roll["transform"]["position"]), stock_enemy_identity(guid, roll.get("visual_id")),
+                *(() if roll.get("settled") else ("legacy-ground",)),
+                *(("memory-escrow",) if frame.get("pending") else ()), timeout=7)
         except RuntimeError as error:
             reason = str(error)
             # These explicit refusals occur before the stock backpack or wallet changes.
@@ -535,12 +539,17 @@ async def claim(host, bridge, character, guid, operation):
         proof = snapshot.get(CLAIM_KEY, {})
         if tuple(proof.get(key) for key in ("map", "pawn", "slot", "guid")) != (roll["map"], pawn, frame["slot"], guid):
             raise RuntimeError("The stock enemy loot transfer did not match the exact claimant")
-        candidate = party.load_party(host.party)
+        cash = roll["class_path"] in native_loot.CASH_RANGES
+        if deferred:
+            candidate = native_loot.copy_pending_loot(host.party, STATE, character=character, cash=cash)
+            candidate[STATE][guid] = roll.copy()
+        else:
+            candidate = party.load_party(host.party)
         committed = candidate[STATE][guid]
         committed["claimed_by"] = character
         committed.pop("escrow")
         merge = {}
-        if roll["class_path"] in native_loot.CASH_RANGES:
+        if cash:
             credit = native_loot._verified_cash_credit(
                 {"status": proof.get("status"), "cash": proof}, roll, snapshot.get("native_wallet"))
             candidate["economy"].update(wallet=credit["after"], native_wallet_active=True)

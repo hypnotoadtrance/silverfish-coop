@@ -456,7 +456,8 @@ async def claim(host, bridge, character, requested, operation, *, local_input=Fa
             receipt = ("stock-input",) if local_input and character == "host" else ()
             if quest_placement:
                 receipt += ("memory-retained",)
-            snapshot = await bridge.command(CLAIM, pawn, slot, path, *receipt, timeout=7)
+            snapshot = await native_loot.submit_loot_command(host, bridge, CLAIM, operation, pawn, slot, path,
+                                                             *receipt, timeout=7)
         except RuntimeError as error:
             if str(error) == "loose_pickup_source_unavailable":
                 host.native_checkpoint_unsafe = False

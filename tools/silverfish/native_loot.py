@@ -8,6 +8,7 @@ from . import native_host_save, native_pickup_audio, native_stock_door, party
 from .authored_cash import CASH_RANGES
 from .authored_loot import (CRATES, DEFERRED_PRY_CLASSES, LEGACY_CRATE, key_unlock_only, lockable_container, loot_capacity, random_lid,
                             valid_lid_angle, valid_loot_trait_calls)
+from .local_bridge import LocalCommandNotSubmitted
 from .native_gold import valid_guid
 
 
@@ -61,6 +62,19 @@ def copy_pending_loot(state, *ledgers, character=None, cash=False):
     if cash:
         candidate["economy"] = state["economy"].copy()
     return candidate
+
+
+async def submit_loot_command(host, bridge, action, operation_id, *arguments, timeout, prior_mutation=False):
+    try:
+        return await bridge.command(action, *arguments, timeout=timeout)
+    except LocalCommandNotSubmitted as error:
+        # An unclaimed ticket cannot have changed the game. A preceding tool
+        # action may already have changed a lock or charge in this transaction.
+        if prior_mutation:
+            raise
+        host.native_checkpoint_unsafe = False
+        host.control.event("native_loot_command_not_submitted", action=action, operation_id=operation_id, reason=str(error))
+        raise party.RuleError("native_loot_bridge_busy") from error
 
 
 def public_roll(roll: dict) -> dict:
@@ -706,7 +720,8 @@ async def use_vehicle_pry_tool(host, bridge, character, target, operation_id, ac
     host.native_checkpoint_unsafe = True
     try:
         try:
-            snapshot = await bridge.command(f"native-loot-guest-{kind}-use", crate, pawn, guid, timeout=4)
+            snapshot = await submit_loot_command(host, bridge, f"native-loot-guest-{kind}-use", operation_id,
+                                                 crate, pawn, guid, timeout=4)
         except RuntimeError as error:
             if str(error).startswith(f"stock_{kind}_"):
                 host.native_checkpoint_unsafe = False
@@ -890,7 +905,8 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
     if mutates:
         host.native_checkpoint_unsafe = True
     try:
-        snapshot = await bridge.command(f"native-loot-{action}", pawn, crate, *arguments, timeout=6)
+        snapshot = await submit_loot_command(host, bridge, f"native-loot-{action}", operation_id, pawn, crate,
+                                             *arguments, timeout=6, prior_mutation=tool_receipt is not None)
         proof = snapshot.get("native_loot", {})
         if (snapshot.get("state") != "hosting" or snapshot.get("map") != area
                 or (proof.get("action"), proof.get("map"), proof.get("pawn"), proof.get("crate"))

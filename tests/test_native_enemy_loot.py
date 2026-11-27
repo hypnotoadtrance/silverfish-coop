@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import time
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
+from tools.silverfish.local_bridge import LocalCommandNotSubmitted
 
 from tools.silverfish import native_enemy_loot, native_enemy_shells, native_host_save, native_stock_enemy_drops, native_world_loot, party
 from tools.silverfish.campaign import CampaignFormatError, CampaignStore
@@ -70,7 +71,7 @@ class StockEnemyDropSchedulingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_memory_banking_publishes_completed_drops_before_yielding(self):
         drops = native_stock_enemy_drops
-        for boundary in ("guest request", "time allowance"):
+        for boundary in ("guest request", "time allowance", "unclaimed command"):
             with self.subTest(boundary=boundary):
                 stock = {number: {"sequence": number, "map": CROSSROADS, "actor": f"item-{number}",
                                   "class_path": "ammo", "source": "Bandit_C NPC", "killer": None,
@@ -93,6 +94,8 @@ class StockEnemyDropSchedulingTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual((action, option), (drops.BANK, "memory-escrow"))
                     number = int(serial)
                     order.append(number)
+                    if number == 2 and boundary == "unclaimed command" and order.count(2) == 1:
+                        raise LocalCommandNotSubmitted("expired before claim")
                     if number == 1 and boundary == "guest request":
                         ready.set()
                     if number == 1 and boundary == "time allowance":
@@ -104,14 +107,14 @@ class StockEnemyDropSchedulingTests(unittest.IsolatedAsyncioTestCase):
                 bridge = SimpleNamespace(command=AsyncMock(side_effect=capture))
                 with patch.object(drops, "time", SimpleNamespace(monotonic=clock)):
                     await drops.observe(host, bridge, interaction_ready=ready.is_set)
-                    self.assertEqual(order, [1])
+                    self.assertEqual(order, [1, 2] if boundary == "unclaimed command" else [1])
                     self.assertFalse(host.native_checkpoint_unsafe)
                     self.assertEqual(host.processed_stock_enemy_drops, {1})
                     self.assertTrue(host.party[drops.STATE]["1" * 32]["escrow"]["pending"])
                     self.assertEqual(original[drops.STATE], {"A" * 32: existing})
                     ready.clear()
                     await drops.observe(host, bridge, interaction_ready=ready.is_set)
-                self.assertEqual(order, [1, 2, 3])
+                self.assertEqual(order, [1, 2, 2, 3] if boundary == "unclaimed command" else [1, 2, 3])
                 self.assertEqual(host.processed_stock_enemy_drops, {1, 2, 3})
                 self.assertIs(host.party[drops.STATE]["A" * 32], existing)
                 self.assertFalse(host.stopping)
