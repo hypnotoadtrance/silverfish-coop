@@ -951,6 +951,41 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         await client.refresh_gameplay(project=False)
         self.assertEqual(client.gameplay[door.KEY], {**older, "sequence": 11})
 
+    async def test_door_receipt_keeps_an_inflight_snapshot_with_other_world_changes(self):
+        door = native_stock_door
+        area, epoch = OBSERVATORY, "c" * 32
+        actor = f"Door_BP_C {area}.Observitory_P:PersistentLevel.Door_BP_C_1"
+        closed = dict(locked=False, broken=False, open=False, pitch=0, yaw=0, roll=0, x=0, y=0, z=0)
+        opened = dict(closed, open=True, yaw=90)
+        delta = {"map": area, "epoch": epoch, "sequence": 10, "doors": {actor: opened}}
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        async def request(payload, *, timeout):
+            if payload["action"] == door.ACTION:
+                return {"ok": True, door.DELTA: delta}
+            started.set()
+            await finish.wait()
+            return {"ok": True, "zone": area, "zone_epoch": epoch, "gameplay": {"host_world": {"clock": 9}}}
+
+        client = self.guest(AsyncMock(side_effect=request))
+        client.transport.connected = True
+        client.zone_epoch = epoch
+        client.last_game = {"state": "connected", "map": area, door.KEY: {actor: closed}}
+        client.bridge.command = AsyncMock(return_value={**client.last_game, door.KEY: {actor: opened}})
+        await client.refresh_gameplay(project=False, wait=False)
+        await asyncio.wait_for(started.wait(), 1)
+        pending = client.snapshot_request
+
+        await client.gameplay_action(door.ACTION, "a" * 32, actor)
+        self.assertEqual(client.gameplay[door.KEY], delta)
+        self.assertIs(client.snapshot_request, pending)
+        self.assertFalse(pending.done())
+
+        finish.set()
+        await client.refresh_gameplay(project=False)
+        self.assertEqual(client.gameplay, {door.KEY: delta, "host_world": {"clock": 9}})
+        self.assertEqual(client.transport.request.await_count, 2)
+
     async def test_bridge_idle_wait_wakes_for_a_host_request_without_local_input(self):
         with TemporaryDirectory() as temporary:
             bridge = runtime.Bridge(Path(temporary), Mock())

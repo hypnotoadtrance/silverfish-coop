@@ -5940,7 +5940,6 @@ class Client:
                         hidden.append(path)
             if target and (action == native_stock_door.ACTION or action in native_stock_door.PRY_ACTIONS.values()
                            or action == native_loot.LOCKPICK and native_stock_door.DELTA in reply):
-                await self.cancel_gameplay_snapshot()
                 actor = target.split("@", 2)[1] if action == native_loot.LOCKPICK else target.rsplit("@", 1)[-1]
                 if (self.last_game.get("map"), self.zone_epoch, self.host_session) == (area, epoch, session):
                     delta = self.stock_door_view.accept(self.gameplay, reply.get(native_stock_door.DELTA),

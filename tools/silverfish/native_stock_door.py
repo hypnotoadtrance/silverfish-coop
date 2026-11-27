@@ -156,6 +156,9 @@ class GuestView:
     def reconcile(self, gameplay, area, epoch):
         self._visit(area, epoch)
         snapshot = gameplay.get(KEY)
+        if snapshot is None and self.receipts:
+            # An in-flight snapshot can predate the host's first sample of this door.
+            snapshot = {"map": area, "epoch": epoch, "sequence": 0, "doors": {}}
         if (not isinstance(snapshot, dict) or (snapshot.get("map"), snapshot.get("epoch")) != self.scope
                 or type(sequence := snapshot.get("sequence")) is not int):
             return
