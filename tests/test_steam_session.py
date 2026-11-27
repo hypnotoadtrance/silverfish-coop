@@ -59,9 +59,12 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
                   "game_payload_bytes_delivered": 900, "snapshot_received_bytes": 330, "relay_queue_expired_frames": 4}
         last = {"keepalive_probes_acked": 9, "keepalive_rtt_us": 500_000,
                 "game_payload_bytes_delivered": 1010, "snapshot_received_bytes": 385, "relay_queue_expired_frames": 4}
-        report.sample(10, {**frame, "transport": first}, (10, 100, 5, 500, 3))
-        report.sample(11, {**frame, "transport": middle}, (20, 300, 10, 1400, 3))
-        report.sample(11.25, {**frame, "zone_epoch": "destination", "transport": last}, (21, 350, 13, 1650, 3))
+        report.sample(10, {**frame, "transport": first}, (10, 100, 5, 500, 3),
+                      {"full_receive_batches": 3, "send_rejected_bytes": 0})
+        report.sample(11, {**frame, "transport": middle}, (20, 300, 10, 1400, 3),
+                      {"full_receive_batches": 7, "send_rejected_bytes": 0})
+        report.sample(11.25, {**frame, "zone_epoch": "destination", "transport": last}, (21, 350, 13, 1650, 3),
+                      {"full_receive_batches": 7, "send_rejected_bytes": 100})
         result = report.result("guest", VERSION)
         self.assertEqual(result["overall"]["sent_bytes"], 250)
         self.assertEqual(result["overall"]["received_bytes"], 1150)
@@ -77,7 +80,11 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
                                                    "snapshot_received_bytes": 180, "relay_queue_expired_frames": 1})
         self.assertEqual(travel["link_activity"]["snapshot_received_bytes"], 55)
         self.assertEqual(result["overall"]["link_activity"]["game_payload_bytes_delivered"], 710)
-        peak = {"map": OBSERVATORY, "lobby_members": 3, "seconds": 1, "link_activity": stable["link_activity"]}
+        self.assertEqual(stable["steam_activity"], {"full_receive_batches": 4})
+        self.assertEqual(travel["steam_activity"], {"send_rejected_bytes": 100})
+        self.assertEqual(result["overall"]["steam_activity"], {"full_receive_batches": 4, "send_rejected_bytes": 100})
+        peak = {"map": OBSERVATORY, "lobby_members": 3, "seconds": 1, "link_activity": stable["link_activity"],
+                "steam_activity": stable["steam_activity"]}
         self.assertEqual(result["overall"]["peak_receive_interval"], peak)
         self.assertEqual(result["overall"]["peak_send_interval"], peak)
 
@@ -85,11 +92,11 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         report = steam_network_report._Report()
         frame = {"state": "connected", "link_connected": True, "game": {"map": OBSERVATORY}, "zone_epoch": "visit"}
         report.sample(10, {**frame, "generation": "old", "transport": {"snapshot_received_bytes": 900}},
-                      (8, 200, 4, 700, 2))
+                      (8, 200, 4, 700, 2), {})
         report.sample(11, {**frame, "generation": "new", "transport": {"snapshot_received_bytes": 1100}},
-                      (10, 300, 6, 1300, 2))
+                      (10, 300, 6, 1300, 2), {})
         report.sample(12, {**frame, "generation": "new", "transport": {"snapshot_received_bytes": 1280}},
-                      (13, 530, 10, 1600, 2))
+                      (13, 530, 10, 1600, 2), {})
         result = report.result("guest", VERSION)
         self.assertEqual(result["overall"]["received_bytes"], 900)
         self.assertEqual(result["overall"]["link_activity"], {"snapshot_received_bytes": 180})
@@ -125,6 +132,8 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
                 payload = b"test packet"
                 async with client.playing(route.host, route.port, role="guest", network_run=guest.run):
                     client.transport._guest_udp(payload, ("127.0.0.1", 32125))
+                    with patch.object(client.transport.api, "send_datagram", return_value=False):
+                        client.transport._guest_udp(payload, ("127.0.0.1", 32125))
                     await self.ready(lambda: session.transport.received_messages)
                     self.assertFalse(output.exists())
                     self.assertFalse(guest_output.exists())
@@ -133,6 +142,10 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["overall"]["received_messages"], 1)
         self.assertEqual(report["overall"]["received_bytes"], len(payload) + struct.calcsize("!4sQQ"))
         self.assertEqual(report["overall"]["received_bytes"], guest_report["overall"]["sent_bytes"])
+        self.assertEqual(guest_report["overall"]["sent_messages"], 1)
+        self.assertEqual(guest_report["overall"]["steam_activity"], {
+            "send_rejected_messages": 1, "send_rejected_bytes": len(payload) + struct.calcsize("!4sQQ"),
+        })
         self.assertNotIn(str(HOST), output.read_text())
         self.assertNotIn(str(GUEST), output.read_text())
 

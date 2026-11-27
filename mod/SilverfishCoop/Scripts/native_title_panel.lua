@@ -127,6 +127,14 @@ local function cancel_steam_form(nonce, path)
     end
 end
 
+local function close_browser(owner)
+    local browser = owner.browser
+    owner.browser = nil
+    if browser and browser.state == "joining" then
+        cancel_steam_form(browser.token, steam_browser_cancel_path)
+    end
+end
+
 local function close_form(owner, preserve_route)
     local form = owner.form
     owner.form = nil
@@ -144,6 +152,7 @@ local function remove_display(preserve_route)
     local old = session
     session = nil
     if old then
+        if not preserve_route then close_browser(old) end
         close_form(old, preserve_route)
         surface.remove(old.view)
         controls.remove(old.solo_back)
@@ -175,7 +184,7 @@ local function steam_available()
 end
 
 local function multiplayer(offer, focus, note)
-    session.browser = nil
+    close_browser(session)
     local choices, rows = actions[offer.choices], {}
     if choices.host then rows[#rows + 1] = {button("host", "Host Game")} end
     if choices.join then rows[#rows + 1] = {button("join", direct_join and "Join by Direct IP" or "Join")} end
@@ -684,9 +693,6 @@ end
 local function browser_action(action)
     local browser = session.browser
     if action == "steam-back" then
-        if browser and browser.state == "joining" then
-            cancel_steam_form(browser.token, steam_browser_cancel_path)
-        end
         multiplayer(session.offer, "steam-public")
         return
     end
@@ -1075,6 +1081,7 @@ local function update_title()
     if surface.press_pending(session.view) or (session.solo_back and session.solo_back.pending)
         or (form and form.role == "join" and surface.press_pending(form.draft.view)) then return end
     poll_steam_invite(context)
+    if not session then return end
     if session.browser then poll_public_lobbies(session.browser) end
     surface.sync(session.view)
     form = session.form

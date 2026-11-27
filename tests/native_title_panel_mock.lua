@@ -909,3 +909,41 @@ drain()
 assert(display.title == "Multiplayer" and display.focus == "join")
 tick()
 assert(display.title == "Multiplayer", "A cancelled join must stay closed")
+
+local function pick_retiring_lobby(owner)
+    files[browse_request], files[browse_response], files[browse_cancel] = nil, nil, nil
+    files[steam_join], files[steam_cancel], files[steam_opened] = nil, nil, nil
+    next_guid = next_guid + 1
+    click("steam-public")
+    local token = operation_id()
+    files[browse_request] = nil
+    files[browse_response] = ("2\t%s\t%s\tready\t1\nRetiring Host\trc-abcdef0\t1\n"):format(owner, token)
+    now = now + 1
+    tick()
+    click("steam-pick:1")
+    assert(display.note == "Connecting through Steam…")
+    assert(files[browse_request] == ("1\t%s\t%s\t1\n"):format(owner, token))
+    sync()
+    files[browse_request], files[steam_cancel] = nil, nil
+    return token
+end
+
+local retiring_lobby = pick_retiring_lobby(recovery_generation)
+local replacement_generation = generation("2")
+offer("host,join", now + 8, replacement_generation, defaults)
+assert(display.title == "Project Silverfish")
+assert(files[browse_cancel] == ("1\t%s\tcancel\n"):format(retiring_lobby),
+    "Replacing the title offer must cancel an in-flight public Steam join")
+assert(not files[steam_cancel] and not files[join_request], "Cancel only the browser route that owned the old title")
+
+click("multiplayer")
+local late_lobby = pick_retiring_lobby(replacement_generation)
+now = now + 1
+files[descriptor] = ("2\t%s\thost,join\t%d\t%s\n"):format(generation("3"), now + 8, table.concat(defaults, "\t"))
+files[steam_join] = ("1\t%s\t28951\t%d\tbrowser\n"):format(late_lobby, now + 20)
+tick()
+assert(not display and not files[join_request] and not files[steam_opened],
+    "A lobby completing during title replacement must leave the old screen closed")
+assert(files[browse_cancel] == ("1\t%s\tcancel\n"):format(late_lobby))
+sync()
+assert(display.title == "Project Silverfish" and report()[3] == "ready")

@@ -151,11 +151,19 @@ class SteamTransport:
         self._roster_at = 0.0
         self.sent_messages = self.sent_bytes = 0
         self.received_messages = self.received_bytes = 0
+        self._pressure = {
+            "send_rejected_messages": 0, "send_rejected_bytes": 0,
+            "full_receive_batches": 0, "receive_drain_budget_hits": 0,
+        }
 
     def traffic_counters(self) -> tuple[int, int, int, int, int]:
         """Steam message counts and bytes, including this tunnel's header."""
         return (self.sent_messages, self.sent_bytes, self.received_messages, self.received_bytes,
                 len(self._members))
+
+    def pressure_counters(self) -> dict[str, int]:
+        """Cumulative SDK send rejections and local receive-poll pressure."""
+        return self._pressure.copy()
 
     async def _lobby_call(self, requested: int | None, *, access: str = "friends") -> int:
         if self._closed or self._opening or self.lobby is not None:
@@ -404,6 +412,9 @@ class SteamTransport:
                 self.sent_messages += 1
                 self.sent_bytes += len(packet)
                 self._sessions.add(peer)
+            else:
+                self._pressure["send_rejected_messages"] += 1
+                self._pressure["send_rejected_bytes"] += len(packet)
 
     def _remove_guest_flow(self, token: int) -> None:
         flow = self._guest_flows.pop(token)
@@ -547,13 +558,15 @@ class SteamTransport:
                 packets = self.api.receive_datagrams()
                 for peer, packet in packets:
                     await self._receive(peer, packet)
-                if (self.lobby is not None and len(packets) == _MAX_DATAGRAMS
-                        and drained_batches < _MAX_DRAIN_BATCHES - 1):
-                    drained_batches += 1
-                    # A full SDK read may leave queued messages. Yield for the
-                    # QUIC loop and poll Steam callbacks again before reading more.
-                    await asyncio.sleep(0)
-                    continue
+                if self.lobby is not None and len(packets) == _MAX_DATAGRAMS:
+                    self._pressure["full_receive_batches"] += 1
+                    if drained_batches < _MAX_DRAIN_BATCHES - 1:
+                        drained_batches += 1
+                        # A full SDK read may leave queued messages. Yield for the
+                        # QUIC loop and poll Steam callbacks again before reading more.
+                        await asyncio.sleep(0)
+                        continue
+                    self._pressure["receive_drain_budget_hits"] += 1
                 drained_batches = 0
                 await asyncio.sleep(_POLL_INTERVAL)
         finally:

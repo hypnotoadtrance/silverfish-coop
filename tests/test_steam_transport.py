@@ -214,6 +214,10 @@ class SteamTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delays, [0] * (relay._MAX_DRAIN_BATCHES - 1) + [relay._POLL_INTERVAL] * 2)
         self.assertEqual(callbacks, list(range(0, full_budget + 1, batch_size)))
         self.assertEqual(tunnel.received_messages, full_budget + 1)
+        self.assertEqual(tunnel.pressure_counters(), {
+            "send_rejected_messages": 0, "send_rejected_bytes": 0,
+            "full_receive_batches": relay._MAX_DRAIN_BATCHES, "receive_drain_budget_hits": 1,
+        })
         self.assertEqual(tunnel.pending_invites.get_nowait(), LOBBY + 1)
         roster.assert_called_once()
 

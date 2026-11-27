@@ -40,10 +40,11 @@ class _Traffic:
     peak_receive_bps: int | None = None
     peak_heartbeat_rtt_us: int = 0
     link_activity: dict[str, int] = field(default_factory=dict)
+    steam_activity: dict[str, int] = field(default_factory=dict)
     peak_send_interval: dict | None = None
     peak_receive_interval: dict | None = None
 
-    def add(self, seconds, counters, rtt, group, activity):
+    def add(self, seconds, counters, rtt, group, link_activity, steam_activity):
         sent, send_bytes, received, receive_bytes = counters
         self.seconds += seconds
         self.samples += 1
@@ -59,7 +60,7 @@ class _Traffic:
             receive_peak = self.peak_receive_bps is None or receive_bps > self.peak_receive_bps
             if send_peak or receive_peak:
                 interval = {"seconds": round(seconds, 3), "map": group[0], "lobby_members": group[1],
-                            "link_activity": activity.copy()}
+                            "link_activity": link_activity.copy(), "steam_activity": steam_activity.copy()}
             if send_peak:
                 self.peak_send_bps = send_bps
                 self.peak_send_interval = interval
@@ -67,8 +68,10 @@ class _Traffic:
                 self.peak_receive_bps = receive_bps
                 self.peak_receive_interval = interval
         self.peak_heartbeat_rtt_us = max(self.peak_heartbeat_rtt_us, rtt)
-        for key, amount in activity.items():
+        for key, amount in link_activity.items():
             self.link_activity[key] = self.link_activity.get(key, 0) + amount
+        for key, amount in steam_activity.items():
+            self.steam_activity[key] = self.steam_activity.get(key, 0) + amount
 
     def result(self):
         return {
@@ -86,7 +89,7 @@ class _Report:
         self.groups = {}
         self.previous = None
 
-    def sample(self, now, frame, counters):
+    def sample(self, now, frame, counters, pressure):
         packets, lobby_members = counters[:4], counters[4]
         area = frame.get("game", {}).get("map")
         if (not frame.get("link_connected") or frame.get("state") not in ("hosting", "connected")
@@ -95,13 +98,15 @@ class _Report:
         group = area, lobby_members
         transport = frame.get("transport", {})
         observation = frame.get("generation"), frame.get("zone_epoch")
-        previous, self.previous = self.previous, (now, packets, group, observation, transport)
+        previous, self.previous = self.previous, (now, packets, group, observation, transport, pressure)
         if not previous or now <= previous[0]:
             return
-        last_time, last_packets, last_group, last_observation, last_transport = previous
+        last_time, last_packets, last_group, last_observation, last_transport, last_pressure = previous
         elapsed = now - last_time
         delta = tuple(after - before for after, before in zip(packets, last_packets, strict=True))
-        if not (lobby_members or last_group[1] or any(delta)):
+        steam_activity = {key: after - before for key, before in last_pressure.items()
+                          if (after := pressure.get(key, before)) > before}
+        if not (lobby_members or last_group[1] or any(delta) or steam_activity):
             return
         activity = {}
         rtt = 0
@@ -120,8 +125,8 @@ class _Report:
             group = None, None
         if group not in self.groups:
             self.groups[group] = _Traffic()
-        self.groups[group].add(elapsed, delta, rtt, group, activity)
-        self.total.add(elapsed, delta, rtt, group, activity)
+        self.groups[group].add(elapsed, delta, rtt, group, activity, steam_activity)
+        self.total.add(elapsed, delta, rtt, group, activity, steam_activity)
 
     def result(self, role, version):
         return {
@@ -144,7 +149,8 @@ async def capture(work, run, transport, role):
     report = _Report()
 
     def sample():
-        report.sample(time.monotonic(), resident_status(run) or {}, transport.traffic_counters())
+        report.sample(time.monotonic(), resident_status(run) or {}, transport.traffic_counters(),
+                      transport.pressure_counters())
 
     async def watch():
         while True:
@@ -160,7 +166,7 @@ async def capture(work, run, transport, role):
         with suppress(asyncio.CancelledError):
             await watcher
         sample()
-        if report.total.sent_messages or report.total.received_messages:
+        if report.total.sent_messages or report.total.received_messages or report.total.steam_activity:
             # The opt-in report is written once after the session, outside the engine thread.
             with suppress(OSError):
                 await asyncio.to_thread(write_json, work / REPORT_FILE, report.result(role, transport.version))
