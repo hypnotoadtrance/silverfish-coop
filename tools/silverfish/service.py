@@ -1049,6 +1049,9 @@ class Host:
         balance = self.last_game.get("native_wallet")
         if self.native_zones and type(balance) is int:
             view["shared_wallet"] = balance
+        debt = self.last_game.get(native_wallet.DEBT_STATUS)
+        if self.native_zones and type(debt) is int:
+            view[native_wallet.DEBT] = debt
         merchant_revisions = self.last_game.get(native_finite_shop.STOCK_REVISION)
         if merchant_revisions and not self.transitioning:
             view[native_finite_shop.STOCK_REVISION] = {
@@ -4750,7 +4753,7 @@ class Host:
         # A missing census preserves the last observed set. Only visibility edges
         # need an early snapshot. Motion continues on its normal cadences.
         state = (door_flags, switch_flags, self.party.get(native_loot.STATE_KEY, {}),
-                 game.get("native_wallet"), tuple(sorted(self.guest_wallet_receipts.items())),
+                 game.get("native_wallet"), game.get(native_wallet.DEBT_STATUS), tuple(sorted(self.guest_wallet_receipts.items())),
                  self.world_loot.moving_ids(*scope), self.party.get(native_loose_pickup.STATE, {}),
                  game.get(native_loose_pickup.RESPAWN_HIDDEN, ()), self.gameplay_change_quest_sources)
         if scope == self.gameplay_change_scope and state != self.gameplay_change_state:

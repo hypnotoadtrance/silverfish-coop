@@ -210,6 +210,21 @@ local function lighter_input(pawn, lamp, pressed)
 end
 
 local function run(action,id)
+    if action == "debt-read" or action == "debt-set" then
+        local viewport = FindFirstOf("GameViewportClient")
+        local world = valid(viewport) and viewport.World
+        assert(valid(world) and world:GetFullName() == "World /Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P")
+        local instance = world.OwningGameInstance
+        assert(valid(instance) and valid(world.NetDriver))
+        local debt = FName("Player_Debt")
+        if action == "debt-set" then
+            assert(not valid(world.NetDriver.ServerConnection) and (id == "3000000" or id == "2000000"))
+            instance:Add_PointTo_SaveFlag(debt, tonumber(id), true, true)
+        end
+        local out = {}
+        instance:Check_SaveFlag(debt, out, out)
+        return tostring(out.Value)
+    end
     if crate_types[id] and (action == "watch-lid" or action == "lid-result") then return watch_lid(action,id) end
     if action == "break-state" then
         local lamp = scene(id, true)

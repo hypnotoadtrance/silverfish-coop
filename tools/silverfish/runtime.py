@@ -3496,6 +3496,10 @@ class Bridge:
                     })
                 elif fields[0] == "wallet" and len(fields) == 2:
                     data["native_wallet"] = None if fields[1] == "-" else int(fields[1])
+                elif fields[0] == "campaign-debt" and len(fields) == 2 and data.get("state") == "hosting":
+                    debt = int(fields[1])
+                    if native_wallet.MIN_CASH <= debt <= native_wallet.MAX_CASH:
+                        data[native_wallet.DEBT_STATUS] = debt
                 elif fields[0] == "wallet-guest-change" and len(fields) == 5 and data.get("state") == "connected":
                     data[native_wallet.CHANGE] = native_wallet.parse_change(fields)
                 elif fields[0] == "vitals" and len(fields) == 6:

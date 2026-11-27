@@ -48,6 +48,7 @@ namespace
     constexpr auto item_base_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto health_item_path = STR("/Game/Classes/Items/HealthItem_Master_BP.HealthItem_Master_BP_C");
     constexpr auto bandage_path = STR("/Game/Classes/Items/Item_Bandage.Item_Bandage_C");
+    constexpr auto homebrew_medicine_path = STR("/Game/Classes/Items/Item_HomeBrew_Med.Item_HomeBrew_Med_C");
     constexpr auto blue_mushroom_path = STR("/Game/Classes/Items/Item_BlueMushroom.Item_BlueMushroom_C");
     constexpr auto starter_bag_path = STR("/Game/Classes/Items/Random_GearBag_Starter.Random_GearBag_Starter_C");
     constexpr auto hyper_bag_path = STR("/Game/Classes/Items/HyperRandom_GearBag_Starter.HyperRandom_GearBag_Starter_C");
@@ -128,7 +129,9 @@ namespace
 
         // The stock Blue Mushroom adds a delayed personal time shift and a
         // construction script that selects its display mesh.
-        const bool blue_mushroom = path == blue_mushroom_path && type->GetSuperClass() == base;
+        const bool direct_child = type->GetSuperClass() == base;
+        const bool blue_mushroom = path == blue_mushroom_path && direct_child;
+        const bool personal_override = blue_mushroom || (path == homebrew_medicine_path && direct_child);
         const auto exact_override = [type](Unreal::UFunction* function) {
             return function && function->GetOuterPrivate() == type && function->GetNumParms() == 0 &&
                 function->GetParmsSize() == 0 && !function->GetReturnProperty() &&
@@ -142,7 +145,7 @@ namespace
         {
             const Unreal::FName entry{name, Unreal::FNAME_Find};
             auto* stock = base->GetFunctionByNameInChain(entry);
-            if (blue_mushroom && std::wstring_view{name} == STR("ApplyItemEffects"))
+            if (personal_override && std::wstring_view{name} == STR("ApplyItemEffects"))
             {
                 if (!stock || !exact_override(type->GetFunctionByNameInChain(entry))) return nullptr;
                 continue;

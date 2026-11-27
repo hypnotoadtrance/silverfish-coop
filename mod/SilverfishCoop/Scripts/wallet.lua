@@ -116,7 +116,8 @@ local function sync_guest(fields, state, phase)
     local balance = integer(fields[5], min_cash, max_cash)
     local sequence = integer(fields[6], 0, max_total)
     local total = integer(fields[7], -max_total, max_total)
-    if #fields ~= 7 or not token(session) or not token(stream) or not balance or not sequence or not total then
+    local debt = #fields == 8 and integer(fields[8], min_cash, max_cash)
+    if (#fields ~= 7 and not debt) or not token(session) or not token(stream) or not balance or not sequence or not total then
         error("Invalid guest wallet frame", 0)
     end
     local save, _, character = save_scope.bind_guest(state, phase)
@@ -135,6 +136,9 @@ local function sync_guest(fields, state, phase)
     local projected = clamp_cash(balance + guest.total - total)
     if not write_projected(save, key, projected) then error("The attached co-op wallet failed readback", 0) end
     guest.balance, guest.acknowledged = projected, sequence
+    if debt and not write_projected(save, FName("Player_Debt"), debt) then
+        error("The attached campaign debt failed readback", 0)
+    end
     return "guest wallet verified"
 end
 
@@ -203,12 +207,15 @@ function wallet.rows(state, phase, status_row)
         last_read_error = nil
         return {}
     end
-    local ok, current = pcall(function()
-        return read_cash(game_instance(pawn), FName("Player_Cash"))
+    local ok, current, debt = pcall(function()
+        local instance = game_instance(pawn)
+        return read_cash(instance, FName("Player_Cash")), read_cash(instance, FName("Player_Debt"))
     end)
     if not ok and current ~= last_read_error then print("[SilverfishCoop] Wallet read failed: " .. tostring(current) .. "\n") end
     last_read_error = not ok and current or nil
-    return { status_row("wallet", ok and current or "-") }
+    local rows = {status_row("wallet", ok and current or "-")}
+    if ok then rows[2] = status_row("campaign-debt", debt) end
+    return rows
 end
 
 return wallet

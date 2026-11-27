@@ -13,6 +13,8 @@ REPORT = "wallet-guest-report"
 SYNC = "wallet-guest-sync"
 CHANGE = "wallet_guest_change"
 ACK = "wallet_guest_ack"
+DEBT = "shared_debt"
+DEBT_STATUS = "native_debt_balance"
 MAX_TOTAL = 2**53 - 1
 MIN_CASH, MAX_CASH = -(2**31), 2**31 - 1
 _NUMBER = re.compile(r"-?[0-9]{1,16}")
@@ -112,10 +114,14 @@ class GuestWallet:
                 return
         if self.projection and self.projection[0][0] == session and sequence < self.projection[2]:
             return
-        projection = scope, balance, sequence, total
+        debt = client.gameplay.get(DEBT)
+        if type(debt) is not int or not MIN_CASH <= debt <= MAX_CASH:
+            debt = None
+        projection = scope, balance, sequence, total, debt
         if projection != self.projection:
+            amounts = (balance, sequence, total) if debt is None else (balance, sequence, total, debt)
             try:
-                await client.bridge.command(SYNC, session, self.stream, *map(str, projection[1:]),
+                await client.bridge.command(SYNC, session, self.stream, *map(str, amounts),
                                             timeout=2, update_status=False)
             except (OSError, RuntimeError, ValueError) as error:
                 client.control.event("native_guest_wallet_projection_deferred", reason=str(error))
