@@ -91,6 +91,21 @@ class DeadDropFrameTests(unittest.TestCase):
         source.party[drop.PICKUPS] = {metro.source: {}}
         self.assertEqual(drop.frame(source), {})
 
+    def test_flood_town_uses_authored_quest_id_when_the_bag_has_a_different_name(self):
+        flood = drop.FLOOD_TOWN_DROP
+        pawn = f"Player_FP_C {flood.world}:PersistentLevel.Player_FP_C_41"
+        row = [drop.TAG, "stock-active", flood.map, flood.actor, pawn, "-", *axes(NEW_POSE)]
+        self.assertIn("Bag_DeadDrop_FloodVillage", flood.actor)
+        source = host()
+        source.party = {"native_quests": {"DeadDrop_FloodVillage": {"quest_id": "DeadDrop_FloodVillage", "step": 1}}}
+        source.last_game = {"state": "hosting", "map": flood.map, "pawns": {"local": {"name": pawn}},
+                            drop.KEY: drop.parse(row, "hosting", flood.map)}
+        self.assertEqual(drop.frame(source), {})
+        source.party["native_quests"][flood.quest] = {"quest_id": flood.quest, "step": 1}
+        self.assertEqual(drop.frame(source), flood.frame(EPOCH, NEW_POSE))
+        self.assertEqual(pickup.SOURCES[flood.source], (flood.map, flood.actor, flood.class_path))
+        self.assertEqual(pickup.request_target(flood.source, EPOCH), f"{flood.source}@{EPOCH}")
+
     def test_authority_requires_canonical_pose_and_committed_unclaimed_step(self):
         source = host()
         self.assertEqual(drop.frame(source), {"map": drop.MAP, "quest": drop.QUEST, "actor": drop.ACTOR,

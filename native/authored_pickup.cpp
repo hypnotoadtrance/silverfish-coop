@@ -96,6 +96,14 @@ namespace
         .item_type = 1, .dead_drop = STR("DeadDrop_Metro"),
     };
 
+    constexpr Profile flood_town_drop_profile{
+        .source = "flood-town-dead-drop-bag",
+        .world = STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P"),
+        .actor = STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P:PersistentLevel.Bag_DeadDrop_FloodVillage_C_1"),
+        .item_class = STR("/Game/Classes/Items/Key_Items/Bag_DeadDrop_FloodVillage.Bag_DeadDrop_FloodVillage_C"),
+        .item_type = 1, .dead_drop = STR("DeadDrop_FloodTown"),
+    };
+
     constexpr std::string_view drill_head_source = "scientist-tunnel-drill-head";
     constexpr std::string_view lab_blank_tape_source = "lab-e206-blank-data-tape";
     constexpr std::string_view crossroads_lockpick_source = "crossroads-lockpick";
@@ -103,6 +111,7 @@ namespace
     constexpr std::array profiles{
         dead_drop_profile,
         metro_drop_profile,
+        flood_town_drop_profile,
         Profile{
             "observatory-comp-board",
             STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"),
@@ -248,8 +257,6 @@ namespace
 #include "authored_cash_profiles.inc"
 #include "authored_supply_profiles.inc"
     };
-    constexpr std::size_t dead_drop_count = 2;
-    static_assert(profiles[0].dead_drop && profiles[1].dead_drop && !profiles[2].dead_drop);
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto interact_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:SendInteractionToActor");
     constexpr auto money_base = STR("/Game/Classes/Items/Item_Money_Master.Item_Money_Master_C");
@@ -776,9 +783,10 @@ namespace
     {
         if (!live(world)) return nullptr;
         const auto path = world->GetPathName();
-        const auto end = profiles.begin() + dead_drop_count;
-        const auto match = std::find_if(profiles.begin(), end, [&](const auto& profile) { return path == profile.world; });
-        return match == end ? nullptr : &*match;
+        const auto match = std::ranges::find_if(profiles, [&](const auto& profile) {
+            return profile.dead_drop && path == profile.world;
+        });
+        return match == profiles.end() ? nullptr : &*match;
     }
 
     const char* placed_drop_fault(U::UObject* actor, U::UObject* world, const Profile& profile)
@@ -871,7 +879,7 @@ namespace
             return env("SILVERFISH_COOP_NATIVE_GUEST_SAVE") && actor &&
                 drop_settled_actor.Get() == actor && Clock::now() >= drop_settles_at &&
                 object(state.pawn.Get(), STR("Save")) == save &&
-                silverfish::native_quest_rewards::active_dead_drop(save, actor->GetClassPrivate());
+                silverfish::native_quest_rewards::active_dead_drop(save, actor);
         }
         const auto& bound = drop_projection.scope;
         return Clock::now() < drop_projection.expires && state.actor.Get() == bound.actor.Get() &&
@@ -881,14 +889,25 @@ namespace
 
     bool drop_fence(U::UObject* actor)
     {
-        if (!live(actor)) return false;
-        static const U::FName crossroads{STR("Bag_DeadDrop_CrossRoads_C")};
-        static const U::FName metro{STR("Bag_DeadDrop_Metro_C")};
-        const auto name = actor->GetClassPrivate()->GetFName();
-        if (name != crossroads && name != metro) return false;
+        auto* type = live(actor) ? actor->GetClassPrivate() : nullptr;
+        if (!type) return false;
+        constexpr auto count = std::ranges::count_if(profiles, [](const Profile& profile) { return profile.dead_drop != nullptr; });
+        static const auto classes = [] {
+            std::array<std::pair<U::FName, const Profile*>, count> result{};
+            std::size_t index = 0;
+            for (const auto& profile : profiles)
+            {
+                if (!profile.dead_drop) continue;
+                const RC::StringViewType path{profile.item_class};
+                const auto name = path.substr(path.find_last_of(STR('.')) + 1);
+                result[index++] = {U::FName{name.data(), U::FNAME_Add}, &profile};
+            }
+            return result;
+        }();
+        const auto match = std::ranges::find(classes, type->GetFName(), [](const auto& entry) { return entry.first; });
+        if (match == classes.end() || type->GetPathName() != match->second->item_class) return false;
         auto* world = static_cast<U::AActor*>(actor)->GetWorld();
-        const auto* profile = dead_drop_in_world(world);
-        if (!profile || placed_drop_fault(actor, world, *profile)) return false;
+        if (placed_drop_fault(actor, world, *match->second)) return false;
         auto* driver = object(world, STR("NetDriver"));
         auto* field_server = field<U::FObjectProperty>(driver, STR("ServerConnection"));
         auto* server = read(field_server, driver);

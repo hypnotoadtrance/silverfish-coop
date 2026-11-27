@@ -1,4 +1,4 @@
-"""Run both stock randomized Dead Drops through the installed title."""
+"""Run the stock randomized Dead Drops through the installed title."""
 
 import asyncio
 import math
@@ -40,7 +40,8 @@ def allow_resident_contract_xp(script):
     return script.replace(gate, f'({gate} and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") ~= "1")')
 
 
-async def verify_dead_drop(host, guest, contract, drop):
+async def verify_dead_drop(host, guest, contract, drop, *, via=(LAKE,), cash=None):
+    generic_board = drop.quest != contract.quest
     host_run, guest_run = host.campaign / "run", guest.client / "run"
 
     async def action(run, verb, **kwargs):
@@ -78,8 +79,9 @@ async def verify_dead_drop(host, guest, contract, drop):
         await action(guest_run, native_wire_board.STOCK_F_FIXTURE, target=BOARDS[area])
         await wait_resident_status(guest_run, lambda frame:
             frame["game"].get("native_wire_board_stock", {}).get("state") == "visible", timeout=14)
-        preflight = (await action(guest_run, contract.command("preflight")))[contract.key]
-        assert preflight["board"] == BOARDS[area]
+        if not generic_board:
+            preflight = (await action(guest_run, contract.command("preflight")))[contract.key]
+            assert preflight["board"] == BOARDS[area]
         await action(guest_run, native_wire_board.STOCK_FIXTURE, target=f"{drop.quest}|{verb}")
 
     paths = (OBSERVATORY, CROSSROADS, LAKE, BLACK_MARKET)
@@ -101,8 +103,9 @@ async def verify_dead_drop(host, guest, contract, drop):
     if start == OBSERVATORY:
         await cross(OBSERVATORY, CROSSROADS)
     else:
-        await cross(BLACK_MARKET, LAKE)
-        await cross(LAKE, drop.map)
+        route = (BLACK_MARKET, *via, drop.map)
+        for source, destination in zip(route, route[1:]):
+            await cross(source, destination)
 
     authority, _ = await seats(drop.map)
     epoch = authority["zone_epoch"]
@@ -143,8 +146,8 @@ async def verify_dead_drop(host, guest, contract, drop):
             if "_no_clear_sight:" not in str(error) or attempt == 2:
                 raise
             failed_poses.append({"pose": pose, "reason": str(error)})
-            await cross(drop.map, LAKE)
-            await cross(LAKE, drop.map)
+            await cross(drop.map, via[-1])
+            await cross(via[-1], drop.map)
             authority, _ = await seats(drop.map)
             epoch = authority["zone_epoch"]
             sample = await wait_resident_status(host_run, lambda frame:
@@ -166,17 +169,20 @@ async def verify_dead_drop(host, guest, contract, drop):
     claim = collected["gameplay"][native_dead_drop.PICKUPS][drop.source]
     await wait_resident_status(guest_run, lambda frame:
         native_dead_drop.observed(frame["game"], "hidden") or native_dead_drop.observed(frame["game"], "absent"))
-    await cross(drop.map, LAKE)
-    await cross(LAKE, BLACK_MARKET)
+    route = (drop.map, *reversed(via), BLACK_MARKET)
+    for source, destination in zip(route, route[1:]):
+        await cross(source, destination)
 
     before = campaign_save_hashes(host.campaign)
     await select(BLACK_MARKET, "turnin")
     finished = await wait_resident_status(host_run, lambda frame:
         frame["gameplay"].get("native_quests", {}).get(drop.quest, {}).get("step") == -10)
     result = finished["gameplay"]["native_quests"][drop.quest]
-    assert (result[contract.consumed_field], result["cash"], result["xp"]) == (claim["guid"], contract.cash, 1)
+    consumed = result["consumed_guid" if generic_board else contract.consumed_field]
+    assert (consumed, result["cash"], result["xp"]) == (claim["guid"], contract.cash if cash is None else cash, 1)
     assert result["actor"] == accepted["gameplay"]["native_quests"][drop.quest]["actor"] == claim["owner"]
     assert campaign_save_hashes(host.campaign) == before
-    return {contract.key: {"epoch": epoch, "pose": pose, "claim": claim["guid"], "cash": result["cash"],
-                          "project_reply_bytes": samples, "fixture_sight_refusals": failed_poses,
-                          "renewed_and_reconnected": True, "no_save_during_turnin": True}}
+    key = drop.source if generic_board else contract.key
+    return {key: {"epoch": epoch, "pose": pose, "claim": claim["guid"], "cash": result["cash"],
+                  "board": BOARDS[BLACK_MARKET], "project_reply_bytes": samples, "fixture_sight_refusals": failed_poses,
+                  "renewed_and_reconnected": True, "no_save_during_turnin": True}}

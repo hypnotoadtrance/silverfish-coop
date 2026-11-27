@@ -33,7 +33,7 @@ from tools.silverfish.control import NAME, current_status, submit
 from tools.silverfish.guest_weapon_profiles import FIREARMS, SHOTGUN_AMMO, THIRTY_06_FMJ, THIRTY_06_INCENDIARY
 from tools.silverfish.service import PROTOCOL, menu_host_checkpoint
 from tools.silverfish.steam_cloud import FOLDER
-from tools.silverfish.travel import CROSSROADS, OBSERVATORY
+from tools.silverfish.travel import CROSSROADS, LAKE, OBSERVATORY
 from tools.silverfish.win_job import GameProcess
 from live_installed_title_smoke import boot_states, native_mailbox
 from live_loose_pickup_smoke import DEFAULT_ACTOR
@@ -8035,6 +8035,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_dead_drops, "metro_dead_drop", "metro_dead_drop",
          lambda host, guest, _pawn: verify_dead_drop(host, guest, native_computer_board.METRO_DEAD_DROP,
                                                      native_dead_drop.METRO_DROP)),
+        (stock_dead_drops, "flood_town_dead_drop", "flood_town_dead_drop",
+         lambda host, guest, _pawn: verify_dead_drop(host, guest, native_computer_board.METRO_DEAD_DROP,
+                                                     native_dead_drop.FLOOD_TOWN_DROP, via=(LAKE, CROSSROADS), cash=400)),
         (stock_board_offers, "stock_board_offers", "stock_board_offers", verify_resident_board_offers),
         (stock_streamed_board, "streamed_board", "stock_streamed_board", verify_streamed_stock_board),
         (stock_quarry_photo, "quarry_photo", "stock_quarry_photo",
@@ -8768,7 +8771,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_shot_view", "tutorial_dock_buckshot",
                     "tutorial_dock_melee", "tutorial_dock_late_join", "dock_population", "stock_melee_family",
                     "crossroads", "crossroads_anomaly", "quarry_photo", "buried_placements",
-                    "crossroads_dead_drop", "metro_dead_drop",
+                    "crossroads_dead_drop", "metro_dead_drop", "flood_town_dead_drop",
                     "lab_east_wing_acid", "lab_terminal", "oil_lamps", "shopkeep", "simmi", "stock_board_offers", "missing_contact_untracked",
                     "friendly_fire_enabled", "friendly_fire_default", "stardust_handoff"
                 } or stock_host_prop_observer and campaign == prop_campaign else ("save_and_quit",)
@@ -8985,7 +8988,7 @@ if __name__ == "__main__":
     parser.add_argument("--manage-saves", action="store_true",
                         help="Delete, restore and resume saves through the installed title")
     parser.add_argument("--stock-dead-drops", action="store_true",
-                        help="Verify the Crossroads and Metro Dead Drops in one resident pair")
+                        help="Verify the Crossroads, Metro and Flood Town Dead Drops in one resident pair")
     parser.add_argument("--stock-board-offers", action="store_true",
                         help="compare stock board offers and complete a Forest fuel tank bounty through guest gunfire")
     parser.add_argument("--stock-streamed-board", action="store_true",

@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <format>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -318,9 +319,9 @@ namespace
 
     enum class WirePhase { active, complete };
 
-    bool objective_recipe(U::UObject* stock, const U::TCHAR* quest, U::UClass* wanted, int expected_cash,
+    bool objective_recipe(U::UObject* stock, const U::TCHAR* quest, U::UClass* wanted, std::optional<int> expected_cash,
                           U::UClass* first_reward, U::UClass* second_reward, WirePhase phase,
-                          int expected_final_step = 2, int expected_xp = 1, int exact_active_step = 0,
+                          int expected_final_step = 2, std::optional<int> expected_xp = 1, int exact_active_step = 0,
                           const U::TCHAR* display_alias = nullptr, std::span<U::UClass* const> board_objectives = {},
                           std::span<U::UClass* const> board_rewards = {})
     {
@@ -359,7 +360,8 @@ namespace
         }
         if (!found || final_step->GetPropertyValueInContainer(found) != expected_final_step ||
             consumed->GetPropertyValueInContainer(found) != (wanted != nullptr) ||
-            xp->GetPropertyValueInContainer(found) != expected_xp || cash->GetPropertyValueInContainer(found) != expected_cash) return false;
+            (expected_xp && xp->GetPropertyValueInContainer(found) != *expected_xp) ||
+            (expected_cash && cash->GetPropertyValueInContainer(found) != *expected_cash)) return false;
         const auto current_step = step->GetPropertyValueInContainer(found);
         if (phase == WirePhase::complete ? current_step != -10 :
             current_step < 1 || current_step > expected_final_step || (exact_active_step && current_step != exact_active_step))
@@ -727,7 +729,6 @@ namespace
         dead_drop_item_path, 300};
     constexpr ObjectiveQuest metro_drop_objective{"metro_dead_drop", PartyWorld::black_market, STR("DeadDrop_Metro"),
         STR("/Game/Classes/Items/Key_Items/Bag_DeadDrop_Metro.Bag_DeadDrop_Metro_C"), 600};
-    constexpr std::array dead_drop_objectives{&dead_drop_objective, &metro_drop_objective};
     constexpr ObjectiveQuest stolen_bag_objective{"stolen_bag", PartyWorld::black_market, STR("Clt_StolenBag"),
         stolen_bag_item_path, 1200};
     constexpr ObjectiveQuest black_box_objective{"black_box", PartyWorld::observatory, STR("Clct_Radio_Scar"),
@@ -1911,14 +1912,14 @@ namespace
     }
 }
 
-bool silverfish::native_quest_rewards::active_dead_drop(U::UObject* canonical_save, U::UClass* item)
+bool silverfish::native_quest_rewards::active_dead_drop(U::UObject* canonical_save, U::UObject* item)
 {
     if (!live(item) || !exact(canonical_save, find<U::UClass>(save_path))) return false;
-    const auto path = item->GetPathName();
-    const auto quest = std::ranges::find_if(dead_drop_objectives, [&](const auto* objective) { return path == objective->item; });
-    return quest != dead_drop_objectives.end() &&
-        objective_recipe(canonical_save, (*quest)->id, item, (*quest)->cash, nullptr, nullptr,
-            WirePhase::active, 2, (*quest)->xp, 1);
+    auto* quest = field<U::FNameProperty>(item, STR("Quest_ID"));
+    if (!quest) return false;
+    const auto id = quest->GetPropertyValueInContainer(item);
+    return !id.IsNone() && objective_recipe(canonical_save, id.ToString().c_str(), item->GetClassPrivate(),
+        std::nullopt, nullptr, nullptr, WirePhase::active, 2, std::nullopt, 1);
 }
 
 bool silverfish::native_quest_rewards::active_missing_contact(RC::Unreal::UObject* canonical_save)

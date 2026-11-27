@@ -5,7 +5,7 @@ import re
 import time
 
 from .authored_loot import same_pose, valid_item_transform
-from .travel import CITY, CROSSROADS
+from .travel import CITY, CROSSROADS, RUIN_FIELDS
 
 
 @dataclass(frozen=True)
@@ -13,6 +13,7 @@ class DeadDrop:
     map: str
     quest: str
     source: str
+    bag_asset: str | None = None
 
     @property
     def world(self):
@@ -20,11 +21,12 @@ class DeadDrop:
 
     @property
     def class_path(self):
-        return f"/Game/Classes/Items/Key_Items/Bag_{self.quest}.Bag_{self.quest}_C"
+        bag = self.bag_asset or f"Bag_{self.quest}"
+        return f"/Game/Classes/Items/Key_Items/{bag}.{bag}_C"
 
     @property
     def actor(self):
-        name = f"Bag_{self.quest}_C"
+        name = self.class_path.rsplit(".", 1)[1]
         return f"{name} {self.world}:PersistentLevel.{name}_1"
 
     def matches_pawn(self, pawn: str) -> bool:
@@ -38,7 +40,8 @@ class DeadDrop:
 
 CROSSROADS_DROP = DeadDrop(CROSSROADS, "DeadDrop_CrossRoads", "crossroads-dead-drop-bag")
 METRO_DROP = DeadDrop(CITY, "DeadDrop_Metro", "metro-dead-drop-bag")
-BY_MAP = {drop.map: drop for drop in (CROSSROADS_DROP, METRO_DROP)}
+FLOOD_TOWN_DROP = DeadDrop(RUIN_FIELDS, "DeadDrop_FloodTown", "flood-town-dead-drop-bag", "Bag_DeadDrop_FloodVillage")
+BY_MAP = {drop.map: drop for drop in (CROSSROADS_DROP, METRO_DROP, FLOOD_TOWN_DROP)}
 BY_SOURCE = {drop.source: drop for drop in BY_MAP.values()}
 MAP, QUEST, SOURCE = CROSSROADS_DROP.map, CROSSROADS_DROP.quest, CROSSROADS_DROP.source
 CLASS, WORLD, ACTOR = CROSSROADS_DROP.class_path, CROSSROADS_DROP.world, CROSSROADS_DROP.actor

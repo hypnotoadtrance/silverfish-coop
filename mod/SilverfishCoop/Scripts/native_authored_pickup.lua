@@ -17,6 +17,7 @@ local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local savlo_estate = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P"
 local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
+local ruin_fields = "/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P"
 local dead_end = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
 local scav_bar = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"
 local gold_bag = {
@@ -44,10 +45,12 @@ end
 local dead_drops = {
     [crossroads] = dead_drop_profile(crossroads, "crossroads-dead-drop-bag", "Bag_DeadDrop_CrossRoads"),
     [city] = dead_drop_profile(city, "metro-dead-drop-bag", "Bag_DeadDrop_Metro"),
+    [ruin_fields] = dead_drop_profile(ruin_fields, "flood-town-dead-drop-bag", "Bag_DeadDrop_FloodVillage"),
 }
 local profiles = {
     dead_drops[crossroads],
     dead_drops[city],
+    dead_drops[ruin_fields],
     drill_head.profile,
     {
         map = observatory,
