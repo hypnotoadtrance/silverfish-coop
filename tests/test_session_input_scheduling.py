@@ -395,8 +395,7 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         for target in (f"world-loot:{epoch}:{item}:2", f"stack-drop:{epoch}:{item}"):
             with self.subTest(target=target):
                 client.bridge.command.reset_mock()
-                client.bridge.interactions.return_value = [(operation, target)]
-                await client.service_stock_interactions(scope)
+                await client.dispatch_stock_interaction(scope, operation, target)
                 client.bridge.command.assert_awaited_once_with("native-pickup-cancel-preview", target,
                                                                timeout=.75, update_status=False)
 
@@ -405,7 +404,6 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         actor = f"Door_BP_C {OBSERVATORY}.Observitory_P:PersistentLevel.Door_BP_C_1"
         scope, started, settle = ("session", "epoch", OBSERVATORY, "pawn"), asyncio.Event(), asyncio.Event()
         client.stock_interaction_scope = Mock(return_value=scope)
-        client.bridge.interactions.return_value = [("door", native_stock_door.TARGET_PREFIX + actor), ("pick", None)]
 
         async def interaction(_scope, operation, _target):
             if operation == "door":
@@ -414,7 +412,8 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
             return {}
 
         client.apply_stock_interaction = AsyncMock(side_effect=interaction)
-        await client.service_stock_interactions(scope)
+        await client.dispatch_stock_interaction(scope, "door", native_stock_door.TARGET_PREFIX + actor)
+        await client.dispatch_stock_interaction(scope, "pick", None)
         await asyncio.wait_for(started.wait(), .5)
         self.assertFalse(client.stock_door_requests[actor].done())
         client.apply_stock_interaction.assert_any_await(scope, "pick", None)

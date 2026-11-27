@@ -5,9 +5,62 @@ from unittest.mock import AsyncMock, Mock
 import uuid
 
 from tools.silverfish import service
+from tools.silverfish.travel import OBSERVATORY
 
 
 class GuestInteractionLaneTests(unittest.IsolatedAsyncioTestCase):
+    async def test_local_switch_reports_keep_their_order_during_a_pending_pickup(self):
+        client = service.Client.__new__(service.Client)
+        client.stopping = client.needs_travel = client.server_transitioning = False
+        client.host_session, client.zone_epoch, client.expected_zone = "session", "visit", OBSERVATORY
+        client.last_game = {"state": "connected", "map": OBSERVATORY, "pawns": {"local": {"name": "pawn"}}}
+        client.transport = SimpleNamespace(connected=True)
+        client.control = SimpleNamespace(event=Mock())
+        client.stock_door_requests = {}
+        pickup_started, finish_pickup, carry_polled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        first_report, finish_report, second_report = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        read_this_tick = []
+        client.prop_carry = SimpleNamespace(poll_local_edges=lambda _scope: pickup_started.is_set() and carry_polled.set())
+        client.bridge = SimpleNamespace(
+            local_bridge=object(),
+            stock_interaction_ready=lambda *, crates: bool(read_this_tick),
+            interactions=lambda: [read_this_tick.pop(0) for _ in range(len(read_this_tick))],
+        )
+        radio = f"Prop_Radio01_C {OBSERVATORY}.Observitory_P:PersistentLevel.Prop_Radio01_C_1"
+        read_this_tick.extend([("pickup", None), ("on", f"stock-switch-state:2:1:{radio}"),
+                               ("off", f"stock-switch-state:3:0:{radio}")])
+
+        async def apply(action, operation, target):
+            if operation == "pickup":
+                pickup_started.set()
+                await finish_pickup.wait()
+            elif operation == "on":
+                self.assertEqual((action, target), (service.native_stock_switch.REPORT, f"{radio}@1"))
+                first_report.set()
+                await finish_report.wait()
+            elif operation == "off":
+                self.assertEqual((action, target), (service.native_stock_switch.REPORT, f"{radio}@0"))
+                second_report.set()
+            return {}
+
+        client.gameplay_action = AsyncMock(side_effect=apply)
+        worker = asyncio.create_task(client.run_stock_interactions())
+        try:
+            await asyncio.wait_for(pickup_started.wait(), 1)
+            await asyncio.wait_for(first_report.wait(), 1)
+            await asyncio.wait_for(carry_polled.wait(), 1)
+            self.assertFalse(second_report.is_set())
+            finish_report.set()
+            await asyncio.wait_for(second_report.wait(), 1)
+            self.assertFalse(finish_pickup.is_set())
+            self.assertEqual([entry.args[1] for entry in client.gameplay_action.await_args_list],
+                             ["pickup", "on", "off"])
+        finally:
+            client.stopping = True
+            finish_pickup.set()
+            finish_report.set()
+            await asyncio.wait_for(worker, 1)
+
     async def test_ordinary_interact_finishes_before_an_earlier_crate_reply(self):
         waiting_for_host, release_roll, ordinary_done = asyncio.Event(), asyncio.Event(), asyncio.Event()
         client = service.Client.__new__(service.Client)

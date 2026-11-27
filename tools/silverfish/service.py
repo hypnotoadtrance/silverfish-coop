@@ -88,6 +88,7 @@ _TIMED_INTERACTIONS = (frozenset({"native-loot-inspect", "native-loot-open", "na
                        if os.environ.get("SILVERFISH_COOP_TITLE_FIXTURES") == "1" else frozenset())
 _NATIVE_REQUESTS_PER_PASS = 3
 _NATIVE_REQUEST_PASS_SECONDS = .025
+_LOCAL_STOCK_INPUT_BACKLOG = 64
 # Cap early refreshes during bursts without changing the ordinary snapshot fallback.
 _GAMEPLAY_CHANGE_INTERVAL = link.STATE_INTERVAL
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
@@ -7089,24 +7090,48 @@ class Client:
         return None
 
     async def run_stock_interactions(self) -> None:
+        interact = asyncio.Queue(maxsize=_LOCAL_STOCK_INPUT_BACKLOG)
+        controls = asyncio.Queue(maxsize=_LOCAL_STOCK_INPUT_BACKLOG)
+
+        workers = [asyncio.create_task(self.run_stock_input_queue(queue)) for queue in (interact, controls)]
         try:
             while not self.stopping:
+                for worker in workers:
+                    if worker.done():
+                        await worker
                 for actor, request in tuple(self.stock_door_requests.items()):
                     if request.done():
                         del self.stock_door_requests[actor]
                         await request
                 scope = self.stock_interaction_scope()
                 self.prop_carry.poll_local_edges(scope)
-                if self.bridge.stock_interaction_ready(crates=False):
-                    await self.service_stock_interactions(scope)
+                inputs = self.bridge.interactions() if self.bridge.stock_interaction_ready(crates=False) else ()
+                if scope is not None:
+                    for operation, target in inputs:
+                        # Keep linked controls in order, independently of pickups waiting on shared loot.
+                        queue = controls if (native_stock_door.target_actor(target) or native_stock_switch.input_target(target)
+                                             or native_stock_switch.local_outcome(target) or native_lantern.target_angles(target)
+                                             or native_ladder.target_parts(target)) else interact
+                        try:
+                            queue.put_nowait((scope, operation, target))
+                        except asyncio.QueueFull:
+                            self.control.event("interaction_rejected", operation_id=operation, reason="stock_input_queue_full")
                 await asyncio.sleep(.012)
         finally:
+            for worker in workers:
+                worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
             for request in self.stock_door_requests.values():
                 request.cancel()
             for request in self.stock_door_requests.values():
                 with contextlib.suppress(asyncio.CancelledError):
                     await request
             self.stock_door_requests.clear()
+
+    async def run_stock_input_queue(self, queue) -> None:
+        while not self.stopping:
+            scope, operation, target = await queue.get()
+            await self.dispatch_stock_interaction(scope, operation, target)
 
     async def project_world_loot(self) -> None:
         game = self.last_game
@@ -7168,18 +7193,17 @@ class Client:
                 await self.service_crate_interaction(self.stock_interaction_scope())
             await asyncio.sleep(.012)
 
-    async def service_stock_interactions(self, scope) -> None:
-        for operation, target in self.bridge.interactions():
-            if scope is None or self.stock_interaction_scope() != scope:
-                break
-            if self.bridge.local_bridge is not None and (actor := native_stock_door.target_actor(target)):
-                if actor not in self.stock_door_requests and len(self.stock_door_requests) < 4:
-                    self.stock_door_requests[actor] = asyncio.create_task(self.finish_stock_interaction(scope, operation, target))
-                    await asyncio.sleep(0)
-                else:
-                    self.control.event("interaction_rejected", operation_id=operation, reason="stock_door_in_motion")
-                continue
-            await self.finish_stock_interaction(scope, operation, target)
+    async def dispatch_stock_interaction(self, scope, operation, target) -> None:
+        if self.stock_interaction_scope() != scope:
+            return
+        if self.bridge.local_bridge is not None and (actor := native_stock_door.target_actor(target)):
+            if actor not in self.stock_door_requests and len(self.stock_door_requests) < 4:
+                self.stock_door_requests[actor] = asyncio.create_task(self.finish_stock_interaction(scope, operation, target))
+                await asyncio.sleep(0)
+            else:
+                self.control.event("interaction_rejected", operation_id=operation, reason="stock_door_in_motion")
+            return
+        await self.finish_stock_interaction(scope, operation, target)
 
     async def finish_stock_interaction(self, scope, operation, target) -> None:
         if self.stock_interaction_scope() != scope:
@@ -7417,7 +7441,10 @@ class Client:
             if self.bridge.local_bridge is None:
                 scope = self.stock_interaction_scope()
                 await self.service_crate_interaction(scope)
-                await self.service_stock_interactions(scope)
+                for operation, target in self.bridge.interactions():
+                    if scope is None or self.stock_interaction_scope() != scope:
+                        break
+                    await self.dispatch_stock_interaction(scope, operation, target)
             flashlight = (self.gameplay.get(native_flashlight.KEY)
                           if active and self.transport.game_access and time.monotonic() - self.gameplay_seen < 3 else None)
             with contextlib.suppress(OSError, RuntimeError):
