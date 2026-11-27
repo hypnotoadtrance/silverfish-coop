@@ -8068,7 +8068,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             resident_campaigns.setdefault(campaign, []).append((name, check))
     if stock_split and resident_campaigns:
         resident_campaigns["stock_split"] = [("stock_split_and_merge",
-            lambda host, guest, pawn: verify_gameplay(host, guest, pawn, stock_split=True))]
+            lambda host, guest, pawn: verify_gameplay(host, guest, pawn, stock_split=True,
+                                                      projected_nearby=projected_nearby))]
     single_scenario = (bool(resident_campaigns) or stock_prop_grip
                        or stock_crate_ring or guest_world_start
                        or guest_ui_memory or compact_crate_status or compact_world_view or guest_shop_lease
@@ -9091,7 +9092,8 @@ if __name__ == "__main__":
             args.guest_world_start, args.guest_world_start_travel, args.guest_ui_memory, args.compact_crate_status,
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
-    resident_check_options = {"guest_shop_lease", "stock_unequip", "stock_split", "stock_food", "stock_personal_consumable", "stock_wipe_chooser",
+    resident_check_options = {"guest_shop_lease", "stock_unequip", "stock_split", "projected_nearby",
+                              "stock_food", "stock_personal_consumable", "stock_wipe_chooser",
                               "stock_campfire", "stock_npc_override", "stock_dock_population", "stock_streamed_npc",
                               "stock_dead_drops",
                               "stock_board_offers", "stock_streamed_board", "stock_quarry_photo",
