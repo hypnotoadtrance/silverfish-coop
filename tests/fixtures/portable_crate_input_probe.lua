@@ -3,8 +3,8 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not mailbox
     or not mailbox:match("[/\\]portable%-title%-%x+[\\/]second[\\/]")
     or not mailbox:match("[/\\]run[/\\]game%-bridge[/\\]%x+$") then return end
 
-local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
-local path = map .. ":PersistentLevel.LootCrate_Small_BP_C_1"
+local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
+local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
 local command, reply = mailbox .. "/portable-crate-command.tsv", mailbox .. "/portable-crate-reply.tsv"
 local last, motion
 local stock_focus = require("native_loot_crate_input").stock_focus
@@ -54,6 +54,8 @@ local function sample_motion()
 end
 
 local function press(mode)
+    local map = mode == "crossroads" and crossroads or observatory
+    local path = map .. ":PersistentLevel.LootCrate_Small_BP_C_" .. (mode == "crossroads" and "3" or "1")
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
     local driver = valid(world) and world.NetDriver
@@ -64,7 +66,7 @@ local function press(mode)
     assert(valid(world) and world:GetFullName() == "World " .. map and valid(driver) and valid(driver.ServerConnection)
         and valid(pawn) and pawn:IsLocallyControlled() and not pawn:HasAuthority() and pawn.Dead == false
         and valid(crate) and not crate:HasAuthority() and same(crate:GetWorld(), world) and crate.Looted == false
-        and valid(box) and same(box:GetOwner(), crate), "unqualified Observatory crate or guest")
+        and valid(box) and same(box:GetOwner(), crate), "unqualified stock crate or guest")
     local _, detail = stock_focus(pawn, box, function()
         assert(pawn.Holding_Interact == false, "stock F is already held")
         local input = StaticFindObject("/Script/EnhancedInput.Default__EnhancedInputLibrary")
@@ -72,7 +74,7 @@ local function press(mode)
         assert(valid(input) and valid(action), "stock Interact is unavailable")
         local started = input:MakeInputActionValueOfType(1, 0, 0, 0)
         local completed = input:MakeInputActionValueOfType(0, 0, 0, 0)
-        if mode == "coldpress" then SilverfishClearNativeLootCrateInput() end
+        if mode == "coldpress" or mode == "crossroads" then SilverfishClearNativeLootCrateInput() end
         local panel = crate.SM_Prop_Cabinet_Small_Door_01
         local mesh_class = StaticFindObject("/Script/Engine.StaticMeshComponent")
         assert(valid(panel) and valid(mesh_class), "stock crate lid probe unavailable")
@@ -103,7 +105,7 @@ LoopInGameThreadWithDelay(25, function()
     request:close()
     local ticket, mode
     if line then ticket, mode = line:match("^(%x+)\t(%a+)$") end
-    if mode ~= "press" and mode ~= "coldpress" and mode ~= "motion" then return end
+    if mode ~= "press" and mode ~= "coldpress" and mode ~= "motion" and mode ~= "crossroads" then return end
     if not ticket or #ticket ~= 32 or last == ticket then return end
     last = ticket
     local ok, result

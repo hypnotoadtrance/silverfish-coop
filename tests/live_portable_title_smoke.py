@@ -7166,6 +7166,34 @@ async def verify_compact_crate_status(host: Seat, guest: Seat, pawn: str) -> dic
     return {"stock_crate": crate, "host": inspections[0], "guest": inspections[1], "stock_open": stock_open}
 
 
+async def verify_original_crossroads_crate(host: Seat, guest: Seat, pawn: str) -> dict:
+    crate = native_loot.CRATE
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    approached = await host.bridge.command("native-loot-approach", pawn, crate, timeout=5)
+    position, = [row["location"] for row in approached["pawns"].values() if row["name"] == pawn]
+
+    def crate_state(frame, state):
+        return frame.get("game", {}).get("native_loot_crates", {}).get(crate, {}).get("state") == state
+
+    await wait(host_run, lambda frame: crate_state(frame, "ready"))
+    ready = await wait(guest_run, lambda frame: crate_state(frame, "ready")
+                       and (point := frame["game"].get("pawns", {}).get("local", {}).get("location"))
+                       and math.dist(point, position) < 50)
+    checkpoint = campaign_save_hashes(host.campaign)
+    guest_actor = (await portable_probe_command(guest.bridge, "portable-crate", "crossroads")).partition("|")[0]
+    assert guest_actor == crate, guest_actor
+    observed = await asyncio.gather(*(wait(run, lambda frame: crate_state(frame, "exhausted")
+        and crate in frame.get("gameplay", {}).get(native_loot.STATE_KEY, {})) for run in (host_run, guest_run)))
+    host_roll, guest_roll = (frame["gameplay"][native_loot.STATE_KEY][crate] for frame in observed)
+    assert host_roll == guest_roll, observed
+    pressed, = [row for row in await resident_events(guest_run, ready)
+                if row.get("event") == "native_stock_crate_interaction" and row.get("crate") == crate]
+    assert pressed["input_source"] == "memory_input" and pressed["operation_id"] == host_roll["id"], pressed
+    assert campaign_save_hashes(host.campaign) == checkpoint
+    return {"crate": crate, "roll_id": host_roll["id"], "item_count": len(host_roll["items"]),
+            "input_source": pressed["input_source"], "checkpoints_unchanged": True}
+
+
 async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: bool = False,
                           stock_split: bool = False, stock_equip: bool = False, stock_nearby: bool = False,
                           projected_nearby: bool = False) -> dict:
@@ -8008,6 +8036,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_weather_travel, "crossroads", "stock_weather_travel",
          lambda host, guest, pawn: verify_weather_travel(host, guest, pawn, portable_probe_command,
                                                         profile=crossroads_profile, gc_trial=crossroads_gc_trial)),
+        (stock_crate_ring and crossroads_profile and stock_weather_travel, "crossroads", "stock_original_crossroads_crate",
+         verify_original_crossroads_crate),
         # Exercise recovery near the arrival point before world-object checks move the party.
         (stock_crossroads_recovery, "crossroads", "stock_crossroads_recovery", verify_crossroads_recovery),
         (stock_lightning, "crossroads", "stock_lightning",

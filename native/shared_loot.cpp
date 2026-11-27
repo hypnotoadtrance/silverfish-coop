@@ -1574,8 +1574,6 @@ namespace silverfish::shared_loot
                 key->GetName() != profile->key_class_name : key != nullptr)
                 return refuse("stock_container_key_unqualified");
         }
-        // Keep the previously live-qualified stock route on its existing guards.
-        if (profile == &authored_loot::profiles.front()) return true;
         auto* defaults = crate->GetClassPrivate()->GetClassDefaultObject().Get();
         if (!defaults || defaults->GetClassPrivate() != crate->GetClassPrivate()) return refuse("crate_settings_defaults");
         if (!read_bool(crate, STR("Ping_IfOpened"), profile->stock_class->stock_ping || profile->extra_open_ping))

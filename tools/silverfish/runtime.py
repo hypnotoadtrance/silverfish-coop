@@ -73,7 +73,7 @@ from . import native_host_dig, native_host_dig_live, native_package_handoff_jour
 from . import native_title_entry
 from .native_host_landmine import parse as parse_host_landmine
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
-from .authored_loot import (CRATES as AUTHORED_CRATES, CRATE_NAMES_BY_INDEX, LEGACY_CRATE, loot_capacity, random_lid,
+from .authored_loot import (CRATES as AUTHORED_CRATES, CRATE_NAMES_BY_INDEX, loot_capacity, random_lid,
                             valid_item_transform, valid_lid_angle, lockable_container)
 from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
 from .native_quest_catalog import parse as parse_quest_catalog
@@ -742,8 +742,6 @@ def _store_crate_state(data: dict, area: str, crate: str, state: str, angle_text
             raise ValueError("Invalid stock lid pose")
         row[lid[0]] = angle
     data.setdefault("native_loot_crates", {})[crate] = row
-    if crate == LEGACY_CRATE:
-        data["native_loot_crate_input"] = row
 
 
 def _read_crate_state(data: dict, fields: list[str]) -> None:
@@ -2587,8 +2585,6 @@ class Bridge:
                            "looted": None if fields[7] == "-" else fields[7] == "1",
                            "collision": _finite(fields[8]), "roll": _finite(fields[9])}
                     data.setdefault(native_loot.CRATE_DIAGNOSTICS, {})[fields[2]] = row
-                    if fields[2] == LEGACY_CRATE:
-                        data["native_loot_crate_diagnostic"] = row
                 elif (fields[0] == "native-loot-crate-replenished" and len(fields) == 4
                         and AUTHORED_CRATES.get(fields[2]) == fields[1] and data.get("state") == "hosting"):
                     row = {"map": fields[1], "crate": fields[2], "pawn": fields[3]}

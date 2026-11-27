@@ -432,7 +432,7 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         snapshot = runtime.Bridge(self.root, None).snapshot()
         self.assertEqual({crate: row["state"] for crate, row in snapshot["native_loot_crates"].items()},
                          {LEGACY_CRATE: "exhausted", OTHER_CRATE: "ready"})
-        self.assertEqual(snapshot["native_loot_crate_input"], snapshot["native_loot_crates"][LEGACY_CRATE])
+        self.assertEqual(snapshot["native_loot_crates"][LEGACY_CRATE]["state"], "exhausted")
 
     def test_compact_stock_crate_snapshot_preserves_locks_lids_and_replenishment(self):
         angle_crate = next(crate for crate, area in CRATES.items() if area == CROSSROADS and random_lid(crate))
@@ -452,7 +452,7 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
             return runtime.Bridge(self.root, None)._parse_status(text)
 
         snapshot = parse(rows)
-        self.assertEqual(snapshot["native_loot_crate_input"]["state"], "ready")
+        self.assertEqual(snapshot["native_loot_crates"][LEGACY_CRATE]["state"], "ready")
         self.assertEqual(snapshot["native_loot_crates"][angle_crate][pose], angle)
         self.assertEqual(snapshot[native_loot.REPLENISHED][LEGACY_CRATE]["pawn"], PAWN)
         self.assertEqual(snapshot[native_loot.VEHICLE_LOCKS], {locked_crate: True})

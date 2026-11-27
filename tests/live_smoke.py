@@ -1867,14 +1867,14 @@ async def smoke():
                     await command(*stock, "native-loot-approach", "--target", "host")
                 open_crate = ("action", "--profile", profile, "native-loot-open", "--target", NATIVE_LOOT_CRATE)
                 if args.native_loot_input:
-                    await wait(client_run, lambda state: state.get("game", {}).get("native_loot_crate_input", {}).get("state") == "ready")
+                    await wait(client_run, lambda state: state.get("game", {}).get("native_loot_crates", {}).get(NATIVE_LOOT_CRATE, {}).get("state") == "ready")
                     observed = (await command("action", "--profile", profile,
                                               "native-loot-crate-fixture"))["native_loot_crate_interaction"]
                     assert observed["crate"] == NATIVE_LOOT_CRATE and observed["entry"] == "fixture", observed
                     opened = await wait(run, lambda state: state.get("gameplay", {}).get("native_loot_rolls", {}).get(NATIVE_LOOT_CRATE))
                     loot_roll = opened["gameplay"]["native_loot_rolls"][NATIVE_LOOT_CRATE]
                     for directory in (run, client_run):
-                        await wait(directory, lambda state: state.get("game", {}).get("native_loot_crate_input", {}).get("state") == "exhausted")
+                        await wait(directory, lambda state: state.get("game", {}).get("native_loot_crates", {}).get(NATIVE_LOOT_CRATE, {}).get("state") == "exhausted")
                     note("stock_interact_opens_the_authoritative_party_crate", observed)
                 else:
                     proof_command = (*stock, "native-loot-open-fixture", "--target", "guest") if args.native_loot_nonempty else open_crate
@@ -2394,7 +2394,7 @@ async def smoke():
                 note("stock_crate_roll_survives_restart_without_a_reroll", loot_roll)
                 if args.native_loot_input:
                     for directory in (run, client_run):
-                        await wait(directory, lambda state: state.get("game", {}).get("native_loot_crate_input", {}).get("state") == "exhausted")
+                        await wait(directory, lambda state: state.get("game", {}).get("native_loot_crates", {}).get(NATIVE_LOOT_CRATE, {}).get("state") == "exhausted")
                     note("committed_stock_crate_reopens_visually_without_a_reroll", {"crate": NATIVE_LOOT_CRATE})
                 if claim_crate:
                     assert (await command(*claim_crate))["native_loot_claim"] == claim

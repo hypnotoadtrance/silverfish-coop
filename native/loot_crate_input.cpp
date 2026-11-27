@@ -415,10 +415,8 @@ namespace
         const auto index = static_cast<std::size_t>(profile - profiles.data());
         auto& active = scopes[index];
         const auto now = Clock::now();
-        const bool legacy = index == 0;
-        // Stock input qualifies the live target even before the background crate scan
-        // reaches it. Keep the older exact crate's existing scene qualification rules.
-        if (!legacy && !ready_profile(crate, world)) return;
+        // Stock input qualifies the live target even before the background crate scan reaches it.
+        if (!ready_profile(crate, world)) return;
 
         if (script)
         {
@@ -492,12 +490,11 @@ namespace
         {
             status = "scope_arguments";
             const auto count = lua.get_stack_size();
-            if ((count == 2 || count == 3) && lua.is_integer(1) && lua.is_bool(2) &&
-                (count == 2 || lua.is_integer(3)))
+            if (count == 3 && lua.is_integer(1) && lua.is_bool(2) && lua.is_integer(3))
             {
                 const auto pawn = lua.get_integer();
                 const bool host = lua.get_bool();
-                const auto profile_index = count == 3 ? lua.get_integer() : 1;
+                const auto profile_index = lua.get_integer();
                 if (profile_index <= 0 || profile_index > static_cast<std::int64_t>(profiles.size()))
                 {
                     lua.set_bool(false);
@@ -527,7 +524,7 @@ namespace
                     if (local.pawn && pawn == reinterpret_cast<std::intptr_t>(local.pawn) && host == local.host)
                     {
                         status = "crate_profile_shape";
-                        if (index == 0 || ready_profile(crate, world, &status))
+                        if (ready_profile(crate, world, &status))
                         {
                             arm_scope(scope, crate, world, local, now);
                             status = "bound";
@@ -545,7 +542,7 @@ namespace
     int status(const Lua& lua)
     {
         const auto count = lua.get_stack_size();
-        const auto index = count == 0 ? 1 : count <= 2 && lua.is_integer(1) ? lua.get_integer() : 0;
+        const auto index = count >= 1 && count <= 2 && lua.is_integer(1) ? lua.get_integer() : 0;
         const bool snapshot = count == 2 && lua.is_bool(2) && lua.get_bool();
         const auto* scope = ready() && index > 0 && index <= static_cast<std::int64_t>(scopes.size())
             ? &scopes[static_cast<std::size_t>(index - 1)] : nullptr;
