@@ -17,7 +17,7 @@ from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, REFINERY
 
 
 class StockEnemyDropSchedulingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_refused_stock_conversion_keeps_host_and_other_drops_live(self):
+    async def test_refused_stock_capture_keeps_host_and_other_drops_live(self):
         drops = native_stock_enemy_drops
         rows = {number: {"sequence": number, "map": CROSSROADS, "actor": f"item-{number}",
                          "class_path": "ammo", "source": "Bandit_C NPC", "killer": None,
@@ -32,35 +32,41 @@ class StockEnemyDropSchedulingTests(unittest.IsolatedAsyncioTestCase):
                                    processed_stock_enemy_drops=set(), roles=dict, checkpoint_native=AsyncMock(),
                                    control=Mock())
 
-        async def capture(action, serial, slot, option, *, timeout):
-            self.assertEqual((action, option), (drops.BANK, "memory-escrow"))
-            if serial == "1":
-                raise RuntimeError("native_loot_stock_actor_conversion_unverified")
-            return {**game, drops.BANK_KEY: {"map": CROSSROADS, "sequence": 2, "actor": "item-2",
-                                            "class_path": "ammo", "slot": slot, "guid": "2" * 32, "ammo": 1,
-                                            "transform": {}, "memory": True}}
+        for refusal in ("native_loot_stock_actor_conversion_unverified",
+                        "native_loot_escrow_memory_loot_escrow_reference_unavailable"):
+            with self.subTest(refusal=refusal):
+                async def capture(action, serial, slot, option, *, timeout):
+                    self.assertEqual((action, option), (drops.BANK, "memory-escrow"))
+                    if serial == "1":
+                        raise RuntimeError(refusal)
+                    return {**game, drops.BANK_KEY: {"map": CROSSROADS, "sequence": 2, "actor": "item-2",
+                                                    "class_path": "ammo", "slot": slot, "guid": "2" * 32, "ammo": 1,
+                                                    "transform": {}, "memory": True}}
 
-        authority = host()
-        bridge = SimpleNamespace(command=AsyncMock(side_effect=capture))
-        await drops.observe(authority, bridge)
-        await drops.observe(authority, bridge)
-        self.assertEqual(bridge.command.await_count, 2)
-        self.assertEqual(authority.processed_stock_enemy_drops, {1, 2})
-        self.assertTrue(authority.party[drops.STATE]["2" * 32]["escrow"]["pending"])
-        self.assertFalse(authority.stopping)
-        self.assertFalse(authority.native_checkpoint_unsafe)
-        authority.checkpoint_native.assert_not_awaited()
-        authority.control.event.assert_any_call("native_stock_enemy_loot_capture_refused", sequence=1,
-                                                actor="item-1", reason="native_loot_stock_actor_conversion_unverified")
+                authority = host()
+                bridge = SimpleNamespace(command=AsyncMock(side_effect=capture))
+                await drops.observe(authority, bridge)
+                await drops.observe(authority, bridge)
+                self.assertEqual(bridge.command.await_count, 2)
+                self.assertEqual(authority.processed_stock_enemy_drops, {1, 2})
+                self.assertEqual(set(authority.party[drops.STATE]), {"2" * 32})
+                self.assertTrue(authority.party[drops.STATE]["2" * 32]["escrow"]["pending"])
+                self.assertFalse(authority.stopping)
+                self.assertFalse(authority.native_checkpoint_unsafe)
+                authority.checkpoint_native.assert_not_awaited()
+                authority.control.event.assert_any_call("native_stock_enemy_loot_capture_refused", sequence=1,
+                                                        actor="item-1", reason=refusal)
 
-        authority = host()
-        bridge.command = AsyncMock(side_effect=RuntimeError("mutation_unverified_stock_enemy_drop_retirement"))
-        with self.assertRaisesRegex(RuntimeError, "mutation_unverified_stock_enemy_drop_retirement"):
-            await drops.observe(authority, bridge)
-        self.assertTrue(authority.stopping)
-        self.assertTrue(authority.native_checkpoint_unsafe)
-        self.assertEqual(authority.processed_stock_enemy_drops, set())
-        authority.checkpoint_native.assert_not_awaited()
+        for error in ("mutation_unverified_stock_enemy_drop_retirement", "native_loot_escrow_release_failed"):
+            with self.subTest(error=error):
+                authority = host()
+                bridge = SimpleNamespace(command=AsyncMock(side_effect=RuntimeError(error)))
+                with self.assertRaisesRegex(RuntimeError, error):
+                    await drops.observe(authority, bridge)
+                self.assertTrue(authority.stopping)
+                self.assertTrue(authority.native_checkpoint_unsafe)
+                self.assertEqual(authority.processed_stock_enemy_drops, set())
+                authority.checkpoint_native.assert_not_awaited()
 
     async def test_memory_banking_publishes_completed_drops_before_yielding(self):
         drops = native_stock_enemy_drops

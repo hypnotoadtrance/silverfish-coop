@@ -24,6 +24,10 @@ local function page_rows(rows, entries, first, row_for)
     if #navigation > 0 then rows[#rows + 1] = navigation end
 end
 
+local function loading_characters(state)
+    return state.pending and state.pending.action == "characters" and not state.character_refresh
+end
+
 local function draw(state, note, focus)
     local rows, heading = {}, "Manage Saves"
     local save = state.save
@@ -73,6 +77,9 @@ local function draw(state, note, focus)
         rows = {{button("back", "Cancel"), button("confirm", character and "Delete Character" or "Delete Save")}}
     else
         note = note or "Updating co-op saves…"
+        if loading_characters(state) then
+            rows[1], focus = {button("back", "Back")}, "back"
+        end
     end
     state.present({title = heading, note = note, rows = rows, focus = focus})
 end
@@ -139,7 +146,14 @@ end
 
 function manager.press(state, action)
     local screen = state.screen
-    if screen == "waiting" then return end
+    if screen == "waiting" then
+        if action == "back" and loading_characters(state) then
+            -- The worker can finish the read. A later lookup uses a fresh request ID.
+            state.pending, state.screen = nil, "save"
+            draw(state, nil, "characters")
+        end
+        return
+    end
     local focus
     if action == "back" then
         if screen == "list" then return "leave" end

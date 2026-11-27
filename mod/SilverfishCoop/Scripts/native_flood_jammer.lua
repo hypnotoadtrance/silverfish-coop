@@ -291,7 +291,7 @@ local function objective_row(state, phase, status_row)
     local guests = {}
     for _, detail in ipairs(state.pawns) do
         if detail.name ~= state.local_pawn.name then
-            local verified, pawn, detached = pcall(guest_save.exact_item_context, state, phase, detail.name)
+            local verified, pawn, detached = pcall(guest_save.observed_item_context, state, phase, detail)
             if verified and valid(pawn) and valid(detached) then
                 guests[#guests + 1] = pawn:GetAddress()
                 guests[#guests + 1] = detached:GetAddress()

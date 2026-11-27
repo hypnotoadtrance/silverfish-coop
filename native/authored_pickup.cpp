@@ -258,6 +258,7 @@ namespace
 #include "authored_supply_profiles.inc"
     };
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
+    constexpr auto quest_container_class = STR("/Game/Classes/Items/Container_Item_Master.Container_Item_Master_C");
     constexpr auto interact_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:SendInteractionToActor");
     constexpr auto money_base = STR("/Game/Classes/Items/Item_Money_Master.Item_Money_Master_C");
     constexpr auto money_interact = STR("/Game/Classes/Items/Item_Money_Master.Item_Money_Master_C:SendInteractionToActor");
@@ -403,6 +404,12 @@ namespace
 
     bool headless() { return env("SILVERFISH_COOP_HEADLESS"); }
 
+    bool quest_placement_fixture()
+    {
+        static const bool enabled = headless() && env("SILVERFISH_COOP_TITLE_FIXTURES");
+        return enabled;
+    }
+
     struct Observation
     {
         Clock::time_point expires{};
@@ -436,6 +443,7 @@ namespace
     std::map<U::UObject*, LooseSource*> loose_by_actor;
     std::set<std::string, std::less<>> loose_carry_pending;
     std::vector<U::FWeakObjectPtr> loose_candidates;
+    std::vector<U::FWeakObjectPtr> quest_placements, pending_quest_placements;
     std::size_t next_loose_candidate{};
     std::set<std::string, std::less<>> loose_hidden;
     std::uint64_t loose_generation{};
@@ -445,6 +453,7 @@ namespace
     constexpr auto loose_scan_interval = std::chrono::seconds(5);
     constexpr auto loose_scan_budget = std::chrono::microseconds(1500);
     constexpr std::size_t loose_scan_limit = 64;
+    constexpr std::size_t quest_placement_limit = 32;
 
     std::uint64_t sequence{};
     Scope* fixture_scope{};
@@ -1078,6 +1087,8 @@ namespace
         loose_sources.clear();
         loose_by_actor.clear();
         loose_candidates.clear();
+        quest_placements.clear();
+        pending_quest_placements.clear();
         loose_carry_pending.clear();
         next_loose_candidate = 0;
         loose_hidden.clear();
@@ -2405,6 +2416,17 @@ namespace
         return result(lua, true, "loose_pickup_projection_applied");
     }
 
+    std::optional<U::FName> quest_placement_id(U::AActor* actor, U::UScriptStruct* transform)
+    {
+        auto* quest = field<U::FNameProperty>(actor, STR("Quest_ID"));
+        auto* original = field<U::FStructProperty>(actor, STR("OriginalTrans"));
+        if (!quest || !original || original->GetStruct().Get() != transform) return {};
+        const auto id = quest->GetPropertyValueInContainer(actor);
+        const auto name = id.ToString();
+        if (id.IsNone() || !silverfish::content_paths::quest_id(RC::StringViewType{name})) return {};
+        return id;
+    }
+
     int discover_loose(const Lua& lua)
     {
         if (!ready() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_bool(2)) return 0;
@@ -2430,7 +2452,8 @@ namespace
         const auto now = Clock::now();
         auto* base = find<U::UClass>(base_class);
         if (!base) return 0;
-        if (next_loose_candidate == loose_candidates.size() && now >= loose_rescan)
+        const bool rescan = next_loose_candidate == loose_candidates.size() && now >= loose_rescan;
+        if (rescan)
         {
             loose_rescan = now + loose_scan_interval;
             loose_candidates.clear();
@@ -2443,12 +2466,23 @@ namespace
                     loose_candidates.emplace_back(actor);
         }
         const auto cutoff = Clock::now() + loose_scan_budget;
-        const auto limit = std::min(loose_candidates.size(), next_loose_candidate + loose_scan_limit);
+        const auto first = next_loose_candidate;
+        const auto limit = std::min(loose_candidates.size(), first + loose_scan_limit);
+        auto* container = host && first < limit && quest_placement_fixture() ? find<U::UClass>(quest_container_class) : nullptr;
+        auto* transform = container ? find<U::UScriptStruct>(STR("/Script/CoreUObject.Transform")) : nullptr;
         while (next_loose_candidate < limit)
         {
             auto* actor = static_cast<U::AActor*>(loose_candidates[next_loose_candidate++].Get());
+            if (transform && pending_quest_placements.size() < quest_placement_limit &&
+                live(actor) && actor->IsA(container) && quest_placement_id(actor, transform))
+                pending_quest_placements.emplace_back(actor);
             enroll_loose_actor(actor, base, seat);
             if (Clock::now() >= cutoff) break;
+        }
+        if (next_loose_candidate == loose_candidates.size() && (rescan || first != next_loose_candidate))
+        {
+            quest_placements.swap(pending_quest_placements);
+            pending_quest_placements.clear();
         }
 
         std::string carry_paths;
@@ -2465,6 +2499,51 @@ namespace
         lua.set_string(carry_paths);
         lua.set_integer(static_cast<std::int64_t>(loose_generation));
         return 3;
+    }
+
+    int read_quest_placements(const Lua& lua)
+    {
+        if (!ready() || !loose_host || !quest_placement_fixture() || !env("SILVERFISH_COOP_NATIVE_GUEST_SAVE") ||
+            lua.get_stack_size() != 1 || !lua.is_integer()) return 0;
+        const auto pointer = static_cast<Address>(lua.get_integer());
+        auto* pawn = loose_pawn.Get();
+        auto* world = loose_world.Get();
+        if (!live(pawn) || address(pawn) != pointer || !live(world)) return 0;
+        const auto world_path = world->GetPathName();
+        const Profile seat_profile{.world = world_path.c_str()};
+        const Scope seat{world, pawn, nullptr, nullptr, object(pawn, STR("Controller")),
+            object(world, STR("NetDriver")), &seat_profile, true};
+        if (!local_scope(seat)) return 0;
+        auto* save = object(object(world, STR("OwningGameInstance")), STR("SaveSlot_Ref"));
+        auto* transform = find<U::UScriptStruct>(STR("/Script/CoreUObject.Transform"));
+        if (!live(save) || object(pawn, STR("Save")) != save || !transform) return 0;
+        const auto world_utf8 = RC::to_utf8_string(world_path);
+        auto* persistent = object(world, STR("PersistentLevel"));
+        std::string rows;
+        for (const auto& candidate : quest_placements)
+        {
+            auto* actor = static_cast<U::AActor*>(candidate.Get());
+            if (!live(actor) || !actor->HasAnyFlags(U::RF_WasLoaded) || !in_loose_level(actor, world) ||
+                !boolean(actor, STR("bActorIsBeingDestroyed"), false) || !boolean(actor, STR("bHidden"), false) ||
+                !boolean(actor, STR("bReplicates"), false) || !boolean(actor, STR("Stacks"), false) ||
+                !boolean(actor, STR("Physics"), false) || !actor->GetActorEnableCollision() || !source_box(actor))
+                continue;
+            const auto path = actor->GetPathName();
+            const auto type = actor->GetClassPrivate()->GetPathName();
+            if (authored_path(path) || !silverfish::content_paths::item_class(RC::StringViewType{type})) continue;
+            const auto source = loose_source_key(path, world_path, actor->GetLevel() != persistent);
+            if (loose_actor_path(source, world_utf8).empty()) continue;
+            const auto id = quest_placement_id(actor, transform);
+            if (!id || !silverfish::native_quest_rewards::active_dead_drop(save, actor)) continue;
+            const auto pose = read_drop_pose(actor);
+            if (!valid_drop_pose(pose)) continue;
+            std::format_to(std::back_inserter(rows),
+                "native-authored-quest-placement\t{}\t{}\t{}\t{}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.6f}\t{:.6f}\t{:.6f}\n",
+                world_utf8, source, RC::to_utf8_string(id->ToString()), RC::to_utf8_string(type),
+                pose[0], pose[1], pose[2], pose[3], pose[4], pose[5], pose[6], pose[7], pose[8]);
+        }
+        lua.set_string(rows);
+        return 1;
     }
 
     int acknowledge_loose_carry(const Lua& lua)
@@ -3217,6 +3296,7 @@ namespace silverfish::native_authored_pickup
         lua.register_function("SilverfishSetNativeAuthoredPickupScope", set_scope);
         lua.register_function("SilverfishSampleNativeAuthoredPickups", sample_authored);
         lua.register_function("SilverfishDiscoverLoosePickups", discover_loose);
+        if (quest_placement_fixture()) lua.register_function("SilverfishReadNativeAuthoredQuestPlacements", read_quest_placements);
         lua.register_function("SilverfishReadHostLooseRespawnHidden", read_host_respawn_hidden);
         lua.register_function("SilverfishAcknowledgeLooseCarry", acknowledge_loose_carry);
         lua.register_function("SilverfishSetGuestLoosePickupView", set_guest_loose_view);

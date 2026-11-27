@@ -361,8 +361,14 @@ def instrument_host_drop_context(source):
     anchor = "host_save.canonical_host(state, phase)"
     if source.count(anchor) != 1:
         raise ValueError("The host drop context timing anchor changed")
-    return source.replace(anchor, 'SilverfishProfileCrossroadsCall('
-                          '"host_drop_context", host_save.canonical_host, state, phase)')
+    source = source.replace(anchor, 'SilverfishProfileCrossroadsCall('
+                            '"host_drop_context", host_save.canonical_host, state, phase)')
+    reuse = "local pawn = refreshed and binding.pawn or context(state, phase)"
+    if reuse in source:
+        source = ("local function checked_drop_pawn(scope) return scope.pawn end\n" + source)
+        source = source.replace(reuse, 'local pawn = refreshed and SilverfishProfileCrossroadsCall('
+                                '"host_drop_reused", checked_drop_pawn, binding) or context(state, phase)')
+    return source
 
 
 def instrument_weather_status(source):
@@ -682,7 +688,8 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
             else:
                 assert lookups == 0, (area, lookups)
                 drop_checks = timings.get("host_drop_context", {}).get("count", 0)
-                assert 0 < drop_checks <= timings["write_status"]["count"], (area, drop_checks)
+                drop_reuses = timings.get("host_drop_reused", {}).get("count", 0)
+                assert 0 < drop_checks + drop_reuses <= timings["write_status"]["count"], (area, drop_checks, drop_reuses)
         return dict(zip(seats, profiles, strict=True))
 
     async def compare_vitals(seat):

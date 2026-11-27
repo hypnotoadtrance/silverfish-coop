@@ -24,6 +24,17 @@ def with_test_profile_photo(source):
     return source.replace(marker, "        assert(not test_photo or valid(view.photos[test_photo]), \"stock_avatar_import_failed\")\n" + marker)
 
 
+def defer_first_character_response(source):
+    anchor = "local function response(state)\n"
+    assert source.count(anchor) == 1
+    return source.replace(anchor, """local function response(state)
+    if not state.fixture_deferred and state.pending.action == "characters" then
+        state.fixture_deferred = state.pending.id
+    end
+    if state.pending.id == state.fixture_deferred then return end
+""")
+
+
 async def verify_save_management(host, guest):
     async def edit_stock_name(guest, join, name):
         await join("create-editor", name)
@@ -95,6 +106,19 @@ async def verify_save_management(host, guest):
     await click("manage")
     await click("save:" + campaign_id)
     await click("characters")
+    await focused("back")
+    async with asyncio.timeout(8):
+        while True:
+            try:
+                response = (host.bridge.directory / title_host_campaigns.RESPONSE).read_text(encoding="utf-8")
+            except FileNotFoundError:
+                response = ""
+            if f"\n{character}\t" in response:
+                break
+            await asyncio.sleep(.1)
+    await click("back")
+    await focused("characters")
+    await click("characters")
     await click("character:" + character)
     await click("back")
     await focused("character:" + character)
@@ -162,4 +186,5 @@ async def verify_save_management(host, guest):
     await click("modes")
     return {"created": created, "reopened": reopened, "campaign_files_erased": True,
             "guest_slot_erased": True, "confirmation_cancelled": True, "title_focus_verified": True,
+            "pending_character_lookup_cancelled": True,
             "revisions": [original["revision"], deleted_character["revision"], reopened["revision"]]}

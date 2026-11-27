@@ -62,7 +62,8 @@ from portable_personal_consumable import (
     BLUE_MUSHROOM, verify_blue_mushroom, verify_personal_consumable_reconnect, verify_stock_personal_consumable,
 )
 from portable_wipe_chooser import verify_stock_wipe_chooser
-from portable_save_management import verify_save_management, with_test_profile_photo
+from portable_save_management import defer_first_character_response, verify_save_management, with_test_profile_photo
+from portable_authored_quest_placement import apply_quest_placement_probe, verify_authored_quest_placement
 from portable_simmi_jammer import instrument_jammer_sampler, verify_stock_simmi_jammers
 from portable_quarry_photo import verify_quarry_photo
 from portable_weather_travel import verify_weather_travel
@@ -7908,6 +7909,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  crossroads_profile: bool = False, crossroads_gc_trial: bool | str = False, rendered: bool = False,
                  stock_crossroads_door: bool = False, stock_dock_gate: bool = False,
                  stock_crossroads_recovery: bool = False, stock_discovered_overlap: bool = False,
+                 stock_authored_quest_placement: bool = False,
                  stock_melee_family: bool = False, stock_melee_edges: bool = False,
                  stock_warehouse_switch: bool = False, stock_warehouse_board: bool = False, stock_bottle: bool = False,
                  stock_roaming_barter: bool = False, stock_castaway_dialogue: bool = False,
@@ -8125,6 +8127,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         # Exercise recovery near the arrival point before world-object checks move the party.
         (stock_crossroads_recovery, "crossroads", "stock_crossroads_recovery", verify_crossroads_recovery),
         (stock_discovered_overlap, "discovered_overlap", "stock_discovered_overlap", verify_stock_discovered_overlap),
+        (stock_authored_quest_placement, "authored_quest_placement", "stock_authored_quest_placement",
+         verify_authored_quest_placement),
         (stock_lightning, "crossroads", "stock_lightning",
          lambda host, guest, pawn: verify_stock_lightning(host, guest, pawn, portable_probe_command)),
         (storm_trial, "storm", "stock_storm_ambience",
@@ -8211,12 +8215,18 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if manage_saves:
             for game in games:
                 probes.enter_context(portable_script_overlay(game, "native_title_surface.lua", with_test_profile_photo))
+                probes.enter_context(portable_script_overlay(game, "native_title_save_manager.lua",
+                                                            defer_first_character_response))
         if stock_dead_drops:
             for game in games:
                 probes.enter_context(portable_main_overlay(game, observe_dead_drop_replies))
         if stock_discovered_overlap:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableExitDiscoveryProbe",
                                                  fixture="portable_discovered_exit_probe.lua"))
+        if stock_authored_quest_placement:
+            for game in games:
+                probes.enter_context(portable_script_overlay(game, "native_authored_pickup.lua",
+                                                            apply_quest_placement_probe))
         if crossroads_profile or stock_crossroads_recovery:
             for game in games:
                 probes.enter_context(portable_script_overlay(
@@ -8481,7 +8491,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 or stardust_handoff_check
                 or stock_critters or stock_placed_item
                 or stock_crossroads_door or stock_dock_gate
-                or stock_discovered_overlap
+                or stock_discovered_overlap or stock_authored_quest_placement
                 or stock_dead_drops
                 or stock_board_offers or stock_streamed_board or stock_quarry_photo or stock_eye_stacks
                 or stock_lingering_teleport or stock_acid_pool or stock_mushrooms):
@@ -8789,6 +8799,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_shot_view", "tutorial_dock_buckshot",
                     "tutorial_dock_melee", "tutorial_dock_late_join", "dock_population", "stock_melee_family",
                     "crossroads", "crossroads_anomaly", "discovered_overlap", "quarry_photo", "buried_placements",
+                    "authored_quest_placement",
                     "crossroads_dead_drop", "metro_dead_drop", "flood_town_dead_drop",
                     "lab_east_wing_acid", "lab_terminal", "oil_lamps", "shopkeep", "simmi", "stock_board_offers", "missing_contact_untracked",
                     "friendly_fire_enabled", "friendly_fire_default", "stardust_handoff"
@@ -9151,6 +9162,8 @@ if __name__ == "__main__":
                         help="verify both players recover from the stock Crossroads kill volume")
     parser.add_argument("--stock-discovered-overlap", action="store_true",
                         help="verify discovery, wall gating, and arrival for a streamed stock exit")
+    parser.add_argument("--stock-authored-quest-placement", action="store_true",
+                        help="verify native discovery of the stock Smuggler quest placement")
     parser.add_argument("--crossroads-profile", action="store_true",
                         help="measure co-op frame and subsystem times around the stock weather travel check")
     parser.add_argument("--rendered", action="store_true",
@@ -9301,7 +9314,7 @@ if __name__ == "__main__":
         parser.error("Use --stock-shovel-host-quest with --stock-shovel-quest")
     resident_check_options.add("stock_cooked_meal")
     resident_check_options.update(("crossroads_profile", "crossroads_gc_trial", "stock_crossroads_recovery",
-                                   "stock_discovered_overlap", "rendered"))
+                                   "stock_discovered_overlap", "stock_authored_quest_placement", "rendered"))
     if args.crossroads_gc_trial and not args.crossroads_profile:
         parser.error("--crossroads-gc-trial requires --crossroads-profile")
     if args.rendered and not args.crossroads_profile:
@@ -9320,7 +9333,7 @@ if __name__ == "__main__":
             args.stock_loki_control, args.stock_loki_guest,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
             args.crossroads_profile, args.stock_lightning, args.stock_crossroads_door, args.stock_dock_gate,
-            args.stock_crossroads_recovery, args.stock_discovered_overlap,
+            args.stock_crossroads_recovery, args.stock_discovered_overlap, args.stock_authored_quest_placement,
             args.stock_storm_ambience,
             args.stock_melee_family, args.stock_melee_edges, args.stock_warehouse_switch, args.stock_warehouse_board, args.stock_bottle,
             args.stock_roaming_barter, args.stock_castaway_dialogue, args.stock_critters, args.stock_placed_item,
@@ -9386,6 +9399,7 @@ if __name__ == "__main__":
                        stock_crossroads_door=args.stock_crossroads_door,
                        stock_crossroads_recovery=args.stock_crossroads_recovery,
                        stock_discovered_overlap=args.stock_discovered_overlap,
+                       stock_authored_quest_placement=args.stock_authored_quest_placement,
                        stock_dock_gate=args.stock_dock_gate,
                        stock_lightning=args.stock_lightning,
                        stock_storm_ambience=args.stock_storm_ambience,

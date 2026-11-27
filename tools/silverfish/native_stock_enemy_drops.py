@@ -44,6 +44,11 @@ _BANK_REFUSALS_BEFORE_RETIREMENT = frozenset({
     "stock_enemy_escrow_scope_unavailable", "stock_enemy_escrow_transform_unavailable",
     "stock_enemy_escrow_fixture_save_unavailable", "stock_enemy_escrow_capture_unavailable",
     "native_loot_escrow_slot_unavailable", "native_loot_escrow_could_not_create_save",
+    # These scratch-save refusals occur before the native call that captures the world drop.
+    "native_loot_escrow_memory_game_thread_required", "native_loot_escrow_memory_two_save_addresses_required",
+    "native_loot_escrow_memory_distinct_save_addresses_required", "native_loot_escrow_memory_stock_save_schema_unavailable",
+    "native_loot_escrow_memory_invalid_stock_or_detached_save", "native_loot_escrow_memory_loot_escrow_not_transient",
+    "native_loot_escrow_memory_loot_escrow_reference_unavailable",
     "native_loot_inventory_schema_unavailable", "native_loot_save_attachment_schema_unavailable",
     "native_loot_escrow_save_attached_to_owner", "native_loot_live_stock_escrow_save_missing",
     "native_loot_escrow_save_outer_unqualified", "native_loot_blank_escrow_required",

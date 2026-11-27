@@ -1550,7 +1550,7 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         for _, row in ipairs(native_finite_shop.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wipe_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_stack_drop.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
-        for _, row in ipairs(native_host_stack_drop.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_host_stack_drop.rows(state, current_phase, status_row, fields)) do rows[#rows + 1] = row end
         local projections = native_guest_drop_projection.rows(state, current_phase, status_row)
         for _, row in ipairs(projections) do rows[#rows + 1] = row end
         for _, row in ipairs(native_pickup.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

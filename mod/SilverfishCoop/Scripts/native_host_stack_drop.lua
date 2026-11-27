@@ -40,6 +40,7 @@ function menu_drop.clear()
 end
 
 function menu_drop.sync(state, phase)
+    state.status_host_drop = nil
     if not binding then return end
     -- The native refresh checks the active controller, driver, and canonical save.
     local pawn = standing_host(state, phase)
@@ -48,6 +49,7 @@ function menu_drop.sync(state, phase)
         menu_drop.clear()
         return
     end
+    state.status_host_drop = binding
     if not pending then
         local sequence, guid, count, entry = SilverfishTakeNativeHostDropRequest(pawn:GetAddress(), binding.epoch)
         if math.type(sequence) == "integer" and sequence > 0 and sequence < 2 ^ 53
@@ -85,12 +87,15 @@ function menu_drop.command(fields, state, phase)
     return status
 end
 
-function menu_drop.rows(state, phase, row)
-    local pawn = context(state, phase)
+function menu_drop.rows(state, phase, row, command)
+    -- The native refresh already checked the same seat for this observation.
+    -- Command replies must requalify because a command can replace the save.
+    local refreshed = not command and phase == "hosting" and binding and state.status_host_drop == binding
+    local pawn = refreshed and binding.pawn or context(state, phase)
     if not valid(pawn) then return {} end
     local rows = {row("native-host-stack-drop-menu-capability", 1)}
     if binding and same(pawn, binding.pawn) and binding.map == state.map and same(state.world, binding.world) then
-        local name = pawn:GetFullName()
+        local name = refreshed and state.local_pawn.name or pawn:GetFullName()
         rows[#rows + 1] = row("native-host-stack-drop-scope", state.map, name, binding.epoch)
         if pending then
             rows[#rows + 1] = row("native-host-stack-drop-intent", state.map, name, binding.epoch,

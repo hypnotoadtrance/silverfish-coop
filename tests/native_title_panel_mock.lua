@@ -655,6 +655,21 @@ click("host")
 click("manage")
 click("save:" .. campaign_id)
 click("characters")
+local cancelled_lookup = operation_id()
+local pending_lookup = files[save_request]
+assert(display.note == "Loading guest characters…" and display.buttons.back and display.focus == "back")
+click("back")
+assert(display.title == "Expedition" and display.focus == "characters" and files[save_request] == pending_lookup)
+local returned_save = display
+files[save_request] = nil
+files[save_response] = ("2\t%s\t%s\tok\t0\n"):format(manage_generation, cancelled_lookup)
+tick()
+assert(display == returned_save, "A late character list must leave the restored save in focus")
+next_guid = next_guid + 1
+click("characters")
+tick()
+assert(display.note == "Loading guest characters…" and display.buttons.back,
+    "An abandoned response must not complete the new lookup")
 local steam_account = "76561198000000002"
 local other_character, other_account = "00000000-1111-2222-3333-444444444445", "76561198000000003"
 save_reply("characters", 9, "-", "2\n" .. character .. "\tCourier\tFixture Guest\t" .. steam_account
@@ -671,12 +686,14 @@ click("back")
 assert(not files[save_request])
 click("delete-character")
 click("confirm")
+assert(not display.buttons.back, "A confirmed delete must stay in the updating view")
 save_reply("delete-character", 9, character, "0\n")
 tick()
-assert(not files[save_request] and display.note:find("Refreshing", 1, true))
+assert(not files[save_request] and display.note:find("Refreshing", 1, true) and not display.buttons.back)
 manage_list(10, "active")
 next_guid = next_guid + 1
 tick()
+assert(not display.buttons.back, "The refresh after a committed delete must finish")
 save_reply("characters", 10, "-", "1\n" .. other_character .. "\tScout\tOther Guest\t" .. other_account .. "\n")
 assert(display.title == "Manage Characters" and display.note == "Character deleted.")
 assert(display.focus == "character:" .. other_character and not display.buttons["character:" .. character])
