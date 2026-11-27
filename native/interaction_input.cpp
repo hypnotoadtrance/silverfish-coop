@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -1880,6 +1881,66 @@ namespace
         return 0;
     }
 
+    int read_switch_power(const Lua& lua)
+    {
+        if (!available() || lua.get_stack_size() != 5 || !lua.is_integer(1) || !lua.is_integer(2) ||
+            !lua.is_string(3) || !lua.is_string(4) || !lua.is_bool(5)) return 0;
+        // LuaMadeSimple removes each argument when it reads it.
+        const auto lantern = lua.get_bool(5);
+        const auto power = lua.get_string(4);
+        const auto path = lua.get_string(3);
+        const auto expected = lua.get_integer(2);
+        const auto world_address = lua.get_integer(1);
+        auto* world = scope.world.Get();
+        if (!live(world) || address(world) != world_address ||
+            scope.generation != generation.load(std::memory_order_acquire) || Clock::now() >= scope.expires)
+            return 0;
+        const auto* property_name = power == "Lit" ? STR("Lit") :
+            power == "Powered" ? STR("Powered") : power == "Power" ? STR("Power") : nullptr;
+        if (!property_name || expected <= 0) return 0;
+
+        static Unreal::FWeakObjectPtr last_world;
+        static std::unordered_map<Address, Unreal::FWeakObjectPtr> switches;
+        if (last_world.Get() != world)
+        {
+            switches.clear();
+            last_world = world;
+        }
+        const auto entry = switches.find(expected);
+        auto* actor = entry != switches.end() ? entry->second.Get() : nullptr;
+        if (!actor)
+        {
+            if (path.empty() || path.size() > 384) return 0;
+            actor = find<Unreal::AActor>(RC::to_wstring(path).c_str());
+            if (address(actor) != expected || !live(actor) ||
+                actor->GetOuterPrivate() != object_field(world, STR("PersistentLevel"))) return 0;
+            switches[expected] = actor;
+        }
+        if (!live(actor)) return 0;
+        if (scope.host)
+        {
+            if (!live_actor_role(actor, 3)) return 0;
+        }
+        else
+        {
+            auto* destroyed = field<Unreal::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
+            if (!destroyed || destroyed->GetPropertyValueInContainer(actor)) return 0;
+        }
+
+        auto* power_field = field<Unreal::FBoolProperty>(actor, property_name);
+        if (!power_field) return 0;
+        if (lantern)
+        {
+            auto* broken = field<Unreal::FBoolProperty>(actor, STR("Broken_0"));
+            if (!broken) return 0;
+            lua.set_bool(power_field->GetPropertyValueInContainer(actor));
+            lua.set_bool(broken->GetPropertyValueInContainer(actor));
+            return 2;
+        }
+        lua.set_bool(power_field->GetPropertyValueInContainer(actor));
+        return 1;
+    }
+
     int take_stash_press(const Lua& lua)
     {
         if (lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
@@ -2464,6 +2525,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishTakeNativeStashPress", take_stash_press);
         lua.register_function("SilverfishReadNativeLocalLean", read_local_lean);
         lua.register_function("SilverfishReadNativeRemoteAim", read_remote_aim);
+        lua.register_function("SilverfishReadNativeSwitchPower", read_switch_power);
         lua.register_function("SilverfishTakeNativeLanternPress", take_lantern_press);
         lua.register_function("SilverfishDispatchNativeSubwayValve", dispatch_valve);
         mosby_station_input::register_lua(lua);

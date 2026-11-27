@@ -46,6 +46,7 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
         performance["observatory"] = await profile_world(host, guest, OBSERVATORY, probe)
         performance["personal_time_shift"] = await verify_personal_time_shift(host, guest)
     before_travel = campaign_save_hashes(host.campaign)
+    travel_started = time.time()
     blocked_departures = await enter_crossroads(host, pawn, verify_wall=profile)
 
     async def applied(intensity):
@@ -133,7 +134,8 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
             settled = await wait_resident_status(guest_run, ready_after_travel)
             loading, = [event for event in await resident_events(guest_run, settled)
                         if event.get("event") == "native_zone_loading_transition"
-                        and event.get("destination") == CROSSROADS]
+                        and event.get("destination") == CROSSROADS
+                        and event.get("time_unix", 0) >= travel_started]
             assert loading["covered"] and loading["cue"], loading
             performance["crossroads_loading"] = loading
             pawn_name = settled["game"]["pawns"]["local"]["name"]

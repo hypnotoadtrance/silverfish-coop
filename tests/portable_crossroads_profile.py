@@ -610,6 +610,16 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
         return {"rows_per_path": int(calls), "native_ms": float(native_ms), "lua_ms": float(lua_ms),
                 "native_cycles": int(native_cycles), "lua_cycles": int(lua_cycles), "all_rows_matched": True}
 
+    async def compare_switch_reads(seat):
+        reply = await command(seat, "switchreader")
+        if reply == "unavailable":
+            return None
+        assert not reply.startswith("switch comparison failed"), reply
+        switches, native_ms, lua_ms, native_kib, lua_kib = map(float, reply.split(","))
+        return {"fast_reads_per_pass": int(switches), "passes_per_reader": 32, "all_rows_matched": True,
+                "native_ms": native_ms, "lua_ms": lua_ms, "native_heap_growth_kib": native_kib,
+                "lua_heap_growth_kib": lua_kib}
+
     def position(status):
         return status.get("game", {}).get("pawns", {}).get("local", {}).get("location")
 
@@ -745,6 +755,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
         guest_binding = {"guest_binding_comparison": {"reads_per_path": int(calls),
                          "full_qualification_ms": exact, "observed_binding_ms": reused}}
     rows = await asyncio.gather(*(compare_rows(seat) for seat in seats.values()))
+    switches = await asyncio.gather(*(compare_switch_reads(seat) for seat in seats.values()))
     lean = await asyncio.gather(*(compare_lean_reader(seat, probe) for seat in seats.values()))
     journal = {}
     if area == CROSSROADS:
@@ -764,6 +775,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
             "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(after_idle, after_movement),
             "pawn_replication_rates": pawn_rates,
             "row_format_comparison": dict(zip(seats, rows, strict=True)),
+            "switch_reader_comparison": dict(zip(seats, switches, strict=True)),
             "lean_reader_comparison": dict(zip(seats, lean, strict=True)),
             "zone_walls": {seat: frame["game"]["native_zone_wall"]
                            for seat, frame in zip(seats, wall_status, strict=True)},

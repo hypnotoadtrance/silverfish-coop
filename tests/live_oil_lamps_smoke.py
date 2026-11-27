@@ -162,11 +162,18 @@ async def verify_streamed_switch(host, guest, pawn):
     assert await observe(host_run, actor, equal=on_host) == on_host
     assert await observe(guest_run, actor, equal=on_host) == on_host
     frame = await suite.wait_resident_status(guest_run, lambda current: row(current, actor) == on_host)
-    async with asyncio.timeout(6):
-        while not any(event.get("time_unix", 0) >= pressed
-                      and event.get("native_stock_switch_interaction", {}).get("actor") == actor
-                      for event in await suite.resident_events(guest_run, frame)):
-            await asyncio.sleep(.08)
+    try:
+        async with asyncio.timeout(6):
+            while not any(event.get("time_unix", 0) >= pressed
+                          and event.get("native_stock_switch_interaction", {}).get("actor") == actor
+                          for event in await suite.resident_events(guest_run, frame)):
+                await asyncio.sleep(.08)
+    except TimeoutError as error:
+        events = [event for event in await suite.resident_events(guest_run, frame)
+                  if event.get("time_unix", 0) >= pressed
+                  and ("interaction" in event.get("event", "") or "switch" in event.get("event", ""))]
+        raise AssertionError(f"Streamed guest switch changed both views without a receipt. "
+                             f"Input fixture returned {guest_press}. Guest events {events}") from error
     assert await probe(host, "return-guest", actor) == "guest returned"
     assert await probe(guest, "unload") == "unload"
     assert await probe(host, "unload") == "unload"
@@ -179,12 +186,13 @@ async def verify_streamed_switch(host, guest, pawn):
             "unloaded_on_both": True, "checkpoint_unchanged": True}
 
 
-async def exercise(work, first, second, saved, streamed_switch=False):
+async def exercise(work, first, second, saved, streamed_switch=False, crossroads_profile=False):
     with ExitStack() as fixtures:
         for game in (first, second):
             fixtures.enter_context(suite.installed_probe(game, mod="SilverfishPortableOilLampProbe",
                                                          fixture="portable_oil_lamp_probe.lua"))
         await suite.verify(work, first, second, saved, stock_warehouse_switch=True,
+                           crossroads_profile=crossroads_profile,
                            oil_lamps_check=verify_oil_lamps,
                            streamed_switch_check=verify_streamed_switch if streamed_switch else None)
 
@@ -196,6 +204,7 @@ if __name__ == "__main__":
     parser.add_argument("--second-game", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--streamed-switch", action="store_true")
+    parser.add_argument("--crossroads-profile", action="store_true")
     args = parser.parse_args()
     asyncio.run(exercise(args.work.resolve(), args.first_game.resolve(), args.second_game.resolve(),
-                         args.vanilla_saved.resolve(), args.streamed_switch))
+                         args.vanilla_saved.resolve(), args.streamed_switch, args.crossroads_profile))

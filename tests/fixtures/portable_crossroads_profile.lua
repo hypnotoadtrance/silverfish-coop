@@ -157,6 +157,52 @@ local function result()
         .. "|" .. table.concat(memory) .. "|" .. table.concat(sizes) .. "|" .. table.concat(commands)
 end
 
+local function compare_switch_reads()
+    local native = SilverfishReadNativeSwitchPower
+    if type(native) ~= "function" then return "unavailable" end
+    local state = inspect()
+    local seat = phase(state)
+    assert(seat == "hosting" or seat == "connected")
+    local switched, first = 0, nil
+    SilverfishReadNativeSwitchPower = function(...)
+        local powered, broken = native(...)
+        if powered ~= nil then
+            switched = switched + 1
+            first = first or {...}
+        end
+        return powered, broken
+    end
+    local read = native_stock_switch.rows
+    local function sorted_rows()
+        local rows = read(state, seat, status_row)
+        table.sort(rows)
+        return table.concat(rows, "\n")
+    end
+    local function trial(reader)
+        SilverfishReadNativeSwitchPower = reader
+        local heap, start = collectgarbage("count"), stamp()
+        for _ = 1, 32 do read(state, seat, status_row) end
+        return (stamp() - start) / 1000, collectgarbage("count") - heap
+    end
+    local running = collectgarbage("isrunning")
+    local ok, result = pcall(function()
+        local fast = sorted_rows()
+        SilverfishReadNativeSwitchPower = nil
+        assert(switched > 0 and fast == sorted_rows(), "native switch status did not match Lua")
+        assert(native(0, first[2], first[3], first[4], first[5]) == nil, "native switch accepted a different world")
+        assert(native(first[1], 1, first[3], first[4], first[5]) == nil, "native switch accepted a different actor")
+        assert(native(first[1], first[2], first[3], true, first[5]) == nil, "native switch accepted a non-string field")
+        collectgarbage("stop")
+        local native_ms, native_kib = trial(native)
+        local lua_ms, lua_kib = trial(nil)
+        return ("%d,%.3f,%.3f,%.3f,%.3f"):format(switched, native_ms, lua_ms, native_kib, lua_kib)
+    end)
+    SilverfishReadNativeSwitchPower = native
+    if running then collectgarbage("restart") end
+    if not ok then error(result, 0) end
+    return result
+end
+
 local function compare_rows()
     local lua_status_row = status_publication.lua_row
     local samples = {
@@ -297,6 +343,9 @@ LoopInGameThreadWithDelay(50, function()
         else
             message = "unavailable"
         end
+    elseif action == "switchreader" and not capture then
+        local ok, value = pcall(compare_switch_reads)
+        if ok then message = value else message = "switch comparison failed: " .. tostring(value) end
     elseif action == "rows" and not capture then
         local ok, value = pcall(compare_rows)
         if ok then message = value else message = "status rows comparison failed: " .. tostring(value) end

@@ -169,7 +169,8 @@ local function census(state, phase)
                         local entry = parts(actor, world, level)
                         if entry then
                             if entry.power then
-                                entries[name] = {actor = actor, level = level, class = actor:GetClass(), power = entry.power,
+                                entries[name] = {actor = actor, address = actor:GetAddress(), level = level,
+                                    class = actor:GetClass(), power = entry.power,
                                     path = path, candle = entry.candle, lantern = entry.lantern, light = entry.light}
                             else
                                 entry.lights = light_links(actor, world)
@@ -225,11 +226,16 @@ local function suppress_candle_overlap(name, sphere)
     end
 end
 
-function switches.read_row(entry, name, state, phase, row)
-    if not level_visible(entry.level, state.world) then return end
+function switches.read_row(entry, name, state, phase, row, native_world_address)
     if entry.power then
         local actor = entry.actor
-        if not qualified(actor, state.world, entry.level) then
+        local powered, broken
+        if native_world_address then
+            powered, broken = SilverfishReadNativeSwitchPower(native_world_address, entry.address, entry.path,
+                entry.power, entry.lantern == true)
+        end
+        if powered == nil and not level_visible(entry.level, state.world) then return end
+        if powered == nil and not qualified(actor, state.world, entry.level) then
             if not entry.path then return end
             actor = StaticFindObject(entry.path)
             if not qualified(actor, state.world, entry.level) or not same(actor:GetClass(), entry.class)
@@ -241,9 +247,12 @@ function switches.read_row(entry, name, state, phase, row)
             end
             local replacement = parts(actor, state.world)
             if not replacement then return end
-            entry.actor, entry.light = actor, replacement.light
+            entry.actor, entry.address, entry.light = actor, actor:GetAddress(), replacement.light
         end
-        local powered = actor[entry.power]
+        if powered == nil then
+            powered = actor[entry.power]
+            if entry.lantern then broken = actor.Broken_0 == true end
+        end
         if type(powered) == "boolean" then
             if entry.candle and phase == "connected" then
                 local sphere = actor.Sphere
@@ -252,7 +261,7 @@ function switches.read_row(entry, name, state, phase, row)
             local lamp_state
             local panel = "-"
             if entry.lantern then
-                lamp_state = entry.retired and "removed" or actor.Broken_0 == true and "broken" or "intact"
+                lamp_state = entry.retired and "removed" or broken and "broken" or "intact"
                 if lamp_state ~= "intact" then powered = false end
                 if phase == "connected" and lamp_state == "intact" and valid(entry.light)
                     and entry.light:IsVisible() ~= powered then
@@ -271,7 +280,8 @@ function switches.read_row(entry, name, state, phase, row)
             end
             return entry.status_row
         end
-    elseif valid(entry.actor) and not entry.actor:IsActorBeingDestroyed() and valid(entry.lever) then
+    elseif level_visible(entry.level, state.world) and valid(entry.actor) and not entry.actor:IsActorBeingDestroyed()
+        and valid(entry.lever) then
         local angles = entry.lever.RelativeRotation
         local panel = entry.panel:GetMaterial(0)
         local lights = {}
@@ -294,8 +304,11 @@ end
 
 function switches.rows(state, phase, row)
     local rows = {}
-    for name, entry in pairs(census(state, phase)) do
-        rows[#rows + 1] = switches.read_row(entry, name, state, phase, row)
+    local discovered = census(state, phase)
+    local native_world_address = next(discovered) and type(SilverfishReadNativeSwitchPower) == "function"
+        and state.world:GetAddress()
+    for name, entry in pairs(discovered) do
+        rows[#rows + 1] = switches.read_row(entry, name, state, phase, row, native_world_address)
     end
     return rows
 end
