@@ -165,8 +165,22 @@ async def verify_oil_lamps(host, guest, pawn, *, playtest_batch=False):
         await verify_one(lamp_id(OBSERVATORY, 1))
     cabinet = await verify_observer_open(OBSERVATORY, "LootCrate_Small_BP_C_1")
     print("Guest watched the stock cabinet move through intermediate angles", flush=True)
-    gear = {item: await verify_equip(item, source)
-            for item, source in (("fur-cap", "helmet"), ("flashbang", "equipment"))}
+    async def reputation(seat, action="read"):
+        return await suite.portable_probe_command(seat.bridge, "portable-oil-lamps", f"reputation\t{action}")
+
+    async def expect_guest_reputation(expected):
+        async with asyncio.timeout(12):
+            while await reputation(guest) != expected:
+                await asyncio.sleep(.15)
+
+    baseline = await reputation(host, "seed")
+    await expect_guest_reputation(baseline)
+    gear = {"fur-cap": await verify_equip("fur-cap", "helmet")}
+    assert await reputation(guest) == baseline
+    host_cap = await reputation(host, "wear")
+    assert host_cap != baseline
+    await expect_guest_reputation(host_cap)
+    gear["flashbang"] = await verify_equip("flashbang", "equipment")
     print("Fur Cap and Flashbang stayed equipped after reconciliation", flush=True)
     async def simmi(action):
         return await suite.portable_probe_command(host.bridge, "simmi-jobs", action)
@@ -212,7 +226,8 @@ async def verify_oil_lamps(host, guest, pawn, *, playtest_batch=False):
             while await asyncio.gather(*(probe(seat, "latch-state", latch) for seat in (host, guest))) != [expected] * 2:
                 await asyncio.sleep(.05)
     dumpster = await verify_observer_open(CROSSROADS, "Loot_Dumpster_BP_C_1")
-    return {"debt": debt_evidence, "gear": gear, "simmi": quest, "unloaded_source_refused": unloaded, "cabinet": cabinet, "dumpster": dumpster, "gas_lamps": gas_evidence, "lamps": evidence,
+    return {"debt": debt_evidence, "gear": gear, "shared_reputation": {"baseline": baseline, "host_cap": host_cap},
+            "simmi": quest, "unloaded_source_refused": unloaded, "cabinet": cabinet, "dumpster": dumpster, "gas_lamps": gas_evidence, "lamps": evidence,
             "other_lamp_stayed_unlit": adjacent, "latch": {"actor": latch, "initial": before, "toggled": after}}
 
 

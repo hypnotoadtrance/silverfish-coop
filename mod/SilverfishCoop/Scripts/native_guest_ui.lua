@@ -16,6 +16,7 @@ local save_class = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local item_class = "/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"
 local texture_class = "/Script/Engine.Texture2D"
 local quest_photos = "/Game/Classes/GUI/GUI_Elements/QuestPhotos/"
+local add_rep_bonus = "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:Add_RepBonus"
 local item = {
     class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81",
     ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788",
@@ -46,6 +47,7 @@ local axes = {"A", "B", "C", "D"}
 local max_size, max_rows = 20000, 128
 local min_int32, max_int32, completed_step = -2147483648, 2147483647, -10
 local journal_view
+local reputation_view, reputation_hook
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -83,6 +85,50 @@ local function integer(value, minimum, maximum)
     local number = math.tointeger(tonumber(value))
     if not number or number < minimum or number > maximum then error("Invalid co-op view number", 0) end
     return number
+end
+
+local function capture_reputation_bonuses(instance, save, row)
+    local helmet = save.PlayerHelmet[item.class]
+    if not valid(helmet) then return end
+    local bonuses = helmet:GetCDO().RepBonus
+    if not bonuses or #bonuses == 0 then return end
+    local factions = {}
+    bonuses:ForEach(function(key)
+        factions[#factions + 1] = integer(key:get(), 0, 255)
+    end)
+    table.sort(factions)
+    for _, faction in ipairs(factions) do
+        local result = {}
+        instance:Add_RepBonus(0, faction, result)
+        row[#row + 1] = faction
+        row[#row + 1] = integer(result.Output, min_int32, max_int32)
+    end
+end
+
+local function project_reputation_bonuses(instance, save, bonuses)
+    if not reputation_hook then
+        reputation_hook = RegisterHook(add_rep_bonus, function(context, points, faction, output)
+            local view = reputation_view
+            if not view or scope.selected() ~= view.owner then return end
+            local current = context:get()
+            if not valid(current) or current:GetAddress() ~= view.instance then return end
+            local canonical = current.SaveSlot_Ref
+            if not valid(canonical) or canonical:GetAddress() ~= view.save then return end
+            -- Preserve the Blueprint's signed 32-bit addition semantics.
+            local sum = (points:get() + (view.bonuses[faction:get()] or 0)) & 0xffffffff
+            output:set(sum > max_int32 and sum - 0x100000000 or sum)
+        end)
+    end
+    local owner, address, save_address = scope.selected(), instance:GetAddress(), save:GetAddress()
+    local previous = reputation_view
+    if previous and previous.owner == owner and previous.instance == address and previous.save == save_address then
+        local changed = false
+        for faction, bonus in pairs(bonuses) do changed = changed or previous.bonuses[faction] ~= bonus end
+        for faction in pairs(previous.bonuses) do changed = changed or bonuses[faction] == nil end
+        if not changed then return false end
+    end
+    reputation_view = {owner = owner, instance = address, save = save_address, bonuses = bonuses}
+    return true
 end
 
 local function count(array)
@@ -195,7 +241,8 @@ end
 local function capture(state, phase, pawn_name)
     local pawn, save, character = guest_save.exact_item_context(state, phase, pawn_name)
     local host = state.local_pawn and state.local_pawn.pawn
-    local canonical = state.world.OwningGameInstance.SaveSlot_Ref
+    local instance = state.world.OwningGameInstance
+    local canonical = instance.SaveSlot_Ref
     if phase ~= "hosting" or not exact(save, save_class) or not exact(canonical, save_class)
         or not valid(host) or not valid(host.Save) or host.Save:GetAddress() ~= canonical:GetAddress()
         or not character or not pawn or pawn:GetFullName() ~= pawn_name then
@@ -224,6 +271,9 @@ local function capture(state, phase, pawn_name)
             row[#row + 1] = flag[2]
         end
         rows[#rows + 1] = table.concat(row, "\t")
+        local bonuses = {"reputation-bonuses"}
+        capture_reputation_bonuses(instance, canonical, bonuses)
+        rows[#rows + 1] = table.concat(bonuses, "\t")
     end
     for _, key in ipairs({"backpack", "equipment", "armor", "helmet"}) do
         local source = save[slots[key]]
@@ -293,6 +343,7 @@ local function project(state, phase, character, path, raw, sequence)
     if not exact(view, save_class) then error("The stock co-op view could not be allocated", 0) end
     local processed, items, note_count, quest_count = 0, 0, 0, 0
     local completed, attachments, reputation, balance = 0, 0, nil, nil
+    local reputation_bonuses
     local layout, item_positions = nil, {backpack = {}, equipment = {}}
     for line in raw:gmatch("([^\n]+)\n") do
         processed = processed + 1
@@ -321,6 +372,13 @@ local function project(state, phase, character, path, raw, sequence)
                     error("Invalid co-op reputation flag", 0)
                 end
                 reputation[key] = integer(row[index + 1], min_int32, max_int32)
+            end
+        elseif row[1] == "reputation-bonuses" and not reputation_bonuses and #row <= 513 and #row % 2 == 1 then
+            reputation_bonuses = {}
+            for index = 2, #row, 2 do
+                local faction = integer(row[index], 0, 255)
+                if reputation_bonuses[faction] ~= nil then error("Duplicate co-op reputation bonus", 0) end
+                reputation_bonuses[faction] = integer(row[index + 1], min_int32, max_int32)
             end
         elseif row[1] == "item" then
             local entry = item_row(row)
@@ -426,18 +484,27 @@ local function project(state, phase, character, path, raw, sequence)
     if balance ~= nil and not wallet.project_guest(old, balance) then
         error("The attached co-op wallet failed readback", 0)
     end
+    local reputation_changed = false
     if reputation then
         local flags, previous = old.Flags, {}
         flags:ForEach(function(raw)
             local key = raw:get():ToString()
-            if key:match("^Rep_[A-Za-z0-9_%-]+$") then previous[#previous + 1] = key end
+            if key:match("^Rep_[A-Za-z0-9_%-]+$") and reputation[key] == nil then
+                previous[#previous + 1] = key
+            end
         end)
-        for _, key in ipairs(previous) do flags:Remove(FName(key)) end
+        for _, key in ipairs(previous) do
+            flags:Remove(FName(key))
+            reputation_changed = true
+        end
         for key, points in pairs(reputation) do
             local flag = FName(key)
-            flags:Add(flag, points)
             if not flags:Contains(flag) or flags:Find(flag):get() ~= points then
-                error("The attached co-op reputation failed readback", 0)
+                flags:Add(flag, points)
+                if not flags:Contains(flag) or flags:Find(flag):get() ~= points then
+                    error("The attached co-op reputation failed readback", 0)
+                end
+                reputation_changed = true
             end
         end
     end
@@ -445,8 +512,10 @@ local function project(state, phase, character, path, raw, sequence)
         error("The attached co-op Journal view failed readback", 0)
     end
     local instance = state.world.OwningGameInstance
+    local bonuses_changed = reputation_bonuses and project_reputation_bonuses(instance, old, reputation_bonuses)
     if helmet_changed then instance:UpdateHelmet() end
     if armor_changed then instance:UpdateArmor() end
+    if helmet_changed or armor_changed or reputation_changed or bonuses_changed then pawn:Configure_Disguise() end
     -- The stock weight update compiles passives after resolving player zero.
     -- Keep the explicit refresh if that lookup cannot reach this bound pawn.
     local stock_player = api:GetPlayerCharacter(state.world, 0)

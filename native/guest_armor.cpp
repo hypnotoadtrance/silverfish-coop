@@ -469,6 +469,14 @@ namespace
         {
             return nullptr;
         }
+        if (!head)
+        {
+            auto* disguise = field<U::FByteProperty>(defaults, STR("DisguiseFaction"));
+            if (!faction_property(disguise)) return nullptr;
+            profile.disguise_faction = disguise->GetPropertyValueInContainer(defaults);
+            const auto name = disguise->GetEnum().Get()->GetNameByValue(profile.disguise_faction);
+            if (name.IsNone() || name.ToString().ends_with(STR("_MAX"))) return nullptr;
+        }
 
         auto* resist = field<U::FStructProperty>(defaults, STR("Resistance"));
         auto* type = find<U::UScriptStruct>(damage_type);
@@ -728,13 +736,13 @@ namespace
             return true;
         }
 
-        bool refresh(const Scope& scope, bool paired) const
+        bool refresh(const Scope& scope, std::uint8_t expected) const
         {
             if (!configure) return true;
             // Stock Configure_Disguise reads the pawn's own worn rows and the shared reputation.
             scope.pawn->ProcessEvent(configure, nullptr);
             const auto configured = faction->GetPropertyValueInContainer(scope.pawn);
-            return scope.current() && (configured == 0 || (paired && configured == state_faction)) &&
+            return scope.current() && (configured == 0 || configured == expected) &&
                 compromised->GetPropertyValueInContainer(scope.pawn) == prior_compromised;
         }
 
@@ -909,12 +917,9 @@ namespace
 
         const auto* torso = head ? other_profile : remove ? nullptr : selected;
         const auto* helmet = head ? (remove ? nullptr : selected) : other_profile;
-        const auto state_gear = [](const ArmorProfile* profile) {
-            return profile && profile->disguise_faction == state_faction;
-        };
-        const bool state_torso = state_gear(torso);
-        bool state_helmet = state_gear(helmet);
-        if (state_torso && helmet && !state_helmet)
+        const std::uint8_t torso_faction = torso ? torso->disguise_faction : 0;
+        std::uint8_t paired_faction{};
+        if (torso_faction && helmet)
         {
             auto* defaults = armor_defaults(*helmet);
             auto* factions = field<U::FArrayProperty>(defaults, STR("DisguisableFactions"));
@@ -923,11 +928,13 @@ namespace
             {
                 U::FScriptArrayHelper list(factions, factions->ContainerPtrToValuePtr<void>(defaults));
                 for (int i = 0; i < list.Num(); ++i)
-                    state_helmet |= faction->GetPropertyValueInContainer(list.GetRawPtr(i)) == state_faction;
+                    if (faction->GetPropertyValueInContainer(list.GetRawPtr(i)) == torso_faction)
+                        paired_faction = torso_faction;
             }
         }
         DisguiseProjection disguise;
-        if ((state_torso || state_helmet || state_gear(previous) || (remove && state_gear(selected))) && !disguise.bind(scope.pawn))
+        if ((torso_faction || (previous && previous->disguise_faction) || (remove && selected->disguise_faction)) &&
+            !disguise.bind(scope.pawn))
             return report(lua, false, "native_guest_armor_disguise_schema_unqualified");
         // The stock character copies the selected class's voice filter to this pawn.
         const bool sets_voice = helmet || (remove && head);
@@ -1026,7 +1033,7 @@ namespace
         };
         if (worn && !remove && matches())
         {
-            if (disguise.refresh(scope, state_torso && state_helmet)) return success("already_applied");
+            if (disguise.refresh(scope, paired_faction)) return success("already_applied");
             disguise.rollback(scope.pawn);
             return report(lua, false, scope.current() ? "native_guest_armor_disguise_rolled_back" :
                           "mutation_unverified_guest_armor_disguise", proof);
@@ -1044,7 +1051,7 @@ namespace
         if (voice_slot) vox->SetObjectPropertyValue(voice_slot, next_voice);
         projection.carry->SetPropertyValueInContainer(scope.pawn, proof.carry_after);
         projection.minimum->SetPropertyValueInContainer(scope.pawn, proof.minimum);
-        if (scope.current() && matches() && disguise.refresh(scope, state_torso && state_helmet) && matches())
+        if (scope.current() && matches() && disguise.refresh(scope, paired_faction) && matches())
             return success(previous ? "swapped" : worn ? "reapplied" : "equipped");
 
         if (!worn || remove)

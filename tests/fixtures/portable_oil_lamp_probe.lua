@@ -210,6 +210,43 @@ local function lighter_input(pawn, lamp, pressed)
 end
 
 local function run(action,id)
+    if action == "reputation" then
+        local viewport = FindFirstOf("GameViewportClient")
+        local world = valid(viewport) and viewport.World
+        local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+        local pawn = valid(world) and api:GetPlayerPawn(world, 0)
+        assert(valid(pawn))
+        local instance = world.OwningGameInstance
+        assert(valid(instance) and valid(world.NetDriver) and same(pawn.Save, instance.SaveSlot_Ref))
+        local class_name = "/Game/Classes/Armor_Items/Helm_FurCap.Helm_FurCap_C"
+        local class = StaticFindObject(class_name)
+        if not valid(class) then LoadAsset(class_name) class = StaticFindObject(class_name) end
+        local default = assert(class:GetCDO())
+        local faction
+        default.RepBonus:ForEach(function(key, value)
+            if value:get() ~= 0 then faction = faction or key:get() end
+        end)
+        assert(faction ~= nil, "Fur Cap reputation bonus is unavailable")
+        if id == "seed" then
+            assert(not valid(world.NetDriver.ServerConnection))
+            local lib = StaticFindObject("/Game/Classes/Libraries/Fuctions_Lib/FL_Characters.Default__FL_Characters_C")
+            local key = {}
+            lib:Compose_FactionRep_FlagName(faction, pawn, key)
+            pawn.Save.Flags:Add(key.Name, 25)
+        end
+        if id == "wear" then
+            assert(not valid(world.NetDriver.ServerConnection))
+            local converter = StaticFindObject("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C")
+            local row = {}
+            converter:ItemActorToStruct(default, pawn, row)
+            pawn.Save.PlayerHelmet = row.Item or row
+            assert(same(pawn.Save.PlayerHelmet["Item_Class_3_2813641E42AA35FC0693029E4EE49F81"], class))
+        end
+        local out, bonus = {}, {}
+        instance:Add_RepBonus(0, faction, bonus)
+        instance:Find_PlayerReputation(faction, out, out, out)
+        return ("%d,%d,%d,%d,%d"):format(faction, bonus.Output, out.Points, out.Reputation, out.Relationship)
+    end
     if action == "debt-read" or action == "debt-set" then
         local viewport = FindFirstOf("GameViewportClient")
         local world = valid(viewport) and viewport.World
