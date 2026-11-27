@@ -15,9 +15,9 @@ Use the same release candidate on all PCs. Builds before `rc-ad3c9da` used an ol
 | Issue | Current status |
 | --- | --- |
 | Steam password prompt | `rc-479ae08` separates connection retry from the dedicated password screen. Automated checks cover passwordless join, retry, and protected lobbies. Confirm the behavior in a two-account Steam session. |
-| Oil lantern state | Still reported out of sync. Check gold and gray lanterns, lighting and extinguishing from either seat, and a lantern broken before a guest joins. |
+| Oil lantern state | `rc-5a157fb` passed ignition and extinguishing from both seats and a guest joining after the host broke a lamp in isolated Direct IP. Check gold and gray lanterns in a Steam playtest. |
 | Concurrent trader menus | When one player completes a trade, the other player's menu can close. Ordinary stock and barter are confirmed. Refreshing the second player's offers in place is a low-priority UX improvement. |
-| Interaction delay and frame hitches | In isolated Direct IP on `rc-8abcbbb`, the saved cabinet pickup left saves untouched and the longest nearby frame was 23 ms. A Crossroads walk still caught a 38 ms host frame during world status collection. Rendered Steam measurements of input delay, frame pacing, and co-op traffic remain open. [Timing details](NATIVE-INTEGRATION.md#replication-and-travel-pacing) |
+| Interaction delay and frame hitches | In isolated Direct IP on `rc-8abcbbb`, the saved cabinet pickup left saves untouched and the longest nearby frame was 23 ms. `rc-5a157fb` reduced the cost of switch observations. A Crossroads walk still caught a 38 ms host frame. Rendered Steam measurements of input delay, frame pacing, and co-op traffic remain open. [Timing details](NATIVE-INTEGRATION.md#replication-and-travel-pacing) |
 | Crash and disconnect recovery | Retest a guest rejoining after a crash. The host and other guests should stay in play, and the returning guest should recover their character and inventory. Earlier reports also covered enemy-loot crashes, an aimed weapon-swap crash, and a singleplayer crash with the mod installed. Those have development fixes or mitigations and remain regression checks. |
 
 <a id="current-playtest-checks"></a>
