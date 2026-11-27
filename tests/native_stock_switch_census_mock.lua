@@ -238,3 +238,34 @@ assert(later.Powered and later.PointLight.visible and later.toggles == 1)
 assert(not earlier.Powered and not earlier.PointLight.visible and not foreign.Powered and not foreign.PointLight.visible)
 statics.GetStreamingLevel = statics_lookup
 print("Live switch links refresh without a device rescan and projection uses only current owned lights")
+
+local latch_path = "/Game/Assets/StaticMeshes/Doors/DoorLatch_BP.DoorLatch_BP_C"
+local door_path = "/Game/Assets/StaticMeshes/Doors/BasicDoor_Master.BasicDoor_Master_C"
+local latch_class = stock_class(latch_path, "DoorLatch_BP_C")
+local door_class = stock_class(door_path, "BasicDoor_Master_C")
+paths[latch_path], paths[door_path] = latch_class, door_class
+local placed_latch = state.map .. ".Depot:PersistentLevel.DoorLatch_BP_C_2"
+local latch_name = "DoorLatch_BP_C " .. placed_latch
+local latch = device(connected_world, latch_class, latch_name)
+local linked_door = device(connected_world, door_class,
+    "BasicDoor_Master_C " .. state.map .. ".Depot:PersistentLevel.LinkedDoor")
+latch.Door, latch.Box_Knob, latch.SM_Prop_Kitchen_Grill_01_Dial_01 = linked_door, latch.Box, latch.Switch_Mesh
+linked_door.IsA = function(_, class) return class == door_class end
+linked_door.Locked, linked_door.Open, linked_door.LockBroken = false, false, false
+latch.Switch_Mesh.K2_SetRelativeRotation = panel.Switch_Mesh.K2_SetRelativeRotation
+paths[placed_latch] = latch
+latch.SendInteractionToActor = function(self, source, box)
+    assert(source == pawn and box == self.Box_Knob)
+    self.Door.Locked = not self.Door.Locked
+end
+state.server = false
+assert(switches.command({"nonce", "native-stock-switch-interact", latch_name, "qualified guest"}, state, "hosting")
+    == "stock switch interaction dispatched" and linked_door.Locked)
+state.server = true
+local projection = {"nonce", "native-stock-switch-project", latch_name, state.map, "0", "0", "0", "45", "door=wrong"}
+assert(not pcall(switches.command, projection, state, "connected"))
+assert(linked_door.Locked and latch.Switch_Mesh.RelativeRotation.Roll == 0)
+projection[9] = "door=" .. linked_door:GetFullName()
+assert(switches.command(projection, state, "connected") == "stock switch state projected")
+assert(not linked_door.Locked and latch.Switch_Mesh.RelativeRotation.Roll == 45)
+print("Exact latch dispatch reaches a live actor outside the census and projects both dial and lock")

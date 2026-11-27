@@ -2,10 +2,48 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock
 
-from tools.silverfish import native_stock_switch as switches, runtime
+from tools.silverfish import native_stock_door as doors, native_stock_switch as switches, runtime
 
 
 class StockSwitchResponseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_late_latch_interaction_updates_the_exact_linked_door_before_the_census(self):
+        area = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+        prefix = area + ".CrossRoads_P:PersistentLevel."
+        latch = "DoorLatch_BP_C " + prefix + "DoorLatch_BP_C_2"
+        door = "Door_Metal_03_Window_BP_C " + prefix + "Door_Metal_03_Window_BP_C_16"
+        other = door[:-2] + "17"
+        ticket, epoch, local = "a" * 32, "b" * 32, "exact local pawn"
+        shape = {"locked": True, "open": False, "yaw": 0}
+        game = {"state": "hosting", "map": area, "sequence": 8, "pawns": {"local": {"name": local}},
+                doors.KEY: {door: shape, other: shape}}
+        host = SimpleNamespace(
+            zone_epoch=epoch, last_game=game, native_recipients=lambda: {"guest": {"connected": True, "pawn": "bound guest"}},
+            transitioning=False, stopping=False, native_checkpoint_unsafe=False,
+            party={"players": {"guest": {"downed": False}}, "wipe": None, "pending_spawns": {}, "receipts": {}},
+        )
+        raw = (f"native-stock-interaction-reply\t1\t{ticket}\thosting\t{area}\t8\t{local}\taccepted\t"
+               f"stock switch interaction dispatched\n{switches.TAG}\t{area}\t{latch}\t0\t90\t0\t0\t-\t-\tdoor={door}\n")
+        captured = runtime.Bridge._local_stock_interaction_reply(raw, (ticket, switches.ACTION, latch, "bound guest"))
+        bridge = SimpleNamespace(command=AsyncMock(return_value=captured))
+        result = await switches.interact(host, bridge, "guest", f"{epoch}@{latch}", ticket)
+        bridge.command.assert_awaited_once_with(switches.ACTION, latch, "bound guest", timeout=3)
+        self.assertEqual(host.last_game[doors.KEY], {door: dict(shape, locked=False), other: shape})
+        self.assertEqual(host.last_game[switches.KEY][latch]["door"], door)
+        self.assertIs(game[doors.KEY][door], shape)
+
+        connected = dict(game, state="connected")
+        projected = dict(captured, state="connected")
+        client = SimpleNamespace(last_game=connected, zone_epoch=epoch, gameplay={}, needs_travel=False,
+                                 server_transitioning=False, cancel_gameplay_snapshot=AsyncMock(),
+                                 bridge=SimpleNamespace(command=AsyncMock(return_value=projected)))
+        await switches.apply_interaction(client, result[switches.KEY], latch)
+        client.bridge.command.assert_awaited_once_with(switches.PROJECT, latch, area, "0", "90.0", "0.0", "0.0",
+                                                      f"door={door}", timeout=2)
+        self.assertEqual(client.last_game[doors.KEY], host.last_game[doors.KEY])
+        with self.assertRaisesRegex(RuntimeError, "invalid state"):
+            runtime.Bridge._local_stock_interaction_reply(raw.replace("door=" + door, "door=../wrong"),
+                                                         (ticket, switches.ACTION, latch, "bound guest"))
+
     async def test_guest_power_report_applies_absolute_result_once(self):
         area = "/CommunityMaps/Shelter"
         actor = f"Prop_Radio01_C {area}.Shelter:PersistentLevel.Radio_1"

@@ -1,4 +1,5 @@
 local switches = {}
+local stock_door = require("native_stock_door")
 local guest_save = require("guest_save")
 local world_path = require("world_path")
 
@@ -145,6 +146,19 @@ local function refresh_lights(entry, scope, powered, force)
     entry.link_count, entry.link_power, entry.next_link_check = count, powered, now + 0.75
 end
 
+local function cache_entry(name, path, entry)
+    local actor = entry.actor
+    if entry.power then
+        entries[name] = {actor = actor, address = actor:GetAddress(), level = entry.level,
+            class = actor:GetClass(), power = entry.power,
+            path = path, candle = entry.candle, lantern = entry.lantern, gas_lamp = entry.gas_lamp,
+            light = entry.light}
+    else
+        if not entry.latch then refresh_lights(entry, world, actor.Powered) end
+        entries[name] = entry
+    end
+end
+
 function switches.start()
     if type(NotifyOnNewObject) == "function" then
         for kind, profile in pairs(profiles) do
@@ -199,17 +213,7 @@ local function census(state, phase)
                     local previous = entries[name]
                     if package and (not previous or not same(previous.actor, actor)) then
                         local entry = parts(actor, world, level)
-                        if entry then
-                            if entry.power then
-                                entries[name] = {actor = actor, address = actor:GetAddress(), level = level,
-                                    class = actor:GetClass(), power = entry.power,
-                                    path = path, candle = entry.candle, lantern = entry.lantern, gas_lamp = entry.gas_lamp,
-                                    light = entry.light}
-                            else
-                                if not entry.latch then refresh_lights(entry, world, actor.Powered) end
-                                entries[name] = entry
-                            end
-                        end
+                        if entry then cache_entry(name, path, entry) end
                     elseif changed_levels and previous and previous.lights then
                         refresh_lights(previous, world, actor.Powered, true)
                     end
@@ -222,7 +226,17 @@ end
 
 local function find_switch(state, phase, name)
     local entry = census(state, phase)[name]
-    if not entry then return end
+    if not entry then
+        local _, path = placed_actor(name)
+        if not entries or not path then return end
+        local actor = StaticFindObject(path)
+        local resolved = valid(actor) and actor:GetFullName() == name and parts(actor, state.world)
+        if resolved and (phase ~= "hosting" or actor:HasAuthority()) then
+            cache_entry(name, path, resolved)
+            return resolved
+        end
+        return
+    end
     if not entry.power then
         if qualified(entry.actor, state.world) then
             if entry.latch then return parts(entry.actor, state.world) end
@@ -268,7 +282,7 @@ function switches.read_row(entry, name, state, phase, row, native_world_address)
             and valid(entry.lever) then
             local angles = entry.lever.RelativeRotation
             return row("native-stock-switch", state.map, name, bit(entry.door.Locked),
-                angles.Pitch, angles.Yaw, angles.Roll, "-", "-")
+                angles.Pitch, angles.Yaw, angles.Roll, "-", "-", "door=" .. entry.door:GetFullName())
         end
     elseif entry.power then
         local actor = entry.actor
@@ -416,8 +430,23 @@ local function project(entry, powered, angles, lights, replica)
         return
     end
     if entry.latch then
-        -- The hinged door publisher owns lock state. The latch projects its dial here.
-        lever:K2_SetRelativeRotation(angles, false, {}, true)
+        local before, was_locked = lever.RelativeRotation, entry.door.Locked
+        local restore = {Pitch = before.Pitch, Yaw = before.Yaw, Roll = before.Roll}
+        local ok = pcall(function()
+            lever:K2_SetRelativeRotation(angles, false, {}, true)
+            entry.door.Locked = powered
+            local actual = lever.RelativeRotation
+            for _, axis in ipairs({"Pitch", "Yaw", "Roll"}) do
+                if math.abs((actual[axis] - angles[axis] + 180) % 360 - 180) > .05 then error("latch pose mismatch") end
+            end
+            if entry.door.Locked ~= powered then error("latch lock mismatch") end
+        end)
+        if not ok then
+            pcall(function() entry.door.Locked = was_locked end)
+            pcall(function() lever:K2_SetRelativeRotation(restore, false, {}, true) end)
+            error("stock_switch_latch_state_unverified", 0)
+        end
+        stock_door.refresh_linked_lock(entry.door, world)
         return
     end
     if entry.power then
@@ -499,6 +528,7 @@ function switches.command(fields, state, phase)
             if not door.Open and not door.LockBroken then expected = not before end
             entry.actor:SendInteractionToActor(pawn, entry.box)
             if not valid(door) or door.Locked ~= expected then error("stock_switch_toggle_unverified", 0) end
+            stock_door.refresh_linked_lock(door, state.world)
             return "stock switch interaction dispatched", entry
         end
         local power = entry.power or "Powered"
@@ -535,6 +565,13 @@ function switches.command(fields, state, phase)
             error("stock_switch_state_unavailable", 0)
         end
         local lights = {}
+        if entry.latch then
+            if last ~= 9 or fields[9] ~= "door=" .. entry.door:GetFullName() then
+                error("stock_switch_latch_link_unavailable", 0)
+            end
+            project(entry, power == "1", {Pitch = pitch, Yaw = yaw, Roll = roll}, lights, true)
+            return "stock switch state projected", entry
+        end
         if entry.lantern then
             local lamp = fields[9]
             if last ~= 9 or (lamp ~= "intact" and lamp ~= "broken" and lamp ~= "removed") then

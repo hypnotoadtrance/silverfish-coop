@@ -402,6 +402,15 @@ sample_door = function(scan, name, ready_pose)
     end
 end
 
+function doors.refresh_linked_lock(actor, world)
+    local scan = sampler
+    if not scan or not same(scan.world, world) then return end
+    local name = identity(actor, world)
+    if name and same(scan.actors[name], actor) then
+        scan.readings[name] = sample_door(scan, name)
+    end
+end
+
 local function sample_slice(scan, deadline)
     for _ = 1, math.ceil(#scan.names / 12) do
         local name = scan.names[scan.next]

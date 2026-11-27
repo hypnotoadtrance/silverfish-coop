@@ -70,10 +70,25 @@ def parse(fields, phase, area):
         lights[name] = [power == "1", visible == "1"]
     state = {"powered": fields[3] == "1", "angles": angles, "panel": fields[7], "lights": lights}
     if len(fields) == 10:
-        if fields[9] not in _LAMP_STATES:
-            raise ValueError("Invalid stock oil lamp state")
-        state["lamp"] = fields[9]
+        kind, _, extra = fields[9].partition("=")
+        if kind == "door" and not lights and fields[7] == "-" and actor_package(extra):
+            state["door"] = extra
+        elif fields[9] in _LAMP_STATES:
+            state["lamp"] = fields[9]
+        else:
+            raise ValueError("Invalid stock switch extension")
     return state
+
+
+def merge_readback(game, actor, row):
+    updated = {**game, KEY: {**game.get(KEY, {}), actor: row}}
+    door = row.get("door")
+    if door:
+        name = door if native_stock_door.actor_map(door) == game["map"] else native_stock_door.STREAM_PREFIX + door
+        hinges = game.get(native_stock_door.KEY, {})
+        if name in hinges:
+            updated[native_stock_door.KEY] = {**hinges, name: {**hinges[name], "locked": row["powered"]}}
+    return updated
 
 
 async def interact(host, bridge, character, requested, operation, action=ACTION):
@@ -91,7 +106,7 @@ async def interact(host, bridge, character, requested, operation, action=ACTION)
     row = game.get(KEY, {}).get(actor)
     if (action not in ACTIONS or action == IGNITE and (not row or row.get("lamp") != "intact")
             or not epoch or epoch != host.zone_epoch or not actor_package(actor)
-            or row is None or game.get("state") != "hosting" or host.transitioning
+            or game.get("state") != "hosting" or host.transitioning
             or host.stopping or host.native_checkpoint_unsafe or not member.get("connected")
             or not player or player["downed"] or host.party["wipe"]
             or character in host.party["pending_spawns"] or not party.REQUEST_ID.fullmatch(operation)):
@@ -119,7 +134,7 @@ async def interact(host, bridge, character, requested, operation, action=ACTION)
         if host.zone_epoch != epoch or not native_stock_door.matches_local_scope(host.last_game, snapshot):
             raise party.RuleError("stock_switch_scope_unavailable")
         if host.last_game.get("sequence", 0) <= snapshot["sequence"]:
-            host.last_game = {**host.last_game, KEY: {**host.last_game.get(KEY, {}), actor: row}}
+            host.last_game = merge_readback(host.last_game, actor, row)
     else:
         host.last_game = snapshot
         host.last_seen = time.monotonic()
@@ -147,22 +162,23 @@ async def apply_interaction(client, frame, actor, *, sequence=None):
     else:
         client.gameplay[KEY] = frame
     game = client.last_game
-    projected = await project(client.bridge, game, frame, epoch, sequence=sequence)
+    projected = await project(client.bridge, game, frame, epoch, sequence=sequence, exact_actor=actor)
     if client.last_game is game and client.zone_epoch == epoch and not client.needs_travel and not client.server_transitioning:
         client.last_game = projected
 
 
-async def project(bridge, game, frame, epoch, *, sequence=None):
+async def project(bridge, game, frame, epoch, *, sequence=None, exact_actor=None):
     area = game.get("map")
     if not isinstance(frame, dict) or (frame.get("map"), frame.get("epoch")) != (area, epoch) or not epoch:
         return game
     local = game.get(KEY, {})
     rows = frame.get("switches")
-    if game.get("state") != "connected" or not local or not isinstance(rows, dict):
+    if game.get("state") != "connected" or not isinstance(rows, dict):
         return game
     for actor, target in rows.items():
-        if (not actor_package(actor) or actor not in local or not isinstance(target, dict)
-                or (sequence is None and target == local[actor]) or type(target.get("powered")) is not bool):
+        observed = local.get(actor)
+        if (not actor_package(actor) or observed is None and actor != exact_actor or not isinstance(target, dict)
+                or (sequence is None and target == observed) or type(target.get("powered")) is not bool):
             continue
         angles, lights = target.get("angles"), target.get("lights")
         if (not isinstance(angles, list) or len(angles) != 3
@@ -171,11 +187,15 @@ async def project(bridge, game, frame, epoch, *, sequence=None):
             continue
         bulbs = [f"{name}|{int(state[0])}|{int(state[1])}" for name, state in lights.items()
                  if actor_package(name) and isinstance(state, list) and len(state) == 2 and all(type(bit) is bool for bit in state)]
-        if "lamp" in target or "lamp" in local[actor]:
+        if "lamp" in target or (observed and "lamp" in observed):
             lamp = target.get("lamp")
-            if not isinstance(lamp, str) or lamp not in _LAMP_STATES or "lamp" not in local[actor]:
+            if not isinstance(lamp, str) or lamp not in _LAMP_STATES or observed and "lamp" not in observed:
                 continue
             bulbs = [lamp]
+        elif "door" in target:
+            if not actor_package(target["door"]) or observed and observed.get("door") != target["door"]:
+                continue
+            bulbs = ["door=" + target["door"]]
         if sequence is not None:
             bulbs.append(f"ack={sequence}")
         try:
@@ -192,7 +212,7 @@ async def project(bridge, game, frame, epoch, *, sequence=None):
             if not native_stock_door.matches_local_scope(game, updated):
                 return game
             if game.get("sequence", 0) <= updated["sequence"]:
-                game = {**game, KEY: {**game.get(KEY, {}), actor: updated[KEY][actor]}}
+                game = merge_readback(game, actor, updated[KEY][actor])
         else:
             game = updated
     return game
