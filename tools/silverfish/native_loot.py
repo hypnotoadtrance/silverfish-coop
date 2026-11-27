@@ -14,6 +14,7 @@ from .native_gold import valid_guid
 
 CRATE = LEGACY_CRATE
 STATE_KEY = "native_loot_rolls"
+ROLL_REVISION = "native_loot_roll_revision"
 CRATE_DIAGNOSTIC = "native-loot-crate-diagnostic"
 CRATE_DIAGNOSTICS = "native_loot_crate_diagnostics"
 RETIRED = "native_loot_retired_rolls"
@@ -213,6 +214,66 @@ def published(rolls: dict, area: str, *, game=None) -> dict:
     replenished = _replenished(game, rolls) if game is not None else {}
     return {crate: public_roll(roll) for crate, roll in rolls_in_area(rolls, area).items()
             if crate not in replenished}
+
+
+class RollPublication:
+    """Order roll generations and claims across snapshots and interaction replies."""
+
+    def __init__(self):
+        self.scope = None
+        self.revision = 0
+        self.visible = {}
+
+    def observe(self, rolls, scope):
+        if self.scope != scope:
+            self.scope = scope
+            self.revision = 0
+            self.visible = {}
+        # Capture values because physics updates may mutate the roll in place.
+        visible = {crate: (roll["id"], tuple((item["guid"], item.get("claimed_by")) for item in roll["items"]))
+                   for crate, roll in rolls.items()}
+        if visible != self.visible:
+            self.visible = visible
+            self.revision += 1
+        return self.revision
+
+
+class GuestRollView:
+    def __init__(self):
+        self.scope = None
+        self.snapshot_revision = -1
+        self.receipts = {}
+
+    def _visit(self, scope):
+        if self.scope != scope:
+            self.scope = scope
+            self.snapshot_revision = -1
+            self.receipts.clear()
+
+    def accept(self, gameplay, scope, reply):
+        self._visit(scope)
+        roll = reply.get("native_loot_roll")
+        revision = reply.get(ROLL_REVISION)
+        if not isinstance(roll, dict) or type(revision) is not int or revision <= self.snapshot_revision:
+            return False
+        crate, area = roll.get("crate"), scope[2]
+        if not isinstance(crate, str) or CRATES.get(crate) != area or roll.get("map") != area:
+            return False
+        if crate in self.receipts and revision <= self.receipts[crate][0]:
+            return False
+        self.receipts[crate] = revision, roll
+        gameplay[STATE_KEY] = {**gameplay.get(STATE_KEY, {}), crate: roll}
+        return True
+
+    def reconcile(self, gameplay, scope):
+        self._visit(scope)
+        revision = gameplay.get(ROLL_REVISION)
+        if type(revision) is int:
+            self.snapshot_revision = revision
+            self.receipts = {crate: entry for crate, entry in self.receipts.items() if entry[0] > revision}
+        if self.receipts:
+            gameplay[STATE_KEY] = {**gameplay.get(STATE_KEY, {}),
+                                   **{crate: roll for crate, (_, roll) in self.receipts.items()}}
 
 
 def _replenished(game, rolls):

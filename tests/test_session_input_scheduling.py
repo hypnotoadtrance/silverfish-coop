@@ -849,10 +849,66 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(task, 1)
         client.bridge.command.assert_awaited_once()
 
+    async def test_crate_reply_merges_with_inflight_snapshot_and_expires_on_replenishment(self):
+        crate, other, *_ = [name for name, area in native_loot.CRATES.items() if area == OBSERVATORY]
+        client = self.guest(AsyncMock())
+        client.transport.connected = True
+        client.host_session, client.zone_epoch = "session", "visit"
+        client.last_game = {"state": "connected", "map": OBSERVATORY}
+        visit = OBSERVATORY, client.zone_epoch
+        roll = {"id": "roll", "map": OBSERVATORY, "crate": crate, "items": [{"guid": "drop"}]}
+        other_roll = dict(roll, id="other", crate=other, items=[])
+        publication = native_loot.RollPublication()
+        before = {other: other_roll}
+        first = publication.observe(before, visit)
+        accepted = publication.observe({**before, crate: roll}, visit)
+        request_started, release = asyncio.Event(), asyncio.Event()
+
+        async def request(payload, *, timeout):
+            if payload["action"] == "snapshot":
+                request_started.set()
+                await release.wait()
+                return {"ok": True, "zone": OBSERVATORY, "zone_epoch": client.zone_epoch,
+                        "gameplay": server_view, gameplay_snapshot.REVISION: "a" * 32}
+            return {"ok": True, "native_loot_roll": roll, native_loot.ROLL_REVISION: accepted}
+
+        server_view = {native_loot.STATE_KEY: before, native_loot.ROLL_REVISION: first, "host_world": {"clock": 19}}
+        client.transport.request.side_effect = request
+        await client.refresh_gameplay(project=False, wait=False)
+        await asyncio.wait_for(request_started.wait(), .5)
+        pending = client.snapshot_request
+        await client.gameplay_action("native-loot-open", "op", crate)
+        self.assertIs(client.snapshot_request, pending)
+
+        release.set()
+        await client.refresh_gameplay(project=False)
+        self.assertEqual(client.gameplay["host_world"]["clock"], 19)
+        self.assertEqual(client.gameplay[native_loot.STATE_KEY], {**before, crate: roll})
+        self.assertEqual(server_view[native_loot.STATE_KEY], {other: other_roll})
+
+        depleted = dict(roll, items=[{"guid": "drop", "claimed_by": "host"}])
+        claimed = {**before, crate: depleted}
+        claimed_revision = publication.observe(claimed, visit)
+        self.assertGreater(claimed_revision, accepted)
+        self.assertEqual(publication.observe({**before, crate: dict(depleted, pose="new")}, visit), claimed_revision)
+        server_view = {native_loot.STATE_KEY: claimed, native_loot.ROLL_REVISION: claimed_revision}
+        client.next_snapshot = 0
+        await client.refresh_gameplay(project=False)
+        await client.gameplay_action("native-loot-open", "op", crate)
+        self.assertEqual(client.gameplay[native_loot.STATE_KEY], claimed)
+
+        server_view = {native_loot.STATE_KEY: before, native_loot.ROLL_REVISION: publication.observe(before, visit)}
+        client.next_snapshot = 0
+        await client.refresh_gameplay(project=False)
+        await client.gameplay_action("native-loot-open", "op", crate)
+        self.assertEqual(client.gameplay[native_loot.STATE_KEY], before)
+
     async def test_crate_reply_wakes_world_loot_and_drops_a_projection_from_the_previous_visit(self):
         crate = next(name for name, area in native_loot.CRATES.items() if area == OBSERVATORY)
         roll = {"id": "a" * 32, "map": OBSERVATORY, "crate": crate, "items": []}
-        client = self.guest(AsyncMock(return_value={"ok": True, "native_loot_roll": roll}))
+        client = self.guest(AsyncMock(return_value={
+            "ok": True, "native_loot_roll": roll, native_loot.ROLL_REVISION: 1,
+        }))
         client.host_session, client.zone_epoch = "session", "old-visit"
         client.expected_zone = OBSERVATORY
         state = {"state": "connected", "map": OBSERVATORY, "sequence": 1, native_world_loot.CAPABILITY: 2}

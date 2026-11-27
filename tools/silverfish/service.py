@@ -358,6 +358,7 @@ class Host:
         self.native_host_dig_live_fixture = host_dig_live_fixture
         self.wipe_view = None
         self.crate_intents = native_loot.OpenIntents()
+        self.crate_publication = native_loot.RollPublication()
         if authored_zones and expanded_zones:
             self.allowed_maps |= EXPANDED_MAPS
         self.next_zone_heartbeat = 0.0
@@ -2132,6 +2133,8 @@ class Host:
 
     def snapshot_for_guest(self, guest_id: str, role: str) -> dict:
         gameplay = self.public_gameplay()
+        gameplay[native_loot.ROLL_REVISION] = self.crate_publication.observe(
+            gameplay.get(native_loot.STATE_KEY, {}), (self.last_game.get("map"), self.zone_epoch))
         if self.native_guest and self.prop_carry_bridge is not None:
             gameplay[native_prop_carry.RELEASE_POSE] = True
         if (isinstance(self.relay, link.HostLink) and self.prop_carry_bridge is not None
@@ -2462,6 +2465,7 @@ class Host:
         if future.cancelled():
             return
         timed = request["action"] in _TIMED_INTERACTIONS
+        crate_visit = self.last_game.get("map"), self.zone_epoch
         if timed:
             self.control.event("host_interaction_started", action=request["action"], operation_id=request["operation_id"])
         try:
@@ -2645,6 +2649,13 @@ class Host:
             result = {"ok": False, "error": str(error)}
         if not future.done():
             reply = {"ok": True, **result}
+            roll = result.get("native_loot_roll")
+            if isinstance(roll, dict) and crate_visit == (self.last_game.get("map"), self.zone_epoch):
+                area, _ = crate_visit
+                rolls = native_loot.published(self.party.get(native_loot.STATE_KEY, {}), area, game=self.last_game)
+                # A replay can still return its original receipt after the roll has changed.
+                if rolls.get(roll.get("crate")) == roll:
+                    reply[native_loot.ROLL_REVISION] = self.crate_publication.observe(rolls, crate_visit)
             if reply["ok"] and (cue := self.pickup_audio.frame(
                     self.last_game, self.zone_epoch, operation=request["operation_id"])):
                 reply[native_pickup_audio.KEY] = cue
@@ -5522,6 +5533,7 @@ class Client:
         self.guest_grants = native_inventory_grant.GuestGrants()
         self.crate_intents = native_loot.OpenIntents()
         self.crate_lids = native_loot.GuestCrateProjection()
+        self.crate_roll_view = native_loot.GuestRollView()
         self.provisional_crate_rolls = {}
         self.world_loot_wake = asyncio.Event()
         self.last_lockpick_result = 0
@@ -5909,17 +5921,9 @@ class Client:
                     else:
                         if clip := local_view.get("ack", {}).get("message"):
                             self.control.event("native_guest_reload_view_played", operation_id=operation_id, clip=clip)
-            # Make the confirmed roll available before the next periodic host snapshot.
-            roll = reply.get("native_loot_roll")
-            if (action == "native-loot-open" and isinstance(roll, dict)
-                    and (roll.get("map"), roll.get("crate")) == (area, target)
-                    and native_loot.CRATES.get(target) == area):
-                await self.cancel_gameplay_snapshot()
-                if (self.last_game.get("map"), self.zone_epoch, self.host_session) == (area, epoch, session):
-                    rolls = self.gameplay.setdefault(native_loot.STATE_KEY, {})
-                    if rolls.get(target) != roll:
-                        rolls[target] = roll
-                        self.world_loot_wake.set()
+            if action in ("native-loot-open", native_crate_outcome.REPORT) and self.crate_roll_view.accept(
+                    self.gameplay, (session, epoch, area), reply):
+                self.world_loot_wake.set()
             placed = reply.get("native_authored_pickup_claim")
             if action == native_authored_pickup.ACTION and isinstance(placed, dict):
                 source = target.partition("@")[0] if target else None
@@ -6266,11 +6270,10 @@ class Client:
             accepted = result.get("native_loot_roll")
             if not isinstance(accepted, dict) or (accepted.get("map"), accepted.get("crate")) != (area, crate):
                 raise RuntimeError("The host returned a different crate outcome")
-            await self.cancel_gameplay_snapshot()
-            if self.stock_interaction_scope() == scope:
-                self.gameplay.setdefault(native_loot.STATE_KEY, {})[crate] = accepted
-                if accepted.get("id") == local_roll["id"] and accepted.get("items") == local_roll["items"]:
-                    settled = local_roll["id"]
+            visible = self.gameplay.get(native_loot.STATE_KEY, {}).get(crate, {})
+            if (self.stock_interaction_scope() == scope and visible.get("id") == local_roll["id"]
+                    and accepted.get("id") == local_roll["id"] and accepted.get("items") == local_roll["items"]):
+                settled = local_roll["id"]
             return result
         finally:
             settlement.set_result(settled)
@@ -6668,7 +6671,9 @@ class Client:
                     gameplay = self.gameplay_snapshots.read(reply)
                     self.stock_door_view.reconcile(gameplay, reply["zone"], reply["zone_epoch"])
                     self.stock_switch_view.reconcile(gameplay, reply["zone"], reply["zone_epoch"])
-                    self.loose_pickup_view.reconcile(gameplay, (self.host_session, reply["zone_epoch"], reply["zone"]))
+                    visit = self.host_session, reply["zone_epoch"], reply["zone"]
+                    self.loose_pickup_view.reconcile(gameplay, visit)
+                    self.crate_roll_view.reconcile(gameplay, visit)
                     self.gameplay = gameplay
                     viewer = reply.get("viewer_role")
                     if viewer in ("guest", "guest2", "guest3", "guest4"):

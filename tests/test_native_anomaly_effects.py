@@ -9,6 +9,7 @@ from tools.silverfish.native_anomaly_effects import (
     project_fixed_explosives, project_observer_opacity, project_sensors, valid_acid_pools,
 )
 from tools.silverfish.native_damage_feedback import Playback as HurtPlayback
+from tools.silverfish.native_loot import RollPublication
 from tools.silverfish.runtime import Bridge
 from tools.silverfish.service import Host
 from tools.silverfish.native_weather_view import (
@@ -22,6 +23,7 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
         area, epoch = "/Game/Classes/Maps/Dreams/TheRook_P", "a" * 32
         cues = [[1, "wandering", [0, 0, 0], 1, .6], [2, "wandering", [200, 0, 0], 1, .6]]
         host = Mock(public_gameplay=dict, native_guest=True, prop_carry_bridge=None, relay=None,
+                    crate_publication=RollPublication(),
                     roles=lambda: {"guest": "surveyor"}, party={}, native_recipients=dict,
                     transitioning=False, last_seen=49, zone_epoch=epoch,
                     last_game={"map": area, "state": "hosting", KEY: cues},
