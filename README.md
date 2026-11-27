@@ -11,7 +11,7 @@ Anyone is free to use, modify, fork, and redistribute the original mod code for 
 
 An unofficial UE4SS mod that adds co-op via Steam invites or Direct IP to the Windows Steam version of Project Silverfish. Open **Multiplayer** from the game’s title screen to host a campaign or join a friend. The mod runs in the existing Steam installation and keeps multiplayer campaigns separate from singleplayer saves.
 
-[Download a release candidate](docs/RELEASES.md) · [Known Issues](docs/KNOWN-ISSUES.md) · [Player guide](docs/PLAYING-COOP.md) · [18-rule design](docs/DESIGN.md) · [Contribute with a coding agent](CONTRIBUTING.md) · [Build and publish a release](docs/RELEASING.md)
+[Download the latest test build](docs/RELEASES.md#latest-test-build) · [Known Issues](docs/KNOWN-ISSUES.md) · [Player guide](docs/PLAYING-COOP.md) · [18-rule design](docs/DESIGN.md) · [Contribute with a coding agent](CONTRIBUTING.md) · [Build and publish a release](docs/RELEASING.md)
 
 ![Four co-op guests gathered in front of the Observatory gate](docs/screenshots/observatory-party.png)
 

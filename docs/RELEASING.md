@@ -12,10 +12,10 @@ Use a local Windows x64 machine with the qualified Steam installation, the pinne
 
 ```powershell
 $sfRevision = (git rev-parse HEAD).Trim()
-$sfTag = "rc-$($sfRevision.Substring(0,7))"
+$sfVersion = "rc-$($sfRevision.Substring(0,7))"
 & $sfPython -m bootstrap.resident_drop `
   --output "$sfReleaseFolder\Silverfish-Coop-RC-$($sfRevision.Substring(0,7)).zip" `
-  --version $sfTag --revision $sfRevision `
+  --version $sfVersion --revision $sfRevision `
   --shipping "$sfGame\SilverFish\Binaries\Win64\SilverFish-Win64-Shipping.exe" `
   --ue4ss $sfUe4ssRelease --signatures $sfSignatures --include-loader `
   --cpp-addon $sfGameplayDll --embedded-addon $sfEmbeddedDll --embedded-runtime $sfRuntime `
@@ -27,10 +27,11 @@ $sfTag = "rc-$($sfRevision.Substring(0,7))"
 ## Verify and publish
 
 1. Apply the exact ZIP to a clean isolated install and over an older supported resident install. Check that the game reaches the in-game title menu, both seats can host and join, and singleplayer saves remain isolated. Verify loading an existing co-op campaign when the release supports it. If a fundamental change makes earlier campaigns incompatible, verify the documented reset and fresh campaign instead. Keep the upgrade replica's old runtime directory and local descriptor so the test exercises the overwrite players perform. Run focused checks for the changed mechanics. [Portable title test](../tests/live_portable_title_smoke.py)
-2. Create and push an annotated tag such as `rc-d9978a3` at the exact source commit used for the ZIP. On GitHub, open **Releases → Draft a new release** and select that tag.
+2. When the ZIP is ready to publish, create and push one annotated tag at the exact source commit used for the ZIP. Use `vYYYYMMDD.HHMMSS.0-rc.g<SHA>` with the UTC date, the UTC time as an integer, and the seven-character source revision. For example, `v20261127.103756.0-rc.gd9978a3` represents 10:37:56 UTC. The version increases throughout the day so GitHub can sort the tags by version. Existing tags keep their published URLs. On GitHub, open **Releases → Draft a new release** and select that tag. [GitHub release ordering discussion](https://github.com/orgs/community/discussions/8226#discussioncomment-1728546)
 3. Include the UTC date and short commit ID in the release title. State that the candidate is for testing and bug reports. Summarize changes, supported game build, installation, known issues, and the ZIP’s SHA-256. Record automated checks and human playtesting separately. If the exact ZIP is awaiting human verification, say so. Give testers a short list of actions, expected results, and details to include if they report a problem.
 4. Attach `Silverfish-Coop-RC-*.zip` under the release assets and select **This is a pre-release**. Publish once the upload is complete, then open the release and verify the asset name and checksum. Keep the automatically generated **Source code** downloads available for readers who need the source snapshot.
-5. Retain up to three published candidates for the current Mountain Time day and the newest candidate from each earlier publication day. Run `python tools/release_index.py` from the repository root after publishing and pruning, verify the new candidate appears first and the older links still resolve, then commit the refreshed [release download index](RELEASES.md).
+5. Retain up to three published candidates for the current Mountain Time day and the newest candidate from each earlier publication day. Prune retired release entries together with their tags. Keep only the tags that back the builds still available on GitHub Releases.
+6. Run `python tools/release_index.py` from the repository root after publishing and pruning. Verify the newest candidate's download is featured at the top and that the retained links still resolve, then commit the refreshed index. GitHub's Releases page can order prereleases differently from their publication times. GitHub reserves its **Latest** badge for full releases. [Latest test build](RELEASES.md#latest-test-build) · [GitHub release API](https://docs.github.com/en/rest/releases/releases#update-a-release)
 
 Review the README, player guide, installation steps, and known issues during the first repository update of each working day. Compare them with the published candidate and recent test evidence. The download index tracks each publication and pruning pass.
 
