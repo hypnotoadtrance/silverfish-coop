@@ -49,6 +49,23 @@ class AdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transport.connect.await_count, 2)
         waiting.assert_called_once_with(NATIVE_RUNTIME_RETIRING)
 
+    async def test_disconnected_guest_retention_timeout_is_logged_once_and_keeps_host_running(self):
+        control = Mock()
+        store = Mock(status=Mock(return_value={"world": {}}))
+        host = Host(store, control, "build", None, "127.0.0.1", 0, False, None,
+                    native_backend=None, native_events=False, native_guest=True)
+        host.last_game = {"state": "hosting", "map": MAP, "native_guest_save_retention": True}
+        bridge = Mock(command=AsyncMock(side_effect=TimeoutError("guest pawn already retired")))
+
+        await host.retain_disconnected_guest(bridge, "guest", "scout", "old pawn")
+        await host.retain_disconnected_guest(bridge, "guest", "scout", "old pawn")
+
+        bridge.command.assert_awaited_once_with("native-guest-save-retain", "old pawn", "scout", timeout=1)
+        control.event.assert_called_once_with("guest_disconnect_retention_unavailable", character_id="scout",
+                                              reason="guest pawn already retired")
+        self.assertFalse(host.stopping)
+        self.assertFalse(host.native_checkpoint_unsafe)
+
     async def test_client_disables_routes_when_admission_does_not_confirm_selected_character(self):
         invite = dict(self.invite, guest_id="guest", credential="credential", character_id="scout", game_build="build")
         for character in (None, "different-character"):

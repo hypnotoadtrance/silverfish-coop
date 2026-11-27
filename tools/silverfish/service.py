@@ -407,6 +407,7 @@ class Host:
         self.native_restart_attempted = 0
         self.relay = None
         self.guest_runtime_replacements: dict[str, dict] = {}
+        self.guest_disconnect_retention_failures: dict[str, str] = {}
 
     def runtime_admission(self, request: dict, character_id: str | None, previous_runtime: str | None,
                           *, disconnected: bool) -> dict:
@@ -441,8 +442,27 @@ class Host:
         return {"accepted": False, "reason": NATIVE_RUNTIME_RETIRING}
 
     def report_guest_runtime_retired(self, guest_id: str) -> None:
+        self.guest_disconnect_retention_failures.pop(guest_id, None)
         if proof := self.guest_runtime_replacements.pop(guest_id, None):
             self.control.event("guest_runtime_retired", **proof)
+
+    async def retain_disconnected_guest(self, bridge: Bridge, guest_id: str, character: str, pawn: str) -> None:
+        if (self.stopping or self.transitioning or self.native_checkpoint_unsafe
+                or self.last_game.get("native_guest_save_retention") is not True):
+            return
+        retained = self.pending_guest_saves.get(character)
+        if (retained and retained[0] == pawn) or self.guest_disconnect_retention_failures.get(guest_id) == pawn:
+            return
+        # Keep the live detached save reachable after stock destroys the old pawn.
+        # A later native bind can adopt it without an extra disk checkpoint.
+        try:
+            saved = await native_inventory.retain_guest_save(self, bridge, character, pawn, timeout=1)
+        except (OSError, RuntimeError, ValueError) as error:
+            self.guest_disconnect_retention_failures[guest_id] = pawn
+            self.control.event("guest_disconnect_retention_unavailable", character_id=character, reason=str(error)[:256])
+        else:
+            if saved:
+                self.control.event("guest_disconnect_save_retained", character_id=character, pawn=pawn)
 
     def admit(self, request: dict) -> dict:
         if self.stopping:
@@ -502,6 +522,7 @@ class Host:
         if not active["resumed"]:
             self.guest_pawn = None
         self.guest_runtime_replacements.pop(request["guest_id"], None)
+        self.guest_disconnect_retention_failures.pop(request["guest_id"], None)
         with contextlib.suppress(OSError):
             self.control.event("guest_link_authenticated", guest_id=request["guest_id"],
                                character_id=self.guest["character_id"], resumed=active["resumed"])
@@ -2978,6 +2999,8 @@ class Host:
             health = _pawn(self.last_game, "guest")["health"]
             if health is not None:
                 self.native_guest_health = (self.guest["character_id"], bound_pawn, health)
+            if self.guest["disconnected"] is not None:
+                await self.retain_disconnected_guest(bridge, self.guest["guest_id"], self.guest["character_id"], bound_pawn)
         if (self.native_guest and pawn and lease_active and self.last_game.get("remote_clients") == 1
                 and bound_pawn != pawn["name"]):
             saved_health = self.guest["restore"].get("health")

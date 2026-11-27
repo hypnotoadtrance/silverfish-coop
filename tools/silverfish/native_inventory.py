@@ -122,15 +122,15 @@ def valid_take_ammo_result(weapon, ammo, rounds):
             and compatible_magazine_round(magazine.ammo, round_type))
 
 
-async def retain_guest_save(host, bridge, character: str, pawn: str) -> bool:
-    """Keep the exact working inventory until a paired save is requested."""
+async def retain_guest_save(host, bridge, character: str, pawn: str, *, timeout=3) -> bool:
+    """Keep the guest's working save object until a paired save is requested."""
     if host.last_game.get("native_guest_save_retention") is not True:
         return False
     retained = host.pending_guest_saves.get(character)
     if retained and retained[0] == pawn:
         return True
     area = host.last_game["map"]
-    snapshot = await bridge.command("native-guest-save-retain", pawn, character, timeout=3)
+    snapshot = await bridge.command("native-guest-save-retain", pawn, character, timeout=timeout)
     if (snapshot.get("state"), snapshot.get("map")) != ("hosting", area):
         raise party.RuleError("native_guest_save_scope_changed")
     host.last_game, host.last_seen = snapshot, time.monotonic()

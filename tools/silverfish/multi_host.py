@@ -82,6 +82,7 @@ class MultiHost(Host):
         member = admitted.member
         member.runtime_id = request.get("runtime_id")
         self.guest_runtime_replacements.pop(member.guest_id, None)
+        self.guest_disconnect_retention_failures.pop(member.guest_id, None)
         self.control.event("guest_link_authenticated", guest_id=member.guest_id, character_id=member.character_id,
                            role=member.role, resumed=admitted.resumed)
         return {"accepted": True, "resumed": admitted.resumed, "character_id": member.character_id,
@@ -422,6 +423,8 @@ class MultiHost(Host):
         participants = self.members.match_pawns(self.last_game)
         for member in self.members.members:
             observation = participants.get(member.role)
+            if observation and member.ready and member.disconnected_at is not None:
+                await self.retain_disconnected_guest(bridge, member.guest_id, member.character_id, observation.binding.pawn)
             if observation and not member.ready and member.disconnected_at is None:
                 try:
                     await self._attach_member(bridge, member, observation)

@@ -314,7 +314,8 @@ async def validate(work, original_saved, *, with_observer=False):
         try:
             start(run, service.host_game(work, campaign, "127.0.0.1", 0, True, fixtures=True,
                                         native_events=True, native_guest=True, native_zones=True,
-                                        start_zone=OBSERVATORY, max_guests=2 if with_observer else 1))
+                                        guest_sickness=True, start_zone=OBSERVATORY,
+                                        max_guests=2 if with_observer else 1))
             initial = await wait_for("The isolated Observatory host did not start",
                                      lambda server, _: server if server.get("state") == "hosting"
                                      and server.get("game", {}).get("map") == OBSERVATORY else None)
@@ -371,11 +372,9 @@ async def validate(work, original_saved, *, with_observer=False):
             await _command(run, "native-guest-weapon-seed", target=seat["role"], item_guid=guid)
             held_items = await inventory(seat["role"])
             assert guid in held_items
-            await _command(run, "checkpoint")
-            before_checkpoint = _saved_guest(campaign, character)
             proof["initial_guest"] = {"character": character, "game_pid": old_game.pid, "native": seat,
                                       "local_pawn": local, "coordinator": guest_generation,
-                                      "item_guid": guid, "item": held_items[guid], "checkpoint": before_checkpoint["revision"]}
+                                      "item_guid": guid, "item": held_items[guid]}
 
             await _command(guest_run, "drop-link")
 
@@ -399,6 +398,19 @@ async def validate(work, original_saved, *, with_observer=False):
             assert (_identity(resumed), resumed_local, resumed_generation) == (_identity(seat), local, guest_generation)
             assert old_game.poll() is None and await inventory(resumed["role"]) == held_items
             proof["same_runtime_reconnect"] = {"retained_exact_connection": True, "retained_exact_inventory": True}
+            await _command(run, "checkpoint")
+            before_checkpoint = _saved_guest(campaign, character)
+            proof["initial_guest"]["checkpoint"] = before_checkpoint["revision"]
+            # Stock infection changes the detached guest save outside the inventory commands.
+            # Keep the value safely above zero because stock sickness can decay while the pawn is reserved.
+            sickness = 0
+            for _ in range(4):
+                infected = await _command(run, "native-guest-sickness-fixture", target=resumed["role"], amount=100)
+                assert infected["native_guest_sickness_fixture"]["pawn"] == seat["pawn"]
+                sickness = infected["native_guest_sickness"]["guest_sickness"]
+                if sickness >= 12:
+                    break
+            assert sickness >= 12 and _saved_guest(campaign, character) == before_checkpoint
 
             assert old_game is not host_game and (not with_observer or old_game is not observer_game)
             assert old_game.poll() is None and old_bridge.parent == guest_run / "game-bridge"
@@ -446,6 +458,9 @@ async def validate(work, original_saved, *, with_observer=False):
                 if not result or result[2] == guest_generation:
                     return None
                 current, _, _ = result
+                live_sickness = server["game"].get("native_guest_sickness", {}).get(current["pawn"], {})
+                if "guest_sickness" not in live_sickness:
+                    return None
                 if (current["connection_id"] == seat["connection_id"] or current["pawn"] == seat["pawn"]
                         or current["driver"] != seat["driver"]):
                     return None
@@ -469,6 +484,9 @@ async def validate(work, original_saved, *, with_observer=False):
             if fresh["health"] != seat["health"] or not safe_position:
                 raise RuntimeError("The fresh pawn did not restore the same character's health at a qualified place")
             assert await inventory(fresh["role"]) == held_items
+            restored_sickness = status(run)["game"]["native_guest_sickness"][fresh["pawn"]]["guest_sickness"]
+            assert 0 < restored_sickness <= sickness, (sickness, restored_sickness)
+            assert _saved_guest(campaign, character) == before_checkpoint
             events = _events(run)[event_floor:]
 
             def event_index(kind, after, **expected):
@@ -479,20 +497,24 @@ async def validate(work, original_saved, *, with_observer=False):
                 raise RuntimeError(f"The host did not record an ordered {kind} for the exact replacement")
 
             pending = event_index("guest_runtime_replacement_pending", -1, guest_id=guest_id)
+            saved = event_index("guest_disconnect_save_retained", -1, character_id=character, pawn=seat["pawn"])
             retired = event_index("guest_runtime_retired", pending, guest_id=guest_id)
+            assert saved < retired
             for event in (events[pending], events[retired]):
                 connection = event.get("old_connection_id", event.get("connection_id"))
                 if connection is not None and connection != seat["connection_id"]:
                     raise RuntimeError("The replacement retirement receipt names the wrong old native connection")
             enrolled = event_index("native_guest_enrolled", retired, guest_id=guest_id,
                                    connection_id=fresh["connection_id"], pawn=fresh["pawn"])
-            event_index("native_guest_save_restored", enrolled, character_id=character, pawn=fresh["pawn"])
+            event_index("guest_pawn_ready", enrolled, character_id=character, pawn=fresh["pawn"])
             await _command(run, "checkpoint")
             final_checkpoint = _saved_guest(campaign, character)
             assert final_checkpoint["revision"] > before_checkpoint["revision"]
             proof["new_runtime"] = {"native": fresh, "local_pawn": fresh_local, "coordinator": fresh_generation,
                                     "game_pid": fresh_game.pid, "elapsed_seconds": round(elapsed, 3),
                                     "prior_connection_absent": True, "same_inventory": True,
+                                    "unsaved_sickness": sickness, "restored_sickness": restored_sickness,
+                                    "checkpoint_unchanged_until_explicit_save": True,
                                     "waited_for_native_retirement": waiting_for_retirement,
                                     "retirement_before_enrollment": True,
                                     "checkpoint": final_checkpoint["revision"]}
