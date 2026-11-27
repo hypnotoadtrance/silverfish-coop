@@ -218,6 +218,11 @@ local function run(action,id)
         assert(valid(pawn))
         local instance = world.OwningGameInstance
         assert(valid(instance) and valid(world.NetDriver) and same(pawn.Save, instance.SaveSlot_Ref))
+        if id == "disguise" then return tostring(pawn.Disguise) end
+        if id == "peer_disguise" then
+            assert(not valid(world.NetDriver.ServerConnection))
+            return tostring(remote_seat(pawn, world).Disguise)
+        end
         local class_name = "/Game/Classes/Armor_Items/Helm_FurCap.Helm_FurCap_C"
         local class = StaticFindObject(class_name)
         if not valid(class) then LoadAsset(class_name) class = StaticFindObject(class_name) end

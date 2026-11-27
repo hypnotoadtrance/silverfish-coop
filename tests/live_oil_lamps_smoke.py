@@ -122,7 +122,7 @@ async def verify_oil_lamps(host, guest, pawn, *, playtest_batch=False):
         inventory = (await suite.submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
         stored, = [row for row in inventory if row["guid"] == guid]
         assert stored["source"] == inventory_source, stored
-        return stored["class_path"]
+        return stored["class_path"], guid
 
     debt_evidence = []
     for balance in ("3000000", "2000000"):
@@ -175,12 +175,28 @@ async def verify_oil_lamps(host, guest, pawn, *, playtest_batch=False):
 
     baseline = await reputation(host, "seed")
     await expect_guest_reputation(baseline)
-    gear = {"fur-cap": await verify_equip("fur-cap", "helmet")}
+    cap_path, cap_guid = await verify_equip("fur-cap", "helmet")
     assert await reputation(guest) == baseline
     host_cap = await reputation(host, "wear")
     assert host_cap != baseline
     await expect_guest_reputation(host_cap)
-    gear["flashbang"] = await verify_equip("flashbang", "equipment")
+    flashbang_path, _ = await verify_equip("flashbang", "equipment")
+    gear = {"fur-cap": cap_path, "flashbang": flashbang_path}
+
+    async def expect_disguise(expected):
+        async with asyncio.timeout(10):
+            while (await reputation(guest, "disguise"), await reputation(host, "peer_disguise")) != (expected, expected):
+                await asyncio.sleep(.15)
+        assert await reputation(host, "disguise") == "0"
+
+    await expect_disguise("0")
+    await verify_equip("conscript-uniform", "armor")
+    await expect_disguise("0")
+    await verify_equip("standard-infantry-helmet", "helmet")
+    await expect_disguise("4")
+    restored = await suite.submit(guest_run, native_guest_drop.STOCK_EQUIP_FIXTURE, target=cap_guid)
+    assert restored["ok"], restored
+    await expect_disguise("0")
     print("Fur Cap and Flashbang stayed equipped after reconciliation", flush=True)
     async def simmi(action):
         return await suite.portable_probe_command(host.bridge, "simmi-jobs", action)
@@ -227,6 +243,7 @@ async def verify_oil_lamps(host, guest, pawn, *, playtest_batch=False):
                 await asyncio.sleep(.05)
     dumpster = await verify_observer_open(CROSSROADS, "Loot_Dumpster_BP_C_1")
     return {"debt": debt_evidence, "gear": gear, "shared_reputation": {"baseline": baseline, "host_cap": host_cap},
+            "guest_disguise": [0, 4, 0],
             "simmi": quest, "unloaded_source_refused": unloaded, "cabinet": cabinet, "dumpster": dumpster, "gas_lamps": gas_evidence, "lamps": evidence,
             "other_lamp_stayed_unlit": adjacent, "latch": {"actor": latch, "initial": before, "toggled": after}}
 
