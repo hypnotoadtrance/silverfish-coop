@@ -5,6 +5,8 @@ import math
 import time
 
 from portable_guest_world_start import wait_resident_status
+from tools.silverfish import native_drum_fire
+from tools.silverfish.control import current_status
 from tools.silverfish.native_anomaly_effects import CANISTERS
 from tools.silverfish.travel import CROSSROADS
 
@@ -141,6 +143,63 @@ end""")
     return source.replace(anchor, anchor + fixture)
 
 
+def ground_fire_fields(view):
+    fields = {}
+    for encoded in view.get("fields", []):
+        identity, center, particles = encoded.split("|", 2)
+        fields[int(identity)] = {"center": [float(axis) for axis in center.split(",")],
+                                 "particles": particles.count(";") + 1}
+    return fields
+
+
+async def verify_ground_fire(host_run, guest_run, baseline, origin, first_host):
+    host_revisions, target_ids = {}, set()
+    active = None
+    epoch = first_host["zone_epoch"]
+
+    def observe(frame):
+        game = frame.get("game", {})
+        view = game.get(native_drum_fire.KEY, {})
+        if (frame.get("zone_epoch"), game.get("map"), game.get("state")) == (epoch, CROSSROADS, "hosting") and view:
+            host_revisions[view["revision"]] = view
+
+    observe(first_host)
+    deadline = time.monotonic() + 22
+    host_frame, guest_frame = first_host, {}
+    while time.monotonic() < deadline:
+        try:
+            host_frame, guest_frame = await asyncio.gather(current_status(host_run), current_status(guest_run))
+        except (FileNotFoundError, RuntimeError):
+            await asyncio.sleep(.12)
+            continue
+        observe(host_frame)
+        guest_game = guest_frame.get("game", {})
+        local = guest_game.get(native_drum_fire.VIEW, {})
+        incoming = guest_frame.get("gameplay", {}).get(native_drum_fire.KEY, {})
+        revision = local.get("revision")
+        authoritative = host_revisions.get(revision)
+        guest_scope = (guest_game.get("state"), guest_game.get("map"), local.get("epoch"), incoming.get("epoch"),
+                       incoming.get("map"), incoming.get("revision"))
+        if (guest_scope == ("connected", CROSSROADS, epoch, epoch, CROSSROADS, revision)
+                and authoritative and incoming.get("fields") == authoritative["fields"]):
+            fields = ground_fire_fields(authoritative)
+            target_ids.update(identity for identity in fields.keys() - baseline
+                              if math.dist(fields[identity]["center"], origin[:2]) <= 100)
+            expected = sum(field["particles"] for field in fields.values())
+            remaining = fields.keys() & target_ids
+            if local.get("desired") == local.get("rendered") == expected:
+                proof = {"revision": revision, "expected_particles": expected, "host_fields": fields, "guest": local}
+                if remaining:
+                    active = proof
+                elif active and revision > active["revision"]:
+                    return {"baseline_ids": sorted(baseline), "target_ids": sorted(target_ids),
+                            "active": active, "retired": proof}
+        await asyncio.sleep(.12)
+    raise RuntimeError(f"Stock drum ground fire did not render and retire for {DRUM}: "
+                       f"baseline={sorted(baseline)}, target={sorted(target_ids)}, active={active}, "
+                       f"host={host_frame.get('game', {}).get(native_drum_fire.KEY)}, guest={guest_frame.get('game', {}).get(native_drum_fire.VIEW)}")
+
+
 async def verify_crossroads_canister(host, guest, _pawn, resident_events, campaign_save_hashes):
     host_run = host.campaign / "run"
     guest_run = guest.client / "run"
@@ -186,6 +245,8 @@ async def verify_crossroads_canister(host, guest, _pawn, resident_events, campai
 
     drum, original, _ = await stage(DRUM)
     await command(host, "prepare", DRUM)
+    before_blast = await wait_resident_status(host_run, lambda frame: stock(frame, DRUM).get("phase") == 0)
+    baseline = set(ground_fire_fields(before_blast["game"].get(native_drum_fire.KEY, {})))
     started = time.time()
     await command(host, "shoot", DRUM)
     ignited = await wait_resident_status(host_run, lambda frame: stock(frame, DRUM).get("phase") == 1)
@@ -198,7 +259,16 @@ async def verify_crossroads_canister(host, guest, _pawn, resident_events, campai
     assert fire_frames and ignition_requests and activation_calls == 1 and rejected_activations == 0, observed
     drum["guest_fire_activation_calls"] = activation_calls
     drum["guest_continuous_particles_observed"] = particle_frames > 0
-    await wait_resident_status(host_run, lambda frame: stock(frame, DRUM).get("phase") == 2, timeout=24)
+    origin = stock(ignited, DRUM)["location"]
+
+    def drum_destroyed(frame):
+        nonlocal origin
+        view = stock(frame, DRUM)
+        if view.get("location"):
+            origin = view["location"]
+        return view.get("phase") == 2
+
+    exploded = await wait_resident_status(host_run, drum_destroyed, timeout=24)
     finished = await wait_resident_status(guest_run, lambda frame: stock(frame, DRUM).get("phase") == 2)
     async with asyncio.timeout(7):
         while not (blasts := [entry for entry in await resident_events(guest_run, finished)
@@ -206,6 +276,7 @@ async def verify_crossroads_canister(host, guest, _pawn, resident_events, campai
             await asyncio.sleep(.12)
     # The muted run verifies cue dispatch and reports particle creation separately.
     assert len(blasts) == 1, blasts
+    drum["ground_fire"] = await verify_ground_fire(host_run, guest_run, baseline, origin, exploded)
     assert campaign_save_hashes(host.campaign) == checkpoint
     drum["guest_blast"] = blasts[0]
     drum["removed_on_both_seats"] = True

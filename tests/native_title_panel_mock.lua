@@ -489,6 +489,33 @@ end
 direct_retry("", "direct_password_required")
 assert(surface.write(display, "password", "Wrong fixture"))
 direct_retry("Wrong fixture", "direct_wrong_password")
+
+local function direct_trust(kind, title, fingerprint)
+    assert(surface.write(display, "password", "Trusted fixture"))
+    next_guid = next_guid + 1
+    click("connect")
+    local prefix = ("1\t%s\t%s\tdirect\t127.0.0.2\t28952\tTrusted fixture"):format(steam_generation, operation_id())
+    assert(files[join_request] == prefix .. "\n")
+    files[join_request] = nil
+    files[join_response] = ("1\t%s\t%s\ttrust\t%s\t1\n%s\n")
+        :format(steam_generation, operation_id(), kind, fingerprint)
+    tick()
+    assert(display.title == title and display.focus == "back" and display.buttons.trust)
+    assert(not files[join_request], "The trust prompt must wait for an explicit choice")
+end
+
+direct_trust("new", "Trust this host?", string.rep("a", 64))
+click("back")
+assert(display.title == "Join by Direct IP" and display.fields.address == "127.0.0.2"
+    and display.fields.port == "28952" and surface.read(display, "password") == "", "Keep the endpoint after declining trust")
+assert(not files[join_request])
+local changed_fingerprint = string.rep("b", 64)
+direct_trust("changed", "Host identity changed", changed_fingerprint)
+next_guid = next_guid + 1
+click("trust")
+assert(files[join_request] == ("1\t%s\t%s\tdirect\t127.0.0.2\t28952\tTrusted fixture\t%s\n")
+    :format(steam_generation, operation_id(), changed_fingerprint))
+files[join_request], files[join_response] = nil, nil
 click("back")
 assert(display.title == "Multiplayer" and display.focus == "join"
     and files[steam_cancel] == "1\t" .. steam_nonce .. "\tcancel\n")
@@ -507,6 +534,13 @@ assert(display.title == "Steam lobby access" and display.buttons.invite.label ==
 assert(display.buttons.invite.detail == "Join from a Steam invite"
     and display.buttons.friends.detail == "Friends can use Join Game"
     and display.buttons.public.detail == "Listed in the lobby browser")
+click("back")
+assert(display.title == "Host networking" and display.focus == "steam", "Return to the transport that opened lobby access")
+click("back")
+assert(display.title == "New Game" and display.focus == "network" and display.buttons.network.label == "Network · Direct IP",
+    "Backing out of Steam lobby access must preserve Direct IP")
+click("network")
+click("steam")
 click("public")
 assert(display.title == "New Game" and display.fields.port == nil and display.fields.bind == nil
     and display.buttons.network.label == "Steam · Public")

@@ -341,9 +341,10 @@ local function host_settings(form, note, focus)
     present({title = title_text, note = note or form.saved_display, rows = rows, focus = focus})
 end
 
-local function host_network(form, note)
+local function host_network(form, note, focus)
     form.screen = "network"
-    present({title = "Host networking", note = note, focus = form.values.steam_access and "steam" or "direct", rows = {
+    focus = focus or (form.values.steam_access and "steam" or "direct")
+    present({title = "Host networking", note = note, focus = focus, rows = {
         {button("direct", "Direct IP"), button("steam", "Steam Networking")},
         {button("back", "Back")},
     }})
@@ -418,7 +419,7 @@ local function handle_host_form(action, context)
         return true
     end
     if action == "back" then
-        if form.screen == "steam-access" then host_network(form)
+        if form.screen == "steam-access" then host_network(form, nil, "steam")
         elseif form.screen == "network" then host_settings(form, nil, "network")
         elseif form.fixture and form.screen == "saved" then host_settings(form)
         elseif form.fixture or form.screen == "menu" or not resident then

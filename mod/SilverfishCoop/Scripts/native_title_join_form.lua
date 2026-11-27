@@ -159,6 +159,7 @@ local function render_surface(draft, screen, hint, initial)
         local endpoint = draft.steam_port and "Steam invitation" or draft.address .. " · UDP " .. draft.port
         note = endpoint .. "\nOnly continue if you expect this host. A fake server could collect your lobby password."
         rows = {{button("trust", "Trust and connect"), back}}
+        focus = "back"
     elseif screen == "invite" then
         rows = {field("invite", "Invitation", "Paste the host's invitation", max_invite, initial, true),
             {button("connect", "Load invitation"), back}}

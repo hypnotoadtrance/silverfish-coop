@@ -51,11 +51,17 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
 
     def test_network_report_groups_stable_samples_and_keeps_travel_traffic_in_totals(self):
         report = steam_network_report._Report()
-        field = {"link_connected": True, "game": {"map": OBSERVATORY},
-                 "transport": {"keepalive_probes_acked": 7, "keepalive_rtt_us": 42_000}}
-        report.sample(10, field, (10, 100, 5, 500, 3))
-        report.sample(11, field, (20, 300, 10, 1400, 3))
-        report.sample(11.25, {}, (21, 350, 13, 1650, 3))
+        frame = {"state": "connected", "link_connected": True, "game": {"map": OBSERVATORY},
+                 "generation": "session", "zone_epoch": "visit"}
+        first = {"keepalive_probes_acked": 7, "keepalive_rtt_us": 95_000,
+                 "game_payload_bytes_delivered": 300, "snapshot_received_bytes": 150, "relay_queue_expired_frames": 3}
+        middle = {"keepalive_probes_acked": 8, "keepalive_rtt_us": 42_000,
+                  "game_payload_bytes_delivered": 900, "snapshot_received_bytes": 330, "relay_queue_expired_frames": 4}
+        last = {"keepalive_probes_acked": 9, "keepalive_rtt_us": 500_000,
+                "game_payload_bytes_delivered": 1010, "snapshot_received_bytes": 385, "relay_queue_expired_frames": 4}
+        report.sample(10, {**frame, "transport": first}, (10, 100, 5, 500, 3))
+        report.sample(11, {**frame, "transport": middle}, (20, 300, 10, 1400, 3))
+        report.sample(11.25, {**frame, "zone_epoch": "destination", "transport": last}, (21, 350, 13, 1650, 3))
         result = report.result("guest", VERSION)
         self.assertEqual(result["overall"]["sent_bytes"], 250)
         self.assertEqual(result["overall"]["received_bytes"], 1150)
@@ -66,6 +72,31 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((stable["map"], stable["lobby_members"], stable["received_bytes"]), (OBSERVATORY, 3, 900))
         self.assertEqual((travel["map"], travel["lobby_members"], travel["received_bytes"]), (None, None, 250))
         self.assertIsNone(travel["peak_receive_bps"])
+        self.assertIsNone(travel["peak_heartbeat_rtt_us"])
+        self.assertEqual(stable["link_activity"], {"game_payload_bytes_delivered": 600,
+                                                   "snapshot_received_bytes": 180, "relay_queue_expired_frames": 1})
+        self.assertEqual(travel["link_activity"]["snapshot_received_bytes"], 55)
+        self.assertEqual(result["overall"]["link_activity"]["game_payload_bytes_delivered"], 710)
+        peak = {"map": OBSERVATORY, "lobby_members": 3, "seconds": 1, "link_activity": stable["link_activity"]}
+        self.assertEqual(result["overall"]["peak_receive_interval"], peak)
+        self.assertEqual(result["overall"]["peak_send_interval"], peak)
+
+    def test_network_report_rebases_link_counters_without_changing_steam_totals(self):
+        report = steam_network_report._Report()
+        frame = {"state": "connected", "link_connected": True, "game": {"map": OBSERVATORY}, "zone_epoch": "visit"}
+        report.sample(10, {**frame, "generation": "old", "transport": {"snapshot_received_bytes": 900}},
+                      (8, 200, 4, 700, 2))
+        report.sample(11, {**frame, "generation": "new", "transport": {"snapshot_received_bytes": 1100}},
+                      (10, 300, 6, 1300, 2))
+        report.sample(12, {**frame, "generation": "new", "transport": {"snapshot_received_bytes": 1280}},
+                      (13, 530, 10, 1600, 2))
+        result = report.result("guest", VERSION)
+        self.assertEqual(result["overall"]["received_bytes"], 900)
+        self.assertEqual(result["overall"]["link_activity"], {"snapshot_received_bytes": 180})
+        self.assertEqual(result["overall"]["peak_receive_interval"]["map"], None)
+        self.assertEqual(result["overall"]["peak_receive_interval"]["link_activity"], {})
+        self.assertEqual(result["overall"]["peak_send_interval"]["link_activity"], {"snapshot_received_bytes": 180})
+        self.assertEqual(result["by_map_and_lobby_size"][0]["link_activity"], {})
 
     async def test_opt_in_steam_report_writes_once_at_session_exit_and_skips_direct_ip(self):
         _, session, _ = await self.start(HOST)

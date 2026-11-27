@@ -106,6 +106,7 @@ end
 
 function actions.pending_escrow(world, slot)
     local entry = pending_escrows[slot]
+    if entry and entry.retired then return nil, true end
     if entry and valid_object(world) and entry.world == world:GetAddress() and valid_object(entry.pool) then
         return entry.pool
     end
@@ -169,8 +170,28 @@ local function release_escrow(slot)
     pending_escrows[slot] = nil
 end
 
+local function release_retired_escrow(slot, entry)
+    local called, released, reason = pcall(release_reference, entry)
+    if called and (released == true or reason == "loot_escrow_not_retained") then
+        pending_escrows[slot] = nil
+    else
+        if not called then reason = released end
+        print("[SilverfishCoop] Retired loot escrow release deferred: " .. tostring(reason) .. "\n")
+    end
+end
+
+function actions.retire_pending_escrow(slot)
+    local entry = pending_escrows[slot]
+    if not entry or entry.retired then return end
+    -- The stock drop was either never banked or already transferred. Keep its
+    -- exact native weak-reference registration for cleanup without exposing its payload.
+    entry.retired = true
+    release_retired_escrow(slot, entry)
+end
+
 local function commit_escrow_cache(world, slot)
     local escrow = pending_escrows[slot]
+    if escrow and escrow.retired then return end
     if escrow and escrow.cache_after_commit and valid_object(world) and escrow.world == world:GetAddress()
         and valid_object(escrow.owner) and valid_object(escrow.pool) then
         local stock = escrow.owner.SaveSlot_Ref
@@ -189,7 +210,14 @@ actions.release_escrow = release_escrow
 
 function actions.release_pending()
     clear_cache()
-    for slot in pairs(pending_escrows) do release_escrow(slot) end
+    for slot, entry in pairs(pending_escrows) do
+        if not entry.retired then
+            release_escrow(slot)
+        elseif not entry.retirement_retried then
+            entry.retirement_retried = true
+            release_retired_escrow(slot, entry)
+        end
+    end
 end
 
 function actions.command(fields, state, phase)
@@ -205,7 +233,7 @@ function actions.command(fields, state, phase)
             if fields[2] == "native-loot-release-escrows" then
                 commit_escrow_cache(state.world, slot)
             else
-                if not escrow then error("native_loot_escrow_not_pending", 0) end
+                if not escrow or escrow.retired then error("native_loot_escrow_not_pending", 0) end
                 if not valid_object(api) then error("native_loot_escrow_save_api_unavailable", 0) end
                 if not valid_object(escrow.pool) then error("native_loot_escrow_object_unavailable", 0) end
                 if not valid_object(state.world) or escrow.world ~= state.world:GetAddress() then

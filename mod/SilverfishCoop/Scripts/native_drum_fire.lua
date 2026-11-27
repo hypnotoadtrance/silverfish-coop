@@ -1,6 +1,7 @@
 local fire = {}
 local child_class = "BlueprintGeneratedClass /Game/Classes/Anomalies/Fire_Molotov.Fire_Molotov_C"
 local particle_path = "/Game/Assets/PFX/NI_FireMolotov.NI_FireMolotov"
+local particle_name = "NiagaraSystem " .. particle_path
 local max_fields, max_particles, max_field_bytes = 4, 64, 6400
 local chunk_bytes, max_chunks = 960, 27
 local world, phase, host, guest, serial
@@ -37,13 +38,23 @@ local function number(value, minimum, maximum)
     return type(value) == "number" and value >= minimum and value <= maximum
 end
 
-local function transform(component)
-    local p, r, s = component:K2_GetComponentLocation(), component:K2_GetComponentRotation(), component:K2_GetComponentScale()
-    if not (number(p.X, -1e7, 1e7) and number(p.Y, -1e7, 1e7) and number(p.Z, -1e7, 1e7)
-        and number(r.Pitch, -360, 360) and number(r.Yaw, -360, 360) and number(r.Roll, -360, 360)
-        and number(s.X, .001, 10) and number(s.Y, .001, 10) and number(s.Z, .001, 10)) then return end
-    return ("%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f"):format(
-        p.X, p.Y, p.Z, r.Pitch, r.Yaw, r.Roll, s.X, s.Y, s.Z)
+local function sample_pose(component, previous, next_id)
+    local frame = component:K2_GetComponentToWorld()
+    local p, s, r = frame.Translation, frame.Scale3D, component:K2_GetComponentRotation()
+    local x, y, z = p.X, p.Y, p.Z
+    local pitch, yaw, roll = r.Pitch, r.Yaw, r.Roll
+    local sx, sy, sz = s.X, s.Y, s.Z
+    if previous and previous.x == x and previous.y == y and previous.z == z
+        and previous.pitch == pitch and previous.yaw == yaw and previous.roll == roll
+        and previous.sx == sx and previous.sy == sy and previous.sz == sz then return previous end
+    if not (number(x, -1e7, 1e7) and number(y, -1e7, 1e7) and number(z, -1e7, 1e7)
+        and number(pitch, -360, 360) and number(yaw, -360, 360) and number(roll, -360, 360)
+        and number(sx, .001, 10) and number(sy, .001, 10) and number(sz, .001, 10)) then return end
+    local pose = previous or {id = next_id}
+    pose.x, pose.y, pose.z, pose.pitch, pose.yaw, pose.roll = x, y, z, pitch, yaw, roll
+    pose.sx, pose.sy, pose.sz = sx, sy, sz
+    pose.text = ("%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f"):format(pose.id, x, y, z, pitch, yaw, roll, sx, sy, sz)
+    return pose
 end
 
 local function admit()
@@ -58,7 +69,7 @@ local function admit()
             local origin = actor:K2_GetActorLocation()
             if number(origin.X, -1e7, 1e7) and number(origin.Y, -1e7, 1e7) then
                 host.fields[#host.fields + 1] = {actor = actor, id = serial,
-                    center = ("%.3f,%.3f"):format(origin.X, origin.Y), ids = {}, next_id = 0}
+                    center = ("%.3f,%.3f"):format(origin.X, origin.Y), poses = {}, parts = {}, next_id = 0}
                 added = true
             end
         end
@@ -66,28 +77,46 @@ local function admit()
     return added
 end
 
-local function sample(entry)
+local function stock_particle(component, owner_address, asset_address)
+    if not valid(component) then return false end
+    local owner = component:GetOwner()
+    if not valid(owner) or owner:GetAddress() ~= owner_address then return false end
+    local asset = component.Asset
+    if not valid(asset) then return false end
+    if asset_address then return asset:GetAddress() == asset_address end
+    return asset:GetFullName() == particle_name
+end
+
+local function sample(entry, asset_address)
     local actor = entry.actor
     local particles = actor.Particles
     local count = particles and particles:GetArrayNum() or 0
     if count == 0 or count > max_particles then return end
-    local parts = {}
+    local owner_address = actor:GetAddress()
+    local parts, used, changed = entry.parts, 0, false
     for index = 1, count do
         local object = particles[index]
-        if valid(object) and same(object:GetOwner(), actor) and valid(object.Asset)
-            and object.Asset:GetFullName() == "NiagaraSystem " .. particle_path then
-            local at = transform(object)
+        if stock_particle(object, owner_address, asset_address) then
             local address = object:GetAddress()
-            local id = entry.ids[address]
-            if at and not id and entry.next_id < max_particles then
-                entry.next_id = entry.next_id + 1
-                id = entry.next_id
-                entry.ids[address] = id
+            local previous = entry.poses[address]
+            if previous or entry.next_id < max_particles then
+                local pose = sample_pose(object, previous, entry.next_id + 1)
+                if pose then
+                    if not previous then entry.poses[address], entry.next_id = pose, pose.id end
+                    used = used + 1
+                    if parts[used] ~= pose.text then parts[used], changed = pose.text, true end
+                end
             end
-            if at and id then parts[#parts + 1] = id .. "," .. at end
         end
     end
-    if #parts > 0 then return ("%d|%s|%s"):format(entry.id, entry.center, table.concat(parts, ";")) end
+    if used < #parts then
+        for index = #parts, used + 1, -1 do parts[index] = nil end
+        changed = true
+    end
+    if changed then
+        entry.encoded = used > 0 and ("%d|%s|%s"):format(entry.id, entry.center, table.concat(parts, ";")) or nil
+    end
+    return entry.encoded
 end
 
 local function host_rows(row)
@@ -105,8 +134,10 @@ local function host_rows(row)
     if not admitted and not removed and now < host.next_sample then return host.rows end
     host.next_sample = now + .10
     local fields = {}
+    local asset = #host.fields > 0 and StaticFindObject(particle_path)
+    local asset_address = valid(asset) and asset:GetAddress()
     for index = #host.fields, 1, -1 do
-        local encoded = sample(host.fields[index])
+        local encoded = sample(host.fields[index], asset_address)
         if encoded then fields[#fields + 1] = encoded end
     end
     local content = table.concat(fields, "\t")

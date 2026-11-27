@@ -207,12 +207,16 @@ local function capture(fields, state, phase, fixture)
         or not pending and api:DoesSaveGameExist(slot, 0) then
         error("stock_enemy_escrow_fixture_save_unavailable", 0)
     end
-    local scratch = pending and escrow.create_pending_escrow(pawn.Save, api:GetGameInstance(pawn), state.world, slot)
-        or api:CreateSaveGameObject(save_class)
+    local scratch
+    if pending then
+        scratch = escrow.create_pending_escrow(pawn.Save, api:GetGameInstance(pawn), state.world, slot)
+    else
+        scratch = api:CreateSaveGameObject(save_class)
+    end
     if not scratch or not scratch:IsValid() then error("stock_enemy_escrow_fixture_save_unavailable", 0) end
     local ok, reason, guid, ammo = SilverfishCaptureStockEnemyDrop(pawn:GetAddress(), scratch:GetAddress(), actor:GetAddress(), sequence)
     if not ok then
-        if pending then escrow.release_escrow(slot) end
+        if pending then escrow.retire_pending_escrow(slot) end
         error(tostring(reason), 0)
     end
     if not pending then
@@ -247,8 +251,10 @@ local function transfer(fields, state, phase)
     local x, y, z, identity = tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8]), fields[9]
     local host, fresh = transport.scoped_host(state, phase)
     local stock = host and host.pawn.Save
-    local ground = #fields == 10 and fields[10] == "legacy-ground"
-    if phase ~= "hosting" or (#fields ~= 9 and not ground) or not fresh or not stock or not stock:IsValid()
+    local memory = fields[#fields] == "memory-escrow"
+    local option_end = #fields - (memory and 1 or 0)
+    local ground = option_end == 10 and fields[10] == "legacy-ground"
+    if phase ~= "hosting" or (option_end ~= 9 and not ground) or not fresh or not stock or not stock:IsValid()
         or not valid_slot(slot) or type(guid) ~= "string" or #guid ~= 32 or not guid:match("^[0-9A-F]+$")
         or not finite(x, 1e7) or not finite(y, 1e7) or not finite(z, 1e7)
         or type(identity) ~= "string" or #identity ~= 32 or not identity:match("^[0-9a-f]+$")
@@ -270,16 +276,19 @@ local function transfer(fields, state, phase)
         and not world_loot.authority_sight(state, phase, pawn, identity, position) then
         error("stock_enemy_loot_out_of_reach_or_obstructed", 0)
     end
-    local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
-    local pending = escrow.pending_escrow(state.world, slot)
-    local pool = pending or api and api:IsValid() and api:LoadGameFromSlot(slot, 0)
+    local pending, retired = escrow.pending_escrow(state.world, slot)
+    local pool = pending
+    if not pool and not memory and not retired then
+        local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+        pool = api and api:IsValid() and api:LoadGameFromSlot(slot, 0)
+    end
     if not pool or not pool:IsValid() then error("stock_enemy_loot_escrow_unavailable", 0) end
     local ok, status, amount, before, after, inventory_guid = SilverfishClaimNativeLootEscrow(pawn:GetAddress(), save:GetAddress(),
         stock:GetAddress(), pool:GetAddress(), guid)
     if not ok then error(tostring(status), 0) end
-    if pending then escrow.release_escrow(slot) end
     claim = {name, slot, guid, status, amount or 0, before or 0, after or 0}
     if status == "merged" then claim[8] = inventory_guid or "-" end
+    if pending then escrow.retire_pending_escrow(slot) end
     return "exact stock NPC item transferred"
 end
 

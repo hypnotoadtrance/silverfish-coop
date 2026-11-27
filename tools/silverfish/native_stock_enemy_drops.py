@@ -521,6 +521,7 @@ async def claim(host, bridge, character, guid, operation):
                                             *(str(axis) for axis in roll["transform"]["position"]),
                                             stock_enemy_identity(guid, roll.get("visual_id")),
                                             *(() if roll.get("settled") else ("legacy-ground",)),
+                                            *(("memory-escrow",) if frame.get("pending") else ()),
                                             timeout=7)
         except RuntimeError as error:
             reason = str(error)

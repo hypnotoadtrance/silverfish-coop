@@ -2,7 +2,7 @@
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import time
 
 from .control import resident_status
@@ -14,6 +14,18 @@ ENABLE_FILE = "capture-steam-network"
 REPORT_FILE = "steam-network-report.json"
 SAMPLE_SECONDS = 1.0
 MAX_GROUPS = 31
+LINK_COUNTERS = (
+    "game_payload_bytes_queued",
+    "game_wire_payload_bytes_queued",
+    "game_payload_bytes_delivered",
+    "snapshot_plaintext_bytes",
+    "snapshot_encoded_bytes",
+    "snapshot_received_bytes",
+    "snapshot_responses_encoded",
+    "snapshot_responses_decoded",
+    "relay_queue_evicted_frames",
+    "relay_queue_expired_frames",
+)
 
 
 @dataclass(slots=True)
@@ -27,8 +39,11 @@ class _Traffic:
     peak_send_bps: int | None = None
     peak_receive_bps: int | None = None
     peak_heartbeat_rtt_us: int = 0
+    link_activity: dict[str, int] = field(default_factory=dict)
+    peak_send_interval: dict | None = None
+    peak_receive_interval: dict | None = None
 
-    def add(self, seconds, counters, rtt):
+    def add(self, seconds, counters, rtt, group, activity):
         sent, send_bytes, received, receive_bytes = counters
         self.seconds += seconds
         self.samples += 1
@@ -38,9 +53,22 @@ class _Traffic:
         self.received_bytes += receive_bytes
         # The last interval can be short when the player exits.
         if seconds >= SAMPLE_SECONDS:
-            self.peak_send_bps = max(self.peak_send_bps or 0, round(send_bytes * 8 / seconds))
-            self.peak_receive_bps = max(self.peak_receive_bps or 0, round(receive_bytes * 8 / seconds))
+            send_bps = round(send_bytes * 8 / seconds)
+            receive_bps = round(receive_bytes * 8 / seconds)
+            send_peak = self.peak_send_bps is None or send_bps > self.peak_send_bps
+            receive_peak = self.peak_receive_bps is None or receive_bps > self.peak_receive_bps
+            if send_peak or receive_peak:
+                interval = {"seconds": round(seconds, 3), "map": group[0], "lobby_members": group[1],
+                            "link_activity": activity.copy()}
+            if send_peak:
+                self.peak_send_bps = send_bps
+                self.peak_send_interval = interval
+            if receive_peak:
+                self.peak_receive_bps = receive_bps
+                self.peak_receive_interval = interval
         self.peak_heartbeat_rtt_us = max(self.peak_heartbeat_rtt_us, rtt)
+        for key, amount in activity.items():
+            self.link_activity[key] = self.link_activity.get(key, 0) + amount
 
     def result(self):
         return {
@@ -57,31 +85,43 @@ class _Report:
         self.total = _Traffic()
         self.groups = {}
         self.previous = None
-        self.last_acks = 0
 
     def sample(self, now, frame, counters):
         packets, lobby_members = counters[:4], counters[4]
         area = frame.get("game", {}).get("map")
-        if not frame.get("link_connected") or not valid_campaign_package(area):
+        if (not frame.get("link_connected") or frame.get("state") not in ("hosting", "connected")
+                or frame.get("awaiting_zone_guest") or not valid_campaign_package(area)):
             area = None
         group = area, lobby_members
-        previous, self.previous = self.previous, (now, packets, group)
+        transport = frame.get("transport", {})
+        observation = frame.get("generation"), frame.get("zone_epoch")
+        previous, self.previous = self.previous, (now, packets, group, observation, transport)
         if not previous or now <= previous[0]:
             return
-        elapsed = now - previous[0]
-        delta = tuple(after - before for after, before in zip(packets, previous[1], strict=True))
-        if not (lobby_members or previous[2][1] or any(delta)):
+        last_time, last_packets, last_group, last_observation, last_transport = previous
+        elapsed = now - last_time
+        delta = tuple(after - before for after, before in zip(packets, last_packets, strict=True))
+        if not (lobby_members or last_group[1] or any(delta)):
             return
-        transport = frame.get("transport", {})
-        acks = transport.get("keepalive_probes_acked", 0)
-        rtt = transport.get("keepalive_rtt_us", 0) if area and acks > self.last_acks else 0
-        self.last_acks = max(acks, self.last_acks)
-        if group != previous[2] or (group not in self.groups and len(self.groups) >= MAX_GROUPS):
+        activity = {}
+        rtt = 0
+        if observation[0] and observation[0] == last_observation[0]:
+            for key in LINK_COUNTERS:
+                before, after = last_transport.get(key), transport.get(key)
+                if type(before) is int and type(after) is int and after >= before >= 0:
+                    activity[key] = after - before
+            if (area and group == last_group and observation == last_observation
+                    and transport.get("keepalive_probes_acked", 0) > last_transport.get("keepalive_probes_acked", 0)):
+                sample = transport.get("keepalive_rtt_us")
+                if type(sample) is int and sample > 0:
+                    rtt = sample
+        if (group != last_group or observation != last_observation
+                or (group not in self.groups and len(self.groups) >= MAX_GROUPS)):
             group = None, None
         if group not in self.groups:
             self.groups[group] = _Traffic()
-        self.groups[group].add(elapsed, delta, rtt)
-        self.total.add(elapsed, delta, rtt)
+        self.groups[group].add(elapsed, delta, rtt, group, activity)
+        self.total.add(elapsed, delta, rtt, group, activity)
 
     def result(self, role, version):
         return {
