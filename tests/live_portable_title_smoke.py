@@ -241,8 +241,10 @@ def stock_wipe_chooser_overlay(game: Path):
 def jammer_aim_overlay(game: Path):
     def allow_isolated_aim(script):
         gate = 'local enabled = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1" and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"'
-        search = 'local rooftop = tag == "native-crossroads-jammer"'
-        if script.count(gate) != 1 or script.count(search) != 1:
+        searches = ('local rooftop = tag == "native-crossroads-jammer"',
+                    'local wide_search = tag == "native-crossroads-jammer" or tag == "native-flood-jammer"')
+        search = next((anchor for anchor in searches if script.count(anchor) == 1), None)
+        if script.count(gate) != 1 or not search:
             raise ValueError("The replica lacks the stock jammer aim fixture gate")
         opted_in = script.replace(gate, gate + '\n    or (os.getenv("SILVERFISH_COOP_HEADLESS") == "1"'
                                   + '\n        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1")', 1)

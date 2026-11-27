@@ -144,6 +144,17 @@ local function floor_at(context, center, x, y, radius, height)
         context.ignored, 0, hit, true, color, color, 0) == false then return point end
 end
 
+local function camera_sees_target(context, eye, target)
+    local _, range = look(eye, target)
+    if range <= 1 or range >= 2000 then return false end
+    local span = (range + 60) / range
+    local end_point = {X = eye.X + (target.X - eye.X) * span, Y = eye.Y + (target.Y - eye.Y) * span,
+        Z = eye.Z + (target.Z - eye.Z) * span}
+    local hit = trace(context, eye, end_point, 0, false, {context.pawn, context.weapon})
+    local component = hit and hit.Component and hit.Component:Get()
+    return valid(component) and same(component:GetOwner(), context.target_capsule:GetOwner())
+end
+
 local function align(context, center)
     if context.fixed_ranges then
         local view, distance, aim = fixed_contact(context.pawn, context.weapon, context.camera,
@@ -165,7 +176,8 @@ local function align(context, center)
     for _, height in ipairs({0, 8, -8, 16, -16, 25}) do
         local target = {X = center.X, Y = center.Y, Z = center.Z + height}
         local aim, distance = look(muzzle, target)
-        if distance >= 75 and distance <= context.aim_range and math.abs(aim.Pitch) < context.aim_pitch then
+        if distance >= 75 and distance <= context.aim_range and math.abs(aim.Pitch) < context.aim_pitch
+            and (not context.require_view or camera_sees_target(context, eye, target)) then
             context.muzzle:K2_SetWorldRotation(aim, false, {}, true)
             local forward = context.muzzle:GetForwardVector()
             if vector(forward) and (forward.X * (target.X - muzzle.X) + forward.Y * (target.Y - muzzle.Y)
@@ -200,6 +212,7 @@ function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule
     local context = equipped(state, phase, name, guid, tag)
     context.trace, context.target_capsule, context.target_mesh = StaticFindObject(trace_path), target_capsule, target_mesh
     context.fixed_ranges = fixed and fixed_ranges(actor)
+    context.require_view = tag == "native-flood-jammer"
     context.ignored = {context.pawn, context.weapon, actor}
     local wide_search = tag == "native-crossroads-jammer" or tag == "native-flood-jammer"
     context.floor_depth, context.aim_range, context.aim_pitch = (wide_search or fixed) and 1800 or 330,
