@@ -8669,9 +8669,12 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 evidence["guest_stock_nearby_container_pickup"] = await verify_container_pickup(
                     host, guest, pawn, memory_ui=guest_ui_memory)
             return evidence
-        if manage_saves:
-            managed = proof["save_management"] = await verify_save_management(first, second)
+        async def check_save_management(host):
+            managed = proof["save_management"] = await verify_save_management(host, second)
             proof["sessions"].extend((managed["created"], managed["reopened"]))
+
+        if manage_saves and not resident_campaigns:
+            await check_save_management(first)
         if nonmirrored_startup:
             startup = proof["nonmirrored_startup"] = {}
             proof["sessions"].append(await verify_nonmirrored_startup(first, second, startup))
@@ -8872,8 +8875,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     assert reopened["campaign_id"] == session["campaign_id"]
                     assert reopened["revision"] > session["revision"]
                     proof["sessions"].append(dict(reopened, resident_campaign="loki_reopened"))
-            assert len({row["campaign_id"] for row in proof["sessions"]}) == (
-                len(resident_campaigns) + int(stock_unequip) + int(manage_saves))
+            assert len({row["campaign_id"] for row in proof["sessions"]}) == len(resident_campaigns) + int(stock_unequip)
+            if manage_saves:
+                # A menu failure must not prevent independent gameplay checks on this pair.
+                port = next(port for port in choose_ports() if port not in used_ports)
+                managed_host = replace(first, port=port, campaign=first.campaign.with_name(
+                    "title-host-settings-" + uuid.uuid4().hex[:8]))
+                await check_save_management(managed_host)
             assert all(row["host_pid"] == first.bridge.process.pid and row["guest_pid"] == second.bridge.process.pid
                        for row in proof["sessions"])
             if resident_weapon_cues:

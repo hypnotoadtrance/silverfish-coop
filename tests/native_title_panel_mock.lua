@@ -57,8 +57,12 @@ function controls.remove(record)
     if record then record.widget.parent = nil end
 end
 function controls.press_fixture(record)
-    if not record or not record.widget.parent then return false end
-    queued[#queued + 1] = record.callback
+    if not record or not record.widget.parent or record.pending then return false end
+    record.pending = true
+    queued[#queued + 1] = function()
+        record.pending = false
+        if record.widget.parent then record.callback() end
+    end
     return true
 end
 
@@ -124,6 +128,14 @@ end
 
 function surface.press_fixture(view, key)
     return view == display and view and controls.press_fixture(view.buttons[key]) or false
+end
+
+function surface.press_pending(view)
+    if not view or view ~= display then return false end
+    for _, record in pairs(view.buttons) do
+        if record.pending then return true end
+    end
+    return false
 end
 
 local env
@@ -738,9 +750,15 @@ assert(display.focus == "characters")
 click("delete-save")
 assert(not files[save_request] and display.title == "Delete Save?")
 click("confirm")
-files[host_catalog] = ("3\t%s\t0\n"):format(manage_generation)
+files[host_catalog] = nil
 save_reply("delete-save", 10, "-", "0\n")
-click("back")
+assert(display.title == "Manage Saves" and display.note == "Save deleted." and display.buttons.back)
+local back_queued, back_result = button("back")
+assert(back_queued and back_result == "title_button_queued")
+files[host_catalog] = ("3\t%s\t0\n"):format(manage_generation)
+tick()
+drain()
+assert(display.title == "Host Game" and display.focus == "manage", "A refreshed catalog must not swallow Back")
 click("browse")
 rejected("title_panel_fixture_button_unavailable", button("load:Expedition"))
 click("back")

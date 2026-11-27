@@ -304,6 +304,14 @@ function surface.press_fixture(view, key)
     return button and controls.press_fixture(button)
 end
 
+function surface.press_pending(view)
+    if not view or not view.active then return false end
+    for _, button in pairs(view.buttons) do
+        if button.pending then return true end
+    end
+    return false
+end
+
 function surface.has_focus(view, key)
     if not view or not view.active then return false end
     local button, input, toggle = view.buttons[key], view.inputs[key], view.toggles[key]
