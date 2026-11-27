@@ -208,7 +208,9 @@ The final muted Direct IP pair opened a cold-cache Observatory crate, saw the sa
 
 `rc-602e3dd` removes the retired bounty-board text panel and its per-quest copy. Players use the stock board. Older headless contract fixtures retain their status replies. The streamed stock board passed acceptance and turn-in in a muted pair, including the quest supplied through a loaded board row and its follow-up. A second muted pair verified acceptance of all three Observatory jammer offers. That run stopped at the Flood Plains aim fixture before turn-in. The separate extended Observatory offer check stopped at setup with only the three jammer bounties on both this build and `rc-5295a37`. The three pairs preserved original saves. Rendered Steam play and cooked third-party quest packs still need coverage. [Board cleanup source](https://github.com/hypnotoadtrance/silverfish-coop/commit/602e3dda0fbca55cec9b4f08589e0a017ff20578)
 
-Dedicated handlers remain for stock objectives with their own callbacks, such as jammer destruction, and for loading older pickup receipts and crate rolls. Keep tracing the normal game entry point whenever a shared path replaces one of those handlers.
+Dedicated handlers remain for stock objectives with their own callbacks, such as jammer destruction. Keep tracing the normal game entry point whenever a shared path replaces one of those handlers.
+
+`rc-ad3c9da` starts co-op campaign schema 2. All earlier candidates wrote schema 1, so start a fresh host campaign when upgrading. The new loader skips older co-op saves and cloud backups. It keeps those files available for the earlier builds that wrote them. The cleanup removed old placed food claims, crate placement reconstruction, unrecorded stack claimants, a shell placement fallback, the original Stardust visit format, and migration from per-campaign Direct IP certificates. [Co-op save reset instructions](PLAYING-COOP.md#reset-co-op-campaigns)
 
 ### Compatibility with game updates and content mods
 
