@@ -37,7 +37,7 @@ Development builds can break compatibility with older co-op campaigns. When a re
 
 ## Screenshots
 
-Captured in-game from [release candidate rc-9ce343b](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-9ce343b). The menus show a local test address and port.
+Captured in-game from [build rc-9ce343b](https://github.com/hypnotoadtrance/silverfish-coop/commit/9ce343bad85a3dbd599cecb603aa851047e06518). The menus show a local test address and port.
 
 ![The same four co-op guests at the Observatory, viewed from the side](docs/screenshots/observatory-party-angle.png)
 
