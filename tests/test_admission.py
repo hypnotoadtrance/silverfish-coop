@@ -69,6 +69,43 @@ class AdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(host.stopping)
         self.assertFalse(host.native_checkpoint_unsafe)
 
+    async def test_disconnected_guest_retention_retries_only_on_a_new_exact_stock_frame(self):
+        control = Mock()
+        store = Mock(status=Mock(return_value={"world": {}}))
+        host = Host(store, control, "build", None, "127.0.0.1", 0, False, None,
+                    native_backend=None, native_events=False, native_guest=True)
+        old = connection(1)
+        assert old is not None
+        pawn = old["pawn"]
+
+        def frame(sequence, *, bound=True):
+            observed = snapshot(sequence, old, map_name=MAP)
+            observed["native_guest_save_retention"] = True
+            if bound:
+                observed["native_guest_save_members"] = {pawn: {"state": "bound", "pawn": pawn}}
+            return observed
+
+        host.last_game = frame(10)
+        bridge = Mock(command=AsyncMock(side_effect=[TimeoutError("lost retain reply"), frame(13)]))
+
+        await host.retain_disconnected_guest(bridge, "guest", "scout", pawn)
+        await host.retain_disconnected_guest(bridge, "guest", "scout", pawn)
+        host.last_game = frame(11, bound=False)
+        await host.retain_disconnected_guest(bridge, "guest", "scout", pawn)
+        bridge.command.assert_awaited_once()
+
+        host.last_game = frame(12)
+        await host.retain_disconnected_guest(bridge, "guest", "scout", pawn)
+        await host.retain_disconnected_guest(bridge, "guest", "scout", pawn)
+        self.assertEqual(bridge.command.await_count, 2)
+        self.assertTrue(all(call.args == ("native-guest-save-retain", pawn, "scout")
+                            for call in bridge.command.await_args_list))
+        self.assertEqual(host.pending_guest_saves["scout"][0], pawn)
+        self.assertEqual(host.last_game["sequence"], 13)
+        control.event.assert_any_call("guest_disconnect_save_retained", character_id="scout", pawn=pawn)
+        store.checkpoint.assert_not_called()
+        self.assertFalse(host.stopping)
+
     async def test_client_disables_routes_when_admission_does_not_confirm_selected_character(self):
         invite = dict(self.invite, guest_id="guest", credential="credential", character_id="scout", game_build="build")
         for character in (None, "different-character"):

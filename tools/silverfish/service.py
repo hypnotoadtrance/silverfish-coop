@@ -186,6 +186,12 @@ class GuestLeave:
                 "operation_id": self.operation, "revision": self.revision}
 
 
+@dataclass(frozen=True)
+class _GuestRetentionFailure:
+    visit: tuple[str, str, str]
+    retry_after_sequence: int | None
+
+
 def guest_arrival_positions(point: list[float], first: int = 0):
     x, y, z = point
     offsets = ((110, 0), (-110, 0), (0, 110), (0, -110))
@@ -407,7 +413,7 @@ class Host:
         self.native_restart_attempted = 0
         self.relay = None
         self.guest_runtime_replacements: dict[str, dict] = {}
-        self.guest_disconnect_retention_failures: dict[str, str] = {}
+        self.guest_disconnect_retention_failures: dict[str, _GuestRetentionFailure] = {}
 
     def runtime_admission(self, request: dict, character_id: str | None, previous_runtime: str | None,
                           *, disconnected: bool, grace_until: float | None = None) -> dict:
@@ -458,17 +464,31 @@ class Host:
                 or self.last_game.get("native_guest_save_retention") is not True):
             return
         retained = self.pending_guest_saves.get(character)
-        if (retained and retained[0] == pawn) or self.guest_disconnect_retention_failures.get(guest_id) == pawn:
+        if retained and retained[0] == pawn:
             return
-        # Keep the live detached save reachable after stock destroys the old pawn.
-        # A later native bind can adopt it without an extra disk checkpoint.
+        game = self.last_game
+        visit = self.zone_epoch, game["map"], pawn
+        sequence = game.get("sequence")
+        previous = self.guest_disconnect_retention_failures.get(guest_id)
+        retrying = previous is not None and previous.visit == visit
+        if retrying:
+            newer_than = previous.retry_after_sequence
+            scope = game.get("native_guest_save_members", {}).get(pawn) or game.get("native_guest_save", {})
+            if (newer_than is None or type(sequence) is not int or sequence <= newer_than
+                    or game.get("state") != "hosting" or (scope.get("state"), scope.get("pawn")) != ("bound", pawn)
+                    or not any(row.get("name") == pawn for row in game.get("pawns", {}).values())):
+                return
+        # A timed-out reply may already have pinned this detached save. The
+        # stock command can safely confirm the same binding once on a newer frame.
         try:
             saved = await native_inventory.retain_guest_save(self, bridge, character, pawn, timeout=1)
         except (OSError, RuntimeError, ValueError) as error:
-            self.guest_disconnect_retention_failures[guest_id] = pawn
+            retry_after = sequence if not retrying and isinstance(error, TimeoutError) and type(sequence) is int else None
+            self.guest_disconnect_retention_failures[guest_id] = _GuestRetentionFailure(visit, retry_after)
             self.control.event("guest_disconnect_retention_unavailable", character_id=character, reason=str(error)[:256])
         else:
             if saved:
+                self.guest_disconnect_retention_failures.pop(guest_id, None)
                 self.control.event("guest_disconnect_save_retained", character_id=character, pawn=pawn)
 
     def admit(self, request: dict) -> dict:
