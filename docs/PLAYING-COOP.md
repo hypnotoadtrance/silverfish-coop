@@ -8,6 +8,8 @@ Close the game on both PCs. Download the same `Silverfish-Coop-RC-*.zip` for bot
 
 Trial setup defaults to listening on all IPv4 interfaces on UDP port 7777. The host can select an interface address and port in **Host** settings. For LAN play, use the host PC's LAN address and allow inbound UDP on the chosen port. Across networks, use an address the guest can reach on that port. Use `127.0.0.1` when both players run on the same PC.
 
+In the co-op menus, **Tab** and **Shift+Tab** cycle through enabled controls. The arrow keys move by row or column. Turn on **Require password** or **Use password** to include its field in navigation.
+
 ## Stage the development build
 
 Open PowerShell in the mod repository. Use Python 3.11 or later, a Steam installation of Project Silverfish, and the extracted [UE4SS v4.0.0 release](https://github.com/UE4SS-RE/RE-UE4SS/releases/tag/v4.0.0). Point the launcher at the release folder that contains `dwmapi.dll` and `ue4ss`.
