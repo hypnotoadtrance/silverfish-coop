@@ -16,6 +16,7 @@ from tools.silverfish.campaign import CampaignStore
 from tools.silverfish.control import Control, status as control_status
 from tools.silverfish.steam_transport import (
     SteamTransport, _BUILD_KEY, _CALLBACK_ENTER, _CALLBACK_FRIEND_JOIN, _CALLBACK_INVITE, _CALLBACK_MATCH_LIST,
+    _HEADER, _MAGIC,
 )
 from tools.silverfish.title_handoff import DESCRIPTOR_FILE, REQUEST_FILE
 from tools.silverfish.title_session import STATUS_FILE, SessionPlan, TitleSession
@@ -77,14 +78,16 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(travel["peak_receive_bps"])
         self.assertIsNone(travel["peak_heartbeat_rtt_us"])
         self.assertEqual(stable["link_activity"], {"game_payload_bytes_delivered": 600,
-                                                   "snapshot_received_bytes": 180, "relay_queue_expired_frames": 1})
+                                                   "snapshot_received_bytes": 180, "relay_queue_expired_frames": 1,
+                                                   "keepalive_probes_acked": 1})
         self.assertEqual(travel["link_activity"]["snapshot_received_bytes"], 55)
         self.assertEqual(result["overall"]["link_activity"]["game_payload_bytes_delivered"], 710)
         self.assertEqual(stable["steam_activity"], {"full_receive_batches": 4})
         self.assertEqual(travel["steam_activity"], {"send_rejected_bytes": 100})
         self.assertEqual(result["overall"]["steam_activity"], {"full_receive_batches": 4, "send_rejected_bytes": 100})
         peak = {"map": OBSERVATORY, "lobby_members": 3, "seconds": 1, "link_activity": stable["link_activity"],
-                "steam_activity": stable["steam_activity"]}
+                "steam_activity": stable["steam_activity"], "sent_bytes": 200, "received_bytes": 900,
+                "heartbeat_rtt_us": 42_000}
         self.assertEqual(result["overall"]["peak_receive_interval"], peak)
         self.assertEqual(result["overall"]["peak_send_interval"], peak)
 
@@ -104,6 +107,25 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["overall"]["peak_receive_interval"]["link_activity"], {})
         self.assertEqual(result["overall"]["peak_send_interval"]["link_activity"], {"snapshot_received_bytes": 180})
         self.assertEqual(result["by_map_and_lobby_size"][0]["link_activity"], {})
+
+    def test_network_report_distinguishes_quic_payload_and_delayed_frames_at_the_peak(self):
+        report = steam_network_report._Report()
+        frame = {"state": "connected", "link_connected": True, "game": {"map": OBSERVATORY},
+                 "generation": "session", "zone_epoch": "visit"}
+        totals = {"quic_payload_bytes_received": 800_000, "game_wire_payload_bytes_received": 420_000,
+                  "snapshot_received_bytes": 180_000, "snapshot_field_delta_responses": 7,
+                  "relay_queue_departed_frames": 10, "relay_queue_wait_total_ns": 200_000_000,
+                  "relay_queue_wait_over_20ms_frames": 4, "relay_queue_wait_over_50ms_frames": 1}
+        report.sample(1, {**frame, "transport": dict.fromkeys(totals, 0)}, (0, 0, 0, 0, 4),
+                      {"receive_unforwarded_bytes": 0})
+        report.sample(2, {**frame, "transport": totals}, (8, 800, 750, 820_000, 4),
+                      {"receive_unforwarded_bytes": 5_000})
+        overall = report.result("guest", VERSION)["overall"]
+        self.assertEqual(overall["mean_relay_queue_wait_us"], 20_000)
+        peak = overall["peak_receive_interval"]
+        self.assertEqual(peak["received_bytes"], 820_000)
+        self.assertEqual(peak["link_activity"], totals)
+        self.assertEqual(peak["steam_activity"], {"receive_unforwarded_bytes": 5_000})
 
     async def test_opt_in_steam_report_writes_once_at_session_exit_and_skips_direct_ip(self):
         _, session, _ = await self.start(HOST)
@@ -135,6 +157,10 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
                     with patch.object(client.transport.api, "send_datagram", return_value=False):
                         client.transport._guest_udp(payload, ("127.0.0.1", 32125))
                     await self.ready(lambda: session.transport.received_messages)
+                    # A valid lobby message can reach a short-lived route that has already gone away.
+                    stale = _HEADER.pack(_MAGIC, LOBBY, 0xF123456789ABCDEF) + b"late catalogue response"
+                    session.transport.api.send_datagram(GUEST, stale)
+                    await self.ready(lambda: client.transport.pressure_counters()["receive_unforwarded_messages"] == 1)
                     self.assertFalse(output.exists())
                     self.assertFalse(guest_output.exists())
         report = runtime.read_json(output)
@@ -145,6 +171,7 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(guest_report["overall"]["sent_messages"], 1)
         self.assertEqual(guest_report["overall"]["steam_activity"], {
             "send_rejected_messages": 1, "send_rejected_bytes": len(payload) + struct.calcsize("!4sQQ"),
+            "receive_unforwarded_messages": 1, "receive_unforwarded_bytes": len(stale),
         })
         self.assertNotIn(str(HOST), output.read_text())
         self.assertNotIn(str(GUEST), output.read_text())

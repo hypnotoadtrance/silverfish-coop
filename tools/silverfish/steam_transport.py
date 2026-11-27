@@ -154,6 +154,7 @@ class SteamTransport:
         self._pressure = {
             "send_rejected_messages": 0, "send_rejected_bytes": 0,
             "full_receive_batches": 0, "receive_drain_budget_hits": 0,
+            "receive_unforwarded_messages": 0, "receive_unforwarded_bytes": 0,
         }
 
     def traffic_counters(self) -> tuple[int, int, int, int, int]:
@@ -162,7 +163,7 @@ class SteamTransport:
                 len(self._members))
 
     def pressure_counters(self) -> dict[str, int]:
-        """Cumulative SDK send rejections and local receive-poll pressure."""
+        """Cumulative SDK rejections, poll pressure, and local delivery losses."""
         return self._pressure.copy()
 
     def waiting_for_lobby_callback(self, requested: int | None) -> bool:
@@ -450,7 +451,15 @@ class SteamTransport:
             return
         self.received_messages += 1
         self.received_bytes += len(packet)
-        payload = packet[_HEADER.size:]
+        try:
+            forwarded = await self._forward_incoming(peer, token, packet[_HEADER.size:])
+        except OSError:
+            forwarded = False
+        if not forwarded:
+            self._pressure["receive_unforwarded_messages"] += 1
+            self._pressure["receive_unforwarded_bytes"] += len(packet)
+
+    async def _forward_incoming(self, peer: int, token: int, payload: bytes) -> bool:
         now = time.monotonic()
         if self._host is not None:
             key = (peer, token)
@@ -461,21 +470,21 @@ class SteamTransport:
                     oldest = min(peer_flows, key=lambda existing: self._host_flows[existing].seen)
                     self._host_flows.pop(oldest).transport.close()
                 generation = self._generation
-                try:
-                    transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
-                        lambda: _Udp(lambda data, _: self._host_udp(generation, key, data)), remote_addr=self._host,
-                    )
-                except OSError:
-                    return
+                transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+                    lambda: _Udp(lambda data, _: self._host_udp(generation, key, data)), remote_addr=self._host,
+                )
                 if generation != self._generation:
                     transport.close()
-                    return
+                    return False
                 flow = self._host_flows[key] = _HostFlow(transport, now)
             flow.seen = now
             flow.transport.sendto(payload)
+            return True
         elif self._guest is not None and (flow := self._guest_flows.get(token)) is not None:
             flow.seen = now
             self._guest.sendto(payload, flow.source)
+            return True
+        return False
 
     def _host_udp(self, generation: int, key: tuple[int, int], payload: bytes) -> None:
         if generation == self._generation and (flow := self._host_flows.get(key)) is not None:

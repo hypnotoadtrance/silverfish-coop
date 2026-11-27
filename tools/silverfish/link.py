@@ -398,6 +398,7 @@ class _TransportStatistics:
     game_packets_queued: int = 0
     game_payload_bytes_queued: int = 0
     game_wire_payload_bytes_queued: int = 0
+    game_wire_payload_bytes_received: int = 0
     game_packets_compressed: int = 0
     game_fragments_queued: int = 0
     game_fragments_received: int = 0
@@ -412,6 +413,8 @@ class _TransportStatistics:
     relay_queue_departed_frames: int = 0
     relay_queue_wait_total_ns: int = 0
     relay_queue_wait_max_ns: int = 0
+    relay_queue_wait_over_20ms_frames: int = 0
+    relay_queue_wait_over_50ms_frames: int = 0
     interaction_priority_passes: int = 0
     weapon_cues_rejected_full_queue: int = 0
     prop_pose_datagrams_queued: int = 0
@@ -537,6 +540,7 @@ class _Reassembler:
                 or len(chunk) != min(_FRAGMENT_SIZE, size - start)):
             stats.game_fragments_rejected += 1
             return None
+        stats.game_wire_payload_bytes_received += len(chunk)
 
         # Dict insertion order is creation order. Stop at the first live assembly.
         while self._pending:
@@ -795,8 +799,11 @@ class _LinkProtocol(QuicConnectionProtocol):
                 oldest = now
                 for _ in range(departed):
                     queued_at = self._game_enqueued.popleft()
-                    waited += now - queued_at
+                    age = now - queued_at
+                    waited += age
                     oldest = min(oldest, queued_at)
+                    stats.relay_queue_wait_over_20ms_frames += age > .02
+                    stats.relay_queue_wait_over_50ms_frames += age > STATE_INTERVAL
                 stats.relay_queue_departed_frames += departed
                 stats.relay_queue_wait_total_ns += int(waited * 1_000_000_000)
                 stats.relay_queue_wait_max_ns = max(stats.relay_queue_wait_max_ns, int((now - oldest) * 1_000_000_000))

@@ -177,6 +177,7 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stats["game_packets_delivered"], len(sizes))
             self.assertEqual(stats["game_payload_bytes_queued"], sum(sizes))
             self.assertEqual(stats["game_payload_bytes_delivered"], sum(sizes))
+            self.assertEqual(stats["game_wire_payload_bytes_received"], sum(sizes))
             self.assertEqual(stats["game_fragments_queued"], fragments)
             self.assertEqual(stats["game_fragments_received"], fragments)
             self.assertGreater(stats["quic_datagrams_sent"], 0)
@@ -318,6 +319,8 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["relay_queue_departed_frames"], 2)
         self.assertAlmostEqual(stats["relay_queue_wait_total_ns"], 100_000_000, delta=10)
         self.assertAlmostEqual(stats["relay_queue_wait_max_ns"], 70_000_000, delta=10)
+        self.assertEqual(stats["relay_queue_wait_over_20ms_frames"], 2)
+        self.assertEqual(stats["relay_queue_wait_over_50ms_frames"], 1)
 
     async def test_avatar_poses_coalesce_independently_from_prop_and_unreal_frames(self):
         self.assertTrue((await self.connect_guest())["accepted"])
@@ -369,6 +372,7 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stats["game_packets_compressed"], 1)
             self.assertEqual(stats["game_payload_bytes_queued"], len(payload))
             self.assertLess(stats["game_wire_payload_bytes_queued"], len(payload) // 2)
+            self.assertEqual(stats["game_wire_payload_bytes_received"], stats["game_wire_payload_bytes_queued"])
 
     def test_compressed_game_datagrams_require_one_bounded_complete_stream(self):
         stats = link._TransportStatistics()

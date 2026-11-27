@@ -217,6 +217,7 @@ class SteamTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tunnel.pressure_counters(), {
             "send_rejected_messages": 0, "send_rejected_bytes": 0,
             "full_receive_batches": relay._MAX_DRAIN_BATCHES, "receive_drain_budget_hits": 1,
+            "receive_unforwarded_messages": 0, "receive_unforwarded_bytes": 0,
         })
         self.assertEqual(tunnel.pending_invites.get_nowait(), LOBBY + 1)
         roster.assert_called_once()

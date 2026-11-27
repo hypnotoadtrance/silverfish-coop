@@ -15,8 +15,13 @@ REPORT_FILE = "steam-network-report.json"
 SAMPLE_SECONDS = 1.0
 MAX_GROUPS = 31
 LINK_COUNTERS = (
+    "quic_datagrams_sent",
+    "quic_datagrams_received",
+    "quic_payload_bytes_sent",
+    "quic_payload_bytes_received",
     "game_payload_bytes_queued",
     "game_wire_payload_bytes_queued",
+    "game_wire_payload_bytes_received",
     "game_payload_bytes_delivered",
     "snapshot_plaintext_bytes",
     "snapshot_encoded_bytes",
@@ -24,8 +29,16 @@ LINK_COUNTERS = (
     "snapshot_responses_encoded",
     "snapshot_responses_decoded",
     "snapshot_world_delta_responses",
+    "snapshot_field_delta_responses",
+    "relay_queue_departed_frames",
+    "relay_queue_wait_total_ns",
+    "relay_queue_wait_over_20ms_frames",
+    "relay_queue_wait_over_50ms_frames",
     "relay_queue_evicted_frames",
     "relay_queue_expired_frames",
+    "keepalive_probes_queued",
+    "keepalive_probes_acked",
+    "keepalive_ticks_congested",
 )
 
 
@@ -61,6 +74,7 @@ class _Traffic:
             receive_peak = self.peak_receive_bps is None or receive_bps > self.peak_receive_bps
             if send_peak or receive_peak:
                 interval = {"seconds": round(seconds, 3), "map": group[0], "lobby_members": group[1],
+                            "sent_bytes": send_bytes, "received_bytes": receive_bytes, "heartbeat_rtt_us": rtt or None,
                             "link_activity": link_activity.copy(), "steam_activity": steam_activity.copy()}
             if send_peak:
                 self.peak_send_bps = send_bps
@@ -75,12 +89,15 @@ class _Traffic:
             self.steam_activity[key] = self.steam_activity.get(key, 0) + amount
 
     def result(self):
+        departed = self.link_activity.get("relay_queue_departed_frames", 0)
+        wait = self.link_activity.get("relay_queue_wait_total_ns", 0)
         return {
             **asdict(self),
             "seconds": round(self.seconds, 3),
             "mean_send_bps": round(self.sent_bytes * 8 / self.seconds),
             "mean_receive_bps": round(self.received_bytes * 8 / self.seconds),
             "peak_heartbeat_rtt_us": self.peak_heartbeat_rtt_us or None,
+            "mean_relay_queue_wait_us": round(wait / departed / 1000) if departed else None,
         }
 
 
