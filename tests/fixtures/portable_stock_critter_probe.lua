@@ -38,9 +38,9 @@
         assert(exact_critter(actor), "the selected frog is not available")
         local point = actor:K2_GetActorLocation()
         local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
-        local function focus(player)
-            local aim = math_api:FindLookAtRotation(player.Camera:K2_GetComponentLocation(), point)
-            player.Controller:SetControlRotation(aim)
+        local function focus(player, target, remote)
+            local aim = math_api:FindLookAtRotation(player.Camera:K2_GetComponentLocation(), target)
+            if remote then player.Controller:SetControlRotation(aim) end
             player.Camera:K2_SetWorldRotation(aim, false, {}, true)
             player:LookTrace()
             local component = player.InteractionTarget_Component
@@ -61,13 +61,14 @@
                     if floor then return {X=x,Y=y,Z=floor.Z+player.CapsuleComponent:GetScaledCapsuleHalfHeight()+3} end
                 end
             end
-            for step = 0, 11 do
+            for step = entry.fixture_next_stance or 0, 11 do
                 local angle = step * math.pi / 6
                 local x, y = point.X + 125 * math.cos(angle), point.Y + 125 * math.sin(angle)
                 local target = ground_at(remote, x, y)
                 local host_target = ground_at(pawn, 2 * x - point.X, 2 * y - point.Y)
                 if target and host_target and remote:K2_TeleportTo(target, remote:K2_GetActorRotation())
-                    and pawn:K2_TeleportTo(host_target, pawn:K2_GetActorRotation()) and focus(remote) then
+                    and pawn:K2_TeleportTo(host_target, pawn:K2_GetActorRotation()) and focus(remote, point, true) then
+                    entry.fixture_next_stance = step + 1
                     return ("%f,%f,%f"):format(target.X,target.Y,target.Z)
                 end
             end
@@ -92,12 +93,38 @@
             return "stock placement restored"
         end
         if mode == "press" and not host then
-            assert(focus(pawn), "stock Interact did not focus the frog")
-            local target = critters.focused_target(pawn, pawn.InteractionTarget_Component:GetFullName():match("^%S+ (.+)$"))
-            assert(target == "stock-critter:" .. number, "stock Interact resolved the wrong frog")
-            local ok, reason = SilverfishProbeNativeInteractInput(pawn:GetAddress(), true)
-            assert(ok, tostring(reason))
-            return "stock Interact dispatched"
+            local camera = pawn.Camera
+            local original = camera.RelativeRotation
+            local restore = {Pitch = original.Pitch, Yaw = original.Yaw, Roll = original.Roll}
+            local points = {point}
+            for _, component in pairs({actor.CapsuleComponent, actor.StaticMesh}) do
+                if valid(component) and same(component:GetOwner(), actor) then
+                    points[#points + 1] = component:K2_GetComponentLocation()
+                end
+            end
+            for _, height in ipairs({8, 16, -6}) do
+                points[#points + 1] = {X = point.X, Y = point.Y, Z = point.Z + height}
+            end
+            local completed, result = pcall(function()
+                for _, target_point in ipairs(points) do
+                    if focus(pawn, target_point) then
+                        local path = pawn.InteractionTarget_Component:GetFullName():match("^%S+ (.+)$")
+                        assert(critters.focused_target(pawn, path) == "stock-critter:" .. number,
+                            "stock Interact resolved the wrong frog")
+                        local ok, reason = SilverfishProbeNativeInteractInput(pawn:GetAddress(), true)
+                        assert(ok, tostring(reason))
+                        return "stock Interact dispatched"
+                    end
+                end
+                local hit, eye = pawn.InteractionTarget_Component, camera:K2_GetComponentLocation()
+                return ("stock Interact focus unavailable:can=%s,hit=%s,eye=(%.1f,%.1f,%.1f),frog=(%.1f,%.1f,%.1f)")
+                    :format(tostring(pawn.CanInteract), valid(hit) and hit:GetFullName() or "-", eye.X, eye.Y, eye.Z,
+                        point.X, point.Y, point.Z)
+            end)
+            camera:K2_SetRelativeRotation(restore, false, {}, true)
+            pawn:LookTrace()
+            if not completed then error(result, 0) end
+            return result
         end
         error("stock critter probe unavailable", 0)
     end

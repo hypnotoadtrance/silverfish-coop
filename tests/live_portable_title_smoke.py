@@ -2709,9 +2709,13 @@ async def verify_stock_critters(host: Seat, guest: Seat, pawn: str) -> dict:
     connected = await wait_resident_status(guest_run, lambda f: f.get("game", {}).get("map") == crossroads
                                             and f.get("zone_epoch") == arrival["zone_epoch"], timeout=35)
     number, actor = (await probe(host, "find")).split(";", 1)
-    point = tuple(map(float, (await probe(host, "stage", number)).split(",")))
-    await wait_resident_status(guest_run, lambda f: f["game"].get("pawns", {}).get("local", {}).get("location")
-                               and math.dist(f["game"]["pawns"]["local"]["location"], point) < 65, timeout=12)
+
+    async def stage(timeout=12):
+        point = tuple(map(float, (await probe(host, "stage", number)).split(",")))
+        await wait_resident_status(guest_run, lambda f: f["game"].get("pawns", {}).get("local", {}).get("location")
+                                   and math.dist(f["game"]["pawns"]["local"]["location"], point) < 65, timeout=timeout)
+
+    await stage()
     async with asyncio.timeout(10):
         while not (guest_idle := await probe(guest, "view", number)).startswith("1,false,idle,"):
             await asyncio.sleep(.05)
@@ -2722,14 +2726,36 @@ async def verify_stock_critters(host: Seat, guest: Seat, pawn: str) -> dict:
             await asyncio.sleep(.03)
     assert float(guest_hop.rsplit(",", 1)[1]) > float(guest_idle.rsplit(",", 1)[1])
     assert await probe(host, "settle", number) == "stock placement restored"
+    host_rest = await probe(host, "view", number)
+    assert host_rest.startswith("3,false,idle,"), host_rest
+    settled = tuple(map(float, host_rest.split(",")[-3:]))
     async with asyncio.timeout(6):
-        while not (await probe(guest, "view", number)).startswith("1,false,idle,"):
+        while True:
+            guest_rest = await probe(guest, "view", number)
+            if guest_rest.startswith("1,false,idle,") and math.dist(
+                    tuple(map(float, guest_rest.split(",")[-3:])), settled) < 30:
+                break
             await asyncio.sleep(.05)
 
     checkpoint = campaign_save_hashes(host.campaign)
     host_pack = (await submit(host_run, "native-inventory-list"))["native_inventory"]
     pressed = time.time()
-    assert await probe(guest, "press", number) == "stock Interact dispatched"
+    focus_failures = []
+    async with asyncio.timeout(16):
+        for stance in range(12):
+            if stance:
+                try:
+                    await stage(timeout=3)
+                except RuntimeError as error:
+                    if str(error) != "no clear stock interaction focus on the frog":
+                        raise
+                    break
+            focus = await probe(guest, "press", number)
+            if focus == "stock Interact dispatched":
+                break
+            assert focus.startswith("stock Interact focus unavailable:"), focus
+            focus_failures.append(focus)
+    assert focus == "stock Interact dispatched", focus_failures
     async with asyncio.timeout(8):
         while True:
             events = [row for row in await resident_events(host_run, arrival)
@@ -2748,7 +2774,8 @@ async def verify_stock_critters(host: Seat, guest: Seat, pawn: str) -> dict:
                and item["class_path"].endswith(".Item_LiveFrog_C") for item in items), items
     assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_pack
     assert campaign_save_hashes(host.campaign) == checkpoint
-    return {"stock_critters": {"actor": actor, "idle": guest_idle, "hop": guest_hop, "claim": claim,
+    return {"stock_critters": {"actor": actor, "idle": guest_idle, "hop": guest_hop, "settled": guest_rest,
+                               "focus_failures_before_pickup": focus_failures, "claim": claim,
                                "removed_on_both_peers": True, "checkpoint_unchanged": True}}
 
 
