@@ -8,9 +8,10 @@ from unittest.mock import AsyncMock, Mock
 from tools.silverfish import native_computer_board, native_finite_shop, native_inventory, party
 from tools.silverfish.campaign import CampaignStore
 from tools.silverfish.control import Control
+from tools.silverfish.guest_weapon_profiles import NINE_MM_BALL
 from tools.silverfish.multi_host import MultiHost
 from tools.silverfish.native_tape_profiles import BLANK_CLASS
-from tools.silverfish.runtime import read_json, write_json
+from tools.silverfish.runtime import Bridge, read_json, write_json
 from tools.silverfish.service import Host
 from tools.silverfish.travel import OBSERVATORY, SCIENTIST_SHOP
 
@@ -66,6 +67,49 @@ class NativeInventoryTransactionTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.assert_awaited_once_with(native_inventory.UNEQUIP, PAWN, GUID, "1", timeout=6)
         host.checkpoint_native.assert_not_awaited()
         self.assertFalse(host.native_checkpoint_unsafe)
+
+    async def test_inventory_action_replies_leave_the_cached_world_snapshot_available(self):
+        host = self.host_without_fresh_guest_frame(OBSERVATORY)
+        original = host.last_game
+        original.update({native_inventory.UNEQUIP_CAPABILITY: 1, "native_guest_save_retention": True})
+        host.pending_guest_saves = {GUEST: (PAWN,)}
+        seen_at = host.last_seen
+        bridge = Bridge(Path("unused"), None)
+        bridge._local_status = original
+        bandage = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
+        pistol = "/Game/Classes/Weapons/Wep_Revolver_9mm.Wep_Revolver_9mm_C"
+        new_guid = "C" * 32
+        rows = {
+            native_inventory.SPLIT: (GUID, new_guid, bandage, "5", "3", "2"),
+            native_inventory.MERGE: (GUID, new_guid, bandage, "3", "5", "2"),
+            native_inventory.TAKE_AMMO: (GUID, new_guid, NINE_MM_BALL.item_path, "3", "0", "3", pistol),
+            native_inventory.SORT: ("sorted", "2"),
+            native_inventory.STORE_EQUIPMENT: (GUID, "1", pistol, "-"),
+            native_inventory.UNEQUIP: (GUID, "1", pistol, "3"),
+        }
+
+        async def reply(request, timeout):
+            nonce, action, pawn, *_ = request.decode().rstrip("\n").split("\t")
+            change = "\t".join((action, OBSERVATORY, PAWN, *rows[action]))
+            return (native_inventory.ACTION_REPLY_HEADER + f"schema\t1\nseq\t42\nack\t{nonce}\taccepted\tverified\n"
+                    f"session\thost\thosting\t{OBSERVATORY}\t1\t0\n{change}\n")
+
+        bridge.local_bridge = SimpleNamespace(command=reply)
+        for action, key in native_inventory.ACTION_KEYS.items():
+            with self.subTest(action=action):
+                received = await bridge.command(action, PAWN)
+                self.assertEqual((received[key]["map"], received[key]["pawn"]), (OBSERVATORY, PAWN))
+                self.assertLess(received[native_inventory.ACTION_REPLY_BYTES], 512)
+        with self.assertRaisesRegex(RuntimeError, "did not verify the exact stock change"):
+            await bridge.command(native_inventory.MERGE, HOST_PAWN)
+        result = await native_inventory.store_equipment(
+            host, bridge, GUEST, f"{GUID}|1", OPERATION_ID, unequip=True)
+        self.assertEqual(result[native_inventory.UNEQUIP_KEY]["ammo"], 3)
+        self.assertLess(host.control.event.call_args.kwargs["bridge_reply_bytes"], 512)
+        self.assertIs(bridge._local_status, original)
+        self.assertIs(host.last_game, original)
+        self.assertEqual(host.last_seen, seen_at)
+        host.checkpoint_native.assert_not_awaited()
 
     async def test_reported_quick_slot_move_accepts_stale_downed_state_for_current_visit_only(self):
         routes = ((native_inventory.STORE_EQUIPMENT, native_inventory.STORE_CAPABILITY, native_inventory.STORE_KEY),

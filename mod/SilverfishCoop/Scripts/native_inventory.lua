@@ -5,7 +5,16 @@ local host_save = require("native_host_save")
 local weapon_profiles = require("guest_weapon_registry")
 local inventory_grant = require("native_inventory_grant")
 local statics_path = "/Script/Engine.Default__GameplayStatics"
-local observation, split, merged, unloaded, sorted, stored, removed
+local observation
+local action_results = {}
+local action_fields = {
+    ["native-inventory-split"] = {"source", "created", "class", "before", "remaining", "taken"},
+    ["native-inventory-merge"] = {"source", "destination", "class", "before", "after", "moved"},
+    ["native-inventory-take-ammo"] = {"source", "created", "class", "before", "remaining", "taken", "weapon"},
+    ["native-inventory-sort"] = {"status", "count"},
+    ["native-inventory-store-equipment"] = {"guid", "slot", "class", "displaced"},
+    ["native-inventory-unequip"] = {"guid", "slot", "class", "rounds"},
+}
 local stock_backpack = "/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C"
 local page_size = 16
 
@@ -31,7 +40,7 @@ local function split_stack(fields, state, phase)
         or not content_paths.item_class(class, 512) then
         error("mutation_unverified_native_inventory_split_receipt", 0)
     end
-    split = {map = state.map, pawn = name, source = source, created = created, class = class,
+    action_results[fields[2]] = {map = state.map, pawn = name, source = source, created = created, class = class,
         before = before, remaining = remaining, taken = taken}
     return "native guest stock stack split verified"
 end
@@ -55,7 +64,7 @@ local function take_ammo(fields, state, phase)
         or type(weapon) ~= "string" or not weapon:match("^/Game/[%w_./%-]+$") then
         error("mutation_unverified_native_inventory_take_ammo_receipt", 0)
     end
-    unloaded = {map = state.map, pawn = name, source = source, created = created, class = ammo,
+    action_results[fields[2]] = {map = state.map, pawn = name, source = source, created = created, class = ammo,
         weapon = weapon, before = before, remaining = remaining, taken = taken}
     return "native guest weapon unloading verified"
 end
@@ -78,13 +87,12 @@ local function merge_stacks(fields, state, phase)
         or not content_paths.item_class(class, 512) then
         error("mutation_unverified_native_inventory_merge_receipt", 0)
     end
-    merged = {map = state.map, pawn = name, source = source, destination = destination, class = class,
+    action_results[fields[2]] = {map = state.map, pawn = name, source = source, destination = destination, class = class,
         before = before, after = after, moved = moved}
     return "native guest stock stacks merged"
 end
 
 local function sort_backpack(fields, state, phase)
-    sorted = nil
     if #fields ~= 3 or phase ~= "hosting" or not state.listening or state.server ~= false
         or type(SilverfishSortNativeGuestBackpack) ~= "function" then
         error("native_inventory_sort_refused_scope", 0)
@@ -98,19 +106,19 @@ local function sort_backpack(fields, state, phase)
         or count < 0 or count > 4096 then
         error("mutation_unverified_native_inventory_sort_receipt", 0)
     end
-    sorted = { map = state.map, pawn = name, status = status, count = count }
+    action_results[fields[2]] = {map = state.map, pawn = name, status = status, count = count}
     return "native guest backpack sort verified"
 end
 
 function inventory.command(fields, state, phase)
     local grant = inventory_grant.command(fields, state, phase)
     if grant then return grant end
+    if action_fields[fields[2]] then action_results[fields[2]] = nil end
     if fields[2] == "native-inventory-sort" then return sort_backpack(fields, state, phase) end
     if fields[2] == "native-inventory-split" then return split_stack(fields, state, phase) end
     if fields[2] == "native-inventory-merge" then return merge_stacks(fields, state, phase) end
     if fields[2] == "native-inventory-take-ammo" then return take_ammo(fields, state, phase) end
     if fields[2] == "native-inventory-unequip" then
-        removed = nil
         local name, item = fields[3], fields[4]
         local slot = math.tointeger(tonumber(fields[5]))
         local reported = #fields == 6 and fields[6] == "reported"
@@ -134,11 +142,10 @@ function inventory.command(fields, state, phase)
             or math.type(rounds) ~= "integer" or rounds < -1 or rounds > 2147483647 then
             error("mutation_unverified_native_inventory_unequip_receipt", 0)
         end
-        removed = {map = state.map, pawn = name, guid = item, slot = slot, class = class, rounds = rounds}
+        action_results[fields[2]] = {map = state.map, pawn = name, guid = item, slot = slot, class = class, rounds = rounds}
         return "native guest unequip to backpack verified"
     end
     if fields[2] == "native-inventory-store-equipment" then
-        stored = nil
         local name, item = fields[3], fields[4]
         local requested = math.tointeger(tonumber(fields[5]))
         local reported = #fields == 6 and fields[6] == "reported"
@@ -160,7 +167,7 @@ function inventory.command(fields, state, phase)
             or (displaced ~= "-" and (not guid(displaced) or displaced == item)) then
             error("mutation_unverified_native_inventory_equip_receipt", 0)
         end
-        stored = { map = state.map, pawn = name, guid = item, slot = slot, class = class, displaced = displaced }
+        action_results[fields[2]] = {map = state.map, pawn = name, guid = item, slot = slot, class = class, displaced = displaced}
         return "native guest equipment slot verified"
     end
     local live = fields[2] == "native-inventory-live-census"
@@ -217,8 +224,41 @@ function inventory.command(fields, state, phase)
     return "stock inventory census verified"
 end
 
+local function action_row(action, state, status_row)
+    local report = action_results[action]
+    if not report or report.map ~= state.map then return end
+    local values = {action, report.map, report.pawn}
+    for _, field in ipairs(action_fields[action]) do
+        values[#values + 1] = report[field]
+    end
+    return status_row(table.unpack(values))
+end
+
+function inventory.has_action_reply(action)
+    return action_fields[action] ~= nil
+end
+
+function inventory.action_reply(fields, state, phase, sequence, status_row)
+    local accepted, message = pcall(inventory.command, fields, state, phase)
+    local row
+    if accepted then
+        row = action_row(fields[2], state, status_row)
+        action_results[fields[2]] = nil
+        if not row then accepted, message = false, "mutation_unverified_native_inventory_receipt" end
+    end
+    local rows = {
+        "native-inventory-action-reply\t1",
+        status_row("schema", 1),
+        status_row("seq", sequence),
+        status_row("ack", fields[1], accepted and "accepted" or "error", message),
+        status_row("session", "host", phase, state.map, state.clients, state.server and 1 or 0),
+    }
+    if row then rows[#rows + 1] = row end
+    return table.concat(rows, "\n") .. "\n"
+end
+
 function inventory.reset()
-    observation, split, merged, unloaded, sorted, stored = nil, nil, nil, nil, nil, nil
+    observation, action_results = nil, {}
 end
 
 function inventory.rows(state, phase, status_row)
@@ -230,50 +270,33 @@ function inventory.rows(state, phase, status_row)
     if type(SilverfishSplitNativeGuestAmmoStack) == "function" then
         rows[#rows + 1] = status_row("native-inventory-split-capability", 1)
     end
-    if split and split.map == state.map then
-        rows[#rows + 1] = status_row("native-inventory-split", split.map, split.pawn, split.source, split.created,
-            split.class, split.before, split.remaining, split.taken)
-    end
+    rows[#rows + 1] = action_row("native-inventory-split", state, status_row)
     if type(SilverfishMergeNativeGuestStacks) == "function" then
         rows[#rows + 1] = status_row("native-inventory-merge-capability", 1)
     end
-    if merged and merged.map == state.map then
-        rows[#rows + 1] = status_row("native-inventory-merge", merged.map, merged.pawn, merged.source,
-            merged.destination, merged.class, merged.before, merged.after, merged.moved)
-    end
+    rows[#rows + 1] = action_row("native-inventory-merge", state, status_row)
     if type(SilverfishTakeNativeGuestWeaponAmmo) == "function" then
         rows[#rows + 1] = status_row("native-inventory-take-ammo-capability", 1)
         if type(SilverfishTakeLocalGuestWeaponAmmo) == "function" then
             rows[#rows + 1] = status_row("native-inventory-take-ammo-preview-capability", 1)
         end
     end
-    if unloaded and unloaded.map == state.map then
-        rows[#rows + 1] = status_row("native-inventory-take-ammo", unloaded.map, unloaded.pawn, unloaded.source,
-            unloaded.created, unloaded.class, unloaded.before, unloaded.remaining, unloaded.taken, unloaded.weapon)
-    end
+    rows[#rows + 1] = action_row("native-inventory-take-ammo", state, status_row)
     if type(SilverfishSortNativeGuestBackpack) == "function" then
         rows[#rows + 1] = status_row("native-inventory-sort-capability", 1)
     end
-    if sorted and sorted.map == state.map then
-        rows[#rows + 1] = status_row("native-inventory-sort", sorted.map, sorted.pawn, sorted.status, sorted.count)
-    end
+    rows[#rows + 1] = action_row("native-inventory-sort", state, status_row)
     if type(SilverfishStoreNativeGuestEquipment) == "function" then
         rows[#rows + 1] = status_row("native-inventory-store-equipment-capability", 1)
     end
-    if stored and stored.map == state.map then
-        rows[#rows + 1] = status_row("native-inventory-store-equipment", stored.map, stored.pawn, stored.guid,
-            stored.slot, stored.class, stored.displaced)
-    end
+    rows[#rows + 1] = action_row("native-inventory-store-equipment", state, status_row)
     if type(SilverfishUnequipNativeGuestEquipment) == "function" then
         rows[#rows + 1] = status_row("native-inventory-unequip-capability", 1)
     end
     if type(SilverfishUnequipNativeGuestArmor) == "function" then
         rows[#rows + 1] = status_row("native-inventory-unequip-worn-capability", 1)
     end
-    if removed and removed.map == state.map then
-        rows[#rows + 1] = status_row("native-inventory-unequip", removed.map, removed.pawn, removed.guid,
-            removed.slot, removed.class, removed.rounds)
-    end
+    rows[#rows + 1] = action_row("native-inventory-unequip", state, status_row)
     local report = observation
     if not report or report.map ~= state.map then return rows end
     rows[#rows + 1] = status_row("native-inventory-census", report.slot, report.map, report.total, report.offset, #report.rows,

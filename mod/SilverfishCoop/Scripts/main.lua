@@ -1924,6 +1924,15 @@ local function tick(fields, pending, periodic)
         if not periodic then return true end
         fields, pending = nil, nil
     end
+    if fields and pending and current_phase == "hosting" and native_inventory.has_action_reply(fields[2])
+        and status_publication.steady(state, current_phase) then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        SilverfishPublishLocalBridgeReply(pending.ticket,
+            native_inventory.action_reply(fields, state, current_phase, sequence, status_row))
+        if not periodic then return true end
+        fields, pending = nil, nil
+    end
     local interaction = fields and status_publication.stock_interactions[fields[2]]
     if interaction and pending and not periodic and current_phase == interaction.phase
         and status_publication.compact() and status_publication.steady(state, current_phase) then

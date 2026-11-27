@@ -48,6 +48,12 @@ UNEQUIP = "native-inventory-unequip"
 UNEQUIP_CAPABILITY = "native_inventory_unequip_capability"
 UNEQUIP_WORN_CAPABILITY = "native_inventory_unequip_worn_capability"
 UNEQUIP_KEY = "native_inventory_unequip"
+ACTION_REPLY_HEADER = "native-inventory-action-reply\t1\n"
+ACTION_REPLY_BYTES = "native_inventory_action_reply_bytes"
+ACTION_KEYS = {
+    SPLIT: SPLIT_KEY, MERGE: MERGE_KEY, TAKE_AMMO: TAKE_AMMO_KEY,
+    SORT: SORT_KEY, STORE_EQUIPMENT: STORE_KEY, UNEQUIP: UNEQUIP_KEY,
+}
 _STORE_TARGET = re.compile(r"([0-9A-F]{32})(?:\|([0-7])(?:\|([0-9a-f]{32}))?)?\Z")
 _UNEQUIP_TARGET = re.compile(r"([0-9A-F]{32})\|([0-9])(?:\|([0-9a-f]{32}))?\Z")
 
@@ -223,7 +229,8 @@ async def split_stack(host, bridge, character: str, target, operation: str, *, u
                 or tuple(proof.get(field) for field in proof_fields) != (area, pawn, source, created, expected, quantity_after, take)
                 or not qualified):
             raise RuntimeError("The native inventory action did not verify both exact stock rows")
-        host.last_game, host.last_seen = snapshot, time.monotonic()
+        if ACTION_REPLY_BYTES not in snapshot:
+            host.last_game, host.last_seen = snapshot, time.monotonic()
         result = {key: {"state": "merged" if merge else "unloaded" if unload else "split", "owner": character, **proof}}
         candidate = party.load_party(host.party)
         receipts = candidate["receipts"].setdefault(character, [])
@@ -238,7 +245,8 @@ async def split_stack(host, bridge, character: str, target, operation: str, *, u
         raise
     host.party, host.native_checkpoint_unsafe = candidate, False
     event = f"native_guest_inventory_{'merge' if merge else 'take_ammo' if unload else 'split'}_{'accepted' if deferred else 'committed'}"
-    host.control.event(event, operation_id=operation, revision=revision, **result[key])
+    host.control.event(event, operation_id=operation, revision=revision,
+                       bridge_reply_bytes=snapshot.get(ACTION_REPLY_BYTES), **result[key])
     return result
 
 
@@ -280,7 +288,8 @@ async def sort_backpack(host, bridge, character: str, target, operation: str) ->
                 ("hosting", area, area, pawn) or proof.get("state") not in ("sorted", "already_sorted")
                 or type(count) is not int or not 0 <= count <= 4096):
             raise RuntimeError("The stock backpack sort did not verify the exact guest inventory")
-        host.last_game, host.last_seen = snapshot, time.monotonic()
+        if ACTION_REPLY_BYTES not in snapshot:
+            host.last_game, host.last_seen = snapshot, time.monotonic()
         result = {SORT_KEY: {"owner": character, **proof}}
         candidate = party.load_party(host.party)
         receipts = candidate["receipts"].setdefault(character, [])
@@ -295,7 +304,8 @@ async def sort_backpack(host, bridge, character: str, target, operation: str) ->
         raise
     host.party, host.native_checkpoint_unsafe = candidate, False
     event = "native_guest_inventory_sort_accepted" if deferred else "native_guest_inventory_sort_committed"
-    host.control.event(event, operation_id=operation, revision=revision, **result[SORT_KEY])
+    host.control.event(event, operation_id=operation, revision=revision,
+                       bridge_reply_bytes=snapshot.get(ACTION_REPLY_BYTES), **result[SORT_KEY])
     return result
 
 
@@ -352,7 +362,8 @@ async def store_equipment(host, bridge, character: str, target, operation: str, 
                 or requested_slot is not None and proof.get("slot") != int(requested_slot)
                 or unequip and (proof.get("state") != "unequipped" or type(proof.get("ammo")) is not int)):
             raise RuntimeError("The host did not verify the guest's stock equipment move")
-        host.last_game, host.last_seen = snapshot, time.monotonic()
+        if ACTION_REPLY_BYTES not in snapshot:
+            host.last_game, host.last_seen = snapshot, time.monotonic()
         result = {key: dict(proof, owner=character)}
         if reported:
             result[key]["reported"] = True
@@ -369,7 +380,8 @@ async def store_equipment(host, bridge, character: str, target, operation: str, 
         raise
     host.party, host.native_checkpoint_unsafe = candidate, False
     event = f"native_guest_inventory_{suffix}_{'accepted' if deferred else 'committed'}"
-    host.control.event(event, operation_id=operation, revision=revision, **result[key])
+    host.control.event(event, operation_id=operation, revision=revision,
+                       bridge_reply_bytes=snapshot.get(ACTION_REPLY_BYTES), **result[key])
     return result
 
 

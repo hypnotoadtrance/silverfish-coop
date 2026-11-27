@@ -3970,6 +3970,27 @@ class Bridge:
                 return reply
         raise RuntimeError("The stock board receipt did not verify the requested menu")
 
+    def _local_inventory_action_reply(self, raw: str, fields: tuple[str, ...]) -> dict:
+        body = raw.removeprefix(native_inventory.ACTION_REPLY_HEADER)
+        lines = body.splitlines()
+        status = (self._parse_status(body, cache=False)
+                  if len(raw) <= 4096 and body.endswith("\n") and len(lines) in (4, 5) else None)
+        if (not status or status.get("mode") != "host" or status.get("state") != "hosting"
+                or status.get("ack", {}).get("id") != fields[0]):
+            raise RuntimeError("The local inventory action receipt did not match the request")
+        ack = status["ack"]
+        if ack["result"] != "accepted":
+            if len(lines) != 4:
+                raise RuntimeError("A refused inventory action returned a stock change")
+            raise RuntimeError(ack["message"] or f"The game declined the {fields[1]} command")
+        key = native_inventory.ACTION_KEYS[fields[1]]
+        if (len(fields) < 3 or len(lines) != 5
+                or lines[-1].split("\t", 3)[:3] != [fields[1], status["map"], fields[2]]
+                or key not in status):
+            raise RuntimeError("The local inventory action receipt did not verify the exact stock change")
+        status[native_inventory.ACTION_REPLY_BYTES] = len(raw.encode("utf-8"))
+        return status
+
     @staticmethod
     def _local_stock_interaction_reply(raw: str, fields: tuple[str, ...]) -> dict:
         rows = [line.split("\t") for line in raw.splitlines()] if len(raw) <= 16384 and raw.endswith("\n") else []
@@ -4088,6 +4109,8 @@ class Bridge:
                 return _parse_local_stock_loot(raw, fields, opening=False)
             if action == "native-loot-open" and raw.startswith("native-loot-open-reply\t"):
                 return _parse_local_stock_loot(raw, fields, opening=True)
+            if action in native_inventory.ACTION_KEYS and raw.startswith(native_inventory.ACTION_REPLY_HEADER):
+                return self._local_inventory_action_reply(raw, fields)
             if action in (native_loot.CLAIM, native_authored_pickup.ACTION, native_loose_pickup.CLAIM) and raw.startswith(
                     native_loot.CLAIM_REPLY_HEADER):
                 body = raw.removeprefix(native_loot.CLAIM_REPLY_HEADER)
