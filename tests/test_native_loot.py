@@ -169,6 +169,71 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
         client.bridge.command.assert_awaited_with(loose.QUEST_CLEAR, epoch, path, timeout=1.5, update_status=False)
         self.assertFalse(view.leases)
 
+    async def test_missing_streamed_quest_placements_do_not_starve_visible_sources(self):
+        loose = native_loose_pickup
+        area, epoch = OBSERVATORY, "1" * 32
+        sources = [f"{area}|/FrontierPack/Maps/Yard_{index}.Yard:PersistentLevel.Item_Case_C_1" for index in range(5)]
+        visible = sources[-1]
+        row = {"quest": "Collect_Test", "class_path": ITEM["class_path"],
+               "transform": {"position": [12, 15, 17], "rotation": [0, 90, 0], "scale": [1, 1, 1]}}
+        status = {"state": "connected", "map": area, loose.VIEW_SCOPE: 1, loose.CAPABILITY: 1}
+        frame = {"map": area, "epoch": epoch, "items": dict.fromkeys(sources, row)}
+
+        async def project(action, visit, source, *arguments, **options):
+            self.assertEqual((action, visit), (loose.QUEST_PROJECT, epoch))
+            if source != visible:
+                raise RuntimeError("quest_placement_source_unavailable")
+            return status
+
+        for delay in (.25, .8):
+            with self.subTest(delay=delay):
+                bridge = SimpleNamespace(command=AsyncMock(side_effect=project))
+                client = SimpleNamespace(last_game=status, zone_epoch=epoch, host_session="live host", needs_travel=False,
+                                         server_transitioning=False, gameplay_seen=10, control=Mock(), bridge=bridge,
+                                         gameplay={loose.STATE: [], loose.QUEST_FRAME: frame})
+                view = loose.QuestPlacementView()
+                with patch.object(loose.time, "monotonic", return_value=10) as clock:
+                    await view.project(client)
+                    self.assertEqual(bridge.command.await_count, 4)
+                    self.assertNotIn(visible, view.leases)
+                    clock.return_value = client.gameplay_seen = 10 + delay
+                    await view.project(client)
+                self.assertIn(visible, view.leases)
+                self.assertEqual(bridge.command.await_args_list[4].args[2], visible)
+                self.assertEqual(bridge.command.await_count, 5 if delay == .25 else 8)
+
+    async def test_failed_quest_retires_do_not_hold_back_active_renewals(self):
+        loose = native_loose_pickup
+        area, epoch = OBSERVATORY, "1" * 32
+        sources = [f"{area}|/FrontierPack/Maps/Yard_{index}.Yard:PersistentLevel.Item_Case_C_1" for index in range(5)]
+        visible = sources[-1]
+        row = {"quest": "Collect_Test", "class_path": ITEM["class_path"],
+               "transform": {"position": [12, 15, 17], "rotation": [0, 90, 0], "scale": [1, 1, 1]}}
+        status = {"state": "connected", "map": area, loose.VIEW_SCOPE: 1, loose.CAPABILITY: 1}
+
+        async def project(action, visit, source, *arguments, **options):
+            if action == loose.QUEST_CLEAR:
+                self.assertNotEqual(source, visible)
+                raise RuntimeError("quest_placement_clear_scope_unavailable")
+            return status
+
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=project))
+        frame = {"map": area, "epoch": epoch, "items": dict.fromkeys(sources, row)}
+        client = SimpleNamespace(last_game=status, zone_epoch=epoch, host_session="live host", needs_travel=False,
+                                 server_transitioning=False, gameplay_seen=10, control=Mock(), bridge=bridge,
+                                 gameplay={loose.STATE: [], loose.QUEST_FRAME: frame})
+        view = loose.QuestPlacementView()
+        with patch.object(loose.time, "monotonic", return_value=10) as clock:
+            for tick in (10, 10.25):
+                clock.return_value = client.gameplay_seen = tick
+                await view.project(client)
+            self.assertEqual(set(view.leases), set(sources))
+            frame["items"] = {visible: row}
+            for tick in (10.5, 11.3):
+                clock.return_value = client.gameplay_seen = tick
+                await view.project(client)
+        self.assertEqual(view.leases[visible][1], 11.3)
+
     async def test_quest_claim_requires_retention_before_pickup_and_replays_without_writing(self):
         loose = native_loose_pickup
         area, epoch, character = OBSERVATORY, "1" * 32, "guest"

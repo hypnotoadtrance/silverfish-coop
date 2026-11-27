@@ -282,15 +282,13 @@ class QuestPlacementView:
             return False
         _, epoch, area, _ = scope
         prior = self.refused.get(path)
-        if prior and time.monotonic() < prior[0]:
-            return False
         try:
             reply = await client.bridge.command(action, epoch, path, *arguments, timeout=1.5, update_status=False)
             if (reply.get("map"), reply.get("state")) != (area, "connected"):
                 raise RuntimeError("The stock quest placement changed worlds")
         except (OSError, RuntimeError) as error:
             reason = str(error)
-            self.refused[path] = time.monotonic() + _QUEST_RENEWAL, reason
+            self.refused[path] = time.monotonic(), reason
             if not prior or prior[1] != reason:
                 client.control.event("native_quest_placement_projection_unavailable", actor=path, reason=reason)
             return False
@@ -321,22 +319,31 @@ class QuestPlacementView:
             return
         hidden = set(retired)
         active = items.keys() - hidden
-        for path in self.refused.keys() - (self.leases.keys() | active):
+        tracked = self.leases.keys() | active
+        for path in self.refused.keys() - tracked:
             del self.refused[path]
-        clear = sorted(self.leases.keys() - active)[:4]
-        for path in clear:
-            if await self._apply(client, QUEST_CLEAR, scope, path):
-                del self.leases[path]
         now = time.monotonic()
         due = []
-        for path in active:
+        for path in tracked:
+            refused_at, _ = self.refused.get(path, (-float("inf"), None))
+            if now - refused_at < _QUEST_RENEWAL:
+                continue
+            if path not in active:
+                due.append((refused_at, False, path))
+                continue
             previous, at = self.leases.get(path, (None, -float("inf")))
             row = items[path]
             if (previous is None or now - at >= _QUEST_RENEWAL or previous["quest"] != row["quest"]
                     or previous["class_path"] != row["class_path"]
                     or not same_pose(previous["transform"], row["transform"])):
-                due.append((at, path))
-        for _, path in sorted(due)[:4 - len(clear)]:
+                # An unavailable level still counts as a recent attempt. Other
+                # placements should get a turn even if every refusal can retry.
+                due.append((max(at, refused_at), True, path))
+        for _, show, path in sorted(due)[:4]:
+            if not show:
+                if await self._apply(client, QUEST_CLEAR, scope, path):
+                    del self.leases[path]
+                continue
             if path in (client.gameplay.get(STATE) or ()):
                 continue
             row = items[path]
