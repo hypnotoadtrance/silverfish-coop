@@ -466,7 +466,8 @@ namespace
     constexpr auto loose_scan_interval = std::chrono::seconds(5);
     constexpr auto loose_scan_budget = std::chrono::microseconds(1500);
     constexpr std::size_t loose_scan_limit = 64;
-    constexpr std::size_t quest_placement_limit = 32;
+    constexpr std::size_t quest_placement_snapshot_limit = 96;
+    constexpr std::size_t quest_placement_batch_limit = 32;
 
     std::uint64_t sequence{};
     Scope* fixture_scope{};
@@ -2643,7 +2644,7 @@ namespace
         {
             auto* actor = static_cast<U::AActor*>(loose_candidates[next_loose_candidate++].Get());
             auto* loose = enroll_loose_actor(actor, base, seat);
-            if (host && loose && !loose->profile.quest_id.empty() && pending_quest_placements.size() <= quest_placement_limit)
+            if (host && loose && !loose->profile.quest_id.empty())
                 pending_quest_placements.emplace_back(actor);
             if (Clock::now() >= cutoff) break;
         }
@@ -2651,7 +2652,7 @@ namespace
         {
             quest_placements.swap(pending_quest_placements);
             pending_quest_placements.clear();
-            quest_placements_at = quest_placements.size() <= quest_placement_limit ? Clock::now() : Clock::time_point{};
+            quest_placements_at = Clock::now();
         }
 
         std::string carry_paths;
@@ -2688,11 +2689,14 @@ namespace
         if (!live(save) || object(pawn, STR("Save")) != save) return 0;
         const auto world_utf8 = RC::to_utf8_string(world_path);
         std::string rows;
+        std::size_t published = 0;
         for (const auto& candidate : quest_placements)
         {
             auto* loose = enrolled_loose_actor(candidate.Get());
             if (!loose || loose->profile.quest_id.empty() || loose_hidden.contains(loose->profile.source) ||
                 !available(loose->scope)) continue;
+            // An incomplete census would retire still-active placements on the guest.
+            if (++published > quest_placement_snapshot_limit) return 0;
             const auto pose = read_drop_pose(static_cast<U::AActor*>(loose->scope.actor.Get()));
             std::format_to(std::back_inserter(rows),
                 "native-authored-quest-placement\t{}\t{}\t{}\t{}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.6f}\t{:.6f}\t{:.6f}\n",
@@ -3168,7 +3172,7 @@ namespace
     {
         const auto count = lua.get_stack_size();
         if (!ready() || !quest_placement_enabled() || count < 4 ||
-            static_cast<std::size_t>(count - 3) > quest_placement_limit || !lua.is_integer(1) ||
+            static_cast<std::size_t>(count - 3) > quest_placement_batch_limit || !lua.is_integer(1) ||
             !lua.is_string(2) || !lua.is_integer(3))
             return result(lua, false, "quest_placement_renew_arguments");
         const auto pointer = static_cast<Address>(lua.get_integer());

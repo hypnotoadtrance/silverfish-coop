@@ -182,7 +182,12 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
         sources = [f"{world}:PersistentLevel.Item_Bandage_C_{index:02d}" for index in range(loose.QUEST_LIMIT)]
         row = {"quest": "Collect_Test", "class_path": ITEM["class_path"],
                "transform": {"position": [12, 15, 17], "rotation": [0, 90, 0], "scale": [1, 1, 1]}}
-        items = dict.fromkeys(sources, row)
+        records = [("schema", "1"), ("session", "host", "hosting", area, "1", "0"), (loose.QUEST_HEADER, "1")]
+        records.extend((loose.QUEST_ROW, world, source, row["quest"], row["class_path"],
+                        "12", "15", "17", "0", "90", "0", "1", "1", "1") for source in sources)
+        text = "".join("\t".join(record) + "\n" for record in records)
+        items = runtime.Bridge(None, None)._parse_status(text)[loose.QUEST_SOURCES]
+        self.assertEqual(items, dict.fromkeys(sources, row))
         status = {"state": "connected", "map": area, loose.VIEW_SCOPE: 7, loose.CAPABILITY: 1}
         now, expires = [10.0], {}
         missed = set()
@@ -199,6 +204,7 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(action, loose.QUEST_RENEW)
                 *other_sources, generation = arguments
                 self.assertEqual(generation, "7")
+                self.assertLessEqual(1 + len(other_sources), 32)
                 mask = ""
                 for path in (source, *other_sources):
                     self.assertIn(path, items)
@@ -219,7 +225,7 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
                                  gameplay={loose.STATE: [], loose.QUEST_FRAME: {"map": area, "epoch": epoch, "items": items}})
         view = loose.QuestPlacementView()
         with patch.object(loose.time, "monotonic", side_effect=lambda: now[0]):
-            for _ in range(16):
+            for _ in range((len(sources) + 3) // 4 + 8):
                 client.gameplay_seen = now[0]
                 await view.project(client)
                 now[0] += .25
@@ -235,7 +241,10 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
             await view.project(client)
 
         requests = [call.args for call in bridge.command.await_args_list[prior_count:]]
-        self.assertEqual([args[0] for args in requests].count(loose.QUEST_RENEW), 1)
+        renewed_batches = [args[2:-1] for args in requests if args[0] == loose.QUEST_RENEW]
+        self.assertEqual(len(renewed_batches), 3)
+        self.assertEqual({path for batch in renewed_batches for path in batch},
+                         set(sources) - {omitted, claimed, moved})
         self.assertNotIn(omitted, expires)
         self.assertNotIn(claimed, expires)
         self.assertEqual(view.leases[moved][0], items[moved])

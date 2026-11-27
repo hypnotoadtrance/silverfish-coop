@@ -38,7 +38,8 @@ QUEST_CLEAR = "native-quest-placement-clear"
 QUEST_RENEW = "native-quest-placement-renew"
 QUEST_ACTIONS = (QUEST_PROJECT, QUEST_CLEAR, QUEST_RENEW)
 QUEST_REPLY = "native-quest-placement-reply"
-QUEST_LIMIT = 32
+QUEST_LIMIT = 96
+_QUEST_BATCH_LIMIT = 32  # The native renewal command and its memory bridge payload stay bounded.
 _QUEST_RENEWAL = .65
 _QUEST_MAX_AGE = 1.5
 _PREFIX = "loose:"
@@ -345,12 +346,13 @@ class QuestPlacementView:
                 due.append((max(at, refused_at), True, path))
             elif now - at >= _QUEST_RENEWAL:
                 renew.append(path)
-        if renew:
-            renew.sort()
-            reply = await self._apply(client, QUEST_RENEW, scope, *renew, str(generation))
+        renew.sort()
+        for index in range(0, len(renew), _QUEST_BATCH_LIMIT):
+            batch = renew[index:index + _QUEST_BATCH_LIMIT]
+            reply = await self._apply(client, QUEST_RENEW, scope, *batch, str(generation))
             if reply:
                 renewed_at = time.monotonic()
-                for path, renewed in zip(renew, reply["ack"]["message"], strict=True):
+                for path, renewed in zip(batch, reply["ack"]["message"], strict=True):
                     row, at = self.leases[path]
                     if renewed == "1":
                         self.leases[path] = row, renewed_at
