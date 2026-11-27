@@ -7,6 +7,7 @@ local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
 local path = map .. ":PersistentLevel.LootCrate_Small_BP_C_1"
 local command, reply = mailbox .. "/portable-crate-command.tsv", mailbox .. "/portable-crate-reply.tsv"
 local last, motion
+local stock_focus = require("native_loot_crate_input").stock_focus
 
 local function valid(object) return object and object:IsValid() end
 local function same(first, second)
@@ -64,17 +65,8 @@ local function press(mode)
         and valid(pawn) and pawn:IsLocallyControlled() and not pawn:HasAuthority() and pawn.Dead == false
         and valid(crate) and not crate:HasAuthority() and same(crate:GetWorld(), world) and crate.Looted == false
         and valid(box) and same(box:GetOwner(), crate), "unqualified Observatory crate or guest")
-    local camera = pawn.Camera
-    local eye, point = camera:K2_GetComponentLocation(), box:K2_GetComponentLocation()
-    local original = camera.RelativeRotation
-    local restore = {Pitch = original.Pitch, Yaw = original.Yaw, Roll = original.Roll}
-    local x, y, z = point.X - eye.X, point.Y - eye.Y, point.Z - eye.Z
-    local ok, detail = pcall(function()
-        camera:K2_SetWorldRotation({Pitch = math.deg(math.atan(z, math.sqrt(x*x + y*y))),
-            Yaw = math.deg(math.atan(y, x)), Roll = 0}, false, {}, true)
-        pawn:LookTrace()
-        assert(pawn.CanInteract == true and same(pawn.InteractionTarget_Component, box)
-            and pawn.Holding_Interact == false, "stock F is not focused on the authored crate")
+    local _, detail = stock_focus(pawn, box, function()
+        assert(pawn.Holding_Interact == false, "stock F is already held")
         local input = StaticFindObject("/Script/EnhancedInput.Default__EnhancedInputLibrary")
         local action = StaticFindObject("/Game/Classes/Player/Player_Inputs/IA_Interact.IA_Interact")
         assert(valid(input) and valid(action), "stock Interact is unavailable")
@@ -100,9 +92,6 @@ local function press(mode)
         pawn.Holding_Interact = false
         return pressed_us and crate:GetFullName() .. "|" .. pressed_us or crate:GetFullName()
     end)
-    camera:K2_SetRelativeRotation(restore, false, {}, true)
-    pawn:LookTrace()
-    assert(ok, detail)
     return detail
 end
 

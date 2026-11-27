@@ -15,7 +15,7 @@ local world = object(1, "world")
 local pawn = object(2, "local guest")
 local area = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
 local path = area .. ".City_01_P:PersistentLevel.LootCrate_Small_BP_C_5"
-local profile = {index = 4, map = area, path = path, name = "LootCrate_Small_BP_C " .. path}
+local profile = {index = 1, map = area, path = path, name = "LootCrate_Small_BP_C " .. path}
 local crate = object(3, profile.name)
 crate.IsActorBeingDestroyed = function() return false end
 local camera_type, box_type, mesh_type = object(4, "camera class"), object(5, "box class"), object(6, "mesh class")
@@ -70,7 +70,7 @@ chosen = sibling
 local accepted, failure = pcall(input.command, request, state, "connected")
 assert(not accepted and failure:find("native_loot_crate_stock_fixture_focus_unavailable:another crate box", 1, true) == 1)
 assert(sequence == 1 and camera.RelativeRotation.Yaw == 90 and pawn.InteractionTarget_Component == nil)
-print("New crate fixture requires exact stock LookTrace and restores the camera")
+print("The first registered crate uses stock LookTrace and restores the camera")
 
 profile.small_cabinet = true
 local frame, second_door = object(11, "exact cabinet frame"), object(12, "exact second cabinet door")
@@ -148,8 +148,9 @@ assert(not pcall(input.diagnostic, query, state, "connected", row))
 crate.IsActorBeingDestroyed = function() return false end
 
 local function upvalue(callback, wanted, replacement)
-    for index = 1, 100 do
+    for index = 1, math.huge do
         local name, value = debug.getupvalue(callback, index)
+        if not name then break end
         if name == wanted then
             if replacement then debug.setupvalue(callback, index, replacement) end
             return value
@@ -202,7 +203,8 @@ local function status_case(installed, headless, resident)
         SilverfishClaimLocalBridgeCommand = function(ticket) return ticket == 1 end,
     }, {__index = _G})
     assert(loadfile("mod/SilverfishCoop/Scripts/main.lua", "t", env))()
-    local tick = upvalue(callback, "tick")
+    local publication = upvalue(callback, "status_publication")
+    local tick = upvalue(publication.dispatch, "tick")
     upvalue(tick, "observe_session", function() return state, "connected" end)
     local write = upvalue(tick, "write_status")
     local function status(fields, pending, requested)

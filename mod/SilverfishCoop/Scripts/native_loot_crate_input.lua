@@ -10,7 +10,6 @@ local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local client_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1"
 local title_fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
-local legacy_fixture_profiles = 3
 local open_rotation = { Pitch = 0, Yaw = 0, Roll = -95 }
 local cabinet_rotations = {{Pitch = 0, Yaw = 95, Roll = 0}, {Pitch = 0, Yaw = -95, Roll = 0}}
 local bindings, fixture_sequences = {}, {}
@@ -533,15 +532,7 @@ local function fixture(current)
     local index = current.profile.index
     local before_active, before = SilverfishReadNativeLootCrateInput(index)
     if before_active ~= true then error("native_loot_crate_stock_fixture_scope_unavailable", 0) end
-    local invoked, ok, detail
-    if index > legacy_fixture_profiles then
-        invoked, ok, detail = stock_focus(pawn, box)
-    else
-        local original = pawn.InteractionTarget_Component
-        pawn.InteractionTarget_Component = box
-        invoked, ok, detail = pcall(SilverfishProbeNativeInteractInput, pawn:GetAddress(), true)
-        pawn.InteractionTarget_Component = valid(original) and original or nil
-    end
+    local invoked, ok, detail = stock_focus(pawn, box)
     local active, sequence = SilverfishReadNativeLootCrateInput(index)
     if not invoked or not ok or detail ~= "stock_started_consumed" or not active or sequence <= before
         or crate.Looted ~= false then

@@ -8463,8 +8463,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 str(game): probes.enter_context(portable_main_overlay(game, patch_world_view_receipts)) for game in games
             }
         if stock_crate_ring and not crossroads_profile or compact_crate_status:
-            probes.enter_context(installed_probe(second_game, mod="SilverfishPortableCrateProbe",
-                                                 fixture="portable_crate_input_probe.lua"))
+            crate_probe = (Path(__file__).with_name("fixtures") / "portable_crate_input_probe.lua").read_text(encoding="utf-8")
+            probes.enter_context(portable_main_overlay(second_game, lambda script:
+                script + "\n;(function()\n" + crate_probe + "\nend)()\n"))
         if (stock_use or stock_drop or stock_split or stock_equip or stock_nearby or container_nearby
                 or guest_stash_memory or nonmirrored_startup or manage_saves):
             for game in games:
