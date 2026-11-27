@@ -3038,6 +3038,13 @@ class Bridge:
                             or data.get("state") != "hosting" or loot.get("map") != data.get("map")):
                         raise ValueError("Stock crate merge proof is out of scope")
                     loot["merge"] = native_loot.parse_stack_merge(fields[1:])
+                elif fields[0] == native_loot.TRANSFER_TAG:
+                    loot = data.get("native_loot", {})
+                    if (len(fields) == 3 and loot.get("action") == "claim" and loot.get("status") in ("claimed", "merged")
+                            and loot.get("ok") and loot.get("retained") and "received" not in loot
+                            and valid_guid(fields[1]) and fields[2].startswith("(") and fields[2].endswith(")")
+                            and len(fields[2].encode("utf-8")) <= native_inventory_grant.MAX_ITEM_BYTES):
+                        loot["received"] = {"guid": fields[1], "text": fields[2]}
                 elif fields[0] == "native-wipe-inventory" and len(fields) == 8:
                     data["native_wipe_inventory"] = {
                         "map": fields[1], "source": fields[2], "replacement": fields[3],
@@ -4142,6 +4149,7 @@ class Bridge:
         long_fields = (range(7, len(fields), 3) if action == native_crate_outcome.ADOPT and self.local_bridge is not None else
                        (5, 6) if action == native_board_contract.MENU_OPEN else
                        (5,) if action == native_inventory_grant.APPLY and self.local_bridge is not None else
+                       (9,) if action == native_world_loot.PRESENT_CLAIM and self.local_bridge is not None else
                        (10,) if action == native_board_contract.COMMAND else ())
         if any(len(value) > (8192 if index in long_fields else 1024)
                or "\t" in value or "\r" in value or "\n" in value for index, value in enumerate(fields)):

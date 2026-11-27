@@ -354,6 +354,14 @@ function actions.command(fields, state, phase)
         elseif ok and status == "merged" then
             result.merge = { guid = guid, inventory_guid = inventory_guid, amount = amount, before = before, after = after }
         end
+        if ok and retained and (status == "claimed" or result.merge) and type(SilverfishExportDetachedInventoryItem) == "function" then
+            local received = result.merge and inventory_guid or guid
+            local called, exported, text = pcall(SilverfishExportDetachedInventoryItem,
+                scope.pawn:GetAddress(), scope.save:GetAddress(), received)
+            if called and exported and type(text) == "string" and #text <= 8192 and not text:find("[%z\t\r\n]") then
+                result.transfer = {guid = received, text = text}
+            end
+        end
         result.invoked = result.ok or tostring(result.status):match("^mutation_unverified_") ~= nil
         if result.invoked then result.retained = retained
         else guest_save.cancel_retention(new_retention) end
@@ -626,6 +634,9 @@ function actions.claim_reply(fields, state, phase, status_row)
     if not result then return false, "native_loot_claim_readback_unavailable" end
     local records = {result_row(result, status_row)}
     append_transfer_rows(records, result, status_row)
+    if result.transfer then
+        records[#records + 1] = status_row("native-loot-received-item", result.transfer.guid, result.transfer.text)
+    end
     if result.retained then
         for _, details in ipairs(state.pawns) do
             if details.name == result.pawn then

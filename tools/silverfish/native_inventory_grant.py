@@ -30,6 +30,11 @@ _TERMINAL = {
 }
 
 
+def next_view_revision(host):
+    host.guest_inventory_view_revision = getattr(host, "guest_inventory_view_revision", 0) + 1
+    return host.guest_inventory_view_revision
+
+
 def parse_ready(fields):
     _, sequence = fields
     if not re.fullmatch(r"[0-9]{1,16}", sequence) or not 0 < int(sequence) < 2**53:

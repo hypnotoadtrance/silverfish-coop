@@ -3594,10 +3594,13 @@ namespace
         return result(lua, !!weapon_data(target, inventory.item).data, "stock weapon payload copied");
     }
 
+    template <bool local = false>
     int import_inventory_addition(const Lua& lua)
     {
-        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 5 || !lua.is_integer(1) || !lua.is_integer(2) ||
-            !lua.is_string(3) || !lua.is_string(4) || !lua.is_string(5))
+        const auto argc = lua.get_stack_size();
+        if (!Unreal::IsInGameThreadRaw() || (argc != 5 && (!local || argc != 6)) ||
+            !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3) ||
+            !lua.is_string(4) || !lua.is_string(5) || (argc == 6 && !lua.is_integer(6)))
             return result(lua, false, "native_inventory_grant_refused_arguments");
         Context context;
         const auto pawn = lua.get_integer(), save = lua.get_integer();
@@ -3610,7 +3613,13 @@ namespace
             reported.back() != ')' || reported.find_first_of("\t\r\n") != std::string::npos ||
             reported.find('\0') != std::string::npos)
             return result(lua, false, "native_inventory_grant_refused_encoding");
-        if (!resolve_owner(context, pawn, save).empty())
+        if constexpr (local)
+        {
+            if (!bind_local_inventory(context, pawn, save, false) || grant_scope.save.Get() != context.save ||
+                !grant_scope.pending.empty())
+                return result(lua, false, "native_inventory_grant_refused_owner");
+        }
+        else if (!resolve_owner(context, pawn, save).empty())
             return result(lua, false, "native_inventory_grant_refused_owner");
 
         Inventory inventory;
@@ -3649,23 +3658,56 @@ namespace
             return inventory.type->Identical(row.get(), target) &&
                 payload->Identical(payload->ContainerPtrToValuePtr<void>(row.get()), payload->ContainerPtrToValuePtr<void>(target));
         };
-        if (inventory.item)
+        if (argc == 6)
+        {
+            const auto before = lua.get_integer();
+            const auto after = inventory.ammo->GetPropertyValueInContainer(row.get());
+            if (!inventory.item || inventory.backpack_index < 0 || before <= 0 || before >= after)
+                return result(lua, false, "native_inventory_grant_refused_stack");
+            if (!identical(inventory.item))
+            {
+                if (inventory.ammo->GetPropertyValueInContainer(inventory.item) != before)
+                    return result(lua, false, "native_inventory_grant_refused_stack");
+                Value previous(inventory.type->AllocateAndInitializeValue(), {inventory.type});
+                if (!previous) return result(lua, false, "native_inventory_grant_refused_storage");
+                inventory.type->CopyCompleteValue(previous.get(), inventory.item);
+                if (!silverfish::loot_escrow::stock_stack_matches(context.pawn, inventory.type,
+                        previous.get(), row.get(), after - static_cast<int>(before)) || !inventory_current<local>(context))
+                    return result(lua, false, "native_inventory_grant_refused_stack");
+                Inventory current;
+                if (!locate(context, current, expected).empty() || current.backpack_index != inventory.backpack_index ||
+                    !inventory.type->Identical(previous.get(), current.item) ||
+                    !payload->Identical(payload->ContainerPtrToValuePtr<void>(previous.get()),
+                                        payload->ContainerPtrToValuePtr<void>(current.item)))
+                    return result(lua, false, "native_inventory_grant_refused_stack");
+                inventory.type->CopyCompleteValue(current.item, row.get());
+                if (!identical(current.item))
+                {
+                    inventory.type->CopyCompleteValue(current.item, previous.get());
+                    return result(lua, false, "native_inventory_grant_refused_readback");
+                }
+            }
+        }
+        else if (inventory.item)
         {
             if (!identical(inventory.item)) return result(lua, false, "native_inventory_grant_refused_guid");
-            return result(lua, true, "present");
         }
-        auto* bag = inventory.backpack->ContainerPtrToValuePtr<void>(context.save);
-        Unreal::FScriptArrayHelper current(inventory.backpack, bag);
-        if (current.Num() >= max_inventory || !ownership_current(context))
-            return result(lua, false, "native_inventory_grant_refused_backpack");
-        const auto position = current.AddValue();
-        inventory.type->CopyCompleteValue(current.GetRawPtr(position), row.get());
-        if (!ownership_current(context) || !identical(current.GetRawPtr(position)))
+        else
         {
-            current.RemoveValues(position, 1);
-            return result(lua, false, "native_inventory_grant_refused_readback");
+            auto* bag = inventory.backpack->ContainerPtrToValuePtr<void>(context.save);
+            Unreal::FScriptArrayHelper current(inventory.backpack, bag);
+            if (current.Num() >= max_inventory || !inventory_current<local>(context))
+                return result(lua, false, "native_inventory_grant_refused_backpack");
+            const auto position = current.AddValue();
+            inventory.type->CopyCompleteValue(current.GetRawPtr(position), row.get());
+            if (!inventory_current<local>(context) || !identical(current.GetRawPtr(position)))
+            {
+                current.RemoveValues(position, 1);
+                return result(lua, false, "native_inventory_grant_refused_readback");
+            }
         }
-        return result(lua, true, "added");
+        if constexpr (local) grant_scope.granted.insert(context.guid);
+        return result(lua, true, argc == 6 ? "merged" : inventory.item ? "present" : "added");
     }
 
     int increase_inventory_stack(const Lua& lua)
@@ -5050,7 +5092,8 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishStoreLocalGuestEquipment", store_stock_equipment<true>);
     lua.register_function("SilverfishExportLocalInventoryItem", export_inventory_item<true>);
     lua.register_function("SilverfishExportDetachedInventoryItem", export_inventory_item<false>);
-    lua.register_function("SilverfishImportGuestInventoryAddition", import_inventory_addition);
+    lua.register_function("SilverfishImportGuestInventoryAddition", import_inventory_addition<false>);
+    lua.register_function("SilverfishImportLocalInventoryPickup", import_inventory_addition<true>);
     lua.register_function("SilverfishArmInventoryGrants", arm_inventory_grants);
     lua.register_function("SilverfishReadInventoryGrant", read_inventory_grant);
     lua.register_function("SilverfishAcknowledgeInventoryGrant", acknowledge_inventory_grant);

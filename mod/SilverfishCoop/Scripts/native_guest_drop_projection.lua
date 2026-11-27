@@ -3,6 +3,7 @@ local world_path = require("world_path")
 local drop_items = require("native_guest_drop_items")
 local pickup_fixture = require("native_authored_pickup_input_fixture")
 local pickup_audio = require("native_pickup_audio")
+local inventory_grant = require("native_inventory_grant")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local headless = enabled and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
@@ -446,20 +447,22 @@ end
 local function present_claim(fields, state, phase)
     local epoch, id, area, audio_epoch, cue = fields[3], fields[4], fields[5], fields[6], fields[7]
     local entry, pawn = world_items[id], local_pawn(state, phase)
+    local typed = #fields == 11 and phase == "connected"
     local class = cue and cue:match("^%x+|([^|]+)|")
-    if #fields ~= 7 or not pawn or area ~= state.map
-        or not identifier(epoch) or not identifier(id) or not identifier(audio_epoch) or not class then
+    if (#fields ~= 7 and not typed) or not pawn or area ~= state.map
+        or not identifier(epoch) or not identifier(id) or not identifier(audio_epoch)
+        or (not class and (not typed or cue ~= "-")) or (typed and class and fields[9] ~= class) then
         error("world_loot_retirement_scope_unavailable", 0)
     end
-    local audible = entry and entry.epoch == epoch and same(entry.pawn, pawn) and same(entry.world, state.world)
-        and entry.class == class and not entry.error and not entry.moving
-    if audible then
+    local visible = entry and entry.epoch == epoch and same(entry.pawn, pawn) and same(entry.world, state.world)
+        and entry.class == (class or fields[9]) and not entry.error and not entry.moving
+    if visible then
         local ok, active, reported_epoch, reported_id = pcall(SilverfishReadNativeGuestDropProjection, entry.slot)
-        audible = ok and active == true and reported_epoch == epoch and reported_id == id
+        visible = ok and active == true and reported_epoch == epoch and reported_id == id
     end
     local removed, outcome = pcall(retire, state, phase, epoch, id)
     local heard = ""
-    if audible then
+    if visible and class then
         -- A projected item is already loaded. An unresolved audio asset must fall back
         -- to normal playback outside this game-thread command.
         local ok, receipt = pcall(pickup_audio.command,
@@ -468,7 +471,15 @@ local function present_claim(fields, state, phase)
     end
     local status = removed and "retired" or tostring(outcome):match("^world_loot_retirement_[%l_]+$")
         or "world_loot_retirement_unverified"
-    return status .. "|" .. heard
+    local reply = status .. "|" .. heard
+    if typed then
+        local ok, inventory
+        if visible then
+            ok, inventory = pcall(inventory_grant.project_pickup, state, phase, audio_epoch, table.unpack(fields, 8, 11))
+        end
+        reply = reply .. "|" .. (ok and inventory or "deferred")
+    end
+    return reply
 end
 
 function projection.command(fields, state, phase)

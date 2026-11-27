@@ -7888,17 +7888,17 @@ async def verify_container_pickup(host: Seat, guest: Seat, pawn: str, *, memory_
         return (campaign_save_hashes(host.campaign), saved_hashes(host.profile / "Saved/SaveGames"),
                 saved_hashes(guest.profile / "Saved/SaveGames"))
 
-    def projections():
+    def inventory_events():
         rows = (guest_run / "events.jsonl").read_text(encoding="utf-8").splitlines()
-        return [row for line in rows if (row := json.loads(line))["event"] == "native_guest_ui_projected"]
+        return [json.loads(line) for line in rows]
 
     if memory_ui:
         for run in (host_run, guest_run):
             await wait(run, lambda state: state.get("local_bridge") == "memory"
                        and state.get("game", {}).get(runtime.GUEST_UI_MEMORY) is True)
         before = save_state()
-        projections_before = len(projections())
-        assert before[0] and projections_before
+        events_before = len(inventory_events())
+        assert before[0] and events_before
 
     clicked = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, target=actor)
     assert clicked["ok"] and clicked["proof"].startswith("stock Nearby Items card requested"), clicked
@@ -7927,9 +7927,10 @@ async def verify_container_pickup(host: Seat, guest: Seat, pawn: str, *, memory_
     assert duplicate.get("error") == "native_loot_already_claimed", duplicate
     memory_proof = {}
     if memory_ui:
-        refreshed = projections()[projections_before:]
-        combined, = [record for record in refreshed if record.get("stock_menu") == "refreshed"]
-        assert combined["items"] >= 1 and combined["local_reply_bytes"] < 1024, combined
+        refreshed = inventory_events()[events_before:]
+        combined, = [record for record in refreshed if record["event"] == "native_pickup_inventory_applied"
+                     and record["operation_id"] == claim["operation_id"]]
+        assert combined["guid"] == inventory_guid and combined["item_bytes"] > 0, combined
         assert save_state() == before
         memory_proof = {"resident_ui_projection": combined, "saves_unchanged_before_checkpoint": True}
     checkpoint = await submit(host_run, "checkpoint")

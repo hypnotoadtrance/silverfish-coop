@@ -7258,18 +7258,26 @@ class Client:
                 result = await self.gameplay_action(action, operation, claim, defer_pickup_cue=True)
             cue = result.pop(native_pickup_audio.KEY, None)
             if self.stock_interaction_scope() == scope:
+                inventory = result.pop(native_loot.TRANSFER, None)
+                applied = False
                 try:
                     game = self.last_game
-                    projected = await self.world_loot.present_claim(
-                        self, self.bridge, loot, operation, cue, generation=scope[0])
+                    projected = None
+                    if isinstance(inventory, dict):
+                        projected, applied = await self.guest_ui.present_pickup(self, scope, loot, operation, cue, result, inventory)
+                    if projected is None and self.stock_interaction_scope() == scope:
+                        projected = await self.world_loot.present_claim(
+                            self, self.bridge, loot, operation, cue, generation=scope[0])
                     if projected is None:
-                        projected = await self.world_loot.retire_claim(self.bridge, game, loot)
+                        if self.stock_interaction_scope() == scope:
+                            projected = await self.world_loot.retire_claim(self.bridge, game, loot)
                     if self.last_game is game and self.stock_interaction_scope() == scope:
                         self.last_game = projected
                 except (OSError, RuntimeError) as error:
                     self.control.event("native_world_loot_retirement_deferred", reason=str(error))
                 if self.stock_interaction_scope() == scope:
-                    self.guest_ui.queue_stock_inventory(self)
+                    if not applied:
+                        self.guest_ui.queue_stock_inventory(self)
                     if cue:
                         game = self.last_game
                         heard = await self.pickup_playback.sync(self.bridge, self.control, game, cue, scope[1], scope[0])

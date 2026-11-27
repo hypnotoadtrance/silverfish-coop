@@ -497,22 +497,27 @@ class Projection:
         presented = await self.present_claim(host, bridge, target, operation, cue, generation=host.control.generation)
         return await self.retire_claim(bridge, game, target) if presented is None else presented
 
-    async def present_claim(self, seat, bridge, target, operation, cue, *, generation):
+    async def present_claim(self, seat, bridge, target, operation, cue, *, generation, inventory=()):
         game, playback, control, audio_epoch = seat.last_game, seat.pickup_playback, seat.control, seat.zone_epoch
         epoch, identity = target[:2]
         item = self.items.get(identity)
         if (bridge.local_bridge is None or game.get(PRESENTATION) is not True or epoch != self.epoch
-                or not item or identity in self.moving or not isinstance(cue, dict)):
+                or not item or identity in self.moving or (not isinstance(cue, dict) and not inventory)):
             return None
-        args, asked = playback.prepare(game, cue, audio_epoch, generation)
-        if len(args) != 1 or asked.keys() != {operation} or args[0].split("|", 2)[1] != item.class_path:
+        args, asked = playback.prepare(game, cue, audio_epoch, generation) if isinstance(cue, dict) else ((), {})
+        audible = len(args) == 1 and asked.keys() == {operation} and args[0].split("|", 2)[1] == item.class_path
+        if not audible and not inventory:
+            return None
+        if inventory and inventory[1] != item.class_path:
             return None
 
         area, pending = game["map"], playback.pending
-        pending.add(operation)
+        if audible:
+            pending.add(operation)
         self._remember_retirement(identity)
         try:
-            snapshot = await bridge.command(PRESENT_CLAIM, epoch, identity, area, audio_epoch, args[0], timeout=3)
+            snapshot = await bridge.command(PRESENT_CLAIM, epoch, identity, area, audio_epoch,
+                                            args[0] if audible else "-", *inventory, timeout=3)
         except (OSError, RuntimeError, TimeoutError) as error:
             control.event("native_world_loot_retirement_deferred", reason=str(error))
             return game
@@ -520,13 +525,18 @@ class Projection:
             pending.discard(operation)
 
         status, separator, heard = snapshot.get("ack", {}).get("message", "").partition("|")
-        if separator and pending is playback.pending:
+        heard, _, inventory_result = heard.partition("|")
+        if separator and audible and pending is playback.pending:
             playback.acknowledge(control, area, asked, heard)
         if not separator or status != "retired" or identity in snapshot.get(KEY, {}):
             reason = status if status.startswith("world_loot_retirement_") else "The claimed stock world item did not retire"
             control.event("native_world_loot_retirement_deferred", reason=reason)
-            return snapshot if "state" in snapshot else game
-        return self._after_retirement(game, snapshot, identity)
+            projected = snapshot if "state" in snapshot else game
+        else:
+            projected = self._after_retirement(game, snapshot, identity)
+        if inventory and inventory_result in ("added", "present", "merged"):
+            return {**projected, "pickup_inventory_result": inventory_result}
+        return projected
 
     async def fixture(self, bridge, game, identity):
         shown = game.get(KEY, {}).get(identity, {})

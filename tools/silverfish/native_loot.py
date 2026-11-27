@@ -35,6 +35,8 @@ LOCKPICK_RESULT = "native_loot_lockpick_result"
 PRY_TOOL_ACTIONS = {"blowtorch": TORCH_USE, "crowbar": CROWBAR_USE}
 PRY_TOOL_RESULTS = {"blowtorch": TORCH_RESULT, "crowbar": CROWBAR_RESULT}
 STACK_MERGE_TAG = "native-loot-stack-merge"
+TRANSFER_TAG = "native-loot-received-item"
+TRANSFER = "native_loot_received_item"
 FORCED_ROLL_STATUS = "opened_fixture_seeded"
 SPECIAL_MEMORY_CAPABILITY = "native_loot_special_memory"
 INSPECTION_BYTES = "native_loot_inspection_reply_bytes"
@@ -790,6 +792,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                   fixture_nonempty: bool = False, pried: bool = False, tool_receipt=None,
                   power_sequence: int | None = None, defer_save: bool = False) -> dict:
     area = host.last_game.get("map")
+    epoch = getattr(host, "zone_epoch", None)
     if (not host.native_zones or not (host.fixtures or host.native_loot_input) or host.native_profile is None
             or host.stopping or host.transitioning or (host.native_checkpoint_unsafe and tool_receipt is None)
             or host.last_game.get("state") != "hosting" or area not in CRATES.values()
@@ -1050,6 +1053,12 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             else:
                 host.control.event("native_loot_claim_committed", revision=revision, **result["native_loot_claim"])
             native_pickup_audio.committed(host, pawn, operation_id, claimed["class_path"], credit=credit)
+            transfer = proof.get("received")
+            if deferred and character != "host" and epoch and transfer and transfer["guid"] == merge.get("inventory_guid", guid):
+                from .native_inventory_grant import next_view_revision
+
+                return {**result, TRANSFER: {**transfer, "owner": character, "map": area, "epoch": epoch,
+                                             "revision": next_view_revision(host)}}
             return result
         if action == "seed":
             if not proof["lucky_looter"]:

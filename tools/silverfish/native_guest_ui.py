@@ -10,7 +10,7 @@ import time
 import uuid
 import zlib
 
-from . import party, runtime
+from . import native_inventory_grant, party, runtime
 
 
 ACTION = "native-guest-ui-read"
@@ -99,7 +99,8 @@ async def capture(host, bridge, character: str, known) -> dict:
             with contextlib.suppress(FileNotFoundError, PermissionError):
                 path.unlink()
     digest = sha256(contents).hexdigest()
-    result = {"map": game["map"], "epoch": host.zone_epoch, "owner": character, "digest": digest}
+    result = {"map": game["map"], "epoch": host.zone_epoch, "owner": character, "digest": digest,
+              "revision": native_inventory_grant.next_view_revision(host)}
     if digest != known:
         result["payload"] = base64.b64encode(zlib.compress(contents, level=1)).decode("ascii")
     return {"native_guest_ui": result}
@@ -117,6 +118,9 @@ class GuestView:
         self.health_receipt = None
         self.health_checked = None
         self.health_error = None
+        self.inventory_lock = asyncio.Lock()
+        self.inventory_visit = None
+        self.full_revision = self.pickup_revision = 0
 
     async def close(self, *, preserve_stock=False):
         pending = (self.pending_stock_refresh or self.request_for_stock) if preserve_stock else None
@@ -156,6 +160,51 @@ class GuestView:
     def stock_refresh_ready(self):
         return ((self.request_for_stock is not None and self.request is not None and self.request.done())
                 or (self.pending_stock_refresh is not None and self.request is None))
+
+    def _visit_revisions(self, scope):
+        if scope != self.inventory_visit:
+            self.inventory_visit = scope
+            self.full_revision = self.pickup_revision = 0
+
+    async def present_pickup(self, client, scope, loot, operation, cue, reply, row):
+        claim = reply.get("native_loot_claim", {})
+        owner = client.invite["character_id"]
+        guid, text, revision = row.get("guid"), row.get("text"), row.get("revision")
+        item_class = claim.get("class_path")
+        if (not isinstance(guid, str) or not isinstance(text, str) or not isinstance(item_class, str)
+                or (row.get("map"), row.get("epoch"), row.get("owner"), claim.get("claimed_by")) !=
+                    (scope[2], scope[1], owner, owner)
+                or guid != claim.get("inventory_guid", claim.get("guid"))
+                or type(revision) is not int or not 0 < revision < 2**53):
+            return None, False
+        try:
+            _, _, _, units = native_inventory_grant.parse_item(f"{guid}@{item_class}@{text}")
+        except ValueError:
+            return None, False
+        if units:
+            return None, False
+        previous = (claim.get("stack_merge") or {}).get("before")
+        if previous is not None and (type(previous) is not int or not 0 < previous < 2**31):
+            return None, False
+        async with self.inventory_lock:
+            if client.stock_interaction_scope() != scope or self.inventory_scope(client) != scope:
+                return None, False
+            self._visit_revisions(scope)
+            if revision <= self.pickup_revision or revision <= self.full_revision:
+                return None, revision <= self.full_revision
+            args = guid, item_class, text, "-" if previous is None else str(previous)
+            projected = await client.world_loot.present_claim(
+                client, client.bridge, loot, operation, cue, generation=scope[0], inventory=args)
+            if projected is None or "pickup_inventory_result" not in projected:
+                return projected, False
+            outcome = projected.pop("pickup_inventory_result")
+            if client.stock_interaction_scope() != scope or self.inventory_scope(client) != scope:
+                return None, False
+            self.pickup_revision = revision
+            self.digest = "-"
+            client.control.event("native_pickup_inventory_applied", operation_id=operation, outcome=outcome,
+                                 guid=guid, revision=revision, item_bytes=len(text.encode("utf-8")))
+            return projected, True
 
     async def sync_health(self, client, active):
         game, frame = client.last_game, client.gameplay.get(HEALTH)
@@ -272,6 +321,22 @@ class GuestView:
                 client.last_game = updated
 
     async def receive(self, client, result, area, epoch, character, *, layout_sequence=None, refresh_stock=False):
+        scope = self.inventory_scope(client)
+        revision = result.get("revision", 0)
+        if type(revision) is not int or not 0 <= revision < 2**53:
+            raise ValueError("Invalid co-op inventory revision")
+        async with self.inventory_lock:
+            if scope != self.inventory_scope(client):
+                return False
+            self._visit_revisions(scope)
+            if revision < max(self.full_revision, self.pickup_revision):
+                return False
+            projected = await self._receive(client, result, area, epoch, character, layout_sequence, refresh_stock)
+            if projected and scope == self.inventory_scope(client):
+                self.full_revision = revision
+            return projected
+
+    async def _receive(self, client, result, area, epoch, character, layout_sequence, refresh_stock):
         digest = result["digest"]
         if ((result["map"], result["epoch"], result["owner"]) != (area, epoch, character)
                 or (client.last_game.get("map"), client.zone_epoch) != (area, epoch)

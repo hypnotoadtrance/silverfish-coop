@@ -113,7 +113,8 @@ class NativeGuestUIOwnershipTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(first["owner"], character)
             self.assertIn("payload", first)
             returned = (await native_guest_ui.capture(host, bridge, character, first["digest"]))["native_guest_ui"]
-            self.assertEqual(returned, {key: value for key, value in first.items() if key != "payload"})
+            self.assertEqual(returned, {**{key: value for key, value in first.items() if key != "payload"},
+                                        "revision": first["revision"] + 1})
             self.assertEqual(list(directory.iterdir()), [])
 
     async def test_projection_reports_settled_quests_and_stock_attachments(self):
@@ -315,7 +316,8 @@ class ResidentGuestUIBridgeTests(unittest.IsolatedAsyncioTestCase):
         guest_receipt = {**guest_game, "ack": {"message": "stock co-op inventory and Journal projected 0 0 0 0 0"}}
         guest_bridge = SimpleNamespace(local_bridge=object(), command=AsyncMock(),
                                        guest_ui_command=AsyncMock(return_value=(guest_receipt, None)))
-        client = SimpleNamespace(last_game=guest_game, zone_epoch=zone, bridge=guest_bridge, control=Mock())
+        client = SimpleNamespace(last_game=guest_game, host_session="session", zone_epoch=zone,
+                                 expected_zone=self.area, invite={"character_id": owner}, bridge=guest_bridge, control=Mock())
         with patch.object(runtime, "write_text", side_effect=AssertionError("unexpected disk write")):
             await native_guest_ui.GuestView().receive(client, result, self.area, zone, owner)
         guest_bridge.guest_ui_command.assert_awaited_once_with(owner, payload=self.body)
@@ -427,6 +429,24 @@ class NativeGuestStockPickupViewTests(unittest.IsolatedAsyncioTestCase):
         await self.view.sync(self.client, True)
         self.client.bridge.command.assert_not_awaited()
         self.view.receive.assert_not_awaited()
+
+    async def test_exact_pickup_rejects_an_older_full_view(self):
+        del self.view.receive
+        client, owner = self.client, str(self.character)
+        scope = self.view.inventory_scope(client)
+        guid, item_class = "A" * 32, "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
+        operation = "b" * 32
+        client.stock_interaction_scope = lambda: scope
+        client.world_loot = SimpleNamespace(present_claim=AsyncMock(return_value={"pickup_inventory_result": "merged"}))
+        reply = {"native_loot_claim": {"guid": "C" * 32, "inventory_guid": guid, "class_path": item_class,
+                                       "claimed_by": owner, "stack_merge": {"before": 3}}}
+        row = dict(owner=owner, map=self.area, epoch=self.epoch, revision=4, guid=guid, text="(Item=Bandage)")
+        _, applied = await self.view.present_pickup(client, scope, ("epoch", "id"), operation, None, reply, row)
+        self.assertTrue(applied)
+        self.assertEqual(client.world_loot.present_claim.await_args.kwargs["inventory"], (guid, item_class, row["text"], "3"))
+        self.assertFalse(await self.view.receive(client, {"revision": 3}, self.area, self.epoch, owner))
+        client.bridge.command.assert_not_awaited()
+        self.assertEqual(self.view.pickup_revision, 4)
 
 
 class NativeGuestHealthViewTests(unittest.IsolatedAsyncioTestCase):

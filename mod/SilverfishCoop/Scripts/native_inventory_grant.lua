@@ -15,6 +15,23 @@ function grant.rows(state, phase, status_row)
     return {}
 end
 
+function grant.project_pickup(state, phase, epoch, guid, item_class, text, previous)
+    if type(SilverfishImportLocalInventoryPickup) ~= "function" or not content_paths.item_class(item_class, 512)
+        or grant.pending(state, phase) then return end
+    local save, pawn = scope.bind_guest(state, phase)
+    local view = require("native_inventory_view")
+    if not save or not view.accept_layout_projection(pawn) then return end
+    local before = previous ~= "-" and math.tointeger(tonumber(previous)) or nil
+    if previous ~= "-" and not before then return end
+    local args = before and {before} or {}
+    local ok, outcome = SilverfishImportLocalInventoryPickup(pawn:GetAddress(), save:GetAddress(),
+        guid, item_class, text, table.unpack(args))
+    if not ok then return end
+    state.world.OwningGameInstance:Calc_CarryWeight()
+    view.refresh_projected(state, phase, epoch)
+    return outcome
+end
+
 function grant.command(fields, state, phase)
     local action = fields[2]
     if action == "native-inventory-grant-read" or action == "native-inventory-grant-ack" then
