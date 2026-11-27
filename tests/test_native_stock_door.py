@@ -179,3 +179,41 @@ class StockDoorActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(door.accept_delta(gameplay, {**delta, "doors": {other: opened}},
                                                CROSSROADS, self.epoch, other))
         self.assertEqual(gameplay[door.KEY]["doors"], {self.actor: self.closed, other: opened})
+
+    async def test_compact_projection_applies_only_verified_doors_and_keeps_other_world_state(self):
+        other = self.actor.replace("_1719", "_1720")
+        untouched = self.actor.replace("_1719", "_1721")
+        pawn = "Player_FP_C local guest"
+        opened = dict(self.closed, open=True, yaw=90)
+        game = {"state": "connected", "map": CROSSROADS, "sequence": 8, "pawns": {"local": {"name": pawn}},
+                "native_wallet": 20, door.KEY: {self.actor: self.closed, other: self.closed, untouched: self.closed}}
+        frame = {"map": CROSSROADS, "epoch": self.epoch, "sequence": 9, "doors": {self.actor: opened, other: opened}}
+        bridge = runtime.Bridge(None, None)
+        bridge._local_status = game
+        response = dict(sequence=9, pawn=pawn, actor=self.actor)
+
+        async def command(payload, timeout):
+            nonce, action, area, first, second = payload.decode().strip().split("\t")
+            self.assertEqual((action, area), (door.PROJECT, CROSSROADS))
+            self.assertTrue(first.startswith(self.actor + "|") and second.startswith(other + "|"))
+            return (f"native-stock-interaction-reply\t1\t{nonce}\tconnected\t{area}\t{response['sequence']}\t"
+                    f"{response['pawn']}\taccepted\tstock door flags and hinge transform synchronized|2\n"
+                    f"{door.TAG}\t{area}\t{response['actor']}\t0\t1\t1\t0\t90\t0\t0\t0\t0\t1\t2\t3\t4\t5\t6\t3\n")
+
+        bridge.local_bridge = SimpleNamespace(command=command)
+        updated = await door.project(bridge, game, frame, self.epoch)
+        self.assertIs(bridge._local_status, game)
+        self.assertIs(updated["pawns"], game["pawns"])
+        self.assertEqual(updated["native_wallet"], 20)
+        self.assertEqual(updated["sequence"], 8)
+        self.assertTrue(door.matches(updated[door.KEY][self.actor], opened))
+        self.assertEqual(updated[door.KEY][self.actor]["knob_location"], [4, 5, 6])
+        self.assertIs(updated[door.KEY][other], self.closed)
+        self.assertIs(updated[door.KEY][untouched], self.closed)
+        response["pawn"] = "departed pawn"
+        self.assertIs(await door.project(bridge, game, frame, self.epoch), game)
+        response.update(pawn=pawn, sequence=7)
+        self.assertIs(await door.project(bridge, game, frame, self.epoch), game)
+        response.update(sequence=9, actor=untouched)
+        with self.assertRaisesRegex(RuntimeError, "did not match"):
+            await door.project(bridge, game, frame, self.epoch)

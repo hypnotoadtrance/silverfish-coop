@@ -16,6 +16,7 @@ STATE_TAG = TAG + "-state"
 KEY = "native_stock_doors"
 ACTION = "native-stock-door-interact"
 DISPATCH = TAG + "-guest-interact"
+PROJECT = TAG + "-project"
 LOCAL_SCOPE = "native_stock_interaction_local_scope"
 RESULT = "native_stock_door_interaction"
 DELTA = "native_stock_door_delta"
@@ -179,7 +180,7 @@ async def project(bridge, game, frame, epoch):
         return game
     args = ("|".join((name, *("1" if row[flag] else "0" for flag in _FLAGS),
                        *(str(row[key]) for key in (*_ANGLES, *_OFFSET)))) for name, row in batch)
-    result = await bridge.command(TAG + "-project", area, *args, timeout=4)
+    result = await bridge.command(PROJECT, area, *args, timeout=4)
     after = result.get(KEY, {})
     message = result.get("ack", {}).get("message", "")
     suffix = message.split("|")[1:] if message.startswith("stock door flags and hinge transform synchronized|") else []
@@ -190,6 +191,12 @@ async def project(bridge, game, frame, epoch):
             index not in deferred and not matches(after.get(name, {}), row)
             for index, (name, row) in enumerate(batch, 1)):
         raise RuntimeError("Stock hinged door projection did not match the host")
+    if LOCAL_SCOPE in result:
+        if set(after) != {name for index, (name, _) in enumerate(batch, 1) if index not in deferred}:
+            raise RuntimeError("Stock hinged door projection receipt did not match the requested actors")
+        if not matches_local_scope(game, result) or result["sequence"] < game.get("sequence", 0):
+            return game
+        return {**game, KEY: local | after} if after else game
     return result
 
 

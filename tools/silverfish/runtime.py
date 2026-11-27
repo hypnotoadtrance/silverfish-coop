@@ -4050,11 +4050,14 @@ class Bridge:
                 or len(fields) < 3):
             raise RuntimeError("The stock interaction receipt did not match the request")
         _, _, nonce, phase, area, sequence, pawn, status, message = rows[0]
-        expected_phase = "connected" if fields[1] == native_stock_switch.PROJECT else "hosting"
+        projection = fields[1] in (native_stock_switch.PROJECT, native_stock_door.PROJECT)
+        expected_phase = "connected" if projection else "hosting"
         if fields[1] == native_stock_door.DISPATCH:
             target_in_area = native_stock_door.matches_area(fields[2], area)
         elif fields[1] == native_host_dig_live.GUEST_ACTION:
             target_in_area = valid_campaign_package(area) and fields[2].startswith(f"Player_FP_C {area}.")
+        elif fields[1] == native_stock_door.PROJECT:
+            target_in_area = valid_campaign_package(area) and fields[2] == area and 4 <= len(fields) <= 27
         else:
             # The game thread verifies the exact switch's visible level. A streamed
             # switch's level package can differ from the active visit's world.
@@ -4069,6 +4072,15 @@ class Bridge:
         reply = {"state": phase, "map": area, "sequence": local_sequence, native_stock_door.LOCAL_SCOPE: pawn,
                  "ack": {"id": nonce, "result": status, "message": message}}
         if fields[1] == native_stock_door.DISPATCH and len(rows) == 1:
+            return reply
+        if fields[1] == native_stock_door.PROJECT:
+            try:
+                observed = {row[2]: native_stock_door.parse(row, phase, area) for row in rows[1:]}
+                if len(observed) != len(rows) - 1:
+                    raise ValueError("Repeated projected stock door")
+            except (IndexError, ValueError) as error:
+                raise RuntimeError("The stock door projection receipt contained an invalid state") from error
+            reply[native_stock_door.KEY] = observed
             return reply
         if fields[1] == native_host_dig_live.GUEST_ACTION and len(rows) == 1:
             reply[native_host_dig_live.COMPACT_SCOPE] = fields[2]
@@ -4238,7 +4250,8 @@ class Bridge:
                 return self._local_storm_ambience_reply(raw, fields)
             if action == native_weather_view.SIREN_PLAY and raw.startswith(native_weather_view.SIREN_REPLY + "\t"):
                 return self._local_siren_reply(raw, fields)
-            if (action in (native_stock_door.DISPATCH, native_stock_switch.PROJECT, native_host_dig_live.GUEST_ACTION,
+            if (action in (native_stock_door.DISPATCH, native_stock_door.PROJECT,
+                           native_stock_switch.PROJECT, native_host_dig_live.GUEST_ACTION,
                            *native_stock_switch.ACTIONS)
                     and raw.startswith("native-stock-interaction-reply\t")):
                 return self._local_stock_interaction_reply(raw, fields)

@@ -1875,6 +1875,7 @@ end
 
 status_publication.stock_interactions = {
     ["native-stock-door-guest-interact"] = {phase = "hosting", command = native_stock_door.command},
+    ["native-stock-door-project"] = {phase = "connected", command = native_stock_door.project_compact},
     ["native-stock-switch-interact"] = {phase = "hosting", command = native_stock_switch.command},
     ["native-stock-switch-ignite"] = {phase = "hosting", command = native_stock_switch.command},
     ["native-stock-switch-report"] = {phase = "hosting", command = native_stock_switch.command},
@@ -1981,7 +1982,7 @@ local function tick(fields, pending, periodic)
         and status_publication.compact() and status_publication.steady(state, current_phase) then
         if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
         pending.dispatched = true
-        local accepted, message, target = pcall(interaction.command, fields, state, current_phase)
+        local accepted, message, target = pcall(interaction.command, fields, state, current_phase, status_row)
         local readback
         if accepted and interaction.command == native_stock_switch.command then
             local checked, line = pcall(native_stock_switch.read_row, target, fields[3], state, current_phase, status_row)
@@ -1990,6 +1991,8 @@ local function tick(fields, pending, periodic)
             else
                 accepted, message = false, "stock_switch_readback_unavailable"
             end
+        elseif accepted and interaction.command == native_stock_door.project_compact and #target > 0 then
+            readback = table.concat(target, "\n") .. "\n"
         end
         local reply = status_row("native-stock-interaction-reply", 1, fields[1], current_phase, state.map,
             sequence, state.local_pawn.name, accepted and "accepted" or "error", message) .. "\n"

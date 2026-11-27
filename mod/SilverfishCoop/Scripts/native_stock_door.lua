@@ -298,7 +298,9 @@ function doors.play_motion(state, pawn, fields)
     return true
 end
 
-local function project(fields, state, phase)
+local sample_door
+
+local function project(fields, state, phase, status_row)
     if phase ~= "connected" or fields[3] ~= state.map or #fields < 4 or #fields > 27 then
         error("stock_door_projection_scope_unavailable", 0)
     end
@@ -324,10 +326,18 @@ local function project(fields, state, phase)
             updates[name] = {actor = actor, arrow = arrow, before = before, expected = expected}
         end
     end
+    local records = {}
+    local scan = status_row and {actors = known, world = state.world, map = state.map, row = status_row, confirmation = true}
     local applied = pcall(function()
-        for _, row in pairs(updates) do
+        for name, row in pairs(updates) do
             apply(row.actor, row.arrow, row.expected)
-            if not matches(pose(row.actor, row.arrow), row.expected) then error("stock_door_projection_readback") end
+            local actual = pose(row.actor, row.arrow)
+            if not matches(actual, row.expected) then error("stock_door_projection_readback") end
+            if scan then
+                row.record = sample_door(scan, name, actual)
+                if not row.record then error("stock_door_projection_readback") end
+                records[#records + 1] = row.record
+            end
         end
     end)
     if not applied then
@@ -338,14 +348,21 @@ local function project(fields, state, phase)
     end
     for name, row in pairs(updates) do
         motions[name] = nil
+        if row.record and sampler and sampler.actors == known then
+            sampler.readings[name], sampler.samples[name] = row.record, nil
+        end
         if preview and preview.name == name and (row.expected[1] or row.expected[3] == preview.opens) then
             clear_preview()
         end
     end
-    return "stock door flags and hinge transform synchronized" .. (#deferred > 0 and "|" .. table.concat(deferred, "|") or "")
+    return "stock door flags and hinge transform synchronized" .. (#deferred > 0 and "|" .. table.concat(deferred, "|") or ""), records
 end
 
-local function sample_door(scan, name, ready_pose)
+function doors.project_compact(fields, state, phase, status_row)
+    return project(fields, state, phase, status_row)
+end
+
+sample_door = function(scan, name, ready_pose)
     local actor, parts = scan.actors[name], door_parts[name]
     if not world_path.visible_actor_level(actor, scan.world, scan.streams) or not parts
         or not valid(parts[1]) or not valid(parts[2]) or not valid(parts[3]) then return end

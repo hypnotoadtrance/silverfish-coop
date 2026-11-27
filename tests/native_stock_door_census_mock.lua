@@ -111,6 +111,28 @@ for _ = 1, 40 do
 end
 assert(#current_rows(doors, state) == 30, "the bounded pass must still publish every valid door")
 
+local close = {"request", "native-stock-door-project", state.map, target.name .. "|0|0|0|0|0|0|0|0|0"}
+local prior_encodes = encodes
+local reply, readback = doors.project_compact(close, state, "connected", row)
+assert(reply == "stock door flags and hinge transform synchronized"
+    and #readback == 1 and encodes == prior_encodes + 1 and not target.Open)
+assert(readback[1][1] == "native-stock-door" and readback[1][3] == target.name and readback[1][6] == 0)
+local published
+for _, reading in ipairs(current_rows(doors, state)) do
+    if reading[3] == target.name then published = reading end
+end
+assert(published == readback[1], "the next periodic frame must see the same projection")
+local other = state.world.doors[29]
+local open_both = {table.unpack(command)}
+open_both[5] = other.name .. "|0|0|1|0|90|0|0|5|0"
+other.DoorMesh.GetCollisionEnabled = function() return -1 end
+assert(not pcall(doors.project_compact, open_both, state, "connected", row),
+    "unverified readback must reject the whole projection")
+assert(not target.Open and not other.Open, "failure must restore all changed flags")
+assert(target.Arrow.RelativeRotation.Yaw == 0 and other.Arrow.RelativeRotation.Yaw == 0,
+    "failure must restore all changed transforms")
+other.DoorMesh.GetCollisionEnabled = function() return 3 end
+
 target.destroying = true
 assert(not pcall(doors.command, command, state, "connected"), "a cached door undergoing destruction cannot be projected")
 target.destroying = false
