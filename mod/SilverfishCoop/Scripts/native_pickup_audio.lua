@@ -61,7 +61,7 @@ function audio.command(fields, state, phase, loaded_only)
         end
         x, y, z = tonumber(x), tonumber(y), tonumber(z)
         local positioned = x and y and z
-        local show_cash = amount and phase == "connected" and not loaded_only
+        local show_cash = amount and phase == "connected"
         if token(id) and seen[id] then
             heard[#heard + 1] = id
         elseif token(id) and content_paths.item_class(path) and (positioned or show_cash) then

@@ -156,7 +156,7 @@ class HostPickupPresentationTests(unittest.IsolatedAsyncioTestCase):
         self.guid = "A" * 32
         self.item = "/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C"
         self.crate = "the selected stock container"
-        self.game = {"state": "hosting", "map": OBSERVATORY, loot.HOST_PRESENTATION: True,
+        self.game = {"state": "hosting", "map": OBSERVATORY, loot.PRESENTATION: True,
                      "pawns": {"local": {"name": "host", "location": [0, 0, 0]}}}
         self.cues, self.playback, self.control = PickupAudio(), Playback(), Mock(generation="host-session")
         self.cues.append(self.game, self.audio_epoch, "host", self.operation, self.item)
@@ -171,7 +171,7 @@ class HostPickupPresentationTests(unittest.IsolatedAsyncioTestCase):
         self.bridge = Mock(local_bridge=object(), command=AsyncMock())
         self.args = f"{self.operation}|{self.item}|0|0|0"
         self.played = call("native_pickup_sound_played", operation_id=self.operation, map=OBSERVATORY)
-        self.batch = call(loot.PRESENT_HOST_CLAIM, self.projection_epoch, self.identity, OBSERVATORY,
+        self.batch = call(loot.PRESENT_CLAIM, self.projection_epoch, self.identity, OBSERVATORY,
                           self.audio_epoch, self.args, timeout=3)
 
     async def retire(self):
@@ -249,7 +249,7 @@ class HostPickupPresentationTests(unittest.IsolatedAsyncioTestCase):
             call("native_world_loot_retirement_deferred", reason="receipt timed out"), self.played])
 
     async def test_older_lua_keeps_the_normal_retirement(self):
-        del self.game[loot.HOST_PRESENTATION]
+        del self.game[loot.PRESENTATION]
         self.bridge.command.return_value = self.game
         await self.retire()
         self.bridge.command.assert_awaited_once_with(loot.RETIRE, self.projection_epoch, self.identity, timeout=3)

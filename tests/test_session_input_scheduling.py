@@ -8,7 +8,7 @@ from unittest.mock import ANY, AsyncMock, Mock, call, patch
 import uuid
 
 from tools.silverfish import (
-    gameplay_snapshot, native_flashlight, native_loot, native_player_avatar, native_stock_door, native_world_loot,
+    gameplay_snapshot, native_flashlight, native_loot, native_pickup_audio, native_player_avatar, native_stock_door, native_world_loot,
     runtime, service,
 )
 from tools.silverfish.travel import OBSERVATORY, PLAYTEST_MAPS
@@ -456,7 +456,8 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         finished = asyncio.Event()
         operations = []
 
-        async def send(_action, operation, _target):
+        async def send(_action, operation, _target, *, defer_pickup_cue):
+            self.assertTrue(defer_pickup_cue)
             operations.append(operation)
             if operation == "press-4":
                 second_sent.set()
@@ -502,6 +503,48 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         await task
         client.gameplay_action.assert_not_awaited()
         client.bridge.command.assert_not_awaited()
+
+    async def test_projected_guest_pickup_retires_item_and_plays_one_sound(self):
+        epoch, projection_epoch, item, operation = (letter * 32 for letter in "abcd")
+        class_path = "/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C"
+        cue = {"map": OBSERVATORY, "epoch": epoch, "cues": [[operation, class_path, [1, 2, 3]]]}
+        transport = AsyncMock(return_value={"ok": True, "picked": item, native_pickup_audio.KEY: cue})
+        client = self.guest(transport)
+        client.transport.connected = True
+        client.host_session, client.zone_epoch, client.expected_zone = "session", epoch, OBSERVATORY
+        character = uuid.UUID(int=1)
+        client.invite["character_id"] = str(character)
+        client.last_game = {"state": "connected", "map": OBSERVATORY, native_world_loot.PRESENTATION: True,
+                            "save_scope": character.hex,
+                            "pawns": {"local": {"name": "guest pawn", "location": [1, 2, 3]}},
+                            native_world_loot.KEY: {item: {}}}
+        client.world_loot.epoch = projection_epoch
+        client.world_loot.seat = "connected", OBSERVATORY, "guest pawn"
+        client.world_loot.items[item] = native_world_loot.Item(
+            item, class_path, {}, native_world_loot.ENEMY_CLAIM, item, 1)
+        admitted, finish = asyncio.Event(), asyncio.Event()
+
+        async def local(*args, **kwargs):
+            admitted.set()
+            await finish.wait()
+            return {"ack": {"message": f"retired|{operation}"}}
+
+        client.bridge.command = AsyncMock(side_effect=local)
+        async with asyncio.TaskGroup() as tasks:
+            claimed = tasks.create_task(client.apply_stock_interaction(
+                client.stock_interaction_scope(), operation, f"world-loot:{projection_epoch}:{item}:2"))
+            await asyncio.wait_for(admitted.wait(), 1)
+            # The same sound can arrive again in a gameplay snapshot before the receipt.
+            await client.pickup_playback.sync(client.bridge, client.control, client.last_game, cue, epoch, "session")
+            self.assertEqual(client.bridge.command.await_count, 1)
+            finish.set()
+        self.assertEqual(claimed.result(), {"picked": item})
+        self.assertNotIn(item, client.last_game[native_world_loot.KEY])
+        self.assertEqual(client.guest_ui.pending_stock_refresh, client.stock_interaction_scope())
+        client.bridge.command.assert_awaited_once_with(
+            native_world_loot.PRESENT_CLAIM, projection_epoch, item, OBSERVATORY, epoch,
+            f"{operation}|{class_path}|1|2|3", timeout=3)
+        client.control.event.assert_any_call("native_pickup_sound_played", operation_id=operation, map=OBSERVATORY)
 
     async def test_queued_stock_interactions_dispatch_before_delayed_flashlight_projection(self):
         session, epoch, operation = "a" * 32, "b" * 32, "c" * 32

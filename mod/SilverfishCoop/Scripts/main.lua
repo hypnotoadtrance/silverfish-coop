@@ -1835,7 +1835,7 @@ end
 status_publication.pickup_presentation = {
     ["native-sound-pickup"] = native_pickup_audio.command,
     ["native-world-loot-retire"] = native_guest_drop_projection.command,
-    ["native-world-loot-present-host-claim"] = native_guest_drop_projection.command,
+    ["native-world-loot-present-claim"] = native_guest_drop_projection.command,
 }
 
 status_publication.guest_combat_actions = {

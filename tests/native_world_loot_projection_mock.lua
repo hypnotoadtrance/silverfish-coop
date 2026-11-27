@@ -99,24 +99,38 @@ local function cue(id)
     return id .. "|" .. ammo .. "|1|2|3"
 end
 local function present(id, phase)
-    return projection.command({"request", "native-world-loot-present-host-claim", epoch, good,
+    return projection.command({"request", "native-world-loot-present-claim", epoch, good,
         area, epoch, cue(id)}, state, phase)
 end
 
-assert(not pcall(present, operation, "connected"))
-state.server = false
-assert(present(operation, "hosting") == "retired|")
+assert(not pcall(present, operation, "hosting"))
+assert(present(operation, "connected") == "retired|")
 assert(play_count == 0 and loads == 0)
-assert(audio.command({"request", "native-sound-pickup", area, epoch, cue(operation)}, state, "hosting") == operation)
+assert(audio.command({"request", "native-sound-pickup", area, epoch, cue(operation)}, state, "connected") == operation)
 assert(play_count == 1 and loads == 1)
+assert(projection.command(frame, state, "connected") == "stock world loot synchronized")
+assert(present(other_operation, "connected") == "retired|" .. other_operation)
+assert(play_count == 2 and loads == 1)
+local cash = require("authored_cash_catalog")[1]
+local cash_operation = string.rep("2", 32)
+pawn.HasAuthority = function() return false end
+pawn.IsActorBeingDestroyed = function() return false end
+pawn.Controller = object({GetAddress = function() return 3 end})
+state.controller = pawn.Controller
+local cash_command = {"request", "native-sound-pickup", area, epoch,
+    cash_operation .. "|" .. cash.class .. "|cash|" .. cash.cash_min}
+assert(audio.command(cash_command, state, "connected", true) == cash_operation)
+assert(play_count == 2 and loads == 1)
+state.server = false
 assert(projection.command(frame, state, "hosting") == "stock world loot synchronized")
 blocked = true
-assert(present(other_operation, "hosting") == "world_loot_retirement_pending|" .. other_operation)
-assert(play_count == 2 and loads == 1)
-assert(audio.command({"request", "native-sound-pickup", area, epoch, cue(other_operation)}, state, "hosting")
-    == other_operation)
-assert(play_count == 2)
-print("Host presentation never loads missing assets and each effect can complete independently")
+local host_operation = string.rep("1", 32)
+assert(present(host_operation, "hosting") == "world_loot_retirement_pending|" .. host_operation)
+assert(play_count == 3 and loads == 1)
+assert(audio.command({"request", "native-sound-pickup", area, epoch, cue(host_operation)}, state, "hosting")
+    == host_operation)
+assert(play_count == 3)
+print("Pickup presentation uses loaded assets on both seats and the effects can complete independently")
 
 blocked = false
 local fall_id = string.rep("f", 32)

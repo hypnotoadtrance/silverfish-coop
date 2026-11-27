@@ -3000,8 +3000,8 @@ class Bridge:
                     data["native_loot"] = _parse_stock_loot_receipt(fields)
                 elif fields[0] == "native-world-loot-capability" and len(fields) == 2 and fields[1] in {"1", "2"}:
                     data[native_world_loot.CAPABILITY] = int(fields[1])
-                elif fields == ["native-world-loot-host-presentation", "1"] and data.get("state") == "hosting":
-                    data[native_world_loot.HOST_PRESENTATION] = True
+                elif fields == ["native-world-loot-pickup-presentation", "1"] and data.get("state") in {"hosting", "connected"}:
+                    data[native_world_loot.PRESENTATION] = True
                 elif fields[0] == native_world_loot.ROW:
                     item = native_world_loot.parse(fields, data.get("state"), data.get("map"))
                     projected = data.setdefault(native_world_loot.KEY, {})
@@ -4183,7 +4183,7 @@ class Bridge:
             receipt_tag = None
             if action == "native-weapon-play-shots":
                 receipt_tag = "weapon-cue-ack"
-            elif action in (native_pickup_audio.COMMAND, native_world_loot.RETIRE, native_world_loot.PRESENT_HOST_CLAIM):
+            elif action in (native_pickup_audio.COMMAND, native_world_loot.RETIRE, native_world_loot.PRESENT_CLAIM):
                 receipt_tag = "pickup-presentation-ack"
             if receipt_tag and raw.startswith(receipt_tag + "\t"):
                 receipt = raw[:-1].split("\t", 3) if raw.endswith("\n") and "\n" not in raw[:-1] else []

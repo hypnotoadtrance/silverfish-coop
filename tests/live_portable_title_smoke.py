@@ -754,7 +754,7 @@ def cabinet_provenance(archive: Path, games: tuple[Path, Path], releases: tuple[
                 raise ValueError("The cabinet release does not identify its packed source revision")
         if candidate_sha256:
             projection = runtime.SHIPPING.parent / runtime.MOD_SCRIPTS / "native_guest_drop_projection.lua"
-            if b"native-world-loot-present-host-claim" not in bundle.read(projection.as_posix()):
+            if runtime.native_world_loot.PRESENT_CLAIM.encode("ascii") not in bundle.read(projection.as_posix()):
                 raise ValueError("The pinned candidate does not include the joint pickup command")
     return {"release_source": revision[:7], "release_revision": revision, "release_archive_sha256": expected,
             "native_sha256": fingerprint(gameplay), "runtime_manifest_sha256": release.manifest_sha256,

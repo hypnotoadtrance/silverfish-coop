@@ -265,7 +265,7 @@ function projection.rows(state, phase, row)
     local shared_pickups = valid(pawn) and type(SilverfishSyncNativeWorldLootItem) == "function"
     if shared_pickups then
         rows[#rows + 1] = row("native-world-loot-capability", 2)
-        if phase == "hosting" then rows[#rows + 1] = row("native-world-loot-host-presentation", 1) end
+        rows[#rows + 1] = row("native-world-loot-pickup-presentation", 1)
     end
     if current and (current.map ~= state.map or not same(pawn, current.pawn) or not same(state.world, current.world)) then
         current = nil
@@ -443,11 +443,11 @@ local function retire(state, phase, epoch, id)
     return "stock world loot retired"
 end
 
-local function present_host_claim(fields, state, phase)
+local function present_claim(fields, state, phase)
     local epoch, id, area, audio_epoch, cue = fields[3], fields[4], fields[5], fields[6], fields[7]
     local entry, pawn = world_items[id], local_pawn(state, phase)
     local class = cue and cue:match("^%x+|([^|]+)|")
-    if #fields ~= 7 or phase ~= "hosting" or not pawn or area ~= state.map
+    if #fields ~= 7 or not pawn or area ~= state.map
         or not identifier(epoch) or not identifier(id) or not identifier(audio_epoch) or not class then
         error("world_loot_retirement_scope_unavailable", 0)
     end
@@ -478,8 +478,8 @@ function projection.command(fields, state, phase)
     elseif command == "native-world-loot-retire" then
         if #fields ~= 4 then error("world_loot_retirement_scope_unavailable", 0) end
         return retire(state, phase, fields[3], fields[4])
-    elseif command == "native-world-loot-present-host-claim" then
-        return present_host_claim(fields, state, phase)
+    elseif command == "native-world-loot-present-claim" then
+        return present_claim(fields, state, phase)
     elseif command == "native-world-loot-approach" then
         local id, pawn_name = fields[3], fields[4]
         local item, pawn = world_items[id]

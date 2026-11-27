@@ -5855,7 +5855,8 @@ class Client:
         return {"revision": receipt["revision"], "retirement_confirmed": confirmed}
 
     async def gameplay_action(self, action: str, operation_id: str, target: str | None,
-                              retained: dict | None = None, *, merchant: str | None = None) -> dict:
+                              retained: dict | None = None, *, merchant: str | None = None,
+                              defer_pickup_cue: bool = False) -> dict:
         if not self.transport.connected or (action != "keep" and self.last_game.get("state") != "connected"):
             raise RuntimeError("game_connection_unavailable")
         area, epoch, session = self.last_game.get("map"), self.zone_epoch, self.host_session
@@ -5955,8 +5956,11 @@ class Client:
         cue = reply.pop(native_pickup_audio.KEY, None)
         if isinstance(cue, dict) and isinstance(rows := cue.get("cues"), list) and len(rows) == 1:
             if isinstance(rows[0], list) and len(rows[0]) == 3 and rows[0][0] == operation_id:
-                self.last_game = await self.pickup_playback.sync(
-                    self.bridge, self.control, self.last_game, cue, self.zone_epoch, self.host_session)
+                if defer_pickup_cue:
+                    reply[native_pickup_audio.KEY] = cue
+                else:
+                    self.last_game = await self.pickup_playback.sync(
+                        self.bridge, self.control, self.last_game, cue, self.zone_epoch, self.host_session)
         return {key: value for key, value in reply.items() if key != "ok"}
 
     async def service_reload_input(self, active: bool, game: dict | None = None) -> None:
@@ -7251,17 +7255,26 @@ class Client:
             async with self.stock_pickup_slots:
                 if self.stock_interaction_scope() != scope:
                     raise ValueError("The stock pickup visit changed")
-                result = await self.gameplay_action(action, operation, claim)
+                result = await self.gameplay_action(action, operation, claim, defer_pickup_cue=True)
+            cue = result.pop(native_pickup_audio.KEY, None)
             if self.stock_interaction_scope() == scope:
                 try:
                     game = self.last_game
-                    projected = await self.world_loot.retire_claim(self.bridge, game, loot)
+                    projected = await self.world_loot.present_claim(
+                        self, self.bridge, loot, operation, cue, generation=scope[0])
+                    if projected is None:
+                        projected = await self.world_loot.retire_claim(self.bridge, game, loot)
                     if self.last_game is game and self.stock_interaction_scope() == scope:
                         self.last_game = projected
                 except (OSError, RuntimeError) as error:
                     self.control.event("native_world_loot_retirement_deferred", reason=str(error))
                 if self.stock_interaction_scope() == scope:
                     self.guest_ui.queue_stock_inventory(self)
+                    if cue:
+                        game = self.last_game
+                        heard = await self.pickup_playback.sync(self.bridge, self.control, game, cue, scope[1], scope[0])
+                        if self.last_game is game and self.stock_interaction_scope() == scope:
+                            self.last_game = heard
             return result
         if dropped := native_guest_drop_projection.target_parts(target):
             result = await self.stack_drop_projection.reclaim(self, operation, dropped)

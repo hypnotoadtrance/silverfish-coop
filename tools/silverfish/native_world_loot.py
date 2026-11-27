@@ -26,8 +26,8 @@ MOVING = "native_world_loot_moving"
 FRAME = "native-world-loot-frame"
 FRAME_REPLY = "native-world-loot-frame-reply"
 RETIRE = "native-world-loot-retire"
-PRESENT_HOST_CLAIM = "native-world-loot-present-host-claim"
-HOST_PRESENTATION = "native_world_loot_host_presentation"
+PRESENT_CLAIM = "native-world-loot-present-claim"
+PRESENTATION = "native_world_loot_pickup_presentation"
 FIXTURE = "native-world-loot-fixture"
 APPROACH = "native-world-loot-approach"
 CAPABILITY = "native_world_loot_version"
@@ -485,32 +485,42 @@ class Projection:
 
     async def present_host_claim(self, host, bridge, target, operation, result):
         game = host.last_game
-        epoch, identity = target[:2]
+        identity = target[1]
         item = self.items.get(identity)
         claim = result.get("native_loot_claim", {})
-        if (bridge.local_bridge is None or game.get("state") != "hosting"
-                or game.get(HOST_PRESENTATION) is not True or epoch != self.epoch
-                or not item or identity in self.moving or item.claim_action != CRATE_CLAIM
+        if (not item or item.claim_action != CRATE_CLAIM
                 or claim.get("claimed_by") != "host" or claim.get("class_path") != item.class_path
                 or f"{claim.get('guid')}@{result.get('native_loot_crate')}" != item.claim_target):
             return await self.retire_claim(bridge, game, target)
 
-        playback, control, audio_epoch = host.pickup_playback, host.control, host.zone_epoch
-        cue = host.pickup_audio.frame(game, audio_epoch, operation=operation)
-        args, asked = playback.prepare(game, cue, audio_epoch, control.generation)
-        if len(args) != 1 or asked.keys() != {operation}:
-            return await self.retire_claim(bridge, game, target)
+        cue = host.pickup_audio.frame(game, host.zone_epoch, operation=operation)
+        presented = await self.present_claim(host, bridge, target, operation, cue, generation=host.control.generation)
+        return await self.retire_claim(bridge, game, target) if presented is None else presented
 
+    async def present_claim(self, seat, bridge, target, operation, cue, *, generation):
+        game, playback, control, audio_epoch = seat.last_game, seat.pickup_playback, seat.control, seat.zone_epoch
+        epoch, identity = target[:2]
+        item = self.items.get(identity)
+        if (bridge.local_bridge is None or game.get(PRESENTATION) is not True or epoch != self.epoch
+                or not item or identity in self.moving or not isinstance(cue, dict)):
+            return None
+        args, asked = playback.prepare(game, cue, audio_epoch, generation)
+        if len(args) != 1 or asked.keys() != {operation} or args[0].split("|", 2)[1] != item.class_path:
+            return None
+
+        area, pending = game["map"], playback.pending
+        pending.add(operation)
         self._remember_retirement(identity)
-        area = game["map"]
         try:
-            snapshot = await bridge.command(PRESENT_HOST_CLAIM, epoch, identity, area, audio_epoch, args[0], timeout=3)
+            snapshot = await bridge.command(PRESENT_CLAIM, epoch, identity, area, audio_epoch, args[0], timeout=3)
         except (OSError, RuntimeError, TimeoutError) as error:
             control.event("native_world_loot_retirement_deferred", reason=str(error))
             return game
+        finally:
+            pending.discard(operation)
 
         status, separator, heard = snapshot.get("ack", {}).get("message", "").partition("|")
-        if separator:
+        if separator and pending is playback.pending:
             playback.acknowledge(control, area, asked, heard)
         if not separator or status != "retired" or identity in snapshot.get(KEY, {}):
             reason = status if status.startswith("world_loot_retirement_") else "The claimed stock world item did not retire"

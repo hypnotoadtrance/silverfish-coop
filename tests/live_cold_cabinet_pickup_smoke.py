@@ -35,7 +35,7 @@ PRIVATE_RUNTIME = next((parent / "Runtime" for parent in (ROOT.parent, ROOT.pare
 CABINET = full_name(OBSERVATORY, "LootCabnet_Small_BP_C_3")
 SEED = 441206
 PROFILE_MODULE = "cabinet_pickup_profile.lua"
-JOINT_PRESENTATION = "native-world-loot-present-host-claim"
+JOINT_PRESENTATION = "native-world-loot-present-claim"
 PROBES = {
     "native_loot_actions.lua": {
         "pcall(loot.claim_context, state, phase, pawn, crate, point)": (
@@ -407,7 +407,7 @@ async def verify_resident_pickup(host, guest, guest_pawn: str, source: tuple[dic
     host_pawn = game["pawns"]["local"]["name"]
     assert game["map"] == OBSERVATORY
     if combined:
-        assert game.get("native_world_loot_host_presentation") is True, "The packed worker lacks the joint pickup capability"
+        assert game.get(native_world_loot.PRESENTATION) is True, "The packed worker lacks the joint pickup capability"
 
     async def submit_ok(run, action, **arguments):
         result = await submit(run, action, **arguments)

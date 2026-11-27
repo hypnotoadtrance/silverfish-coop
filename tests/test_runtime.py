@@ -381,7 +381,7 @@ class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
 
         bridge.local_bridge.command.side_effect = reply
         for action in (runtime.native_pickup_audio.COMMAND, runtime.native_world_loot.RETIRE,
-                       runtime.native_world_loot.PRESENT_HOST_CLAIM):
+                       runtime.native_world_loot.PRESENT_CLAIM):
             result = await bridge.command(action, "fixture")
             self.assertEqual(set(result), {"ack"})
             self.assertEqual(result["ack"]["message"], action)
