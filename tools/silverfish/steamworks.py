@@ -108,6 +108,10 @@ class Steamworks:
         get_user = _binding(dll, "SteamUser_v023", pointer)
         get_utils = _binding(dll, "SteamUtils_v010", pointer)
         get_app_id = _binding(dll, "ISteamUtils_GetAppID", C.c_uint32, pointer)
+        self._is_call_completed = _binding(dll, "ISteamUtils_IsAPICallCompleted", boolean, pointer, number64,
+                                           C.POINTER(boolean))
+        self._get_completed_call = _binding(dll, "ISteamUtils_GetAPICallResult", boolean, pointer, number64,
+                                            pointer, integer, integer, C.POINTER(boolean))
         get_user_id = _binding(dll, "ISteamUser_GetSteamID", number64, pointer)
         logged_on = _binding(dll, "ISteamUser_BLoggedOn", boolean, pointer)
         relay_init = _binding(dll, "ISteamNetworkingUtils_InitRelayNetworkAccess", None, pointer)
@@ -244,6 +248,25 @@ class Steamworks:
     def join_lobby(self, lobby_id: int) -> int:
         self._require_open()
         return self._remember(LOBBY_ENTER, self._join_lobby(self._matchmaking, _steam_id(lobby_id)))
+
+    def take_join_result(self, handle: int) -> tuple[int, bytes, int] | None:
+        """Recover a completed JoinLobby result whose notification has not arrived."""
+        self._require_open()
+        if self._pending.get(handle) != LOBBY_ENTER:
+            return None
+        failed = C.c_bool()
+        if not self._is_call_completed(self._utils, handle, C.byref(failed)):
+            return None
+        completed_with_failure = failed.value
+        size = _CALL_RESULT_SIZE[LOBBY_ENTER]
+        buffer = C.create_string_buffer(size)
+        ok = self._get_completed_call(self._utils, handle, buffer, size, LOBBY_ENTER, C.byref(failed))
+        call_failed = completed_with_failure or failed.value
+        if not ok and not call_failed:
+            return None
+        # Manual dispatch uses this same entry, so a later notification is ignored.
+        del self._pending[handle]
+        return LOBBY_ENTER, buffer.raw if ok and not call_failed else b"", handle
 
     def request_lobbies(self, key: str, value: str, *, limit: int) -> int:
         self._require_open()

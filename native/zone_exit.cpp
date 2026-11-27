@@ -1140,18 +1140,31 @@ namespace
         return discover_exit(exit, read_object(field<Unreal::FObjectProperty>(exit, STR("Box")), exit), world);
     }
 
-    int lua_discovered_overlap(const Lua& lua)
+    int lua_snapshot_discovered_overlaps(const Lua& lua)
     {
         if (!Unreal::IsInGameThreadRaw() || scope.generation != generation.load(std::memory_order_acquire) ||
-            Clock::now() >= scope.expires || lua.get_stack_size() != 2 || !lua.is_string(1) || !lua.is_integer(2)) return 0;
+            Clock::now() >= scope.expires || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
         auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
-        auto* exit = exit_by_name(lua.get_string());
-        if (!world || !exit || address(exit) != static_cast<Address>(lua.get_integer())) return 0;
-        const auto route = unregistered_exit(exit, world);
-        if (!route) return 0;
-        lua.set_string(RC::to_string(route->destination));
-        lua.set_string(RC::to_string(route->entrance));
-        return 2;
+        if (!live_object(world) || !scope.exit_class || address(world) != static_cast<Address>(lua.get_integer())) return 0;
+
+        std::vector<Unreal::AActor*> actors;
+        Unreal::UGameplayStatics::GetAllActorsOfClass(world, scope.exit_class, actors);
+        std::string rows;
+        constexpr std::size_t candidate_limit = 128;
+        for (auto* actor : std::span{actors}.first(std::min(actors.size(), candidate_limit)))
+        {
+            if (!live_object(actor) || !actor->GetActorEnableCollision()) continue;
+            auto* parent = field<Unreal::FWeakObjectProperty>(actor, STR("ParentComponent"));
+            if (parent && parent->GetPropertyValueInContainer(actor).Get()) continue;
+            const auto route = unregistered_exit(actor, world);
+            if (!route) continue;
+            const auto path = RC::to_utf8_string(actor->GetPathName());
+            if (!path.starts_with('/') || path.size() > 512 || path.find_first_of("\r\n\t") != std::string::npos) continue;
+            rows.append(path).push_back('\t');
+            rows.append(RC::to_utf8_string(route->entrance)).push_back('\n');
+        }
+        lua.set_string(rows);
+        return 1;
     }
 
     int lua_exit_approach(const Lua& lua)
@@ -1771,7 +1784,7 @@ namespace silverfish::native_zone
         lua.register_function("SilverfishClearNativeZoneScope", lua_clear);
         lua.register_function("SilverfishPauseNativeZoneScope", lua_pause);
         lua.register_function("SilverfishSetNativeExitApproach", lua_exit_approach);
-        lua.register_function("SilverfishInspectDiscoveredOverlap", lua_discovered_overlap);
+        lua.register_function("SilverfishSnapshotDiscoveredOverlaps", lua_snapshot_discovered_overlaps);
         lua.register_function("SilverfishInspectMapPackage", lua_inspect_map_package);
         lua.register_function("SilverfishSnapshotNativeWorldActorPaths", lua_snapshot_world_actor_paths);
         lua.register_function("SilverfishCheckNativeExitCrossing", lua_exit_crossing);

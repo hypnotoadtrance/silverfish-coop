@@ -138,6 +138,30 @@ class RosterEnrollmentTests(unittest.TestCase):
         rebound = self.roster.observe(snapshot(5, self.second, connection(3))).assignment
         self.assertEqual((rebound.character_id, rebound.connection_id), ("char-3", "c3"))
 
+    def test_departure_requires_current_census_and_original_driver_and_character(self):
+        self.enroll_first()
+        self.assertFalse(self.roster.departure_current("first", "char-1", snapshot(3)))
+        self.assertEqual(self.roster.retire("first", snapshot(3)).state, "released")
+        self.assertTrue(self.roster.departure_current("first", "char-1", snapshot(3)))
+        self.assertFalse(self.roster.departure_current("first", "char-2", snapshot(3)))
+
+        for unqualified in (snapshot(2), snapshot(3, self.first), snapshot(4, driver="d2"),
+                            snapshot(4, map_name=OBSERVATORY), dict(snapshot(3), native_roster=None)):
+            self.assertFalse(self.roster.departure_current("first", "char-1", unqualified))
+
+        # The old actor identities must also be absent even if a row has a new ID.
+        self.roster.observe(snapshot(4, dict(self.first, id="c3")))
+        self.assertFalse(self.roster.departure_current("first", "char-1", snapshot(4, dict(self.first, id="c3"))))
+        self.roster.observe(snapshot(5))
+        self.assertTrue(self.roster.departure_current("first", "char-1", snapshot(5)))
+        pending = self.roster.reserve("second", "char-2", snapshot(5)).reservation
+        self.assertFalse(self.roster.departure_current("first", "char-1", snapshot(5)))
+        self.roster.cancel(pending.id)
+        self.roster.begin_travel()
+        self.assertFalse(self.roster.departure_current("first", "char-1", snapshot(5)))
+        self.roster.observe(snapshot(6, driver="d2", map_name=OBSERVATORY))
+        self.assertFalse(self.roster.departure_current("first", "char-1", snapshot(6, driver="d2", map_name=OBSERVATORY)))
+
     def test_stale_cancel_cannot_cancel_another_reservation(self):
         first = self.roster.reserve("first", "char-1", snapshot(1)).reservation
         self.assertEqual(self.roster.cancel(first.id).reason, "reservation_cancelled")

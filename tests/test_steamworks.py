@@ -1,7 +1,7 @@
 import ctypes as C
 import struct
 import unittest
-from unittest.mock import Mock
+from unittest.mock import ANY, Mock
 
 from tools.silverfish import steamworks
 
@@ -13,6 +13,7 @@ class _Dll:
         self.callbacks = []
         self.callback_memory = None
         self.results = {}
+        self.completed = set()
         self.exports = {}
         self.functions = {
             "InitFlat": 0,
@@ -25,6 +26,8 @@ class _Dll:
             "SteamUser_v023": 2,
             "SteamUtils_v010": 2,
             "ISteamUtils_GetAppID": app,
+            "ISteamUtils_IsAPICallCompleted": self.is_completed,
+            "ISteamUtils_GetAPICallResult": self.result,
             "ISteamUser_BLoggedOn": True,
             "ISteamUser_GetSteamID": 76561198000000001,
             "ISteamMatchmaking_CreateLobby": 24,
@@ -65,6 +68,9 @@ class _Dll:
             return True
         C.memmove(out, payload, size)
         return True
+
+    def is_completed(self, utils, handle, failed):
+        return handle in self.completed
 
 
 class SteamworksTests(unittest.TestCase):
@@ -120,6 +126,33 @@ class SteamworksTests(unittest.TestCase):
         ])
         self.assertEqual(api.poll_callbacks(), [(510, matches, active), (504, entered, joining)])
         self.assertEqual(dll.SteamAPI_ManualDispatch_FreeLastCallback.call_count, 3)
+
+    def test_exact_join_result_recovery_consumes_the_manual_dispatch_entry(self):
+        dll = _Dll()
+        api = steamworks.Steamworks(dll)
+        self.addCleanup(api.close)
+        creating = api.create_lobby()
+        joining = api.join_lobby(17)
+        self.assertIsNone(api.take_join_result(creating))
+        self.assertIsNone(api.take_join_result(joining))
+        dll.SteamAPI_ISteamUtils_IsAPICallCompleted.assert_called_once_with(api._utils, joining, ANY)
+        dll.SteamAPI_ISteamUtils_GetAPICallResult.assert_not_called()
+
+        entered = struct.pack("<QIB3xI4x", 17, 0, 0, 1)
+        dll.results[joining] = entered
+        dll.completed.add(joining)
+        native_result = dll.SteamAPI_ISteamUtils_GetAPICallResult
+        native_result.side_effect = lambda *_: False
+        self.assertIsNone(api.take_join_result(joining))
+        native_result.side_effect = dll.result
+        self.assertEqual(api.take_join_result(joining), (504, entered, joining))
+        native_result.assert_called_with(api._utils, joining, ANY, 24, 504, ANY)
+        self.assertIsNone(api.take_join_result(joining))
+
+        dll.callbacks.append((703, struct.pack("<QiI", joining, 504, 24)))
+        self.assertEqual(api.poll_callbacks(), [])
+        dll.SteamAPI_ManualDispatch_GetAPICallResult.assert_not_called()
+        dll.SteamAPI_ManualDispatch_FreeLastCallback.assert_called_once_with(api._pipe)
 
     def test_received_data_is_copied_and_each_message_is_released(self):
         dll = _Dll()

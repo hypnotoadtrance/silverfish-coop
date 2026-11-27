@@ -52,6 +52,7 @@ class FakeSteam:
         self.callbacks, self.messages = [], []
         self.left, self.accepted, self.closed_channels = [], [], []
         self.discarded_searches = []
+        self.completed_joins = {}
         self.presence = self.invited = None
         self.closed = False
         self.overlay = True
@@ -67,6 +68,11 @@ class FakeSteam:
         self.platform.members.add(self.local_id)
         self.callbacks.append((_CALLBACK_ENTER, struct.pack("<QIB3xI4x", lobby, 0, 0, 1), 26))
         return 26
+
+    def take_join_result(self, handle):
+        if handle in self.completed_joins:
+            return _CALLBACK_ENTER, self.completed_joins.pop(handle), handle
+        return None
 
     def leave_lobby(self, lobby):
         self.left.append(lobby)
@@ -154,6 +160,65 @@ class Inbox(asyncio.DatagramProtocol):
 
 
 class SteamTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retry_reuses_timed_out_join_and_recovers_its_missing_callback(self):
+        platform = Platform()
+        host = await self.start(platform.client(HOST))
+        api = platform.client(GUEST)
+        guest = await self.start(api)
+        await host.host(9123, fingerprint=FINGERPRINT)
+
+        with patch.object(api, "join_lobby", return_value=81) as join:
+            with patch("tools.silverfish.steam_transport._LOBBY_TIMEOUT", 0):
+                for _ in range(2):
+                    with self.assertRaisesRegex(SteamTransportError, "did not answer the lobby request"):
+                        await guest.join(LOBBY)
+                    guest.leave()
+            self.assertIsNone(guest.lobby)
+            self.assertEqual(join.call_count, 1)
+            with self.assertRaisesRegex(SteamTransportError, "finishing a previous lobby request"):
+                await guest.join(LOBBY + 1)
+
+            # Steam leaves a completed, retrievable result without the dispatch notification.
+            retry = asyncio.create_task(guest.join(LOBBY))
+            await asyncio.sleep(0)
+            self.assertTrue(guest._opening)
+            platform.members.add(GUEST)
+            entered = struct.pack("<QIB3xI4x", LOBBY, 0, 0, 1)
+            api.completed_joins[81] = entered
+            route = await asyncio.wait_for(retry, 2)
+            self.assertEqual((route.lobby, route.fingerprint), (LOBBY, FINGERPRINT))
+            join.assert_called_once_with(LOBBY)
+
+            # A result delivered later and an uncorrelated broadcast cannot remove membership.
+            api.callbacks.extend(((_CALLBACK_ENTER, entered, 81), (_CALLBACK_ENTER, entered, 0)))
+            async with asyncio.timeout(2):
+                while api.callbacks:
+                    await asyncio.sleep(.01)
+            self.assertEqual(guest.lobby, LOBBY)
+            self.assertIn(GUEST, platform.members)
+            self.assertEqual(api.left, [])
+
+    async def test_recovered_late_join_without_waiter_leaves_exact_lobby_and_allows_fresh_join(self):
+        platform = Platform()
+        host = await self.start(platform.client(HOST))
+        api = platform.client(GUEST)
+        guest = await self.start(api)
+        await host.host(9123, fingerprint=FINGERPRINT)
+        with (patch.object(api, "join_lobby", return_value=81),
+              patch("tools.silverfish.steam_transport._LOBBY_TIMEOUT", 0)):
+            with self.assertRaisesRegex(SteamTransportError, "did not answer the lobby request"):
+                await guest.join(LOBBY)
+        guest.leave()
+        platform.members.add(GUEST)
+        api.completed_joins[81] = struct.pack("<QIB3xI4x", LOBBY, 0, 0, 1)
+        async with asyncio.timeout(2):
+            while not api.left:
+                await asyncio.sleep(.01)
+        self.assertEqual(api.left, [LOBBY])
+        self.assertNotIn(GUEST, platform.members)
+        self.assertEqual((await guest.join(LOBBY)).lobby, LOBBY)
+        self.assertIn(GUEST, platform.members)
+
     async def test_timed_out_lobby_search_discards_its_handle_and_can_retry(self):
         api = Platform().client(GUEST)
         guest = await self.start(api)

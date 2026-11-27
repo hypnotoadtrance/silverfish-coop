@@ -47,7 +47,8 @@ from live_stock_creator_smoke import creator_action, installed_probe
 from live_stock_pause_exit_smoke import stock_pause
 from live_unified_title_smoke import Seat, offered, start_pair
 from portable_dead_drop import (allow_resident_contract_xp, allow_resident_dead_drop_fixtures,
-                                observe_dead_drop_replies, verify_dead_drop)
+                                arm_resident_metro_seed, observe_dead_drop_replies,
+                                resident_metro_seed_overlay, verify_dead_drop)
 from portable_dock_pursuit import verify_dock_pursuit
 from portable_held_mask import verify_stock_held_mask
 from portable_eye_board import verify_stock_eye_stacks
@@ -7884,6 +7885,12 @@ async def verify_cloud_restore(first, second, session, game, processes):
             "steam_download_simulated": True}
 
 
+async def verify_stock_discovered_overlap(host, guest, pawn):
+    from live_discovered_exit_smoke import live_discovered_exit
+
+    return await live_discovered_exit(host, guest, pawn, portable_probe_command, streamed=True)
+
+
 async def verify(work: Path, first_game: Path, second_game: Path, original: Path,
                  second_legacy_work: Path | None = None, *, stock_drop: bool = False, stock_split: bool = False,
                  stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False,
@@ -7900,7 +7907,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_weather_travel: bool = False, stock_lightning: bool = False, stock_storm_ambience: bool = False,
                  crossroads_profile: bool = False, crossroads_gc_trial: bool | str = False, rendered: bool = False,
                  stock_crossroads_door: bool = False, stock_dock_gate: bool = False,
-                 stock_crossroads_recovery: bool = False,
+                 stock_crossroads_recovery: bool = False, stock_discovered_overlap: bool = False,
                  stock_melee_family: bool = False, stock_melee_edges: bool = False,
                  stock_warehouse_switch: bool = False, stock_warehouse_board: bool = False, stock_bottle: bool = False,
                  stock_roaming_barter: bool = False, stock_castaway_dialogue: bool = False,
@@ -8117,6 +8124,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          verify_original_crossroads_crate),
         # Exercise recovery near the arrival point before world-object checks move the party.
         (stock_crossroads_recovery, "crossroads", "stock_crossroads_recovery", verify_crossroads_recovery),
+        (stock_discovered_overlap, "discovered_overlap", "stock_discovered_overlap", verify_stock_discovered_overlap),
         (stock_lightning, "crossroads", "stock_lightning",
          lambda host, guest, pawn: verify_stock_lightning(host, guest, pawn, portable_probe_command)),
         (storm_trial, "storm", "stock_storm_ambience",
@@ -8206,6 +8214,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if stock_dead_drops:
             for game in games:
                 probes.enter_context(portable_main_overlay(game, observe_dead_drop_replies))
+        if stock_discovered_overlap:
+            probes.enter_context(installed_probe(first_game, mod="SilverfishPortableExitDiscoveryProbe",
+                                                 fixture="portable_discovered_exit_probe.lua"))
         if crossroads_profile or stock_crossroads_recovery:
             for game in games:
                 probes.enter_context(portable_script_overlay(
@@ -8370,6 +8381,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(portable_script_overlay(game, "native_computer_board.lua", allow_resident_contract_xp))
                 for name in ("native_authored_pickup.lua", "native_authored_pickup_input_fixture.lua"):
                     probes.enter_context(portable_script_overlay(game, name, allow_resident_dead_drop_fixtures))
+            if "metro" in dead_drop_cases:
+                proof["metro_seed_overlays"] = [probes.enter_context(portable_script_overlay(
+                    game, "native_fresh_campaign.lua", resident_metro_seed_overlay)) for game in games]
         if stardust_handoff_check:
             for game in games:
                 probes.enter_context(guest_weapon_fixture_overlay(game, "portable_stardust_handoff_probe.lua"))
@@ -8467,6 +8481,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 or stardust_handoff_check
                 or stock_critters or stock_placed_item
                 or stock_crossroads_door or stock_dock_gate
+                or stock_discovered_overlap
                 or stock_dead_drops
                 or stock_board_offers or stock_streamed_board or stock_quarry_photo or stock_eye_stacks
                 or stock_lingering_teleport or stock_acid_pool or stock_mushrooms):
@@ -8773,7 +8788,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 exit_actions = ("prompt", "confirm") if campaign in {
                     "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_shot_view", "tutorial_dock_buckshot",
                     "tutorial_dock_melee", "tutorial_dock_late_join", "dock_population", "stock_melee_family",
-                    "crossroads", "crossroads_anomaly", "quarry_photo", "buried_placements",
+                    "crossroads", "crossroads_anomaly", "discovered_overlap", "quarry_photo", "buried_placements",
                     "crossroads_dead_drop", "metro_dead_drop", "flood_town_dead_drop",
                     "lab_east_wing_acid", "lab_terminal", "oil_lamps", "shopkeep", "simmi", "stock_board_offers", "missing_contact_untracked",
                     "friendly_fire_enabled", "friendly_fire_default", "stardust_handoff"
@@ -8828,7 +8843,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     used_ports.add(port)
                     host = replace(first, port=port, campaign=first.campaign.with_name(
                         "title-host-settings-" + uuid.uuid4().hex[:8]))
-                session = await run_resident_campaign(campaign, checks, host)
+                if campaign == "metro_dead_drop":
+                    with arm_resident_metro_seed(host.bridge):
+                        session = await run_resident_campaign(campaign, checks, host)
+                else:
+                    session = await run_resident_campaign(campaign, checks, host)
                 if crossroads_profile:
                     session["title_collector_modes"] = await read_collector_modes(host, second, portable_probe_command)
                 proof["sessions"].append(dict(session, resident_campaign=campaign))
@@ -9130,6 +9149,8 @@ if __name__ == "__main__":
                         help="verify stock guest door toggles, replay, and panel collision in Crossroads")
     parser.add_argument("--stock-crossroads-recovery", action="store_true",
                         help="verify both players recover from the stock Crossroads kill volume")
+    parser.add_argument("--stock-discovered-overlap", action="store_true",
+                        help="verify discovery, wall gating, and arrival for a streamed stock exit")
     parser.add_argument("--crossroads-profile", action="store_true",
                         help="measure co-op frame and subsystem times around the stock weather travel check")
     parser.add_argument("--rendered", action="store_true",
@@ -9279,7 +9300,8 @@ if __name__ == "__main__":
     if args.stock_shovel_host_quest and not args.stock_shovel_quest:
         parser.error("Use --stock-shovel-host-quest with --stock-shovel-quest")
     resident_check_options.add("stock_cooked_meal")
-    resident_check_options.update(("crossroads_profile", "crossroads_gc_trial", "stock_crossroads_recovery", "rendered"))
+    resident_check_options.update(("crossroads_profile", "crossroads_gc_trial", "stock_crossroads_recovery",
+                                   "stock_discovered_overlap", "rendered"))
     if args.crossroads_gc_trial and not args.crossroads_profile:
         parser.error("--crossroads-gc-trial requires --crossroads-profile")
     if args.rendered and not args.crossroads_profile:
@@ -9298,7 +9320,7 @@ if __name__ == "__main__":
             args.stock_loki_control, args.stock_loki_guest,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
             args.crossroads_profile, args.stock_lightning, args.stock_crossroads_door, args.stock_dock_gate,
-            args.stock_crossroads_recovery,
+            args.stock_crossroads_recovery, args.stock_discovered_overlap,
             args.stock_storm_ambience,
             args.stock_melee_family, args.stock_melee_edges, args.stock_warehouse_switch, args.stock_warehouse_board, args.stock_bottle,
             args.stock_roaming_barter, args.stock_castaway_dialogue, args.stock_critters, args.stock_placed_item,
@@ -9363,6 +9385,7 @@ if __name__ == "__main__":
                        rendered=args.rendered,
                        stock_crossroads_door=args.stock_crossroads_door,
                        stock_crossroads_recovery=args.stock_crossroads_recovery,
+                       stock_discovered_overlap=args.stock_discovered_overlap,
                        stock_dock_gate=args.stock_dock_gate,
                        stock_lightning=args.stock_lightning,
                        stock_storm_ambience=args.stock_storm_ambience,

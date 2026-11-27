@@ -1,3 +1,4 @@
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -5,8 +6,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from tools.silverfish.campaign import CampaignStore
+from tools.silverfish.multi_host import MultiHost
 from tools.silverfish.runtime import MAP
 from tools.silverfish.service import NATIVE_RUNTIME_RETIRING, PROTOCOL, Client, Host, open_admission
+from test_party_members import connection, snapshot
 
 
 class AdmissionTests(unittest.IsolatedAsyncioTestCase):
@@ -165,3 +168,73 @@ class RuntimeAdmissionTests(unittest.TestCase):
         self.assertEqual(self.host.guest["lease_id"], self.old_guest["lease_id"])
         self.assertEqual(self.host.guest_pawn, "old native pawn")
         self.assertFalse(self.host.guest_runtime_replacements)
+
+
+class QualifiedRuntimeDepartureTests(unittest.TestCase):
+    def test_replacement_resumes_before_grace_only_after_qualified_departure(self):
+        directory = Path(self.enterContext(TemporaryDirectory()))
+        store = self.enterContext(CampaignStore(directory))
+        control = Mock()
+        host = MultiHost(store, control, "build", None, "127.0.0.1", 0, False, None, max_guests=3,
+                         native_backend="cpp", native_events=True, native_guest=True, verify_native_roster=True,
+                         persist_native_guest=True, native_profile=object())
+        guest = dict(store.issue_invitation("Guest", "Scout"), game_build="build", protocol_version=PROTOCOL,
+                     runtime_id="a" * 32)
+        observer = dict(store.issue_invitation("Observer", "Pilot"), game_build="build", protocol_version=PROTOCOL,
+                        runtime_id="b" * 32)
+        replacement = dict(guest, runtime_id="c" * 32)
+        first, second, fresh = connection(1), connection(2), connection(3)
+        host.last_game = snapshot(1)
+        self.assertTrue(host.admit(guest)["accepted"])
+        host.last_game = snapshot(2, first)
+        original = host.members.observe(host.last_game).assignment
+        host.members.mark_ready(guest["guest_id"], original)
+        member = host.members.get(guest["guest_id"])
+        lease = member.lease_id
+
+        self.assertTrue(host.admit(observer)["accepted"])
+        host.last_game = snapshot(3, first, second)
+        observer_binding = host.members.observe(host.last_game).assignment
+        host.members.mark_ready(observer["guest_id"], observer_binding)
+        host.last_seen = time.monotonic()
+
+        host.disconnected(guest["guest_id"])
+        parked = {"accepted": False, "reason": NATIVE_RUNTIME_RETIRING}
+        self.assertEqual(host.admit(replacement), parked)
+        warm = host.admit(guest)
+        self.assertTrue(warm["resumed"])
+        self.assertNotIn("rotate_game_route", warm)
+        self.assertEqual(member.binding, original)
+
+        host.disconnected(guest["guest_id"])
+        self.assertEqual(host.admit(replacement), parked)
+        host.last_game = snapshot(4, second)
+        self.assertEqual(host.members.observe(host.last_game).reason, "known_connection_missing")
+        self.assertEqual(host.members.forget_departed(guest["guest_id"], host.last_game).state, "released")
+        self.assertIsNone(member.binding)
+        self.assertTrue(member.in_grace(time.monotonic()))
+
+        host.last_seen = time.monotonic() - 10
+        self.assertEqual(host.admit(replacement), parked)
+        host.last_seen = time.monotonic()
+        reservation_until = member.grace_until
+        member.grace_until = time.monotonic() - 1
+        self.assertEqual(host.admit(replacement), parked)
+        member.grace_until = reservation_until
+        self.assertFalse(host.admit(dict(replacement, credential="incorrect"))["accepted"])
+        self.assertIsNone(host.enrollment.pending)
+        self.assertEqual(member.lease_id, lease)
+
+        replaced = host.admit(replacement)
+        self.assertTrue(replaced["accepted"])
+        self.assertTrue(replaced["resumed"])
+        self.assertTrue(replaced["rotate_game_route"])
+        self.assertEqual(member.lease_id, lease)
+        self.assertEqual(member.runtime_id, replacement["runtime_id"])
+        self.assertTrue(member.spawn_near_host)
+        self.assertFalse(member.ready)
+        self.assertEqual(host.enrollment.pending.guest_id, guest["guest_id"])
+        host.last_game = snapshot(5, second, fresh)
+        self.assertEqual(host.members.observe(host.last_game).assignment.connection_id, "c3")
+        self.assertEqual(host.members.get(observer["guest_id"]).binding, observer_binding)
+        self.assertFalse(host.admit(guest)["accepted"])

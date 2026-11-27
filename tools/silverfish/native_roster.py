@@ -62,6 +62,13 @@ class _Pending:
     candidate: tuple[str, _Connection] | None = None
 
 
+@dataclass(frozen=True)
+class _Departure:
+    assignment: Assignment
+    sequence: int
+    map: str
+
+
 def _text(value: object, *, limit: int = 512) -> bool:
     return isinstance(value, str) and 0 < len(value) <= limit and value.isprintable()
 
@@ -124,6 +131,7 @@ class RosterEnrollment:
         self._latest: _Census | None = None
         self._driver_retired = False
         self._assignments: dict[str, Assignment] = {}
+        self._departures: dict[str, _Departure] = {}
         self._pending: _Pending | None = None
         self._next_id = 0
 
@@ -166,6 +174,7 @@ class RosterEnrollment:
                 expected = self._driver_retired
                 changed = self._abort("driver_changed")
                 self._assignments.clear()
+                self._departures.clear()
                 self._driver_retired = False
                 self._latest = current
                 if not expected:
@@ -222,6 +231,7 @@ class RosterEnrollment:
         self._next_id += 1
         reservation = Reservation(self._next_id, guest_id, character_id, current.driver)
         self._pending = _Pending(reservation, current.sequence)
+        self._departures.pop(guest_id, None)
         return EnrollmentResult("reserved", "ready_for_relay", reservation)
 
     def observe(self, game: dict | None, *, expired_guests: frozenset[str] = frozenset()) -> EnrollmentResult:
@@ -287,12 +297,35 @@ class RosterEnrollment:
         if binding.connection_id in current.connections:
             return EnrollmentResult("blocked", "connection_still_present")
         del self._assignments[guest_id]
+        self._departures[guest_id] = _Departure(binding, current.sequence, current.map)
         return EnrollmentResult("released", "connection_departed", assignment=binding)
+
+    def departure_current(self, guest_id: str, character_id: str, game: dict | None) -> bool:
+        """Require a qualified current census on the same driver as the departed pawn."""
+        departure = self._departures.get(guest_id)
+        if not departure or self._driver_retired or self._pending or guest_id in self._assignments:
+            return False
+        try:
+            current = _census(game)
+        except ValueError:
+            return False
+        binding = departure.assignment
+        if (current != self._latest or current.sequence < departure.sequence
+                or (current.driver, current.map, character_id) != (binding.driver, departure.map, binding.character_id)):
+            return False
+        known, problem = self._baseline(current)
+        return (not problem and current.connections.keys() == known and binding.connection_id not in known
+                and not any(row.name == binding.connection or row.controller == binding.controller or row.pawn == binding.pawn
+                            for row in current.connections.values()))
+
+    def clear_departure(self, guest_id: str) -> None:
+        self._departures.pop(guest_id, None)
 
     def begin_travel(self) -> EnrollmentResult:
         """Clear native assignments and refuse the outgoing driver until a new one appears."""
         self._driver_retired = self._latest is not None
         self._assignments.clear()
+        self._departures.clear()
         if self._pending:
             return self._abort("driver_retired")
         return EnrollmentResult("idle", "driver_retired")

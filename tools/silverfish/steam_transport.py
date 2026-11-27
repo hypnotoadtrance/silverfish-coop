@@ -158,13 +158,19 @@ class SteamTransport:
     async def _lobby_call(self, requested: int | None, *, access: str = "friends") -> int:
         if self._closed or self._opening or self.lobby is not None:
             raise SteamTransportError("A Steam lobby is already active or opening.")
-        if len(self._calls) >= 4 or any(entry.lobby == requested for entry in self._calls.values()):
+        pending = next(iter(self._calls.values()), None)
+        if pending is not None and (requested is None or pending.lobby != requested or not pending.result.done()):
             raise SteamTransportError("Steam is still finishing a previous lobby request.")
-        handle = self.api.create_lobby(access=access) if requested is None else self.api.join_lobby(requested)
-        if not handle or handle in self._calls:
-            raise SteamTransportError("Steam could not start the lobby request.")
         future = asyncio.get_running_loop().create_future()
-        self._calls[handle] = _LobbyCall(_CALLBACK_CREATED if requested is None else _CALLBACK_ENTER, requested, future)
+        if pending is not None:
+            # Steam gives the user one regular lobby membership. A retry for
+            # the same lobby can wait on the existing call without racing it.
+            pending.result = future
+        else:
+            handle = self.api.create_lobby(access=access) if requested is None else self.api.join_lobby(requested)
+            if not handle:
+                raise SteamTransportError("Steam could not start the lobby request.")
+            self._calls[handle] = _LobbyCall(_CALLBACK_CREATED if requested is None else _CALLBACK_ENTER, requested, future)
         self._opening = True
         generation = self._generation
         try:
@@ -524,12 +530,17 @@ class SteamTransport:
         try:
             while not self._closed:
                 now = time.monotonic()
-                if now >= self._roster_at:
+                maintenance_due = now >= self._roster_at
+                if maintenance_due:
                     self._roster_at = now + _ROSTER_INTERVAL
                     self._refresh_roster()
                     self._expire_flows(now)
                 for callback, data, handle in self.api.poll_callbacks():
                     self._callback(callback, data, handle)
+                if maintenance_due:
+                    for handle, call in tuple(self._calls.items()):
+                        if call.callback == _CALLBACK_ENTER and (result := self.api.take_join_result(handle)) is not None:
+                            self._callback(*result)
                 for peer, packet in self.api.receive_datagrams():
                     await self._receive(peer, packet)
                 await asyncio.sleep(_POLL_INTERVAL)

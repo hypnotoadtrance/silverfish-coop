@@ -9,8 +9,6 @@ local named_fixtures = expanded and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES")
 local authored_routes = enabled and expanded and require("authored_wall_routes") or {}
 local trigger_class = "/Script/Engine.TriggerBox"
 local exit_class = "Level_Exit_BP_C"
-local exit_path = "/Game/Classes/ScriptingActors/Level_Exit_BP.Level_Exit_BP_C"
-local statics_path = "/Script/Engine.Default__GameplayStatics"
 local door_class = "Dungeon_TransitionDoor_BP_C"
 local no_collision, query_only = 0, 1
 local world_static, pawn_channel = 0, 2
@@ -342,31 +340,24 @@ local function scan_authored(world, plans)
 end
 
 local function discovered_walls(world, known)
-    if not expanded or type(SilverfishInspectDiscoveredOverlap) ~= "function" then return {} end
+    if not expanded or type(SilverfishSnapshotDiscoveredOverlaps) ~= "function" then return {} end
     if not same(discovered_world, world) then
         discovered_world, discovered_sources, discover_after = world, {}, 0
     end
     local now = os.time()
     if now < discover_after then return discovered_sources end
     discover_after = now + 1
-    local statics, class = StaticFindObject(statics_path), StaticFindObject(exit_path)
-    if not valid(statics) or not valid(class) then return {} end
-    local found, sources = {}, {}
-    statics:GetAllActorsOfClass(world, class, found)
-    local candidates = found.OutActors or found
-    for index = 1, math.min(#candidates, 128) do
-        local actor = candidates[index]
-        if type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
-        if visible_exit(actor, world) and not valid(actor:GetParentComponent()) and actor:GetActorEnableCollision() then
-            local path = actor:GetFullName():match("^%S+ (/.+)$")
-            local name = path and path:match(":PersistentLevel%.([A-Za-z0-9_%-]+)$")
+    local census = SilverfishSnapshotDiscoveredOverlaps(world:GetAddress())
+    if type(census) ~= "string" then return discovered_sources end
+    local sources = {}
+    for path, tag in census:gmatch("([^\t\n]+)\t([^\n]+)\n") do
+        local actor = StaticFindObject(path)
+        if visible_exit(actor, world) and not valid(actor:GetParentComponent()) then
+            local name = path:match(":PersistentLevel%.([A-Za-z0-9_%-]+)$")
             local registered = name and known[name] and same(actor:GetOuter(), world.PersistentLevel)
             local box = name and not registered and actor.Box
             if box and valid(box) and box:GetGenerateOverlapEvents() then
-                local destination, tag = SilverfishInspectDiscoveredOverlap(path, actor:GetAddress())
-                if destination and tag then
-                    sources[path] = {fixture = actor, tag = tag, kind = "overlap", discovered = true}
-                end
+                sources[path] = {fixture = actor, tag = tag, kind = "overlap", discovered = true}
             end
         end
     end

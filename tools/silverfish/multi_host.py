@@ -68,7 +68,8 @@ class MultiHost(Host):
         previous = self.members.get(request["guest_id"])
         runtime = self.runtime_admission(request, previous.character_id if previous else None,
                                          previous.runtime_id if previous else None,
-                                         disconnected=previous is not None and previous.disconnected_at is not None)
+                                         disconnected=previous is not None and previous.disconnected_at is not None,
+                                         grace_until=previous.grace_until if previous else None)
         if runtime.get("accepted") is False:
             return runtime
         try:
@@ -81,8 +82,12 @@ class MultiHost(Host):
         self._update_native_relay()
         member = admitted.member
         member.runtime_id = request.get("runtime_id")
-        self.guest_runtime_replacements.pop(member.guest_id, None)
-        self.guest_disconnect_retention_failures.pop(member.guest_id, None)
+        if previous and runtime.get("rotate_game_route"):
+            self.report_guest_runtime_retired(member.guest_id)
+            member.spawn_near_host = True
+        else:
+            self.guest_runtime_replacements.pop(member.guest_id, None)
+            self.guest_disconnect_retention_failures.pop(member.guest_id, None)
         self.control.event("guest_link_authenticated", guest_id=member.guest_id, character_id=member.character_id,
                            role=member.role, resumed=admitted.resumed)
         return {"accepted": True, "resumed": admitted.resumed, "character_id": member.character_id,

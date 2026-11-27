@@ -1,16 +1,55 @@
 """Run the stock randomized Dead Drops through the installed title."""
 
 import asyncio
+from contextlib import contextmanager
+import json
 import math
 
-from live_multi_smoke import campaign_save_hashes
+from live_multi_smoke import campaign_save_hashes, saved_hashes
 from portable_guest_world_start import wait_resident_status
-from tools.silverfish import native_authored_pickup, native_dead_drop, native_wire_board
+from tools.silverfish import native_authored_pickup, native_dead_drop, native_host_save, native_wire_board
 from tools.silverfish.authored_loot import same_pose
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.control import submit
 from tools.silverfish.native_computer_board import BOARDS
 from tools.silverfish.travel import BLACK_MARKET, CROSSROADS, LAKE, OBSERVATORY
+
+
+METRO_WANDERER_SEED = 418508
+METRO_STATIC_SEED = 874453998
+METRO_SEED_REQUEST = "portable-metro-placement-seed.txt"
+
+
+@contextmanager
+def arm_resident_metro_seed(bridge):
+    request = bridge.directory / METRO_SEED_REQUEST
+    with request.open("x", encoding="ascii") as stream:
+        stream.write(str(METRO_WANDERER_SEED))
+    try:
+        yield
+    finally:
+        request.unlink()
+
+
+def resident_metro_seed_overlay(script):
+    needle = "    local planned = starter(seed, slot)\n"
+    replacement = rf'''    local planned = starter(seed, slot)
+    local mailbox = os.getenv("SILVERFISH_COOP_BRIDGE")
+    if os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
+        and mailbox and mailbox:match("[/\\]portable%-title%-%x+[/\\]first[/\\]titles[/\\]local[/\\]run[/\\]game%-bridge[/\\]%x+$") then
+        local request = io.open(mailbox .. "/{METRO_SEED_REQUEST}", "rb")
+        if request then
+            local requested = request:read(7)
+            request:close()
+            require_exact(requested == "{METRO_WANDERER_SEED}", "portable_metro_seed_request_invalid")
+            -- Preserve the worker's instance seed and all normal stock startup receipts.
+            planned.world_seed = starter({METRO_WANDERER_SEED}, slot).world_seed
+            require_exact(planned.world_seed == {METRO_STATIC_SEED}, "portable_metro_seed_derivation_changed")
+        end
+    end
+'''
+    assert script.count(needle) == 1
+    return script.replace(needle, replacement)
 
 
 def observe_dead_drop_replies(script):
@@ -43,6 +82,11 @@ def allow_resident_contract_xp(script):
 async def verify_dead_drop(host, guest, contract, drop, *, via=(LAKE,), cash=None):
     generic_board = drop.quest != contract.quest_id
     host_run, guest_run = host.campaign / "run", guest.client / "run"
+
+    def save_fingerprints():
+        manifest = json.loads((host.campaign / "save/campaign.json").read_text(encoding="utf-8"))
+        stock = native_host_save.directory(native_host_save.checkpoint_profile(host.profile, manifest))
+        return campaign_save_hashes(host.campaign), saved_hashes(stock)
 
     async def action(run, verb, **kwargs):
         reply = await submit(run, verb, **kwargs)
@@ -110,11 +154,11 @@ async def verify_dead_drop(host, guest, contract, drop, *, via=(LAKE,), cash=Non
     host_pawn = authority["game"]["pawns"]["local"]["name"]
     await host.bridge.command(contract.command("approach"), host_pawn)
     await host.bridge.command(contract.command("xp-fixture"), host_pawn)
-    before = campaign_save_hashes(host.campaign)
+    before = save_fingerprints()
     await select(start, "start")
     accepted = await wait_resident_status(host_run, lambda frame:
         frame["gameplay"].get("native_quests", {}).get(drop.quest, {}).get("step") == 1)
-    assert campaign_save_hashes(host.campaign) == before
+    assert save_fingerprints() == before
     if start == OBSERVATORY:
         await cross(OBSERVATORY, CROSSROADS)
     else:
@@ -127,6 +171,9 @@ async def verify_dead_drop(host, guest, contract, drop, *, via=(LAKE,), cash=Non
     sample = await wait_resident_status(host_run, lambda frame:
         frame["gameplay"].get(native_dead_drop.FRAME, {}).get("epoch") == epoch)
     pose = sample["gameplay"][native_dead_drop.FRAME]["transform"]
+    seed = sample["game"].get("static_world_seed", {}).get("value")
+    if drop is native_dead_drop.METRO_DROP:
+        assert seed == METRO_STATIC_SEED, sample["game"].get("static_world_seed")
 
     async def projected():
         frame = await wait_resident_status(guest_run, lambda frame:
@@ -158,7 +205,7 @@ async def verify_dead_drop(host, guest, contract, drop, *, via=(LAKE,), cash=Non
         try:
             await host.bridge.command(native_authored_pickup.APPROACH, pawn, drop.source)
         except RuntimeError as error:
-            if "_no_clear_sight:" not in str(error) or attempt == 2:
+            if "_no_clear_sight:" not in str(error) or attempt == 2 or drop is native_dead_drop.METRO_DROP:
                 raise
             failed_poses.append({"pose": pose, "reason": str(error)})
             await cross(drop.map, via[-1])
@@ -178,17 +225,19 @@ async def verify_dead_drop(host, guest, contract, drop, *, via=(LAKE,), cash=Non
     await wait_resident_status(guest_run, lambda frame:
         (location := frame["game"]["pawns"]["local"].get("location")) and math.dist(location, point) <= 25
         and frame["game"].get("native_authored_pickup_sources", {}).get(drop.source, {}).get("state") == "available")
+    before = save_fingerprints()
     await action(guest_run, native_authored_pickup.STOCK_FIXTURE, pickup_source=drop.source)
     collected = await wait_resident_status(host_run, lambda frame:
         drop.source in frame["gameplay"].get(native_dead_drop.PICKUPS, {}))
     claim = collected["gameplay"][native_dead_drop.PICKUPS][drop.source]
     await wait_resident_status(guest_run, lambda frame:
         native_dead_drop.observed(frame["game"], "hidden") or native_dead_drop.observed(frame["game"], "absent"))
+    assert save_fingerprints() == before
     route = (drop.map, *reversed(via), BLACK_MARKET)
     for source, destination in zip(route, route[1:]):
         await cross(source, destination)
 
-    before = campaign_save_hashes(host.campaign)
+    before = save_fingerprints()
     await select(BLACK_MARKET, "turnin")
     finished = await wait_resident_status(host_run, lambda frame:
         frame["gameplay"].get("native_quests", {}).get(drop.quest, {}).get("step") == -10)
@@ -196,8 +245,8 @@ async def verify_dead_drop(host, guest, contract, drop, *, via=(LAKE,), cash=Non
     consumed = result["consumed_guid" if generic_board else contract.consumed_field]
     assert (consumed, result["cash"], result["xp"]) == (claim["guid"], contract.cash if cash is None else cash, 1)
     assert result["actor"] == accepted["gameplay"]["native_quests"][drop.quest]["actor"] == claim["owner"]
-    assert campaign_save_hashes(host.campaign) == before
+    assert save_fingerprints() == before
     key = drop.source if generic_board else contract.key
-    return {key: {"epoch": epoch, "pose": pose, "claim": claim["guid"], "cash": result["cash"],
+    return {key: {"epoch": epoch, "pose": pose, "static_placement_seed": seed, "claim": claim["guid"], "cash": result["cash"],
                   "board": BOARDS[BLACK_MARKET], "project_reply_bytes": samples, "fixture_sight_refusals": failed_poses,
-                  "renewed_and_reconnected": True, "no_save_during_turnin": True}}
+                  "renewed_and_reconnected": True, "no_save_during_turnin": True, "no_save_during_pickup": True}}

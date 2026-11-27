@@ -410,7 +410,7 @@ class Host:
         self.guest_disconnect_retention_failures: dict[str, str] = {}
 
     def runtime_admission(self, request: dict, character_id: str | None, previous_runtime: str | None,
-                          *, disconnected: bool) -> dict:
+                          *, disconnected: bool, grace_until: float | None = None) -> dict:
         """Preflight a new process without renewing the disconnected process's native lease."""
         guest_id = request["guest_id"]
         runtime_id = request.get("runtime_id")
@@ -432,6 +432,11 @@ class Host:
             owned = []
         if not any(saved["character_id"] == character_id for saved in owned):
             return {"accepted": False, "reason": "guest_or_character_unavailable"}
+        now = time.monotonic()
+        if (grace_until is not None and now < grace_until and self.enrollment
+                and now - self.last_seen <= POSITION_MAX_AGE
+                and self.enrollment.departure_current(guest_id, character_id, self.last_game)):
+            return {"rotate_game_route": True}
         if guest_id not in self.guest_runtime_replacements:
             binding = self.enrollment.assignments.get(guest_id) if self.enrollment else None
             proof = {"guest_id": guest_id, "character_id": character_id, "zone_epoch": self.zone_epoch}
@@ -442,6 +447,8 @@ class Host:
         return {"accepted": False, "reason": NATIVE_RUNTIME_RETIRING}
 
     def report_guest_runtime_retired(self, guest_id: str) -> None:
+        if self.enrollment:
+            self.enrollment.clear_departure(guest_id)
         self.guest_disconnect_retention_failures.pop(guest_id, None)
         if proof := self.guest_runtime_replacements.pop(guest_id, None):
             self.control.event("guest_runtime_retired", **proof)
@@ -490,9 +497,12 @@ class Host:
         if self.party["wipe"] and request["character_id"] not in self.party["wipe"]["roster"]:
             return {"accepted": False, "reason": "wipe_in_progress"}
         previous = self.guest if self.guest and self.guest["guest_id"] == request["guest_id"] else None
+        disconnected_at = previous["disconnected"] if previous else None
         runtime = self.runtime_admission(request, previous["character_id"] if previous else None,
                                          previous.get("runtime_id") if previous else None,
-                                         disconnected=previous is not None and previous["disconnected"] is not None)
+                                         disconnected=disconnected_at is not None,
+                                         grace_until=(disconnected_at + DEFAULT_RECONNECT_GRACE
+                                                      if disconnected_at is not None else None))
         if runtime.get("accepted") is False:
             return runtime
         if (self.guest and self.guest["disconnected"] is not None
@@ -521,8 +531,11 @@ class Host:
         }
         if not active["resumed"]:
             self.guest_pawn = None
-        self.guest_runtime_replacements.pop(request["guest_id"], None)
-        self.guest_disconnect_retention_failures.pop(request["guest_id"], None)
+        if previous and runtime.get("rotate_game_route"):
+            self.report_guest_runtime_retired(request["guest_id"])
+        else:
+            self.guest_runtime_replacements.pop(request["guest_id"], None)
+            self.guest_disconnect_retention_failures.pop(request["guest_id"], None)
         with contextlib.suppress(OSError):
             self.control.event("guest_link_authenticated", guest_id=request["guest_id"],
                                character_id=self.guest["character_id"], resumed=active["resumed"])
