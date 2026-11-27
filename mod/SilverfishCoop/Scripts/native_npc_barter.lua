@@ -224,6 +224,13 @@ local function confirmation(context, screen)
     end
 end
 
+local function dismiss_confirmation(context, screen)
+    local modal = confirmation(context, screen)
+    if modal then
+        modal:BndEvt__ConfirmationScreen_Button_Cancel_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
+    end
+end
+
 local function copy_items(from, to)
     local count = from:GetArrayNum()
     to:Empty()
@@ -240,10 +247,7 @@ local function close_stock(committed)
             current.screen.PlayerOffer:Empty()
             current.screen.TraderOffer:Empty()
         end
-        local modal = confirmation(current, current.screen)
-        if modal then
-            modal:BndEvt__ConfirmationScreen_Button_Cancel_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
-        end
+        dismiss_confirmation(current, current.screen)
         if top(current, current.screen) then current.controller:CloseMenu({}) end
         if current.screen:IsInViewport() then current.screen:RemoveFromParent() end
     end
@@ -259,6 +263,13 @@ local function close_stock(committed)
     end
     if type(SilverfishSetNativeNpcBarterScreen) == "function" then SilverfishSetNativeNpcBarterScreen(0) end
     session = nil
+end
+
+local function resume_draft(screen)
+    screen:UnlockPanels()
+    screen:SetIsEnabled(true)
+    session.state, session.expires = "ready", nil
+    session.give, session.receive, session.cash = nil, nil, nil
 end
 
 function barter.clear()
@@ -337,8 +348,20 @@ local function guest_command(action, fields, state, phase)
         return "exact NPC barter screen closed"
     end
     if not context or not same(context.pawn, session.pawn) or not same(context.actor, session.actor)
-        or fields[4] ~= session.identifier or #fields < 8 or #fields > 392
+        or fields[4] ~= session.identifier or #fields > 392
         or session.expires and session.expires < os.time() then fail("view_scope") end
+    if recover and #fields == 4 then
+        local screen = session.screen
+        if not valid(screen) or not same(screen.Trader, context.actor) or context.actor.Save ~= false
+            or not same(session.pawn.Save, session.save) then fail("view_recover_screen") end
+        -- Stock reserves the host's staged items until they finish their trade.
+        -- Keep the guest's draft when the host is still using those items.
+        dismiss_confirmation(context, screen)
+        if not top(context, screen) then fail("view_recover_screen") end
+        resume_draft(screen)
+        return "exact stock NPC barter draft kept"
+    end
+    if #fields < 8 then fail("view_scope") end
     local cash = math.tointeger(tonumber(fields[5]))
     local seed, minimum = math.tointeger(tonumber(fields[6])), tonumber(fields[7])
     local accepts = fields[8]
@@ -363,18 +386,29 @@ local function guest_command(action, fields, state, phase)
         end
     end
 
-    if not refresh then close_stock(session.state == "confirming" and not recover) end
+    if not refresh and not recover then close_stock(session.state == "confirming") end
     local save, pawn = guest_scope.bind_guest(state, phase)
     local stock_before = amounts(entries)
-    if refresh then
+    if refresh or recover then
         local screen = session.screen
         if not same(save, session.save) or not same(pawn, session.pawn)
-            or not same(screen.Trader, context.actor) or context.actor.Save ~= false
-            or not valid(screen.TraderInventoryPanel) then fail("view_refresh_screen") end
+            or not valid(screen) or not same(screen.Trader, context.actor) or context.actor.Save ~= false
+            or not valid(screen.TraderInventoryPanel) or recover and not valid(screen.TraderOfferPanel)
+            then fail("view_refresh_screen") end
         local okay, reason = pcall(function()
+            if recover then
+                dismiss_confirmation(context, screen)
+                if not top(context, screen) then fail("view_recover_screen") end
+                -- Only the trader's offers refer to the replaced stock. The guest's
+                -- staged items remain in their offer and their before-image stays rooted.
+                screen.TraderOffer:Empty()
+                if screen.PlayerCashOffer > cash or accepts == "0" then screen.PlayerCashOffer = 0 end
+            end
             apply_catalog(context.actor, save, cash, seed, minimum, accepts, entries, taste)
             screen.TraderInventoryPanel:FullRefresh()
+            if recover then screen.TraderOfferPanel:FullRefresh() end
             screen:UpdateBalance()
+            if recover then resume_draft(screen) end
         end)
         if not okay then close_stock(); error(reason, 0) end
         session.stock_before = stock_before

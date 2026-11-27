@@ -144,15 +144,62 @@ local function floor_at(context, center, x, y, radius, height)
         context.ignored, 0, hit, true, color, color, 0) == false then return point end
 end
 
-local function camera_sees_target(context, eye, target)
-    local _, range = look(eye, target)
-    if range <= 1 or range >= 2000 then return false end
-    local span = (range + 60) / range
-    local end_point = {X = eye.X + (target.X - eye.X) * span, Y = eye.Y + (target.Y - eye.Y) * span,
-        Z = eye.Z + (target.Z - eye.Z) * span}
-    local hit = trace(context, eye, end_point, 0, false, {context.pawn, context.weapon})
-    local component = hit and hit.Component and hit.Component:Get()
-    return valid(component) and same(component:GetOwner(), context.target_capsule:GetOwner())
+local function jammer_contact(context)
+    local eye = context.camera:K2_GetComponentLocation()
+    local muzzle = context.muzzle:K2_GetComponentLocation()
+    local range = context.pawn.SightRange
+    if not vector(eye) or not vector(muzzle) or not finite(range) or range <= 0 then return end
+    local center = context.target_capsule:K2_GetComponentLocation()
+    if not vector(center) then return end
+    local points = {}
+    for _, offset in ipairs({0, 8, -8, 16, -16, 25, -25, 40}) do
+        points[#points + 1] = {X = center.X, Y = center.Y, Z = center.Z + offset}
+    end
+    if valid(context.target_mesh) then
+        local origin, bounds = {}, {}
+        context.trace:GetComponentBounds(context.target_mesh, origin, bounds, {})
+        origin, bounds = origin.Origin or origin, bounds.BoxExtent or bounds
+        if vector(origin) and vector(bounds) then
+            points[#points + 1] = origin
+            -- Randomly placed jammers can be partially obscured at the capsule center.
+            for _, side in ipairs({-1, 1}) do
+                points[#points + 1] = {X = origin.X + side * bounds.X / 2, Y = origin.Y, Z = origin.Z}
+                points[#points + 1] = {X = origin.X, Y = origin.Y + side * bounds.Y / 2, Z = origin.Z}
+                points[#points + 1] = {X = origin.X, Y = origin.Y, Z = origin.Z + side * bounds.Z / 2}
+            end
+        end
+    end
+    local ignored = {context.pawn, context.weapon}
+    for _, target in ipairs(points) do
+        local view, distance = look(eye, target)
+        if distance > 1 and distance <= math.min(range, context.aim_range) and math.abs(view.Pitch) < context.aim_pitch then
+            local dx, dy, dz = (target.X - eye.X) / distance, (target.Y - eye.Y) / distance, (target.Z - eye.Z) / distance
+            local finish = {X = eye.X + dx * range, Y = eye.Y + dy * range, Z = eye.Z + dz * range}
+            -- Follow the stock camera impact, then check the muzzle's actual projectile channel.
+            local sight = trace(context, eye, finish, 1, true, ignored)
+            local hit_point = sight and sight.ImpactPoint or finish
+            if vector(hit_point) then
+                local x, y, z = hit_point.X - muzzle.X, hit_point.Y - muzzle.Y, hit_point.Z - muzzle.Z
+                local aim, length = look(muzzle, hit_point)
+                local reach = length + 100
+                if x * dx + y * dy + z * dz < 1 then
+                    x, y, z, length, reach, aim = dx, dy, dz, 1, range, view
+                end
+                local span = reach / length
+                local stop = {X = muzzle.X + x * span, Y = muzzle.Y + y * span, Z = muzzle.Z + z * span}
+                local hit = trace(context, muzzle, stop, 2, true, ignored)
+                local contact = hit and hit.Component and hit.Component:Get()
+                if same(contact, context.target_capsule) or same(contact, context.target_mesh) then
+                    return view, aim, distance, contact
+                end
+            end
+        end
+    end
+end
+
+local function set_view(context, view)
+    context.controller:SetControlRotation(view)
+    context.camera:K2_SetWorldRotation(view, false, {}, true)
 end
 
 local function align(context, center)
@@ -160,24 +207,28 @@ local function align(context, center)
         local view, distance, aim = fixed_contact(context.pawn, context.weapon, context.camera,
             context.target_mesh, center, context.fixed_ranges)
         if not view then return end
-        context.controller:SetControlRotation(view)
-        context.camera:K2_SetWorldRotation(view, false, {}, true)
+        set_view(context, view)
         context.muzzle:K2_SetWorldRotation(aim, false, {}, true)
         return distance, context.target_mesh:GetFullName()
+    end
+    if context.aim_jammer then
+        local view, aim, distance, contact = jammer_contact(context)
+        if not view then return end
+        set_view(context, view)
+        context.muzzle:K2_SetWorldRotation(aim, false, {}, true)
+        return distance, contact:GetFullName()
     end
     local eye = context.camera:K2_GetComponentLocation()
     if not vector(eye) then return end
     local view = look(eye, center)
-    context.controller:SetControlRotation(view)
-    context.camera:K2_SetWorldRotation(view, false, {}, true)
+    set_view(context, view)
     local muzzle = context.muzzle:K2_GetComponentLocation()
     if not vector(muzzle) then return end
 
     for _, height in ipairs({0, 8, -8, 16, -16, 25}) do
         local target = {X = center.X, Y = center.Y, Z = center.Z + height}
         local aim, distance = look(muzzle, target)
-        if distance >= 75 and distance <= context.aim_range and math.abs(aim.Pitch) < context.aim_pitch
-            and (not context.require_view or camera_sees_target(context, eye, target)) then
+        if distance >= 75 and distance <= context.aim_range and math.abs(aim.Pitch) < context.aim_pitch then
             context.muzzle:K2_SetWorldRotation(aim, false, {}, true)
             local forward = context.muzzle:GetForwardVector()
             if vector(forward) and (forward.X * (target.X - muzzle.X) + forward.Y * (target.Y - muzzle.Y)
@@ -212,7 +263,7 @@ function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule
     local context = equipped(state, phase, name, guid, tag)
     context.trace, context.target_capsule, context.target_mesh = StaticFindObject(trace_path), target_capsule, target_mesh
     context.fixed_ranges = fixed and fixed_ranges(actor)
-    context.require_view = tag == "native-flood-jammer"
+    context.aim_jammer = tag == "native-flood-jammer"
     context.ignored = {context.pawn, context.weapon, actor}
     local wide_search = tag == "native-crossroads-jammer" or tag == "native-flood-jammer"
     context.floor_depth, context.aim_range, context.aim_pitch = (wide_search or fixed) and 1800 or 330,
@@ -295,6 +346,30 @@ function fixture.aim(state, phase, name, guid, profile)
     local actor = StaticFindObject(profile.jammer_path)
     if not valid(actor) or actor:GetFullName() ~= profile.jammer_name then refuse("living_authored_jammer_required") end
     return fixture.aim_target(state, phase, name, guid, profile.tag, actor, actor.Capsule, actor.StaticMesh)
+end
+
+function fixture.aim_local_jammer(state, phase, profile)
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    if not enabled or phase ~= "connected" or not valid(pawn) or not pawn:IsLocallyControlled()
+        or pawn:HasAuthority() or not same(pawn:GetWorld(), state.world) or not same(pawn.Controller, state.controller) then
+        refuse("local_guest_required")
+    end
+    local actor, weapon = StaticFindObject(profile.jammer_path), pawn.EquipedItem
+    if not valid(actor) or actor:GetFullName() ~= profile.jammer_name or not same(actor:GetWorld(), state.world)
+        or not component(actor.Capsule, actor, "CapsuleComponent") or not valid(weapon)
+        or weapon:GetClass():GetFullName() ~= "BlueprintGeneratedClass " .. firearms.paths["light-pistol"]
+        or not component(pawn.Camera, pawn, "CameraComponent")
+        or not component(weapon.Arrow_Muzzle, weapon, "ArrowComponent") then return "waiting" end
+    local trace_library = StaticFindObject(trace_path)
+    if not valid(trace_library) then refuse("geometry_unqualified") end
+    local context = {pawn = pawn, weapon = weapon, camera = pawn.Camera, muzzle = weapon.Arrow_Muzzle,
+        controller = state.controller, trace = trace_library, target_capsule = actor.Capsule,
+        target_mesh = component(actor.StaticMesh, actor, "StaticMeshComponent") and actor.StaticMesh or nil,
+        aim_range = 1600, aim_pitch = 70}
+    local view = jammer_contact(context)
+    if not view then return "waiting" end
+    set_view(context, view)
+    return "the guest crosshair is on the jammer"
 end
 
 function fixture.row(state, phase, status_row)

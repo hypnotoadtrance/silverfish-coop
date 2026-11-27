@@ -2645,6 +2645,7 @@ async def verify_roaming_barter(host: Seat, guest: Seat, _pawn: str) -> dict:
     host_updated = await screen(host, point)
     assert host_updated == {**host_browsing, "wallet": updated["wallet"] - cash,
                             "cards": host_browsing["cards"] - {item}}, (host_browsing, host_updated)
+    guest_before_contested = await screen(guest, point)
     assert int(await operate(guest, "stage", point, contested)) > 0
     last_host_payment = int(await operate(host, "buy", point, contested))
     async with asyncio.timeout(8):
@@ -2660,6 +2661,7 @@ async def verify_roaming_barter(host: Seat, guest: Seat, _pawn: str) -> dict:
     assert refusal["reason"] == "barter_refused_stock_selection" and refusal["catalogue_restored"] is True, refusal
     screen_after_refusal = await screen(guest, point)
     assert screen_after_refusal["visible"] and screen_after_refusal["cards"] == host_updated["cards"] - {contested}
+    assert screen_after_refusal["widget"] == guest_before_contested["widget"]
     assert screen_after_refusal["wallet"] == host_updated["wallet"] - last_host_payment, screen_after_refusal
     final_host = await wait_resident_status(host_run, lambda frame: frame.get("state") == "hosting")
     assert not [entry for entry in await resident_events(host_run, final_host)
@@ -2680,6 +2682,7 @@ async def verify_roaming_barter(host: Seat, guest: Seat, _pawn: str) -> dict:
                                      "guest_purchase_refreshed_same_host_widget": True,
                                      "wallet": [guest_screen["wallet"], updated["wallet"], host_updated["wallet"]],
                                      "contested_offer_refused": refusal["reason"],
+                                     "contested_offer_refreshed_same_guest_widget": True,
                                      "death_during_confirmation_kept_inventory_and_cash": True,
                                      "dead_trader_open_refused": True,
                                      "recovered_guest_wallet": screen_after_refusal["wallet"],

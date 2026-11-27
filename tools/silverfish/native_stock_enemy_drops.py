@@ -50,6 +50,22 @@ _BANK_REFUSALS_BEFORE_RETIREMENT = frozenset({
     "native_loot_stock_actor_conversion_unverified", "native_loot_escrow_append_unverified",
     "native_loot_escrow_payload_unverified",
 })
+_CLAIM_REFUSALS_BEFORE_MUTATION = frozenset({
+    "stock_enemy_loot_out_of_reach_or_obstructed", "stock_enemy_loot_claimant_unavailable",
+    "stock_enemy_loot_claim_scope_unavailable", "stock_enemy_loot_escrow_unavailable",
+    "native_loot_escrow_claim_unavailable", "native_loot_exact_escrow_guid_required",
+    "native_loot_exact_claimant_unavailable", "native_loot_inventory_schema_unavailable",
+    "native_loot_save_ownership_conflict", "native_loot_save_attachment_schema_unavailable",
+    "native_loot_escrow_save_attached_to_owner", "native_loot_live_stock_escrow_save_missing",
+    "native_loot_escrow_save_outer_unqualified", "native_loot_escrow_shape_changed",
+    "native_loot_escrow_item_unavailable", "native_loot_cash_payload_unqualified",
+    "native_loot_claimant_guid_conflict", "native_loot_escrow_backpack_alias",
+    "native_loot_other_owner_guid_conflict", "native_loot_save_backpack_alias",
+    "native_loot_cash_inventory_conflict", "native_loot_save_snapshot_unavailable",
+    "native_loot_cash_schema_unavailable", "native_loot_cash_wallet_out_of_range",
+    "native_loot_claimant_stack_guid_conflict", "native_loot_other_owner_stack_guid_conflict",
+    "native_loot_claimant_backpack_full",
+})
 
 
 def _actor_path(area, path):
@@ -503,11 +519,9 @@ async def claim(host, bridge, character, guid, operation):
                                             timeout=7)
         except RuntimeError as error:
             reason = str(error)
-            # Refusals before mutation leave the actor and the authoritative item available.
-            if reason in {"stock_enemy_loot_out_of_reach_or_obstructed", "stock_enemy_loot_claimant_unavailable",
-                          "stock_enemy_loot_claim_scope_unavailable", "stock_enemy_loot_escrow_unavailable",
-                          "native_loot_exact_claimant_unavailable", "native_loot_escrow_item_unavailable",
-                          "native_loot_claimant_backpack_full", "native_loot_cash_wallet_out_of_range"}:
+            # These explicit refusals occur before the stock backpack or wallet changes.
+            # Keep the escrow and receipt available for a later valid claim.
+            if reason in _CLAIM_REFUSALS_BEFORE_MUTATION:
                 host.native_checkpoint_unsafe = False
                 host.control.event("native_stock_enemy_loot_claim_refused", operation_id=operation, guid=guid, reason=reason)
                 raise party.RuleError(reason) from error

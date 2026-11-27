@@ -23,6 +23,7 @@ STOCK = "native_npc_barter"
 VIEW = "native_npc_barter_view"
 STOCK_VERSION = "native_npc_barter_stock_version"
 REFRESH_SECONDS = 3
+HOST_TRADING = "barter_refused_host_is_trading"
 REQUOTE_REFUSALS = frozenset({
     "barter_refused_stock_selection", "barter_refused_stock_bounds",
     "barter_refused_wallet", "barter_refused_native_balance",
@@ -316,9 +317,18 @@ class View:
                 try:
                     reply = await client.gameplay_action(action, operation, target)
                 except ValueError as error:
-                    if action != EXCHANGE or str(error) not in REQUOTE_REFUSALS:
+                    if action != EXCHANGE:
                         raise
                     refusal = str(error)
+                    if refusal == HOST_TRADING:
+                        client.last_game = await client.bridge.command(RECOVER, str(sequence), trader, timeout=4)
+                        if client.last_game.get("ack", {}).get("message") != "exact stock NPC barter draft kept":
+                            raise RuntimeError("The stock NPC barter draft could not resume")
+                        client.control.event("native_npc_barter_refused", action=action, sequence=sequence,
+                                             reason=refusal, draft_kept=True)
+                        return
+                    if refusal not in REQUOTE_REFUSALS:
+                        raise
                     reply = await self.read_stock(client, f"{epoch}@{trader}")
                     if reply is None:
                         raise

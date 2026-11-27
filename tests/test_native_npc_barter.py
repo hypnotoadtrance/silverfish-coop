@@ -201,3 +201,27 @@ class BarterViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.guest_ui.digest, "unchanged")
         client.control.event.assert_called_once_with("native_npc_barter_refused", action=barter.EXCHANGE,
             sequence=3, reason="barter_refused_stock_selection", catalogue_restored=True)
+
+    async def test_host_staging_a_trade_leaves_the_guest_draft_open_without_requoting(self):
+        frame = {"map": OBSERVATORY, "pawns": {"local": {"name": PAWN}}, barter.VIEW: {
+            "map": OBSERVATORY, "pawn": PAWN, "state": "confirming", "sequence": 6, "trader": TRADER,
+            "give": f"{PAYMENT}:2", "receive": f"{OFFER}:1", "cash": 20,
+        }}
+        recovered = {**frame, "ack": {"message": "exact stock NPC barter draft kept"},
+                     barter.VIEW: {**frame[barter.VIEW], "state": "ready"}}
+        bridge = SimpleNamespace(input_namespace=uuid.uuid4(), command=AsyncMock(return_value=recovered))
+        client = SimpleNamespace(
+            host_session="host", zone_epoch=EPOCH, bridge=bridge, last_game=frame,
+            control=SimpleNamespace(event=Mock()), guest_ui=SimpleNamespace(refresh=AsyncMock()),
+            gameplay_action=AsyncMock(side_effect=ValueError(barter.HOST_TRADING)),
+        )
+        view = barter.View()
+
+        await view.sync(client, True)
+
+        client.gameplay_action.assert_awaited_once()
+        bridge.command.assert_awaited_once_with(barter.RECOVER, "6", TRADER, timeout=4)
+        client.guest_ui.refresh.assert_not_awaited()
+        self.assertEqual(client.last_game, recovered)
+        client.control.event.assert_called_once_with("native_npc_barter_refused", action=barter.EXCHANGE,
+            sequence=6, reason=barter.HOST_TRADING, draft_kept=True)

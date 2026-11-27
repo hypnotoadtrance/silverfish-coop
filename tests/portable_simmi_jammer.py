@@ -248,7 +248,14 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe, *, flood_objectiv
                 spec.objective_map, pawn, spec.jammer, guid), aim
             await movement_arrived(guest, aimed["pawns"]["guest"]["location"])
             async with asyncio.timeout(5):
-                while await command(guest, "aimjammer") != "the guest crosshair is on the jammer":
+                while True:
+                    if spec == FLOOD:
+                        positioned = await guest.bridge.command(spec.command("aim-local"), timeout=4)
+                        bearing = positioned["ack"]["message"]
+                    else:
+                        bearing = await command(guest, "aimjammer")
+                    if bearing == "the guest crosshair is on the jammer":
+                        break
                     await asyncio.sleep(.1)
             started = time.time()
             sequence = await press_primary()
@@ -263,6 +270,9 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe, *, flood_objectiv
             assert result["event"] == "native_guest_primary_input", result
             shot = result["native_guest_weapon"]
             assert (shot["before"], shot["after"], shot["projectiles"]) == (magazine, magazine - 1, 1), shot
+            if spec == FLOOD:
+                contact = result.get("native_guest_trigger_view", {}).get("contact") or {}
+                assert contact.get("actor") == spec.jammer.split(" ", 1)[1], result
             magazine = shot["after"]
             shots.append({"aim": aim, "shot": shot})
             try:

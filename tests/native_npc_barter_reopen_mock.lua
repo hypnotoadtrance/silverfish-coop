@@ -4,6 +4,7 @@ local actor_class = "/Game/Classes/Actors/Barter_BP.Barter_BP_C"
 local npc_class = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local data_class = "/Game/Classes/Libraries/DataAssets/Merchants/MerchantData.MerchantData_C"
 local screen_class = "/Game/Classes/GUI/New/BarterScreen.BarterScreen_C"
+local confirmation_class = "/Game/Classes/GUI/New/ConfirmationScreen.ConfirmationScreen_C"
 local add_menu = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C:AddMenu"
 local world, opened_hook
 local assets = {}
@@ -54,7 +55,10 @@ local function screen(trader)
     menu.PlayerOffer, menu.TraderOffer, menu.PlayerCashOffer = array(), array(), 0
     menu.TraderInventoryPanel = object()
     menu.TraderInventoryPanel.FullRefresh = function() menu.refreshed = (menu.refreshed or 0) + 1 end
+    menu.TraderOfferPanel = object()
+    menu.TraderOfferPanel.FullRefresh = function() menu.offer_refreshed = true end
     menu.UpdateBalance = function() menu.balance_updated = true end
+    menu.UnlockPanels = function() menu.unlocked = true end
     function menu:GetOwningPlayer() return controller end
     function menu:SetRenderOpacity(value) self.opacity = value end
     function menu:SetIsEnabled(value) self.enabled = value end
@@ -86,10 +90,29 @@ save.Flags = {
 pawn.Save = save
 package.loaded.guest_save, package.loaded.native_wire_quest = {}, {}
 package.loaded.native_save_scope = {bind_guest = function() return save, pawn end}
+package.loaded.native_npc_barter_identity = {sync = function() end, key = function() end, is_dynamic = function() return false end}
 SilverfishSetNativeNpcBarter = function() return true end
 SilverfishSetNativeNpcBarterScreen = function() return true end
 local sequence = 0
 SilverfishCaptureNativeNpcBarterMenu = function() sequence = sequence + 1; return sequence end
+local confirm
+SilverfishTakeNativeNpcBarterConfirm = function()
+    if confirm then confirm = false; sequence = sequence + 1; return sequence end
+end
+
+local item_path = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
+local class = stock(item_path)
+local default = object()
+default.Stacks, default.IsA = false, function() return true end
+class.GetCDO = function() return default end
+class.GetFullName = function() return "BlueprintGeneratedClass " .. item_path end
+local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
+local item_ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
+local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
+local owned = {[item_class] = class, [item_ammo] = -1, [item_guid] = {A = 5, B = 0, C = 0, D = 0}}
+local stolen = "A" .. string.rep("0", 31) .. "|" .. item_path .. "|-1|0.5|10|0"
+local available = "B" .. string.rep("0", 31) .. "|" .. item_path .. "|-1|0.5|10|0"
+save.PlayerBackpack[1] = owned
 local barter = require("native_npc_barter")
 local scene = {controller = controller, local_pawn = {pawn = pawn}, world = world, server = true, map = "/Game/Test"}
 local function project(trader, cash)
@@ -119,12 +142,46 @@ assert(barter.command(changed, scene, "connected") == "exact stock NPC barter sc
 assert(controller.MenuStack[1] == verified and verified.enabled and verified.opacity == 1)
 assert(verified.refreshed == 1 and verified.balance_updated and save.Flags.Player_Cash == 1100)
 
+changed[9], changed[10] = stolen, available
+assert(barter.command(changed, scene, "connected") == "exact stock NPC barter screen shown")
+verified.TraderOffer[1] = first.Inventory[1]
+verified.PlayerOffer[1] = owned
+first.Inventory[1] = first.Inventory[2]
+first.Inventory[2], save.PlayerBackpack[1] = nil, nil
+verified.PlayerCashOffer = 11
+confirm = true
+barter.sync(scene, "connected")
+assert(not verified.enabled)
+
+local modal, tree = object(confirmation_class), object()
+modal.GetOuter, tree.GetOuter = function() return tree end, function() return verified end
+modal.BndEvt__ConfirmationScreen_Button_Cancel_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature = function()
+    controller.MenuStack[2] = nil
+end
+controller.MenuStack[2] = modal
+local retry = {"request", "native-npc-barter-recover", tostring(sequence), changed[4]}
+assert(barter.command(retry, scene, "connected") == "exact stock NPC barter draft kept")
+assert(controller.MenuStack:GetArrayNum() == 1 and controller.MenuStack[1] == verified and verified.enabled)
+assert(#verified.TraderOffer == 1 and #verified.PlayerOffer == 1 and verified.PlayerCashOffer == 11)
+assert(save.PlayerBackpack:GetArrayNum() == 0)
+
+confirm = true
+barter.sync(scene, "connected")
+local recovered = {"request", "native-npc-barter-recover", tostring(sequence), changed[4],
+    "10", "31", "2", "1", available}
+assert(barter.command(recovered, scene, "connected") == "exact stock NPC barter screen shown")
+assert(controller.MenuStack[1] == verified and verified.enabled and verified.unlocked and verified.offer_refreshed)
+assert(#verified.TraderOffer == 0 and verified.PlayerOffer[1] == owned and verified.PlayerCashOffer == 0)
+assert(save.PlayerBackpack:GetArrayNum() == 0 and first.Inventory:GetArrayNum() == 1 and save.Flags.Player_Cash == 10)
+assert(barter.rows(scene, "connected", function(...) return {...} end)[1][5] == "ready")
+
 controller:CloseMenu()
 local reopened = screen(first)
 assert(first.Save == false, "the prior projected view must still retain its stock")
 controller:AddMenu(reopened)
 assert(reopened.opacity == 0 and not reopened.enabled, "reopening the same trader exposes provisional stock")
 barter.sync(scene, "connected")
+assert(save.PlayerBackpack[1] == owned, "closing the restored draft returned the guest's original item")
 project(first, 1300)
 
 controller:CloseMenu()
