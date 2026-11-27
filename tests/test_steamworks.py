@@ -100,6 +100,27 @@ class SteamworksTests(unittest.TestCase):
             api.create_lobby(access=access)
             dll.SteamAPI_ISteamMatchmaking_CreateLobby.assert_called_with(api._matchmaking, kind, 5)
 
+    def test_discarded_search_handle_does_not_dispatch_or_remove_join_results(self):
+        dll = _Dll()
+        dll.SteamAPI_ISteamMatchmaking_RequestLobbyList.side_effect = (81, 82)
+        api = steamworks.Steamworks(dll)
+        self.addCleanup(api.close)
+        previous = api.request_lobbies("key", "value", limit=4)
+        api.discard_lobby_search(previous)
+        active = api.request_lobbies("key", "value", limit=4)
+        joining = api.join_lobby(17)
+        api.discard_lobby_search(joining)
+        matches = struct.pack("<I", 1)
+        entered = struct.pack("<QIB3xI4x", 17, 0, 0, 1)
+        dll.results.update({active: matches, joining: entered})
+        dll.callbacks.extend([
+            (703, struct.pack("<QiI", previous, 510, 4)),
+            (703, struct.pack("<QiI", active, 510, 4)),
+            (703, struct.pack("<QiI", joining, 504, 24)),
+        ])
+        self.assertEqual(api.poll_callbacks(), [(510, matches, active), (504, entered, joining)])
+        self.assertEqual(dll.SteamAPI_ManualDispatch_FreeLastCallback.call_count, 3)
+
     def test_received_data_is_copied_and_each_message_is_released(self):
         dll = _Dll()
         api = steamworks.Steamworks(dll)

@@ -35,6 +35,7 @@ _PUBLIC_LIMIT = 12
 _MAX_PEER_FLOWS = 16
 _FLOW_IDLE = 45.0
 _LOBBY_TIMEOUT = 12.0
+_SEARCH_TIMEOUT = 21.0  # Steam gives RequestLobbyList up to 20 seconds.
 _POLL_INTERVAL = .01
 _ROSTER_INTERVAL = .25
 _CALLBACK_INVITE = 333
@@ -239,12 +240,13 @@ class SteamTransport:
         handle = self.api.request_lobbies(_PUBLIC_KEY, _METADATA_VERSION, limit=_PUBLIC_LIMIT)
         self._search = handle, future
         try:
-            async with asyncio.timeout(_LOBBY_TIMEOUT):
+            async with asyncio.timeout(_SEARCH_TIMEOUT):
                 return await future
         except TimeoutError as error:
             raise SteamTransportError("Steam did not return a lobby list.") from error
         finally:
             self._search = None
+            self.api.discard_lobby_search(handle)
 
     def _lobby_results(self, data: bytes) -> tuple[PublicLobby, ...]:
         if len(data) != 4:

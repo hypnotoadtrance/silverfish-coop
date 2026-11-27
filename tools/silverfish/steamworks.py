@@ -252,6 +252,10 @@ class Steamworks:
         self._lobby_open_slots(self._matchmaking, 1)
         return self._remember(LOBBY_MATCH_LIST, self._lobby_list(self._matchmaking))
 
+    def discard_lobby_search(self, handle: int) -> None:
+        if self._pending.get(handle) == LOBBY_MATCH_LIST:
+            del self._pending[handle]
+
     def list_lobbies(self, count: int) -> tuple[int, ...]:
         self._require_open()
         return tuple(self._lobby_by_index(self._matchmaking, index) for index in range(count))

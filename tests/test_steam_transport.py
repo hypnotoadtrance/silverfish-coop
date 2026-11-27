@@ -3,6 +3,7 @@ from hashlib import sha256
 import secrets
 import struct
 import unittest
+from unittest.mock import patch
 
 from tools.silverfish import link
 from tools.silverfish.steam_transport import (
@@ -50,6 +51,7 @@ class FakeSteam:
         self.platform, self.local_id = platform, peer
         self.callbacks, self.messages = [], []
         self.left, self.accepted, self.closed_channels = [], [], []
+        self.discarded_searches = []
         self.presence = self.invited = None
         self.closed = False
         self.overlay = True
@@ -92,6 +94,9 @@ class FakeSteam:
         count = int(self.platform.metadata.get(key) == value)
         self.callbacks.append((_CALLBACK_MATCH_LIST, struct.pack("<I", count), 27))
         return 27
+
+    def discard_lobby_search(self, handle):
+        self.discarded_searches.append(handle)
 
     def list_lobbies(self, count):
         return (LOBBY,) if count else ()
@@ -149,6 +154,16 @@ class Inbox(asyncio.DatagramProtocol):
 
 
 class SteamTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_timed_out_lobby_search_discards_its_handle_and_can_retry(self):
+        api = Platform().client(GUEST)
+        guest = await self.start(api)
+        with (patch.object(api, "request_lobbies", return_value=81),
+              patch("tools.silverfish.steam_transport._SEARCH_TIMEOUT", 0)):
+            with self.assertRaisesRegex(SteamTransportError, "did not return a lobby list"):
+                await guest.public_lobbies()
+        self.assertEqual(api.discarded_searches, [81])
+        self.assertEqual(await guest.public_lobbies(), ())
+
     async def test_steam_lobby_access_controls_friend_join_presence_without_disabling_invites(self):
         api = Platform().client(HOST)
         host = await self.start(api)

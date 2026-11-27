@@ -14,7 +14,9 @@ from tools.silverfish import (
 )
 from tools.silverfish.campaign import CampaignStore
 from tools.silverfish.control import Control, status as control_status
-from tools.silverfish.steam_transport import SteamTransport, _BUILD_KEY, _CALLBACK_FRIEND_JOIN, _CALLBACK_INVITE
+from tools.silverfish.steam_transport import (
+    SteamTransport, _BUILD_KEY, _CALLBACK_FRIEND_JOIN, _CALLBACK_INVITE, _CALLBACK_MATCH_LIST,
+)
 from tools.silverfish.title_handoff import DESCRIPTOR_FILE, REQUEST_FILE
 from tools.silverfish.title_session import STATUS_FILE, SessionPlan, TitleSession
 from tools.silverfish.travel import OBSERVATORY
@@ -383,6 +385,45 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
     async def stop_browser(browser):
         browser.cancel()
         await asyncio.gather(browser, return_exceptions=True)
+
+    async def test_reopened_public_browser_supersedes_unanswered_search_and_uses_fresh_selection(self):
+        _, host, _ = await self.start(HOST)
+        guest_api, guest, bridge = await self.start(GUEST)
+        await host.transport.host(32124, fingerprint="e" * 64, access="public")
+        browser = asyncio.create_task(steam_browser.serve(bridge, guest.transport, guest.open_lobby, guest.pump))
+        self.addAsyncCleanup(self.stop_browser, browser)
+        await asyncio.sleep(0)
+
+        generation, previous, latest = "a" * 32, "b" * 32, "c" * 32
+        runtime.write_text(bridge / DESCRIPTOR_FILE, f"1\t{generation}\thost,join\t{int(time.time()) + 8}\n")
+        request, result = bridge / steam_browser.REQUEST, bridge / steam_browser.RESPONSE
+
+        def submit(token, action):
+            runtime.write_text(request, f"1\t{generation}\t{token}\t{action}\n", newline="\n")
+
+        with patch.object(guest_api, "request_lobbies", side_effect=(81, 82)) as searches:
+            submit(previous, "search")
+            await self.ready(lambda: searches.call_count == 1)
+            submit(latest, "search")
+            await self.ready(lambda: searches.call_count == 2)
+            self.assertEqual(guest_api.discarded_searches, [81])
+            self.assertFalse(result.exists())
+
+            # A late old callback must have no effect on the new view or its selection.
+            guest_api.callbacks.extend([
+                (_CALLBACK_MATCH_LIST, struct.pack("<I", 0), 81),
+                (_CALLBACK_MATCH_LIST, struct.pack("<I", 1), 82),
+            ])
+            listing = f"2\t{generation}\t{latest}\tready\t1\nFixture Host\t{VERSION}\t1\n"
+            await self.ready(lambda: result.exists() and result.read_text() == listing)
+            submit(previous, "1")
+            await self.ready(lambda: not request.exists())
+            self.assertEqual(result.read_text(), listing)
+            self.assertIsNone(guest.transport.lobby)
+
+            submit(latest, "1")
+            await self.ready(lambda: result.read_text() == f"2\t{generation}\t{latest}\tjoined\t0\n")
+            self.assertEqual(guest.transport.lobby, LOBBY)
 
     async def test_cancel_releases_only_the_current_join_offer_and_allows_a_fresh_invite(self):
         _, host, _ = await self.start(HOST)

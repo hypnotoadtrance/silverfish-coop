@@ -705,3 +705,31 @@ sync()
 local before = display
 offer("host,join", now + 8, generation("f"), defaults)
 assert(display == before and report()[3] == "ready")
+
+local reopened_generation = generation("f")
+files[browse_request], files[browse_response], files[steam_join] = nil, nil, nil
+click("multiplayer")
+next_guid = next_guid + 1
+click("steam-public")
+local previous_search = operation_id()
+assert(files[browse_request] == ("1\t%s\t%s\tsearch\n"):format(reopened_generation, previous_search))
+click("steam-back")
+next_guid = next_guid + 1
+click("steam-public")
+local latest_search = operation_id()
+assert(display.note == "Looking for public lobbies…", "Stay in search while its request file is briefly busy")
+assert(files[browse_request]:find(previous_search, 1, true))
+files[browse_request] = nil
+files[browse_response] = ("2\t%s\t%s\tready\t1\nOld Host\trc-abcdef0\t1\n")
+    :format(reopened_generation, previous_search)
+now = now + 1
+tick()
+assert(files[browse_request] == ("1\t%s\t%s\tsearch\n"):format(reopened_generation, latest_search))
+assert(display.note == "Looking for public lobbies…" and not display.buttons["steam-pick:1"])
+files[browse_request] = nil
+files[browse_response] = ("2\t%s\t%s\tready\t1\nNew Host\trc-abcdef0\t1\n")
+    :format(reopened_generation, latest_search)
+now = now + 18
+offer("host,join", now + 8, reopened_generation, defaults)
+tick()
+assert(display.buttons["steam-pick:1"].label == "New Host", "Accept the latest search through Steam's search deadline")

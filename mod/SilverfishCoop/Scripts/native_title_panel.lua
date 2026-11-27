@@ -22,6 +22,7 @@ local settings_fixture, credits_fixture
 local credits_path = "/Game/Classes/GUI/Credits_MainMenu_Widget.Credits_MainMenu_Widget_C"
 local initial_port, edited_port = "7777", "28181"
 local steam_access_labels = {invite = "Invite Only", friends = "Friends Only", public = "Public"}
+local steam_search_timeout, steam_join_timeout = 24, 15
 
 local function valid(object)
     return object and object:IsValid()
@@ -638,10 +639,11 @@ start_public_browser = function(selection)
     if not token then return end
     local now = os.time()
     local browser = {generation = session.offer.generation, token = token, first = 1,
-        state = selection and "returning" or "searching", lobbies = {}, expires = now + 15,
+        state = selection and "returning" or "searching", lobbies = {},
+        expires = now + (selection and steam_join_timeout or steam_search_timeout),
         previous_selection = selection, release_until = now + 3}
     session.browser = browser
-    if not selection and not browser_request(browser, "search") then browser.state = "unavailable" end
+    if not selection then browser.search_sent = browser_request(browser, "search") end
     show_public_lobbies(browser)
     return true
 end
@@ -662,7 +664,7 @@ local function browser_action(action)
             if lobby.compatible then
                 browser.note = nil
                 browser.state = browser_request(browser, selected) and "joining" or "unavailable"
-                browser.expires = os.time() + 15
+                browser.expires = os.time() + steam_join_timeout
                 if browser.state == "joining" then
                     browser.selection = {first = browser.first, index = tonumber(selected), name = lobby.name, version = lobby.version}
                 end
@@ -698,9 +700,15 @@ local function poll_public_lobbies(browser)
                 return
             end
         end
-        browser.state = browser_request(browser, "search") and "searching" or "unavailable"
-        browser.expires = now + 15
+        browser.state = "searching"
+        browser.search_sent = browser_request(browser, "search")
+        browser.expires = now + steam_search_timeout
         show_public_lobbies(browser)
+        return
+    end
+    if browser.state == "searching" and not browser.search_sent then
+        -- Windows can leave the previous request in this mailbox until the worker reads it.
+        browser.search_sent = browser_request(browser, "search")
         return
     end
     local file = io.open(bridge_path .. "/steam-coop-browser-response.tsv", "rb")

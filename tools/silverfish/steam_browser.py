@@ -38,10 +38,16 @@ def _publish(bridge, generation, token, result, rows=()):
         runtime.write_text(bridge / RESPONSE, header + listing, newline="\n")
 
 
+async def _cancel_search(task):
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
 async def serve(bridge, transport, open_lobby, pump):
     request_path = bridge / REQUEST
     response_path = bridge / RESPONSE
     lookup = None
+    search = None
     for path in (request_path, response_path):
         with suppress(OSError):
             path.unlink(missing_ok=True)
@@ -51,29 +57,39 @@ async def serve(bridge, transport, open_lobby, pump):
             if request is not None and _qualified(bridge, request[1]):
                 generation, token, action = request.groups()
                 if action == b"search":
+                    if search is not None:
+                        await _cancel_search(search[2])
                     lookup = None
-                    try:
-                        rows = await transport.public_lobbies()
-                    except (OSError, ValueError, RuntimeError):
+                    search = generation, token, asyncio.create_task(transport.public_lobbies())
+                elif search is None and (lookup is None or lookup[:2] == (generation, token)):
+                    index = int(action) - 1
+                    result = "unavailable"
+                    if (lookup is not None and time.monotonic() < lookup[2] and index < len(lookup[3])):
+                        selected = lookup[3][index]
+                        if not selected.compatible:
+                            result = "incompatible"
+                        else:
+                            lookup = None
+                            if await open_lobby(selected.lobby):
+                                result = "joined"
+                    _publish(bridge, generation, token, result)
+            if search is not None and search[2].done():
+                generation, token, task = search
+                search = None
+                try:
+                    rows = task.result()
+                except (OSError, ValueError, RuntimeError):
+                    rows = None
+                if _qualified(bridge, generation):
+                    if rows is None:
                         _publish(bridge, generation, token, "unavailable")
                     else:
                         lookup = generation, token, time.monotonic() + 60, rows
                         _publish(bridge, generation, token, "ready", rows)
-                else:
-                    index = int(action) - 1
-                    current, lookup = lookup, None
-                    result = "unavailable"
-                    if (current and current[:2] == (generation, token) and time.monotonic() < current[2]
-                            and index < len(current[3])):
-                        selected = current[3][index]
-                        if not selected.compatible:
-                            result = "incompatible"
-                            lookup = current
-                        elif await open_lobby(selected.lobby):
-                            result = "joined"
-                    _publish(bridge, generation, token, result)
             await asyncio.sleep(.15)
     finally:
+        if search is not None:
+            await _cancel_search(search[2])
         for path in (request_path, response_path):
             with suppress(OSError):
                 path.unlink(missing_ok=True)
