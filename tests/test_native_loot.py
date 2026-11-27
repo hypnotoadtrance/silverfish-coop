@@ -133,6 +133,25 @@ class AuthoredCrateRegistryTests(unittest.TestCase):
 
 
 class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_old_named_food_claim_projects_through_stock_loose_visibility(self):
+        from tools.silverfish import native_authored_pickup as authored
+
+        loose = native_loose_pickup
+        source = authored.CROSSROADS_MUSHROOM
+        area, name, item_class = authored.LEGACY_LOOSE_SOURCES[source]
+        path = name.split(" ", 1)[1]
+        self.assertNotIn(source, authored.SOURCES)
+        game = {"state": "hosting", "map": area, loose.CAPABILITY: 1, loose.VIEW_SCOPE: 2}
+        claim = dict(source=source, map=area, actor=name, class_path=item_class, owner="host", guid=ITEM["guid"])
+        host = SimpleNamespace(last_game=game, zone_epoch="d" * 32, transitioning=False,
+                               native_checkpoint_unsafe=False, party={authored.STATE_KEY: {source: claim}})
+        bridge = SimpleNamespace(command=AsyncMock(return_value=game))
+        view = loose.Visibility()
+        await view.refresh(host, bridge)
+        self.assertEqual(view.hidden(host), [path])
+        self.assertEqual(host.party, {authored.STATE_KEY: {source: claim}})
+        bridge.command.assert_awaited_once_with(loose.PROJECT, "2", "hide", path, timeout=4)
+
     async def test_streamed_claim_uses_the_owning_campaign_and_survives_missing_local_actor(self):
         loose = native_loose_pickup
         raw = "/FrontierPack/Maps/StockroomInstance.Stockroom:PersistentLevel.Item_Bandage_C_1"

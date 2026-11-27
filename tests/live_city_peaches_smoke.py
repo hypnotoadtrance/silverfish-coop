@@ -16,6 +16,7 @@ from live_multi_smoke import saved_hashes
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from tools.silverfish import native_authored_pickup as pickup
+from tools.silverfish import native_loose_pickup as loose
 from tools.silverfish import native_guest_consumable as consumable, native_host_save
 from tools.silverfish.control import submit
 
@@ -24,7 +25,9 @@ FOOD_SOURCES = (pickup.CITY_PEACHES, pickup.CITY_BEANS, pickup.CRASH_SITE_BEANS,
 
 async def verify(work: Path, original: Path, source=pickup.CITY_PEACHES, *, pickup_only=False):
     name = source + "-" + uuid.uuid4().hex[:8]
-    area, actor, item_class = pickup.SOURCES[source]
+    area, name_in_world, item_class = pickup.LEGACY_LOOSE_SOURCES[source]
+    actor = name_in_world.split(" ", 1)[1]
+    pickup_target = f"loose:{actor}"
     use_action = consumable.COMMANDS[item_class]
     expected = consumable.MEALS[use_action]
     result_key = consumable.RESULT[use_action]
@@ -119,17 +122,17 @@ async def verify(work: Path, original: Path, source=pickup.CITY_PEACHES, *, pick
         return receipt
 
     async def verify_food(authority, guest, invitation, initial):
-        approach = await action(host_run, pickup.APPROACH, target="guest", pickup_source=source)
+        approach = await action(host_run, loose.APPROACH, target=f"guest@{pickup_target}")
         assert approach["actor"] == actor, approach
 
         def projected(state):
-            return state.get("game", {}).get(pickup.SOURCES_KEY, {}).get(source, {})
+            return state.get("game", {}).get(loose.KEY, {}).get(actor, {})
 
         async def retired(directory):
-            claimed_state = await wait(directory, lambda state: projected(state).get("state") == "claimed")
-            row = projected(claimed_state)
-            assert (row["source"], row["map"], row["actor"], row["class_path"]) == (source, area, actor, item_class), row
-            return row
+            claimed_state = await wait(directory, lambda state: state.get("game", {}).get("map") == area
+                                       and projected(state).get("state") != "available"
+                                       and actor in state.get("gameplay", {}).get(loose.STATE, ()))
+            return projected(claimed_state)
 
         available = await wait(guest_run, lambda state: projected(state).get("state") == "available")
         assert (projected(available)["actor"], projected(available)["class_path"]) == (actor, item_class), available
@@ -139,11 +142,11 @@ async def verify(work: Path, original: Path, source=pickup.CITY_PEACHES, *, pick
             guest_inventory_before = await inventory(guest_run)
             before = save_fingerprints()
             assert any(path.endswith("campaign.json") for path in before) and any(path.endswith(".sav") for path in before)
-        interaction = (await action(guest_run, "native-authored-pickup-stock-fixture",
-                                    pickup_source=source))["native_authored_pickup_interaction"]
-        assert (interaction["map"], interaction["source"], interaction["entry"]) == (area, source, "stock"), interaction
-        claimed = await wait(host_run, lambda state: source in state.get("gameplay", {}).get(pickup.STATE_KEY, {}))
-        claim = claimed["gameplay"][pickup.STATE_KEY][source]
+        interaction = await action(guest_run, loose.FIXTURE, target=pickup_target)
+        assert interaction["actor"] == actor, interaction
+        committed = await wait_event(host_run, "native_loose_pickup_claimed", lambda event: event.get("actor") == actor)
+        operation_id = committed["operation_id"]
+        claim = (await action(guest_run, loose.CLAIM, target=pickup_target, operation_id=operation_id))[loose.PROOF]
         assert (claim["map"], claim["actor"], claim["owner"], claim["class_path"]) == (area, actor, character, item_class), claim
         guid = claim["guid"]
         guest_items = await inventory(guest_run)
@@ -158,10 +161,7 @@ async def verify(work: Path, original: Path, source=pickup.CITY_PEACHES, *, pick
             host_retired, guest_retired = await asyncio.gather(retired(host_run), retired(guest_run))
             assert host_inventory == host_inventory_before and guid not in guest_inventory_before
             assert guest_items == {**guest_inventory_before, guid: item}
-            committed = await wait_event(host_run, "native_authored_pickup_committed",
-                                         lambda event: all(event.get(key) == value for key, value in claim.items()))
             assert committed["revision"] is None, committed
-            operation_id = committed["operation_id"]
             after_pickup = save_fingerprints()
             assert after_pickup == before, "Stock pickup changed save content or modification times before checkpoint"
             evidence.update(retired={"host": host_retired, "guest": guest_retired},
@@ -197,12 +197,12 @@ async def verify(work: Path, original: Path, source=pickup.CITY_PEACHES, *, pick
         assert host_frame and guest_frame and host_frame["slot"] != guest_frame["slot"], (host_frame, guest_frame)
         assert host_frame["map"] == guest_frame["map"] == area, (host_frame, guest_frame)
         record = checkpoint["world"]["party"]
-        assert record[pickup.STATE_KEY][source] == claim, record[pickup.STATE_KEY]
+        assert record[loose.STATE][actor] == claim, record[loose.STATE]
         receipts = [row for row in record["receipts"][character] if row["id"] == operation_id]
         assert len(receipts) == 1, record["receipts"]
         if pickup_only:
-            assert receipts[0]["request"] == [pickup.ACTION, source, None]
-            assert receipts[0]["result"]["native_authored_pickup_claim"] == claim
+            assert receipts[0]["request"] == [loose.CLAIM, pickup_target, None]
+            assert receipts[0]["result"][loose.PROOF] == claim
 
         port = initial["endpoint"]["port"]
         await launch(host_run, "restart-host", "host", *team, "--port", str(port), *host_flags)
@@ -215,15 +215,15 @@ async def verify(work: Path, original: Path, source=pickup.CITY_PEACHES, *, pick
         await retired(guest_run)
         if pickup_only:
             await retired(host_run)
-            replay = await action(guest_run, pickup.ACTION, target=source, operation_id=operation_id)
-            assert replay["native_authored_pickup_claim"] == claim, replay
-            replayed = {"replayed_pickup": replay["native_authored_pickup_claim"], "inventory_unchanged": True}
+            replay = await action(guest_run, loose.CLAIM, target=pickup_target, operation_id=operation_id)
+            assert replay[loose.PROOF] == claim, replay
+            replayed = {"replayed_pickup": replay[loose.PROOF], "inventory_unchanged": True}
         else:
             replay = await action(guest_run, use_action, target=guid, operation_id=operation_id)
             assert replay[result_key] == consumed[result_key] and guid not in await inventory(guest_run), replay
             replayed = {"replayed_use": replay[result_key]}
-        repeated = await action(guest_run, pickup.ACTION, target=source, expected=False)
-        assert repeated["error"] == "native_authored_pickup_already_claimed", repeated
+        repeated = await action(guest_run, loose.CLAIM, target=pickup_target, expected=False)
+        assert repeated["error"] == "loose_pickup_already_claimed", repeated
         if pickup_only:
             assert await inventory(guest_run) == guest_items and await inventory(host_run) == host_inventory
         evidence.update(verified=True, restart={"map": area, "port": port, "host_slot": host_frame["slot"],

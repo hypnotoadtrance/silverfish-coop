@@ -6,9 +6,45 @@ import math
 from portable_guest_world_start import resident_events, wait_resident_status
 from portable_pickup_preview import PREVIEW_FIXTURE, read_preview
 from portable_stock_shovel import stock_inventory
-from tools.silverfish import native_loose_pickup as loose, native_prop_carry as carry
+from tools.silverfish import native_authored_pickup as authored, native_loose_pickup as loose, native_prop_carry as carry
 from tools.silverfish.control import submit
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
+
+
+async def verify_stock_placed_food(host, guest, pawn):
+    _, name, item_class = authored.LEGACY_LOOSE_SOURCES[authored.CROSSROADS_MUSHROOM]
+    path = name.split(" ", 1)[1]
+    target = f"loose:{path}"
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    approached = await host.bridge.command(loose.APPROACH, path, pawn, timeout=5)
+    position, = [row["location"] for row in approached["pawns"].values() if row.get("name") == pawn]
+    await wait_resident_status(guest_run, lambda frame:
+        frame.get("game", {}).get(loose.KEY, {}).get(path, {}).get("state") == "available"
+        and (point := frame["game"].get("pawns", {}).get("local", {}).get("location"))
+        and math.dist(point, position) < 50)
+    authority = await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == CROSSROADS)
+    before = await stock_inventory(guest_run, guest=True)
+    pressed = await submit(guest_run, loose.FIXTURE, target=target)
+    assert pressed["ok"], pressed
+    await asyncio.gather(*(wait_resident_status(run, lambda frame: path in frame.get("gameplay", {}).get(loose.STATE, ())
+        and frame.get("game", {}).get(loose.KEY, {}).get(path, {}).get("state") != "available") for run in (host_run, guest_run)))
+    async with asyncio.timeout(8):
+        while not (claims := [row for row in await resident_events(host_run, authority)
+                              if row.get("event") == "native_loose_pickup_claimed" and row.get("actor") == path]):
+            await asyncio.sleep(.08)
+    claim, = claims
+    assert claim["class_path"] == item_class and claim["revision"] is None, claim
+    async with asyncio.timeout(8):
+        while True:
+            after = await stock_inventory(guest_run, guest=True)
+            amount_before = sum(item["quantity"] for item in before if item["class_path"] == item_class)
+            amount_after = sum(item["quantity"] for item in after if item["class_path"] == item_class)
+            if amount_after == amount_before + 1:
+                break
+            await asyncio.sleep(.08)
+    repeated = await submit(guest_run, loose.CLAIM, target=target)
+    assert not repeated["ok"] and repeated["error"] == "loose_pickup_already_claimed", repeated
+    return {"actor": path, "class_path": item_class, "new_quantity": amount_after, "duplicate_refused": True}
 
 
 def placed_item_overlay(game, overlay):

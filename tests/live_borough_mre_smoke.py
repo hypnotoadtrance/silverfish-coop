@@ -16,6 +16,7 @@ from live_multi_smoke import saved_hashes
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from tools.silverfish import native_authored_pickup as pickup, native_guest_consumable as consume, native_host_save
+from tools.silverfish import native_loose_pickup as loose
 from tools.silverfish.control import submit
 from tools.silverfish.travel import BOROUGH
 
@@ -86,13 +87,14 @@ async def verify(work: Path, original: Path):
         character = invitation["character_id"]
         guest = await launch(guest_run, "guest", "join", *client, "--invite", invitation["invite_file"], *guest_flags)
         initial, attached = await paired(character)
-        prepared = await action(host_run, pickup.APPROACH, target="guest", pickup_source=pickup.BOROUGH_MRE)
-        assert prepared["actor"] == pickup.SOURCES[pickup.BOROUGH_MRE][1], prepared
-        raw = (await action(guest_run, pickup.STOCK_FIXTURE, pickup_source=pickup.BOROUGH_MRE))["native_authored_pickup_interaction"]
-        assert (raw["entry"], raw["source"], raw["map"]) == ("stock", pickup.BOROUGH_MRE, BOROUGH), raw
-        observed = await wait(host_run, lambda state: pickup.BOROUGH_MRE in state.get(
-            "campaign", {}).get("world", {}).get("party", {}).get(pickup.STATE_KEY, {}))
-        claim = observed["campaign"]["world"]["party"][pickup.STATE_KEY][pickup.BOROUGH_MRE]
+        actor = pickup.LEGACY_LOOSE_SOURCES[pickup.BOROUGH_MRE][1].split(" ", 1)[1]
+        target = f"loose:{actor}"
+        prepared = await action(host_run, loose.APPROACH, target=f"guest@{target}")
+        assert prepared["actor"] == actor, prepared
+        raw = await action(guest_run, loose.FIXTURE, target=target)
+        assert raw["actor"] == actor, raw
+        committed = await wait_event(host_run, "native_loose_pickup_claimed", lambda event: event.get("actor") == actor)
+        claim = (await action(guest_run, loose.CLAIM, target=target, operation_id=committed["operation_id"]))[loose.PROOF]
         assert (claim["owner"], claim["class_path"]) == (character, consume.MRE_CLASS), claim
         guid = claim["guid"]
         guest_before, host_before = await inventory(guest_run, character), await inventory(host_run, "host")

@@ -49,12 +49,8 @@ FORT_LETO = "/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P"
 FORT_LETO_LOCKER_KEY = "fort-leto-locker-key-543"
 STOLEN_BAG = "forest-brokers-artifacts-bag"
 DEAD_DROP = native_dead_drop.SOURCE
-SOURCES = {
-    SOURCE: (OBSERVATORY, ACTOR, ITEM_CLASS),
-    CITY_WIRE: (CITY, f"Item_CopperWire_C {CITY}.City_01_P:PersistentLevel.Item_CopperWire_C_3",
-                "/Game/Classes/Items/Item_CopperWire.Item_CopperWire_C"),
-    CITY_BRANDY: (CITY, f"Item_VintageWine_C {CITY}.City_01_P:PersistentLevel.Item_VintageWine_C_1",
-                  "/Game/Classes/Items/Item_VintageWine.Item_VintageWine_C"),
+# Previously claimed food keeps its original saved identity and inventory GUID.
+LEGACY_LOOSE_SOURCES = {
     CITY_PEACHES: (CITY, f"Item_CannedPeaches_C {CITY}.City_01_P:PersistentLevel.Item_CannedPeaches_C_1",
                    "/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C"),
     CITY_BEANS: (CITY, f"Item_CannedBeans_C {CITY}.City_01_P:PersistentLevel.Item_CannedBeans_C_1", CANNED_BEANS_CLASS),
@@ -62,6 +58,15 @@ SOURCES = {
                       CANNED_BEANS_CLASS),
     CROSSROADS_MUSHROOM: (CROSSROADS, f"Item_BrownMushroom_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Item_BrownMushroom_C_3",
                           BROWN_MUSHROOM_CLASS),
+    BOROUGH_MRE: (BOROUGH, f"Item_MRE_C {BOROUGH}.Borough:PersistentLevel.Item_MRE_C_1",
+                  "/Game/Classes/Items/Item_MRE.Item_MRE_C"),
+}
+SOURCES = {
+    SOURCE: (OBSERVATORY, ACTOR, ITEM_CLASS),
+    CITY_WIRE: (CITY, f"Item_CopperWire_C {CITY}.City_01_P:PersistentLevel.Item_CopperWire_C_3",
+                "/Game/Classes/Items/Item_CopperWire.Item_CopperWire_C"),
+    CITY_BRANDY: (CITY, f"Item_VintageWine_C {CITY}.City_01_P:PersistentLevel.Item_VintageWine_C_1",
+                  "/Game/Classes/Items/Item_VintageWine.Item_VintageWine_C"),
     COUP_REPORT: (DEAD_END, f"Note_DeadEnd_01_C {DEAD_END}.DeadEnd_01_P:PersistentLevel.Note_DeadEnd_01_C_1",
                   "/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C"),
     GOLD_BAG: (SCAV_BAR, f"Bag_GoldRush_C {SCAV_BAR}.Shop_ScavBar_P:PersistentLevel.Bag_GoldRush_C_1",
@@ -82,8 +87,6 @@ SOURCES = {
                           "/Game/Classes/Equipment/Eqp_LockPick.Eqp_LockPick_C"),
     SAVLO_RING: (SAVLO_ESTATE, f"Art_EvilEyeRing_C {SAVLO_ESTATE}.SavloEstate_P:PersistentLevel.Art_EvilEyeRing_C_1",
                  "/Game/Classes/Items/Artifacts/Art_EvilEyeRing.Art_EvilEyeRing_C"),
-    BOROUGH_MRE: (BOROUGH, f"Item_MRE_C {BOROUGH}.Borough:PersistentLevel.Item_MRE_C_1",
-                  "/Game/Classes/Items/Item_MRE.Item_MRE_C"),
     DUST_FILTER: (RAIL_YARD, f"Helm_DustFilter_C {RAIL_YARD}.RailYard_P:PersistentLevel.Helm_DustFilter_C_1",
                   "/Game/Classes/Armor_Items/Helm_DustFilter.Helm_DustFilter_C"),
     MOLASSES: (NORTHEAST_RAIL, f"Item_Molasis_C {NORTHEAST_RAIL}.NorthEast_Rail_P:PersistentLevel.Item_Molasis_C_1",
@@ -125,8 +128,7 @@ def select_source(area: str | None, requested: str | None) -> str:
     sources = MAP_SOURCES.get(area, ())
     if requested is None:
         defaults = [source for source in sources if source not in native_dead_drop.BY_SOURCE
-                    and source not in (OLD_PIPE, PROTOTYPE_DRILL, CROSSROADS_LOCKPICK,
-                                                                 CITY_BEANS, CRASH_SITE_BEANS, CROSSROADS_MUSHROOM, GOLD_BAG)
+                    and source not in (OLD_PIPE, PROTOTYPE_DRILL, CROSSROADS_LOCKPICK, GOLD_BAG)
                     and source not in STOCK_SUPPLIES and source not in STOCK_CASH]
         if len(defaults) == 1:
             return defaults[0]
@@ -293,14 +295,15 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
     is_supply = target in STOCK_SUPPLIES
     is_cash = target in STOCK_CASH
     bound_epoch = _needs_epoch(target)
-    if target not in SOURCES or (has_epoch and not bound_epoch):
+    placement = SOURCES.get(target) or LEGACY_LOOSE_SOURCES.get(target)
+    if not placement or (has_epoch and not bound_epoch):
         raise party.RuleError("invalid_authored_pickup_request")
     if bound_epoch:
         if character == "host" and not has_epoch:
             epoch = host.zone_epoch
         if not isinstance(epoch, str) or not party.REQUEST_ID.fullmatch(epoch) or epoch != host.zone_epoch:
             raise party.RuleError("native_authored_pickup_stale_zone")
-    area, actor, item_class = SOURCES[target]
+    area, actor, item_class = placement
     if (not host.native_zones or host.native_profile is None or host.stopping or host.transitioning
             or host.native_checkpoint_unsafe or host.last_game.get("state") != "hosting"
             or host.last_game.get("map") != area or time.monotonic() - host.last_seen > 3):
@@ -313,6 +316,8 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
             return receipt["result"]
     if target in host.party.get(STATE_KEY, {}):
         raise party.RuleError("native_authored_pickup_already_claimed")
+    if target in LEGACY_LOOSE_SOURCES:
+        raise party.RuleError("native_authored_pickup_unavailable")
     if target in native_dead_drop.BY_SOURCE and not native_dead_drop.frame(host):
         raise party.RuleError("authored_pickup_dead_drop_inactive")
     if target == SAVLO_KEYCARD and not native_savlo_locker.observed(host.last_game, "opened"):

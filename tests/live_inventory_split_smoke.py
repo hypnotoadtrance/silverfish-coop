@@ -20,6 +20,7 @@ from tools.silverfish import native_authored_pickup as pickup
 from tools.silverfish import native_guest_stack_drop as stack_drop
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as drop_record, native_host_save
 from tools.silverfish import native_world_loot as drop_projection
+from tools.silverfish import native_loose_pickup as loose
 
 
 OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
@@ -35,7 +36,8 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
     item_class = ammo.item_path
     expected_quantity = ammo.fixture_units
     if item_source:
-        drop_map, source_actor, item_class = pickup.SOURCES[item_source]
+        placements = pickup.LEGACY_LOOSE_SOURCES if food_source else pickup.SOURCES
+        drop_map, source_actor, item_class = placements[item_source]
         expected_quantity = 1
     area = drop_map or (drop_record.CROSSROADS if crossroads_drop else OBSERVATORY)
     manual_drop = manual_drop or crossroads_drop or drop_map is not None or multiple_drops
@@ -117,17 +119,27 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
             seeded_weapon = await ask("action", *host, "native-guest-weapon-seed", "--item-guid", weapon)
             assert seeded_weapon["native_guest_weapon"]["guid"] == weapon, seeded_weapon
         if item_source:
-            if authored_item:
+            if food_source:
+                path = source_actor.split(" ", 1)[1]
+                target = f"loose:{path}"
+                await ask("action", *host, loose.APPROACH, "--target", f"guest@{target}")
+                await ask("action", *guest, loose.FIXTURE, "--target", target)
+                await wait(run, lambda state: path in state.get("gameplay", {}).get(loose.STATE, ()))
+                rows = await page(guest, character)
+                item, = [row for row in rows if row["source"] == "backpack" and row["class_path"] == item_class]
+                source = item["guid"]
+                evidence["stock_food_pickup"] = item
+            else:
                 await ask("action", *host, pickup.APPROACH, "--target", "host", "--pickup-source", item_source)
-            await ask("action", *host, pickup.APPROACH, "--target", "guest", "--pickup-source", item_source)
-            await wait(guest_run, lambda state: state.get("game", {}).get(pickup.SOURCES_KEY, {}).get(item_source, {})
-                       .get("state") == "available")
-            await ask("action", *guest, "native-authored-pickup-stock-fixture", "--pickup-source", item_source)
-            collected = await wait(run, lambda state: item_source in state.get("gameplay", {}).get(pickup.STATE_KEY, {}))
-            claim = collected["gameplay"][pickup.STATE_KEY][item_source]
-            assert (claim["owner"], claim["actor"], claim["class_path"]) == (character, source_actor, item_class), claim
-            source = claim["guid"]
-            evidence["authored_food_pickup" if food_source else "authored_stock_pickup"] = claim
+                await ask("action", *host, pickup.APPROACH, "--target", "guest", "--pickup-source", item_source)
+                await wait(guest_run, lambda state: state.get("game", {}).get(pickup.SOURCES_KEY, {}).get(item_source, {})
+                           .get("state") == "available")
+                await ask("action", *guest, pickup.STOCK_FIXTURE, "--pickup-source", item_source)
+                collected = await wait(run, lambda state: item_source in state.get("gameplay", {}).get(pickup.STATE_KEY, {}))
+                claim = collected["gameplay"][pickup.STATE_KEY][item_source]
+                assert (claim["owner"], claim["actor"], claim["class_path"]) == (character, source_actor, item_class), claim
+                source = claim["guid"]
+                evidence["authored_stock_pickup"] = claim
         else:
             if ammo != NINE_MM_BALL:
                 weapon = uuid.uuid4().hex.upper()

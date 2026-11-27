@@ -197,13 +197,6 @@ namespace
             125.08236158222627, 2704.0395701013076, 474.9005913197349, 0,
         },
         Profile{
-            "borough-mre",
-            STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough"),
-            STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough:PersistentLevel.Item_MRE_C_1"),
-            STR("/Game/Classes/Items/Item_MRE.Item_MRE_C"),
-            73.05513264620163, 2566.409056792115, 307.29826126640774, 1, 1, true,
-        },
-        Profile{
             "railyard-dust-filter",
             STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P"),
             STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P:PersistentLevel.Helm_DustFilter_C_1"),
@@ -251,34 +244,6 @@ namespace
             STR("/Game/Classes/Maps/Maps_OverWorld/Forest_01_P.Forest_01_P:PersistentLevel.Brokers_ArtifactsBag_C_1"),
             STR("/Game/Classes/Items/Key_Items/Brokers_ArtifactsBag.Brokers_ArtifactsBag_C"),
             -8042.335612722819, 25100.7873570329, 898.6314940223217, 1,
-        },
-        Profile{
-            "city-canned-peaches",
-            STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
-            STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.Item_CannedPeaches_C_1"),
-            STR("/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C"),
-            -670.2554344659196, 4487.914807500511, 41.21247972722806, 1, 1, true,
-        },
-        Profile{
-            "city-canned-beans",
-            STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
-            STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.Item_CannedBeans_C_1"),
-            STR("/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C"),
-            -2872.6649813452254, 4277.220818581784, 331.53292892615934, 1, 1, true,
-        },
-        Profile{
-            "crash-site-canned-beans",
-            STR("/Game/Classes/Maps/Maps_Dungeons/CrashSite_01_P.CrashSite_01_P"),
-            STR("/Game/Classes/Maps/Maps_Dungeons/CrashSite_01_P.CrashSite_01_P:PersistentLevel.Item_CannedBeans_C_1"),
-            STR("/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C"),
-            12444.932956609755, 1960.3141652888612, 158.15586974916707, 1, 1, true,
-        },
-        Profile{
-            "crossroads-brown-mushroom",
-            STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"),
-            STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.Item_BrownMushroom_C_3"),
-            STR("/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C"),
-            -19989.96202763854, -1402.687676772569, -202.34374719406702, 1, 1,
         },
 #include "authored_cash_profiles.inc"
 #include "authored_supply_profiles.inc"
@@ -2280,9 +2245,8 @@ namespace
     void apply_loose_view(std::string_view path, Scope& scope)
     {
         auto* actor = static_cast<U::AActor*>(scope.actor.Get());
-        if (!live(actor) || (scope.host && !path.contains('|'))) return;
-
         const bool hidden = loose_hidden.contains(path);
+        if (!live(actor) || (scope.host && !path.contains('|') && !hidden)) return;
         if (scope.claimed != hidden ||
             (hidden && (actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), true))))
             set_visibility(scope, hidden);
@@ -2400,17 +2364,24 @@ namespace
         {
             if (!lua.is_string()) return result(lua, false, "loose_pickup_projection_arguments");
             std::string path{lua.get_string()};
-            if (loose_actor_path(path, area).empty() || (loose_host && !path.contains('|')))
+            if (loose_actor_path(path, area).empty())
                 return result(lua, false, "loose_pickup_projection_source");
             paths.push_back(std::move(path));
         }
 
         for (const auto& path : paths)
         {
+            bool was_hidden{};
             if (hidden) loose_hidden.insert(path);
-            else loose_hidden.erase(path);
+            else was_hidden = loose_hidden.erase(path) != 0;
             if (auto found = loose_sources.find(path); found != loose_sources.end())
-                apply_loose_view(path, found->second.scope);
+            {
+                auto& scope = found->second.scope;
+                if (was_hidden && scope.host && !path.contains('|') && scope.claimed)
+                    set_visibility(scope, false);
+                else
+                    apply_loose_view(path, scope);
+            }
         }
         return result(lua, true, "loose_pickup_projection_applied");
     }
