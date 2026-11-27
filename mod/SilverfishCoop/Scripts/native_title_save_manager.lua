@@ -47,8 +47,11 @@ local function draw(state, note, focus)
         rows[#rows + 1] = {button("back", "Back")}
     elseif state.screen == "characters" then
         heading = "Manage Characters"
-        note = note or clip(save_label(save), 32)
-        if #state.characters == 0 then note = "No guest characters in this save." end
+        if #state.characters == 0 then
+            note = (note and note .. " " or "") .. "No guest characters in this save."
+        else
+            note = note or clip(save_label(save), 32)
+        end
         page_rows(rows, state.characters, state.character_first, function(character)
             local row = button("character:" .. character.id, clip(character.name, 25), "Created by " .. clip(character.creator, 20))
             row.photo = character.photo
@@ -110,7 +113,9 @@ local function request(state, action)
     end
     state.pending = {id = id, action = action, until_at = os.time() + 20}
     state.screen = "waiting"
-    draw(state, action == "characters" and "Loading guest characters…" or nil)
+    local note = state.character_refresh and "Character deleted. Refreshing guest characters…"
+        or action == "characters" and "Loading guest characters…"
+    draw(state, note)
     return true
 end
 
@@ -119,8 +124,8 @@ local function start_request(state, action)
 end
 
 local function find(entries, key)
-    for _, entry in ipairs(entries) do
-        if entry.id == key then return entry end
+    for index, entry in ipairs(entries) do
+        if entry.id == key then return entry, index end
     end
 end
 
@@ -221,20 +226,44 @@ function manager.poll(state)
         if entries then open_list(state, previous.note, previous.selected_id, entries) end
         return
     end
-    local pending = state.pending
-    if not pending then return end
+    local pending, refresh = state.pending, state.character_refresh
+    if not pending then
+        if not refresh then return end
+        local saves = state.catalog()
+        local save = saves and find(saves, state.save.id)
+        if save and not save.deleted and tonumber(save.revision) > refresh.revision then
+            state.save = save
+            if request(state, "characters") then return end
+        end
+        if os.time() > refresh.until_at or saves and (not save or save.deleted) then
+            state.character_refresh = nil
+            open_list(state, "Character deleted. Reopen the save to refresh the list.", state.save.id, saves)
+        end
+        return
+    end
     local entries, failure = response(state)
     if not entries and not failure and os.time() <= pending.until_at then return end
-    state.pending = nil
+    state.pending, state.character_refresh = nil, nil
     if failure or not entries then
-        open_list(state, failure == "busy" and "Close the hosted campaign before managing this save."
-            or "Could not complete the save request. Reopen the save and try again.", state.save.id)
+        local note = refresh and "Character deleted. Reopen the save to refresh the list."
+            or failure == "busy" and "Close the hosted campaign before managing this save."
+            or "Could not complete the save request. Reopen the save and try again."
+        open_list(state, note, state.save.id)
     elseif pending.action == "characters" then
         state.characters, state.screen = entries, "characters"
-        draw(state)
+        if refresh then
+            local index = math.min(refresh.index, #entries)
+            state.character_first = index > 0 and (index - 1) // page_size * page_size + 1 or 1
+            draw(state, "Character deleted.", index > 0 and "character:" .. entries[index].id or "back")
+        else
+            draw(state)
+        end
+    elseif pending.action == "delete-character" then
+        local _, index = find(state.characters, state.character.id)
+        state.character_refresh = {revision = tonumber(state.save.revision), index = index or 1, until_at = os.time() + 20}
+        draw(state, "Character deleted. Refreshing guest characters…")
     else
-        local name = pending.action:match("%-character$") and "Character" or "Save"
-        open_list(state, name .. " deleted.", state.save.id)
+        open_list(state, "Save deleted.", state.save.id)
     end
 end
 

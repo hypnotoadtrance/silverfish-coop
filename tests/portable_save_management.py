@@ -112,6 +112,10 @@ async def verify_save_management(host, guest):
     assert host_slot.read_bytes() == host_bytes and not guest_slot.exists()
     assert b"Management scout" not in (checkpoint / "campaign.previous.json").read_bytes()
 
+    await focused("back")
+    await click("back")
+    await focused("characters")
+    await click("back")
     await focused("save:" + campaign_id)
     await click("back")
     await focused("manage")

@@ -140,7 +140,7 @@ local function render_surface(draft, screen, hint, initial)
     local title = draft.steam_port and "Join via Steam"
         or draft.direct and "Join by Direct IP" or "Join by Invitation"
     local rows = {}
-    local note = hint
+    local note, focus = hint, nil
     local back = button("back", "Back")
     if screen == "steam_password" then
         rows = {field("password", "Lobby password", "", 512, nil, true), {button("connect", "Join"), back}}
@@ -167,7 +167,13 @@ local function render_surface(draft, screen, hint, initial)
         local last_page = page_count(draft)
         draft.page = math.min(draft.page or 1, last_page)
         local start = (draft.page - 1) * page_size + 1
-        for index = start, math.min(#draft.characters, start + page_size - 1) do
+        local last = math.min(#draft.characters, start + page_size - 1)
+        if draft.index > #draft.characters then
+            focus = "create"
+        elseif draft.index >= start and draft.index <= last then
+            focus = "character:" .. draft.index
+        end
+        for index = start, last do
             local row = button("character:" .. index, short_name(draft.characters[index].name))
             if draft.creator then
                 local ending = utf8.offset(draft.creator, 21)
@@ -199,8 +205,9 @@ local function render_surface(draft, screen, hint, initial)
             or draft.steam_port and pending == "direct" and "Connecting through Steam…" or "Waiting for the host…")
         rows = {{back}}
     end
-    local focus = (screen == "steam_password" or screen == "password" and password_errors[draft.failure])
-        and "password" or nil
+    if screen == "steam_password" or screen == "password" and password_errors[draft.failure] then
+        focus = "password"
+    end
     draft.view = draft.surface.mount(draft.context, {title = title, note = note, rows = rows, focus = focus}, draft.on_action)
 end
 
@@ -437,6 +444,7 @@ function form.press(draft, action, state, phase)
         local page = (draft.page or 1) + (action == "next_page" and 1 or -1)
         if page < 1 or page > page_count(draft) then return false, "title_join_form_selection_unavailable" end
         draft.page = page
+        draft.index = (page - 1) * page_size + 1
         render(draft, state, phase, "catalog")
         return true
     elseif action ~= "host" and action ~= "join" then
