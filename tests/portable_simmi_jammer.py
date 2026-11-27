@@ -65,13 +65,24 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe, *, flood_objectiv
         assert result["ok"], (operation, fields, result)
         return result
 
-    async def press_primary():
+    async def press_primary(spec):
         async with asyncio.timeout(7):
             while True:
-                result = await submit(guest_run, "native-guest-primary-input-fixture")
-                if result.get("ok"):
-                    return result["native_guest_primary_fixture"]["sequence"]
-                assert result.get("error") == "Stock primary input is temporarily blocked by the equipped player's state", result
+                if spec == FLOOD:
+                    try:
+                        result = await guest.bridge.command(spec.command("fire-fixture"), timeout=4)
+                    except RuntimeError as error:
+                        if str(error) != "Stock primary input is temporarily blocked by the equipped player's state":
+                            raise
+                    else:
+                        if result["ack"]["message"] == "stock guest primary input verified":
+                            return result["native_guest_primary_fixture"]["sequence"]
+                        assert result["ack"]["message"] == "waiting", result["ack"]
+                else:
+                    result = await submit(guest_run, "native-guest-primary-input-fixture")
+                    if result.get("ok"):
+                        return result["native_guest_primary_fixture"]["sequence"]
+                    assert result.get("error") == "Stock primary input is temporarily blocked by the equipped player's state", result
                 await asyncio.sleep(.15)
 
     async def state(seat, predicate, timeout=12):
@@ -247,18 +258,12 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe, *, flood_objectiv
             assert (aim["map"], aim["pawn"], aim["jammer"], aim["guid"]) == (
                 spec.objective_map, pawn, spec.jammer, guid), aim
             await movement_arrived(guest, aimed["pawns"]["guest"]["location"])
-            async with asyncio.timeout(5):
-                while True:
-                    if spec == FLOOD:
-                        positioned = await guest.bridge.command(spec.command("aim-local"), timeout=4)
-                        bearing = positioned["ack"]["message"]
-                    else:
-                        bearing = await command(guest, "aimjammer")
-                    if bearing == "the guest crosshair is on the jammer":
-                        break
-                    await asyncio.sleep(.1)
+            if spec != FLOOD:
+                async with asyncio.timeout(5):
+                    while await command(guest, "aimjammer") != "the guest crosshair is on the jammer":
+                        await asyncio.sleep(.1)
             started = time.time()
-            sequence = await press_primary()
+            sequence = await press_primary(spec)
             async with asyncio.timeout(7):
                 while True:
                     result = next((row for row in await resident_events(guest_run, guest_frame)
@@ -270,11 +275,14 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe, *, flood_objectiv
             assert result["event"] == "native_guest_primary_input", result
             shot = result["native_guest_weapon"]
             assert (shot["before"], shot["after"], shot["projectiles"]) == (magazine, magazine - 1, 1), shot
+            evidence = {"aim": aim, "shot": shot}
             if spec == FLOOD:
-                contact = result.get("native_guest_trigger_view", {}).get("contact") or {}
-                assert contact.get("actor") == spec.jammer.split(" ", 1)[1], result
+                view = result.get("native_guest_trigger_view", {})
+                if contact := view.get("contact"):
+                    assert contact.get("actor") == spec.jammer.split(" ", 1)[1], result
+                evidence["view"] = view
             magazine = shot["after"]
-            shots.append({"aim": aim, "shot": shot})
+            shots.append(evidence)
             try:
                 async with asyncio.timeout(2.5):
                     objective = await quest_on(host, spec, 2)

@@ -205,9 +205,12 @@ function quest.command(fields, state, phase)
         if #fields ~= 4 or state.map ~= profile.objective_map then refuse(profile, "aim_arguments_unqualified") end
         return aim_fixture.aim(state, phase, fields[3], fields[4], profile)
     end
-    if operation == "aim-local" and profile.objective_map then
+    if operation == "fire-fixture" and profile.objective_map then
         if #fields ~= 2 or state.map ~= profile.objective_map then refuse(profile, "aim_arguments_unqualified") end
-        return aim_fixture.aim_local_jammer(state, phase, profile)
+        if not aim_fixture.aim_local_jammer(state, phase, profile) then return "waiting" end
+        -- Take the stock input sample before movement or camera ticks can alter the verified shot.
+        return require("native_guest_primary_input").command(
+            {fields[1], "native-guest-primary-input-fixture", state.local_pawn.name}, state, phase)
     end
     if not commands[operation] or operation == "xp-fixture" and not profile.xp_fixture then return end
     last = nil

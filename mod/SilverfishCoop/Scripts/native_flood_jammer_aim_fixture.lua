@@ -354,12 +354,16 @@ function fixture.aim_local_jammer(state, phase, profile)
         or pawn:HasAuthority() or not same(pawn:GetWorld(), state.world) or not same(pawn.Controller, state.controller) then
         refuse("local_guest_required")
     end
+    local movement = pawn.CharacterMovement
+    if not valid(movement) or not movement:IsMovingOnGround() then return false end
+    local velocity = movement.Velocity
+    if not vector(velocity) or velocity.X ^ 2 + velocity.Y ^ 2 + velocity.Z ^ 2 > 25 ^ 2 then return false end
     local actor, weapon = StaticFindObject(profile.jammer_path), pawn.EquipedItem
     if not valid(actor) or actor:GetFullName() ~= profile.jammer_name or not same(actor:GetWorld(), state.world)
         or not component(actor.Capsule, actor, "CapsuleComponent") or not valid(weapon)
         or weapon:GetClass():GetFullName() ~= "BlueprintGeneratedClass " .. firearms.paths["light-pistol"]
         or not component(pawn.Camera, pawn, "CameraComponent")
-        or not component(weapon.Arrow_Muzzle, weapon, "ArrowComponent") then return "waiting" end
+        or not component(weapon.Arrow_Muzzle, weapon, "ArrowComponent") then return false end
     local trace_library = StaticFindObject(trace_path)
     if not valid(trace_library) then refuse("geometry_unqualified") end
     local context = {pawn = pawn, weapon = weapon, camera = pawn.Camera, muzzle = weapon.Arrow_Muzzle,
@@ -367,9 +371,9 @@ function fixture.aim_local_jammer(state, phase, profile)
         target_mesh = component(actor.StaticMesh, actor, "StaticMeshComponent") and actor.StaticMesh or nil,
         aim_range = 1600, aim_pitch = 70}
     local view = jammer_contact(context)
-    if not view then return "waiting" end
+    if not view then return false end
     set_view(context, view)
-    return "the guest crosshair is on the jammer"
+    return true
 end
 
 function fixture.row(state, phase, status_row)
