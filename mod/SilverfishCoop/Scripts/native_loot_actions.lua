@@ -243,7 +243,7 @@ function actions.release_pending()
     end
 end
 
-function actions.command(fields, state, phase)
+function actions.command(fields, state, phase, status_row)
     if fields[2] == "native-loot-flush-escrows" or fields[2] == "native-loot-release-escrows" then
         if not enabled or phase ~= "hosting" or #fields < 3 or #fields > 18 then
             error("native_loot_escrow_save_scope_unavailable", 0)
@@ -354,17 +354,13 @@ function actions.command(fields, state, phase)
         elseif ok and status == "merged" then
             result.merge = { guid = guid, inventory_guid = inventory_guid, amount = amount, before = before, after = after }
         end
-        if ok and retained and (status == "claimed" or result.merge) and type(SilverfishExportDetachedInventoryItem) == "function" then
-            local received = result.merge and inventory_guid or guid
-            local called, exported, text = pcall(SilverfishExportDetachedInventoryItem,
-                scope.pawn:GetAddress(), scope.save:GetAddress(), received)
-            if called and exported and type(text) == "string" and #text <= 8192 and not text:find("[%z\t\r\n]") then
-                result.transfer = {guid = received, text = text}
-            end
-        end
         result.invoked = result.ok or tostring(result.status):match("^mutation_unverified_") ~= nil
         if result.invoked then result.retained = retained
         else guest_save.cancel_retention(new_retention) end
+        if status_row and ok and retained and (status == "claimed" or result.merge) then
+            result.received = require("native_inventory_grant").pickup_row(
+                scope.pawn, scope.save, result.merge and inventory_guid or guid, status_row)
+        end
         return "stock loot claim reported"
     end
     local inspect = action == "approach" and loot.approach_fixture or loot.qualify
@@ -595,10 +591,10 @@ function actions.compact_open(fields, state, phase)
     return profile and not profile.key_unlock_only and not profile.random_lid
 end
 
-local function capture_reply(fields, state, phase)
+local function capture_reply(fields, state, phase, status_row)
     local previous = observation
     observation = nil
-    local accepted, message = pcall(actions.command, fields, state, phase)
+    local accepted, message = pcall(actions.command, fields, state, phase, status_row)
     local result = observation
     observation = previous
     return accepted, message, result
@@ -629,14 +625,12 @@ local function append_transfer_rows(records, result, status_row)
 end
 
 function actions.claim_reply(fields, state, phase, status_row)
-    local accepted, message, result = capture_reply(fields, state, phase)
+    local accepted, message, result = capture_reply(fields, state, phase, status_row)
     if not accepted then return false, message end
     if not result then return false, "native_loot_claim_readback_unavailable" end
     local records = {result_row(result, status_row)}
     append_transfer_rows(records, result, status_row)
-    if result.transfer then
-        records[#records + 1] = status_row("native-loot-received-item", result.transfer.guid, result.transfer.text)
-    end
+    records[#records + 1] = result.received
     if result.retained then
         for _, details in ipairs(state.pawns) do
             if details.name == result.pawn then

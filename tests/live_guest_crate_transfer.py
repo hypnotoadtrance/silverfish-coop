@@ -14,7 +14,7 @@ def install_fixture(game):
     fixture = Path(__file__).with_name("fixtures").joinpath("portable_guest_crate_transfer.lua").read_text(encoding="utf-8")
 
     def inject(source):
-        entry = "function actions.command(fields, state, phase)\n"
+        entry = "function actions.command(fields, state, phase, status_row)\n"
         if source.count(entry) != 1:
             raise ValueError("The isolated replica lacks the stock crate command")
         return source.replace(entry, entry + fixture, 1)

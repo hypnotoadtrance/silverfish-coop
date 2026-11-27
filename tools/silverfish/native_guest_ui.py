@@ -166,8 +166,7 @@ class GuestView:
             self.inventory_visit = scope
             self.full_revision = self.pickup_revision = 0
 
-    async def present_pickup(self, client, scope, loot, operation, cue, reply, row):
-        claim = reply.get("native_loot_claim", {})
+    async def present_pickup(self, client, scope, loot, operation, cue, claim, row):
         owner = client.invite["character_id"]
         guid, text, revision = row.get("guid"), row.get("text"), row.get("revision")
         item_class = claim.get("class_path")

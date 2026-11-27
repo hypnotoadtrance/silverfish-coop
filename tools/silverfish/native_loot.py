@@ -35,8 +35,6 @@ LOCKPICK_RESULT = "native_loot_lockpick_result"
 PRY_TOOL_ACTIONS = {"blowtorch": TORCH_USE, "crowbar": CROWBAR_USE}
 PRY_TOOL_RESULTS = {"blowtorch": TORCH_RESULT, "crowbar": CROWBAR_RESULT}
 STACK_MERGE_TAG = "native-loot-stack-merge"
-TRANSFER_TAG = "native-loot-received-item"
-TRANSFER = "native_loot_received_item"
 FORCED_ROLL_STATUS = "opened_fixture_seeded"
 SPECIAL_MEMORY_CAPABILITY = "native_loot_special_memory"
 INSPECTION_BYTES = "native_loot_inspection_reply_bytes"
@@ -1053,12 +1051,10 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             else:
                 host.control.event("native_loot_claim_committed", revision=revision, **result["native_loot_claim"])
             native_pickup_audio.committed(host, pawn, operation_id, claimed["class_path"], credit=credit)
-            transfer = proof.get("received")
-            if deferred and character != "host" and epoch and transfer and transfer["guid"] == merge.get("inventory_guid", guid):
-                from .native_inventory_grant import next_view_revision
+            if deferred and credit is None and proof["status"] in ("claimed", "merged"):
+                from .native_inventory_grant import with_pickup_row
 
-                return {**result, TRANSFER: {**transfer, "owner": character, "map": area, "epoch": epoch,
-                                             "revision": next_view_revision(host)}}
+                return with_pickup_row(host, snapshot, result, character, area, merge.get("inventory_guid", guid))
             return result
         if action == "seed":
             if not proof["lucky_looter"]:

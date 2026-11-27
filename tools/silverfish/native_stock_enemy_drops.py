@@ -578,6 +578,10 @@ async def claim(host, bridge, character, guid, operation):
         host.control.event("native_stock_enemy_loot_claimed", revision=revision, operation_id=operation,
                            bridge_reply_bytes=snapshot.get(native_loot.CLAIM_REPLY_BYTES), **result[CLAIM_KEY])
         native_pickup_audio.committed(host, pawn, operation, committed["class_path"], credit=committed.get("wallet_credit"))
+        if deferred and not cash and proof["status"] in ("claimed", "merged"):
+            from .native_inventory_grant import with_pickup_row
+
+            return with_pickup_row(host, snapshot, result, character, roll["map"], merge.get("inventory_guid", guid))
         return result
     finally:
         if host.native_checkpoint_unsafe:

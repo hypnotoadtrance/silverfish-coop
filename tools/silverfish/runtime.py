@@ -3038,13 +3038,11 @@ class Bridge:
                             or data.get("state") != "hosting" or loot.get("map") != data.get("map")):
                         raise ValueError("Stock crate merge proof is out of scope")
                     loot["merge"] = native_loot.parse_stack_merge(fields[1:])
-                elif fields[0] == native_loot.TRANSFER_TAG:
-                    loot = data.get("native_loot", {})
-                    if (len(fields) == 3 and loot.get("action") == "claim" and loot.get("status") in ("claimed", "merged")
-                            and loot.get("ok") and loot.get("retained") and "received" not in loot
+                elif fields[0] == native_inventory_grant.PICKUP_TAG:
+                    if (len(fields) == 3 and data.get("state") == "hosting" and native_inventory_grant.PICKUP not in data
                             and valid_guid(fields[1]) and fields[2].startswith("(") and fields[2].endswith(")")
                             and len(fields[2].encode("utf-8")) <= native_inventory_grant.MAX_ITEM_BYTES):
-                        loot["received"] = {"guid": fields[1], "text": fields[2]}
+                        data[native_inventory_grant.PICKUP] = {"guid": fields[1], "text": fields[2]}
                 elif fields[0] == "native-wipe-inventory" and len(fields) == 8:
                     data["native_wipe_inventory"] = {
                         "map": fields[1], "source": fields[2], "replacement": fields[3],

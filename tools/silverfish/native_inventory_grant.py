@@ -19,6 +19,8 @@ REPORT = "native-inventory-grant-report"
 READY = "native_inventory_grant_ready"
 RESULT = "native_inventory_grant"
 MAX_ITEM_BYTES = 8192
+PICKUP_TAG = "native-pickup-inventory-row"
+PICKUP = "native_pickup_inventory_row"
 _STACK = re.compile(r"stack:([1-9][0-9]{0,9})")
 _TERMINAL = {
     "native_inventory_grant_refused_class",
@@ -33,6 +35,16 @@ _TERMINAL = {
 def next_view_revision(host):
     host.guest_inventory_view_revision = getattr(host, "guest_inventory_view_revision", 0) + 1
     return host.guest_inventory_view_revision
+
+
+def with_pickup_row(host, snapshot, result, character, area, guid):
+    row = snapshot.get(PICKUP)
+    epoch = getattr(host, "zone_epoch", None)
+    if character == "host" or not epoch or not row or row["guid"] != guid:
+        return result
+    # Keep the item payload out of the durable replay receipt.
+    return {**result, PICKUP: {**row, "owner": character, "map": area, "epoch": epoch,
+                              "revision": next_view_revision(host)}}
 
 
 def parse_ready(fields):

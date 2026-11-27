@@ -7258,13 +7258,15 @@ class Client:
                 result = await self.gameplay_action(action, operation, claim, defer_pickup_cue=True)
             cue = result.pop(native_pickup_audio.KEY, None)
             if self.stock_interaction_scope() == scope:
-                inventory = result.pop(native_loot.TRANSFER, None)
+                inventory = result.pop(native_inventory_grant.PICKUP, None)
                 applied = False
                 try:
                     game = self.last_game
                     projected = None
-                    if isinstance(inventory, dict):
-                        projected, applied = await self.guest_ui.present_pickup(self, scope, loot, operation, cue, result, inventory)
+                    claimed = result.get("native_loot_claim") or result.get(native_stock_enemy_drops.CLAIM_KEY)
+                    if isinstance(inventory, dict) and isinstance(claimed, dict):
+                        projected, applied = await self.guest_ui.present_pickup(
+                            self, scope, loot, operation, cue, claimed, inventory)
                     if projected is None and self.stock_interaction_scope() == scope:
                         projected = await self.world_loot.present_claim(
                             self, self.bridge, loot, operation, cue, generation=scope[0])

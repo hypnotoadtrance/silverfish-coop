@@ -3,6 +3,16 @@ local content_paths = require("content_paths")
 local scope = require("native_save_scope")
 local guest_save = require("guest_save")
 
+function grant.pickup_row(pawn, save, guid, status_row)
+    if type(SilverfishExportDetachedInventoryItem) ~= "function" or type(guid) ~= "string"
+        or #guid ~= 32 or not guid:match("^[0-9A-F]+$") then return end
+    local called, exported, text = pcall(SilverfishExportDetachedInventoryItem,
+        pawn:GetAddress(), save:GetAddress(), guid)
+    if called and exported and type(text) == "string" and #text <= 8192 and not text:find("[%z\t\r\n]") then
+        return status_row("native-pickup-inventory-row", guid, text)
+    end
+end
+
 function grant.pending(state, phase)
     if phase ~= "connected" or type(SilverfishArmInventoryGrants) ~= "function" then return end
     local save, pawn = scope.bind_guest(state, phase)

@@ -2948,6 +2948,13 @@ async def verify_dock_enemy_drop(host: Seat, guest: Seat, arrival: dict) -> dict
     receipt, = [row for row in await resident_events(host_run, authority)
                 if row["event"] == "native_stock_enemy_loot_claimed" and row.get("guid") == guid]
     assert receipt["claimed_by"] == owner and receipt["revision"] is None, receipt
+    connected = await wait_resident_status(guest_run, lambda frame: frame["state"] == "connected")
+    async with asyncio.timeout(3):
+        while not (delivered := next((row for row in await resident_events(guest_run, connected)
+                                      if row["event"] == "native_pickup_inventory_applied"
+                                      and row["operation_id"] == receipt["operation_id"]), None)):
+            await asyncio.sleep(.05)
+    assert delivered["guid"] == guid and delivered["outcome"] in ("added", "present"), delivered
     inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
     assert any(row["guid"] == guid and row["class_path"] == item["class_path"] for row in inventory), inventory
     refused = await submit(host_run, scope.CLAIM, target=guid)
@@ -2961,6 +2968,7 @@ async def verify_dock_enemy_drop(host: Seat, guest: Seat, arrival: dict) -> dict
     assert math.isclose(resting_heights[0], item["transform"]["position"][2], abs_tol=2), heights
     assert len({actor for _, _, actor in heights}) == 1, heights
     return {"item": item["class_path"], "stock_source": item["source"], "inventory_guid": guid,
+            "inventory_receipt": delivered["outcome"], "inventory_receipt_bytes": delivered["item_bytes"],
             "focus_failures_before_pickup": focus_failures,
             "moving_heights_cm": moving_heights, "resting_height_cm": resting_heights[0],
             "pickup_preview": await verified_drop_preview(guest, identity),
@@ -7072,7 +7080,7 @@ async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str, *, large
 
 
 def instrument_crate_host_action(script: str) -> str:
-    marker = "function actions.command(fields, state, phase)"
+    marker = "function actions.command(fields, state, phase, status_row)"
     assert script.count(marker) == 1
     start = '''
 local durations
@@ -7084,7 +7092,7 @@ local function profiled(label, action, ...)
     return table.unpack(result, 1, result.n)
 end
 
-''' + script.replace(marker, "local function run_action(fields, state, phase)", 1)
+''' + script.replace(marker, "local function run_action(fields, state, phase, status_row)", 1)
     for needle, replacement in (
         ("pcall(inspect, state, phase", 'pcall(profiled, "qualify", inspect, state, phase'),
         ("table.pack(SilverfishOpenNativeLootCrate(", 'table.pack(profiled("open", SilverfishOpenNativeLootCrate,'),
@@ -7096,11 +7104,11 @@ end
         assert start.count(needle) == 1, needle
         start = start.replace(needle, replacement)
     return start.replace("\nreturn actions\n", '''
-function actions.command(fields, state, phase)
-    if phase ~= "hosting" or fields[2] ~= "native-loot-open" then return run_action(fields, state, phase) end
+function actions.command(fields, state, phase, status_row)
+    if phase ~= "hosting" or fields[2] ~= "native-loot-open" then return run_action(fields, state, phase, status_row) end
     local started = SilverfishBridgeProfileStamp()
     durations = {}
-    local ok, result = pcall(run_action, fields, state, phase)
+    local ok, result = pcall(run_action, fields, state, phase, status_row)
     local finished = SilverfishBridgeProfileStamp()
     local measured = durations
     durations = nil

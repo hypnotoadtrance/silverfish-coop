@@ -253,7 +253,7 @@ function drops.bank_reply(fields, state, phase, status_row)
     }
 end
 
-local function transfer(fields, state, phase)
+local function transfer(fields, state, phase, status_row)
     local name, slot, guid = fields[3], fields[4], fields[5]
     local x, y, z, identity = tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8]), fields[9]
     local host, fresh = transport.scoped_host(state, phase)
@@ -296,13 +296,18 @@ local function transfer(fields, state, phase)
     local outcome = {name, slot, guid, status, amount or 0, before or 0, after or 0}
     if status == "merged" then outcome[8] = inventory_guid or "-" end
     if pending then escrow.retire_pending_escrow(slot) end
-    return "exact stock NPC item transferred", outcome
+    local received
+    if status_row and not same(pawn, host.pawn) and (status == "claimed" or status == "merged") then
+        received = require("native_inventory_grant").pickup_row(pawn, save,
+            status == "merged" and inventory_guid or guid, status_row)
+    end
+    return "exact stock NPC item transferred", outcome, received
 end
 
 function drops.claim_reply(fields, state, phase, status_row)
-    local accepted, message, outcome = pcall(transfer, fields, state, phase)
+    local accepted, message, outcome, received = pcall(transfer, fields, state, phase, status_row)
     if not accepted then return false, message end
-    return true, message, {status_row("native-stock-enemy-loot-claimed", state.map, table.unpack(outcome))},
+    return true, message, {status_row("native-stock-enemy-loot-claimed", state.map, table.unpack(outcome)), received},
         outcome[4] == "cash_credited"
 end
 
