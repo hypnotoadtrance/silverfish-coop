@@ -302,6 +302,12 @@ local function run(action,id)
     if action == "use-lighter" or action == "lower-lighter" then
         return lighter_input(pawn,lamp,action == "use-lighter")
     end
+    if action == "close-lighter" then
+        local item = pawn.EquipedItem
+        assert(valid(item) and same(item:GetClass(), StaticFindObject(lighter_class)) and same(item.Player_Ref, pawn))
+        item:Open_Close(false)
+        return tostring(item.Open)
+    end
     local latch = id == "DoorLatch_BP_C_2"
     if action == "latch-state" then
         assert(latch and valid(lamp.Door))

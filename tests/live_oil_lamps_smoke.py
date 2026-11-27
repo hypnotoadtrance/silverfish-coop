@@ -74,6 +74,7 @@ async def verify_oil_lamps(host, guest, pawn, *, playtest_batch=False):
             _, host_lit = await verify_state(actor, True)
         finally:
             assert await probe(host, "lower-lighter", actor) == "true;false"
+            assert await probe(host, "close-lighter", actor) == "false"
         assert await probe(guest, "visual-drift", actor) == "visual drift"
         async with asyncio.timeout(5):
             while (repaired := await probe(guest, "state", actor)).split(";")[:2] != ["true", "true"]:
@@ -90,6 +91,7 @@ async def verify_oil_lamps(host, guest, pawn, *, playtest_batch=False):
             replica, guest_lit = await verify_state(actor, True)
         finally:
             assert await probe(guest, "lower-lighter", actor) == "true;false"
+            assert await probe(guest, "close-lighter", actor) == "false"
         # A compact ignition receipt and a later full status can disagree for
         # the same lamp. Check the native state after another publication.
         await asyncio.sleep(.3)

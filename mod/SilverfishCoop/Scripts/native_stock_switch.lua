@@ -402,10 +402,12 @@ local function project(entry, powered, angles, lights, replica)
             if actor.Lit ~= powered or entry.light:IsVisible() ~= powered then
                 actor:Set_LitUnlit(powered, false)
             end
-        elseif actor.Lit ~= powered or entry.lantern and entry.light:IsVisible() ~= powered then
-            local _, path = placed_actor(actor:GetFullName())
-            if not path or type(SilverfishSetNativePlacedFlame) ~= "function"
-                or not SilverfishSetNativePlacedFlame(path, actor:GetAddress(), powered) then
+        else
+            if not replica and not powered and actor.Lit then
+                -- End the stock burn as well as changing its visible state.
+                actor:Extinguish(1.0)
+            end
+            if actor.Lit ~= powered or entry.lantern and entry.light:IsVisible() ~= powered then
                 actor:SetLitUnlit(powered, false)
             end
         end
@@ -453,7 +455,7 @@ function switches.local_interaction(pawn, target, sequence)
     local entry = parts(StaticFindObject(path), world)
     if not entry or not can_set_power(entry) then return end
     local actor = entry.actor
-    local toggles = not entry.candle or entry.gas_lamp
+    local toggles = not entry.candle or entry.gas_lamp == true
     local expected = toggles and not actor[entry.power]
     project(entry, expected, nil, nil, true)
     if not valid(actor) or actor:IsActorBeingDestroyed() then return end
@@ -501,7 +503,7 @@ function switches.command(fields, state, phase)
         end
         local power = entry.power or "Powered"
         local before = entry.actor[power]
-        local toggles = not entry.candle or entry.gas_lamp
+        local toggles = not entry.candle or entry.gas_lamp == true
         -- The guest routes the exact stock interaction component it just hit.
         if not valid(entry.box) or not same(entry.box:GetOwner(), entry.actor) then error("stock_switch_unavailable", 0) end
         if entry.television and entry.actor.Working ~= true then error("stock_switch_unavailable", 0) end
