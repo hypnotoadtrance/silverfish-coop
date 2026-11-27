@@ -263,6 +263,7 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
             dispatch = await observe(host, "host-press", digger, *(["keep-aim", site] if quest_dig else []))
             assert dispatch == ("pressed" if quest_dig else "pressed and released"), dispatch
         else:
+            assert await observe(host, "aim-away", digger) == "aimed away from soil"
             tap = await submit(guest_run, "native-guest-primary-input-fixture")
             assert tap["ok"], tap
             sequence = tap["native_guest_primary_fixture"]["sequence"]
@@ -276,6 +277,7 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
             event, = events
             assert event["event"] == "native_guest_dig_input", event
             dispatch = event[dig.GUEST_RESULT]
+            assert dispatch.get("aim_source") == "guest_camera", dispatch
         if quest_dig:
             # The buried-item branch can emit its package without leaving an ordinary terrain hole.
             return {"contact": contacts, "dispatch": dispatch}

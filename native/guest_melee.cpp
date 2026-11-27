@@ -1689,9 +1689,17 @@ bool silverfish::native_guest_melee::apply_stock_control_rotation(RC::Unreal::UO
                                                                  std::array<double, 3>& previous)
 {
     if (!live(camera) || !live(controller)) return false;
-    const auto relative = relative_rotation(camera);
     const auto control = component_vector(controller, STR("/Script/Engine.Controller:GetControlRotation"), rotator_path);
-    if (!relative || !control || !set_camera_rotation(camera, *control, true)) return false;
+    return control && apply_stock_aim_rotation(camera, *control, previous);
+}
+
+bool silverfish::native_guest_melee::apply_stock_aim_rotation(RC::Unreal::UObject* camera,
+                                                             const std::array<double, 3>& rotation,
+                                                             std::array<double, 3>& previous)
+{
+    if (!live(camera)) return false;
+    const auto relative = relative_rotation(camera);
+    if (!relative || !set_camera_rotation(camera, rotation, true)) return false;
     previous = *relative;
     return true;
 }

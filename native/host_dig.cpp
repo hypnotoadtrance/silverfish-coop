@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -424,10 +425,17 @@ namespace
         Clock::time_point expires{};
         U::FFrame* frame{};
         Point relative{};
+        std::optional<Point> aim;
         std::string guid;
     };
 
     std::array<GuestDigAttempt, 8> guest_digs;
+
+    bool apply_dig_aim(U::UObject* camera, U::UObject* pawn, const std::optional<Point>& aim, Point& previous)
+    {
+        return aim ? silverfish::native_guest_melee::apply_stock_aim_rotation(camera, *aim, previous) :
+            silverfish::native_guest_melee::apply_stock_control_rotation(camera, object(pawn, STR("Controller")), previous);
+    }
 
     bool guest_dig_graph(U::UObject* receiver, U::FFrame& frame)
     {
@@ -446,7 +454,7 @@ namespace
         if (Clock::now() >= found->expires || !authority(pawn) || !boolean(pawn, STR("Dead"), false) ||
             object(pawn, STR("Save")) != found->save.Get() || object(pawn, STR("EquipedItem")) != receiver ||
             object(pawn, STR("Camera")) != camera ||
-            !silverfish::native_guest_melee::apply_stock_control_rotation(camera, object(pawn, STR("Controller")), found->relative))
+            !apply_dig_aim(camera, pawn, found->aim, found->relative))
         {
             call.PreventOriginalFunctionCall();
             return;
@@ -470,13 +478,24 @@ namespace
 
     int start_guest_dig(const Lua& lua)
     {
-        if (!ready() || !ordinary || lua.get_stack_size() != 3 || !lua.is_string(1) || !lua.is_integer(2) || !lua.is_string(3))
+        const auto arguments = lua.get_stack_size();
+        if (!ready() || !ordinary || (arguments != 3 && arguments != 6) || !lua.is_string(1) ||
+            !lua.is_integer(2) || !lua.is_string(3))
             return result(lua, false, "stock_guest_dig_arguments");
         const std::string path{lua.get_string()};
         const auto save_address = lua.get_integer();
         const std::string expected{lua.get_string()};
         if (!path.starts_with("/Game/Classes/Maps/") || path.size() > 512 || save_address <= 0 || expected.size() != 32)
             return result(lua, false, "stock_guest_dig_arguments");
+        std::optional<Point> aim;
+        if (arguments == 6)
+        {
+            if (!lua.is_number(1) || !lua.is_number(2) || !lua.is_number(3))
+                return result(lua, false, "stock_guest_dig_camera_unqualified");
+            aim = Point{lua.get_number(), lua.get_number(), lua.get_number()};
+            if (!std::ranges::all_of(*aim, [](double angle) { return std::isfinite(angle) && std::abs(angle) <= 360; }))
+                return result(lua, false, "stock_guest_dig_camera_unqualified");
+        }
 
         auto* pawn = find<U::AActor>(RC::to_wstring(path).c_str());
         if (!exact(pawn, pawn_class) || !authority(pawn) || !boolean(pawn, STR("Dead"), false) ||
@@ -513,9 +532,9 @@ namespace
         auto* camera = object(pawn, STR("Camera"));
         Point relative{};
         if (!exact(camera, STR("/Script/Engine.CameraComponent")) || camera->GetOuterPrivate() != pawn ||
-            !silverfish::native_guest_melee::apply_stock_control_rotation(camera, object(pawn, STR("Controller")), relative))
+            !apply_dig_aim(camera, pawn, aim, relative))
             return result(lua, false, "stock_guest_dig_camera_unavailable");
-        *found = {pawn, save, spade, camera, now + std::chrono::seconds(2), nullptr, {}, std::move(guid)};
+        *found = {pawn, save, spade, camera, now + std::chrono::seconds(2), nullptr, {}, aim, std::move(guid)};
         std::uint8_t args{};
         spade->ProcessEvent(primary, &args);
         silverfish::native_guest_melee::restore_stock_camera_rotation(camera, relative);

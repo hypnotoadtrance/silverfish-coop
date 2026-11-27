@@ -24,6 +24,7 @@ GUEST_ACTION = "native-guest-dig"
 GUEST_KIND = "spade"
 GUEST_INTENT = "native_guest_spade_intent"
 GUEST_RESULT = "native_guest_dig"
+COMPACT_SCOPE = "native_guest_dig_local_scope"
 HEARTBEAT = TAG + "-heartbeat"
 WAITING = "stock_live_dig_checkpoint_pending"
 _HANDOFF_MAPS = {BLACK_MARKET, CROSSROADS}
@@ -34,13 +35,28 @@ _STATES = {"ready", "refused", "contact", "unclaimed", "escrowed", "collecting",
 _FRAME_SLOT = re.compile(r"SFCoop_[0-9a-f]{32}\Z")
 _FAULT = re.compile(r"stock_[a-z0-9_]{1,80}\Z")
 _STATUS = re.compile(r"[a-z][a-z0-9_]{0,80}|-")
+_ANGLE = r"-?[0-9]{1,3}\.[0-9]{5}"
+_CAMERA_AIM = re.compile(rf"{_ANGLE},{_ANGLE},{_ANGLE}")
 _CUSTODY_FIELDS = {"state", "map", "source", "flag", "flag_value", "spade_guid", "contact", "material", "package_guid"}
+
+
+def camera_aim(value):
+    if not isinstance(value, str) or not _CAMERA_AIM.fullmatch(value):
+        return None
+    angles = tuple(map(float, value.split(",")))
+    return angles if all(abs(angle) <= 360 for angle in angles) else None
 
 
 async def guest_dig(host, bridge, character, target, operation):
     from . import native_guest_melee
 
-    guid = native_guest_melee.current_guid(target, host.zone_epoch)
+    if isinstance(target, str) and target.count("@") >= 2:
+        identity, _, aim = target.rpartition("@")
+        if camera_aim(aim) is None:
+            raise party.RuleError("stock_guest_dig_camera_unqualified")
+    else:
+        identity, aim = target, None
+    guid = native_guest_melee.current_guid(identity, host.zone_epoch)
     if not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
         raise party.RuleError("stock_guest_dig_operation_unqualified")
     game = host.last_game
@@ -63,8 +79,10 @@ async def guest_dig(host, bridge, character, target, operation):
     equipped = game.get("native_guest_equipped_weapons", {}).get(pawn, {})
     if (equipped.get("kind"), equipped.get("guid")) != (GUEST_KIND, guid):
         raise party.RuleError("stock_guest_dig_equipment_changed")
+    options = {"update_status": False} if getattr(bridge, "local_bridge", None) is not None else {}
     try:
-        snapshot = await bridge.command(GUEST_ACTION, pawn, guid, timeout=3)
+        args = (aim,) if aim is not None else ()
+        snapshot = await bridge.command(GUEST_ACTION, pawn, guid, *args, timeout=3, **options)
     except RuntimeError as error:
         if str(error).startswith("stock_guest_dig_"):
             raise party.RuleError(str(error)) from error
@@ -72,8 +90,15 @@ async def guest_dig(host, bridge, character, target, operation):
     if (snapshot.get("map"), snapshot.get("state"), snapshot.get("ack", {}).get("message")) != (
             area, "hosting", "stock_guest_dig_dispatched"):
         raise RuntimeError("The stock guest shovel dispatch did not verify")
-    host.last_game, host.last_seen = snapshot, time.monotonic()
+    if COMPACT_SCOPE in snapshot:
+        if snapshot[COMPACT_SCOPE] != pawn:
+            raise RuntimeError("The stock guest shovel reply belonged to another pawn")
+    else:
+        host.last_game = snapshot
+    host.last_seen = time.monotonic()
     result = {GUEST_RESULT: {"map": area, "pawn": pawn, "guid": guid, "state": "dispatched"}}
+    if aim is not None:
+        result[GUEST_RESULT]["aim_source"] = "guest_camera"
     receipts.append({"id": operation, "request": fingerprint, "result": result})
     del receipts[:-party.RECENT_ACTIONS]
     return result

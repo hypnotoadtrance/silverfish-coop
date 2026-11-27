@@ -186,14 +186,20 @@ function dig.command(fields, state, phase)
     if fields[2] == "native-missing-contact-collect" then return collect(fields, state, phase) end
     if fields[2] == "native-guest-dig" then
         local name, identity = fields[3], fields[4]
-        require_true(enabled and phase == "hosting" and #fields == 4 and guid(identity) and
+        require_true(enabled and phase == "hosting" and (#fields == 4 or #fields == 5) and guid(identity) and
             type(SilverfishDispatchNativeGuestDig) == "function", "stock_guest_dig_unavailable")
         local ok, pawn, save = pcall(guest_save.exact_item_context, state, phase, name)
         require_true(ok and valid(pawn) and valid(save) and players.is_standing_guest(pawn, name),
             "stock_guest_dig_owner_unqualified")
         local path = pawn:GetFullName():match("^Player_FP_C (%S+)$")
         require_true(path, "stock_guest_dig_owner_unqualified")
-        local accepted, status = SilverfishDispatchNativeGuestDig(path, save:GetAddress(), identity)
+        local aim = {}
+        if fields[5] then
+            local pitch, yaw, roll = fields[5]:match("^(%-?%d+%.%d+),(%-?%d+%.%d+),(%-?%d+%.%d+)$")
+            require_true(pitch, "stock_guest_dig_camera_unqualified")
+            aim = {tonumber(pitch), tonumber(yaw), tonumber(roll)}
+        end
+        local accepted, status = SilverfishDispatchNativeGuestDig(path, save:GetAddress(), identity, table.unpack(aim))
         require_true(accepted == true, status or "stock_guest_dig_unavailable")
         return status
     end

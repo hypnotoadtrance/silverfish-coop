@@ -304,6 +304,14 @@
             local x, y, z = encoded:match("^([%d%.%-]+),([%d%.%-]+),([%d%.%-]+)$")
             local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
             aim = math_api:FindLookAtRotation(pawn.Camera:K2_GetComponentLocation(), {X=tonumber(x), Y=tonumber(y), Z=tonumber(z)})
+        elseif fields[2] == "fixture-spade-aim-away" then
+            assert(phase == "hosting" and fields[3] ~= "local")
+            local away = {Pitch=75, Yaw=0, Roll=0}
+            controller:SetControlRotation(away)
+            pawn.Camera:K2_SetWorldRotation(away, false, {}, true)
+            local eye, forward = pawn.Camera:K2_GetComponentLocation(), pawn.Camera:GetForwardVector()
+            assert(not soil(eye, {X=eye.X+forward.X*300,Y=eye.Y+forward.Y*300,Z=eye.Z+forward.Z*300}))
+            return "aimed away from soil"
         else
             assert(fields[2] == "fixture-spade-aim", "Unknown stock shovel fixture command")
         end

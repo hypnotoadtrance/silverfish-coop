@@ -186,6 +186,17 @@ local function camera_view(current)
         position.X, position.Y, position.Z, rotation.X, rotation.Y, rotation.Z, rotation.W)
 end
 
+local function shovel_aim(current)
+    local camera = current.pawn.Camera
+    if not valid(camera) or not same(camera:GetOwner(), current.pawn) then return end
+    local angle = camera:K2_GetComponentRotation()
+    if not angle then return end
+    for _, axis in ipairs({angle.Pitch, angle.Yaw, angle.Roll}) do
+        if type(axis) ~= "number" or axis ~= axis or math.abs(axis) > 360 then return end
+    end
+    return ("%.5f,%.5f,%.5f"):format(angle.Pitch, angle.Yaw, angle.Roll)
+end
+
 local function drain_taps(current, address)
     if not standing(current) then
         primary.reset()
@@ -211,8 +222,13 @@ local function drain_taps(current, address)
             end
             pending_pry = nil
         elseif kind == "spade" then
-            shovel_intent = {sequence = sequence, expires = os.clock() + 1.5}
-            commit("tap", address, sequence)
+            local sampled, aim = pcall(shovel_aim, current)
+            aim = sampled and aim or nil
+            if not embedded or not publish("tap", event_path, current, address, sequence,
+                {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind, aim}) then
+                shovel_intent = {sequence = sequence, expires = os.clock() + 1.5, aim = aim}
+                commit("tap", address, sequence)
+            end
         else
             local view = shot_view.format(x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz, actor, hx, hy, hz)
             if kind == "camera" and current.field_camera then
@@ -430,7 +446,8 @@ function primary.rows(state, phase, status_row)
     local rows = { status_row("native-guest-primary-scope", current.map, current.name, binding.guid,
         binding.kind, binding.mode, trigger and 1 or 0) }
     if binding.kind == "spade" and shovel_intent and os.clock() < shovel_intent.expires and can_use(current) then
-        rows[#rows + 1] = status_row("native-guest-spade-intent", current.map, current.name, binding.guid, shovel_intent.sequence)
+        rows[#rows + 1] = status_row("native-guest-spade-intent", current.map, current.name, binding.guid,
+            shovel_intent.sequence, shovel_intent.aim)
     end
     if fixture_proof and same_context(current, fixture_proof.context) and fixture_proof.guid == binding.guid then
         rows[#rows + 1] = status_row("native-guest-primary-fixture", current.map, current.name, fixture_proof.guid,

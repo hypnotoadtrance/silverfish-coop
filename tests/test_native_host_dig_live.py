@@ -60,6 +60,19 @@ class GuestDigTests(unittest.IsolatedAsyncioTestCase):
             await dig.guest_dig(self.host, self.bridge, GUEST_ID, f"{self.epoch}@{PACKAGE}", self.operation)
         self.bridge.command.assert_not_awaited()
 
+    async def test_reported_camera_angles_reach_the_host_without_replacing_the_world_snapshot(self):
+        original = self.host.last_game
+        self.bridge.local_bridge = object()
+        aim = "-86.10000,35.00000,1.23000"
+        self.bridge.command.return_value[dig.COMPACT_SCOPE] = PAWN
+        result = await dig.guest_dig(self.host, self.bridge, GUEST_ID, f"{self.target}@{aim}", self.operation)
+        self.assertEqual(result[dig.GUEST_RESULT]["aim_source"], "guest_camera")
+        self.assertEqual(await dig.guest_dig(self.host, self.bridge, GUEST_ID, f"{self.target}@{aim}", self.operation), result)
+        self.assertIs(self.host.last_game, original)
+        self.bridge.command.assert_awaited_once_with(dig.GUEST_ACTION, PAWN, SPADE, aim, timeout=3, update_status=False)
+        with self.assertRaisesRegex(party.RuleError, "stock_guest_dig_camera_unqualified"):
+            await dig.guest_dig(self.host, self.bridge, GUEST_ID, f"{self.target}@361.00000,0.00000,0.00000", self.operation)
+
 
 class DigReportTests(unittest.TestCase):
     def test_diagnostic_belongs_to_the_current_listen_host(self):

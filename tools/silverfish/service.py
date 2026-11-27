@@ -6160,7 +6160,7 @@ class Client:
                     if not extra:
                         continue
                     selection = f"{event_guid}@{self.zone_epoch}@{extra[0]}"
-                elif extra and event_kind in native_guest_weapon.FIRE_CLASSES:
+                elif extra and (event_kind in native_guest_weapon.FIRE_CLASSES or event_kind == native_host_dig_live.GUEST_KIND):
                     selection = f"{event_guid}@{self.zone_epoch}@{extra[0]}"
                 else:
                     selection = f"{event_guid}@{extra[0]}" if extra else event_guid

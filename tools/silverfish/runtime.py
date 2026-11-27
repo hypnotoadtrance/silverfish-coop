@@ -1217,6 +1217,9 @@ class Bridge:
             elif fields[5] == "camera":
                 if target is not None and (len(target) > 180 or not target.startswith("camera:")):
                     continue
+            elif fields[5] == native_host_dig_live.GUEST_KIND:
+                if target is not None and native_host_dig_live.camera_aim(target) is None:
+                    continue
             elif target is not None and (fields[5] not in FIRE_CLASSES or not valid_primary_shot(fields[5], target)):
                 continue
             events.append((sequence, *fields[2:]))
@@ -2491,10 +2494,11 @@ class Bridge:
                 elif fields[0] == "native-guest-primary-fixture" and len(fields) == 6:
                     data["native_guest_primary_fixture"] = {"map": fields[1], "pawn": fields[2], "guid": fields[3],
                                                             "sequence": int(fields[4]), "stock_wrappers": int(fields[5])}
-                elif (fields[0] == "native-guest-spade-intent" and len(fields) == 5 and valid_guid(fields[3])
+                elif (fields[0] == "native-guest-spade-intent" and len(fields) in (5, 6) and valid_guid(fields[3])
                       and fields[1] == data.get("map") and data.get("state") == "connected" and len(fields[2]) <= 512
-                      and (sequence := _held_input_sequence(fields[4]))):
-                    data[native_host_dig_live.GUEST_INTENT] = (sequence, fields[1], fields[2], fields[3], "spade")
+                      and (sequence := _held_input_sequence(fields[4]))
+                      and (len(fields) == 5 or native_host_dig_live.camera_aim(fields[5]) is not None)):
+                    data[native_host_dig_live.GUEST_INTENT] = (sequence, fields[1], fields[2], fields[3], "spade", *fields[5:])
                 elif fields[0] == "native-guest-primary-scope" and len(fields) in {6, 7}:
                     data["native_guest_primary_scope"] = dict(zip(("map", "pawn", "guid", "kind", "mode"), fields[1:6]))
                     if len(fields) == 7 and fields[6] == "1":
@@ -4049,6 +4053,8 @@ class Bridge:
         expected_phase = "connected" if fields[1] == native_stock_switch.PROJECT else "hosting"
         if fields[1] == native_stock_door.DISPATCH:
             target_in_area = native_stock_door.matches_area(fields[2], area)
+        elif fields[1] == native_host_dig_live.GUEST_ACTION:
+            target_in_area = valid_campaign_package(area) and fields[2].startswith(f"Player_FP_C {area}.")
         else:
             # The game thread verifies the exact switch's visible level. A streamed
             # switch's level package can differ from the active visit's world.
@@ -4063,6 +4069,9 @@ class Bridge:
         reply = {"state": phase, "map": area, "sequence": local_sequence, native_stock_door.LOCAL_SCOPE: pawn,
                  "ack": {"id": nonce, "result": status, "message": message}}
         if fields[1] == native_stock_door.DISPATCH and len(rows) == 1:
+            return reply
+        if fields[1] == native_host_dig_live.GUEST_ACTION and len(rows) == 1:
+            reply[native_host_dig_live.COMPACT_SCOPE] = fields[2]
             return reply
         if (fields[1] == native_stock_door.DISPATCH or len(rows) != 2
                 or rows[1][:3] != [native_stock_switch.TAG, area, fields[2]]):
@@ -4225,7 +4234,8 @@ class Bridge:
                 return self._local_storm_ambience_reply(raw, fields)
             if action == native_weather_view.SIREN_PLAY and raw.startswith(native_weather_view.SIREN_REPLY + "\t"):
                 return self._local_siren_reply(raw, fields)
-            if (action in (native_stock_door.DISPATCH, native_stock_switch.PROJECT, *native_stock_switch.ACTIONS)
+            if (action in (native_stock_door.DISPATCH, native_stock_switch.PROJECT, native_host_dig_live.GUEST_ACTION,
+                           *native_stock_switch.ACTIONS)
                     and raw.startswith("native-stock-interaction-reply\t")):
                 return self._local_stock_interaction_reply(raw, fields)
             if (action in (native_board_contract.COMMAND, native_board_contract.CATALOG, native_board_contract.MENU_OPEN)
