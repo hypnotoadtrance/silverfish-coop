@@ -65,7 +65,9 @@ local function text(view, value, size, color, x, y, w, h, wrap, z, justified)
     local widget = label(view, value, size, color, wrap)
     if justified then widget:SetJustification(justified) end
     if z then widget:SetClipping(1) end
-    place(cell(view.canvas, widget), x, y, w, h, z or 0)
+    local slot = cell(view.canvas, widget)
+    place(slot, x, y, w, h, z or 0)
+    return slot
 end
 
 local function profile_photo(view, context, hex, x, y)
@@ -199,8 +201,24 @@ local function navigation(view)
     end
 end
 
+local function place_rail(view, frame)
+    local fit = frame.fit
+    place(view.rail, -frame.x / fit, -frame.y / fit, frame.rail / fit, frame.height / fit, -1)
+    local title_y = math.min((frame.height * 0.085 - frame.y) / fit, 10)
+    place(view.rail_title, padding, title_y, navigation_width, 102, 0)
+end
+
 function surface.sync(view)
     if not view or not view.active then return false end
+    local now = os.clock()
+    if now >= view.next_layout then
+        view.next_layout = now + 0.15
+        local frame = display.reflow(view.context, view.widget, view.layout, view.frame)
+        if frame ~= view.frame then
+            view.frame = frame
+            if view.rail then place_rail(view, frame) end
+        end
+    end
     for _, toggle in pairs(view.toggles) do
         if reconcile(view, toggle) == nil then return false end
     end
@@ -236,12 +254,12 @@ end
 function surface.mount(context, spec, on_action)
     local first = spec.note and 126 or 66
     local height = first + #spec.rows * (control_height + gap) + padding
+    local layout = {width = width, height = height, center = spec.center ~= false, top_level = true,
+        navigation = spec.navigation == true, navigation_width = navigation_width, responsive = true}
+    local widget, frame = display.mount(context, "", layout)
     local view = {buttons = {}, inputs = {}, toggles = {}, linked = {}, photos = {}, active = false,
-        navigation_rows = {}, navigation_dirty = true}
-    local widget, metrics = display.mount(context, "",
-        {width = width, height = height, center = spec.center ~= false, top_level = true,
-            navigation = spec.navigation == true, navigation_width = navigation_width})
-    view.widget = widget
+        navigation_rows = {}, navigation_dirty = true, context = context, widget = widget, layout = layout,
+        frame = frame, next_layout = os.clock() + 0.15}
     local ok, reason = pcall(function()
         local tree = widget.WidgetTree
         local canvas = exact(tree, widget_tree) and tree.RootWidget
@@ -258,11 +276,11 @@ function surface.mount(context, spec, on_action)
         divider:SetBrushColor(amber)
         divider:SetVisibility(3)
         if spec.navigation then
-            place(cell(canvas, background), -metrics.x, -metrics.y, metrics.rail, metrics.height, -1)
+            view.rail = cell(canvas, background)
             place(cell(canvas, divider), padding, height - 7, navigation_width, 2, 0)
-            local title_y = math.min(metrics.height * 0.085 - metrics.y, 10)
             local heading = spec.title == "Project Silverfish" and "PROJECT\nSILVERFISH" or spec.title:upper()
-            text(view, heading, 35, amber, padding, title_y, navigation_width, 102, false, nil, 1)
+            view.rail_title = text(view, heading, 35, amber, padding, 0, navigation_width, 102, false, nil, 1)
+            place_rail(view, frame)
         else
             place(cell(canvas, background), 0, 0, width, height, -1)
             place(cell(canvas, divider), padding, 54, width - padding * 2, 2, 0)
