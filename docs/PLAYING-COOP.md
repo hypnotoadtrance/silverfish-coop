@@ -56,7 +56,7 @@ The game asks you to confirm trust on a first connection or when a known host’
 3. Once the campaign is ready, open the pause menu and select **Invite Steam Friends** to open the Steam overlay. If the overlay is disabled, friends can still use **Join Game** for Friends Only and Public lobbies. Enable the overlay to send invites.
 4. On the guest, accept the invite, use **Join Game**, or select a lobby from the public list. Then select **Connect**, enter the host password if set, and select or create a campaign character.
 
-The public list shows the host’s mod version. Incompatible or unknown builds are identified before the character picker opens. From a public lobby’s connection screen, **Back** refreshes the previous lobby page. Both Steam and Direct IP require the same packaged release and compatible game files and protocol.
+The public list shows the host’s mod version. Incompatible or unknown builds are identified before the character picker opens. While a Public lobby is connecting, **Back** cancels that join and returns to Multiplayer. From the lobby's connection form, **Back** refreshes the previous lobby page. Both Steam and Direct IP require the same packaged release and compatible game files and protocol.
 
 Steam relay carries the connection without a publicly reachable UDP port. The host remains the authority for the same campaign and character roster. The lobby ends when the host closes the campaign. Direct IP remains available through the title menu.
 
