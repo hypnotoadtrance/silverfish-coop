@@ -51,6 +51,8 @@ Open **Multiplayer → Host Game → Manage Saves** on the host PC. Select a cam
 
 Choose **Multiplayer** and **Join by Direct IP**. Enter the host's numeric IP and UDP port. Select **Use password** if the host gave you one, then choose **Connect**. Select a saved character or choose **Create Character**. Confirm the selected character to join.
 
+If the Join form rejects an entry, it puts focus on the field that needs correction. Turning off **Use password** clears the password field and returns focus to its checkbox if the field was active.
+
 The game asks you to confirm trust on a first connection or when a known host’s identity changes. Once accepted, the connection remains encrypted. The default resident co-op workspace is `%LOCALAPPDATA%\SilverfishCoop\Resident`. Each loaded host campaign has its own character list.
 
 ### Steam relay trial
