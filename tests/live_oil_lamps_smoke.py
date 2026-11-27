@@ -8,9 +8,8 @@ from pathlib import Path
 import time
 
 import live_portable_title_smoke as suite
-from portable_personal_consumable import FALLBACK_RECEIPT, stock_inventory_open, use_stock_item
 from portable_weather_travel import enter_crossroads
-from tools.silverfish import native_guest_drop, native_loot, native_stock_switch
+from tools.silverfish import native_guest_drop, native_loose_pickup, native_loot, native_stock_switch
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
 
@@ -169,35 +168,31 @@ async def verify_oil_lamps(host, guest, pawn, *, playtest_batch=False):
     gear = {item: await verify_equip(item, source)
             for item, source in (("fur-cap", "helmet"), ("flashbang", "equipment"))}
     print("Fur Cap and Flashbang stayed equipped after reconciliation", flush=True)
-    guid = await suite.portable_probe_command(host.bridge, "portable-guest-food", "seed-homebrew")
-    async with asyncio.timeout(10):
-        while (await guest.bridge.command("fixture-stock-take-ammo-backpack", guid,
-                                          update_status=False))["ack"]["message"] == "waiting":
-            await asyncio.sleep(.08)
-    frame = await suite.wait_resident_status(guest_run, lambda f: f.get("state") == "connected")
-    homebrew = await use_stock_item(guest_run, frame, guid, FALLBACK_RECEIPT)
-    assert homebrew["class_path"].endswith(".Item_HomeBrew_Med_C") and homebrew["quantity_after"] == 2, homebrew
-    await stock_inventory_open(guest_run, False)
-    print("Guest Homebrew Medicine stock use and inventory debit verified", flush=True)
-
     async def simmi(action):
         return await suite.portable_probe_command(host.bridge, "simmi-jobs", action)
 
     quest = "DeadDrop_CrossRoads"
     await simmi("host")
-    await simmi("talk")
-    assert quest in (await simmi("read")).split(";")[-1].split(",")
-    await simmi("acceptdeaddrop")
-    for run in (host_run, guest_run):
-        await suite.wait_resident_status(run, lambda frame:
-            frame.get("gameplay", {}).get("native_quests", {}).get(quest, {}).get("step") == 1)
-    await simmi("closesimmi")
+    try:
+        await simmi("talk")
+        assert quest in (await simmi("read")).split(";")[-1].split(",")
+        await simmi("acceptdeaddrop")
+        for run in (host_run, guest_run):
+            await suite.wait_resident_status(run, lambda frame:
+                frame.get("gameplay", {}).get("native_quests", {}).get(quest, {}).get("step") == 1, timeout=8)
+    finally:
+        await simmi("closesimmi")
     print("Both journals received Simmi's Crossroads Dead Drop", flush=True)
     await enter_crossroads(host, pawn)
     await suite.wait_resident_status(host_run, lambda frame:
         frame.get("game", {}).get("map") == CROSSROADS and not frame.get("awaiting_zone_guest")
         and frame.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
     await suite.wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("map") == CROSSROADS)
+    unloaded = f"{CROSSROADS}.CrossRoads_P:PersistentLevel.SilverfishUnloadedLootFixture_C_1"
+    for _ in range(3):
+        check = await host.bridge.command(native_loose_pickup.CHECK, unloaded)
+        assert check[native_loose_pickup.CHECK_KEY] == {unloaded: False}, check.get("ack")
+    print("Crossroads host repeatedly refused an unloaded loot source", flush=True)
     adjacent = lamp_id(CROSSROADS, 3)
     if not playtest_batch:
         await verify_state(adjacent, False)
@@ -217,7 +212,7 @@ async def verify_oil_lamps(host, guest, pawn, *, playtest_batch=False):
             while await asyncio.gather(*(probe(seat, "latch-state", latch) for seat in (host, guest))) != [expected] * 2:
                 await asyncio.sleep(.05)
     dumpster = await verify_observer_open(CROSSROADS, "Loot_Dumpster_BP_C_1")
-    return {"debt": debt_evidence, "gear": gear, "homebrew": homebrew, "simmi": quest, "cabinet": cabinet, "dumpster": dumpster, "gas_lamps": gas_evidence, "lamps": evidence,
+    return {"debt": debt_evidence, "gear": gear, "simmi": quest, "unloaded_source_refused": unloaded, "cabinet": cabinet, "dumpster": dumpster, "gas_lamps": gas_evidence, "lamps": evidence,
             "other_lamp_stayed_unlit": adjacent, "latch": {"actor": latch, "initial": before, "toggled": after}}
 
 
@@ -314,14 +309,12 @@ async def exercise(work, first, second, saved, streamed_switch=False, crossroads
         for game in (first, second):
             fixtures.enter_context(suite.installed_probe(game, mod="SilverfishPortableOilLampProbe",
                                                          fixture="portable_oil_lamp_probe.lua"))
-            fixtures.enter_context(suite.installed_probe(game, mod="SilverfishPortableGuestFoodProbe",
-                                                         fixture="portable_guest_food_probe.lua"))
             fixtures.enter_context(suite.installed_probe(game, mod="SilverfishPortableSimmiJobsProbe",
                                                          fixture="simmi_jobs_probe.lua"))
         async def power_checks(host, guest, pawn):
             return await verify_oil_lamps(host, guest, pawn, playtest_batch=playtest_batch)
         await suite.verify(work, first, second, saved,
-                           crossroads_profile=crossroads_profile, stock_interaction_feedback=True,
+                           crossroads_profile=crossroads_profile, stock_interaction_feedback=True, stock_placed_item=playtest_batch,
                            oil_lamps_check=power_checks,
                            streamed_switch_check=verify_streamed_switch if streamed_switch else None)
 

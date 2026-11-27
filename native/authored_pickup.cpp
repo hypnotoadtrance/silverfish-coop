@@ -35,6 +35,7 @@
 #include <vector>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
+#include <LuaType/LuaUObject.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/FStrProperty.hpp>
@@ -2729,34 +2730,25 @@ namespace
         const auto requested = lua.get_string();
         auto* world = loose_world.Get();
         if (!live(world)) return 0;
-        const auto raw = loose_actor_path(requested, RC::to_utf8_string(world->GetPathName()));
-        if (raw.empty()) return 0;
+        // Claims carried across visits can arrive before the actor is live.
+        // Discovery and stock input provide qualified weak references for both level types.
         const auto found = loose_sources.find(requested);
-        auto* scope = found != loose_sources.end() ? &found->second.scope : nullptr;
-        if (!scope || !live(scope->actor.Get()))
-        {
-            // A remote streamed key can outlive that level's current load. Wait
-            // for the local census to enroll it rather than searching by path.
-            if (requested.contains('|')) return 0;
-            const auto path = RC::to_wstring(raw);
-            scope = loose_actor_scope(find<U::UObject>(path.c_str()));
-        }
-        if (!scope || !scope->profile || scope->profile->source != requested || !scope->profile->discovered) return 0;
-        auto* actor = scope->actor.Get();
-        if (scope->claimed ? !local_scope(*scope) || !in_loose_level(static_cast<U::AActor*>(actor), world) : !available(*scope))
+        if (found == loose_sources.end()) return 0;
+        const auto& scope = found->second.scope;
+        auto* actor = scope.actor.Get();
+        if (!live(actor) || !scope.profile || scope.profile->source != requested || !scope.profile->discovered ||
+            (scope.claimed ? !local_scope(scope) || !in_loose_level(static_cast<U::AActor*>(actor), world) : !available(scope)))
             return 0;
         auto* mode = loose_respawn_mode(actor);
         if (!mode) return 0;
-        lua.set_string(RC::to_utf8_string(scope->profile->item_class));
-        lua.set_integer(scope->profile->quest_id.empty() ? mode->GetPropertyValueInContainer(actor) : 2);
-        lua.set_bool(scope->claimed);
-        lua.set_bool(scope->profile->stock_cash);
-        if (!scope->profile->quest_id.empty())
-        {
-            lua.set_string(scope->profile->quest_id);
-            return 5;
-        }
-        return 4;
+        lua.set_string(found->second.item_class_utf8);
+        lua.set_integer(scope.profile->quest_id.empty() ? mode->GetPropertyValueInContainer(actor) : 2);
+        lua.set_bool(scope.claimed);
+        lua.set_bool(scope.profile->stock_cash);
+        if (scope.profile->quest_id.empty()) lua.set_nil();
+        else lua.set_string(scope.profile->quest_id);
+        RC::LuaType::auto_construct_object(lua, actor);
+        return 6;
     }
 
     int diagnose_loose(const Lua& lua)

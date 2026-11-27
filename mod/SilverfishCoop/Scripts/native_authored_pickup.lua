@@ -367,16 +367,21 @@ local function loose_profile(source, state)
         or type(SilverfishDescribeLoosePickup) ~= "function" then return end
     local path = loose_actor_path(source, state.map)
     if not path then return end
-    local class, mode, claimed, cash, quest = SilverfishDescribeLoosePickup(source)
-    local actor = class and StaticFindObject(path)
+    local class, mode, claimed, cash, quest, actor = SilverfishDescribeLoosePickup(source)
     local name = valid(actor) and actor:GetFullName():match("^(%S+) ")
     local leaf = path:match(":PersistentLevel%.([%w_%-]+)$")
     local area_name = state.map:match("([^/]+)$")
     local limits = class and cash_limits[class]
     if not name or not leaf or not area_name or (cash and not limits) then return end
     return {loose = true, streamed = source ~= path, source = source, path = path, name = name, class = class, map = state.map,
+        actor = actor,
         mode = mode, claimed = claimed, quest = quest, stock_cash = cash, cash_min = limits and limits[1], cash_max = limits and limits[2],
         cash_flag = source ~= path and "-" or leaf .. "-" .. area_name .. "-"}
+end
+
+local function resolve_actor(profile)
+    if profile.loose then return profile.actor end
+    return StaticFindObject(profile.path)
 end
 
 local function temporary_mark(actor)
@@ -453,7 +458,7 @@ local function claim(fields, state, phase, profile)
     end
     if profile.stock_cash then
         local cash = SilverfishClaimNativeAuthoredCash
-        local actor = StaticFindObject(profile.path)
+        local actor = resolve_actor(profile)
         if type(cash) ~= "function" or not valid(pawn) or not valid(actor)
             or not stock_input and not sight(state, phase, profile, pawn, actor) then
             report.status = "authored_cash_exact_authority_sight_required"
@@ -496,7 +501,7 @@ local function claim(fields, state, phase, profile)
         end
     end
     if not stock_input and (profile.stock_supply or profile.authority_sight or profile.loose) then
-        local checked, visible = pcall(sight, state, phase, profile, pawn, StaticFindObject(profile.path))
+        local checked, visible = pcall(sight, state, phase, profile, pawn, resolve_actor(profile))
         if not checked or visible ~= true then
             report.status = "authored_pickup_exact_authority_sight_required"
             return "authored loose pickup reported"
@@ -567,7 +572,7 @@ local function claim(fields, state, phase, profile)
         report.applied = report.ok or status:match("^mutation_unverified_") ~= nil
     end
     if report.ok and profile.loose then
-        local actor = StaticFindObject(profile.path)
+        local actor = resolve_actor(profile)
         if not valid(actor) then error("mutation_unverified_loose_pickup_source_lost", 0) end
         -- The shared claim owns retirement for a quest occurrence.
         if not profile.quest then
@@ -588,7 +593,7 @@ local function claim(fields, state, phase, profile)
     if report.ok and profile.callback then
         local delivered, effect = SilverfishStockAuthoredPickupCallback(pawn:GetAddress(), save:GetAddress(), true, profile.source)
         if not delivered then error(tostring(effect), 0) end
-        local actor = StaticFindObject(profile.path)
+        local actor = resolve_actor(profile)
         if not valid(actor) then error("mutation_unverified_authored_callback_source_unavailable", 0) end
         local mode = math.tointeger(actor.Item_RespawnMode)
         local leaf = profile.path:match(":PersistentLevel%.([%w_]+)$")
@@ -760,7 +765,7 @@ function pickup.command(fields, state, phase)
         local valid_args = #fields == 5 or (#fields == 6 and (fields[6] == "stock-input" or fields[6] == "memory-retained"))
             or (#fields == 7 and fields[6] == "stock-input" and fields[7] == "memory-retained")
         local profile = valid_args and loose_profile(fields[5], state)
-        if not profile or profile.claimed or require("native_prop_carry").item_is_held(StaticFindObject(profile.path)) then
+        if not profile or profile.claimed or require("native_prop_carry").item_is_held(resolve_actor(profile)) then
             error("loose_pickup_source_unavailable", 0)
         end
         return claim(fields, state, phase, profile)
@@ -780,7 +785,7 @@ function pickup.command(fields, state, phase)
                     available = profile.mode == 0 or profile.mode == 1 and valid(stock)
                         and stream_activation(stock, profile, false) == false
                 elseif not profile.claimed then
-                    available = profile.mode == 0 or profile.mode == 1 and temporary_mark(StaticFindObject(profile.path)) == false
+                    available = profile.mode == 0 or profile.mode == 1 and temporary_mark(resolve_actor(profile)) == false
                 end
             end
             loose_check[#loose_check + 1] = {fields[index], available and 1 or 0}
@@ -813,7 +818,7 @@ function pickup.command(fields, state, phase)
         controller:OpenMenu(class, created)
         local screen = created.CreatedMenu
         if not valid(screen) or not same(screen:GetClass(), class) then error("loose_pickup_nearby_menu_unavailable", 0) end
-        local target = StaticFindObject(profile.path)
+        local target = resolve_actor(profile)
         screen:FindFloorItems()
         for index = 1, screen.FloorActors:GetArrayNum() do
             if same(screen.FloorActors[index], target) then
@@ -839,7 +844,7 @@ function pickup.command(fields, state, phase)
             local reason = fixtures and type(diagnose) == "function" and diagnose(fields[3]) or "scope"
             error("loose_pickup_fixture_scope_unavailable:" .. reason, 0)
         end
-        local actor = StaticFindObject(profile.path)
+        local actor = resolve_actor(profile)
         local pawn
         if approach then
             pawn = owner(state, phase, fields[4])
@@ -870,7 +875,7 @@ function pickup.command(fields, state, phase)
             error("The stock loose pickup positioning fixture is unavailable", 0)
         end
         local pawn = owner(state, phase, fields[3])
-        local actor = StaticFindObject(profile.path)
+        local actor = resolve_actor(profile)
         if not valid(pawn) or not valid(actor) or actor:GetFullName() ~= profile.name .. " " .. profile.path
             or not same(actor:GetWorld(), state.world) then
             error("The stock loose pickup fixture did not match its placed actor", 0)
@@ -969,7 +974,7 @@ end
 local function append_authored_row(rows, state, row, profile, active, claimed, sequence, fixture, amount)
     if not active then return end
     if not claimed and profile == gold_bag then
-        local actor = StaticFindObject(profile.path)
+        local actor = resolve_actor(profile)
         if not valid(actor) or actor.bHidden ~= false or actor:GetActorEnableCollision() ~= true then return end
     end
     rows[#rows + 1] = row("native-authored-pickup", profile.source, state.map,
