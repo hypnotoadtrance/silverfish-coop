@@ -136,7 +136,7 @@ local function page_count(draft)
     return math.max(1, math.ceil(#draft.characters / page_size))
 end
 
-local function render_surface(draft, screen, hint, initial)
+local function render_surface(draft, screen, hint, initial, field_focus)
     local title = draft.steam_port and "Join via Steam"
         or draft.direct and "Join by Direct IP" or "Join by Invitation"
     local rows = {}
@@ -209,7 +209,8 @@ local function render_surface(draft, screen, hint, initial)
     if screen == "steam_password" or screen == "password" and password_errors[draft.failure] then
         focus = "password"
     end
-    draft.view = draft.surface.mount(draft.context, {title = title, note = note, rows = rows, focus = focus}, draft.on_action)
+    draft.view = draft.surface.mount(draft.context, {title = title, note = note, rows = rows,
+        focus = field_focus or focus}, draft.on_action)
 end
 
 local fields = {
@@ -220,11 +221,11 @@ local legacy_titles = {
     profile = "Local profile", waiting = "Waiting for the host…",
 }
 
-local function render(draft, state, phase, next_screen, hint, initial)
+local function render(draft, state, phase, next_screen, hint, initial, field_focus)
     form.remove(draft)
     draft.screen = next_screen
     if draft.surface then
-        render_surface(draft, next_screen, hint, initial)
+        render_surface(draft, next_screen, hint, initial, field_focus)
     else
         local label = next_screen == "catalog" and catalog_text(draft) or legacy_titles[next_screen] or "Join co-op"
         if hint then label = label .. "\n" .. hint end
@@ -384,15 +385,20 @@ local function connect(draft, state, phase)
     local password = draft.surface.read(draft.view, "password")
     draft.use_password = draft.surface.checked(draft.view, "use_password") == true
     draft.address, draft.port = address or draft.address, port or draft.port
-    if not address_valid(address) or not port_valid(port) or not password or utf8.len(password) > 128 then
-        local hint = not address_valid(address) and "Enter a numeric IPv4 or IPv6 address."
-            or not port_valid(port) and "Enter a UDP port from 1 to 65535."
-            or "Enter a password of up to 128 characters."
-        render(draft, state, phase, draft.screen, hint)
+    local field, hint
+    if not address_valid(address) then
+        field, hint = "address", "Enter a numeric IPv4 or IPv6 address."
+    elseif not port_valid(port) then
+        field, hint = "port", "Enter a UDP port from 1 to 65535."
+    elseif not password or utf8.len(password) > 128 then
+        field, hint = "password", "Enter a password of up to 128 characters."
+    end
+    if field then
+        render(draft, state, phase, draft.screen, hint, nil, field)
         return false, "title_join_form_invalid_endpoint"
     end
     if draft.use_password and password == "" then
-        render(draft, state, phase, draft.screen, "Enter the host’s password or clear Use password.")
+        render(draft, state, phase, draft.screen, "Enter the host’s password or clear Use password.", nil, "password")
         return false, "title_join_form_password_required"
     end
     return queue(draft, state, phase, "direct", draft.use_password and password or "")
@@ -545,6 +551,10 @@ function form.fixture(draft, operation, value, state, phase)
         local suffix = draft.screen == "catalog" and ";count=" .. #draft.characters or ""
         if draft.failure then suffix = suffix .. ";error=" .. draft.failure end
         return "title_join_form_state=" .. draft.screen .. suffix
+    end
+    if operation == "edit-port" and draft.view and draft.direct and not draft.steam_port
+        and endpoint_screens[draft.screen] then
+        return draft.surface.write(draft.view, "port", value), "title_join_form_fixture_arguments"
     end
     if operation == "import" and draft.screen == "invite" then
         local data = read_file(draft.fixture, max_invite + 2)

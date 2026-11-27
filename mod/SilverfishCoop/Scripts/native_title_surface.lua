@@ -148,7 +148,13 @@ local function reconcile(view, toggle)
     if not input or not exact(input.widget, editable)
         or not same(input.widget:GetParent(), view.canvas) then return nil end
     if checked ~= toggle.checked then
-        if not checked then input.widget:SetText(FText("")) end
+        if not checked then
+            local controller = view.context.controller
+            if input.widget:HasUserFocus(controller) or input.widget:HasUserFocusedDescendants(controller) then
+                toggle.widget:SetUserFocus(controller)
+            end
+            input.widget:SetText(FText(""))
+        end
         input.widget:SetIsEnabled(checked)
         if input.widget:GetIsEnabled() ~= checked then return nil end
         toggle.checked = checked

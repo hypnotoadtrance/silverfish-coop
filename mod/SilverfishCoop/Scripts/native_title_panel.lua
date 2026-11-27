@@ -960,7 +960,7 @@ local function join_form_fixture_command(fields, state, phase)
     if not fixture_enabled() then error("title_join_form_fixture_unavailable", 0) end
     local operation, value = fields[3], fields[4]
     local has_value = operation == "select" or operation == "create" or operation == "create-editor" or operation == "profile"
-        or operation == "address" or operation == "port"
+        or operation == "address" or operation == "port" or operation == "edit-port"
     if #fields ~= (has_value and 4 or 3) then error("title_join_form_fixture_arguments", 0) end
     local context = title.probe(state, phase)
     local offer, reason = active_offer("join", context)

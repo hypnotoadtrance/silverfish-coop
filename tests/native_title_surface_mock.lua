@@ -1,6 +1,7 @@
 -- Exercise navigation on the real title surface with the stock widget calls stubbed.
 local types, focus = {}, nil
 local clock, viewport = 0, {X = 1280, Y = 720}
+local prompt = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
 local function object(path, parent, outer)
     local value = {path = path, parent = parent, outer = outer, enabled = true, rules = {}, Font = {}}
     function value:IsValid() return true end
@@ -16,7 +17,8 @@ local function object(path, parent, outer)
     function value:GetText() return {ToString = function() return self.text end} end
     function value:SetContent(content) content.parent = self end
     function value:SetUserFocus() focus = self end
-    function value:HasUserFocusedDescendants() return focus ~= nil end
+    function value:HasUserFocus() return focus == self end
+    function value:HasUserFocusedDescendants() return self.path == prompt and focus ~= nil end
     function value:SetNavigationRuleExplicit(direction, destination) self.rules[direction] = destination end
     function value:SetNavigationRuleBase(direction, rule) self.rules[direction] = rule end
     function value:AddChildToCanvas(child)
@@ -39,7 +41,6 @@ local names = {"WidgetTree", "EditableTextBox", "TextBlock", "CheckBox", "Canvas
     "Widget:SetNavigationRuleExplicit", "Widget:SetNavigationRuleBase"}
 for _, name in ipairs(names) do types["/Script/UMG." .. name] = object() end
 
-local prompt = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
 types[prompt] = object()
 local widgets, layout = object(), object()
 types["/Script/UMG.Default__WidgetBlueprintLibrary"] = widgets
@@ -108,7 +109,9 @@ assert(back.rules[4] == campaign and campaign.rules[5] == back)
 
 assert(surface.set_checked(view, "use_password", true) and surface.sync(view))
 assert(password.enabled and toggle.rules[4] == password and password.rules[4] == start)
+password:SetUserFocus(view.context.controller)
 assert(surface.set_checked(view, "use_password", false) and surface.sync(view))
+assert(focus == toggle, "Disabling the active field must leave focus on its password toggle")
 assert(not password.enabled and toggle.rules[4] == start and start.rules[5] == toggle)
 
 viewport, clock = {X = 360, Y = 245}, 1

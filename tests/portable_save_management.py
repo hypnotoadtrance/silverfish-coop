@@ -36,6 +36,23 @@ def defer_first_character_response(source):
 
 
 async def verify_save_management(host, guest):
+    async def title_control(seat, action, name):
+        unavailable = "title_panel_fixture_focus_unavailable" if action == "focus" else "title_panel_fixture_button_unavailable"
+        command = "native-title-focus-fixture" if action == "focus" else "native-title-button-fixture"
+        async with asyncio.timeout(8):
+            while True:
+                try:
+                    reply = await seat.bridge.command(command, name, timeout=3)
+                except RuntimeError as error:
+                    if str(error) != unavailable:
+                        raise
+                    await asyncio.sleep(.1)
+                else:
+                    assert reply["ack"]["result"] == "accepted", reply
+                    if action == "click":
+                        await seat.bridge.wait_for(lambda frame: frame["sequence"] > reply["sequence"])
+                    return
+
     async def edit_stock_name(guest, join, name):
         await join("create-editor", name)
         await guest.bridge.wait_for(lambda row: row.get("native_guest_stock_creator", {}).get("state") == "creating")
@@ -45,6 +62,21 @@ async def verify_save_management(host, guest):
         await creator_action(guest, "finish")
         await offered(guest)
 
+    async def verify_join_focus():
+        await offered(guest)
+        await title_control(guest, "click", "multiplayer")
+        await title_control(guest, "click", "join")
+        await title_control(guest, "focus", "address")
+        await guest.bridge.command("native-title-join-form-fixture", "address", "127.0.0.1")
+        await guest.bridge.command("native-title-join-form-fixture", "edit-port", "0")
+        await title_control(guest, "click", "connect")
+        await title_control(guest, "focus", "port")
+        await title_control(guest, "click", "back")
+        await title_control(guest, "focus", "join")
+        await title_control(guest, "click", "modes")
+        await title_control(guest, "focus", "multiplayer")
+
+    await verify_join_focus()
     created = await start_pair(host, guest, "Management scout", create_character=edit_stock_name)
     campaign_id = uuid.UUID(created["campaign_id"]).hex
     character = created["character_id"]
@@ -61,28 +93,11 @@ async def verify_save_management(host, guest):
     host_slot = native_host_save.slot_path(storage, original["world"]["native_host_save"]["slot"])
     guest_slot = native_host_save.slot_path(storage, original["characters"][character]["state"]["native_guest_save"]["slot"])
     host_bytes = host_slot.read_bytes()
-    fixture = "native-title-button-fixture"
-
-    async def title_control(action, name):
-        unavailable = "title_panel_fixture_focus_unavailable" if action == "focus" else "title_panel_fixture_button_unavailable"
-        command = "native-title-focus-fixture" if action == "focus" else fixture
-        async with asyncio.timeout(8):
-            while True:
-                try:
-                    reply = await host.bridge.command(command, name, timeout=3)
-                except RuntimeError as error:
-                    if str(error) != unavailable:
-                        raise
-                    await asyncio.sleep(.1)
-                else:
-                    assert reply["ack"]["result"] == "accepted", reply
-                    return
-
     async def click(name):
-        await title_control("click", name)
+        await title_control(host, "click", name)
 
     async def focused(name):
-        await title_control("focus", name)
+        await title_control(host, "focus", name)
 
     async def saved_after(revision):
         async with asyncio.timeout(12):
@@ -172,7 +187,7 @@ async def verify_save_management(host, guest):
     await focused("manage")
     await click("browse")
     try:
-        await host.bridge.command(fixture, "load:" + host.campaign.name)
+        await host.bridge.command("native-title-button-fixture", "load:" + host.campaign.name)
     except RuntimeError as error:
         assert str(error) == "title_panel_fixture_button_unavailable", error
     else:
@@ -187,6 +202,7 @@ async def verify_save_management(host, guest):
     await click("modes")
     return {"created": created, "reopened": reopened, "campaign_files_erased": True,
             "guest_slot_erased": True, "confirmation_cancelled": True, "title_focus_verified": True,
+            "invalid_join_port_focused": True,
             "pending_character_lookup_cancelled": True,
             "remaining_campaign_count": len(remaining),
             "revisions": [original["revision"], deleted_character["revision"], reopened["revision"]]}
