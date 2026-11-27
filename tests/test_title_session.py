@@ -299,6 +299,38 @@ class TitleSessionTests(unittest.IsolatedAsyncioTestCase):
         child.finish.set()
         await task
 
+    async def test_resident_host_settings_rejection_shows_a_notice_on_the_reoffered_title(self):
+        saved = self.directory.resolve() / "game-user" / "Saved"
+        saved.mkdir(parents=True)
+        stock = self.bridge.snapshot
+
+        def snapshot():
+            data = stock()
+            data["save_scope"] = None
+            data[native_title_entry.PANEL_KEY] = dict(state="ready", mounted=True, actions=["host"])
+            data[native_title_entry.STARTUP_KEY] = dict(
+                map=data["map"], sequence=data["sequence"], saved_directory=str(saved))
+            return data
+
+        def refuse(_claim):
+            raise ValueError("private setting")
+
+        self.bridge.snapshot = snapshot
+        starter = AsyncMock()
+        plan = SessionPlan(starter, lambda: None, lambda _: True, resolve_claim=refuse)
+        session = TitleSession(self.bridge, {"host": plan}, resident=True, title_saved_directory=saved,
+                               on_title_ready=Mock(), poll_interval=.005)
+        task = asyncio.create_task(session.run())
+        self.addAsyncCleanup(self.stop, task)
+        original = await self.wait(self.generation)
+        self.request("host", original)
+        await self.wait(lambda: self.generation() and self.generation() != original)
+        descriptor = self.descriptor_path.read_text(encoding="ascii")
+        self.assertTrue(descriptor.endswith("\tstart-host\n"), descriptor)
+        self.assertEqual(self.status()["last_failure"]["code"], "title_settings_invalid")
+        self.assertNotIn("private setting", descriptor + str(self.status()))
+        starter.assert_not_awaited()
+
     async def test_retires_title_only_after_exact_child_and_advancing_original_title(self):
         child = Child("host")
         _, task = self.supervise(host=child.plan())

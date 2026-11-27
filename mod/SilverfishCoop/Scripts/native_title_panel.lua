@@ -24,9 +24,11 @@ local credits_path = "/Game/Classes/GUI/Credits_MainMenu_Widget.Credits_MainMenu
 local initial_port, edited_port = "7777", "28181"
 local steam_access_labels = {invite = "Invite Only", friends = "Friends Only", public = "Public"}
 local steam_search_timeout, steam_join_timeout = 24, 15
-local recovery_notes = {
+local offer_notes = {
     ["recover-host"] = {action = "host", text = "Session ended unexpectedly. Load your campaign to resume from the last save."},
     ["recover-join"] = {action = "join", text = "Session ended unexpectedly. Join the host again when ready."},
+    ["start-host"] = {action = "host", text = "Could not start the campaign. Review the Host settings and try again."},
+    ["start-join"] = {action = "join", text = "Could not join the campaign. Check the connection and try again."},
 }
 
 local function valid(object)
@@ -48,9 +50,9 @@ local function read_offer()
     local contents = file:read(257)
     file:close()
     if not contents or #contents > 256 then return end
-    local separation, _, reason = contents:find("\t(recover%-[a-z]+)\r?\n$")
-    local recovery = recovery_notes[reason]
-    if reason and not recovery then return end
+    local separation, _, reason = contents:find("\t([a-z]+%-[a-z]+)\r?\n$")
+    local note = offer_notes[reason]
+    if reason and not note then return end
     if separation then contents = contents:sub(1, separation - 1) .. "\n" end
     local generation, choices, timestamp =
         contents:match("^1\t([0-9a-f]+)\t([a-z,%-]+)\t([0-9]+)\r?\n$")
@@ -67,8 +69,8 @@ local function read_offer()
     local now = os.time()
     if not generation or #generation ~= 32 or not actions[choices] or not expires
         or expires < now or expires > now + 10 then return end
-    if recovery and not actions[choices][recovery.action] then return end
-    return {generation = generation, choices = choices, expires = expires, defaults = defaults, recovery = recovery}
+    if note and not actions[choices][note.action] then return end
+    return {generation = generation, choices = choices, expires = expires, defaults = defaults, note = note}
 end
 
 local function read_campaigns(generation)
@@ -226,10 +228,10 @@ local function mount(context, offer)
     local owner = {context = context, offer = offer, parent = parent, root = root,
         stock_visibility = root:GetVisibility(), startup_until = not offer and os.time() + 8 or nil}
     session = owner
-    if offer and offer.recovery then
+    if offer and offer.note then
         singleplayer_title = nil
         show_stock(owner, false)
-        multiplayer(offer, offer.recovery.action, offer.recovery.text)
+        multiplayer(offer, offer.note.action, offer.note.text)
     elseif same_title(singleplayer_title, context) then
         singleplayer(owner)
     else

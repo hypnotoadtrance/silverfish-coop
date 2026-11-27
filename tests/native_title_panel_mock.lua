@@ -854,6 +854,17 @@ tick()
 assert(display.title == "Join via Steam" and not display.fields.password)
 assert(files[steam_opened] == ("1\t%s\topened\n"):format(next_invite))
 
+local failed_generation = generation("0")
+files[steam_join], files[descriptor] = nil, nil
+sync()
+files[descriptor] = ("2\t%s\thost,join\t%d\t%s\tstart-host\n")
+    :format(failed_generation, now + 8, table.concat(defaults, "\t"))
+sync()
+assert(display.title == "Multiplayer" and display.focus == "host")
+assert(display.note:find("Could not start the campaign", 1, true))
+click("host")
+assert(display.title == "Host Game" and not display.note)
+
 local recovery_generation = generation("1")
 files[steam_join], files[descriptor] = nil, nil
 sync()

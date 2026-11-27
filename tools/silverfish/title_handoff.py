@@ -18,6 +18,7 @@ from .control import NAME
 DESCRIPTOR_FILE = "title-handoff-session.tsv"
 REQUEST_FILE = "title-handoff-request.tsv"
 ACTIONS = ("host", "join")
+_NOTICES = {f"{kind}-{action}": action for kind in ("recover", "start") for action in ACTIONS}
 LEASE_SECONDS = 10
 TOKEN = re.compile(r"[0-9a-f]{32}")
 _REQUEST = re.compile(rb"1\t([0-9a-f]{32})\t([0-9a-f]{32})\t(host|join)\r?\n")
@@ -155,13 +156,13 @@ class TitleHandoff:
         _unlink(self.descriptor_path)
 
     def refresh(self, snapshot: dict | None, bindings: Mapping[str, object], *,
-                host_defaults: HostDefaults | None = None, recovery: str | None = None) -> bool:
+                host_defaults: HostDefaults | None = None, notice: str | None = None) -> bool:
         """Publish or renew usable actions on the current exact stock title screen."""
         choices = dict(bindings)
         if (any(type(action) is not str or action not in ACTIONS or binding is None
                 for action, binding in choices.items()) or
                 (host_defaults is not None and type(host_defaults) is not HostDefaults)
-                or (recovery is not None and recovery not in ACTIONS)):
+                or (notice is not None and notice not in _NOTICES)):
             self.close()
             raise ValueError("Unsupported title handoff binding")
         if self._claim is not None or not choices:
@@ -192,8 +193,8 @@ class TitleHandoff:
         else:
             row = (f"2\t{generation}\t{advertised}\t{expires}"
                    f"\t{defaults.campaign}\t{defaults.bind}\t{defaults.port}\n").encode("ascii")
-        if recovery in choices:
-            row = row[:-1] + f"\trecover-{recovery}\n".encode("ascii")
+        if notice and _NOTICES[notice] in choices:
+            row = row[:-1] + f"\t{notice}\n".encode("ascii")
         with NamedTemporaryFile(dir=self.descriptor_path.parent, prefix=".title-handoff-", delete=False) as stream:
             temporary = Path(stream.name)
             try:

@@ -155,7 +155,7 @@ class TitleSession:
         self._handoff = None
         self._published = None
         self._last_failure = None
-        self._recovery = None
+        self._notice = None
         self._starting = False
         self._cancel_requested = False
         self._control = control
@@ -270,7 +270,7 @@ class TitleSession:
                 snapshot = self._bridge.snapshot()
                 plans = {} if self._resident and snapshot is not None and not self._solo_title(snapshot) else self._plans
                 offered = self._handoff.refresh(snapshot, plans, host_defaults=self._host_defaults,
-                                                recovery=self._recovery)
+                                                notice=self._notice)
                 if self._host_campaigns is not None:
                     generation = self._handoff.generation if offered else None
                     self._host_campaigns.poll(generation)
@@ -331,7 +331,7 @@ class TitleSession:
     async def _launch(self, claim: Claim, original_title: tuple) -> bool:
         from .service import NATIVE_RUNTIME_RETIREMENT_WAIT, NATIVE_RUNTIME_RETIRING
 
-        self._recovery = None
+        self._notice = None
         plan = claim.binding
         attempt = {key: getattr(claim, key) for key in ("action", "request_id", "generation")}
         try:
@@ -345,6 +345,8 @@ class TitleSession:
             if not isinstance(plan, SessionPlan):
                 raise ValueError("Expected a resolved title session plan")
         except (OSError, TypeError, ValueError, RuntimeError):
+            if self._resident:
+                self._notice = f"start-{claim.action}"
             self._last_failure = dict(attempt, code="title_settings_invalid")
             self._publish("failed", attempt=attempt)
             return False
@@ -514,8 +516,10 @@ class TitleSession:
                     self._publish("stopped", attempt=attempt)
                     return False
                 if retired:
-                    self._recovery = claim.action
+                    self._notice = f"recover-{claim.action}"
                     error = "session_failed"
+        if self._resident and not unsafe and not retired and error != "start_cancelled":
+            self._notice = f"start-{claim.action}"
         self._last_failure = dict(attempt, code="cleanup_unverified" if unsafe else error)
         self._publish("cleanup_unverified" if unsafe else "failed", attempt=attempt)
         return unsafe
