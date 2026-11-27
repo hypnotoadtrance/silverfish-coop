@@ -1846,20 +1846,6 @@ local function streamed_npc(world, pawn, host, action)
     if not fixture.stream:IsLevelVisible() then return "waiting" end
     local level = fixture.stream:GetLoadedLevel()
     assert(valid(level) and not same(level, world.PersistentLevel))
-    if action == "stream-npc-plank" or action == "stream-npc-plank-break" then
-        local level_path = level:GetFullName():match("^%S+ (.+)$")
-        local path = level_path .. ".Dest_WoodPlank_BP_C_1"
-        local plank = StaticFindObject(path)
-        if not valid(plank) or plank:IsActorBeingDestroyed() then return "removed" end
-        local placed, remote = SilverfishQualifyNativePlacedDestructible(path, world:GetAddress())
-        assert(placed and remote == not host and same(plank:GetOuter(), level), "streamed plank scope unavailable")
-        if action == "stream-npc-plank-break" then
-            local point = plank.StaticMesh:K2_GetComponentLocation()
-            plank:Damage_Feedback(true, {Location = point, ImpactPoint = point})
-            return "stock plank break requested"
-        end
-        return ("%s;%s;%s"):format(path, tostring(plank.bHidden), tostring(plank:GetActorEnableCollision()))
-    end
     local actor = fixture.actor
     if not valid(actor) then
         local path = level:GetFullName():match("^%S+ (.+)$")

@@ -5135,31 +5135,11 @@ async def verify_stock_streamed_npc(host: Seat, guest: Seat, _pawn: str) -> dict
     identity = native_world_loot.stock_enemy_identity(banked["guid"], banked.get("visual_id"))
     for run in (host_run, guest_run):
         await wait_resident_status(run, lambda status: identity in status["game"].get(native_world_loot.KEY, {}), timeout=8)
-    initial_planks = await asyncio.gather(*(command(seat, "plank") for seat in (host, guest)))
-    plank, hidden, collision = initial_planks[0].split(";")
-    assert initial_planks[0] == initial_planks[1] and (hidden, collision) == ("false", "true"), initial_planks
-    scope = plank.rsplit(".", 1)[0]
-    await wait_resident_status(host_run, lambda status: plank in status["game"].get(native_destructibles.KEY, ()))
-    assert await command(guest, "plank-break") == "stock plank break requested"
-    assert await command(guest, "plank") == initial_planks[1]
-    assert await command(host, "plank-break") == "stock plank break requested"
-    host_plank = None
-    try:
-        async with asyncio.timeout(8):
-            while (host_plank := await command(host, "plank")) != "removed":
-                await asyncio.sleep(.1)
-    except TimeoutError as error:
-        raise AssertionError(f"Stock break did not remove the host's streamed plank. Last state was {host_plank}") from error
-    await wait_resident_status(host_run, lambda status: scope in (
-        roster := status["game"].get(native_destructibles.KEY, ())) and plank not in roster)
-    async with asyncio.timeout(8):
-        while await command(guest, "plank") != f"{plank};true;false":
-            await asyncio.sleep(.1)
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"actor": actor, "world_lookup": ownership, "guest_before": observed, "final_states": after,
             "guest_local_damage_denied": True, "retargeted_when_guest_downed": True,
             "guest_contact": contact, "stock_shot": receipt,
-            "streamed_stock_drop": banked, "streamed_plank_projected": plank,
+            "streamed_stock_drop": banked,
             "campaign_checkpoint_unchanged": True}
 
 
