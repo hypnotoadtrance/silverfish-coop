@@ -4,7 +4,7 @@ import asyncio
 import re
 import time
 
-from . import native_inventory, native_loot, native_pickup_audio, party
+from . import native_inventory, native_inventory_grant, native_loot, native_pickup_audio, party
 from .authored_loot import same_pose, valid_item_transform
 from .content_paths import item_class_name, quest_id
 from .native_gold import valid_guid
@@ -24,6 +24,7 @@ STOCK_CARD_FIXTURE = "native-inventory-stock-nearby-fixture"
 EXPIRE_FIXTURE = "native-loose-pickup-expire-fixture"
 APPROACH = "native-loose-pickup-approach"
 PROJECT = "native-loose-pickup-project"
+PRESENT_CLAIM = "native-loose-pickup-present-claim"
 CHECK = "native-loose-pickup-check"
 CHECK_ROW = "native-loose-pickup-check-result"
 CHECK_KEY = "native_loose_pickup_check"
@@ -254,6 +255,30 @@ class PickupView:
         self.scope = None
         self.hidden = set()
 
+    async def present_claim(self, client, scope, claim, *, inventory):
+        game, bridge = client.last_game, client.bridge
+        path = claim.get("actor")
+        generation = game.get(VIEW_SCOPE)
+        view_scope = scope[2], generation
+        if (bridge.local_bridge is None or game.get(CAPABILITY) != 1 or type(generation) is not int or generation <= 0
+                or actor_map(path) != scope[2] or path not in client.gameplay.get(STATE, ())):
+            return None
+        try:
+            reply = await bridge.command(PRESENT_CLAIM, str(generation), path, scope[2], scope[3], scope[1],
+                                         *inventory, timeout=3)
+        except (OSError, RuntimeError) as error:
+            client.control.event("native_loose_pickup_presentation_deferred", reason=str(error))
+            return None
+        outcome = reply.get("ack", {}).get("message")
+        if (outcome not in ("deferred", "added", "present", "merged") or client.stock_interaction_scope() != scope
+                or client.last_game.get(VIEW_SCOPE) != generation):
+            return None
+        if self.scope != view_scope:
+            self.scope = view_scope
+            self.hidden.clear()
+        self.hidden.add(path)
+        return None if outcome == "deferred" else {"pickup_inventory_result": outcome}
+
     async def project(self, service, bridge, hidden):
         game = service.last_game
         area, generation = game.get("map"), game.get(VIEW_SCOPE)
@@ -395,8 +420,9 @@ class QuestPlacementView:
                 self.leases[path] = (row, time.monotonic())
 
 
-async def refresh_claimed_stock_view(client):
-    client.guest_ui.queue_stock_inventory(client)
+async def refresh_claimed_stock_view(client, *, inventory_applied=False):
+    if not inventory_applied:
+        client.guest_ui.queue_stock_inventory(client)
     try:
         await client.loose_pickup_view.project(client, client.bridge, client.gameplay.get(STATE))
     except (OSError, RuntimeError, ValueError) as error:
@@ -520,6 +546,9 @@ async def claim(host, bridge, character, requested, operation, *, local_input=Fa
                            escrow="memory" if proof.get("memory") else "disk",
                            bridge_reply_bytes=snapshot.get(native_loot.CLAIM_REPLY_BYTES), **row)
         native_pickup_audio.committed(host, pawn, operation, row["class_path"], credit=row.get("wallet_credit"))
+        if deferred and not is_cash:
+            return native_inventory_grant.with_pickup_row(
+                host, snapshot, result, character, area, row.get("inventory_guid", row["guid"]))
         return result
     finally:
         if host.native_checkpoint_unsafe:

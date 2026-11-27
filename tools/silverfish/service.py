@@ -7265,8 +7265,10 @@ class Client:
                     projected = None
                     claimed = result.get("native_loot_claim") or result.get(native_stock_enemy_drops.CLAIM_KEY)
                     if isinstance(inventory, dict) and isinstance(claimed, dict):
+                        present = partial(self.world_loot.present_claim, self, self.bridge, loot, operation, cue,
+                                          generation=scope[0])
                         projected, applied = await self.guest_ui.present_pickup(
-                            self, scope, loot, operation, cue, claimed, inventory)
+                            self, scope, operation, claimed, inventory, present)
                     if projected is None and self.stock_interaction_scope() == scope:
                         projected = await self.world_loot.present_claim(
                             self, self.bridge, loot, operation, cue, generation=scope[0])
@@ -7333,9 +7335,25 @@ class Client:
                   else "native-wipe-recover" if target else "interact")
         if action == native_subway_valve.ACTIVATE:
             target = self.zone_epoch
-        result = await self.gameplay_action(action, operation, target)
-        if action == native_loose_pickup.CLAIM and self.stock_interaction_scope() == scope:
-            await native_loose_pickup.refresh_claimed_stock_view(self)
+        if action != native_loose_pickup.CLAIM:
+            return await self.gameplay_action(action, operation, target)
+        result = await self.gameplay_action(action, operation, target, defer_pickup_cue=True)
+        claimed = result.get(native_loose_pickup.PROOF)
+        inventory = result.pop(native_inventory_grant.PICKUP, None)
+        cue = result.pop(native_pickup_audio.KEY, None)
+        if self.stock_interaction_scope() != scope:
+            return result
+        projected, applied = None, False
+        if isinstance(claimed, dict) and isinstance(inventory, dict):
+            present = partial(self.loose_pickup_view.present_claim, self, scope, claimed)
+            projected, applied = await self.guest_ui.present_pickup(self, scope, operation, claimed, inventory, present)
+        if self.stock_interaction_scope() == scope and projected is None:
+            await native_loose_pickup.refresh_claimed_stock_view(self, inventory_applied=applied)
+        if cue and self.stock_interaction_scope() == scope:
+            game = self.last_game
+            heard = await self.pickup_playback.sync(self.bridge, self.control, game, cue, scope[1], scope[0])
+            if self.last_game is game and self.stock_interaction_scope() == scope:
+                self.last_game = heard
         return result
 
     async def run_weapon_cues(self) -> None:

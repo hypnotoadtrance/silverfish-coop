@@ -166,12 +166,12 @@ class GuestView:
             self.inventory_visit = scope
             self.full_revision = self.pickup_revision = 0
 
-    async def present_pickup(self, client, scope, loot, operation, cue, claim, row):
+    async def present_pickup(self, client, scope, operation, claim, row, present):
         owner = client.invite["character_id"]
         guid, text, revision = row.get("guid"), row.get("text"), row.get("revision")
         item_class = claim.get("class_path")
         if (not isinstance(guid, str) or not isinstance(text, str) or not isinstance(item_class, str)
-                or (row.get("map"), row.get("epoch"), row.get("owner"), claim.get("claimed_by")) !=
+                or (row.get("map"), row.get("epoch"), row.get("owner"), claim.get("claimed_by", claim.get("owner"))) !=
                     (scope[2], scope[1], owner, owner)
                 or guid != claim.get("inventory_guid", claim.get("guid"))
                 or type(revision) is not int or not 0 < revision < 2**53):
@@ -192,8 +192,7 @@ class GuestView:
             if revision <= self.pickup_revision or revision <= self.full_revision:
                 return None, revision <= self.full_revision
             args = guid, item_class, text, "-" if previous is None else str(previous)
-            projected = await client.world_loot.present_claim(
-                client, client.bridge, loot, operation, cue, generation=scope[0], inventory=args)
+            projected = await present(inventory=args)
             if projected is None or "pickup_inventory_result" not in projected:
                 return projected, False
             outcome = projected.pop("pickup_inventory_result")

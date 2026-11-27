@@ -3,6 +3,7 @@
 import asyncio
 import math
 
+from live_multi_smoke import campaign_save_hashes
 from placed_food_sources import CROSSROADS_MUSHROOM, PLACED_FOOD
 from portable_guest_world_start import resident_events, wait_resident_status
 from portable_pickup_preview import PREVIEW_FIXTURE, read_preview
@@ -24,6 +25,7 @@ async def verify_stock_placed_food(host, guest, pawn):
         and (point := frame["game"].get("pawns", {}).get("local", {}).get("location"))
         and math.dist(point, position) < 50)
     authority = await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == CROSSROADS)
+    checkpoint = campaign_save_hashes(host.campaign)
     before = await stock_inventory(guest_run, guest=True)
     pressed = await submit(guest_run, loose.FIXTURE, target=target)
     assert pressed["ok"], pressed
@@ -35,6 +37,13 @@ async def verify_stock_placed_food(host, guest, pawn):
             await asyncio.sleep(.08)
     claim, = claims
     assert claim["class_path"] == item_class and claim["revision"] is None, claim
+    connected = await wait_resident_status(guest_run, lambda frame: frame.get("state") == "connected")
+    async with asyncio.timeout(4):
+        while not (receipt := next((row for row in await resident_events(guest_run, connected)
+                                    if row["event"] == "native_pickup_inventory_applied"
+                                    and row["operation_id"] == claim["operation_id"]), None)):
+            await asyncio.sleep(.05)
+    assert receipt["guid"] == claim.get("inventory_guid", claim["guid"]), receipt
     async with asyncio.timeout(8):
         while True:
             after = await stock_inventory(guest_run, guest=True)
@@ -45,7 +54,10 @@ async def verify_stock_placed_food(host, guest, pawn):
             await asyncio.sleep(.08)
     repeated = await submit(guest_run, loose.CLAIM, target=target)
     assert not repeated["ok"] and repeated["error"] == "loose_pickup_already_claimed", repeated
-    return {"actor": path, "class_path": item_class, "new_quantity": amount_after, "duplicate_refused": True}
+    assert campaign_save_hashes(host.campaign) == checkpoint
+    return {"actor": path, "class_path": item_class, "new_quantity": amount_after, "duplicate_refused": True,
+            "receipt": receipt["outcome"], "item_bytes": receipt["item_bytes"], "checkpoint_unchanged": True,
+            "host_accept_to_backpack_ms": round(1000 * (receipt["time_unix"] - claim["time_unix"]), 1)}
 
 
 def placed_item_overlay(game, overlay):

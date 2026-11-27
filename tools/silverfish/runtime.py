@@ -4147,7 +4147,8 @@ class Bridge:
         long_fields = (range(7, len(fields), 3) if action == native_crate_outcome.ADOPT and self.local_bridge is not None else
                        (5, 6) if action == native_board_contract.MENU_OPEN else
                        (5,) if action == native_inventory_grant.APPLY and self.local_bridge is not None else
-                       (9,) if action == native_world_loot.PRESENT_CLAIM and self.local_bridge is not None else
+                       (9,) if action in (native_world_loot.PRESENT_CLAIM, native_loose_pickup.PRESENT_CLAIM)
+                       and self.local_bridge is not None else
                        (10,) if action == native_board_contract.COMMAND else ())
         if any(len(value) > (8192 if index in long_fields else 1024)
                or "\t" in value or "\r" in value or "\n" in value for index, value in enumerate(fields)):
@@ -4189,7 +4190,8 @@ class Bridge:
             receipt_tag = None
             if action == "native-weapon-play-shots":
                 receipt_tag = "weapon-cue-ack"
-            elif action in (native_pickup_audio.COMMAND, native_world_loot.RETIRE, native_world_loot.PRESENT_CLAIM):
+            elif action in (native_pickup_audio.COMMAND, native_world_loot.RETIRE, native_world_loot.PRESENT_CLAIM,
+                            native_loose_pickup.PRESENT_CLAIM):
                 receipt_tag = "pickup-presentation-ack"
             if receipt_tag and raw.startswith(receipt_tag + "\t"):
                 receipt = raw[:-1].split("\t", 3) if raw.endswith("\n") and "\n" not in raw[:-1] else []

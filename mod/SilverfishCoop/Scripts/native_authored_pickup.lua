@@ -437,7 +437,7 @@ local function owner(state, phase, name)
     return pawn, save, statics, stock
 end
 
-local function claim(fields, state, phase, profile)
+local function claim(fields, state, phase, profile, status_row)
     local name, slot = fields[3], fields[4]
     if phase ~= "hosting" or not exact_slot(slot) then
         error("authored_pickup_claim_arguments", 0)
@@ -614,6 +614,10 @@ local function claim(fields, state, phase, profile)
             report.drill = {before = drill_before.topic, after = after.topic}
         end
     end
+    if status_row and report.ok and memory and profile.loose and not same(save, stock) then
+        local received = report.stack_merge and report.stack_merge.destination or item
+        report.received = require("native_inventory_grant").pickup_row(pawn, save, received, status_row)
+    end
     return "authored loose pickup reported"
 end
 
@@ -625,7 +629,7 @@ local arguments = {
     ["native-authored-pickup-approach"] = 3,
 }
 
-function pickup.command(fields, state, phase)
+function pickup.command(fields, state, phase, status_row)
     local action = fields[2]
     if action == "native-pickup-cancel-preview" then
         if #fields ~= 3 or not binding or not same(binding.world, state.world)
@@ -768,7 +772,7 @@ function pickup.command(fields, state, phase)
         if not profile or profile.claimed or require("native_prop_carry").item_is_held(resolve_actor(profile)) then
             error("loose_pickup_source_unavailable", 0)
         end
-        return claim(fields, state, phase, profile)
+        return claim(fields, state, phase, profile, status_row)
     end
     if action == "native-loose-pickup-check" then
         bind_pickup_seat(state, phase)
@@ -1048,14 +1052,35 @@ end
 function pickup.claim_reply(fields, state, phase, status_row)
     local previous = report
     report = nil
-    local accepted, message = pcall(pickup.command, fields, state, phase)
+    local accepted, message = pcall(pickup.command, fields, state, phase, status_row)
     local outcome = report
     report = previous
     if not accepted then return false, message end
     if not outcome then return false, "authored_pickup_claim_readback_unavailable" end
     local rows = {}
     append_claim_rows(rows, state, status_row, outcome)
+    rows[#rows + 1] = outcome.received
     return true, message, rows, outcome.cash ~= nil
+end
+
+function pickup.present_claim(fields, state, phase)
+    local generation, path, area, pawn_name, epoch = math.tointeger(tonumber(fields[3])), fields[4],
+        fields[5], fields[6], fields[7]
+    local detail = state.local_pawn
+    if #fields ~= 11 or phase ~= "connected" or not binding or not generation or generation ~= binding.loose_generation
+        or area ~= state.map or not detail or pawn_name ~= detail.name or not same(detail.pawn, binding.pawn)
+        or not same(state.world, binding.world) or not loose_actor_path(path, area)
+        or type(epoch) ~= "string" or #epoch ~= 32 or not epoch:match("^[0-9a-f]+$")
+        or type(SilverfishSetGuestLoosePickupView) ~= "function" then
+        error("loose_pickup_presentation_scope_unavailable", 0)
+    end
+    local hidden, issue = SilverfishSetGuestLoosePickupView(generation, true, path)
+    if not hidden then error(issue, 0) end
+    local applied, outcome = pcall(require("native_inventory_grant").project_pickup,
+        state, phase, epoch, table.unpack(fields, 8, 11))
+    if applied and outcome then return outcome end
+    pcall(loot_projection.refresh_stock_inventory, state, false)
+    return "deferred"
 end
 
 local function dead_drop_row(state, phase, status_row)

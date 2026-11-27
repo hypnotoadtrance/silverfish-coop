@@ -30,7 +30,7 @@ PLACEMENTS = "native_authored_quest_placements"
 
 
 def apply_quest_placement_probe(script: str) -> str:
-    marker = "function pickup.command(fields, state, phase)\n"
+    marker = "function pickup.command(fields, state, phase, status_row)\n"
     fixture = Path(__file__).with_name("fixtures") / "portable_authored_quest_placement_probe.lua"
     assert script.count(marker) == 1, "The replica lacks the authored pickup command"
     return script.replace(marker, marker + fixture.read_text(encoding="utf-8") + "\n", 1)

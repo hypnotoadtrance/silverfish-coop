@@ -437,13 +437,13 @@ class NativeGuestStockPickupViewTests(unittest.IsolatedAsyncioTestCase):
         guid, item_class = "A" * 32, "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
         operation = "b" * 32
         client.stock_interaction_scope = lambda: scope
-        client.world_loot = SimpleNamespace(present_claim=AsyncMock(return_value={"pickup_inventory_result": "merged"}))
+        present = AsyncMock(return_value={"pickup_inventory_result": "merged"})
         claim = {"guid": "C" * 32, "inventory_guid": guid, "class_path": item_class,
                  "claimed_by": owner, "stack_merge": {"before": 3}}
         row = dict(owner=owner, map=self.area, epoch=self.epoch, revision=4, guid=guid, text="(Item=Bandage)")
-        _, applied = await self.view.present_pickup(client, scope, ("epoch", "id"), operation, None, claim, row)
+        _, applied = await self.view.present_pickup(client, scope, operation, claim, row, present)
         self.assertTrue(applied)
-        self.assertEqual(client.world_loot.present_claim.await_args.kwargs["inventory"], (guid, item_class, row["text"], "3"))
+        present.assert_awaited_once_with(inventory=(guid, item_class, row["text"], "3"))
         self.assertFalse(await self.view.receive(client, {"revision": 3}, self.area, self.epoch, owner))
         client.bridge.command.assert_not_awaited()
         self.assertEqual(self.view.pickup_revision, 4)
