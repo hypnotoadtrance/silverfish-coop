@@ -1,7 +1,6 @@
 """Read pages from the native save frame of one authenticated character."""
 
 import asyncio
-from contextlib import suppress
 import re
 import time
 import uuid
@@ -33,7 +32,6 @@ TAKE_AMMO_PREVIEW_CAPABILITY = "native_inventory_take_ammo_preview_capability"
 _TAKE_AMMO_TARGET = re.compile(r"([0-9A-F]{32})\|([1-9][0-9]{0,9})")
 _SPLIT_TARGET = re.compile(r"([0-9A-F]{32})\|([1-9][0-9]{0,9})\|([1-9][0-9]{0,9})")
 _MERGE_TARGET = re.compile(r"([0-9A-F]{32})\|([0-9A-F]{32})\|([1-9][0-9]{0,9})\|([1-9][0-9]{0,9})")
-SPLIT_VIEW = "native_guest_inventory_split_view"
 SORT = "native-inventory-sort"
 SORT_CAPABILITY = "native_inventory_sort_capability"
 SORT_KEY = "native_inventory_sort"
@@ -84,28 +82,6 @@ def unequip_receipt(fields, area):
 
 def valid_page_offset(offset: int) -> bool:
     return type(offset) is int and 0 <= offset <= MAX_ITEMS and offset % PAGE_SIZE == 0
-
-
-def displayed_offset(game: dict, sequence: int, area: str, pawn: str) -> int | None:
-    view = game.get("native_inventory_view", {})
-    offset = view.get("offset")
-    if ((game.get("state"), game.get("map"), game.get("pawns", {}).get("local", {}).get("name"))
-            == ("connected", area, pawn)
-            and (view.get("state"), view.get("sequence"), view.get("map"), view.get("pawn"))
-            == ("rendered", sequence, area, pawn) and valid_page_offset(offset)):
-        return offset
-    return None
-
-
-async def read_view_page(client, operation: str, offset: int) -> dict:
-    page = (await client.gameplay_action("native-inventory-list", operation, str(offset)))["native_inventory"]
-    total, items = page["total"], page["items"]
-    if (page["owner"] != client.invite["character_id"] or type(page["offset"]) is not int or page["offset"] != offset
-            or type(total) is not int or not offset <= total <= MAX_ITEMS
-            or offset > 0 and offset == total
-            or type(items) is not list or len(items) != min(PAGE_SIZE, total - offset)):
-        raise ValueError("The host did not return this guest's exact stock inventory page")
-    return page
 
 
 def split_target(value):
@@ -383,52 +359,6 @@ async def store_equipment(host, bridge, character: str, target, operation: str, 
     host.control.event(event, operation_id=operation, revision=revision,
                        bridge_reply_bytes=snapshot.get(ACTION_REPLY_BYTES), **result[key])
     return result
-
-
-async def service_split_view(client, active: bool) -> None:
-    view = client.last_game.get(SPLIT_VIEW, {})
-    sequence = view.get("sequence")
-    if view.get("state") != "splitting" or type(sequence) is not int or not client.last_inventory_split < sequence < 2**53:
-        return
-    client.last_inventory_split = sequence
-    area, pawn, source, expected, item_class = (view.get(key) for key in ("map", "pawn", "guid", "count", "class_path"))
-    if (not active or client.stopping or not client.host_session or not client.zone_epoch
-            or client.gameplay.get(SPLIT_CAPABILITY) != 1 or time.monotonic() - client.gameplay_seen >= 3
-            or area != client.last_game.get("map") or not split_class_path(item_class)
-            or not pawn or pawn != client.last_game.get("pawns", {}).get("local", {}).get("name")
-            or not valid_guid(source) or type(expected) is not int or not 1 < expected < 2**31):
-        return
-    epoch = client.host_session, client.zone_epoch
-    operation = uuid.uuid5(client.bridge.input_namespace, f"{epoch[0]}:{epoch[1]}:{pawn}:inventory-split:{sequence}").hex
-    outcome = "refused"
-    try:
-        offset = displayed_offset(client.last_game, sequence, area, pawn)
-        if offset is None:
-            raise ValueError("The inventory split confirmation expired")
-        page = await read_view_page(client, operation, offset)
-        if not any(row["guid"] == source and splittable(row) and (row["class_path"], row["quantity"]) ==
-                   (item_class, expected) for row in page["items"]):
-            raise ValueError("The selected stack is no longer on the authenticated inventory page")
-        current = client.bridge.snapshot() or {}
-        if ((client.host_session, client.zone_epoch) != epoch or current.get(SPLIT_VIEW) != view
-                or displayed_offset(current, sequence, area, pawn) != offset):
-            raise ValueError("The inventory split confirmation expired")
-        take = expected // 2
-        response = await client.gameplay_action(SPLIT, operation, f"{source}|{take}|{expected}")
-        proof = response[SPLIT_KEY]
-        if (tuple(proof.get(key) for key in ("state", "owner", "map", "class_path", "source_guid", "quantity_before",
-                                           "split", "remaining")) != (
-                "split", client.invite["character_id"], area, item_class, source, expected, take, expected - take
-        ) or not valid_guid(proof.get("new_guid")) or proof["new_guid"] == source):
-            raise ValueError("The host did not verify the selected stack split")
-        outcome = "split"
-        client.control.event("native_guest_inventory_stack_split", operation_id=operation, view_sequence=sequence, **proof)
-    except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
-        client.control.event("native_guest_inventory_split_rejected", operation_id=operation, view_sequence=sequence,
-                             reason=str(error))
-    with suppress(OSError, RuntimeError):
-        client.last_game = await client.bridge.command("native-inventory-view-split-result", str(sequence), area, source,
-                                                       outcome, timeout=2)
 
 
 async def read_page(host, bridge, frame: dict, offset: int) -> dict:

@@ -166,35 +166,31 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
                 rows = await page(guest, character)
                 quantities(rows, {source: expected_quantity, second_source: 4})
 
-            await ask("action", *guest, "native-inventory-view-fixture")
-            await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
-            key = ("action", *guest, "native-inventory-view-key-fixture", "--target")
-            for _ in range(next(index for index, row in enumerate(rows) if row["guid"] == source)):
-                await ask(*key, "down")
-            confirmation = (await ask(*key, "drop"))[drop_record.VIEW]
-            assert (confirmation["state"], confirmation["guid"], confirmation["class_path"], confirmation["count"]) == (
-                "confirming", source, item_class, expected_quantity), confirmation
-            assert (await ask(*key, "back"))[drop_record.VIEW] == {}
+            inventory_key = ("action", *guest, "native-inventory-view-fixture")
+            await ask(*inventory_key)
+            await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
+            await ask(*inventory_key)
             assert await page(guest, character) == rows and await page(host, "host") == host_before
-            evidence["cancelled_confirmation"] = confirmation
+            evidence["closed_stock_backpack_without_drop"] = True
 
-            assert (await ask(*key, "drop"))[drop_record.VIEW] == confirmation
-            pending = (await ask(*key, "confirm"))[drop_record.VIEW]
-            assert pending == {**confirmation, "state": "dropping"}, pending
-            final = await wait(guest_run, lambda state: state.get("game", {}).get(drop_record.VIEW) == {**pending, "state": "dropped"})
-            evidence["rendered_drop_result"] = final["game"][drop_record.VIEW]
-            events = (await ask("events", *guest, "--tail", "100"))["events"]
-            commits = [event for event in events if event["event"] == "native_guest_inventory_stack_dropped"
-                       and event["view_sequence"] == pending["sequence"]]
-            assert len(commits) == 1, commits
-            committed, = commits
+            campaign = run.parent
+            def checkpoint_hashes():
+                files = list((campaign / "save").glob("campaign*.json"))
+                files.extend((campaign / "game-user" / "Saved" / "SaveGames").rglob("*.sav"))
+                return {path: sha256(path.read_bytes()).hexdigest() for path in files}
+
+            baseline = checkpoint_hashes()
+            stock_drop = await ask("action", *guest, drop.STOCK_DROP_FIXTURE, "--target", source)
+            committed = stock_drop[drop.RESULT]
+            assert stock_drop["stock_inventory_proof"].startswith("verified open stock backpack refresh"), stock_drop
             assert (committed["state"], committed["owner"], committed["guid"], committed["quantity"]) == (
                 "dropped", character, source, expected_quantity), committed
-            operation = committed["operation_id"]
+            assert checkpoint_hashes() == baseline, "Stock drop wrote a campaign save"
+            operation = stock_drop["id"]
             assert committed["drop_id"] == operation
             evidence["inventory_drop"] = committed
 
-            campaign = run.parent
+            await ask("action", *host, "checkpoint")
             checkpoint = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
             native_host_save.verify_checkpoint(campaign / "game-user", checkpoint)
             escrow = checkpoint["world"]["party"][drop_record.STATE][operation]
@@ -210,8 +206,8 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
             assert replay == {key: committed[key] for key in replay}, replay
             assert await page(host, "host") == host_before
             if multiple_drops:
-                await ask(*key, "back")
-                second = (await ask("action", *guest, drop.DROP, "--target", f"{second_source}|4"))[drop.RESULT]
+                second = (await ask("action", *guest, drop.STOCK_DROP_FIXTURE, "--target", second_source))[drop.RESULT]
+                assert second["quantity"] == 4, second
                 identities = {drop_projection.player_drop_identity(key) for key in (operation, second["drop_id"])}
                 for role, local_run in (("host", run), ("guest", guest_run)):
                     observed = await wait(local_run, lambda state: identities <= set(
@@ -220,6 +216,7 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
                               if identity in identities and item["class_path"] == item_class}
                     assert len(actors) == 2, observed["game"][drop_projection.KEY]
                     evidence[f"{role}_sees_both_drops"] = sorted(actors)
+                await ask("action", *host, "checkpoint")
                 checkpoint = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
                 native_host_save.verify_checkpoint(campaign / "game-user", checkpoint)
                 held = checkpoint["world"]["party"][drop_record.STATE]
@@ -255,7 +252,6 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
                 evidence["reclaimed"] = tombstone
             if crossroads_drop:
                 identity = drop_projection.player_drop_identity(operation)
-                await ask(*key, "back")
                 observed = await wait(guest_run, lambda state: state.get("gameplay_fresh")
                                       and identity in state.get("game", {}).get(drop_projection.KEY, {}))
                 before = observed["game"][drop_projection.KEY][identity]
@@ -272,6 +268,7 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
                 assert len(claims) == 1, claims
                 claim, = claims
                 assert claim[drop.RESULT] == {**replay, "state": "reclaimed", "claimed_by": character}, claim
+                await ask("action", *host, "checkpoint")
                 checkpoint = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
                 native_host_save.verify_checkpoint(campaign / "game-user", checkpoint)
                 tombstone = checkpoint["world"]["party"][drop_record.STATE][operation]

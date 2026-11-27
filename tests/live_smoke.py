@@ -39,7 +39,7 @@ options.add_argument("--native-death", action="store_true", help="explicitly inv
 options.add_argument("--native-damage", action="store_true", help="exercise stock direct damage and its death handoff")
 options.add_argument("--native-inventory", action="store_true", help="exercise native inventory copy ownership")
 options.add_argument("--native-inventory-list", action="store_true", help="inspect each exact player's read-only stock inventory")
-options.add_argument("--native-inventory-view", action="store_true", help="open the guest inventory overlay through the stock menu")
+options.add_argument("--native-inventory-view", action="store_true", help="open the guest stock backpack")
 options.add_argument("--native-wipe-inventory", action="store_true", help="stage isolated typed keep and drop generations")
 options.add_argument("--native-guest", action="store_true", help="exercise persistent scoped native guest damage and revive")
 options.add_argument("--native-pair", action="store_true", help="also down and revive the native host")
@@ -1773,13 +1773,14 @@ async def smoke():
                         opened = (await command("action", "--profile", profile,
                                                  "native-inventory-view-fixture"))["native_inventory_view"]
                         assert opened["state"] == "pending", opened
-                        rendered = await wait(client_run, lambda state: state.get("game", {}).get("native_inventory_view", {})
-                                              .get("state") == "rendered")
-                        view = rendered["game"]["native_inventory_view"]
-                        assert view["sequence"] == opened["sequence"] and view["count"] == len(owner_list["items"]), view
+                        mounted = await wait(client_run, lambda state: state.get("game", {}).get("native_inventory_view", {})
+                                             .get("state") == "stock")
+                        view = mounted["game"]["native_inventory_view"]
+                        backpack = sum(item["source"] == "backpack" for item in owner_list["items"])
+                        assert view["sequence"] == opened["sequence"] and view["count"] == backpack, (view, owner_list)
                         closed = (await command("action", "--profile", profile,
                                                  "native-inventory-view-fixture"))["native_inventory_view"]
-                        assert closed["state"] == "closed" and closed["sequence"] > view["sequence"], closed
+                        assert closed["state"] == "closed" and closed["sequence"] >= view["sequence"], closed
                         note("stock_inventory_key_displays_only_the_authenticated_guest_inventory", view)
             if args.native_pickup:
                 spawned = await command("action", "--campaign", campaign, "native-pickup-spawn")

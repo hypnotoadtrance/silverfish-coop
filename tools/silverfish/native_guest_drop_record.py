@@ -17,9 +17,6 @@ STATE = "native_guest_stack_drops"
 PICKUP_ACTION = "native-guest-stack-reclaim"
 CAPABILITY = "native_guest_stack_drop_capability"
 GENERIC_CAPABILITY = "native_generic_inventory_drop"
-VIEW = "native_guest_inventory_drop_view"
-VIEW_ROW = "native-guest-inventory-drop-view"
-VIEW_RESULT = "native-inventory-view-drop-result"
 STOCK_ACTION_ROW = "native-inventory-stock-action"
 STOCK_ACTION_KEY = "native_inventory_stock_action"
 ITEM = NINE_MM_BALL.item_path
@@ -123,18 +120,6 @@ def valid_quantity(path, count) -> bool:
     if not valid_class(path) or type(count) is not int:
         return False
     return 1 <= count <= (MAX_QUANTITY if STACKABLE.get(path, True) else 1)
-
-
-def parse_view(fields: list[str], state: str, area: str) -> dict:
-    if len(fields) != 8 or state != "connected" or not supported_map(area):
-        raise ValueError("Unexpected stock inventory drop view")
-    _, number, reported_area, pawn, guid, item, phase, quantity = fields
-    if (reported_area != area or not pawn_matches(area, pawn) or not valid_guid(guid)
-            or phase not in {"confirming", "dropping", "dropped", "refused"}
-            or not re.fullmatch(r"[1-9][0-9]{0,15}", number) or int(number) >= 2**53
-            or not re.fullmatch(r"[1-9][0-9]{0,2}", quantity) or not valid_quantity(item, int(quantity))):
-        raise ValueError("Invalid stock inventory drop view")
-    return dict(sequence=int(number), map=area, pawn=pawn, guid=guid, class_path=item, state=phase, count=int(quantity))
 
 
 def claimed_by(row: dict) -> str | None:

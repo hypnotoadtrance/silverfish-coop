@@ -266,29 +266,6 @@ namespace
         return 0;
     }
 
-    int view_input(const Lua& lua)
-    {
-        bool accepted = false;
-        if (Unreal::IsInGameThreadRaw() && installed.load(std::memory_order_acquire) &&
-            lua.get_stack_size() == 3 && lua.is_integer(1) && lua.is_integer(2) && lua.is_bool(3))
-        {
-            const auto pawn = lua.get_integer();
-            const auto serial = lua.get_integer();
-            const bool close = lua.get_bool();
-            auto* current = scope.pawn.Get();
-            auto* loading = field<Unreal::FBoolProperty>(scope.controller.Get(), STR("Loading"));
-            auto* dead = field<Unreal::FBoolProperty>(current, STR("Dead"));
-            auto* blocked = field<Unreal::FBoolProperty>(current, STR("IsWeaponBlocked"));
-            accepted = pawn > 0 && serial > 0 && reinterpret_cast<Address>(current) == static_cast<Address>(pawn) &&
-                static_cast<std::uint64_t>(serial) == scope.serial && scope.visible && scope.accepting && !scope.pending &&
-                scope.generation == generation.load(std::memory_order_acquire) && Clock::now() < scope.expires &&
-                live_scope(scope) && loading && !loading->GetPropertyValueInContainer(scope.controller.Get()) &&
-                dead && !dead->GetPropertyValueInContainer(current) && blocked && !blocked->GetPropertyValueInContainer(current);
-            if (accepted && close) scope.visible = false;
-        }
-        lua.set_bool(accepted);
-        return 1;
-    }
 }
 
 namespace silverfish::native_inventory_view
@@ -326,7 +303,6 @@ namespace silverfish::native_inventory_view
         lua.register_function("SilverfishSetNativeInventoryViewScope", set_scope);
         lua.register_function("SilverfishTakeNativeInventoryViewRequest", take_request);
         lua.register_function("SilverfishClearNativeInventoryViewScope", clear);
-        lua.register_function("SilverfishNativeInventoryViewInput", view_input);
     }
 
     void clear_scope()

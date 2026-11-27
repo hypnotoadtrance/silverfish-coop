@@ -87,10 +87,6 @@ def droppable(row: dict, *, generic=False) -> bool:
             and _qualified_item(row, guid, count, item))
 
 
-def view_identity(client, sequence: int, area: str, pawn: str) -> tuple:
-    return client.host_session, client.zone_epoch, client.stack_drop_projection.admission, sequence, area, pawn
-
-
 async def stock_menu_fixture(client, target, operation: str, mode: str) -> dict:
     game = client.last_game
     area, epoch = game.get("map"), client.zone_epoch
@@ -330,53 +326,6 @@ async def service_stock_view(client, active: bool) -> None:
         client.control.event("native_stock_inventory_action", operation_id=operation, **result)
     except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
         client.control.event("native_stock_inventory_rejected", operation_id=operation, reason=str(error))
-
-
-async def service_view(client, active: bool) -> None:
-    view = client.last_game.get(record.VIEW, {})
-    sequence = view.get("sequence")
-    if view.get("state") != "dropping" or type(sequence) is not int or not client.last_inventory_drop < sequence < 2**53:
-        return
-    client.last_inventory_drop = sequence
-    area, pawn, guid, item, count = (view.get(key) for key in ("map", "pawn", "guid", "class_path", "count"))
-    identity = view_identity(client, sequence, area, pawn)
-    operation = uuid.uuid5(client.bridge.input_namespace, ":".join(map(str, (*identity, DROP, guid, count)))).hex
-    result = "refused"
-    try:
-        if (not active or client.stopping or client.suspended or not client.transport.game_access
-                or client.needs_travel or client.server_transitioning or not client.host_session or not client.zone_epoch
-                or time.monotonic() - client.gameplay_seen >= 3 or client.gameplay.get(record.CAPABILITY) != 1
-                or not record.supported_map(area) or area != client.last_game.get("map")
-                or not pawn or pawn != client.last_game.get("pawns", {}).get("local", {}).get("name")
-                or client.inventory_drop_scope != identity or not valid_guid(guid) or not record.valid_quantity(item, count)):
-            raise ValueError("The stock inventory drop confirmation expired")
-        owner = client.invite["character_id"]
-        offset = native_inventory.displayed_offset(client.last_game, sequence, area, pawn)
-        if offset is None:
-            raise ValueError("The stock inventory drop confirmation expired")
-        page = await native_inventory.read_view_page(client, operation, offset)
-        generic = client.gameplay.get(record.GENERIC_CAPABILITY) == 1
-        if not any(row.get("guid") == guid and row.get("class_path") == item and row.get("quantity") == count
-                   and droppable(row, generic=generic) for row in page["items"]):
-            raise ValueError("The selected item is no longer on your authenticated backpack page")
-        current = client.bridge.snapshot() or {}
-        if (view_identity(client, sequence, area, pawn) != identity or not client.transport.game_access
-                or client.suspended or client.needs_travel or client.server_transitioning
-                or client.inventory_drop_scope != identity or current.get(record.VIEW) != view
-                or native_inventory.displayed_offset(current, sequence, area, pawn) != offset):
-            raise ValueError("The stock inventory drop confirmation expired")
-        receipt = (await client.gameplay_action(DROP, operation, f"{guid}|{count}"))[RESULT]
-        if (tuple(receipt.get(key) for key in ("state", "drop_id", "owner", "guid", "quantity", "class_path", "map")) != (
-                "dropped", operation, owner, guid, count, item, area)
-                or not record.valid_position(receipt.get("location"))):
-            raise RuntimeError("The host did not verify the exact dropped inventory item")
-        result = "dropped"
-        client.control.event("native_guest_inventory_stack_dropped", operation_id=operation, view_sequence=sequence, **receipt)
-    except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
-        client.control.event("native_guest_inventory_stack_drop_rejected", operation_id=operation, view_sequence=sequence,
-                             reason=str(error))
-    with suppress(OSError, RuntimeError, ValueError):
-        client.last_game = await client.bridge.command(record.VIEW_RESULT, str(sequence), area, guid, result, timeout=2)
 
 
 async def _escrow_item(host, bridge, frame: dict, guid: str, count: int, item: str) -> None:

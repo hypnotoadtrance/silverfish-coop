@@ -338,7 +338,7 @@ class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(bridge.interactions()), 1)
             await asyncio.wait_for(waiting, .25)
             self.assertEqual(bridge.native_inventory_view_requests(), [
-                (2, "open", area, pawn, 0), (2, "page", area, pawn, 16), (2, "closed", area, pawn, 0),
+                (2, "open", area, pawn), (2, "closed", area, pawn),
             ])
             self.assertEqual(bridge.native_shop_view_requests(), [(3, 1, "buy", area, pawn, actor, item, "17")])
             self.assertEqual(bridge.native_inventory_view_requests(), [])

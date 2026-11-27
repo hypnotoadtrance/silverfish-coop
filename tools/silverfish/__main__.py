@@ -155,7 +155,7 @@ def parser() -> argparse.ArgumentParser:
     join.add_argument("--native-guest-primary-input", action="store_true",
                       help="enable stock guest primary input explicitly for an older invitation")
     join.add_argument("--native-guest-inventory-view", action="store_true",
-                      help="enable the stock guest inventory overlay explicitly for an older invitation")
+                      help="enable the stock guest backpack explicitly for an older invitation")
     join.add_argument("--character", help="character ID selected from the guest's catalog")
 
     catalog = commands.add_parser("characters", help="list your host-owned characters before joining")
@@ -219,7 +219,7 @@ def parser() -> argparse.ArgumentParser:
         "native-guest-reload-input-fixture", "native-guest-primary-input-fixture", "native-guest-melee-input-fixture",
         "native-guest-weapon-seed-light-pistol",
         *GUEST_CONSUMABLE_ACTIONS, "native-guest-mre-fixture",
-        "native-inventory-view-key-fixture", "native-guest-clock-fixture",
+        "native-guest-clock-fixture",
         "native-enemy-loot-watch", "native-enemy-loot-clear", "native-bandit-aim-fixture", "native-bandit-shot-fixture", "native-quest-list",
         "native-enemy-loot-bank", "native-enemy-loot-claim", "native-enemy-loot-approach", "native-enemy-shell-input-fixture",
         "native-quest-interact", "native-broker-input-fixture", "native-wipe-view-key-fixture",

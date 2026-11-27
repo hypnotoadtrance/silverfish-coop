@@ -1107,29 +1107,19 @@ class Bridge:
         results.sort(key=lambda entry: entry[0])
         return [(identity, target) for _, identity, target in results]
 
-    def native_inventory_view_requests(self) -> list[tuple[int, str, str, str, int]]:
+    def native_inventory_view_requests(self) -> list[tuple[int, str, str, str]]:
         records = self._native_guest_input_records(self._local_menu_inputs[b"inventory-view"],
                                                   "native-inventory-view-events", "inventory_view_offset")
         events = []
         for line in records:
             fields = line.decode("utf-8", errors="replace").split("\t")
-            if (len(fields) not in (5, 6) or fields[0] != "inventory-view"
+            if (len(fields) != 5 or fields[0] != "inventory-view"
                     or not fields[1].isascii() or not fields[1].isdigit() or len(fields[1]) > 16
                     or not 0 < (sequence := int(fields[1])) < 2**53
+                    or fields[2] not in ("open", "closed")
                     or not 0 < len(fields[3]) <= 256 or not 0 < len(fields[4]) <= 512):
                 continue
-            event, area, pawn = fields[2:5]
-            offset = 0
-            if event == "page" and len(fields) == 6:
-                number = fields[5]
-                if not number.isascii() or not number.isdigit() or len(number) > 4:
-                    continue
-                offset = int(number)
-                if not native_inventory.valid_page_offset(offset):
-                    continue
-            elif event not in ("open", "closed") or len(fields) != 5:
-                continue
-            events.append((sequence, event, area, pawn, offset))
+            events.append((sequence, fields[2], fields[3], fields[4]))
         return events
 
     def _native_guest_input_records(self, pending: deque[bytes], filename: str, offset_name: str,
@@ -2728,25 +2718,9 @@ class Bridge:
                     )
                 elif fields[0] == native_guest_drop_record.STOCK_ACTION_ROW and len(fields) in (9, 10):
                     data[native_guest_drop_record.STOCK_ACTION_KEY] = native_guest_drop_record.parse_stock_action(fields, data)
-                elif fields == ["native-inventory-split-view-capability", "1"]:
-                    data["native_inventory_split_view_capability"] = True
                 elif (fields[0] == "native-inventory-view-binding" and len(fields) == 2
                       and fields[1] in {"ready", "blocked", "hooks_unavailable", "class_unavailable", "scope_unavailable"}):
                     data["native_inventory_view_binding"] = fields[1]
-                elif (fields[0] == "native-guest-inventory-split-view" and len(fields) == 8
-                      and fields[1].isascii() and fields[1].isdigit() and len(fields[1]) <= 16
-                      and 0 < (sequence := int(fields[1])) < 2**53
-                      and fields[2] == data.get("map") and 0 < len(fields[3]) <= 512 and valid_guid(fields[4])
-                      and native_inventory.split_class_path(fields[5]) and fields[6] in {"confirming", "splitting", "split", "refused"}
-                      and fields[7].isascii() and fields[7].isdigit() and len(fields[7]) <= 10
-                      and 1 < (count := int(fields[7])) < 2**31):
-                    data["native_guest_inventory_split_view"] = dict(sequence=sequence, map=fields[2], pawn=fields[3],
-                                                                   guid=fields[4], class_path=fields[5], state=fields[6], count=count)
-                elif fields[0] == native_guest_drop_record.VIEW_ROW:
-                    key = native_guest_drop_record.VIEW
-                    if key in data:
-                        raise ValueError("Duplicate stock inventory drop view")
-                    data[key] = native_guest_drop_record.parse_view(fields, data.get("state"), data.get("map"))
                 elif fields[0] == "native-bag-projection" and len(fields) == 7:
                     data["native_bag_projection"] = {"map": fields[1], "epoch": fields[2], "owner": fields[3],
                                                      "count": int(fields[4]), "requested": int(fields[5]), "status": fields[6]}

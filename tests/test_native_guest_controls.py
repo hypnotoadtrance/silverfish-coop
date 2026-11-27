@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, call, patch
 import uuid
 
-from tools.silverfish import native_guest_consumable, native_guest_ui, native_guest_weapon, party, runtime, service
+from tools.silverfish import native_guest_ui, party, runtime, service
 
 
 class NativeGuestControlInvitationTests(unittest.IsolatedAsyncioTestCase):
@@ -559,8 +559,7 @@ class NativeGuestInventoryViewTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.area = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
         self.pawn = "Player_FP_C Guest"
-        self.guid = "ABCD" * 8
-        self.displayed = {"state": "rendered", "sequence": 3, "map": self.area, "pawn": self.pawn, "offset": 0,
+        self.displayed = {"state": "pending", "sequence": 3, "map": self.area, "pawn": self.pawn, "offset": 0,
                           "total": 1, "count": 1}
         self.game = {"state": "connected", "map": self.area, "pawns": {"local": {"name": self.pawn}},
                      "native_inventory_view": self.displayed}
@@ -571,33 +570,17 @@ class NativeGuestInventoryViewTests(unittest.IsolatedAsyncioTestCase):
         self.client.host_session, self.client.zone_epoch = "session", "zone"
         self.client.gameplay_seen = time.monotonic()
         self.client.last_game = self.game
-        self.page = {"owner": "guest", "offset": 0, "total": 1, "items": [
-            {"guid": self.guid, "source": "backpack", "class_path": native_guest_consumable.BANDAGE_CLASS}
-        ]}
 
-    async def test_existing_open_view_can_request_adjacent_page_for_same_guest(self):
-        self.displayed.update(total=17, count=16)
-        scope = ("session", "zone", 3, self.area, self.pawn)
-        self.client.inventory_view_scope = (*scope, 0)
-        self.bridge.native_inventory_view_requests = Mock(return_value=[(3, "page", self.area, self.pawn, 16)])
-        self.page.update(offset=16, total=17)
-        self.page["items"][0].update(index=16, quantity=1)
-        page_view = dict(self.displayed, offset=16, count=1)
-        self.bridge.command.return_value = dict(self.game, native_inventory_view=page_view)
-        self.client.gameplay_action = AsyncMock(return_value={"native_inventory": self.page})
-        await self.client.service_inventory_view(True)
-        operation = uuid.uuid5(self.bridge.input_namespace, f"session:zone:{self.pawn}:inventory:3:16").hex
-        self.client.gameplay_action.assert_awaited_once_with("native-inventory-list", operation, "16")
-        self.bridge.command.assert_awaited_once_with("native-inventory-view-render", "3", self.area, "16", "17",
-            f"{self.guid}|backpack|16|1|{native_guest_consumable.BANDAGE_CLASS}", timeout=5)
-        self.assertEqual(self.client.inventory_view_scope, (*scope, 16))
-
-        self.bridge.native_inventory_view_requests.return_value = [(3, "page", self.area, self.pawn, 48)]
-        self.client.gameplay_action.reset_mock()
-        self.bridge.command.reset_mock()
+    async def test_unready_backpack_releases_the_pending_stock_request(self):
+        self.bridge.native_inventory_view_requests = Mock(return_value=[(3, "open", self.area, self.pawn)])
+        self.client.gameplay_action = AsyncMock()
+        released = dict(self.game, native_inventory_view=dict(self.displayed, state="error"))
+        self.bridge.command.return_value = released
         await self.client.service_inventory_view(True)
         self.client.gameplay_action.assert_not_awaited()
-        self.bridge.command.assert_awaited_once_with("native-inventory-view-unavailable", "3", self.area, "48", timeout=2)
+        self.bridge.command.assert_awaited_once_with("native-inventory-stock-unavailable", "3", self.area, timeout=2)
+        self.assertEqual(self.client.last_game, released)
+        self.assertEqual(self.client.control.event.call_args.args, ("native_stock_inventory_unavailable",))
 
     async def test_pending_grant_keeps_stock_backpack_open_on_current_local_inventory(self):
         character = uuid.uuid4()
@@ -607,7 +590,7 @@ class NativeGuestInventoryViewTests(unittest.IsolatedAsyncioTestCase):
             service.native_guest_drop_record.CAPABILITY, service.native_inventory.STORE_CAPABILITY,
             service.native_inventory.SORT_CAPABILITY, service.native_inventory.SPLIT_CAPABILITY,
         ), 1)
-        self.bridge.native_inventory_view_requests = Mock(return_value=[(3, "open", self.area, self.pawn, 0)])
+        self.bridge.native_inventory_view_requests = Mock(return_value=[(3, "open", self.area, self.pawn)])
         base = self.game | {"save_scope": character.hex, "native_inventory_view": self.displayed | {"state": "stock"}}
         for already_pending in (True, False):
             with self.subTest(already_pending=already_pending):
@@ -624,7 +607,7 @@ class NativeGuestInventoryViewTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.client.gameplay_action.await_count, 0 if already_pending else 1)
                 self.assertTrue(self.client.guest_ui.inventory_needs_refresh(self.client))
 
-    def test_stock_open_close_and_valid_page_events_preserve_fragmented_rows(self):
+    def test_stock_open_and_close_ignore_old_page_events_and_preserve_fragmented_rows(self):
         with TemporaryDirectory() as directory:
             path = Path(directory)
             bridge = runtime.Bridge(path, None)
@@ -632,10 +615,10 @@ class NativeGuestInventoryViewTests(unittest.IsolatedAsyncioTestCase):
             events.write_text(f"inventory-view\t3\topen\t{self.area}\t{self.pawn}\n"
                               f"inventory-view\t3\tpage\t{self.area}\t{self.pawn}\t15\n"
                               f"inventory-view\t3\tpage\t{self.area}\t{self.pawn}\t1", encoding="utf-8")
-            self.assertEqual(bridge.native_inventory_view_requests(), [(3, "open", self.area, self.pawn, 0)])
+            self.assertEqual(bridge.native_inventory_view_requests(), [(3, "open", self.area, self.pawn)])
             with events.open("a", encoding="utf-8") as stream:
                 stream.write(f"6\ninvalid\ninventory-view\t3\tclosed\t{self.area}\t{self.pawn}\n")
             self.assertEqual(bridge.native_inventory_view_requests(), [
-                (3, "page", self.area, self.pawn, 16), (3, "closed", self.area, self.pawn, 0),
+                (3, "closed", self.area, self.pawn),
             ])
             self.assertEqual(bridge.native_inventory_view_requests(), [])

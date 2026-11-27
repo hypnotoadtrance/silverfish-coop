@@ -1,8 +1,6 @@
 local inventory_view = {}
 local world_path = require("world_path")
 local guest_weapon = require("native_guest_weapon")
-local drop_map_leaf = require("native_guest_drop_maps")
-local drop_items = require("native_guest_drop_items")
 local save_scope = require("native_save_scope")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_INVENTORY_VIEW") == "1"
@@ -21,9 +19,6 @@ local split_popup_path = "/Game/Classes/GUI/New/Components/SplitStackPopup.Split
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
-local display_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
-local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
-local text_path = "/Script/UMG.TextBlock"
 local bandage_path = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
 local starter_bags = {
     ["/Game/Classes/Items/Random_GearBag_Starter.Random_GearBag_Starter_C"] = "Dufflebag",
@@ -31,11 +26,7 @@ local starter_bags = {
 }
 local meals = require("native_guest_mre")
 local mre_enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MRE") == "1"
-local sources = {backpack = "Backpack", equipment = "Equipment", armor = "Armor", helmet = "Helmet"}
-local keys = {up = "PageUp", down = "PageDown", confirm = "Home", back = "End", drop = "Delete"}
-local input_keys, held = {}, {}
-local page_size, max_items = 16, 8194
-local event_path, is_downed, binding, observation, display
+local event_path, is_downed, binding, observation
 local binding_state, stock_drop, stock_session, sync_stock
 local stock_context_hook
 local stock_layout, max_stock_layout = {}, 8
@@ -83,15 +74,7 @@ local function same_context(current, previous)
         and same(current.controller, previous.controller)
 end
 
-local function remove_display()
-    local previous = display
-    display = nil
-    held = {}
-    if valid(previous) then previous:RemoveFromParent() end
-end
-
 function inventory_view.clear()
-    remove_display()
     if stock_session or stock_drop or #stock_layout > 0 then
         local previous = stock_session or stock_drop or stock_layout[1]
         stock_session, stock_drop, stock_layout = nil, nil, {}
@@ -122,8 +105,8 @@ local function emit_line(path, fields)
     return written and closed
 end
 
-local function emit(current, sequence, event, offset)
-    local fields = {"inventory-view", sequence, event, current.map, current.name, offset}
+local function emit(current, sequence, event)
+    local fields = {"inventory-view", sequence, event, current.map, current.name}
     if embedded then
         return type(SilverfishEnqueueLocalBridgeInput) == "function"
             and SilverfishEnqueueLocalBridgeInput(table.concat(fields, "\t") .. "\n") == true
@@ -134,10 +117,8 @@ end
 local function take(current)
     local accepted, sequence, open = SilverfishTakeNativeInventoryViewRequest()
     if not accepted then return false end
-    remove_display()
     observation = {context = current, sequence = sequence, state = open and "pending" or "closed"}
     if not can_view(current) then observation.state = "closed" end
-    if observation.state == "pending" then observation.pending_offset = 0 end
     if not emit(current, sequence, observation.state == "pending" and "open" or "closed") then
         observation.state = "error"
     end
@@ -170,7 +151,6 @@ function inventory_view.sync(state, phase)
     binding_state = allowed and "ready" or "blocked"
     if stock_session then sync_stock(current, state, phase, allowed) end
     if observation and observation.state ~= "closed" and not allowed then
-        remove_display()
         observation.state = "closed"
     end
     take(current)
@@ -180,192 +160,6 @@ local function integer(text, maximum)
     if type(text) ~= "string" or not text:match("^%d+$") or #text > 16 then return nil end
     local value = math.tointeger(tonumber(text))
     if value and value >= 0 and value <= maximum then return value end
-end
-
-local function page(fields)
-    local offset, total = integer(fields[5], max_items), integer(fields[6], max_items)
-    local count = #fields - 6
-    if not offset or not total or offset > total or (offset > 0 and offset == total)
-        or count ~= math.min(page_size, total - offset) then
-        error("The authenticated inventory view page did not match its bounds", 0)
-    end
-    local records, seen, slots = {}, {}, {}
-    for index = 7, #fields do
-        local marked, options = fields[index]:match("^(.+)|([a-z,]+)$")
-        if options and options ~= "split" and options ~= "drop" and options ~= "split,drop" then
-            error("The authenticated inventory row contains an unsupported action", 0)
-        end
-        local guid, source, slot, amount, class = (marked or fields[index]):match(
-            "^([0-9A-F]+)|([a-z]+)|(%d+)|(%d+)|([^|]+)$")
-        local quantity = integer(amount, 2147483647)
-        local actor_class = drop_items.stock_actor_class(class, 512)
-        local index_in_source = integer(slot, 4095)
-        if not guid or #guid ~= 32 or guid == string.rep("0", 32) or seen[guid] or not sources[source]
-            or not index_in_source or not quantity or quantity < 1 or not actor_class then
-            error("The authenticated inventory view contains an invalid stock item", 0)
-        end
-        local position = source .. "|" .. index_in_source
-        if slots[position] then error("The authenticated inventory view repeats a stock inventory position", 0) end
-        slots[position] = true
-        seen[guid] = true
-        local name = actor_class:sub(1, -3):gsub("_", " ")
-        local splittable = options == "split" or options == "split,drop"
-        if splittable and (source ~= "backpack" or not drop_items.stock_actor_class(class) or quantity <= 1) then
-            error("The authenticated inventory split row did not qualify", 0)
-        end
-        local droppable = options == "drop" or options == "split,drop"
-        local drop_profile = drop_items.profiles[class]
-        if droppable and (not drop_map_leaf(fields[4]) or source ~= "backpack" or not drop_items.stock_actor_class(class)
-            or quantity > (drop_profile and drop_profile.maximum or 200)) then
-            error("The authenticated inventory drop row did not qualify", 0)
-        end
-        if droppable and drop_profile then name = drop_profile.label end
-        records[#records + 1] = {guid = guid, class = class, droppable = droppable, name = name, quantity = quantity, splittable = splittable,
-            label = string.format("%s   %d x %s", sources[source], quantity, name)}
-    end
-    return offset, total, records
-end
-
-local function show()
-    local row = observation
-    local records = row.records
-    local lines = { "Co-op inventory", row.total == 0 and "Empty"
-        or string.format("Items %d-%d of %d", row.offset + 1, row.offset + #records, row.total) }
-    for index, entry in ipairs(records) do
-        lines[#lines + 1] = (index == row.selection and "> " or "  ") .. entry.label
-    end
-    local selected = records[row.selection]
-    if row.pending_offset then
-        lines[#lines + 1] = "Loading inventory page. End closes."
-    elseif row.drop_state == "confirming" then
-        local description = selected.quantity > 1
-            and string.format("%d × %s", selected.quantity, selected.name) or selected.name
-        lines[#lines + 1] = "Drop " .. description .. "? Home confirms. End cancels."
-    elseif row.drop_state == "dropping" then
-        lines[#lines + 1] = "Drop pending"
-    elseif row.drop_state == "dropped" then
-        lines[#lines + 1] = "Item dropped. Reopen inventory to refresh."
-    elseif row.drop_state == "refused" then
-        lines[#lines + 1] = "Drop unavailable. Reopen inventory to refresh."
-    elseif row.split_state == "confirming" then
-        lines[#lines + 1] = string.format("Split off %d rounds? Home confirms. End cancels.", selected.quantity // 2)
-    elseif row.split_state == "splitting" then
-        lines[#lines + 1] = "Ammo stack split pending"
-    elseif row.split_state == "split" then
-        lines[#lines + 1] = "Ammo stack split. Reopen inventory to refresh."
-    elseif row.split_state == "refused" then
-        lines[#lines + 1] = "Ammo stack split unavailable. Reopen inventory to refresh."
-    elseif selected and selected.droppable then
-        local other = selected.splittable and " Home splits half the stack." or ""
-        lines[#lines + 1] = "Page Up / Page Down selects. Delete prepares a drop." .. other .. " End closes."
-    elseif selected and selected.splittable then
-        lines[#lines + 1] = "Page Up / Page Down selects. Home splits half the stack. End closes."
-    elseif selected then
-        lines[#lines + 1] = "Read-only item. Page Up / Page Down selects. End closes."
-    end
-    local message = table.concat(lines, "\n")
-    display.Text = FText(message)
-    display.TextBlock_Notes:SetText(FText(message))
-    if display.TextBlock_Notes:GetText():ToString() ~= message then
-        error("The passive inventory widget text did not verify", 0)
-    end
-end
-
-local function render(current)
-    local class, widgets = load_class(display_path), StaticFindObject(widgets_path)
-    if not class or not valid(widgets) then error("The stock passive text widget is unavailable", 0) end
-    local widget = widgets:Create(current.pawn, class, current.controller)
-    if not exact(widget, display_path) or not same(widget:GetOwningPlayer(), current.controller)
-        or not exact(widget.TextBlock_Notes, text_path) then
-        error("The local passive stock inventory widget did not qualify", 0)
-    end
-    display = widget
-    widget:SetVisibility(3)
-    if widget:AddToPlayerScreen(30) ~= true or not widget:IsInViewport() then
-        error("The passive inventory widget could not be added to the local screen", 0)
-    end
-    widget:SetDesiredSizeInViewport({X = 540, Y = 560})
-    widget:SetPositionInViewport({X = 36, Y = 124}, false)
-    show()
-end
-
-local function ready(current, close)
-    return current and observation and observation.state == "rendered" and same_context(current, observation.context)
-        and same_context(current, binding) and can_view(current) and valid(display)
-        and same(display:GetOwningPlayer(), current.controller) and display:IsInViewport()
-        and type(SilverfishNativeInventoryViewInput) == "function"
-        and SilverfishNativeInventoryViewInput(current.pawn:GetAddress(), observation.sequence, close) == true
-end
-
-local function select_item()
-    observation.split_state = nil
-    observation.drop_state = nil
-    observation.confirm_guid = nil
-end
-
-local function choose(current, action)
-    if not ready(current, false) then return false end
-    local row = observation
-    local selected = row.records[row.selection]
-    if action == "back" then
-        if row.split_state == "confirming"
-            or row.drop_state == "confirming" then
-            select_item()
-        elseif ready(current, true) then
-            remove_display()
-            row.state, row.split_state, row.drop_state = "closed", nil, nil
-            row.pending_offset = nil
-            emit(current, row.sequence, "closed")
-            return true
-        end
-    elseif not row.request_guid and not row.pending_offset and selected then
-        if action == "up" or action == "down" then
-            local direction = action == "up" and -1 or 1
-            local selection = row.selection + direction
-            if selection >= 1 and selection <= #row.records then
-                row.selection = selection
-                select_item()
-            else
-                local offset = row.offset + direction * page_size
-                select_item()
-                if offset >= 0 and offset < row.total and emit(current, row.sequence, "page", offset) then
-                    row.pending_offset = offset
-                end
-            end
-        elseif action == "drop" and selected.droppable then
-            select_item()
-            row.drop_state, row.confirm_guid = "confirming", selected.guid
-        elseif action == "confirm" and selected.droppable and row.drop_state == "confirming"
-            and row.confirm_guid == selected.guid then
-            row.request_guid, row.drop_state = selected.guid, "dropping"
-        elseif action == "confirm" and selected.splittable then
-            if row.split_state == "confirming" and row.confirm_guid == selected.guid then
-                row.request_guid, row.split_state = selected.guid, "splitting"
-            else
-                row.split_state, row.confirm_guid = "confirming", selected.guid
-            end
-        end
-    end
-    show()
-    return true
-end
-
-local function poll_keys()
-    local current = observation and observation.context
-    if not ready(current, false) then return end
-    local changed
-    for _, action in ipairs({"back", "up", "down", "drop", "confirm"}) do
-        if not input_keys[action] then
-            local key = FName(keys[action], EFindName.FNAME_Find)
-            if key:GetComparisonIndex() == 0 then error("The stock inventory key did not resolve", 0) end
-            input_keys[action] = {KeyName = key}
-        end
-        local pressed = current.controller:IsInputKeyDown(input_keys[action])
-        if type(pressed) ~= "boolean" then error("The stock inventory key state could not verify", 0) end
-        if pressed and held[action] == false and not changed then changed = action end
-        held[action] = pressed
-    end
-    if changed then choose(current, changed) end
 end
 
 local function widget_at(array, index)
@@ -642,7 +436,7 @@ local function open_stock_inventory(fields, current, state, phase)
     stock_session = {context = current, screen = screen, save = save, epoch = epoch,
         split_preview = split_preview, unload_preview = unload_preview}
     install_stock_context_hook()
-    observation.state, observation.pending_offset = "stock", nil
+    observation.state, observation.count = "stock", displayed
     return ("opened stock guest inventory with %d backpack cards"):format(displayed)
 end
 
@@ -982,8 +776,7 @@ end
 
 function inventory_view.command(fields, state, phase)
     local operation = fields[2]
-    if operation ~= "native-inventory-view-render" and operation ~= "native-inventory-view-unavailable"
-        and operation ~= "native-inventory-view-fixture" and operation ~= "native-inventory-view-key-fixture"
+    if operation ~= "native-inventory-stock-unavailable" and operation ~= "native-inventory-view-fixture"
         and operation ~= "native-inventory-stock-drop-finish"
         and operation ~= "native-inventory-stock-project-unloaded"
         and operation ~= "native-inventory-stock-open"
@@ -992,9 +785,7 @@ function inventory_view.command(fields, state, phase)
         and operation ~= "native-inventory-stock-use-click-fixture"
         and operation ~= "native-inventory-stock-split-click-fixture"
         and operation ~= "native-inventory-stock-merge-click-fixture"
-        and operation ~= "native-inventory-stock-personal-preview"
-        and operation ~= "native-inventory-view-split-result"
-        and operation ~= "native-inventory-view-drop-result" then return end
+        and operation ~= "native-inventory-stock-personal-preview" then return end
     local current = context(state, phase)
     if current and operation == "native-inventory-stock-drop-finish" then return finish_stock_drop(fields, current, state, phase) end
     if operation == "native-inventory-stock-project-unloaded" then
@@ -1010,6 +801,15 @@ function inventory_view.command(fields, state, phase)
         error("Stock inventory view requires the exact standing connected guest", 0)
     end
     if operation == "native-inventory-stock-open" then return open_stock_inventory(fields, current, state, phase) end
+    if operation == "native-inventory-stock-unavailable" then
+        if #fields ~= 4 or not observation or observation.state ~= "pending" or not same_context(current, observation.context)
+            or observation.sequence ~= integer(fields[3], 9007199254740991) or current.map ~= fields[4] then
+            error("The stock inventory request is no longer pending", 0)
+        end
+        SilverfishClearNativeInventoryViewScope()
+        observation.state = "error"
+        return "stock inventory request released"
+    end
     if operation == "native-inventory-stock-personal-preview" then
         return preview_personal_consumable(fields, current, state, phase)
     end
@@ -1225,7 +1025,7 @@ function inventory_view.command(fields, state, phase)
         return fixture(current, state, phase, fields[3] == "stock")
     end
     if operation == "native-inventory-view-fixture" and #fields == 5
-        and (fields[3] == "stock-equip" or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1")
+        and (fields[3] == "stock-equip" or fields[3] == "stock-drop" or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1")
         and #fields[4] == 32 and fields[4]:match("^[0-9a-f]+$") then
         if fields[3] == "stock-sort" and fields[5] == "-" then
             return fixture(current, state, phase, true, fields[4], fields[5])
@@ -1241,68 +1041,13 @@ function inventory_view.command(fields, state, phase)
         local amount = integer(fields[6], 2147483647)
         if amount and amount > 0 then return fixture(current, state, phase, true, fields[4], fields[5], false, amount) end
     end
-    local sequence = integer(fields[3], 9007199254740991)
-    if not observation or not same_context(current, observation.context)
-        or sequence ~= observation.sequence or fields[4] ~= current.map then
-        error("The authenticated inventory view response is stale or belongs to a later keypress", 0)
-    end
-    if operation == "native-inventory-view-key-fixture" then
-        if not headless or #fields ~= 5 or not keys[fields[5]] or not choose(current, fields[5]) then
-            error("The staged inventory keyboard action requires the exact displayed sequence", 0)
-        end
-        return "qualified stock inventory input observed"
-    elseif operation == "native-inventory-view-drop-result" then
-        if #fields ~= 6 or observation.drop_state ~= "dropping" or fields[5] ~= observation.request_guid
-            or (fields[6] ~= "dropped" and fields[6] ~= "refused") or not ready(current, false) then
-            error("The authenticated result does not match the pending inventory drop", 0)
-        end
-        observation.drop_state = fields[6]
-        show()
-        return "verified inventory drop result displayed"
-    elseif operation == "native-inventory-view-split-result" then
-        if #fields ~= 6 or observation.split_state ~= "splitting" or fields[5] ~= observation.request_guid
-            or (fields[6] ~= "split" and fields[6] ~= "refused") or not ready(current, false) then
-            error("The authenticated result does not match the pending inventory split", 0)
-        end
-        observation.split_state = fields[6]
-        show()
-        return "verified inventory split result displayed"
-    end
-    local pending_offset = observation.pending_offset
-    if not pending_offset or observation.state ~= "pending" and observation.state ~= "rendered" then
-        error("No inventory page is awaiting an authenticated response", 0)
-    end
-    if operation == "native-inventory-view-unavailable" and #fields == 5
-        and integer(fields[5], max_items) == pending_offset then
-        observation.pending_offset = nil
-        if observation.state == "pending" then observation.state = "error" else show() end
-        return "authenticated stock inventory view unavailable"
-    end
-    if operation ~= "native-inventory-view-render" or #fields < 6 or #fields > 6 + page_size then
-        error("The authenticated stock inventory view response is incomplete", 0)
-    end
-    local offset, total, records = page(fields)
-    if offset ~= pending_offset then error("The inventory page response does not match the requested offset", 0) end
-    local previous = observation.offset
-    observation.pending_offset = nil
-    observation.offset, observation.total, observation.count, observation.records = offset, total, #records, records
-    observation.selection = previous and offset < previous and #records or (#records > 0 and 1 or 0)
-    select_item()
-    local ok, failure
-    if observation.state == "rendered" then ok, failure = pcall(show)
-    else ok, failure = pcall(render, current) end
-    observation.state = ok and "rendered" or "error"
-    if not ok then
-        remove_display()
-        error(failure, 0)
-    end
-    return "verified stock inventory summary on the local screen"
+    error("The stock inventory command arguments did not qualify", 0)
 end
 
 function inventory_view.rows(state, phase, status_row)
     local current = context(state, phase)
     if not current then return {} end
-    local rows = {status_row("native-inventory-split-view-capability", 1)}
+    local rows = {}
     if binding_state then rows[#rows + 1] = status_row("native-inventory-view-binding", binding_state) end
     local pending = stock_layout[1] or stock_drop
     if pending and pending.live and (not pending.merge or pending.layout_preview) and same_context(current, pending.context) then
@@ -1316,32 +1061,13 @@ function inventory_view.rows(state, phase, status_row)
     end
     if not observation or not same_context(current, observation.context) then return rows end
     rows[#rows + 1] = status_row("native-inventory-view", observation.state, observation.sequence, current.map, current.name,
-        observation.offset or 0, observation.total or 0, observation.count or 0)
-    if observation.drop_state and ready(current, false) then
-        local selected = observation.records[observation.selection]
-        rows[#rows + 1] = status_row("native-guest-inventory-drop-view", observation.sequence, current.map,
-            current.name, selected.guid, selected.class, observation.drop_state, selected.quantity)
-    end
-    if observation.split_state and ready(current, false) then
-        local selected = observation.records[observation.selection]
-        rows[#rows + 1] = status_row("native-guest-inventory-split-view", observation.sequence, current.map,
-            current.name, selected.guid, selected.class, observation.split_state, selected.quantity)
-    end
+        0, observation.count or 0, observation.count or 0)
     return rows
 end
 
 function inventory_view.start(bridge, downed)
     event_path = enabled and bridge and bridge ~= "" and bridge .. "/native-inventory-view-events" or nil
     is_downed = downed
-    if not event_path then return end
-    LoopInGameThreadWithDelay(16, function()
-        local ok, failure = pcall(poll_keys)
-        if not ok then
-            if observation then observation.state = "error" end
-            remove_display()
-            print("[SilverfishCoop] Inventory keys unavailable: " .. tostring(failure) .. "\n")
-        end
-    end)
 end
 
 return inventory_view

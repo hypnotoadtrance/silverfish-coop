@@ -5421,14 +5421,10 @@ class Client:
         self.mindcore_carry = native_mindcore_carry.GuestInput(self) if invite.get("native_zones") else None
         self.prop_carry = native_prop_carry.Guest(self)
         self.last_primary_intent = 0
-        self.last_inventory_split = 0
-        self.last_inventory_drop = 0
         self.last_stock_inventory_action = 0
         self.guest_ui = native_guest_ui.GuestView()
         self.guest_wallet = native_wallet.GuestWallet()
         self.guest_grants = native_inventory_grant.GuestGrants()
-        self.inventory_view_scope = None
-        self.inventory_drop_scope = None
         self.crate_intents = native_loot.OpenIntents()
         self.crate_lids = native_loot.GuestCrateProjection()
         self.world_loot_wake = asyncio.Event()
@@ -6146,97 +6142,46 @@ class Client:
 
     async def service_inventory_view(self, active: bool) -> None:
         requests = self.bridge.native_inventory_view_requests()
-        if not active or self.stopping or not self.host_session or not self.zone_epoch:
-            self.inventory_view_scope = self.inventory_drop_scope = None
+        if not requests or not active or self.stopping or not self.host_session or not self.zone_epoch:
             return
-        if not requests:
-            return
-        sequence, event, area, pawn, offset = requests[-1]
-        if (area != self.last_game.get("map")
+        sequence, event, area, pawn = requests[-1]
+        if (event != "open" or area != self.last_game.get("map")
                 or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name")):
             return
-        scope = self.host_session, self.zone_epoch, sequence, area, pawn
-        if event == "page":
-            previous = native_inventory.displayed_offset(self.last_game, sequence, area, pawn)
-            if (previous is None or self.inventory_view_scope != (*scope, previous)
-                    or abs(offset - previous) != native_inventory.PAGE_SIZE):
-                with contextlib.suppress(OSError, RuntimeError, ValueError):
-                    self.last_game = await self.bridge.command("native-inventory-view-unavailable", str(sequence), area,
-                                                               str(offset), timeout=2)
-                return
-        else:
-            self.inventory_view_scope = self.inventory_drop_scope = None
-            if event != "open":
-                return
-        identity = native_guest_drop.view_identity(self, sequence, area, pawn)
         operation = uuid.uuid5(self.bridge.input_namespace,
-                               f"{self.host_session}:{self.zone_epoch}:{pawn}:inventory:{sequence}:{offset}").hex
-        if (event == "open" and self.last_game.get("save_scope") and native_guest_drop_record.supported_map(area)
-                and all(self.gameplay.get(capability) == 1 for capability in (
-                    native_guest_drop_record.CAPABILITY, native_inventory.STORE_CAPABILITY,
-                    native_inventory.SORT_CAPABILITY, native_inventory.SPLIT_CAPABILITY,
-                ))):
-            try:
-                grant_pending = (type(self.last_game.get(native_inventory_grant.READY)) is int
-                                 or self.guest_grants.request is not None)
-                if grant_pending:
-                    self.guest_ui.queue_stock_inventory(self)
-                elif (self.guest_ui.identity != (self.host_session, self.zone_epoch, area)
-                      or self.guest_ui.digest == "-" or self.guest_ui.inventory_needs_refresh(self)):
-                    # A local grant may arrive while the fresh stock view is being read.
-                    # Show the guest's current stock backpack while that projection waits.
-                    await self.guest_ui.refresh(self, allow_local_pending=True)
-                preview_mode = ()
-                if self.gameplay.get(native_inventory.TAKE_AMMO_PREVIEW_CAPABILITY) == 1:
-                    preview_mode = ("2",)
-                elif self.gameplay.get(native_inventory.SPLIT_PREVIEW_CAPABILITY) == 1:
-                    preview_mode = ("1",)
-                snapshot = await self.bridge.command("native-inventory-stock-open", str(sequence), self.zone_epoch,
-                                                     *preview_mode, timeout=5)
-                proof = snapshot.get("native_inventory_view", {})
-                if (proof.get("state"), proof.get("sequence"), proof.get("map"), proof.get("pawn")) != (
-                    "stock", sequence, area, pawn,
-                ):
-                    raise RuntimeError("The native backpack did not verify its isolated view")
-                self.last_game = snapshot
-                self.control.event("native_stock_inventory_opened", operation_id=operation, **proof)
-                return
-            except (KeyError, TypeError, OSError, RuntimeError, ValueError) as error:
-                self.control.event("native_stock_inventory_unavailable", operation_id=operation, reason=str(error))
+                               f"{self.host_session}:{self.zone_epoch}:{pawn}:inventory:{sequence}").hex
         try:
-            page = await native_inventory.read_view_page(self, operation, offset)
-            items, total = page["items"], page["total"]
-            if native_guest_drop.view_identity(self, sequence, area, pawn) != identity:
-                raise ValueError("The inventory page request expired")
-            splits = (self.gameplay.get(native_inventory.SPLIT_CAPABILITY) == 1
-                      and self.last_game.get("native_inventory_split_view_capability") is True)
-            drops = (self.gameplay.get(native_guest_drop_record.CAPABILITY) == 1
-                     and native_guest_drop_record.supported_map(area))
-            generic_drop = self.gameplay.get(native_guest_drop_record.GENERIC_CAPABILITY) == 1
-            entries = []
-            for row in items:
-                options = []
-                if splits and native_inventory.splittable(row):
-                    options.append("split")
-                if drops and native_guest_drop.droppable(row, generic=generic_drop):
-                    options.append("drop")
-                entry = f"{row['guid']}|{row['source']}|{row['index']}|{row['quantity']}|{row['class_path']}"
-                entries.append(entry + ("|" + ",".join(options) if options else ""))
-            snapshot = await self.bridge.command("native-inventory-view-render", str(sequence), area, str(offset),
-                                                 str(total), *entries, timeout=5)
+            if (not self.last_game.get("save_scope") or not native_guest_drop_record.supported_map(area)
+                    or not all(self.gameplay.get(capability) == 1 for capability in (
+                        native_guest_drop_record.CAPABILITY, native_inventory.STORE_CAPABILITY,
+                        native_inventory.SORT_CAPABILITY, native_inventory.SPLIT_CAPABILITY))):
+                raise ValueError("The host or guest stock inventory is not ready")
+            grant_pending = (type(self.last_game.get(native_inventory_grant.READY)) is int
+                             or self.guest_grants.request is not None)
+            if grant_pending:
+                self.guest_ui.queue_stock_inventory(self)
+            elif (self.guest_ui.identity != (self.host_session, self.zone_epoch, area)
+                  or self.guest_ui.digest == "-" or self.guest_ui.inventory_needs_refresh(self)):
+                # A local grant may arrive while the new view is being read.
+                await self.guest_ui.refresh(self, allow_local_pending=True)
+            preview_mode = ()
+            if self.gameplay.get(native_inventory.TAKE_AMMO_PREVIEW_CAPABILITY) == 1:
+                preview_mode = ("2",)
+            elif self.gameplay.get(native_inventory.SPLIT_PREVIEW_CAPABILITY) == 1:
+                preview_mode = ("1",)
+            snapshot = await self.bridge.command("native-inventory-stock-open", str(sequence), self.zone_epoch,
+                                                 *preview_mode, timeout=5)
             proof = snapshot.get("native_inventory_view", {})
-            if proof != {"state": "rendered", "sequence": sequence, "map": area, "pawn": pawn,
-                         "offset": offset, "total": total, "count": len(items)}:
-                raise RuntimeError("The stock inventory overlay did not verify the authenticated page")
+            if (proof.get("state"), proof.get("sequence"), proof.get("map"), proof.get("pawn")) != (
+                "stock", sequence, area, pawn,
+            ):
+                raise RuntimeError("The native backpack did not verify its isolated view")
             self.last_game = snapshot
-            self.inventory_view_scope = (*scope, offset)
-            self.inventory_drop_scope = identity if drops else None
-            self.control.event("native_guest_inventory_rendered", operation_id=operation, **proof)
-        except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
-            self.control.event("native_guest_inventory_view_rejected", operation_id=operation, reason=str(error))
+            self.control.event("native_stock_inventory_opened", operation_id=operation, **proof)
+        except (KeyError, TypeError, OSError, RuntimeError, ValueError) as error:
+            self.control.event("native_stock_inventory_unavailable", operation_id=operation, reason=str(error))
             with contextlib.suppress(OSError, RuntimeError, ValueError):
-                self.last_game = await self.bridge.command("native-inventory-view-unavailable", str(sequence), area,
-                                                           str(offset), timeout=2)
+                self.last_game = await self.bridge.command("native-inventory-stock-unavailable", str(sequence), area, timeout=2)
 
     async def renew_native_interactions(self) -> None:
         features = (
@@ -6795,16 +6740,6 @@ class Client:
                         raise ValueError("Select a stock stash fixture target")
                     self.last_game = await self.bridge.command(action, target, timeout=5)
                     result = {native_stash.VIEW: self.last_game.get(native_stash.VIEW)}
-                elif action == "native-inventory-view-key-fixture":
-                    view = self.last_game.get("native_inventory_view", {})
-                    key = request.get("target")
-                    if view.get("state") != "rendered" or key not in ("up", "down", "confirm", "back", "drop"):
-                        raise ValueError("Select an input for the current staged inventory page")
-                    self.last_game = await self.bridge.command(action, str(view["sequence"]), view["map"], key, timeout=5)
-                    result = {key: self.last_game.get(key, {}) for key in (
-                        native_inventory.SPLIT_VIEW,
-                        native_guest_drop_record.VIEW,
-                    )}
                 elif action == "native-shop-view-fixture" and self.invite.get("native_shop_view"):
                     choice = request.get("target")
                     if not native_shop_view.valid_fixture(choice):
@@ -7308,8 +7243,6 @@ class Client:
                 await self.guest_ui.sync(self, active)
             await native_stash.service_view(self, active)
             await native_flare.service_input(self, active)
-            await native_inventory.service_split_view(self, active)
-            await native_guest_drop.service_view(self, active)
             world_version = self.last_game.get(native_world_loot.CAPABILITY, 0)
             world_items = world_version >= 1
             shared_pickups = world_version >= native_world_loot.SHARED_PICKUPS_VERSION

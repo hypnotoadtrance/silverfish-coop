@@ -142,32 +142,17 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
             guid, "backpack", 7, -1), report
         return report
 
-    async def drop_pistol_from_overlay(guid, items):
+    async def drop_stock_pistol(guid):
         viewer = clients[owner]
         await wait(viewer, lambda state: state.get("gameplay_fresh")
                    and state.get("gameplay", {}).get(record.CAPABILITY) == 1)
-        await action(owner, "native-inventory-view-fixture")
-        await wait(viewer, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
-        key = ("native-inventory-view-key-fixture", "--target")
-        for _ in range(next(index for index, item in enumerate(items) if item["guid"] == guid)):
-            await action(owner, *key, "down")
-        confirmation = (await action(owner, *key, "drop"))[record.VIEW]
-        assert (confirmation["state"], confirmation["guid"], confirmation["class_path"], confirmation["count"]) == (
-            "confirming", guid, item_class, 1), confirmation
-        pending = (await action(owner, *key, "confirm"))[record.VIEW]
-        assert pending == {**confirmation, "state": "dropping"}, pending
-        result = await wait(viewer, lambda state: (view := state.get("game", {}).get(record.VIEW, {})).get("sequence")
-                            == pending["sequence"] and view.get("state") in {"dropped", "refused"})
-        rendered = result["game"][record.VIEW]
-        assert rendered == {**pending, "state": "dropped"}, rendered
-        events = (await command("events", *owner, "--tail", "100"))["events"]
-        committed, = [event for event in events if event["event"] == "native_guest_inventory_stack_dropped"
-                      and event["view_sequence"] == pending["sequence"]]
-        assert committed["operation_id"] == committed["drop_id"], committed
-        evidence["guest_inventory_drop"] = {"confirmation": confirmation, "result": rendered, "event": committed}
-        await action(owner, *key, "back")
-        fields = ("state", "drop_id", "owner", "guid", "quantity", "class_path", "map", "location")
-        return {field: committed[field] for field in fields}
+        response = await action(owner, drop.STOCK_DROP_FIXTURE, "--target", guid)
+        receipt = response[drop.RESULT]
+        assert response["stock_inventory_proof"].startswith("verified open stock backpack refresh"), response
+        assert (receipt["guid"], receipt["class_path"], receipt["quantity"], receipt["drop_id"]) == (
+            guid, item_class, 1, response["id"]), receipt
+        evidence["guest_inventory_drop"] = response
+        return receipt
 
     def saved():
         checkpoint = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
@@ -545,7 +530,7 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
             assert not saved()
             evidence["wrong_drop_quantity"] = {"item": typed, "requested_quantity": 2, "error": refused["error"]}
 
-            dropped = await drop_pistol_from_overlay(source, initial_items)
+            dropped = await drop_stock_pistol(source)
             attempt = dropped["drop_id"]
         else:
             dropped = (await action(owner, drop.DROP, "--target", f"{source}|{quantity}",
