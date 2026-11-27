@@ -4757,10 +4757,12 @@ class Host:
             self.gameplay_change_quest_sources = placements.keys()
         # A missing census preserves the last observed set. Only visibility edges
         # need an early snapshot. Motion continues on its normal cadences.
+        visible_drops = frozenset(drop_id for drop_id, row in self.party.get(native_guest_drop_record.STATE, {}).items()
+                                  if row["map"] == scope[0] and row["claim_id"] is None)
         state = (door_flags, switch_flags, self.party.get(native_loot.STATE_KEY, {}),
                  game.get("native_wallet"), game.get(native_wallet.DEBT_STATUS), tuple(sorted(self.guest_wallet_receipts.items())),
                  self.world_loot.moving_ids(*scope), self.party.get(native_loose_pickup.STATE, {}),
-                 game.get(native_loose_pickup.RESPAWN_HIDDEN, ()), self.gameplay_change_quest_sources)
+                 game.get(native_loose_pickup.RESPAWN_HIDDEN, ()), self.gameplay_change_quest_sources, visible_drops)
         if scope == self.gameplay_change_scope and state != self.gameplay_change_state:
             # Guests still fetch the authorized snapshot. A lost notice only delays that fetch.
             transport.send_gameplay_change(epoch)

@@ -73,7 +73,7 @@ def parse_stock_action(fields, game):
                   count=amount, expected=before, mode=mode)
     if layout and layout[0]:
         preview = layout[0]
-        if (mode == "sort" and preview == "sorted"
+        if (mode == "sort" and preview == "sorted" or mode == "drop" and preview == "dropped"
                 or mode == "equip" and 1 <= before <= 10 and (preview == "-" or valid_guid(preview) and preview != guid)
                 or mode in ("split", "merge", "unload") and valid_guid(preview) and preview != guid):
             result["layout_preview"] = preview

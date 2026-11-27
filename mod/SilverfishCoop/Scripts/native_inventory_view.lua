@@ -28,7 +28,7 @@ local starter_bags = {
 local meals = require("native_guest_mre")
 local mre_enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MRE") == "1"
 local event_path, is_downed, binding, observation
-local binding_state, stock_drop, stock_session, sync_stock
+local binding_state, stock_drop, stock_session, sync_stock, preview_stock_layout
 local stock_context_hook
 local stock_layout, max_stock_layout = {}, 8
 
@@ -361,10 +361,17 @@ local function stock_action_fixture(screen, current, save, epoch, item, use, spl
         error("The stock guest drop returned more than one intent", 0)
     end
     stock_drop = {context = current, screen = screen, save = save, epoch = epoch, guid = guid, sequence = sequence,
-        split = split, expected = expected, equip = equip}
+        split = split, expected = expected, equip = equip, entry = entry, quantity = quantity}
     if split then return ("stock guest split %s %d %d %d"):format(guid, quantity, sequence, expected) end
     if equip and expected and expected > 0 then
         return ("stock guest equip %s %d %d %d"):format(guid, quantity, sequence, expected)
+    end
+    if entry == "context_menu" then
+        preview_stock_layout(stock_drop)
+        if stock_drop.layout_preview == "dropped" then
+            assert(stock_cards(screen, save, guid, 0), "drop did not leave the stock backpack before the host request")
+            return ("stock guest %s %s %d %d dropped"):format(entry, guid, quantity, sequence)
+        end
     end
     return ("stock guest %s %s %d %d"):format(entry, guid, quantity, sequence)
 end
@@ -453,7 +460,7 @@ local function update_local_worn_slot(current, slot)
     instance:Calc_CarryWeight()
 end
 
-local function preview_stock_layout(action)
+preview_stock_layout = function(action)
     local pawn, save = action.context.pawn:GetAddress(), action.save:GetAddress()
     local target = (action.expected or 0) - 1
     local slot, receipt, unload_slot
@@ -476,6 +483,11 @@ local function preview_stock_layout(action)
         if ok then slot, receipt = stored, displaced end
     elseif (action.equip or action.entry == "unequip") and type(SilverfishPreviewLocalGuestGear) == "function" then
         slot, receipt = SilverfishPreviewLocalGuestGear(pawn, save, action.guid, target, action.entry == "unequip")
+    elseif (action.entry == "context_menu" or action.entry == "ctrl_click") and #stock_layout == 0
+        and type(SilverfishPreviewLocalBackpackDrop) == "function" then
+        if SilverfishPreviewLocalBackpackDrop(pawn, save, action.guid, action.quantity) then
+            receipt = "dropped"
+        end
     end
     if not receipt then return end
 
@@ -494,6 +506,7 @@ local function preview_stock_layout(action)
         if valid(widget) then widget:FullRefresh() end
     end
     if slot and slot >= 8 then update_local_worn_slot(action.context, slot) end
+    if receipt == "dropped" then action.context.world.OwningGameInstance:Calc_CarryWeight() end
 end
 
 local function apply_stock_merge(pawn, pending)

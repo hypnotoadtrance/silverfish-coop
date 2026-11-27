@@ -4009,6 +4009,32 @@ namespace
         return 2;
     }
 
+    int preview_backpack_drop(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 4 || !lua.is_integer(1) || !lua.is_integer(2) ||
+            !lua.is_string(3) || !lua.is_integer(4)) return 0;
+        const auto pawn = lua.get_integer();
+        const auto save = lua.get_integer();
+        Context context;
+        if (!parse_guid(lua.get_string(), context.guid) || !bind_local_inventory(context, pawn, save)) return 0;
+        const auto quantity = lua.get_integer();
+        if (quantity < 1 || quantity > 200) return 0;
+
+        Inventory inventory;
+        if (!locate(context, inventory).empty() || !inventory.item || inventory.backpack_index < 0) return 0;
+        const auto stack = silverfish::drop_item_class::stacks(Unreal::Cast<Unreal::UClass>(inventory.row_class(inventory.item)));
+        auto* never_drop = field<Unreal::FBoolProperty>(inventory.type->GetStruct().Get(),
+            STR("NeverDrop_21_57B44A714ED0B2B1776A5DA7627B4A8D"));
+        if (!stack || !never_drop || never_drop->GetPropertyValueInContainer(inventory.item) ||
+            quantity != (*stack ? inventory.ammo->GetPropertyValueInContainer(inventory.item) : 1) ||
+            !local_inventory_current(context)) return 0;
+
+        Unreal::FScriptArrayHelper bag(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(context.save));
+        bag.RemoveValues(inventory.backpack_index, 1);
+        lua.set_bool(true);
+        return 1;
+    }
+
     struct RemoveEquipmentCall
     {
         static constexpr int parameters_size = 0x69;
@@ -5112,6 +5138,7 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
     if (env("SILVERFISH_COOP_TITLE_FIXTURES") && env("SILVERFISH_COOP_HEADLESS"))
         lua.register_function("SilverfishFixtureLocalTypedInventory", fixture_copy_stock_weapon_payload);
     lua.register_function("SilverfishPreviewLocalGuestGear", preview_worn_or_unequip);
+    lua.register_function("SilverfishPreviewLocalBackpackDrop", preview_backpack_drop);
     lua.register_function("SilverfishUnequipNativeGuestEquipment", unequip_stock_equipment<false>);
     lua.register_function("SilverfishDebitNativeGuestQuickDrop", unequip_stock_equipment<true>);
     lua.register_function("SilverfishSelectNativeGuestEquipment", select_stock_equipment);

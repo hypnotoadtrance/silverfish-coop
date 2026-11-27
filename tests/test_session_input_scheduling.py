@@ -1273,3 +1273,20 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         host.last_game = {**stock, loose.RESPAWN_HIDDEN: ["earlier stock bandage"]}
         host.publish_gameplay_change(transport)
         transport.send_gameplay_change.assert_called_once_with(host.zone_epoch)
+
+        transport.reset_mock()
+        drop = "d" * 32
+        key = service.native_guest_drop_record.STATE
+        host.party[key] = {drop: {"map": "other area", "claim_id": None}}
+        host.publish_gameplay_change(transport)
+        transport.send_gameplay_change.assert_not_called()
+        host.party[key][drop]["map"] = OBSERVATORY
+        host.publish_gameplay_change(transport)
+        transport.send_gameplay_change.assert_called_once_with(host.zone_epoch)
+        transport.reset_mock()
+        host.party[key][drop]["location"] = [20, 30, 10]
+        host.publish_gameplay_change(transport)
+        transport.send_gameplay_change.assert_not_called()
+        host.party[key][drop]["claim_id"] = "a" * 32
+        host.publish_gameplay_change(transport)
+        transport.send_gameplay_change.assert_called_once_with(host.zone_epoch)

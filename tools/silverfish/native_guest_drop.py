@@ -108,17 +108,23 @@ async def stock_menu_fixture(client, target, operation: str, mode: str) -> dict:
         raise ValueError("The selected stock backpack action is unavailable")
     arguments = (str(split[1]),) if splitting else ()
     snapshot = await client.bridge.command("native-inventory-view-fixture", f"stock-{mode}", epoch, selection, *arguments, timeout=5)
+    message = snapshot.get("ack", {}).get("message", "")
+    local_drop = mode == "drop" and message.endswith(" dropped")
+    if local_drop:
+        message = message.removesuffix(" dropped")
     match = re.fullmatch(r"stock guest (sort|split|equip|context_menu|use-[a-z-]+) (-|[0-9A-F]{32})"
-                         r" (0|[1-9][0-9]{0,9}) ([1-9][0-9]{0,15})(?: ([1-9][0-9]{0,9}))?",
-                         snapshot.get("ack", {}).get("message", ""))
+                         r" (0|[1-9][0-9]{0,9}) ([1-9][0-9]{0,15})(?: ([1-9][0-9]{0,9}))?", message)
     if (not match or match[2] != selection or (not splitting and int(match[3]) > record.MAX_QUANTITY)
             or (snapshot.get("state"), snapshot.get("map"), snapshot.get("pawns", {}).get("local", {}).get("name"))
             != ("connected", area, pawn) or client.zone_epoch != epoch):
         raise RuntimeError("The stock screen did not verify the selected backpack action")
     client.last_game = snapshot
     entry, guid, count, sequence, expected = match.groups()
-    return await settle_stock_action(client, area, epoch, operation, mode, entry, guid, int(count),
-                                     sequence, expected, split)
+    result = await settle_stock_action(client, area, epoch, operation, mode, entry, guid, int(count),
+                                       sequence, expected, split, "dropped" if local_drop else None)
+    if local_drop:
+        result["stock_inventory_local_drop"] = True
+    return result
 
 
 async def settle_stock_action(client, area, epoch, operation, mode, entry, guid, quantity, sequence, expected, split,
@@ -267,7 +273,14 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
             if entry not in (*record.WORN_DROP_ENTRIES, *record.QUICK_DROP_ENTRIES, "context_menu", "ctrl_click") or quantity < 1:
                 raise ValueError("The native action did not select an inventory drop")
             key, remaining = RESULT, 0
-            receipt = (await client.gameplay_action(DROP, operation, f"{guid}|{quantity}")).get(key)
+            target = f"{guid}|{quantity}"
+            try:
+                reply = await client.gameplay_action(DROP, operation, target)
+            except TimeoutError:
+                if layout_preview != "dropped" or client.zone_epoch != epoch or client.last_game.get("map") != area:
+                    raise
+                reply = await client.gameplay_action(DROP, operation, target)
+            receipt = reply.get(key)
             if (not isinstance(receipt, dict)
                     or tuple(receipt.get(field) for field in ("state", "drop_id", "owner", "guid", "quantity", "map"))
                     != ("dropped", operation, client.invite["character_id"], guid, quantity, area)
@@ -276,6 +289,8 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                         native_guest_armor.HELMET_ACTION if int(expected) == 9 else native_guest_armor.ACTION)
                     or not record.valid_position(receipt.get("location"))):
                 raise RuntimeError("The host did not settle the stock guest inventory drop")
+            if layout_preview == "dropped":
+                local_result = "dropped"
             committed = (str(remaining),)
         # A matching slot receipt already describes the local inventory.
         # Sorting and unloading still need the complete host rows. In particular,

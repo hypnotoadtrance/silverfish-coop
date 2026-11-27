@@ -7464,6 +7464,7 @@ async def verify_stock_inventory_fall(host: Seat, guest: Seat, pawn: str) -> dic
         assert stocked["ok"], stocked
         result = await submit(guest_run, native_guest_drop.STOCK_DROP_FIXTURE, target=item["guid"])
         assert result["ok"] and result["stock_inventory_proof"].startswith("verified open stock backpack refresh"), result
+        assert result.get("stock_inventory_local_drop") is True, result
         return result[native_guest_drop.RESULT]
 
     async def fall(role, item, press_drop):
@@ -7600,6 +7601,7 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         assert selected is not None, contents
         dropped = await submit(guest_run, native_guest_drop.STOCK_DROP_FIXTURE, target=selected["guid"])
         assert dropped["ok"], dropped
+        assert dropped.get("stock_inventory_local_drop") is True, dropped
         assert re.fullmatch(r"verified open stock backpack refresh with \d+ cards",
                             dropped.get("stock_inventory_proof", "")), dropped
         stock_drop_proof = dropped[native_guest_drop.RESULT]

@@ -66,6 +66,28 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(drop.droppable(dict(pistol, quantity=7)))
         self.assertFalse(drop.droppable(dict(pistol, important=True)))
 
+    async def test_local_backpack_drop_reuses_a_receipt_and_refreshes_only_on_refusal(self):
+        for refused in (False, True):
+            with self.subTest(refused=refused):
+                client = self.client()
+                client.guest_ui = SimpleNamespace(close=AsyncMock(), refresh=AsyncMock())
+                operation = "d" * 32
+                accepted = {drop.RESULT: dict(state="dropped", drop_id=operation, owner="exact-owner", guid=GUID,
+                                              quantity=9, class_path=record.ITEM, map=MAP, location=[5., 20., 30.])}
+                client.gameplay_action.side_effect = [TimeoutError(), ValueError("drop_capacity") if refused else accepted]
+                args = (client, MAP, client.zone_epoch, operation, "drop", "context_menu",
+                        GUID, 9, "5", None, None, "dropped")
+                if refused:
+                    with self.assertRaisesRegex(RuntimeError, "drop_capacity"):
+                        await drop.settle_stock_action(*args)
+                    client.guest_ui.refresh.assert_awaited_once_with(client, layout_sequence="5")
+                else:
+                    await drop.settle_stock_action(*args)
+                    client.guest_ui.refresh.assert_not_called()
+                self.assertEqual(client.gameplay_action.await_count, 2)
+                for request in client.gameplay_action.await_args_list:
+                    self.assertEqual(request.args, (drop.DROP, operation, f"{GUID}|9"))
+
     def test_native_eligibility_replaces_the_list_for_stock_backpack_items(self):
         stock = "/Game/Classes/Items/Item_PocketWatch.Item_PocketWatch_C"
         row = dict(guid=GUID, class_path=stock, quantity=1, source="backpack",
