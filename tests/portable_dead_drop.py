@@ -41,7 +41,7 @@ def allow_resident_contract_xp(script):
 
 
 async def verify_dead_drop(host, guest, contract, drop, *, via=(LAKE,), cash=None):
-    generic_board = drop.quest != contract.quest
+    generic_board = drop.quest != contract.quest_id
     host_run, guest_run = host.campaign / "run", guest.client / "run"
 
     async def action(run, verb, **kwargs):
