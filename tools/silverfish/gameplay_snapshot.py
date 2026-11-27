@@ -50,6 +50,20 @@ def _same_value(first, second) -> bool:
     return first == second
 
 
+def _copy_frame(value):
+    """Detach mutable wire containers without copying immutable leaves."""
+    kind = type(value)
+    if kind is dict:
+        return {key: _copy_frame(child) for key, child in value.items()}
+    if kind is list:
+        return [_copy_frame(child) for child in value]
+    if kind is tuple:
+        return tuple(_copy_frame(child) for child in value)
+    if kind in (str, int, float, bool) or value is None:
+        return value
+    return deepcopy(value)
+
+
 def _difference(before: dict, after: dict) -> tuple[dict, list[str]]:
     return ({key: value for key, value in after.items() if key not in before or not _same_value(before[key], value)},
             sorted(before.keys() - after.keys()))
@@ -157,15 +171,15 @@ class HostSnapshots:
                         rows[section] = patch
                         del changed[section]
             if rows or len(changed) + len(removed) < len(current):
-                cached = _apply(old, deepcopy(changed), removed)
-                _apply_rows(cached, deepcopy(rows))
+                cached = _apply(old, _copy_frame(changed), removed)
+                _apply_rows(cached, _copy_frame(rows))
                 reply[BASE] = previous.revision
                 reply[DELTA] = {"changed": changed, "removed": removed}
                 if rows:
                     reply[DELTA][ROW_CHANGES] = rows
                 del reply["gameplay"]
         revision = reply[REVISION] = uuid.uuid4().hex
-        latest = _Snapshot(revision, scope, deepcopy(current) if cached is None else cached)
+        latest = _Snapshot(revision, scope, _copy_frame(current) if cached is None else cached)
         # Interactions can cancel an in-flight reply. Keep the acknowledged
         # base available until the guest confirms a newer one.
         self._peers[key] = (latest, previous) if previous else (latest,)
@@ -234,7 +248,7 @@ class ClientSnapshots:
             self.world_updates = self.row_updates and reply.get(WORLD_UPDATES) is True
             self.placement_updates = self.row_updates and reply.get(PLACEMENT_UPDATES) is True
             # Local optimistic actions can edit the displayed view before the next snapshot.
-            return deepcopy(gameplay)
+            return _copy_frame(gameplay)
         self.clear()
         if revision == "":
             self.base = ""

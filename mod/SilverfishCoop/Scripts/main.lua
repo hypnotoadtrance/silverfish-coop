@@ -1960,6 +1960,17 @@ local function tick(fields, pending, periodic)
         if not periodic then return true end
         fields, pending = nil, nil
     end
+    if fields and pending and fields[2] == "native-guest-save-retain"
+        and current_phase == "hosting" and status_publication.steady(state, current_phase) then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        local accepted, message = pcall(guest_save.command, fields, state, current_phase)
+        SilverfishPublishLocalBridgeReply(pending.ticket,
+            status_row("native-guest-save-retention-reply", 1, fields[1], state.map, fields[3] or "", fields[4] or "",
+                accepted and "accepted" or "error", message) .. "\n")
+        if not periodic then return true end
+        fields, pending = nil, nil
+    end
     local interaction = fields and status_publication.stock_interactions[fields[2]]
     if interaction and pending and not periodic and current_phase == interaction.phase
         and status_publication.compact() and status_publication.steady(state, current_phase) then
@@ -2348,6 +2359,7 @@ if resident_title and status_publication.installed then
         if not fields or not pending then return end
         local action = fields[2]
         if action == "native-world-loot-frame" or action == "native-loot-open" or action == "native-loot-inspect"
+            or action == "native-guest-save-retain"
             or status_publication.stock_interactions[action] or status_publication.pickup_presentation[action]
             or status_publication.pickup_claims[action] or status_publication.guest_combat_actions[action]
             or status_publication.placed_view_actions[action] or status_publication.prop_carry_actions[action] then

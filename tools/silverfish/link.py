@@ -54,6 +54,7 @@ _MAX_ADMISSION = 4096
 _MAX_ACTION_BODY = 32 * 1024
 _MAX_ACTION_FRAME = _MAX_ACTION_BODY + 64
 _MAX_SNAPSHOT_BODY = 256 * 1024
+_MAX_SNAPSHOT_FRAME = 96 * 1024
 _COMPRESS_SNAPSHOT_MINIMUM = 1024
 _COMPRESSED_SNAPSHOT = b"SFZ\x01"
 _MAX_ACTIONS = 8
@@ -273,12 +274,15 @@ def _address(transport: asyncio.BaseTransport) -> Address:
 
 
 def _configuration(is_client: bool) -> QuicConfiguration:
+    # A rebuilding guest can receive one large world baseline alongside its
+    # ordinary action replies. The host still advertises the smaller request window.
+    frame = _MAX_SNAPSHOT_FRAME if is_client else _MAX_ACTION_FRAME
     return QuicConfiguration(
         is_client=is_client,
         alpn_protocols=[_ALPN],
         idle_timeout=_IDLE_TIMEOUT,
-        max_data=_MAX_ADMISSION + _MAX_ACTION_FRAME * _MAX_ACTIONS,
-        max_stream_data=_MAX_ACTION_FRAME,
+        max_data=_MAX_ADMISSION + _MAX_ACTION_FRAME * (_MAX_ACTIONS - 1) + frame,
+        max_stream_data=frame,
         max_datagram_size=1200,
         max_datagram_frame_size=_FRAGMENT_SIZE + _FRAGMENT_HEADER.size + 16,
     )
@@ -418,6 +422,7 @@ class _TransportStatistics:
     reassembly_expired_packets: int = 0
     reassembly_max_pending_packets: int = 0
     snapshot_responses_encoded: int = 0
+    snapshot_responses_oversized: int = 0
     snapshot_responses_compressed: int = 0
     snapshot_delta_responses: int = 0
     snapshot_row_delta_responses: int = 0
@@ -433,7 +438,8 @@ class _TransportStatistics:
     snapshot_decode_max_ns: int = 0
 
 
-def _encode_response(result: Action, *, snapshot: bool, stats: _TransportStatistics | None = None) -> bytes:
+def _encode_response(result: Action, *, snapshot: bool, snapshot_limit: int = _MAX_SNAPSHOT_FRAME,
+                     stats: _TransportStatistics | None = None) -> bytes:
     started = perf_counter_ns() if snapshot and stats is not None else None
     body = _encode_action(result, limit=_MAX_SNAPSHOT_BODY if snapshot else _MAX_ACTION_BODY)
     frame = b"".join((b'{"result":', body, b"}"))
@@ -445,7 +451,10 @@ def _encode_response(result: Action, *, snapshot: bool, stats: _TransportStatist
         compressed = _COMPRESSED_SNAPSHOT + zlib.compress(frame, level=1)
         if len(compressed) < plaintext_size:
             frame = compressed
-    if len(frame) > _MAX_ACTION_FRAME:
+    maximum = min(snapshot_limit, _MAX_SNAPSHOT_FRAME) if snapshot else _MAX_ACTION_FRAME
+    if len(frame) > maximum:
+        if snapshot and stats is not None:
+            stats.snapshot_responses_oversized += 1
         raise LinkError("application response too large")
     if started is not None:
         assert stats is not None
@@ -923,7 +932,9 @@ class _HostProtocol(_LinkProtocol):
         try:
             if not self.authorized or self.terminated or action.abandoned:
                 return
-            response = await self.host._run_action(self, action)
+            # This is the peer's initial limit for its own bidirectional
+            # streams. Older guests advertise the original 32 KiB window.
+            response = await self.host._run_action(self, action, self._quic._remote_max_stream_data_bidi_local)
             if response is not None and self.authorized and not self.terminated and not action.abandoned:
                 self._send_action_stream(stream_id, response, priority=not action.snapshot)
         finally:
@@ -1204,7 +1215,7 @@ class HostLink:
                         prior.transport.close()
                     await self._release_locked(protocol)
 
-    async def _run_action(self, protocol: _HostProtocol, action: _IncomingAction) -> bytes | None:
+    async def _run_action(self, protocol: _HostProtocol, action: _IncomingAction, snapshot_limit: int) -> bytes | None:
         guest_id = protocol.guest_id
         if self._closed or not protocol.authorized or guest_id is None or self._protocols.get(guest_id) is not protocol:
             return _encode_action({"error": "failed"})
@@ -1224,7 +1235,7 @@ class HostLink:
                     return None
                 if not isinstance(result, dict):
                     raise LinkError("invalid application callback response")
-                return _encode_response(result, snapshot=action.snapshot, stats=self._stats)
+                return _encode_response(result, snapshot=action.snapshot, snapshot_limit=snapshot_limit, stats=self._stats)
         except TimeoutError:
             return _encode_action({"error": "timed_out"})
         except Exception:
@@ -1553,7 +1564,8 @@ class _ClientProtocol(_LinkProtocol):
         action = self._actions.get(stream_id)
         if action is None or action.response.done():
             return
-        if len(action.body) + len(event.data) > _MAX_ACTION_FRAME:
+        limit = _MAX_SNAPSHOT_FRAME if action.snapshot else _MAX_ACTION_FRAME
+        if len(action.body) + len(event.data) > limit:
             action.response.set_exception(LinkError("application response too large"))
             self.close(error_code=_APP_ERROR, reason_phrase="application response too large")
             return

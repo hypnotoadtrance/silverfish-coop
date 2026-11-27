@@ -111,6 +111,33 @@ class BridgeWalkTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_compact_guest_save_retention_keeps_a_newer_world_sample(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        area, pawn, guest = "/Game/Maps/Camp", "Player_FP_C guest", "a" * 32
+        before = {"map": area, "state": "hosting", "sequence": 3, "native_guest_save_retention": True}
+        newer = {**before, "sequence": 4}
+        host = SimpleNamespace(last_game=before, last_seen=1, pending_guest_saves={}, queue_guest_save=Mock())
+        wrong_owner = False
+
+        async def reply(payload, timeout):
+            nonce, action, target, owner = payload.decode().rstrip("\n").split("\t")
+            self.assertEqual((action, target, owner), ("native-guest-save-retain", pawn, guest))
+            host.last_game = newer
+            if wrong_owner:
+                owner = "b" * 32
+            return (f"native-guest-save-retention-reply\t1\t{nonce}\t{area}\t{target}\t{owner}"
+                    "\taccepted\tretained exact co-op guest inventory\n")
+
+        bridge.local_bridge = Mock(command=AsyncMock(side_effect=reply))
+        self.assertTrue(await runtime.native_inventory.retain_guest_save(host, bridge, guest, pawn))
+        self.assertIs(host.last_game, newer)
+        self.assertEqual(host.last_seen, 1)
+        host.queue_guest_save.assert_called_once_with(guest, pawn, game=before)
+        wrong_owner = True
+        with self.assertRaisesRegex(RuntimeError, "requested guest"):
+            await runtime.native_inventory.retain_guest_save(host, bridge, guest, pawn)
+        host.queue_guest_save.assert_called_once()
+
     async def test_host_aim_reply_does_not_replace_a_newer_checkpoint_observation(self):
         avatar = runtime.native_player_avatar
         area, epoch = "/Game/Maps/Camp", "a" * 32

@@ -4105,6 +4105,14 @@ class Bridge:
                 if receipt[2] != "accepted":
                     raise RuntimeError(receipt[3] or f"The game declined the {action} command")
                 return {"ack": {"id": receipt[1], "result": receipt[2], "message": receipt[3]}}
+            if action == "native-guest-save-retain" and raw.startswith("native-guest-save-retention-reply\t"):
+                row = raw[:-1].split("\t") if raw.endswith("\n") and "\n" not in raw[:-1] else []
+                if (len(row) != 8 or row[:3] != ["native-guest-save-retention-reply", "1", fields[0]]
+                        or row[4:6] != list(fields[2:]) or not valid_campaign_package(row[3])):
+                    raise RuntimeError("The retention receipt did not match the requested guest")
+                if row[6] != "accepted" or row[7] != "retained exact co-op guest inventory":
+                    raise RuntimeError(row[7] or "The game did not retain the guest inventory")
+                return {"state": "hosting", "map": row[3], "native_guest_save_retained": fields[3]}
             if action == "native-loot-inspect" and raw.startswith("native-loot-inspection-reply\t"):
                 return _parse_local_stock_loot(raw, fields, opening=False)
             if action == "native-loot-open" and raw.startswith("native-loot-open-reply\t"):

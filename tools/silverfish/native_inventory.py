@@ -136,6 +136,13 @@ async def retain_guest_save(host, bridge, character: str, pawn: str, *, timeout=
     if ((snapshot.get("state"), snapshot.get("map")) != ("hosting", area)
             or allow_pawn_departure and host.zone_epoch != epoch):
         raise party.RuleError("native_guest_save_scope_changed")
+    if "native_guest_save_retained" in snapshot:
+        if snapshot["native_guest_save_retained"] != character:
+            raise RuntimeError("The guest retention reply belonged to another character")
+        # The game verified ownership when it pinned this save. The compact
+        # reply contains no replacement world or pawn observation.
+        host.queue_guest_save(character, pawn, game=before)
+        return True
     host.last_game, host.last_seen = snapshot, time.monotonic()
     if allow_pawn_departure and not any(row.get("name") == pawn for row in snapshot.get("pawns", {}).values()):
         ack = snapshot.get("ack", {})

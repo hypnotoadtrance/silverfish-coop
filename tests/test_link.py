@@ -6,6 +6,8 @@ import unittest
 import zlib
 from contextlib import suppress
 from pathlib import Path
+from random import Random
+from string import ascii_letters, digits
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -858,6 +860,59 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client_stats["snapshot_received_bytes"], host_stats["snapshot_encoded_bytes"])
         self.assertGreater(host_stats["snapshot_encode_total_ns"], 0)
         self.assertGreater(client_stats["snapshot_decode_total_ns"], 0)
+
+    async def test_large_mounted_world_baseline_uses_the_guest_window_and_keeps_other_actions_working(self):
+        older_request = self.guest_request("older")
+        await self.host_for_guests(self.request, older_request)
+        self.assertTrue((await self.connect_guest())["accepted"])
+        older = await start_client()
+        self.addAsyncCleanup(older.close)
+        configuration = link._configuration
+
+        def legacy_window(is_client):
+            options = configuration(is_client)
+            if is_client:
+                options.max_stream_data = link._MAX_ACTION_FRAME
+                options.max_data = link._MAX_ADMISSION + link._MAX_ACTION_FRAME * link._MAX_ACTIONS
+            return options
+
+        with patch.object(link, "_configuration", legacy_window):
+            self.assertTrue((await self.connect_guest(older_request, client=older))["accepted"])
+
+        rng = Random(80)
+
+        def slug(length):
+            return "".join(rng.choices(ascii_letters + digits, k=length))
+
+        items = {}
+        for index in range(96):
+            asset = "Item_" + slug(31)
+            actor = "/Game/Maps/Depot_P.Depot_P:PersistentLevel.Placed_" + slug(113) + f"_C_{index}"
+            items[actor] = {"quest": "Quest_" + slug(88), "class_path": f"/Mounted/{slug(78)}/{slug(80)}/{asset}.{asset}_C",
+                            "transform": {"position": [rng.uniform(-25000, 25000) for _ in range(3)],
+                                          "rotation": [0, index * 11 % 360, 0], "scale": [1, 1, 1]}}
+        world = {"ok": True, "gameplay": {"native_authored_quest_placements": {"items": items}}}
+        size = len(link._encode_response(world, snapshot=True))
+        self.assertGreater(size, link._MAX_ACTION_FRAME)
+        self.assertLess(size, link._MAX_SNAPSHOT_FRAME)
+
+        self.host._request_callback = lambda guest, payload: (
+            world if payload["action"] == "snapshot" else {"ok": True, "guest": guest})
+        replies = await asyncio.gather(
+            self.client.request({"action": "snapshot"}),
+            older.request({"action": "snapshot"}),
+            self.client.request({"action": "interact"}),
+            older.request({"action": "interact"}),
+            self.exchange(1200),
+            return_exceptions=True,
+        )
+        self.assertEqual(replies[0], world)
+        self.assertIsInstance(replies[1], LinkError)
+        self.assertEqual(replies[2:5], [{"ok": True, "guest": self.request["guest_id"]},
+                                        {"ok": True, "guest": older_request["guest_id"]}, None])
+        self.assertEqual(self.client.statistics()["snapshot_received_bytes"], size)
+        self.assertEqual(self.host.statistics()["snapshot_responses_oversized"], 1)
+        self.assertTrue(self.client.connected and older.connected)
 
     async def test_repeated_empty_fin_does_not_redispatch_a_completed_stream(self):
         self.application_handler = AsyncMock(return_value={"ok": True})
