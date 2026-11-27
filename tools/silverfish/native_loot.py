@@ -223,7 +223,16 @@ def _replenished(game, rolls):
 async def retire_replenished(host, bridge):
     if host.stopping or host.transitioning or host.native_checkpoint_unsafe or host.party.get("wipe"):
         return
-    expired = _replenished(host.last_game, host.party.get(STATE_KEY, {}))
+    game = host.last_game
+    candidates = _replenished(game, host.party.get(STATE_KEY, {}))
+    expired = {}
+    for crate, roll in candidates.items():
+        # The paced status scan can still hold the pre-open ready row after a
+        # compact open reply. Confirm the live crate before releasing its roll.
+        report = (await crate_diagnostic(bridge, game, crate))["native_loot_crate_diagnostic"]
+        if (report.get("scope") == "active" and report.get("looted") is False
+                and report.get("box") == "live" and report.get("collision") in (1, 3)):
+            expired[crate] = roll
     if not expired:
         return
     candidate = party.load_party(host.party)
