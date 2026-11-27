@@ -358,7 +358,7 @@ function fields.start(role, current)
             return
         end
         if seat == "host" and class == effects.blast_class and in_world(actor, world) then
-            local source = effects.observe_pipe_bomb_blast(actor)
+            local source = effects.observe_grenade_blast(actor)
             if source then flare.retire_detonated_bomb(source) end
         end
         if class == acid_pools.class_name then

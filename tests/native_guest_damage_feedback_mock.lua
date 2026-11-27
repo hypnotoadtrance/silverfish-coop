@@ -49,8 +49,9 @@ package.loaded.guest_save = {matches = function(pawn) return pawn == guest or pa
 package.loaded.native_save_scope, package.loaded.native_voice = {}, {}
 function StaticFindObject() return object() end
 function RegisterHook(path, callback) hooks[path] = callback end
-function RegisterBeginPlayPreHook() end
-function RegisterBeginPlayPostHook() end
+local begin, finished
+function RegisterBeginPlayPreHook(fn) begin = fn end
+function RegisterBeginPlayPostHook(fn) finished = fn end
 
 local feedback = require("native_damage_feedback")
 local hosting = true
@@ -94,6 +95,23 @@ assert(by_victim[guest:GetFullName()] == 2 and by_victim[other_guest:GetFullName
 state.guests = {{pawn = guest}}
 feedback.sync(state, "hosting")
 assert(#rows() == 2)
+
+local flash = object({Player = guest, Durration = 4.5, LookingAtIt = true})
+local flash_class = name("BlueprintGeneratedClass /Game/Classes/Player/PlayerAssets/PPActor_FlashBang_BP.PPActor_FlashBang_BP_C")
+function flash:GetClass() return flash_class end
+function flash:GetWorld() return area end
+function flash:HasAuthority() return true end
+function flash:SetLifeSpan(seconds) self.retire = seconds end
+flash.PostProcess_FX = object({bEnabled = true, GetOwner = function() return flash end})
+begin(param(flash))
+assert(not flash.LookingAtIt and not flash.PostProcess_FX.bEnabled)
+finished(param(flash))
+assert(flash.retire == .03 and #rows() == 3)
+local cue = rows()[3]
+assert(cue[3] == guest:GetFullName() and cue[4] == 4.5 and cue[5] == 1 and cue[8] == 32)
+local tinnitus = param(name("SoundWave /Game/Assets/Sounds/WAVs/Tinnitus_FadeIn.Tinnitus_FadeIn"))
+assert(volume(guest, tinnitus) == 0 and volume(host, tinnitus) == 1)
+assert(save.PlayerHealth == 80 and host_save.PlayerHealth == 99)
 
 hosting = false
 feedback.sync(state, "ready")

@@ -2554,6 +2554,20 @@ async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str)
                         record["detonation_cue"], = cues
                         break
                     await asyncio.sleep(.05)
+        if kind == "flashbang":
+            async with asyncio.timeout(6):
+                while not (cues := [row for row in await resident_events(guest_run, guest_frame)
+                                    if row["event"] == "native_flashbang_blast_played" and row["time_unix"] >= started]):
+                    await asyncio.sleep(.05)
+            record["detonation_cue"], = cues
+            started = time.time()
+            assert await probe(host, "flash-at-guest", kind) == "stock flashbang detonated by the guest"
+            async with asyncio.timeout(6):
+                while not (feedback := [row for row in await resident_events(guest_run, guest_frame)
+                                        if row["event"] == "native_guest_flashbang_feedback_played"
+                                        and row["time_unix"] >= started]):
+                    await asyncio.sleep(.05)
+            record["guest_feedback"], = feedback
         verified[f"{side}_{kind}"] = record
         for seat in (host, guest):
             assert await probe(seat, "disarm", kind) == "disarmed"

@@ -172,6 +172,29 @@ local function run(action, kind, arg)
         return "reset"
     end
     if action == "stage" then return stage_bolt(pawn, world, arg) end
+    if action == "flash-at-guest" and kind == "flashbang" then
+        local guest = stock_owner(pawn, world, "guest")
+        local origin = guest:K2_GetActorLocation()
+        local trace = asset("/Script/Engine.Default__KismetSystemLibrary")
+        local color = {R = 0, G = 0, B = 0, A = 1}
+        local point
+        for _, dir in ipairs({{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) do
+            local probe = {X = origin.X + dir[1] * 120, Y = origin.Y + dir[2] * 120, Z = origin.Z}
+            if not trace:LineTraceSingle(guest, origin, probe, 0, true, {guest}, 0, {}, true, color, color, 0) then
+                point = probe
+                break
+            end
+        end
+        assert(point, "could not find a clear flash point near the guest")
+        local statics = asset("/Script/Engine.Default__GameplayStatics")
+        local class = asset(projectile_folder .. "FlashBang_Projectile_BP.FlashBang_Projectile_BP_C")
+        local transform = {Translation = point, Rotation = {X = 0, Y = 0, Z = 0, W = 1},
+            Scale3D = {X = 1, Y = 1, Z = 1}}
+        local actor = statics:BeginDeferredActorSpawnFromClass(pawn, class, transform, 1, pawn, 0)
+        assert(valid(actor) and same(statics:FinishSpawningActor(actor, transform, 0), actor))
+        actor:Detonate()
+        return "stock flashbang detonated by the guest"
+    end
     local name = profile[1]
     local class = asset(folder .. name .. "." .. name .. "_C")
     if action == "charges" then

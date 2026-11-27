@@ -22,6 +22,8 @@ local assets = {
         "/Game/Assets/Sounds/CUEs/Blast_Cues/Teleport_Cue.Teleport_Cue"},
 }
 assets.pipebomb = assets.blast
+assets.flashbang = {"/Game/Assets/PFX/FX_Blast_FlashBang.FX_Blast_FlashBang",
+    assets.canister[2], assets.blast[3]}
 assets.fueldrum = assets.blast
 assets.fixedtank = assets.blast
 assets.powerbox = {assets.electrode[1], assets.electrode[2], assets.blast[3]}
@@ -60,8 +62,9 @@ for _, spec in pairs(observer_blasts) do
         assets.vortex[2], assets.blast[3]}
     audio_range[spec.kind] = audio_range.blast
 end
-local pipe_bomb = "BlueprintGeneratedClass /Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/PipeBomb_Projectile_BP.PipeBomb_Projectile_BP_C"
+local grenade_base = "/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/GrenadeProjectile_Master_BP.GrenadeProjectile_Master_BP_C"
 audio_range.pipebomb = audio_range.blast
+audio_range.flashbang = audio_range.blast
 local blasts = {starburst = "blast", vortex = "vortex", electrode = "electrode"}
 effects.blast_class = "BlueprintGeneratedClass /Game/Classes/Actors/ExplosionActor_BP.ExplosionActor_BP_C"
 local history, pending, serial, seen, visit = {}, {}, 0, {}, nil
@@ -172,16 +175,26 @@ function effects.observe_fixed_blast(cue, point, pfx, sfx, scale, volume, attenu
     end
 end
 
-function effects.observe_pipe_bomb_blast(actor)
+function effects.observe_grenade_blast(actor)
     if not actor:HasAuthority() then return end
     local sources = actor["Actors to Ignore"]
     local count = sources and sources:GetArrayNum() or 0
     if count < 1 or count > 8 then return end
+    local particle = actor.PFX
+    if not valid(particle) then return end
+    local name = particle:GetFullName()
+    local kind
+    for _, cue in ipairs({"pipebomb", "flashbang"}) do
+        if name == "NiagaraSystem " .. assets[cue][1] then kind = cue break end
+    end
+    if not kind then return end
+    local base = StaticFindObject(grenade_base)
+    if not valid(base) then return end
     for index = 1, count do
         local source = sources[index]
-        if valid(source) and source:HasAuthority() and source:GetClass():GetFullName() == pipe_bomb
+        if valid(source) and source:HasAuthority() and source:IsA(base)
             and valid(source:GetWorld()) and source:GetWorld():GetAddress() == actor:GetWorld():GetAddress() then
-            effects.observe_fixed_blast("pipebomb", actor:K2_GetActorLocation(), actor.PFX, actor.SFX, actor["PFX Scale"],
+            effects.observe_fixed_blast(kind, actor:K2_GetActorLocation(), particle, actor.SFX, actor["PFX Scale"],
                 actor["SFX Vol"], actor["Attenuation Settings"])
             return source
         end

@@ -28,8 +28,9 @@ GLASS_THREAD = "glassthread"
 FIXED_BREAK_CUES = (*PROP_BREAK_CUES, GLASS_THREAD)
 KINDS = {"charge": 4000, "blast": 500100, "vortex": 500100, "electrode": 8100, "canister": 500100, "wandering": 500100,
          **dict.fromkeys(FIXED_BREAK_CUES, 8000),
-         **dict.fromkeys(("fueldrum", "pipebomb", *FIXED_CUES, *OBSERVER_CUES), 500100)}
-CUE_EVENTS = {"pipebomb": "native_pipe_bomb_effect_played", "vortex": "native_vortex_effect_played", "electrode": "native_electrode_effect_played",
+         **dict.fromkeys(("fueldrum", "pipebomb", "flashbang", *FIXED_CUES, *OBSERVER_CUES), 500100)}
+CUE_EVENTS = {"pipebomb": "native_pipe_bomb_effect_played", "flashbang": "native_flashbang_blast_played",
+              "vortex": "native_vortex_effect_played", "electrode": "native_electrode_effect_played",
               "wandering": "native_wandering_teleport_effect_played", "bottle": "native_bottle_break_played",
               "canister": "native_canister_effect_played", "fueldrum": "native_fuel_drum_effect_played",
               GLASS_THREAD: "native_glass_thread_snap_played",

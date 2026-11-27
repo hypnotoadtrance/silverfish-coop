@@ -8,9 +8,13 @@ local damage_path = "/Game/Classes/Player/PlayerAssets/PPActor_Damage_BP.PPActor
 local damage_class = "BlueprintGeneratedClass " .. damage_path
 local psyche_path = "/Game/Classes/Player/PlayerAssets/PPActor_PsyAttack_BP.PPActor_PsyAttack_BP_C"
 local psyche_class = "BlueprintGeneratedClass " .. psyche_path
+local flash_path = "/Game/Classes/Player/PlayerAssets/PPActor_FlashBang_BP.PPActor_FlashBang_BP_C"
+local flash_class = "BlueprintGeneratedClass " .. flash_path
+local tinnitus = "SoundWave /Game/Assets/Sounds/WAVs/Tinnitus_FadeIn.Tinnitus_FadeIn"
 local dizzy_path = "/Game/Classes/Player/CS_Dizzy.CS_Dizzy_C"
 local whisper_path = "/Game/Assets/Sounds/WAVs/Anomaly_Wav/Misc_Whisper.Misc_Whisper"
 local psyche_mask = 16
+local flash_mask = 32
 -- Stock DealDamage passes the difference between two world positions to the overlay.
 local hit_offset_limit = 1e9
 local shake_path = "/Game/Classes/Player/CS_Jumping.CS_Jumping_C"
@@ -166,7 +170,8 @@ function feedback.start(is_host)
     RegisterHook("/Script/Engine.GameplayStatics:PlaySound2D", function(_, source, sound, volume)
         if not is_host() then return end
         local asset = sound:get()
-        if valid(asset) and stock_hit_cues[asset:GetFullName()] and remote_victim(source:get()) then
+        local name = valid(asset) and asset:GetFullName()
+        if name and (stock_hit_cues[name] or name == tinnitus) and remote_victim(source:get()) then
             volume:set(0.0)
         elseif type(SilverfishIsNativeShadowFeedbackTarget) == "function" then
             local actor = source:get()
@@ -188,9 +193,21 @@ function feedback.start(is_host)
         local actor = context:get()
         if not valid(actor) then return end
         local class = actor:GetClass():GetFullName()
-        if (class ~= damage_class and class ~= psyche_class) or not actor:HasAuthority() then return end
+        if (class ~= damage_class and class ~= psyche_class and class ~= flash_class) or not actor:HasAuthority() then return end
         local victim = actor.Player
-        if not valid(victim) or not guest_save.matches(victim) or victim:IsLocallyControlled() then return end
+        if not valid(victim) or not guest_save.matches(victim) or victim:IsLocallyControlled()
+            or not same(actor:GetWorld(), victim:GetWorld()) then return end
+        if class == flash_class then
+            local duration, looking = actor.Durration, actor.LookingAtIt
+            if remote_victim(victim) and finite(duration, 10) and duration >= 1 and type(looking) == "boolean" then
+                record(victim, duration, {X = looking and 1 or 0, Y = 0, Z = 0}, flash_mask)
+            end
+            -- Stock uses AddToViewport for a direct flash. Prevent that UI on the host's seat.
+            actor.LookingAtIt = false
+            mute_post_process(actor)
+            pending[#pending + 1] = {actor = actor}
+            return
+        end
         local psyche = class == psyche_class
         if psyche and not shadow_target(victim) then return end
         local world, controller = actor:GetWorld(), victim.Controller
@@ -220,6 +237,23 @@ function feedback.start(is_host)
             effect.victim:ClientStartCameraShake(effect.shake, effect.magnitude, 0, {Pitch = 0, Yaw = 0, Roll = 0})
         end
     end)
+end
+
+local function show_flash(state, pawn, duration, looking)
+    local statics, class = StaticFindObject(statics_path), StaticFindObject(flash_path)
+    if not valid(class) then LoadAsset(flash_path); class = StaticFindObject(flash_path) end
+    if not valid(statics) or not valid(class) then return false end
+    local transform = {Translation = {X = 0, Y = 0, Z = 0},
+        Rotation = {X = 0, Y = 0, Z = 0, W = 1}, Scale3D = {X = 1, Y = 1, Z = 1}}
+    local actor = statics:BeginDeferredActorSpawnFromClass(pawn, class, transform, 1, pawn, 0)
+    if not valid(actor) or not same(actor:GetWorld(), state.world) or not same(actor:GetClass(), class) then return false end
+    actor.Player, actor.Durration, actor.LookingAtIt = pawn, duration, looking
+    local ok, finished = pcall(statics.FinishSpawningActor, statics, actor, transform, 0)
+    if not ok or not same(finished, actor) or not same(actor.Player, pawn) or not valid(actor.PostProcess_FX) then
+        if valid(actor) and not actor:IsActorBeingDestroyed() then actor:K2_DestroyActor() end
+        return false
+    end
+    return true
 end
 
 local function show_psyche(state, pawn, amount)
@@ -300,9 +334,10 @@ function feedback.command(fields, state, phase)
     local play_voice = fields[12]
     if math.type(id) ~= "integer" or id < 1 or id >= 2^53 or not finite(amount, 1000) or amount < 1
         or not finite(x, hit_offset_limit) or not finite(y, hit_offset_limit) or not finite(z, hit_offset_limit)
-        or math.type(mask) ~= "integer" or mask < 0 or mask > psyche_mask
+        or math.type(mask) ~= "integer" or mask < 0 or (mask > psyche_mask and mask ~= flash_mask)
         or (play_voice ~= "0" and play_voice ~= "1")
-        or (mask == psyche_mask and (play_voice ~= "0" or amount > 10 or x ~= 0 or y ~= 0 or z ~= 0)) then
+        or (mask >= psyche_mask and (play_voice ~= "0" or amount > 10 or y ~= 0 or z ~= 0
+            or (x ~= 0 and (mask ~= flash_mask or x ~= 1)))) then
         error("Guest hurt feedback cue unavailable", 0)
     end
     local scope = epoch .. "|" .. name
@@ -312,20 +347,27 @@ function feedback.command(fields, state, phase)
         visit, last_played, active_overlay = scope, {}, nil
         psyche_overlay = nil
     end
-    local psyche = mask == psyche_mask
-    if id <= (last_played[psyche] or 0) then return "guest hurt feedback already played" end
+    local kind = mask >= psyche_mask and mask or 0
+    if id <= (last_played[kind] or 0) then return "guest hurt feedback already played" end
     local health_before = save.PlayerHealth
-    if psyche then
+    if kind == flash_mask then
+        if not show_flash(state, pawn, amount, x == 1) or save.PlayerHealth ~= health_before then
+            error("Guest flashbang feedback readback failed", 0)
+        end
+        last_played[kind] = id
+        return "guest flashbang feedback played"
+    end
+    if kind == psyche_mask then
         if not show_psyche(state, pawn, amount) or save.PlayerHealth ~= health_before then
             error("Guest psychic feedback readback failed", 0)
         end
-        last_played[psyche] = id
+        last_played[kind] = id
         return "guest hurt feedback played"
     end
     local shown = show_overlay(state, pawn, {X = x, Y = y, Z = z}, amount)
     if not shown or save.PlayerHealth ~= health_before then error("Guest hurt feedback readback failed", 0) end
     -- The overlay is committed. An audio error must not replay the visual or a cue that already played.
-    last_played[psyche] = id
+    last_played[kind] = id
     voice.local_feedback(pawn, function()
         for _, kind in ipairs(hit_sounds) do
             if mask & kind[1] ~= 0 then pawn:DmgSfx({[kind[2]] = 4}) end
