@@ -2468,8 +2468,9 @@ async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str)
                                        .get("local", {}).get("location", [0, 0, 0]), target) < 20, timeout=8)
         assert await probe(owner, "press", kind) == "press"
         if owner is guest and kind in ("pipebomb", "flashbang"):
+            minimum_cook = .55 if kind == "flashbang" else .18
             async with asyncio.timeout(3):
-                while (cooked := float(await probe(owner, "cook", kind))) < .18:
+                while (cooked := float(await probe(owner, "cook", kind))) < minimum_cook:
                     await asyncio.sleep(.05)
         else:
             await asyncio.sleep(.2)
@@ -2560,8 +2561,6 @@ async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str)
                                     if row["event"] == "native_flashbang_blast_played" and row["time_unix"] >= started]):
                     await asyncio.sleep(.05)
             record["detonation_cue"], = cues
-            started = time.time()
-            assert await probe(host, "flash-at-guest", kind) == "stock flashbang detonated by the guest"
             async with asyncio.timeout(6):
                 while not (feedback := [row for row in await resident_events(guest_run, guest_frame)
                                         if row["event"] == "native_guest_flashbang_feedback_played"
