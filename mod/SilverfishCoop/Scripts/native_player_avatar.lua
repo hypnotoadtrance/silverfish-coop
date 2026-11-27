@@ -762,6 +762,7 @@ local function aim_head(entry, pitch, yaw, now, lean_changed, math_api)
                 aim and aim.Pitch or pitch, aim and aim.Yaw or yaw, aim and aim.Roll or 0) == true) then
             entry.head_pivot:K2_SetWorldRotation(aim or {Pitch = pitch, Yaw = yaw, Roll = 0}, false, {}, true)
         end
+        character_view.update_eye_direction(entry)
         entry.head_roll_pending = true
         previous = previous or {}
         previous.pitch, previous.yaw, previous.time = pitch, yaw, now

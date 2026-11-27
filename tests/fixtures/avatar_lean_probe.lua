@@ -16,7 +16,7 @@ local input_root = "/Game/Classes/Player/Player_Inputs/"
 local subsystem_class = "/Script/EnhancedInput.EnhancedInputLocalPlayerSubsystem"
 local sides = {left = {"IA_Lean_Left", 3}, right = {"IA_Lean_Right", 10}}
 local input_vector = {X = 1, Y = 0, Z = 0}
-local trial, last, hooks_installed
+local trial, last, hooks_installed, gaze_start
 
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -255,6 +255,38 @@ local function answer(id, result, rows, events)
     file:close()
 end
 
+local function gaze(id, operation, now)
+    local run = begin(id, "left", "solver", now, 1)
+    if operation == "gazestate" then
+        local meshes = run.remote:K2_GetComponentsByClass(StaticFindObject("/Script/Engine.StaticMeshComponent"))
+        for index = 1, #meshes do
+            local head = unwrap(meshes[index])
+            if valid(head) and same(head:GetAttachParent(), run.head) then
+                local slot = head:GetMaterialIndex(FName("Eyes", EFindName.FNAME_Find))
+                if slot >= 0 then
+                    local eyes = head:GetMaterial(slot)
+                    assert(exact(eyes, "/Script/Engine.MaterialInstanceDynamic"), "remote eye material missing")
+                    local forward = head:GetForwardVector()
+                    local color = eyes:K2_GetVectorParameterValue(FName("LookVector", EFindName.FNAME_Find))
+                    return table.concat({forward.X, forward.Y, forward.Z, color.R, color.G, color.B, color.A}, "\t")
+                end
+            end
+        end
+        error("remote eye slot missing")
+    elseif operation == "gazeturn" then
+        assert(not gaze_start, "remote gaze test already turned")
+        gaze_start = {pawn = run.pawn, actor = run.pawn:K2_GetActorRotation(), control = run.controller:GetControlRotation()}
+        local rotation = {Pitch = 20, Yaw = gaze_start.actor.Yaw + 90, Roll = 0}
+        run.pawn:K2_SetActorRotation({Pitch = 0, Yaw = rotation.Yaw, Roll = 0}, false)
+        run.controller:SetControlRotation(rotation)
+    elseif gaze_start and same(gaze_start.pawn, run.pawn) then
+        run.pawn:K2_SetActorRotation(gaze_start.actor, false)
+        run.controller:SetControlRotation(gaze_start.control)
+        gaze_start = nil
+    end
+    return operation
+end
+
 LoopInGameThreadWithDelay(50, function()
     local now = os.clock()
     if trial then
@@ -283,6 +315,12 @@ LoopInGameThreadWithDelay(50, function()
     local request = file:read(64)
     file:close()
     local id, operation = (request or ""):match("^(%x+)\t([a-z]+)\n$")
+    if id and #id == 32 and id ~= last and (operation == "gazestate" or operation == "gazeturn" or operation == "gazerestore") then
+        last = id
+        local ok, result = pcall(gaze, id, operation, now)
+        answer(id, ok and "gaze\t" .. result or "error\t" .. tostring(result))
+        return false
+    end
     local solver_side = operation and operation:match("^solver([a-z]+)$")
     local long_side = operation and operation:match("^hold([a-z]+)$")
     local side, drive = solver_side or long_side or operation, solver_side and "solver" or "input"

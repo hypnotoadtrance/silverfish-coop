@@ -32,4 +32,27 @@ character[head] = mesh("HeadB")
 assert(view.observe(character, sample):find("HeadB.HeadB", 1, true) and name_reads == 2)
 character[head], character[skin], character[eye] = nil, nil, 21
 assert(view.observe(character, sample) == "-|-|-|-|-|-|-|-|-|-")
+
+EFindName = {FNAME_Find = 0}
+FName = function(name) return name end
+local direction, updates = {X = 1, Y = 0, Z = 0}, {}
+local avatar = {
+    head = {GetForwardVector = function() return direction end},
+    eye_material = {
+        IsValid = function() return true end,
+        SetVectorParameterValue = function(_, parameter, value)
+            assert(parameter == "LookVector" and value.A == 1)
+            updates[#updates + 1] = value
+        end,
+    },
+}
+view.update_eye_direction(avatar)
+view.update_eye_direction(avatar)
+assert(#updates == 1 and updates[1].R == 1 and updates[1].G == 0)
+direction = {X = 0, Y = -1, Z = .2}
+view.update_eye_direction(avatar)
+assert(#updates == 2 and updates[2].R == 0 and updates[2].G == -1 and updates[2].B == .2)
+avatar.eye_material = nil
+view.update_eye_direction(avatar)
+assert(#updates == 2)
 print("Appearance sampling reuses unchanged values and reports live mesh, color and eye changes")

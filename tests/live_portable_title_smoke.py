@@ -8236,8 +8236,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         return await verify_stock_dock_gate(host, guest)
 
     async def check_lean(host, guest, pawn):
-        from avatar_lean_probe import verify_lean
+        from avatar_lean_probe import verify_eye_direction, verify_lean
         proof = await verify_lean(host, guest, pawn)
+        proof["eye_direction"] = await verify_eye_direction(host, guest)
         if crossroads_profile:
             from portable_crossroads_profile import compare_lean_reader
             samples = await asyncio.gather(*(compare_lean_reader(seat, portable_probe_command) for seat in (host, guest)))

@@ -19,6 +19,7 @@ local material_root = npc_root .. "NPC_Materials/"
 local model_root = "/Game/Classes/Player/PlayerAssets/HelmetMeshes/"
 local eye_tracker = npc_root .. "NPM_EyeTracker_BP.NPM_EyeTracker_BP_C"
 local long_tail = npc_root .. "NPC_Tails/SK_Tail_01.SK_Tail_01"
+local look_vector
 
 local function valid(object)
     return object ~= nil and object:IsValid()
@@ -169,6 +170,18 @@ local function paint(component, index, source, parameter, value, pattern_param, 
     if not valid(material) then error("Stock character material could not be instanced") end
     if value then material:SetVectorParameterValue(FName(parameter, EFindName.FNAME_Find), value) end
     if valid(pattern) then material:SetTextureParameterValue(FName(pattern_param, EFindName.FNAME_Find), pattern) end
+    return material
+end
+
+function view.update_eye_direction(entry)
+    if not valid(entry.eye_material) then return end
+    local forward = entry.head:GetForwardVector()
+    local x, y, z = forward.X, forward.Y, forward.Z
+    if x == entry.eye_x and y == entry.eye_y and z == entry.eye_z then return end
+    look_vector = look_vector or FName("LookVector", EFindName.FNAME_Find)
+    -- The stock eye tracker passes its world forward vector as a linear color.
+    entry.eye_material:SetVectorParameterValue(look_vector, {R = x, G = y, B = z, A = 1})
+    entry.eye_x, entry.eye_y, entry.eye_z = x, y, z
 end
 
 local function tint(component, colors)
@@ -231,6 +244,7 @@ function view.apply(entry, cosmetics, model, asset, add_component)
     local changed = entry.appearance ~= model
     if changed then
         view.clear(entry)
+        entry.eye_material, entry.eye_x, entry.eye_y, entry.eye_z = nil, nil, nil, nil
         local face = checked_asset(paths[1], 1, asset) or entry.default_head
         for index = 0, entry.head:GetNumMaterials() - 1 do entry.head:SetMaterial(index, nil) end
         set_mesh(entry.head, face, false)
@@ -242,8 +256,9 @@ function view.apply(entry, cosmetics, model, asset, add_component)
             paint(entry.head, 0, face_base, "Color", colors[1], "ScalePattern", pattern)
         end
         local eyes = entry.head:GetMaterialIndex(FName("Eyes", EFindName.FNAME_Find))
-        if eyes >= 0 and (colors[3] or cosmetics.eye) then
+        if eyes >= 0 then
             local eyes_base = asset(material_root .. "M_NPC_Eyes_Master.M_NPC_Eyes_Master")
+            local eyes_source = entry.head:GetMaterial(eyes)
             local tracker = asset(eye_tracker)
             local defaults = valid(tracker) and tracker:GetCDO()
             local outlines = valid(defaults) and defaults.Eye_Outlines
@@ -252,7 +267,11 @@ function view.apply(entry, cosmetics, model, asset, add_component)
             if type(outline) == "userdata" and type(outline.type) == "function" and outline:type() == "RemoteUnrealParam" then
                 outline = outline:get()
             end
-            if valid(eyes_base) then paint(entry.head, eyes, eyes_base, "IrisColor", colors[3], "Eye_Outline", outline) end
+            local source_base = valid(eyes_source) and eyes_source:GetBaseMaterial() or nil
+            if valid(eyes_base) and valid(source_base) and source_base:GetAddress() == eyes_base:GetAddress() then
+                entry.eye_material = paint(entry.head, eyes, eyes_source, "IrisColor", colors[3], "Eye_Outline", outline)
+                view.update_eye_direction(entry)
+            end
         end
         local plume = checked_asset(paths[2], 2, asset)
         if plume then

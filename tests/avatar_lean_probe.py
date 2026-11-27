@@ -140,6 +140,46 @@ def input_diagnostic(result):
     return {"verified": status == "verified", "status": status, "trace": result}
 
 
+async def verify_eye_direction(host, guest):
+    async def probe(seat, action):
+        ticket = uuid.uuid4().hex
+        root = seat.bridge.directory
+        runtime.write_text(root / "avatar-lean-probe-command.tsv", f"{ticket}\t{action}\n", newline="\n")
+        async with asyncio.timeout(6):
+            while True:
+                try:
+                    reply = (root / "avatar-lean-probe-reply.tsv").read_text(encoding="utf-8")
+                except (FileNotFoundError, PermissionError):
+                    reply = ""
+                if reply.startswith(f"{ticket}\t") and reply.endswith("\n"):
+                    _, kind, *fields = reply.rstrip("\n").split("\t")
+                    assert kind == "gaze", fields
+                    return fields
+                await asyncio.sleep(.04)
+
+    async def read(observer):
+        values = list(map(float, await probe(observer, "gazestate")))
+        forward, color, alpha = values[:3], values[3:6], values[6]
+        assert math.isclose(math.hypot(*forward), 1, abs_tol=.001), values
+        return forward, color, alpha
+
+    report = {}
+    for label, owner, observer in (("host", host, guest), ("guest", guest, host)):
+        before, color, alpha = await read(observer)
+        assert math.dist(before, color) < .002 and alpha == 1, (before, color, alpha)
+        assert await probe(owner, "gazeturn") == ["gazeturn"]
+        try:
+            async with asyncio.timeout(5):
+                while True:
+                    turned, color, alpha = await read(observer)
+                    if math.dist(before, turned) > .8 and math.dist(turned, color) < .002 and alpha == 1:
+                        break
+        finally:
+            assert await probe(owner, "gazerestore") == ["gazerestore"]
+        report[label] = {"before": before, "turned": turned, "look_vector": color, "alpha": alpha}
+    return report
+
+
 async def verify_lean(host, guest, pawn, *, projected=True, drive="combined"):
     if drive not in {"combined", "input", "solver"}:
         raise ValueError("Use combined, input, or solver lean verification")
