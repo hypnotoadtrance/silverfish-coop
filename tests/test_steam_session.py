@@ -315,6 +315,7 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
                         try:
                             await finish.wait()
                         finally:
+                            live_game = None
                             control.status(role="client", active=False, state="stopped")
 
             bridge.snapshot = file_snapshot

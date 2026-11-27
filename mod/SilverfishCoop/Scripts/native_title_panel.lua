@@ -1066,14 +1066,15 @@ local function update_title()
         report = nil
         return
     end
+    local form = session.form
+    -- A worker response can replace a stock button before its queued press runs.
+    if surface.press_pending(session.view) or (session.solo_back and session.solo_back.pending)
+        or (form and form.role == "join" and surface.press_pending(form.draft.view)) then return end
     poll_steam_invite(context)
     if session.browser then poll_public_lobbies(session.browser) end
     surface.sync(session.view)
-    local form = session.form
-    if form and form.manager and not surface.press_pending(session.view) then
-        -- A catalog refresh can replace the stock button before its queued press runs.
-        form.management.poll(form.manager)
-    end
+    form = session.form
+    if form and form.manager then form.management.poll(form.manager) end
     if form and form.role == "join" then
         local now = os.time()
         if form.steam_nonce and not form.steam_opened and form.steam_opened_at ~= now then

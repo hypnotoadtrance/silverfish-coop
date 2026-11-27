@@ -806,7 +806,13 @@ tick()
 assert(display.buttons["steam-pick:1"].label == "New Host", "Accept the latest search through Steam's search deadline")
 click("steam-pick:1")
 assert(display.note == "Connecting through Steam…" and display.focus == "steam-back")
-click("steam-back")
+local connecting = display
+assert(button("steam-back"))
+now = now + 1
+files[steam_join] = ("1\t%s\t28951\t%d\tbrowser\n"):format(latest_search, now + 20)
+tick()
+assert(display == connecting, "An arriving lobby must leave a queued Back available")
+drain()
 assert(display.title == "Multiplayer" and display.focus == "steam-public")
 assert(files[browse_cancel] == ("1\t%s\tcancel\n"):format(latest_search))
 files[browse_request], files[browse_cancel], files[join_request], files[steam_opened] = nil, nil, nil, nil
@@ -834,3 +840,36 @@ assert(display.title == "Multiplayer" and display.focus == "host" and display.bu
 assert(display.note:find("last save", 1, true))
 click("modes")
 assert(display.title == "Project Silverfish" and not display.note)
+
+files[browse_request], files[browse_response], files[steam_join] = nil, nil, nil
+files[join_request], files[join_response] = nil, nil
+click("multiplayer")
+next_guid = next_guid + 1
+click("steam-public")
+local searching = display
+assert(button("steam-back"))
+files[browse_request] = nil
+files[browse_response] = ("2\t%s\t%s\tready\t1\nLate Host\trc-abcdef0\t1\n")
+    :format(recovery_generation, operation_id())
+tick()
+assert(display == searching, "A search response must leave a queued Back available")
+drain()
+assert(display.title == "Multiplayer" and display.focus == "steam-public")
+tick()
+assert(display.title == "Multiplayer")
+
+click("join")
+assert(join("address", "127.0.0.2") and join("port", "28952"))
+next_guid = next_guid + 1
+click("connect")
+local joining = display
+assert(button("back"))
+files[join_request] = nil
+files[join_response] = ("1\t%s\t%s\tok\t%s\t1\n%s\tLate character\n")
+    :format(recovery_generation, operation_id(), import_id, original_character)
+tick()
+assert(display == joining, "A character list must leave a queued Back available")
+drain()
+assert(display.title == "Multiplayer" and display.focus == "join")
+tick()
+assert(display.title == "Multiplayer", "A cancelled join must stay closed")
