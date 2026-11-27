@@ -122,18 +122,29 @@ def valid_take_ammo_result(weapon, ammo, rounds):
             and compatible_magazine_round(magazine.ammo, round_type))
 
 
-async def retain_guest_save(host, bridge, character: str, pawn: str, *, timeout=3) -> bool:
+async def retain_guest_save(host, bridge, character: str, pawn: str, *, timeout=3, allow_pawn_departure=False) -> bool:
     """Keep the guest's working save object until a paired save is requested."""
     if host.last_game.get("native_guest_save_retention") is not True:
         return False
     retained = host.pending_guest_saves.get(character)
     if retained and retained[0] == pawn:
         return True
-    area = host.last_game["map"]
+    before = host.last_game
+    area = before["map"]
+    epoch = host.zone_epoch if allow_pawn_departure else None
     snapshot = await bridge.command("native-guest-save-retain", pawn, character, timeout=timeout)
-    if (snapshot.get("state"), snapshot.get("map")) != ("hosting", area):
+    if ((snapshot.get("state"), snapshot.get("map")) != ("hosting", area)
+            or allow_pawn_departure and host.zone_epoch != epoch):
         raise party.RuleError("native_guest_save_scope_changed")
     host.last_game, host.last_seen = snapshot, time.monotonic()
+    if allow_pawn_departure and not any(row.get("name") == pawn for row in snapshot.get("pawns", {}).values()):
+        ack = snapshot.get("ack", {})
+        scope = before.get("native_guest_save_members", {}).get(pawn) or before.get("native_guest_save", {})
+        if (before.get("state") == "hosting" and (scope.get("state"), scope.get("pawn")) == ("bound", pawn)
+                and (ack.get("result"), ack.get("message")) == ("accepted", "retained exact co-op guest inventory")):
+            # The exact save was pinned before the following stock frame lost the pawn.
+            host.queue_guest_save(character, pawn, game=before)
+            return True
     host.queue_guest_save(character, pawn)
     return True
 

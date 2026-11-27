@@ -481,7 +481,8 @@ class Host:
         # A timed-out reply may already have pinned this detached save. The
         # stock command can safely confirm the same binding once on a newer frame.
         try:
-            saved = await native_inventory.retain_guest_save(self, bridge, character, pawn, timeout=1)
+            saved = await native_inventory.retain_guest_save(self, bridge, character, pawn, timeout=1,
+                                                             allow_pawn_departure=True)
         except (OSError, RuntimeError, ValueError) as error:
             retry_after = sequence if not retrying and isinstance(error, TimeoutError) and type(sequence) is int else None
             self.guest_disconnect_retention_failures[guest_id] = _GuestRetentionFailure(visit, retry_after)
