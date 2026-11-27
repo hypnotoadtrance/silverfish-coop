@@ -61,7 +61,7 @@ class GuestInteractionLaneTests(unittest.IsolatedAsyncioTestCase):
             finish_report.set()
             await asyncio.wait_for(worker, 1)
 
-    async def test_ordinary_interact_finishes_before_an_earlier_crate_reply(self):
+    async def test_a_second_crate_and_ordinary_interact_finish_during_a_pending_crate_reply(self):
         waiting_for_host, release_roll, ordinary_done = asyncio.Event(), asyncio.Event(), asyncio.Event()
         client = service.Client.__new__(service.Client)
         client.stopping = client.needs_travel = client.server_transitioning = False
@@ -72,15 +72,21 @@ class GuestInteractionLaneTests(unittest.IsolatedAsyncioTestCase):
         client.control = SimpleNamespace(event=Mock())
         client.stock_door_requests = {}
         client.prop_carry = SimpleNamespace(poll_local_edges=Mock())
-        inputs = iter([b"crate press"])
+        presses = [(1, "crate", "pawn", "memory_input")]
         client.bridge = SimpleNamespace(
             local_bridge=object(), input_namespace=uuid.UUID(int=1),
-            stock_interaction_ready=lambda *, crates: not waiting_for_host.is_set() if crates else not ordinary_done.is_set(),
-            native_crate_inputs=lambda: list(inputs),
+            stock_interaction_ready=lambda *, crates: bool(presses) if crates else not ordinary_done.is_set(),
+            native_crate_inputs=lambda: [],
             interactions=Mock(return_value=[("pickup", "object")]),
         )
-        client.crate_intents = SimpleNamespace(take=Mock(return_value=[(1, "crate", "pawn", "memory_input")]))
-        lid_confirmed = asyncio.Event()
+
+        def take(_game, _inputs):
+            batch = presses.copy()
+            presses.clear()
+            return batch
+
+        client.crate_intents = SimpleNamespace(take=take)
+        lid_confirmed, second_crate_done = asyncio.Event(), asyncio.Event()
 
         async def project(_client, *, confirmed_crate=None):
             if confirmed_crate == "crate":
@@ -92,10 +98,13 @@ class GuestInteractionLaneTests(unittest.IsolatedAsyncioTestCase):
         roll = {"id": "roll", "map": "map", "crate": "crate"}
         client.gameplay = {service.native_loot.STATE_KEY: {"crate": roll}}
 
-        async def open_crate(_action, _operation, _crate):
-            waiting_for_host.set()
-            await release_roll.wait()
-            return {"native_loot_roll": roll}
+        async def open_crate(_action, _operation, crate):
+            if crate == "crate":
+                waiting_for_host.set()
+                await release_roll.wait()
+            else:
+                second_crate_done.set()
+            return {"native_loot_roll": {"id": "roll", "map": "map", "crate": crate}}
 
         async def pickup(_scope, _operation, _target):
             ordinary_done.set()
@@ -110,6 +119,10 @@ class GuestInteractionLaneTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(waiting_for_host.wait(), 1)
             ordinary_worker = asyncio.create_task(client.run_stock_interactions())
             await asyncio.wait_for(ordinary_done.wait(), 1)
+            presses.extend(((2, "crate", "pawn", "memory_input"), (3, "second", "pawn", "memory_input")))
+            await asyncio.wait_for(second_crate_done.wait(), 1)
+            self.assertEqual([call.args[2] for call in client.gameplay_action.await_args_list], ["crate", "second"])
+            self.assertFalse(release_roll.is_set())
             client.apply_stock_interaction.assert_awaited_once_with(("session", "visit", "map", "pawn"), "pickup", "object")
             self.assertTrue(all(not call.kwargs for call in projection.await_args_list))
             release_roll.set()

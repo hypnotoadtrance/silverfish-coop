@@ -85,6 +85,45 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host_frame["switches"][actor], off)
         client.transport.request.assert_awaited_once()
 
+    async def test_confirmed_loose_pickup_survives_an_older_snapshot_until_travel(self):
+        loose = service.native_loose_pickup
+        area, epoch = OBSERVATORY, "a" * 32
+        actor = f"{area}.Observitory_P:PersistentLevel.Case_Test_C_1"
+        zone = {"map": area, "epoch": epoch}
+        before = {loose.STATE: [], loose.QUEST_FRAME: {**zone, "items": {actor: {"quest": "Collect"}}},
+                  "host_world": {"clock": 37}}
+        requested, deliver = asyncio.Event(), asyncio.Event()
+
+        async def request(payload, *, timeout):
+            if payload["action"] == "snapshot":
+                requested.set()
+                await deliver.wait()
+                return {"ok": True, "zone": area, "zone_epoch": epoch, "gameplay": before,
+                        gameplay_snapshot.REVISION: "e" * 32, gameplay_snapshot.ROW_UPDATES: True}
+            self.assertEqual((payload["action"], payload["target"]), (loose.CLAIM, f"loose:{actor}@{epoch}"))
+            return {"ok": True, loose.PROOF: {**zone, "actor": actor}}
+
+        client = self.guest(AsyncMock(side_effect=request))
+        client.transport.connected = True
+        client.zone_epoch, client.expected_zone, client.host_session = epoch, area, "session"
+        client.last_game = {"state": "connected", "map": area}
+        await client.refresh_gameplay(project=False, wait=False)
+        await asyncio.wait_for(requested.wait(), .5)
+        pending = client.snapshot_request
+        await client.gameplay_action(loose.CLAIM, "b" * 32, "loose:" + actor, defer_pickup_cue=True)
+        self.assertEqual(client.gameplay[loose.STATE], [actor])
+        self.assertIs(client.snapshot_request, pending)
+        deliver.set()
+        await client.refresh_gameplay(project=False)
+        self.assertEqual(client.gameplay[loose.QUEST_FRAME]["items"], {})
+        self.assertEqual(client.gameplay["host_world"]["clock"], 37)
+        self.assertEqual(client.gameplay[loose.STATE], [actor])
+        self.assertEqual(before[loose.STATE], [])
+        self.assertIn(actor, before[loose.QUEST_FRAME]["items"])
+        next_visit = {loose.STATE: []}
+        client.loose_pickup_view.reconcile(next_visit, ("session", "c" * 32, area))
+        self.assertEqual(next_visit[loose.STATE], [])
+
     async def test_pending_backpack_report_allows_world_updates_without_resending(self):
         drop, record = service.native_guest_drop, service.native_guest_drop_record
         started, release = asyncio.Event(), asyncio.Event()

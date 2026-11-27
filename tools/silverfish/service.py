@@ -5938,10 +5938,7 @@ class Client:
             if action == native_loose_pickup.CLAIM and isinstance(claimed, dict):
                 path = native_loose_pickup.target_path(target.partition("@")[0]) if target else None
                 if path and (claimed.get("map"), claimed.get("actor"), claimed.get("epoch")) == (area, path, epoch):
-                    await self.cancel_gameplay_snapshot()
-                    hidden = self.gameplay.setdefault(native_loose_pickup.STATE, [])
-                    if path not in hidden:
-                        hidden.append(path)
+                    self.loose_pickup_view.confirm(self.gameplay, (session, epoch, area), path)
             if target and (action == native_stock_door.ACTION or action in native_stock_door.PRY_ACTIONS.values()
                            or action == native_loot.LOCKPICK and native_stock_door.DELTA in reply):
                 actor = (target.split("@", 2)[1] if action == native_loot.LOCKPICK
@@ -6189,7 +6186,7 @@ class Client:
             except (ValueError, OSError, RuntimeError) as error:
                 self.control.event(event + "_rejected", operation_id=operation, sequence=sequence, reason=str(error))
 
-    async def service_crate_interaction(self, scope) -> None:
+    async def service_crate_interaction(self, scope, *, schedule=None) -> None:
         if not self.invite.get("native_loot_input"):
             return
         session, epoch = self.host_session, self.zone_epoch
@@ -6202,23 +6199,31 @@ class Client:
                 continue
             operation = uuid.uuid5(self.bridge.input_namespace,
                                    f"{session}:{epoch}:{self.invite['character_id']}:crate:{sequence}:{crate}").hex
-            try:
-                result = await self.open_stock_crate(scope, operation, crate, sequence,
-                                                     local_outcomes.get((sequence, crate)))
-                self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation,
-                                   crate=crate, input_source=source, **result)
-            except (ValueError, OSError, RuntimeError) as error:
-                self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, operation_id=operation,
-                                   crate=crate, input_source=source, reason=str(error))
-                if self.bridge.local_bridge is not None and self.stock_interaction_scope() == scope:
-                    with contextlib.suppress(OSError, RuntimeError, TimeoutError):
-                        await self.bridge.command("native-loot-crate-preview-cancel", crate, str(sequence),
-                                                  timeout=.3, update_status=False)
+            outcome = local_outcomes.get((sequence, crate))
+            if schedule is None:
+                await self.finish_crate_interaction(scope, operation, crate, sequence, source, outcome)
             else:
-                roll = self.gameplay.get(native_loot.STATE_KEY, {}).get(crate)
-                if (self.bridge.local_bridge is not None and self.stock_interaction_scope() == scope
-                        and roll is not None and roll == result.get("native_loot_roll")):
-                    self.crate_lids.prioritize(crate, scope)
+                schedule(scope, operation, crate, sequence, source, outcome)
+
+    async def finish_crate_interaction(self, scope, operation, crate, sequence, source, outcome):
+        if self.stock_interaction_scope() != scope:
+            return
+        try:
+            result = await self.open_stock_crate(scope, operation, crate, sequence, outcome)
+            self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation,
+                               crate=crate, input_source=source, **result)
+        except (ValueError, OSError, RuntimeError) as error:
+            self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, operation_id=operation,
+                               crate=crate, input_source=source, reason=str(error))
+            if self.bridge.local_bridge is not None and self.stock_interaction_scope() == scope:
+                with contextlib.suppress(OSError, RuntimeError, TimeoutError):
+                    await self.bridge.command("native-loot-crate-preview-cancel", crate, str(sequence),
+                                              timeout=.3, update_status=False)
+        else:
+            roll = self.gameplay.get(native_loot.STATE_KEY, {}).get(crate)
+            if (self.bridge.local_bridge is not None and self.stock_interaction_scope() == scope
+                    and roll is not None and roll == result.get("native_loot_roll")):
+                self.crate_lids.prioritize(crate, scope)
 
     async def open_stock_crate(self, scope, operation, crate, sequence, local_outcome=None):
         area, epoch = scope[2], scope[1]
@@ -6663,6 +6668,7 @@ class Client:
                     gameplay = self.gameplay_snapshots.read(reply)
                     self.stock_door_view.reconcile(gameplay, reply["zone"], reply["zone_epoch"])
                     self.stock_switch_view.reconcile(gameplay, reply["zone"], reply["zone_epoch"])
+                    self.loose_pickup_view.reconcile(gameplay, (self.host_session, reply["zone_epoch"], reply["zone"]))
                     self.gameplay = gameplay
                     viewer = reply.get("viewer_role")
                     if viewer in ("guest", "guest2", "guest3", "guest4"):
@@ -7290,10 +7296,40 @@ class Client:
             await self.project_world_loot()
 
     async def run_stock_crates(self) -> None:
-        while not self.stopping:
-            if self.bridge.stock_interaction_ready(crates=True):
-                await self.service_crate_interaction(self.stock_interaction_scope())
-            await asyncio.sleep(.012)
+        pending = {}
+        slots = asyncio.Semaphore(4)
+        visit = None
+
+        def schedule(scope, operation, crate, sequence, source, outcome):
+            if crate in pending:
+                return
+
+            async def settle():
+                async with slots:
+                    await self.finish_crate_interaction(scope, operation, crate, sequence, source, outcome)
+
+            pending[crate] = asyncio.create_task(settle())
+
+        try:
+            while not self.stopping:
+                scope = self.stock_interaction_scope()
+                if scope != visit:
+                    for request in pending.values():
+                        request.cancel()
+                    await asyncio.gather(*pending.values(), return_exceptions=True)
+                    pending.clear()
+                    visit = scope
+                for crate, request in tuple(pending.items()):
+                    if request.done():
+                        del pending[crate]
+                        await request
+                if self.bridge.stock_interaction_ready(crates=True):
+                    await self.service_crate_interaction(scope, schedule=schedule)
+                await asyncio.sleep(.012)
+        finally:
+            for request in pending.values():
+                request.cancel()
+            await asyncio.gather(*pending.values(), return_exceptions=True)
 
     async def dispatch_stock_interaction(self, scope, operation, target) -> None:
         if self.stock_interaction_scope() != scope:

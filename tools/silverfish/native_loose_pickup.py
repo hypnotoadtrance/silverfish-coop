@@ -254,6 +254,34 @@ class PickupView:
         self.phase = phase
         self.scope = None
         self.hidden = set()
+        self.confirmed_visit = None
+        self.confirmed = set()
+
+    def confirm(self, gameplay, visit, path):
+        if self.confirmed_visit != visit:
+            self.confirmed_visit = visit
+            self.confirmed.clear()
+        self.confirmed.add(path)
+        self.reconcile(gameplay, visit)
+
+    def reconcile(self, gameplay, visit):
+        if self.confirmed_visit != visit:
+            self.confirmed_visit = visit
+            self.confirmed.clear()
+        if not self.confirmed:
+            return
+        # The host only replenishes previously claimed loose stock on a later
+        # visit, so an older world frame cannot make these sources available.
+        hidden = gameplay.get(STATE)
+        if not isinstance(hidden, list):
+            hidden = ()
+        if not self.confirmed.issubset(hidden):
+            gameplay[STATE] = sorted(set(hidden) | self.confirmed)
+        frame = gameplay.get(QUEST_FRAME)
+        if (isinstance(frame, dict) and (frame.get("epoch"), frame.get("map")) == visit[1:]
+                and isinstance(items := frame.get("items"), dict) and self.confirmed.intersection(items)):
+            gameplay[QUEST_FRAME] = {**frame, "items": {path: item for path, item in items.items()
+                                                       if path not in self.confirmed}}
 
     async def present_claim(self, client, scope, claim, *, inventory):
         game, bridge = client.last_game, client.bridge
@@ -296,6 +324,11 @@ class PickupView:
         for mode, paths in updates:
             for index in range(0, len(paths), 64):
                 batch = paths[index:index + 64]
+                if (mode == "show" and self.confirmed
+                        and self.confirmed_visit == (service.host_session, service.zone_epoch, area)):
+                    batch = [path for path in batch if path not in self.confirmed]
+                    if not batch:
+                        continue
                 reply = await bridge.command(PROJECT, str(generation), mode, *batch, timeout=4)
                 if (reply.get("map"), reply.get("state"), reply.get(VIEW_SCOPE)) != (area, self.phase, generation):
                     raise RuntimeError("The loose pickup projection changed worlds")
