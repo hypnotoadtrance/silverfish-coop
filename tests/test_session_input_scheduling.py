@@ -924,3 +924,44 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         host.zone_epoch = "b" * 32
         host.publish_gameplay_change(transport)
         self.assertEqual(transport.send_gameplay_change.call_count, 2)
+
+    def test_host_notifies_for_loose_pickups_and_quest_visibility_edges(self):
+        host = service.Host.__new__(service.Host)
+        host.stopping = host.transitioning = host.native_checkpoint_unsafe = False
+        host.gameplay_change_scope = host.gameplay_change_state = None
+        host.game_link_connected = Mock(return_value=True)
+        host.zone_epoch = "a" * 32
+        host.stock_doors = native_stock_door.Interactions()
+        host.world_loot = service.native_world_loot.Projection()
+        host.guest_wallet_receipts = {}
+        host.party = {}
+        loose = service.native_loose_pickup
+        stock = {"state": "hosting", "map": OBSERVATORY}
+        host.last_game = {**stock, loose.QUEST_SOURCES: {}}
+        transport = Mock(spec=service.link.HostLink)
+
+        host.publish_gameplay_change(transport)
+        transport.send_gameplay_change.assert_not_called()
+        host.party[loose.STATE] = {"bandage": {"mode": 1}}
+        host.publish_gameplay_change(transport)
+        transport.send_gameplay_change.assert_called_once_with(host.zone_epoch)
+        transport.reset_mock()
+
+        host.last_game = {**stock, loose.QUEST_SOURCES: {"case": {"transform": [10, 10, 10]}}}
+        host.publish_gameplay_change(transport)
+        transport.send_gameplay_change.assert_called_once_with(host.zone_epoch)
+        transport.reset_mock()
+
+        host.last_game = {**stock, loose.QUEST_SOURCES: {"case": {"transform": [20, 20, 20]}}}
+        host.publish_gameplay_change(transport)
+        host.last_game = stock
+        host.publish_gameplay_change(transport)
+        transport.send_gameplay_change.assert_not_called()
+
+        host.last_game = {**stock, loose.QUEST_SOURCES: {}}
+        host.publish_gameplay_change(transport)
+        transport.send_gameplay_change.assert_called_once_with(host.zone_epoch)
+        transport.reset_mock()
+        host.last_game = {**stock, loose.RESPAWN_HIDDEN: ["earlier stock bandage"]}
+        host.publish_gameplay_change(transport)
+        transport.send_gameplay_change.assert_called_once_with(host.zone_epoch)

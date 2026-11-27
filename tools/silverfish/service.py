@@ -377,6 +377,7 @@ class Host:
         self.stock_doors = native_stock_door.Interactions()
         self.gameplay_change_scope = None
         self.gameplay_change_state = None
+        self.gameplay_change_quest_sources = frozenset()
         self.prepared_guest_leaves: dict[str, GuestLeave] = {}
         self.confirmed_guest_leaves: set[str] = set()
         self.session_stop_reason: str | None = None
@@ -4739,10 +4740,16 @@ class Host:
                     door_flags[actor] = row["open"], row["locked"], row["broken"]
         switch_flags = {actor: (row["powered"], row.get("lamp"), row["lights"])
                         for actor, row in game.get(native_stock_switch.KEY, {}).items()}
-        # Wake the guest for loot motion edges. Poses still use the existing motion relay.
+        if scope != self.gameplay_change_scope:
+            self.gameplay_change_quest_sources = frozenset()
+        if (placements := game.get(native_loose_pickup.QUEST_SOURCES)) is not None:
+            self.gameplay_change_quest_sources = placements.keys()
+        # A missing census preserves the last observed set. Only visibility edges
+        # need an early snapshot. Motion continues on its normal cadences.
         state = (door_flags, switch_flags, self.party.get(native_loot.STATE_KEY, {}),
                  game.get("native_wallet"), tuple(sorted(self.guest_wallet_receipts.items())),
-                 self.world_loot.moving_ids(*scope))
+                 self.world_loot.moving_ids(*scope), self.party.get(native_loose_pickup.STATE, {}),
+                 game.get(native_loose_pickup.RESPAWN_HIDDEN, ()), self.gameplay_change_quest_sources)
         if scope == self.gameplay_change_scope and state != self.gameplay_change_state:
             # Guests still fetch the authorized snapshot. A lost notice only delays that fetch.
             transport.send_gameplay_change(epoch)
