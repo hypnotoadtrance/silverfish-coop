@@ -125,6 +125,8 @@ async def interact(host, bridge, character, requested, operation, action=ACTION)
         host.last_seen = time.monotonic()
     result = {"native_stock_switch_interaction": {"actor": actor, "powered": row["powered"]},
               KEY: {"map": game["map"], "epoch": epoch, "switches": {actor: row}}}
+    if action == REPORT:
+        result["native_stock_switch_interaction"]["origin"] = "player"
     receipts.append({"id": operation, "request": fingerprint, "result": result})
     del receipts[:-party.RECENT_ACTIONS]
     return result

@@ -24,6 +24,7 @@ class StockSwitchResponseTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(switches.local_outcome(f"stock-switch-state:{invalid}:{actor}"))
         request = f"{epoch}@{actor}@0"
         result = await switches.interact(host, bridge, "guest", request, nonce, switches.REPORT)
+        self.assertEqual(result["native_stock_switch_interaction"], {"actor": actor, "powered": False, "origin": "player"})
         self.assertEqual(await switches.interact(host, bridge, "guest", request, nonce, switches.REPORT), result)
         bridge.command.assert_awaited_once_with(switches.REPORT, actor, "qualified guest", "0", timeout=3)
         with self.assertRaisesRegex(switches.party.RuleError, "operation_id_conflict"):

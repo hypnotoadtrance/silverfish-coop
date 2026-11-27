@@ -322,6 +322,7 @@ namespace
     std::uint64_t dialogue_sequence{}, valve_sequence{}, stash_sequence{}, lantern_sequence{};
     Clock::time_point stash_lease{};
     bool dispatching_valve = false;
+    Unreal::UObject* applying_placed_flame{};
     bool event_source_matches{}, event_consumed{};
     Unreal::FWeakObjectPtr event_focus;
     bool sewer_answering{};
@@ -1141,6 +1142,7 @@ namespace
         }
         if (name == extinguish && function == find<Unreal::UFunction>(lantern_extinguish))
         {
+            if (actor == applying_placed_flame) return;
             call.PreventOriginalFunctionCall();
             return;
         }
@@ -1202,7 +1204,8 @@ namespace
         if (!visible_interactable_actor(actor, world)) return;
         if (name != interaction)
         {
-            if (candle && function == find<Unreal::UFunction>(name == ignite ? lantern_ignite : lantern_extinguish))
+            if (candle && !(name == extinguish && actor == applying_placed_flame) &&
+                function == find<Unreal::UFunction>(name == ignite ? lantern_ignite : lantern_extinguish))
                 call.PreventOriginalFunctionCall();
             return;
         }
@@ -1886,6 +1889,47 @@ namespace
             }
         }
         return 0;
+    }
+
+    int set_placed_flame(const Lua& lua)
+    {
+        const auto respond = [&](bool value) { lua.set_bool(value); return 1; };
+        if (!available() || applying_placed_flame || !live_scope(scope) || Clock::now() >= scope.expires ||
+            lua.get_stack_size() != 3 || !lua.is_string(1) || !lua.is_integer(2) || !lua.is_bool(3)) return respond(false);
+        const auto power = lua.get_bool(3);
+        const auto expected = lua.get_integer(2);
+        const auto path = lua.get_string(1);
+        if (path.empty() || path.size() > 384 || expected <= 0) return respond(false);
+        auto* actor = find<Unreal::AActor>(RC::to_wstring(path).c_str());
+        if (!live(actor) || address(actor) != expected || !actor->HasAnyFlags(Unreal::RF_WasLoaded) ||
+            !visible_interactable_actor(actor, scope.world.Get())) return respond(false);
+        const auto kind = stock_switch_kind(actor->GetClassPrivate());
+        if (kind != SwitchKind::Lantern && kind != SwitchKind::Candle) return respond(false);
+        auto* setter = actor->GetClassPrivate()->GetFunctionByNameInChain(Unreal::FName{STR("SetLitUnlit")});
+        if (!setter || setter->GetNumParms() != 2 || setter->GetParmsSize() != 2 ||
+            setter->HasAnyFunctionFlags(Unreal::FUNC_Net | Unreal::FUNC_Native) || setter->GetReturnProperty())
+            return respond(false);
+        std::array<std::uint8_t, 2> params{};
+        std::size_t valid_params = 0;
+        for (Unreal::TFieldIterator<Unreal::FProperty> property(setter); property && valid_params < params.size(); ++property)
+        {
+            if (!property->HasAnyPropertyFlags(Unreal::CPF_Parm)) continue;
+            auto* flag = Unreal::CastField<Unreal::FBoolProperty>(*property);
+            if (!flag || flag->GetOffset_Internal() != static_cast<int>(valid_params) || flag->GetSize() != 1 ||
+                flag->HasAnyPropertyFlags(Unreal::CPF_OutParm)) return respond(false);
+            flag->SetPropertyValueInContainer(params.data(), valid_params == 0 && power);
+            ++valid_params;
+        }
+        if (valid_params != params.size()) return respond(false);
+        struct Invocation
+        {
+            explicit Invocation(Unreal::UObject* actor) { applying_placed_flame = actor; }
+            ~Invocation() { applying_placed_flame = nullptr; }
+        } guard(actor);
+        // The stock setter can call Extinguish. Its ordinary guest hook still blocks
+        // non-local fire events; this invocation only allows the selected placed actor.
+        actor->ProcessEvent(setter, params.data());
+        return respond(true);
     }
 
     int read_switch_power(const Lua& lua)
@@ -2799,6 +2843,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishWriteNativeRemoteHeadRotation", write_remote_head_rotation);
         lua.register_function("SilverfishReadNativeReadyRoster", read_ready_roster);
         lua.register_function("SilverfishReadNativeSwitchPower", read_switch_power);
+        lua.register_function("SilverfishSetNativePlacedFlame", set_placed_flame);
         lua.register_function("SilverfishTakeNativeLanternPress", take_lantern_press);
         lua.register_function("SilverfishDispatchNativeSubwayValve", dispatch_valve);
         mosby_station_input::register_lua(lua);

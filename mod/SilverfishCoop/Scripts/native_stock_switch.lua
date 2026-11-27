@@ -171,7 +171,7 @@ end
 local function census(state, phase)
     if (phase ~= "connected" and phase ~= "hosting") or not state.listening
         or state.server ~= (phase == "connected") or not valid(state.world) then
-        world, entries, dirty = nil, nil, nil
+        world, entries, dirty, local_power = nil, nil, nil, {}
         return {}
     end
     if not same(world, state.world) then
@@ -403,7 +403,11 @@ local function project(entry, powered, angles, lights, replica)
                 actor:Set_LitUnlit(powered, false)
             end
         elseif actor.Lit ~= powered or entry.lantern and entry.light:IsVisible() ~= powered then
-            actor:SetLitUnlit(powered, false)
+            local _, path = placed_actor(actor:GetFullName())
+            if not path or type(SilverfishSetNativePlacedFlame) ~= "function"
+                or not SilverfishSetNativePlacedFlame(path, actor:GetAddress(), powered) then
+                actor:SetLitUnlit(powered, false)
+            end
         end
         if replica then suppress_candle_overlap(actor:GetFullName(), entry.box) end
         if actor.Lit ~= powered or entry.light:IsVisible() ~= powered then error("stock_switch_candle_unverified", 0) end
@@ -518,7 +522,7 @@ function switches.command(fields, state, phase)
         if confirmed then last = last - 1 end
         if pending then
             if pending.actor == entry.actor:GetAddress() and os.clock() < pending.expires
-                and tonumber(confirmed) ~= pending.sequence then
+                and tonumber(confirmed) ~= pending.sequence and (not entry.lantern or fields[9] == "intact") then
                 return "stock switch local result pending", entry
             end
             local_power[fields[3]] = nil
