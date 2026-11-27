@@ -301,7 +301,9 @@ def durable_cabinet(campaign: Path, seed: int):
     profile = campaign / "game-user"
     native_host_save.verify_checkpoint(profile, saved)
     native_host_save.verify_record(native_host_save.checkpoint_profile(profile, saved), escrow)
-    return saved, roll, available[0]
+    # Lower shelves can be occluded from every standing stock Interact angle.
+    # Start with the topmost physical item so the run measures the saved escrow.
+    return saved, roll, max(available, key=lambda item: item["transform"]["position"][2])
 
 
 def copy_checkpoint(source: Path, destination: Path, seed: int):
