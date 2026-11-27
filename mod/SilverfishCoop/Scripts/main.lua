@@ -90,7 +90,6 @@ local native_host_stack_drop_fixture = require("native_host_stack_drop_fixture")
 local native_guest_drop_projection = require("native_guest_drop_projection")
 local native_loot_actions = require("native_loot_actions")
 local native_loot_crate_input = require("native_loot_crate_input")
-local native_loot_view = require("native_loot_view")
 local native_enemy_loot = require("native_enemy_loot")
 local native_enemy_shell_view = require("native_enemy_shell_view")
 local native_broker_input = require("native_broker_input")
@@ -702,7 +701,6 @@ local function run_command(fields, state, current_phase)
         native_guest_clock.clear()
         native_host_camera.reset()
         native_loot_crate_input.clear()
-        native_loot_view.clear()
         native_broker_input.clear()
         native_wire_board.clear()
         native_wipe_view.clear()
@@ -1242,7 +1240,6 @@ local function run_command(fields, state, current_phase)
         or native_guest_sickness.command(fields, state, current_phase)
         or native_loot_actions.command(fields, state, current_phase)
         or native_loot_crate_input.command(fields, state, current_phase)
-        or native_loot_view.command(fields, state, current_phase)
         or native_wire_quest.command(fields, state, current_phase)
         or native_wire_quest_turn_in.command(fields, state, current_phase)
         or native_wire_board.command(fields, state, current_phase)
@@ -1536,7 +1533,7 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         for _, row in ipairs(native_wipe_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_stack_drop.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_host_stack_drop.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
-        local projections, shared_pickups = native_guest_drop_projection.rows(state, current_phase, status_row)
+        local projections = native_guest_drop_projection.rows(state, current_phase, status_row)
         for _, row in ipairs(projections) do rows[#rows + 1] = row end
         for _, row in ipairs(native_pickup.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_shop.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1566,11 +1563,6 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         crate_rows, crate_details = native_loot_crate_input.rows(
             state, current_phase, status_row, fields, compact_crates, crate_diagnostic)
         for _, row in ipairs(crate_rows) do rows[#rows + 1] = row end
-        -- Shared pickups use the base game's world and inventory UI.
-        -- Only the legacy text panel needs a list of nearby opened crates.
-        if not shared_pickups then
-            for _, row in ipairs(native_loot_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
-        end
         for _, row in ipairs(native_wire_quest.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wire_quest_turn_in.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wire_board.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -2097,7 +2089,6 @@ local function tick(fields, pending, periodic)
     native_shop_view.sync(state, current_phase)
     native_npc_barter.sync(state, current_phase)
     pcall(players.critters.sync, state, current_phase)
-    native_loot_view.sync(state, current_phase)
     native_guest_primary_input.sync(state, current_phase)
     native_guest_consumable.sync(state, current_phase)
     native_guest_clock.sync(state, current_phase)
@@ -2248,7 +2239,6 @@ native_enemy_shell_view.start(players.is_downed)
 native_inventory_view.start(bridge, players.is_downed)
 native_stash_view.start(bridge, players.is_downed)
 native_shop_view.start(bridge, players.is_downed)
-native_loot_view.start(bridge, players.is_downed)
 native_guest_primary_input.start(bridge, players.is_downed)
 native_host_camera.start(bridge, players.is_downed)
 native_host_dig_live.start(bridge)

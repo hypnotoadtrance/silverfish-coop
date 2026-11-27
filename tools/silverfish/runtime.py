@@ -2654,16 +2654,6 @@ class Bridge:
                       and all(flag in {"0", "1"} for flag in fields[3:])):
                     data.setdefault("native_loot_power_boxes", {})[fields[2]] = dict(
                         map=fields[1], powered=fields[3] == "1", audible=fields[4] == "1")
-                elif (fields[0] == "native-loot-view-nearby" and len(fields) == 5
-                      and AUTHORED_CRATES.get(fields[2]) == fields[1] and 0 < len(fields[3]) <= 512
-                      and (distance := _finite(fields[4])) is not None and 0 <= distance < 1000):
-                    data.setdefault("native_loot_view_candidates", {})[fields[2]] = {
-                        "map": fields[1], "crate": fields[2], "pawn": fields[3], "distance": distance,
-                    }
-                elif fields[0] == "native-loot-view" and len(fields) == 7 and fields[6] in AUTHORED_CRATES:
-                    data["native_loot_view"] = {"pawn": fields[1], "id": fields[2], "state": fields[3],
-                                                "sequence": None if fields[4] == "-" else int(fields[4]), "guid": fields[5],
-                                                "crate": fields[6]}
                 elif fields[0] == "native-guest-reload-fixture" and len(fields) == 5:
                     data["native_guest_reload_fixture"] = {"map": fields[1], "pawn": fields[2],
                                                            "sequence": int(fields[3]), "stock_wrappers": int(fields[4])}

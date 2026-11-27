@@ -1907,7 +1907,6 @@ async def smoke():
                             shown = (await wait(directory, lambda state: set(
                                 state.get("game", {}).get("native_world_loot_items", {})) == visible.keys()
                             ))["game"]
-                            assert not shown.get("native_loot_view"), shown
                             assert all(shown["native_world_loot_items"][key]["class_path"] == row["class_path"]
                                        for key, row in visible.items()), shown["native_world_loot_items"]
                         identity = uuid.uuid5(uuid.NAMESPACE_OID, f"{loot_roll['id']}:{loot_guid}").hex

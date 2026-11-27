@@ -190,11 +190,6 @@ function input.update(state, phase, profile)
     return binding
 end
 
-function input.bound_in_world(world)
-    if not same(active_world, world) then return {} end
-    return bindings
-end
-
 local function observe_scene(current, box_state, box_address)
     local crate = current.crate
     local hinged = current.profile.hinge_arrow

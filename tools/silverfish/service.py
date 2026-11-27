@@ -4383,13 +4383,9 @@ class Host:
                 self.mindcore_carry.close()
 
     async def run_session(self, bridge: Bridge, transport, invites, *, pause_exit=None) -> None:
-        loot_view = native_loot.LootView(bridge, self.control) if self.native_loot_input else None
         wire_board = native_wire_board.WireBoardView(bridge, self.control) if self.wire_board_enabled else None
         package_journal = native_package_handoff_journal.Journal() if self.native_host_dig_live else None
         dig_settlement = native_host_dig_live.DigSettlement() if self.native_host_dig_live else None
-
-        async def claim_crate(operation, guid):
-            return await native_loot.perform(self, bridge, "host", "claim", guid, operation, defer_save=True)
 
         async def frozen_items(offset):
             return native_inventory_death.items(self, "host", offset)
@@ -4648,11 +4644,6 @@ class Host:
                         self.last_game, self.last_seen = snapshot, time.monotonic()
                 await self.apply_pending_spawns(bridge)
                 await self.project_gameplay(bridge)
-                if loot_view and not self.stopping and not shared_pickups:
-                    rolls = self.party.get(native_loot.STATE_KEY, {})
-                    snapshot = await loot_view.sync(self.last_game, rolls, claim_crate)
-                    if snapshot is not self.last_game:
-                        self.last_game, self.last_seen = snapshot, time.monotonic()
             self.stock_doors.settle(self, bridge.stock_door_confirmations())
             self.publish_host_status(transport, bridge)
             await bridge.wait_for_interaction(
@@ -5459,7 +5450,6 @@ class Client:
         self.mindcore_view = (native_mindcore_view.MindCoreView(bridge, control, invite["character_id"])
                               if invite.get("native_mindcore_view") else None)
         self.wipe_view = native_wipe_view.WipeView(bridge, control, invite["character_id"]) if invite.get("native_wipe_view") else None
-        self.loot_view = native_loot.LootView(bridge, control) if invite.get("native_loot_input") else None
         self.world_loot = native_world_loot.Projection()
         self.primary_scope = None
         self.primary_request = None
@@ -6948,9 +6938,6 @@ class Client:
                     result = {"actor": actor}
                 elif action == native_stock_door.TRACE_FIXTURE:
                     self.last_game, result = await native_stock_door.trace_fixture(self.bridge, self.last_game, request.get("target"))
-                elif action == "native-loot-view-fixture" and self.loot_view:
-                    self.last_game = await self.loot_view.fixture(action, request.get("target"))
-                    result = {"native_loot_view": self.last_game.get("native_loot_view", {})}
                 elif action == "native-broker-input-fixture" and self.invite.get("native_broker_input"):
                     pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
                     if not pawn or self.last_game.get("state") != "connected":
@@ -7288,9 +7275,6 @@ class Client:
                         await task
 
     async def run_session(self, *, pause_exit=None) -> None:
-        async def claim_crate(operation, guid):
-            return await self.gameplay_action("native-loot-claim", operation, guid)
-
         async def frozen_items(offset):
             return await self.gameplay_action("native-wipe-items", uuid.uuid4().hex, offset)
 
@@ -7374,11 +7358,6 @@ class Client:
                 peer_beams = (self.gameplay.get(native_flashlight.GUEST_BEAMS)
                               if active and self.transport.game_access and time.monotonic() - self.gameplay_seen < 1.5 else None)
                 self.last_game = await native_flashlight.project_peers(self.bridge, self.last_game, peer_beams, self.zone_epoch)
-            if (self.loot_view and self.last_game.get(native_world_loot.CAPABILITY, 0)
-                    < native_world_loot.SHARED_PICKUPS_VERSION):
-                rolls = (self.gameplay.get(native_loot.STATE_KEY, {})
-                         if active and time.monotonic() - self.gameplay_seen < 2 else {})
-                self.last_game = await self.loot_view.sync(self.last_game, rolls, claim_crate)
             await self.service_broker_input(active)
             if self.wire_board:
                 epoch = f"{self.host_session}:{self.zone_epoch}" if self.host_session and self.zone_epoch else None

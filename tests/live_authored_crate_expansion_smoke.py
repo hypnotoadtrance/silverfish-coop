@@ -716,7 +716,6 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                     for directory in (run, guest_run):
                         present = await wait(directory, world_item)
                         assert world_item(present)["class_path"] == selected["class_path"]
-                        assert not present["game"].get("native_loot_view")
                     await command("action", *host, "native-world-loot-approach", "--target", f"guest@{identity}")
                     if carry_loot:
                         def settled(state):

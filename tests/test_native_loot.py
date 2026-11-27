@@ -427,16 +427,12 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
             ("native-loot-crate-input", CROSSROADS, OTHER_CRATE, "ready"),
             ("native-loot-crate-input", CROSSROADS, unsupported, "ready"),
             ("native-loot-crate-input", CROSSROADS, BRIDGE_CRATE, "ready"),
-            ("native-loot-view-nearby", CROSSROADS, LEGACY_CRATE, PAWN, "25.5"),
-            ("native-loot-view", PAWN, OPERATION, "claiming", "1", ITEM["guid"], LEGACY_CRATE),
         ]
         (self.root / "status.tsv").write_text("".join("\t".join(fields) + "\n" for fields in data), encoding="utf-8")
         snapshot = runtime.Bridge(self.root, None).snapshot()
         self.assertEqual({crate: row["state"] for crate, row in snapshot["native_loot_crates"].items()},
                          {LEGACY_CRATE: "exhausted", OTHER_CRATE: "ready"})
         self.assertEqual(snapshot["native_loot_crate_input"], snapshot["native_loot_crates"][LEGACY_CRATE])
-        self.assertEqual(snapshot["native_loot_view_candidates"][LEGACY_CRATE]["distance"], 25.5)
-        self.assertEqual(snapshot["native_loot_view"]["crate"], LEGACY_CRATE)
 
     def test_compact_stock_crate_snapshot_preserves_locks_lids_and_replenishment(self):
         angle_crate = next(crate for crate, area in CRATES.items() if area == CROSSROADS and random_lid(crate))
@@ -1120,28 +1116,3 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.return_value = game
         with self.assertRaisesRegex(RuntimeError, "container locks did not match"):
             await native_loot.project_vehicle_locks(bridge, game, host)
-
-    async def test_view_claim_follows_rendered_crate_even_when_another_is_nearer(self):
-        rolls = {crate: self.roll(CROSSROADS, crate, str(index) * 32)
-                 for index, crate in enumerate((LEGACY_CRATE, OTHER_CRATE), start=1)}
-        game = self.game(CROSSROADS, native_loot_view_candidates={
-            crate: {"map": CROSSROADS, "crate": crate, "pawn": PAWN, "distance": distance}
-            for crate, distance in ((LEGACY_CRATE, 5), (OTHER_CRATE, 30))
-        })
-        bridge = SimpleNamespace(directory=self.root, command=AsyncMock(return_value=game))
-        view = native_loot.LootView(bridge, Mock(generation="test"))
-        claim = AsyncMock(return_value={"native_loot_claim": ITEM, "native_loot_crate": OTHER_CRATE})
-        await view.sync(game, rolls, claim)
-        bridge.command.assert_awaited_once_with("native-loot-view-render", rolls[LEGACY_CRATE]["id"], PAWN, LEGACY_CRATE,
-                                               f"{ITEM['guid']}|{ITEM['class_path']}", timeout=2)
-        scope = rolls[OTHER_CRATE]["id"], PAWN, OTHER_CRATE
-        shown = dict(id=scope[0], pawn=scope[1], crate=scope[2], state="ready", guid=ITEM["guid"])
-        game["native_loot_view"] = shown
-        events = self.root / "native-loot-view-events"
-        events.write_text("\t".join(("crate-view", "1", *scope, ITEM["guid"])) + "\n", encoding="utf-8")
-        await view.sync(game, rolls, claim)
-        claim.assert_not_awaited()
-        shown.update(state="claiming", sequence=1)
-        await view.sync(game, rolls, claim)
-        claim.assert_awaited_once()
-        self.assertEqual(claim.await_args.args[1], f"{ITEM['guid']}@{OTHER_CRATE}")
