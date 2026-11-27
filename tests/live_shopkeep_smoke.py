@@ -35,7 +35,7 @@ async def verify(work: Path, original: Path, *, greeting_saves: bool = False):
     cli = (sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work))
     host_flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones",
                   "--native-expanded-zones", "--native-shop-view")
-    guest_flags = ("--headless", "--native-zones")
+    guest_flags = ("--headless", "--native-zones", "--native-guest-inventory-view")
     jobs = []
     evidence = {}
 
@@ -117,14 +117,13 @@ async def verify(work: Path, original: Path, *, greeting_saves: bool = False):
         chosen = (await action(guest_run, dialogue.FIXTURE, target=ordinal))["native_dialogue_view"]
         selected = await wait_event(guest_run, "native_dialogue_interaction", lambda event: event.get("generation") == key
                                     and event.get("sequence") == chosen["sequence"] and event.get("effect") == "cash-granted")
-        view = await page(chosen["sequence"], offset=0)
+        view = await stock_ready(chosen["sequence"])
         assert view["actor"] == dialogue.SHOPKEEP_COUNTER and view["map"] == SHOPKEEP, view
         return {"opened": opened, "cash_response": selected, "merchant": view}
 
-    async def page(sequence, *, offset):
-        state = await wait(guest_run, lambda state: state.get("game", {}).get("native_shop_view", {}).get("state") == "ready"
-                           and state["game"]["native_shop_view"]["sequence"] == sequence
-                           and state["game"].get("native_shop_view_page", {}).get("offset") == offset)
+    async def stock_ready(sequence):
+        state = await wait(guest_run, lambda state: (shop := state.get("game", {}).get("native_shop_view", {})).get("stock")
+                           and (shop.get("state"), shop.get("sequence")) == ("ready", sequence))
         return state["game"]["native_shop_view"]
 
     async def inventory(directory, **arguments):
@@ -184,12 +183,12 @@ async def verify(work: Path, original: Path, *, greeting_saves: bool = False):
         assert (listing["map"], listing["actor"], listing["wallet_before"], listing["wallet_after"]) == (
             SHOPKEEP, dialogue.SHOPKEEP_COUNTER, 100_000, 100_000), listing
         assert 5000 <= listing["merchant_cash_before"] <= 35_000, listing
-        current = await page(opened["merchant"]["sequence"], offset=0)
-        offer, = [row for row in listing["offers"] if (row["guid"], row["price"]) == (current["guid"], current["price"])]
-        confirm = (await action(guest_run, "native-shop-view-fixture", target="enter"))["native_shop_view"]
-        assert confirm["state"] == "confirming", confirm
-        submitted = (await action(guest_run, "native-shop-view-fixture", target="enter"))["native_shop_view"]
-        assert submitted["state"] == "buying", submitted
+        current = await stock_ready(opened["merchant"]["sequence"])
+        assert current["visible"] == listing["count"], current
+        offer = listing["offers"][0]
+        submitted = (await action(guest_run, "native-shop-view-fixture",
+                                  target=f"stock:{offer['source']}:{offer['guid']}"))["native_shop_view"]
+        assert (submitted["state"], submitted["guid"], submitted["price"]) == ("buying", offer["guid"], offer["price"]), submitted
         purchase = (await wait_event(guest_run, "native_shop_view_purchased", lambda event: event.get(
             "native_finite_purchase", {}).get("offers") == [offer]))["native_finite_purchase"]
         assert 0 < offer["price"] <= listing["wallet_before"], offer

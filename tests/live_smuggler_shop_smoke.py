@@ -113,30 +113,21 @@ async def verify(work: Path, original: Path):
 
         return await wait(guest_run, reproduced)
 
-    def offer_menu(s, sequence, offset):
-        game = s.get("game", {})
-        view, page = game.get("native_shop_view", {}), game.get("native_shop_view_page", {})
-        return (view.get("state"), view.get("map"), view.get("actor"), view.get("sequence"), page.get("offset")) == (
-            "ready", SMUGGLER, MERCHANTS[SMUGGLER], sequence, offset)
-
     async def buy_stock():
         listing = (await action(guest_run, "native-finite-shop-list"))["native_finite_shop"]
         assert listing["map"] == SMUGGLER and listing["actor"] == MERCHANTS[SMUGGLER], listing
         assert 25_000 <= listing["merchant_cash_before"] <= 65_000, listing
-        (index, offer), = [(i, item) for i, item in enumerate(listing["offers"]) if item["class_path"] == meals.MRE_CLASS]
+        offer, = [item for item in listing["offers"] if item["class_path"] == meals.MRE_CLASS]
         assert 1 <= offer["quantity"] <= 4 and offer["value"] == 25 * offer["quantity"], offer
         assert offer["price"] == 5 * offer["value"], offer
         opened = (await action(guest_run, "native-shop-view-fixture", target="open"))["native_shop_view"]
-        sequence = opened["sequence"]
-        await wait(guest_run, lambda s: offer_menu(s, sequence, 0))
-        for offset in range(8, (index // 8 + 1) * 8, 8):
-            await action(guest_run, "native-shop-view-fixture", target="page-down")
-            await wait(guest_run, lambda s: offer_menu(s, sequence, offset))
-        for _ in range(index % 8):
-            await action(guest_run, "native-shop-view-fixture", target="down")
-        confirming = (await action(guest_run, "native-shop-view-fixture", target="enter"))["native_shop_view"]
-        assert (confirming["state"], confirming["guid"], confirming["price"]) == ("confirming", offer["guid"], offer["price"])
-        await action(guest_run, "native-shop-view-fixture", target="enter")
+        ready = await wait(guest_run, lambda state: (shop := state.get("game", {}).get("native_shop_view", {})).get("stock")
+                           and (shop.get("state"), shop.get("map"), shop.get("actor"), shop.get("sequence"))
+                           == ("ready", SMUGGLER, MERCHANTS[SMUGGLER], opened["sequence"]))
+        assert ready["game"]["native_shop_view"]["visible"] == listing["count"]
+        selected = (await action(guest_run, "native-shop-view-fixture",
+                                 target=f"stock:{offer['source']}:{offer['guid']}"))["native_shop_view"]
+        assert (selected["state"], selected["guid"], selected["price"]) == ("buying", offer["guid"], offer["price"]), selected
         event = await wait_event(guest_run, "native_shop_view_purchased",
                                  lambda row: row.get("native_finite_purchase", {}).get("offer_guid") == offer["guid"])
         receipt = event["native_finite_purchase"]

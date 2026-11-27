@@ -10,7 +10,7 @@ from tools.silverfish.native_finite_shop import BALL_AMMO, GUNSMITH, MERCHANTS, 
 from tools.silverfish.native_shop_view import ShopView
 
 
-class MerchantPageTests(unittest.IsolatedAsyncioTestCase):
+class MerchantScreenTests(unittest.IsolatedAsyncioTestCase):
     async def test_open_stock_screen_refreshes_when_stock_changes_without_wallet_change(self):
         actor, pawn = MERCHANTS[GUNSMITH], "exact stock guest"
         guid = "A" * 32
@@ -173,91 +173,42 @@ class MerchantPageTests(unittest.IsolatedAsyncioTestCase):
         guid = "A" * 32
         scope = ("host", "visit", 1, GUNSMITH, "guest pawn", MERCHANTS[GUNSMITH])
         view = ShopView()
-        view.rendered = (scope, 0, {guid: 750})
+        view.rendered = (scope, {guid: 750})
         screen = {"stock": True, "guid": guid, "price": 4}
-        self.assertEqual(view._requested_offset("buy", {}, scope, guid, "4/1", screen), 0)
+        view._validate_selection("buy", scope, guid, "4/1", screen)
         for raw in ("4/0", "4/", "4", "5/1", "4/1/2"):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
-                view._requested_offset("buy", {}, scope, guid, raw, screen)
+                view._validate_selection("buy", scope, guid, raw, screen)
         with self.assertRaises(ValueError):
-            view._requested_offset("buy", {}, scope, guid, "4/1", dict(screen, stock=False))
+            view._validate_selection("sell", scope, guid, "4/1", screen)
+        with self.assertRaises(ValueError):
+            view._validate_selection("buy", (scope[0], "older visit", *scope[2:]), guid, "4/1", screen)
 
-    async def test_fresh_adjacent_page_and_current_quote_required(self):
-        actor = MERCHANTS[GUNSMITH]
-        pawn, sequence = "exact stock guest", 14
-        rows = [
-            {"guid": f"{index:032X}", "quantity": 1, "price": 20 + index, "class_path": BALL_AMMO}
-            for index in range(1, 13)
-        ]
-        snapshot = {"map": GUNSMITH, "pawns": {"local": {"name": pawn}}}
-        base = {"sequence": sequence, "map": GUNSMITH, "pawn": pawn, "actor": actor}
-
-        def game(state, event, offset, wanted, **selection):
-            return {
-                **snapshot,
-                "native_shop_view": {**base, "state": state, "visible": min(len(rows) - offset, 8), **selection},
-                "native_shop_view_page": {**base, "offset": offset, "wanted_offset": wanted,
-                                          "pending_event": event, "render_event": 0},
-            }
-
-        async def query(action, _operation, target):
-            if action == "native-finite-shop-buy":
-                self.assertEqual(target, f"{rows[8]['guid']}@{rows[8]['price']}")
-                del rows[7:]
-                return {"native_finite_purchase": {"wallet_after": 801}}
-            return {"native_finite_shop": {"map": GUNSMITH, "actor": actor, "wallet_after": 801,
-                                           "count": len(rows), "offers": list(rows)}}
-
-        async def render(command, *arguments, timeout):
-            if command == "native-shop-view-unavailable":
-                return {}
-            self.assertEqual(command, "native-shop-view-render-page")
-            _, event, _, _, offset = arguments[:5]
-            shown = game("ready", 0, int(offset), int(offset))
-            shown["native_shop_view_page"]["render_event"] = int(event)
-            return shown
-
-        bridge = SimpleNamespace(native_shop_view_requests=Mock(), command=AsyncMock(side_effect=render),
+    async def test_stock_catalog_uses_exact_request_and_passes_every_offer(self):
+        actor, pawn = MERCHANTS[GUNSMITH], "Player_FP_C exact guest"
+        base = {"sequence": 1, "map": GUNSMITH, "pawn": pawn, "actor": actor}
+        game = {"map": GUNSMITH, "pawns": {"local": {"name": pawn}},
+                "native_shop_view": {**base, "stock": True, "state": "pending"},
+                "native_shop_view_request": {**base, "pending_event": 1}}
+        offers = [{"guid": f"{index:032X}", "price": 10 + index} for index in range(1, 13)]
+        bridge = SimpleNamespace(native_shop_view_requests=Mock(return_value=[(2, 1, "open", GUNSMITH, pawn, actor, "-", "-")]),
                                  input_namespace=uuid.UUID(int=1))
-        client = SimpleNamespace(bridge=bridge, last_game=game("pending", 1, 0, 0),
-                                 host_session="server", zone_epoch="zone", stopping=False,
-                                 gameplay_action=AsyncMock(side_effect=query), control=Mock())
+        client = SimpleNamespace(bridge=bridge, last_game=game, host_session="server", zone_epoch="zone",
+                                 stopping=False, control=Mock(), gameplay_action=AsyncMock(return_value={
+                                     "native_finite_shop": {"map": GUNSMITH, "actor": actor, "wallet_after": 500,
+                                                            "count": len(offers), "offers": offers}}))
         view = ShopView()
-
-        def event(number, kind, first="-", second="-"):
-            bridge.native_shop_view_requests.return_value = [(number, sequence, kind, GUNSMITH, pawn, actor, first, second)]
-
-        event(1, "open")
+        view._render_stock = AsyncMock()
         await view.sync(client, True)
-        self.assertEqual(client.last_game["native_shop_view_page"]["offset"], 0)
-
-        event(2, "page", "0", "8")
-        await view.sync(client, True)
-        self.assertEqual(bridge.command.await_count, 1)
-        client.last_game = game("paging", 2, 0, 8)
+        client.gameplay_action.assert_not_awaited()
+        view._render_stock.assert_not_awaited()
+        game["native_shop_view_request"]["pending_event"] = 2
         bridge.native_shop_view_requests.return_value = []
         await view.sync(client, True)
-        self.assertEqual(client.last_game["native_shop_view_page"]["offset"], 8)
-
-        earlier = rows[0]
-        event(3, "buy", earlier["guid"], str(earlier["price"]))
-        client.last_game = game("buying", 3, 8, 8, guid=earlier["guid"], price=earlier["price"])
-        await view.sync(client, True)
-        self.assertEqual(client.gameplay_action.await_count, 2)
-        self.assertEqual(bridge.command.await_args.args[0], "native-shop-view-unavailable")
-
-        event(4, "open")
-        client.last_game = game("pending", 4, 0, 0)
-        await view.sync(client, True)
-        event(5, "page", "0", "8")
-        client.last_game = game("paging", 5, 0, 8)
-        await view.sync(client, True)
-
-        current = rows[8]
-        event(6, "buy", current["guid"], str(current["price"]))
-        client.last_game = game("buying", 6, 8, 8, guid=current["guid"], price=current["price"])
-        await view.sync(client, True)
-        self.assertEqual(client.last_game["native_shop_view_page"]["offset"], 0)
+        scope = ("server", "zone", 1, GUNSMITH, pawn, actor)
+        operation = uuid.uuid5(bridge.input_namespace, f"server:zone:{pawn}:shop:1:2").hex
+        client.gameplay_action.assert_awaited_once_with("native-finite-shop-list", operation, None)
+        view._render_stock.assert_awaited_once_with(client, scope, operation, 2, 500, offers, None)
 
     async def test_fresh_client_process_can_buy_the_same_reusable_offer_again(self):
         actor, pawn = MERCHANTS[GUNSMITH], "Player_FP_C exact same guest"
@@ -269,9 +220,9 @@ class MerchantPageTests(unittest.IsolatedAsyncioTestCase):
         def game(state, pending, rendered=0):
             return {
                 "map": GUNSMITH, "pawns": {"local": {"name": pawn}},
-                "native_shop_view": {**base, "state": state, "visible": 1, "guid": row["guid"], "price": row["price"]},
-                "native_shop_view_page": {**base, "offset": 0, "wanted_offset": 0,
-                                          "pending_event": pending, "render_event": rendered},
+                "native_shop_view": {**base, "state": state, "stock": True, "visible": 1,
+                                     "guid": row["guid"], "price": row["price"]},
+                "native_shop_view_request": {**base, "pending_event": pending, "render_event": rendered},
             }
 
         async def query(action, operation, target):
@@ -285,23 +236,24 @@ class MerchantPageTests(unittest.IsolatedAsyncioTestCase):
                 receipts[operation] = {"native_finite_purchase": {"wallet_after": wallet}}
             return receipts[operation]
 
-        async def render(command, *arguments, timeout):
-            self.assertEqual(command, "native-shop-view-render-page")
-            return game("ready", 0, int(arguments[1]))
+        async def render_stock(client, scope, _operation, event, _wallet, offers, _revision):
+            client.last_game = game("ready", 0, event)
+            view.rendered = (scope, {offer["guid"]: offer["price"] for offer in offers})
 
         for game_instance in (1, 2):
-            bridge = SimpleNamespace(native_shop_view_requests=Mock(), command=AsyncMock(side_effect=render),
+            bridge = SimpleNamespace(native_shop_view_requests=Mock(),
                                      input_namespace=uuid.UUID(int=game_instance))
             client = SimpleNamespace(bridge=bridge, last_game=game("pending", 1), host_session="same server",
                                      zone_epoch="same zone", stopping=False, gameplay_action=query, control=Mock())
             view = ShopView()
+            view._render_stock = render_stock
             bridge.native_shop_view_requests.return_value = [(1, 1, "open", GUNSMITH, pawn, actor, "-", "-")]
             await view.sync(client, True)
 
             client.last_game = game("buying", 2)
             bridge.native_shop_view_requests.return_value = [(2, 1, "buy", GUNSMITH, pawn, actor, row["guid"], str(row["price"]))]
             await view.sync(client, True)
-            self.assertEqual(client.last_game["native_shop_view_page"]["render_event"], 2)
+            self.assertEqual(client.last_game["native_shop_view_request"]["render_event"], 2)
             self.assertEqual(len(receipts), game_instance)
 
             client.last_game = game("buying", 2)

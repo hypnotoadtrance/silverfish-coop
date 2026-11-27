@@ -1218,7 +1218,7 @@ class Bridge:
         events = []
         for line in records:
             fields = line.decode("utf-8", errors="replace").split("\t")
-            if (len(fields) == 9 and fields[0] == "shop-view" and fields[3] in ("open", "close", "buy", "sell", "page")
+            if (len(fields) == 9 and fields[0] == "shop-view" and fields[3] in ("open", "close", "buy", "sell")
                     and all(value.isascii() and value.isdigit() and len(value) <= 16 and 0 < int(value) < 2**53
                             for value in fields[1:3])
                     and all(len(value) <= 512 for value in fields[4:])):
@@ -2747,11 +2747,10 @@ class Bridge:
                         if fields[12] not in {"stock", "list"}:
                             raise ValueError("Invalid merchant screen type")
                         data["native_shop_view"]["stock"] = fields[12] == "stock"
-                elif fields[0] == "native-shop-view-page" and len(fields) == 9:
-                    data["native_shop_view_page"] = {
+                elif fields[0] == "native-shop-view-request" and len(fields) == 7:
+                    data["native_shop_view_request"] = {
                         "sequence": int(fields[1]), "map": fields[2], "pawn": fields[3], "actor": fields[4],
-                        "offset": int(fields[5]), "pending_event": int(fields[6]), "wanted_offset": int(fields[7]),
-                        "render_event": int(fields[8]),
+                        "pending_event": int(fields[5]), "render_event": int(fields[6]),
                     }
                 elif fields[0] in native_dust_cabinet.STATUS_KEYS:
                     key = native_dust_cabinet.STATUS_KEYS[fields[0]]

@@ -172,7 +172,7 @@ Invitations from a current matched native stage also enable the guest's stock in
 | `--native-guest-held-fire` | Enables experimental hold and release for the standard SMG on a current matched native stage. The invitation enables the matching guest control. |
 | `--native-authored-enemy-loot` | Enables shared stock shotgun-shell loot for the qualified CQC encounters. Look at the shell stack and press Interact. Automation can inspect nearby item actors in `game.native_world_loot_items` and use `native-enemy-loot-claim --target GUID` with the GUID shown in `gameplay.native_enemy_loot_rolls`. |
 | `--native-extraction-keep N` | Starts a separate fresh authored native campaign with stock extraction mode and `N` retained inventory rows. Add `--native-extraction-backpacks` and optionally `--native-extraction-lose-slot`. The host save retains those settings, so omit these switches when resuming. |
-| `--native-shop-view` | Enables guest trading at qualified cash merchants. Staged guests can use `--native-guest-inventory-view` with Join to open the stock shop. Other staged guests can use Up and Down to choose an overlay offer, Enter to confirm, and Backspace to close. |
+| `--native-shop-view` | Enables the stock trade screen for guests at qualified cash merchants. On a staged native build, join with `--native-guest-inventory-view` to give the guest screen its isolated backpack. |
 | Guest `--native-guest-inventory-view` | Enables the stock backpack on a matched native stage. Use its normal controls to equip, use, split, merge, or drop items. |
 | Guest `--native-guest-primary-input --native-guest-reload-input` | Enables qualified stock primary and reload controls explicitly. The standard firearm path handles one shot per press. Dead Bridge also has a scoped Old Pipe equip and primary path. |
 
@@ -188,9 +188,9 @@ At a supported cash merchant, use Interact to open the stock shop. Buy offers or
 
 At the Observatory workbench, equip your Hazard Suit and bring a Computer Board. Use Interact to review the supported recipe and Interact again to exchange the Board for one Electron Scrap.
 
-The Scientist's cash counter offers the stock camera through the same guest shop overlay. Buying one adds a separate camera to the guest's inventory. Equip it from the stock backpack, then select its quick slot.
+The Scientist's cash counter offers the stock camera through the guest's stock shop screen. Buying one adds a separate camera to the guest's inventory. Equip it from the stock backpack, then select its quick slot.
 
-At ShopKeep, use Interact at the reception and choose the cash-shop response to open the finite stock overlay.
+At ShopKeep, use Interact at the reception and choose the cash-shop response to open the stock shop screen.
 
 At Borough, ask Mama about trade. Near her trade post, a guest can run `native-borough-mama-trade --target COPPER_WIRE_GUID` to exchange one owned Copper Wire for an exact stock stack of 25 armor-piercing rounds. The trade requires that guest's own conversation and Copper Wire.
 

@@ -13,10 +13,9 @@ from .native_finite_shop import CASTAWAY_ACTOR, MAX_PRICE, STOCK_REVISION, merch
 from .native_gold import valid_guid
 
 
-PAGE_SIZE = 8
 MAX_OFFERS = 128
 STOCK_RECHECK_INTERVAL = 4
-WAITING = {"open": "pending", "page": "paging", "buy": "buying", "sell": "selling"}
+WAITING = {"open": "pending", "buy": "buying", "sell": "selling"}
 _CARD = re.compile(r"stock:(shelf|limited|buyback|backpack):([0-9A-F]{32})\Z")
 _QUANTITY_CARD = re.compile(r"stock-(open|cancel|amount):(shelf|limited|buyback):([0-9A-F]{32})(?::([1-9][0-9]{0,9}))?\Z")
 _REFRESH_AFTER_REFUSAL = {
@@ -35,7 +34,7 @@ def valid_fixture(target):
         return False
     match = _CARD.fullmatch(target)
     quantity = _QUANTITY_CARD.fullmatch(target)
-    return (target in {"open", "up", "down", "enter", "back", "page-up", "page-down"}
+    return (target in {"open", "back"}
             or match is not None and valid_guid(match[2])
             or quantity is not None and valid_guid(quantity[3])
             and ((quantity[1] == "amount") == (quantity[4] is not None))
@@ -45,11 +44,6 @@ def valid_fixture(target):
 def decimal(value, maximum):
     return (int(value) if isinstance(value, str) and value.isascii() and value.isdigit()
             and len(value) <= 10 and int(value) <= maximum else None)
-
-
-def page_offset(value):
-    offset = decimal(value, MAX_OFFERS - PAGE_SIZE)
-    return offset if offset is not None and offset % PAGE_SIZE == 0 else None
 
 
 class ShopView:
@@ -138,61 +132,52 @@ class ShopView:
         game = client.last_game
         view = game.get("native_shop_view", {})
         if (area != game.get("map") or not merchant_in_map(area, actor)
-                or pawn != game.get("pawns", {}).get("local", {}).get("name")
+                or not view.get("stock") or pawn != game.get("pawns", {}).get("local", {}).get("name")
                 or tuple(view.get(key) for key in ("sequence", "map", "pawn", "actor", "state"))
                 != (sequence, area, pawn, actor, WAITING[kind])):
             return
-        page = game.get("native_shop_view_page", {})
-        if page and tuple(page.get(key) for key in ("sequence", "map", "pawn", "actor", "pending_event")) != (
+        request = game.get("native_shop_view_request", {})
+        if tuple(request.get(key) for key in ("sequence", "map", "pawn", "actor", "pending_event")) != (
                 sequence, area, pawn, actor, event):
             return
         self.pending = None
         identifier = f"{epoch[0]}:{epoch[1]}:{pawn}:shop:{sequence}:{event}"
         operation = uuid.uuid5(client.bridge.input_namespace, identifier).hex
         try:
-            wanted = self._requested_offset(kind, page, scope, guid, price, view)
+            self._validate_selection(kind, scope, guid, price, view)
             if kind in {"buy", "sell"}:
                 try:
                     options = {"merchant": actor} if actor == CASTAWAY_ACTOR else {}
                     result = await client.gameplay_action(f"native-finite-shop-{kind}", operation, f"{guid}@{price}", **options)
                 except ValueError as error:
-                    if not view.get("stock") or str(error) not in _REFRESH_AFTER_REFUSAL:
+                    if str(error) not in _REFRESH_AFTER_REFUSAL:
                         raise
                     client.control.event("native_shop_view_trade_refused", operation_id=operation, reason=str(error))
                 else:
                     client.control.event("native_shop_view_sold" if kind == "sell" else "native_shop_view_purchased",
                                          operation_id=operation, **result)
-            await self._render(client, scope, operation, event, wanted, paged=bool(page), stock=view.get("stock", False))
+            await self._render(client, scope, operation, event)
         except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
             self.rendered = None
             client.control.event("native_shop_view_rejected", operation_id=operation, reason=str(error))
             with contextlib.suppress(OSError, RuntimeError, ValueError):
-                arguments = (str(sequence), area, str(event)) if page else (str(sequence), area)
-                await client.bridge.command("native-shop-view-unavailable", *arguments, timeout=2)
+                await client.bridge.command("native-shop-view-unavailable", str(sequence), str(event), area, timeout=2)
 
-    def _requested_offset(self, kind, page, scope, guid, raw, view):
+    def _validate_selection(self, kind, scope, guid, raw, view):
         if kind == "open":
             self.rendered = None
-            return 0
-        offset = page.get("offset", 0)
-        if not self.rendered or self.rendered[:2] != (scope, offset):
+            return
+        if not self.rendered or self.rendered[0] != scope:
             raise ValueError("The merchant view has no current rendered quotes")
-        if kind == "page":
-            start, destination = page_offset(guid), page_offset(raw)
-            if (not page or start != offset or destination is None or abs(destination - start) != PAGE_SIZE
-                    or destination != page.get("wanted_offset")):
-                raise ValueError("Choose an adjacent page from the current stock merchant view")
-            return destination
         raw_price, slash, raw_quantity = raw.partition("/")
         amount = decimal(raw_price, MAX_PRICE)
         quantity = decimal(raw_quantity, MAX_PRICE) if slash else None
-        if slash and (kind != "buy" or not view.get("stock") or not quantity):
+        if slash and (kind != "buy" or not quantity):
             raise ValueError("The stock merchant purchase has no confirmed quantity")
-        if (amount is None or not valid_guid(guid) or view.get("guid") != guid
-                or view.get("price") != amount or kind == "sell" and not view.get("stock")
-                or kind == "buy" and (guid not in self.rendered[2] or not slash and self.rendered[2][guid] != amount)):
+        quotes = self.rendered[1]
+        if (amount is None or not valid_guid(guid) or view.get("guid") != guid or view.get("price") != amount
+                or kind == "buy" and (guid not in quotes or not slash and quotes[guid] != amount)):
             raise ValueError("The stock merchant selection did not match the displayed quote")
-        return offset
 
     async def _listing(self, client, scope, operation):
         _, _, _, area, _, actor = scope
@@ -206,42 +191,12 @@ class ShopView:
             raise ValueError("The host returned an invalid native merchant catalog")
         return listing
 
-    async def _render(self, client, scope, operation, event, wanted, *, paged, stock=False):
-        _, _, sequence, area, pawn, actor = scope
+    async def _render(self, client, scope, operation, event):
         listing = await self._listing(client, scope, operation)
-        total, wallet, offers = listing["count"], listing["wallet_after"], listing["offers"]
-        if stock:
-            revision = listing.get("stock_revision")
-            if revision is not None and not valid_stock_revision(revision):
-                raise ValueError("The host returned an invalid native merchant revision")
-            await self._render_stock(client, scope, operation, event, wallet, offers, revision)
-            return
-        offset = min(wanted, max(0, (total - 1) // PAGE_SIZE) * PAGE_SIZE)
-        fields, quotes = [], {}
-        for row in offers[offset:offset + PAGE_SIZE]:
-            guid, item_class, quantity, price = (row[key] for key in ("guid", "class_path", "quantity", "price"))
-            if (not valid_guid(guid) or guid in quotes or not item_class_name(item_class, 512) or type(quantity) is not int or not 0 < quantity <= MAX_PRICE
-                    or type(price) is not int or not 0 <= price <= MAX_PRICE):
-                raise ValueError("The host returned an invalid merchant offer")
-            fields.append(f"{guid}|{item_class}|{quantity}|{price}")
-            quotes[guid] = price
-        if paged:
-            arguments = ("native-shop-view-render-page", str(sequence), str(event), area, actor, str(offset),
-                         str(wallet), str(total), *fields)
-        else:
-            arguments = ("native-shop-view-render", str(sequence), area, actor, str(wallet), str(total), *fields)
-        snapshot = await client.bridge.command(*arguments, timeout=5)
-        observed = snapshot.get("native_shop_view", {})
-        keys = ("sequence", "map", "pawn", "actor", "state", "visible")
-        if tuple(observed.get(key) for key in keys) != (sequence, area, pawn, actor, "ready", len(fields)):
-            raise RuntimeError("The game did not verify the authenticated merchant overlay")
-        if paged:
-            observed_page = snapshot.get("native_shop_view_page", {})
-            if tuple(observed_page.get(key) for key in ("offset", "pending_event", "render_event")) != (offset, 0, event):
-                raise RuntimeError("The game did not verify the current authenticated merchant page")
-        self.rendered = (scope, offset, quotes)
-        client.last_game = snapshot
-        client.control.event("native_shop_view_rendered", operation_id=operation, sequence=sequence, total=total, offset=offset)
+        revision = listing.get("stock_revision")
+        if revision is not None and not valid_stock_revision(revision):
+            raise ValueError("The host returned an invalid native merchant revision")
+        await self._render_stock(client, scope, operation, event, listing["wallet_after"], listing["offers"], revision)
 
     async def _render_stock(self, client, scope, operation, event, wallet, offers, revision):
         expected_host, expected_visit, sequence, area, pawn, actor = scope
@@ -278,7 +233,7 @@ class ShopView:
         keys = ("sequence", "map", "pawn", "actor", "state", "visible", "stock", "wallet")
         if tuple(observed.get(key) for key in keys) != (sequence, area, pawn, actor, "ready", len(offers), True, wallet):
             raise RuntimeError("The stock shop screen could not verify the authenticated catalog")
-        self.rendered = (scope, 0, quotes)
+        self.rendered = (scope, quotes)
         self._clear_stock_poll()
         now = time.monotonic()
         self.refresh_after = now + .75
