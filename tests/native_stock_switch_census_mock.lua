@@ -184,6 +184,50 @@ assert(switches.command({"nonce", "native-stock-switch-project", stream_name, st
     state, "connected") == "stock switch state projected" and radio_in_stream.Powered)
 print("Streamed device census follows visibility and rejects projection against a hidden level")
 
+local lamp_path = "/Game/Assets/StaticMeshes/Mesh_Props/Prop_Lantern_01.Prop_Lantern_01_C"
+local lamp_class = stock_class(lamp_path, "Prop_Lantern_01_C")
+local lamp_child = stock_class("/CommunityProps/FieldLamp.FieldLamp_C", "FieldLamp_C", lamp_class)
+local lamp_name = "FieldLamp_C " .. stream_package .. ".Harbor:PersistentLevel.FieldLamp_C_1"
+local lamp = device(state.world, lamp_child, lamp_name)
+lamp.GetOuter = function() return level end
+lamp.GetWorld = function() return subworld end
+lamp.Lit, lamp.Broken_0 = false, false
+local owner = lamp.Box.GetOwner
+lamp.Sphere = object({GetOwner = owner, GetGenerateOverlapEvents = function() return false end})
+lamp.PointLight = object({GetOwner = owner, IsVisible = function() return lamp.Lit end})
+lamp.FX_CandleFlame_01_Converted = object({GetOwner = owner})
+lamp.PropMesh = object({
+    GetOwner = owner, response = 1,
+    GetCollisionResponseToChannel = function(self, channel) assert(channel == 16) return self.response end,
+    SetCollisionResponseToChannel = function(self, channel, response)
+        assert(channel == 16)
+        self.response = response
+    end,
+})
+lamp.RootComponent = lamp.PropMesh
+paths[lamp_path], state.world.actors[lamp_class] = lamp_class, {lamp}
+callbacks[lamp_path]()
+switches.rows(state, "connected", row)
+assert(lamp.PropMesh.response == 1, "Unlit lamps retain the pickup collision response")
+lamp.Lit = true
+switches.rows(state, "connected", row)
+assert(lamp.PropMesh.response == 2, "A derived lit lamp exposes its body to Interact")
+lamp.Lit = false
+switches.rows(state, "connected", row)
+assert(lamp.PropMesh.response == 1, "Extinguishing restores the stock collision response")
+lamp.Lit = true
+switches.rows(state, "connected", row)
+lamp.Broken_0 = true
+switches.rows(state, "connected", row)
+assert(lamp.PropMesh.response == 1, "The body of a broken lamp stops intercepting Interact")
+lamp.Broken_0 = false
+switches.rows(state, "connected", row)
+level.bIsVisible = false
+switches.rows(state, "connected", row)
+assert(lamp.PropMesh.response == 1, "The hidden streamed lamp releases its collision override")
+level.bIsVisible = true
+print("Inherited oil lantern collision follows the stock light, broken state, and stream visibility")
+
 local bulb_class = object({})
 paths["/Game/Classes/DynamicLights/DynamicLight_Master_BP.DynamicLight_Master_BP_C"] = bulb_class
 local light_prefix = "DynamicLight_Master_BP_C " .. state.map .. ".Depot:PersistentLevel.Lamp_"

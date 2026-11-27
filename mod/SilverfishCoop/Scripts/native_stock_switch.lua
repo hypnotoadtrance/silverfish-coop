@@ -41,6 +41,8 @@ local world, entries, dirty, visible_streams
 local candle_overlaps, retired_lamps = {}, {}
 local local_power = {}
 local observed_rows, observation = {}, 0
+local lamp_surfaces = {}
+local interact_channel, blocking = 16, 2
 
 local function valid(object) return object and object:IsValid() end
 local function same(left, right) return valid(left) and valid(right) and left:GetAddress() == right:GetAddress() end
@@ -147,13 +149,42 @@ local function refresh_lights(entry, scope, powered, force)
     entry.link_count, entry.link_power, entry.next_link_check = count, powered, now + 0.75
 end
 
+local function release_lamp_surface(entry, current_world)
+    local original = lamp_surfaces[entry]
+    if original == nil then return end
+    local mesh = entry.mesh
+    if same(world, current_world) and valid(mesh) and same(mesh:GetOwner(), entry.actor)
+        and not entry.actor:IsActorBeingDestroyed() and mesh:GetCollisionResponseToChannel(interact_channel) == blocking then
+        mesh:SetCollisionResponseToChannel(interact_channel, original)
+    end
+    lamp_surfaces[entry] = nil
+end
+
+local function expose_lamp_surface(entry, powered, current_world)
+    if not powered then
+        release_lamp_surface(entry, current_world)
+    elseif lamp_surfaces[entry] == nil and valid(entry.mesh) and same(entry.mesh:GetOwner(), entry.actor) then
+        -- A lit oil lamp can be extinguished by aiming at its body as well as its fire sphere.
+        local mesh = entry.mesh
+        local response = mesh:GetCollisionResponseToChannel(interact_channel)
+        if response == 0 or response == 1 then
+            mesh:SetCollisionResponseToChannel(interact_channel, blocking)
+            if mesh:GetCollisionResponseToChannel(interact_channel) == blocking then
+                lamp_surfaces[entry] = response
+            end
+        end
+    end
+end
+
 local function cache_entry(name, path, entry)
+    local previous = entries[name]
+    if previous then release_lamp_surface(previous, world) end
     local actor = entry.actor
     if entry.power then
         entries[name] = {actor = actor, address = actor:GetAddress(), level = entry.level,
             class = actor:GetClass(), power = entry.power,
             path = path, candle = entry.candle, lantern = entry.lantern, gas_lamp = entry.gas_lamp,
-            light = entry.light}
+            light = entry.light, mesh = entry.mesh}
     else
         if not entry.latch then refresh_lights(entry, world, actor.Powered) end
         entries[name] = entry
@@ -177,7 +208,10 @@ local function refresh_streamed_levels()
     if current == visible_streams then return end
     visible_streams = current
     for name, entry in pairs(entries) do
-        if not valid(entry.level) then entries[name] = nil end
+        if not valid(entry.level) then
+            release_lamp_surface(entry, world)
+            entries[name] = nil
+        end
     end
     for kind in pairs(profiles) do dirty[kind] = true end
     return true
@@ -186,11 +220,13 @@ end
 local function census(state, phase)
     if (phase ~= "connected" and phase ~= "hosting") or not state.listening
         or state.server ~= (phase == "connected") or not valid(state.world) then
+        for entry in pairs(lamp_surfaces) do release_lamp_surface(entry, state.world) end
         world, entries, dirty, local_power = nil, nil, nil, {}
         observed_rows = {}
         return {}
     end
     if not same(world, state.world) then
+        lamp_surfaces = {}
         world, entries, dirty, visible_streams = state.world, {}, {}, nil
         local_power, observed_rows = {}, {}
         for kind in pairs(profiles) do dirty[kind] = true end
@@ -253,6 +289,9 @@ local function find_switch(state, phase, name)
 end
 
 function switches.release_candles(state, phase)
+    if (phase ~= "connected" and phase ~= "hosting") or not state.listening or not same(world, state.world) then
+        for entry in pairs(lamp_surfaces) do release_lamp_surface(entry, state.world) end
+    end
     if not next(candle_overlaps) and not next(retired_lamps)
         or phase == "connected" and state.listening and same(world, state.world) then return end
     if same(world, state.world) then
@@ -293,8 +332,12 @@ local function read_switch(entry, name, state, phase, row, native_world_address)
             powered, broken = SilverfishReadNativeSwitchPower(native_world_address, entry.address, entry.path,
                 entry.power, entry.lantern == true)
         end
-        if powered == nil and not level_visible(entry.level, state.world) then return end
+        if powered == nil and not level_visible(entry.level, state.world) then
+            release_lamp_surface(entry, state.world)
+            return
+        end
         if powered == nil and not qualified(actor, state.world, entry.level) then
+            release_lamp_surface(entry, state.world)
             if not entry.path then return end
             actor = StaticFindObject(entry.path)
             if not qualified(actor, state.world, entry.level) or not same(actor:GetClass(), entry.class)
@@ -306,7 +349,7 @@ local function read_switch(entry, name, state, phase, row, native_world_address)
             end
             local replacement = parts(actor, state.world)
             if not replacement then return end
-            entry.actor, entry.address, entry.light = actor, actor:GetAddress(), replacement.light
+            entry.actor, entry.address, entry.light, entry.mesh = actor, actor:GetAddress(), replacement.light, replacement.mesh
         end
         if powered == nil then
             powered = actor[entry.power]
@@ -322,6 +365,7 @@ local function read_switch(entry, name, state, phase, row, native_world_address)
             if entry.lantern then
                 lamp_state = entry.retired and "removed" or broken and "broken" or "intact"
                 if lamp_state ~= "intact" then powered = false end
+                expose_lamp_surface(entry, powered, state.world)
             end
             if phase == "connected" and (entry.gas_lamp or lamp_state == "intact") and valid(entry.light)
                 and entry.light:IsVisible() ~= powered then

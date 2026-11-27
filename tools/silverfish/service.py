@@ -118,7 +118,6 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_authored_pickup.ACTION, native_loose_pickup.CLAIM, native_enemy_loot.CLAIM, native_stock_enemy_drops.CLAIM,
                         native_mushrooms.CLAIM, native_critters.ACTION,
                         native_prop_carry.ACTION, native_flare.ACTION,
-                        native_lantern.EXTINGUISH,
                         *native_guest_weapon.GUEST_ACTIONS, native_guest_weapon.SELECT_EQUIPMENT,
                         native_guest_weapon.SET_FIRE_MODE,
                         *native_guest_consumable.RESULT, native_guest_consumable.COOKED_MEAL, native_guest_melee.SWING, native_guest_melee.INPUT,
@@ -1107,8 +1106,6 @@ class Host:
             view[native_loot.STOCK_ALARMS] = alarms
         if boxes := self.last_game.get(native_loot.POWER_BOX_STATES):
             view[native_loot.POWER_BOX_STATES] = boxes
-        if lantern := native_lantern.published(self.last_game, self.zone_epoch):
-            view[native_lantern.KEY] = lantern
         if flashlight := native_flashlight.frame(self):
             view[native_flashlight.KEY] = flashlight
         if doors := self.stock_doors.world_frame(self.last_game, self.zone_epoch):
@@ -2635,8 +2632,6 @@ class Host:
                 result = await native_mushrooms.claim(self, bridge, character, target, request["operation_id"])
             elif action == native_prop_carry.ACTION:
                 result = await self.prop_carry.operate(bridge, character, target)
-            elif action == native_lantern.EXTINGUISH:
-                result = await native_lantern.extinguish(self, bridge, character, target)
             elif action == native_authored_pickup.ACTION:
                 result = await native_authored_pickup.claim(self, bridge, character, target, request["operation_id"])
             elif action == native_stock_enemy_drops.CLAIM:
@@ -6781,9 +6776,6 @@ class Client:
                         self.bridge, self.last_game, self.gameplay.get(native_stock_door.KEY), self.zone_epoch)
                     self.last_game = await native_stock_switch.project(
                         self.bridge, self.last_game, self.gameplay.get(native_stock_switch.KEY), self.zone_epoch)
-                    self.last_game = await native_lantern.project(
-                        self.bridge, self.last_game, self.gameplay.get(native_lantern.KEY), self.zone_epoch,
-                        stock_switches=self.gameplay.get(native_stock_switch.KEY))
                     self.last_game = await native_stock_enemy_drops.project_broker_cue(
                         self.bridge, self.last_game, self.gameplay.get(native_stock_enemy_drops.BROKER_CUE), self.zone_epoch)
                     await native_inventory_death.project_bags(self, self.bridge, self.invite["character_id"],
@@ -7242,7 +7234,7 @@ class Client:
                             continue
                         # Linked switches and door latches stay ordered together.
                         queue = controls if (native_stock_door.target_actor(target) or native_stock_switch.input_target(target)
-                                             or native_lantern.target_angles(target) or native_ladder.target_parts(target)) else interact
+                                             or native_ladder.target_parts(target)) else interact
                         try:
                             queue.put_nowait((scope, operation, target))
                         except asyncio.QueueFull:
@@ -7468,15 +7460,6 @@ class Client:
         if switch := native_stock_switch.input_target(target):
             action, actor = switch
             return await self.gameplay_action(action, operation, actor)
-        if native_lantern.target_angles(target):
-            result = await self.gameplay_action(native_lantern.EXTINGUISH, operation, f"{self.zone_epoch}@{target}")
-            if self.stock_interaction_scope() == scope:
-                await self.cancel_gameplay_snapshot()
-                self.gameplay[native_lantern.KEY] = result[native_lantern.KEY]
-                self.last_game = await native_lantern.project(
-                    self.bridge, self.last_game, result[native_lantern.KEY], self.zone_epoch,
-                    stock_switches=self.gameplay.get(native_stock_switch.KEY))
-            return result
         action = (native_authored_pickup.ACTION if target in native_authored_pickup.SOURCES
                   else native_loose_pickup.CLAIM if native_loose_pickup.target_path(target)
                   else native_subway_valve.ACTIVATE if target == native_subway_valve.INPUT

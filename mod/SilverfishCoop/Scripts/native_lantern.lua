@@ -1,6 +1,5 @@
 local lantern = {}
 local carry = require("native_prop_carry")
-local guest_save = require("guest_save")
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local world_path = map .. ".Observitory_P"
@@ -9,8 +8,7 @@ local name = "Prop_Lantern_01_C " .. path
 local class = "/Game/Assets/StaticMeshes/Mesh_Props/Prop_Lantern_01.Prop_Lantern_01_C"
 local mesh_path = "/Script/Engine.StaticMeshComponent"
 local sphere_path = "/Script/Engine.SphereComponent"
-local interact_channel, blocking = 16, 2 -- ECC_GameTraceChannel3, the game's Interactable trace.
-local host, guest, surface
+local host, guest
 
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -55,26 +53,6 @@ local function replicate(actor)
     return {actor = actor, world = actor:GetWorld(), held = actor.BeingHeld}
 end
 
-local function clear_surface()
-    if surface and valid(surface.mesh) and surface.mesh:GetCollisionResponseToChannel(interact_channel) == blocking then
-        surface.mesh:SetCollisionResponseToChannel(interact_channel, surface.response)
-    end
-    surface = nil
-end
-
-local function expose_flame(actor)
-    local mesh = actor.PropMesh
-    if surface and (not same(surface.mesh, mesh) or actor.Lit ~= true) then clear_surface() end
-    if actor.Lit ~= true or surface then return end
-    -- The stock visibility ray stops at the visible body in front of the fire sphere.
-    local original = mesh:GetCollisionResponseToChannel(interact_channel)
-    if original ~= 0 and original ~= 1 then return end
-    mesh:SetCollisionResponseToChannel(interact_channel, blocking)
-    if mesh:GetCollisionResponseToChannel(interact_channel) == blocking then
-        surface = {mesh = mesh, response = original}
-    end
-end
-
 function lantern.sync(state, phase)
     if host and not same(host.world, state.world) then host = nil end
     if guest and not same(guest.world, state.world) then guest = nil end
@@ -82,9 +60,9 @@ function lantern.sync(state, phase)
         if guest.overlaps and valid(guest.sphere) then guest.sphere:SetGenerateOverlapEvents(true) end
         guest = nil
     end
-    if not enabled or state.map ~= map then clear_surface(); return end
+    if not enabled or state.map ~= map then return end
     local ok, actor, sphere = pcall(scene, state, phase)
-    if not ok or not actor then clear_surface(); return end
+    if not ok or not actor then return end
     if phase == "hosting" and actor:HasAuthority() then
         if not host or not same(host.actor, actor) then
             host = replicate(actor)
@@ -101,22 +79,9 @@ function lantern.sync(state, phase)
             guest = {actor = actor, world = state.world, sphere = sphere, overlaps = overlaps == true}
         end
     end
-    if phase == "hosting" and host or phase == "connected" and guest then expose_flame(actor) end
 end
 
 function lantern.command(fields, state, phase)
-    if fields[2] == "native-observatory-lantern-extinguish" then
-        local actor = scene(state, phase)
-        if #fields ~= 3 or phase ~= "hosting" or not host or not same(host.actor, actor) or not actor:HasAuthority() then
-            error("native_observatory_lantern_extinguish_unavailable", 0)
-        end
-        local pawn = guest_save.exact_item_context(state, phase, fields[3])
-        if not valid(pawn) or pawn.Dead ~= false then error("native_observatory_lantern_extinguish_unavailable", 0) end
-        -- The input hook already matched the guest's stock trace to this lantern.
-        if actor.Lit then actor:SendInteractionToActor(pawn, actor.PropMesh) end
-        if actor.Lit ~= false then error("native_observatory_lantern_extinguish_unverified", 0) end
-        return "stock lantern interaction extinguished the flame"
-    end
     if fields[2] == "native-observatory-lantern-fixture" then
         local actor = scene(state, phase)
         if #fields ~= 3 or phase ~= "hosting" or not host or not same(host.actor, actor)
@@ -141,19 +106,6 @@ function lantern.command(fields, state, phase)
         end
         return "Observatory lantern fixture dispatched"
     end
-    if fields[2] ~= "native-observatory-lantern-light" then return end
-    local actor, sphere = scene(state, phase)
-    if #fields ~= 5 or phase ~= "connected" or fields[3] ~= map or fields[4] ~= name
-        or (fields[5] ~= "0" and fields[5] ~= "1") or not guest or not same(guest.actor, actor)
-        or sphere:GetGenerateOverlapEvents() ~= false or type(actor.Lit) ~= "boolean" then
-        error("native_observatory_lantern_light_unavailable", 0)
-    end
-    local lit = fields[5] == "1"
-    if actor.Lit ~= lit then actor:SetLitUnlit(lit, false) end
-    if actor.Lit ~= lit or sphere:GetGenerateOverlapEvents() ~= false then
-        error("native_observatory_lantern_light_unverified", 0)
-    end
-    return "Observatory lantern light applied"
 end
 
 function lantern.status(state, phase, row)

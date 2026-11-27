@@ -1153,7 +1153,6 @@ class Bridge:
                 continue
             decoded = target.decode("ascii") if target is not None else None
             if (target is not None and decoded != native_subway_valve.INPUT
-                    and not native_lantern.target_angles(decoded)
                     and target not in AUTHORED_PICKUP_TARGETS and not native_enemy_shells.target_parts(decoded)
                     and not native_guest_drop_projection.target_parts(decoded)
                     and not native_world_loot.target_parts(decoded)

@@ -82,6 +82,8 @@ Use a delayed reply in the interaction checks to measure two distinct intervals.
 
 The guest can send two claims for different loose or projected items at a time. A crate waiting for its local roll to be accepted holds neither request slot. The host still settles competing claims in order. The guest checks the exact item receipt against the original request, so it can update the backpack even if a world snapshot already removed the replica. The guest tracks the latest applied receipt per inventory item, so an out-of-order reply for another item can still update the backpack. A full inventory view must include all applied receipts before it can replace the backpack.
 
+The current native crate path still requires a catalog entry for each placement. The stock input hook, result cache, and host checkpoint validation share that index. To support containers added by maps and mods, discover the live stock actor and its roll behavior, then carry its map and actor path through the report and checkpoint. Keep the first completed roll shared for that container's current loot cycle. Later openers should see the remaining stock, and a stock respawn should start a new cycle.
+
 ## Compatibility with game updates and other mods
 
 - Discover quest offers, objective items, progress, and reward data from the host’s active stock boards and journal. Use stock acceptance and completion paths for quests with the same recipe. Publish the resulting journal and campaign changes to the party.
