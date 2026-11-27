@@ -14,11 +14,11 @@ Use the same release candidate on all PCs. Builds before `rc-ad3c9da` used an ol
 
 | Issue | Current status |
 | --- | --- |
-| Title and Steam join | On `rc-ddbb0c2`, the title mock kept Back responsive when Public search, Steam join, or a character catalog completed during a press. Manage Saves passed in isolated Direct IP. Retest password prompts and navigation with two Steam accounts. |
+| Title and Steam join | On `rc-ed1d643`, the installed Manage Saves menu let the user back out during a character lookup, then delete a guest and reopen the campaign in isolated Direct IP. A delayed Steam profile lookup also passed a mock check. Retest password prompts and navigation with two Steam accounts. |
 | Oil lantern state | `rc-5a157fb` passed ignition and extinguishing from both seats and a guest joining after the host broke a lamp in isolated Direct IP. Check gold and gray lanterns in a Steam playtest. |
 | Concurrent trader menus | On `rc-5d08fc1`, the roaming barter window stayed open and refreshed after the host bought the guest's selected item in isolated Direct IP. Verify concurrent purchases over Steam and at other trader types. |
 | Interaction delay and frame hitches | The saved cabinet pickup left saves untouched and the longest nearby frame was 23 ms. On `rc-ddbb0c2`, a simulated four-peer Steam receive burst drained faster. Crossroads loopback kept about 20 heartbeat probes per second with rendering capped at 10 FPS. Foreground Steam timing and larger-party traffic remain open. [Timing details](NATIVE-INTEGRATION.md#replication-and-travel-pacing) · [Enable the Steam report](PLAYING-COOP.md#network-timing) |
-| Crash and disconnect recovery | On `rc-610c3ab`, a forced host return to title left the checkpoint unchanged and let both players reopen the same campaign in the same game processes. `rc-83362af` passed a fault test for retrying a delayed in-memory guest save retention reply. A previous Direct IP guest crash test rejoined in 113 seconds. Retest recovery on Steam, aimed weapon swaps, enemy loot pickup, and singleplayer combat. |
+| Crash and disconnect recovery | A forced host return to title left the checkpoint unchanged and let both players reopen the same Direct IP campaign with the same characters. `rc-ed1d643` passed a fault test for keeping an acknowledged in-memory guest save after its pawn disappears. A previous Direct IP guest crash test rejoined in 113 seconds. Retest recovery on Steam, aimed weapon swaps, enemy loot pickup, and singleplayer combat. |
 
 <a id="current-playtest-checks"></a>
 
