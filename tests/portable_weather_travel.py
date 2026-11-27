@@ -50,6 +50,8 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
     blocked_departures = await enter_crossroads(host, pawn, verify_wall=profile)
 
     async def applied(intensity):
+        skip_particles = intensity > 0 and not rendered
+
         def matches(frame):
             game = frame.get("game", {})
             view = game.get("native_world_view", {})
@@ -57,8 +59,8 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
                     and frame.get("zone_epoch") != initial["zone_epoch"] and view.get("epoch") == frame["zone_epoch"]
                     and view.get("map") == CROSSROADS and view.get("mode") == "applied"
                     and view.get("weather_verified") is True
-                    and view.get("rain_verified") is (intensity == 0)
-                    and bool(view.get("rain_skipped_nullrhi")) is (intensity > 0)
+                    and view.get("rain_verified") is (not skip_particles)
+                    and bool(view.get("rain_skipped_nullrhi")) is skip_particles
                     and math.isclose(view.get("rain_intensity", -1), intensity, abs_tol=.001))
 
         try:
@@ -103,7 +105,7 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
             while await weather(guest, "siren") == "0":
                 await asyncio.sleep(.12)
         wet_particles = await weather(guest, "particles")
-        assert wet_particles == "0", wet_particles
+        assert int(wet_particles) == int(rendered), wet_particles
         await weather(host, "dry")
         dry = await applied(0)
         assert await weather(guest, "particles") == "0"
