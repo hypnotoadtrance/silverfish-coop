@@ -2815,15 +2815,17 @@ namespace
         int remaining = 48;
         for (auto& [_, source, at] : nearby)
         {
+            if (remaining == 0) break;
             const auto& scope = source->scope;
             auto* actor = scope.actor.Get();
             auto* mode = loose_respawn_mode(actor);
             if (!mode) continue;
-            if (remaining-- == 0) break;
             // Unreal can deliver the host's hidden flag ahead of the pickup ledger.
             // Keep the registered replica eligible for the local visibility update.
             const bool awaiting_claim = !scope.host && remotely_hidden_loose(actor);
             if (!scope.claimed && !available(scope) && !awaiting_claim) continue;
+            // Dormant or unavailable actors do not use the published row budget.
+            --remaining;
             if (!rows.empty()) rows.push_back('\n');
             std::format_to(std::back_inserter(rows), "native-loose-pickup\t{}\t{}\t{}\t{}\t{}\t{:.3f}\t{:.3f}\t{:.3f}",
                 map, scope.profile->source, source->item_class_utf8,
