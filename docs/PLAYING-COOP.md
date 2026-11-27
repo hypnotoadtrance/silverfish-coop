@@ -136,6 +136,16 @@ To end the shared session as host, use **Save and Quit** when the stock game ena
 
 In sessions opened from the in-game co-op title, automation can use `action --profile NAME leave-session` for an acknowledged guest save and departure, or `action --campaign NAME leave-session` to save and end the host's session. A successful response reports the checkpoint revision. Watch the role's status for `state: stopped` and a `stop_reason` of `guest_left` or `host_session_ended`.
 
+## Content compatibility
+
+Install matching content mods on every machine. Co-op discovers compatible content from the loaded game, including when it lives in another mounted package. Content authors can use these built-in paths without editing the co-op mod.
+
+- **Quests.** Use the stock quest row and active journal. A compatible bounty board can supply a complete live offer under a unique quest ID. Stock progress flags, ordinary backpack deposits, and stock cash, XP, and item rewards use the shared contract path. A follow-up that needs to start must currently be available to the stock quest loader.
+- **Items and interactables.** Derive from a supported stock Blueprint and keep its stock interaction functions. Co-op uses the exact cooked class for items and the loaded actor for placed interactables. A Blueprint that adds a new gameplay effect can use a shared adapter for that effect across all assets that use it.
+- **Maps and exits.** Use the stock player and save classes and provide a working spawn or arrival marker. Stock overlap exits and transition doors supply the destination World package and entrance tag. Every player needs the destination in their local Asset Registry.
+
+For a compatibility report, include the content mod and version, the map or quest ID, and the first step where the host and guest diverged. Use `--fixtures` only in a dedicated playtest campaign. [Compatibility and verified scenarios](KNOWN-ISSUES.md#compatibility-with-game-updates-and-content-mods)
+
 ## Optional stock campaign mode
 
 Use the [native build instructions](../native/README.md) for a matched UE4SS runtime and C++ add-on. Stage both DLLs on each PC with `--cpp-runtime` and `--cpp-addon` in a separate workspace. This example starts an authored-map session on the matched stage.
@@ -167,8 +177,6 @@ Invitations from a current matched native stage also enable the guest's stock in
 | Guest `--native-guest-primary-input --native-guest-reload-input` | Enables qualified stock primary and reload controls explicitly. The standard firearm path handles one shot per press. Dead Bridge also has a scoped Old Pipe equip and primary path. |
 
 In the supported stock wipe picker, Page Up and Page Down move the selection, Space toggles an entire row, and Home twice submits the selection. An empty selection is allowed. Backpack recovery uses the local action shown below.
-
-Every player needs matching content mods. Co-op reads live quest rows and board offers, discovers compatible items and interactables through their stock Blueprint behavior, and reads destinations and entrance tags from stock-style overlap exits and transition doors. New campaign maps can live in another content folder or mount. Each seat needs the exact World package in its asset registry, and the map needs the stock player and save classes plus a working spawn or arrival marker. For content authors, use the stock quest row and journal, inherit stock interaction functions, and put route data on the exit actor. Those paths can discover new content without editing the co-op mod. A Blueprint that introduces its own gameplay effect can need a shared adapter for that behavior. Use `--fixtures` only in a dedicated playtest campaign. [Compatibility and verified scenarios](KNOWN-ISSUES.md#compatibility-with-game-updates-and-content-mods)
 
 At a qualified stock container, press Interact to open it. Look at an item inside and press Interact to take it. The same item disappears for everyone when the host commits the pickup. Supported player drops appear on the ground and use the same Interact control. Nearby physical pickups appear in `game.native_world_loot_items`. When the host visits a container from an older co-op save, the mod restores its item positions from the container's stock spawn points and keeps the original roll.
 
