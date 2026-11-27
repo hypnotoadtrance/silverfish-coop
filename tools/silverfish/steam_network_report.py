@@ -14,6 +14,8 @@ ENABLE_FILE = "capture-steam-network"
 REPORT_FILE = "steam-network-report.json"
 SAMPLE_SECONDS = 1.0
 MAX_GROUPS = 31
+MESSAGE_FIELDS = ("sent_messages", "sent_bytes", "received_messages", "received_bytes")
+EMPTY_MESSAGE_COUNTS = (0, 0, 0, 0)
 LINK_COUNTERS = (
     "quic_datagrams_sent",
     "quic_datagrams_received",
@@ -55,10 +57,11 @@ class _Traffic:
     peak_heartbeat_rtt_us: int = 0
     link_activity: dict[str, int] = field(default_factory=dict)
     steam_activity: dict[str, int] = field(default_factory=dict)
+    by_peer: dict[str, dict[str, int]] = field(default_factory=dict)
     peak_send_interval: dict | None = None
     peak_receive_interval: dict | None = None
 
-    def add(self, seconds, counters, rtt, group, link_activity, steam_activity):
+    def add(self, seconds, counters, rtt, group, link_activity, steam_activity, peers):
         sent, send_bytes, received, receive_bytes = counters
         self.seconds += seconds
         self.samples += 1
@@ -75,7 +78,7 @@ class _Traffic:
             if send_peak or receive_peak:
                 interval = {"seconds": round(seconds, 3), "map": group[0], "lobby_members": group[1],
                             "sent_bytes": send_bytes, "received_bytes": receive_bytes, "heartbeat_rtt_us": rtt or None,
-                            "link_activity": link_activity.copy(), "steam_activity": steam_activity.copy()}
+                            "link_activity": link_activity, "steam_activity": steam_activity, "by_peer": peers}
             if send_peak:
                 self.peak_send_bps = send_bps
                 self.peak_send_interval = interval
@@ -87,6 +90,10 @@ class _Traffic:
             self.link_activity[key] = self.link_activity.get(key, 0) + amount
         for key, amount in steam_activity.items():
             self.steam_activity[key] = self.steam_activity.get(key, 0) + amount
+        for peer, amounts in peers.items():
+            totals = self.by_peer.setdefault(peer, dict.fromkeys(MESSAGE_FIELDS, 0))
+            for key, amount in amounts.items():
+                totals[key] += amount
 
     def result(self):
         departed = self.link_activity.get("relay_queue_departed_frames", 0)
@@ -107,7 +114,7 @@ class _Report:
         self.groups = {}
         self.previous = None
 
-    def sample(self, now, frame, counters, pressure):
+    def sample(self, now, frame, counters, pressure, peers=None):
         packets, lobby_members = counters[:4], counters[4]
         area = frame.get("game", {}).get("map")
         if (not frame.get("link_connected") or frame.get("state") not in ("hosting", "connected")
@@ -116,16 +123,23 @@ class _Report:
         group = area, lobby_members
         transport = frame.get("transport", {})
         observation = frame.get("generation"), frame.get("zone_epoch")
-        previous, self.previous = self.previous, (now, packets, group, observation, transport, pressure)
+        peers = peers or {}
+        previous, self.previous = self.previous, (now, packets, group, observation, transport, pressure, peers)
         if not previous or now <= previous[0]:
             return
-        last_time, last_packets, last_group, last_observation, last_transport, last_pressure = previous
+        last_time, last_packets, last_group, last_observation, last_transport, last_pressure, last_peers = previous
         elapsed = now - last_time
         delta = tuple(after - before for after, before in zip(packets, last_packets, strict=True))
         steam_activity = {key: after - before for key, before in last_pressure.items()
                           if (after := pressure.get(key, before)) > before}
         if not (lobby_members or last_group[1] or any(delta) or steam_activity):
             return
+        peer_activity = {}
+        for peer, totals in peers.items():
+            amounts = tuple(after - before for after, before in zip(
+                totals, last_peers.get(peer, EMPTY_MESSAGE_COUNTS), strict=True))
+            if any(amounts):
+                peer_activity[peer] = dict(zip(MESSAGE_FIELDS, amounts, strict=True))
         activity = {}
         rtt = 0
         if observation[0] and observation[0] == last_observation[0]:
@@ -143,8 +157,8 @@ class _Report:
             group = None, None
         if group not in self.groups:
             self.groups[group] = _Traffic()
-        self.groups[group].add(elapsed, delta, rtt, group, activity, steam_activity)
-        self.total.add(elapsed, delta, rtt, group, activity, steam_activity)
+        self.groups[group].add(elapsed, delta, rtt, group, activity, steam_activity, peer_activity)
+        self.total.add(elapsed, delta, rtt, group, activity, steam_activity, peer_activity)
 
     def result(self, role, version):
         return {
@@ -168,23 +182,24 @@ async def capture(work, run, transport, role):
 
     def sample():
         report.sample(time.monotonic(), resident_status(run) or {}, transport.traffic_counters(),
-                      transport.pressure_counters())
+                      transport.pressure_counters(), transport.peer_traffic_counters())
 
     async def watch():
         while True:
             await asyncio.sleep(SAMPLE_SECONDS)
             sample()
 
-    sample()
-    watcher = asyncio.create_task(watch())
-    try:
-        yield
-    finally:
-        watcher.cancel()
-        with suppress(asyncio.CancelledError):
-            await watcher
+    with transport.measure_peer_traffic():
         sample()
-        if report.total.sent_messages or report.total.received_messages or report.total.steam_activity:
-            # The opt-in report is written once after the session, outside the engine thread.
-            with suppress(OSError):
-                await asyncio.to_thread(write_json, work / REPORT_FILE, report.result(role, transport.version))
+        watcher = asyncio.create_task(watch())
+        try:
+            yield
+        finally:
+            watcher.cancel()
+            with suppress(asyncio.CancelledError):
+                await watcher
+            sample()
+            if report.total.sent_messages or report.total.received_messages or report.total.steam_activity:
+                # The opt-in report is written once after the session, outside the engine thread.
+                with suppress(OSError):
+                    await asyncio.to_thread(write_json, work / REPORT_FILE, report.result(role, transport.version))

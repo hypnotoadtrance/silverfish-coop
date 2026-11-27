@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Sequence
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 import ipaddress
 import re
@@ -34,6 +34,7 @@ _MAX_PACKET = 4096 - _HEADER.size
 _MAX_MEMBERS = 5
 _PUBLIC_LIMIT = 12
 _MAX_PEER_FLOWS = 16
+_MAX_MEASURED_PEERS = 16
 _FLOW_IDLE = 45.0
 _LOBBY_TIMEOUT = 12.0
 _SEARCH_TIMEOUT = 21.0  # Steam gives RequestLobbyList up to 20 seconds.
@@ -111,6 +112,14 @@ class _HostFlow:
     seen: float
 
 
+@dataclass(slots=True)
+class _PeerTraffic:
+    sent_messages: int = 0
+    sent_bytes: int = 0
+    received_messages: int = 0
+    received_bytes: int = 0
+
+
 class _Udp(asyncio.DatagramProtocol):
     def __init__(self, receive: Callable[[bytes, tuple[str, int]], None]) -> None:
         self.receive = receive
@@ -151,6 +160,7 @@ class SteamTransport:
         self._roster_at = 0.0
         self.sent_messages = self.sent_bytes = 0
         self.received_messages = self.received_bytes = 0
+        self._peer_traffic: dict[int, _PeerTraffic] | None = None
         self._pressure = {
             "send_rejected_messages": 0, "send_rejected_bytes": 0,
             "full_receive_batches": 0, "receive_drain_budget_hits": 0,
@@ -165,6 +175,34 @@ class SteamTransport:
     def pressure_counters(self) -> dict[str, int]:
         """Cumulative SDK rejections, poll pressure, and local delivery losses."""
         return self._pressure.copy()
+
+    @contextmanager
+    def measure_peer_traffic(self):
+        self._peer_traffic = {}
+        try:
+            yield
+        finally:
+            self._peer_traffic = None
+
+    def _peer_totals(self, peer: int) -> _PeerTraffic:
+        peers = self._peer_traffic
+        if (totals := peers.get(peer)) is not None:
+            return totals
+        if len(peers) >= _MAX_MEASURED_PEERS:
+            peer = 0
+            if (totals := peers.get(peer)) is not None:
+                return totals
+        totals = peers[peer] = _PeerTraffic()
+        return totals
+
+    def peer_traffic_counters(self) -> dict[str, tuple[int, int, int, int]]:
+        """Number peers by their first measured message without exposing Steam IDs."""
+        return {
+            str(index) if peer else "other": (
+                totals.sent_messages, totals.sent_bytes, totals.received_messages, totals.received_bytes
+            )
+            for index, (peer, totals) in enumerate((self._peer_traffic or {}).items(), 1)
+        }
 
     def waiting_for_lobby_callback(self, requested: int | None) -> bool:
         pending = next(iter(self._calls.values()), None)
@@ -416,6 +454,10 @@ class SteamTransport:
             if self.api.send_datagram(peer, packet):
                 self.sent_messages += 1
                 self.sent_bytes += len(packet)
+                if self._peer_traffic is not None:
+                    totals = self._peer_totals(peer)
+                    totals.sent_messages += 1
+                    totals.sent_bytes += len(packet)
                 self._sessions.add(peer)
             else:
                 self._pressure["send_rejected_messages"] += 1
@@ -451,6 +493,10 @@ class SteamTransport:
             return
         self.received_messages += 1
         self.received_bytes += len(packet)
+        if self._peer_traffic is not None:
+            totals = self._peer_totals(peer)
+            totals.received_messages += 1
+            totals.received_bytes += len(packet)
         try:
             forwarded = await self._forward_incoming(peer, token, packet[_HEADER.size:])
         except OSError:

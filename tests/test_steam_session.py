@@ -87,7 +87,7 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["overall"]["steam_activity"], {"full_receive_batches": 4, "send_rejected_bytes": 100})
         peak = {"map": OBSERVATORY, "lobby_members": 3, "seconds": 1, "link_activity": stable["link_activity"],
                 "steam_activity": stable["steam_activity"], "sent_bytes": 200, "received_bytes": 900,
-                "heartbeat_rtt_us": 42_000}
+                "heartbeat_rtt_us": 42_000, "by_peer": {}}
         self.assertEqual(result["overall"]["peak_receive_interval"], peak)
         self.assertEqual(result["overall"]["peak_send_interval"], peak)
 
@@ -119,17 +119,26 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         report.sample(1, {**frame, "transport": dict.fromkeys(totals, 0)}, (0, 0, 0, 0, 4),
                       {"receive_unforwarded_bytes": 0})
         report.sample(2, {**frame, "transport": totals}, (8, 800, 750, 820_000, 4),
-                      {"receive_unforwarded_bytes": 5_000})
+                      {"receive_unforwarded_bytes": 5_000},
+                      {"1": (3, 300, 500, 650_000), "2": (5, 500, 250, 170_000)})
+        report.sample(3, {**frame, "transport": totals}, (8, 800, 751, 820_150, 4),
+                      {"receive_unforwarded_bytes": 5_000},
+                      {"1": (3, 300, 500, 650_000), "2": (5, 500, 251, 170_150)})
         overall = report.result("guest", VERSION)["overall"]
         self.assertEqual(overall["mean_relay_queue_wait_us"], 20_000)
         peak = overall["peak_receive_interval"]
         self.assertEqual(peak["received_bytes"], 820_000)
         self.assertEqual(peak["link_activity"], totals)
         self.assertEqual(peak["steam_activity"], {"receive_unforwarded_bytes": 5_000})
+        self.assertEqual({peer: row["received_bytes"] for peer, row in peak["by_peer"].items()},
+                         {"1": 650_000, "2": 170_000})
+        self.assertEqual({peer: row["received_bytes"] for peer, row in overall["by_peer"].items()},
+                         {"1": 650_000, "2": 170_150})
 
     async def test_opt_in_steam_report_writes_once_at_session_exit_and_skips_direct_ip(self):
         _, session, _ = await self.start(HOST)
         _, client, _ = await self.start(GUEST)
+        _, visitor, _ = await self.start(GUEST + 20)
         session.work = self.directory
         client.work = self.directory / "guest"
         client.work.mkdir()
@@ -157,6 +166,11 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
                     with patch.object(client.transport.api, "send_datagram", return_value=False):
                         client.transport._guest_udp(payload, ("127.0.0.1", 32125))
                     await self.ready(lambda: session.transport.received_messages)
+                    await visitor.transport.join(LOBBY)
+                    await self.ready(lambda: session.transport.traffic_counters()[-1] == 3)
+                    visiting_payload = b"second peer data" * 12
+                    visitor.transport._guest_udp(visiting_payload, ("127.0.0.1", 32126))
+                    await self.ready(lambda: session.transport.received_messages == 2)
                     # A valid lobby message can reach a short-lived route that has already gone away.
                     stale = _HEADER.pack(_MAGIC, LOBBY, 0xF123456789ABCDEF) + b"late catalogue response"
                     session.transport.api.send_datagram(GUEST, stale)
@@ -165,16 +179,29 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(guest_output.exists())
         report = runtime.read_json(output)
         guest_report = runtime.read_json(guest_output)
-        self.assertEqual(report["overall"]["received_messages"], 1)
-        self.assertEqual(report["overall"]["received_bytes"], len(payload) + struct.calcsize("!4sQQ"))
-        self.assertEqual(report["overall"]["received_bytes"], guest_report["overall"]["sent_bytes"])
+        self.assertEqual(report["overall"]["received_messages"], 2)
+        self.assertEqual(report["overall"]["received_bytes"], len(payload) + len(visiting_payload) + 2 * _HEADER.size)
+        self.assertEqual(report["overall"]["by_peer"]["1"]["received_bytes"], guest_report["overall"]["sent_bytes"])
         self.assertEqual(guest_report["overall"]["sent_messages"], 1)
+        self.assertEqual(report["overall"]["by_peer"], {
+            "1": {"sent_messages": 0, "sent_bytes": 0, "received_messages": 1,
+                  "received_bytes": len(payload) + _HEADER.size},
+            "2": {"sent_messages": 0, "sent_bytes": 0, "received_messages": 1,
+                  "received_bytes": len(visiting_payload) + _HEADER.size},
+        })
+        self.assertEqual(guest_report["overall"]["by_peer"], {"1": {
+            "sent_messages": 1, "sent_bytes": len(payload) + _HEADER.size,
+            "received_messages": 1, "received_bytes": len(stale),
+        }})
+        self.assertEqual(session.transport.peer_traffic_counters(), {})
+        self.assertEqual(client.transport.peer_traffic_counters(), {})
         self.assertEqual(guest_report["overall"]["steam_activity"], {
             "send_rejected_messages": 1, "send_rejected_bytes": len(payload) + struct.calcsize("!4sQQ"),
             "receive_unforwarded_messages": 1, "receive_unforwarded_bytes": len(stale),
         })
         self.assertNotIn(str(HOST), output.read_text())
         self.assertNotIn(str(GUEST), output.read_text())
+        self.assertNotIn(str(GUEST + 20), output.read_text())
 
     async def start(self, peer):
         api = self.platform.client(peer)
