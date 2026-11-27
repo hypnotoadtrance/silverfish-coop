@@ -31,7 +31,7 @@ from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lif
 from . import native_dust_cabinet, native_savlo_locker
 from . import native_guest_weapon, native_inventory, native_sewer_barter, native_stash
 from . import native_guest_drop_projection, native_guest_drop_record, native_guest_stack_drop
-from . import native_loot, native_pickup_audio, native_world_loot
+from . import native_crate_outcome, native_loot, native_pickup_audio, native_world_loot
 from . import native_loose_pickup
 from . import native_mushrooms, native_critters
 from . import native_prop_carry
@@ -800,6 +800,42 @@ def _parse_stock_loot_item(fields: list[str]) -> dict:
                 raise ValueError("Stock loot actor reported invalid ammo")
             item["ammo"] = raw_ammo
     return item
+
+
+def _parse_crate_outcome(raw: str, request: tuple[str, ...]) -> dict:
+    rows = [row.split("\t") for row in raw.splitlines()] if len(raw) <= 65536 and raw.endswith("\n") else []
+    adopter = request[1] == native_crate_outcome.ADOPT
+    crate, scope = request[3:5] if adopter else request[2:4]
+    phase = "hosting" if adopter else "connected"
+    area = AUTHORED_CRATES.get(crate)
+    if (not rows or len(rows[0]) != 9 or rows[0][:7] != [
+            native_crate_outcome.REPLY, "1", request[0], phase, area, crate, scope,
+    ]):
+        raise RuntimeError("The stock crate outcome receipt did not match the request")
+    status, message = rows[0][7:]
+    if status != "accepted":
+        raise native_crate_outcome.Refused(message)
+    result = {"map": area, "state": phase, "crate": crate, "scope": scope, "message": message}
+    if (adopter or message == "unavailable") and len(rows) == 1:
+        return result
+    try:
+        if adopter or message != "rolled" or len(rows) < 2 or len(rows) % 2 or len(rows[1]) != 4:
+            raise ValueError("Unexpected stock crate outcome structure")
+        tag, lucky, source, calls = rows[1]
+        if tag != "loot-traits" or lucky not in ("0", "1") or (len(rows) - 2) // 2 > loot_capacity(crate):
+            raise ValueError("Unexpected stock crate outcome traits")
+        items, typed = [], []
+        for item_row, typed_row in zip(rows[2::2], rows[3::2], strict=True):
+            if len(item_row) != 14 or item_row[0] != "native-loot-item" or len(typed_row) != 3 or typed_row[:2] != [
+                    "loot-typed", item_row[3]]:
+                raise ValueError("Unexpected stock crate outcome item")
+            items.append(_parse_stock_loot_item(item_row))
+            typed.append(typed_row[2])
+        result["outcome"] = {"lucky_looter": lucky == "1", "trait_source": source, "trait_calls": int(calls),
+                             "items": items, "typed": typed}
+        return result
+    except ValueError as error:
+        raise RuntimeError("The stock crate outcome payload did not verify") from error
 
 
 def _parse_local_stock_loot(raw: str, request: tuple[str, ...], *, opening: bool) -> dict:
@@ -4056,7 +4092,8 @@ class Bridge:
     async def command(self, action: str, *arguments: str, timeout: float = 8, update_status: bool = True,
                       catalog_body: bytes | None = None) -> dict:
         fields = (uuid.uuid4().hex, action, *arguments)
-        long_fields = ((5, 6) if action == native_board_contract.MENU_OPEN else
+        long_fields = (range(7, len(fields), 3) if action == native_crate_outcome.ADOPT and self.local_bridge is not None else
+                       (5, 6) if action == native_board_contract.MENU_OPEN else
                        (5,) if action == native_inventory_grant.APPLY and self.local_bridge is not None else
                        (10,) if action == native_board_contract.COMMAND else ())
         if any(len(value) > (8192 if index in long_fields else 1024)
@@ -4087,6 +4124,8 @@ class Bridge:
                                              interval=.025, file_reply=True)
         else:
             raw = await self.local_bridge.command(header + (catalog_body or b""), timeout)
+            if action in (native_crate_outcome.LOCAL_ROLL, native_crate_outcome.ADOPT):
+                return _parse_crate_outcome(raw, fields)
             if action in {"travel", "travel-party"} and raw.startswith("native-travel-reply\t"):
                 return self._local_travel_reply(raw, fields)
             if action in {native_voice.COMMAND, native_anomaly_effects.PLAY_CUES, native_weather_view.LIGHTNING_PLAY}:

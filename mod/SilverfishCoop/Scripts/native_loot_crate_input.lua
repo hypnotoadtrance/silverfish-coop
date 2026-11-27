@@ -409,6 +409,12 @@ local function project(current, angle, animate)
     return "stock crate exhausted projection verified"
 end
 
+function input.apply_outcome(state, phase, profile)
+    local current = input.update(state, phase, profile)
+    if phase ~= "hosting" or not current or not current.host then error("stock crate outcome scope unavailable", 0) end
+    return project(current, nil, true)
+end
+
 local function stock_focus(pawn, box, dispatch, focus_refusal)
     local camera = pawn.Camera
     if not exact_component(camera, "/Script/Engine.CameraComponent", pawn) then

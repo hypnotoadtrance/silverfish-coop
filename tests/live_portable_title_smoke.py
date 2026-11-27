@@ -7230,23 +7230,23 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
         reply_ms = (received["time_unix"] * 1_000_000 - pressed_wall_us) / 1000
         first_ms = (min(first_views.values()) - pressed_us) / 1000
         last_ms = (max(first_views.values()) - pressed_us) / 1000
-        host_timing = host.bridge.directory / "portable-crate-host.tsv"
-        action, = [row.split("\t")[1:] for row in host_timing.read_text(encoding="ascii").splitlines()
-                   if row.startswith(crate + "\t")]
-        started, finished, *steps = map(int, action)
-        steps_ms = dict(zip(("qualify", "open", "describe", "retain", "capture"),
-                            (round(micros / 1000, 2) for micros in steps), strict=True))
-        assert pressed_us <= started <= finished
         assert 0 <= committed_ms <= reply_ms < 6000 and 0 <= first_ms <= last_ms < 6000, (
             committed_ms, reply_ms, first_ms, last_ms)
-        timings = {"press_to_host_roll_ms": round(committed_ms, 2), "press_to_guest_reply_ms": round(reply_ms, 2),
+        timings = {"press_to_host_accept_ms": round(committed_ms, 2), "press_to_guest_reply_ms": round(reply_ms, 2),
                    "press_to_first_world_item_ms": first_ms, "press_to_last_world_item_ms": last_ms,
                    "guest_reply_to_last_world_item_ms": round(last_ms - reply_ms, 2),
-                   "world_items_presented": len(items),
-                   "press_to_stock_action_ms": round((started - pressed_us) / 1000, 2),
-                   "stock_action_ms": round((finished - started) / 1000, 2),
-                   "stock_action_steps_ms": steps_ms,
-                   "stock_action_to_host_roll_ms": round(committed_ms - (finished - pressed_us) / 1000, 2)}
+                   "world_items_presented": len(items)}
+        if applied.get("origin") != "player":
+            host_timing = host.bridge.directory / "portable-crate-host.tsv"
+            action, = [row.split("\t")[1:] for row in host_timing.read_text(encoding="ascii").splitlines()
+                       if row.startswith(crate + "\t")]
+            started, finished, *steps = map(int, action)
+            assert pressed_us <= started <= finished
+            timings.update(press_to_stock_action_ms=round((started - pressed_us) / 1000, 2),
+                           stock_action_ms=round((finished - started) / 1000, 2),
+                           stock_action_steps_ms=dict(zip(("qualify", "open", "describe", "retain", "capture"),
+                                                           (round(micros / 1000, 2) for micros in steps), strict=True)),
+                           stock_action_to_host_roll_ms=round(committed_ms - (finished - pressed_us) / 1000, 2))
         if starts := [stamp for stamp in frame_starts if pressed_us <= stamp <= min(first_views.values())]:
             started = max(starts)
             timings["press_to_guest_projection_ms"] = round((started - pressed_us) / 1000, 2)
@@ -7257,7 +7257,8 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
         "local_bridge": {"host": host_state["local_bridge"], "guest": guest_state["local_bridge"]},
         "stock_crate": crate, "guest_actor": guest_actor,
         "input_source": received["input_source"], "sequence": received["sequence"],
-        "roll_id": roll["id"], "roll_count": 1, "guest_scope_cleared_before_press": cold,
+        "roll_id": roll["id"], "roll_count": 1, "roll_origin": applied.get("origin", "host"),
+        "guest_scope_cleared_before_press": cold,
         "saves_unchanged_after_open": True,
         "host_bridge_reply_bytes": applied.get("bridge_reply_bytes"),
         "pre_open_diagnostics": diagnostics,

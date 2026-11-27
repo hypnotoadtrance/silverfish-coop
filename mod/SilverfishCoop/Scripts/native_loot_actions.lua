@@ -112,15 +112,7 @@ function actions.pending_escrow(world, slot)
     end
 end
 
-local function capture(scope, slot, outputs, items, pending)
-    local api, class = StaticFindObject(statics), StaticFindObject(save)
-    if not valid_object(api) or not valid_object(class) or pending_escrows[slot]
-        or not pending and api:DoesSaveGameExist(slot, 0) then
-        error("native_loot_escrow_slot_unavailable", 0)
-    end
-    local pool = pending and actions.create_pending_escrow(scope.stock, scope.instance, scope.world, slot)
-        or api:CreateSaveGameObject(class)
-    if not valid_object(pool) then error("native_loot_escrow_could_not_create_save", 0) end
+local function capture_rows(scope, pool, outputs, items)
     local captured = table.pack(SilverfishCaptureNativeLootEscrow(
         scope.crate:GetAddress(), pool:GetAddress(), table.unpack(outputs)))
     if captured[1] ~= true or captured[3] ~= #items or captured.n ~= 3 + #outputs then
@@ -142,11 +134,9 @@ local function capture(scope, slot, outputs, items, pending)
         end
     end
     if index - 1 ~= #items then error("native_loot_escrow_item_identity_count_unverified", 0) end
-    local restored
-    if not pending then
-        local source = scope.profile.capacity ~= 2 and {scope.crate:GetAddress()} or {}
-        restored = save_escrow(api, slot, pool, source)
-    end
+end
+
+local function retire_items(items)
     for _, item in ipairs(items) do
         item.object:SetActorEnableCollision(false)
         item.object:SetActorHiddenInGame(true)
@@ -155,12 +145,44 @@ local function capture(scope, slot, outputs, items, pending)
         end
         item.object:K2_DestroyActor()
     end
+end
+
+local function capture(scope, slot, outputs, items, pending)
+    local api, class = StaticFindObject(statics), StaticFindObject(save)
+    if not valid_object(api) or not valid_object(class) or pending_escrows[slot]
+        or not pending and api:DoesSaveGameExist(slot, 0) then
+        error("native_loot_escrow_slot_unavailable", 0)
+    end
+    local pool = pending and actions.create_pending_escrow(scope.stock, scope.instance, scope.world, slot)
+        or api:CreateSaveGameObject(class)
+    if not valid_object(pool) then error("native_loot_escrow_could_not_create_save", 0) end
+    capture_rows(scope, pool, outputs, items)
+    local restored
+    if not pending then
+        local source = scope.profile.capacity ~= 2 and {scope.crate:GetAddress()} or {}
+        restored = save_escrow(api, slot, pool, source)
+    end
+    retire_items(items)
     if pending and #items > 0 then
         pending_escrows[slot].cache_after_commit = true
     elseif restored and #items > 0 then
         bind_cache(scope)
         remember_escrow(slot, restored, scope.stock)
     end
+end
+
+local function verified_products(scope, reply)
+    local capacity = scope.profile.capacity
+    if reply.n ~= 7 + math.max(0, capacity - 2) or capacity == 1 and reply[5] ~= 0 then
+        error("native_loot_unexpected_child_output", 0)
+    end
+    local outputs = {}
+    for index = 1, capacity do
+        local address = reply[index <= 2 and index + 3 or index + 5]
+        if math.type(address) ~= "integer" or address < 0 then error("native_loot_unverified_child_output", 0) end
+        outputs[index] = address
+    end
+    return outputs, loot.results(scope, outputs)
 end
 
 local function release_escrow(slot)
@@ -393,22 +415,8 @@ function actions.command(fields, state, phase)
         return "stock key unlock reported"
     end
     if result.ok then
-        local outputs = {}
-        local verified, items = pcall(function()
-            local capacity = scope.profile.capacity
-            if reply.n ~= 7 + math.max(0, capacity - 2) or capacity == 1 and reply[5] ~= 0 then
-                error("native_loot_unexpected_child_output", 0)
-            end
-            for index = 1, capacity do
-                local address = reply[index <= 2 and index + 3 or index + 5]
-                if math.type(address) ~= "integer" or address < 0 then
-                    error("native_loot_unverified_child_output", 0)
-                end
-                outputs[index] = address
-            end
-            return loot.results(scope, outputs)
-        end)
-        local saved, problem = false, items
+        local verified, outputs, items = pcall(verified_products, scope, reply)
+        local saved, problem = false, outputs
         if verified then saved, problem = pcall(capture, scope, slot, outputs, items, pending) end
         if verified and saved then
             result.items = items
@@ -436,6 +444,99 @@ end
 local function item_row(item, status_row)
     return status_row("native-loot-item", item.actor, item.class_path, item.guid, item.ammo,
         table.unpack(item.transform))
+end
+
+local function supports_outcome(profile)
+    return profile and not profile.lockable and not profile.random_lid and not profile.electronic
+end
+
+local function local_outcome(fields, state, phase)
+    local profile = loot.profile(state.map, fields[3])
+    local sequence = math.tointeger(fields[4])
+    if not enabled or phase ~= "connected" or #fields ~= 4 or not supports_outcome(profile) or
+        not sequence or sequence <= 0 or type(SilverfishOpenNativeGuestLootCrate) ~= "function" or
+        type(SilverfishExportNativeLootEscrow) ~= "function" then return "unavailable" end
+    local local_save, pawn = require("native_save_scope").bind_guest(state, phase)
+    local crate = StaticFindObject(profile.path)
+    local instance = state.world.OwningGameInstance
+    local api, class = StaticFindObject(statics), StaticFindObject(save)
+    if not valid_object(local_save) or not valid_object(pawn) or not valid_object(crate)
+        or not valid_object(api) or not valid_object(class) or not valid_object(instance)
+        or not valid_object(crate.Box) or crate.Looted ~= false then return "unavailable" end
+    local lucky, source = loot.lucky_looter(local_save)
+    local pool = api:CreateSaveGameObject(class)
+    if not valid_object(pool) then return "unavailable" end
+    local reply = table.pack(SilverfishOpenNativeGuestLootCrate(profile.path, crate:GetAddress(), pawn:GetAddress(),
+        crate.Box:GetAddress(), local_save:GetAddress(), instance.SaveSlot_Ref:GetAddress(), lucky, sequence))
+    if not reply[1] then
+        if reply[7] then error(reply[2], 0) end
+        return "unavailable"
+    end
+    local outputs, items = verified_products({crate = crate, world = state.world}, reply)
+    local exported, rows = pcall(function()
+        capture_rows({crate = crate}, pool, outputs, items)
+        local ok, reason, rows = SilverfishExportNativeLootEscrow(pool:GetAddress())
+        if not ok or #rows ~= #items then error(reason, 0) end
+        for index, row in ipairs(rows) do
+            if row.guid ~= items[index].guid or row.class_path ~= items[index].class_path then
+                error("native_loot_export_identity_changed", 0)
+            end
+        end
+        return rows
+    end)
+    retire_items(items)
+    if not exported then return "unavailable" end
+    return "rolled", { lucky = lucky, trait = source, calls = reply[6], items = items, rows = rows }
+end
+
+local function adopt_outcome(fields, state, phase)
+    local pawn, crate, slot = fields[3], fields[4], fields[5]
+    if not enabled or phase ~= "hosting" or not valid_slot(slot) or not supports_outcome(loot.profile(state.map, crate))
+        or #fields < 5 or (#fields - 5) % 3 ~= 0 or type(SilverfishImportNativeLootEscrow) ~= "function" then
+        error("native_loot_outcome_scope_unavailable", 0)
+    end
+    local scope = loot.qualify(state, phase, pawn, crate, true)
+    if (#fields - 5) / 3 > scope.profile.capacity then error("native_loot_outcome_capacity", 0) end
+    for index = 7, #fields, 3 do
+        if not valid_object(StaticFindObject(fields[index])) then pcall(LoadAsset, fields[index]) end
+    end
+    local pool = actions.create_pending_escrow(scope.stock, scope.instance, scope.world, slot)
+    local imported, reason = SilverfishImportNativeLootEscrow(pool:GetAddress(), scope.profile.capacity,
+        table.unpack(fields, 6))
+    if not imported then
+        release_escrow(slot)
+        error(reason, 0)
+    end
+    local applied, failure = pcall(function()
+        require("native_loot_crate_input").apply_outcome(state, phase, scope.profile)
+        scope.crate:Resolve_Respawn()
+        local host = state.local_pawn.pawn
+        if loot.temporary_activation(scope.crate, host) == false or scope.crate.Looted ~= true then
+            error("stock crate replenishment state did not apply", 0)
+        end
+    end)
+    if not applied then
+        release_escrow(slot)
+        error("mutation_unverified_native_loot_outcome: " .. tostring(failure), 0)
+    end
+    pending_escrows[slot].cache_after_commit = #fields > 5
+    return "adopted"
+end
+
+function actions.outcome_reply(fields, state, phase, row)
+    local adopter = fields[2] == "native-loot-adopt-outcome"
+    local ok, message, result = pcall(adopter and adopt_outcome or local_outcome, fields, state, phase)
+    local crate = fields[adopter and 4 or 3]
+    local lines = {row("native-loot-outcome-reply", 1, fields[1], phase, state.map, crate,
+        fields[adopter and 5 or 4], ok and "accepted" or "error", message)}
+    if result then
+        lines[#lines + 1] = row("loot-traits", result.lucky and 1 or 0, result.trait, result.calls)
+        for index, item in ipairs(result.items) do
+            lines[#lines + 1] = item_row(item, row)
+            lines[#lines + 1] = row("loot-typed", item.guid, result.rows[index].text)
+        end
+    end
+    return table.concat(lines, "\n") .. "\n"
 end
 
 function actions.compact_open(fields, state, phase)

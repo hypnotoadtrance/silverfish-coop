@@ -35,7 +35,7 @@ from .local_bridge import (GUEST_INTERACTION_BROKER, GUEST_INTERACTION_DIALOGUE,
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from . import native_guest_drop, native_guest_drop_projection, native_guest_drop_record
-from . import native_world_loot, native_zone_lease
+from . import native_crate_outcome, native_world_loot, native_zone_lease
 from . import native_guest_melee
 from . import native_guest_ui, native_wallet, native_inventory_grant
 from . import native_host_dig, native_host_dig_live, native_host_landmine, native_package_handoff_journal
@@ -83,7 +83,7 @@ NATIVE_RUNTIME_RETIRING = "native_runtime_retiring"
 # The stock driver can retain a silent connection for 110 seconds.
 NATIVE_RUNTIME_RETIREMENT_WAIT = 130.0
 NOTHING_VOLUME = f"KillVolume_BP_C {NOTHING}.Nothing_P:PersistentLevel.KillVolume_BP_C_0"
-_TIMED_INTERACTIONS = (frozenset({"native-loot-inspect", "native-loot-open", "native-loot-claim",
+_TIMED_INTERACTIONS = (frozenset({"native-loot-inspect", "native-loot-open", "native-loot-claim", native_crate_outcome.REPORT,
                                   native_authored_pickup.ACTION, native_loose_pickup.CLAIM})
                        if os.environ.get("SILVERFISH_COOP_TITLE_FIXTURES") == "1" else frozenset())
 _NATIVE_REQUESTS_PER_PASS = 3
@@ -106,7 +106,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_inventory.STORE_EQUIPMENT, native_inventory.UNEQUIP,
                         native_stash.LIST, native_stash.MOVE,
                         native_guest_ui.ACTION, native_wallet.REPORT, native_inventory_grant.REPORT,
-                        "native-loot-inspect", "native-loot-open", "native-loot-claim", native_loot.LOCKPICK,
+                        "native-loot-inspect", "native-loot-open", "native-loot-claim", native_loot.LOCKPICK, native_crate_outcome.REPORT,
                         *native_loot.PRY_TOOL_ACTIONS.values(),
                         native_stock_door.ACTION, *native_stock_door.PRY_ACTIONS.values(), *native_stock_switch.ACTIONS,
                         native_ladder.ACTION,
@@ -2504,6 +2504,8 @@ class Host:
             elif action in ("native-loot-inspect", "native-loot-open", "native-loot-claim"):
                 result = await native_loot.perform(self, bridge, character, action.removeprefix("native-loot-"),
                                                    target, request["operation_id"], defer_save=True)
+            elif action == native_crate_outcome.REPORT:
+                result = await native_crate_outcome.accept(self, bridge, character, target, request["operation_id"])
             elif action == native_loot.LOCKPICK:
                 result = await native_loot.settle_lockpick(self, bridge, character, target, request["operation_id"])
             elif action in native_loot.PRY_TOOL_ACTIONS.values():
@@ -5518,6 +5520,7 @@ class Client:
         self.guest_grants = native_inventory_grant.GuestGrants()
         self.crate_intents = native_loot.OpenIntents()
         self.crate_lids = native_loot.GuestCrateProjection()
+        self.provisional_crate_rolls = {}
         self.world_loot_wake = asyncio.Event()
         self.last_lockpick_result = 0
         self.pending_lockpick_unlocks = set()
@@ -6178,7 +6181,7 @@ class Client:
             operation = uuid.uuid5(self.bridge.input_namespace,
                                    f"{session}:{epoch}:{self.invite['character_id']}:crate:{sequence}:{crate}").hex
             try:
-                result = await self.gameplay_action("native-loot-open", operation, crate)
+                result = await self.open_stock_crate(scope, operation, crate, sequence)
                 self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation,
                                    crate=crate, input_source=source, **result)
             except (ValueError, OSError, RuntimeError) as error:
@@ -6193,6 +6196,45 @@ class Client:
                 if (self.bridge.local_bridge is not None and self.stock_interaction_scope() == scope
                         and roll is not None and roll == result.get("native_loot_roll")):
                     self.crate_lids.prioritize(crate, scope)
+
+    async def open_stock_crate(self, scope, operation, crate, sequence):
+        area, epoch = scope[2], scope[1]
+        if self.bridge.local_bridge is None or not native_crate_outcome.supported(crate, area):
+            return await self.gameplay_action("native-loot-open", operation, crate)
+        frame = await self.bridge.command(native_crate_outcome.LOCAL_ROLL, crate, str(sequence),
+                                          timeout=3, update_status=False)
+        if self.stock_interaction_scope() != scope:
+            raise ValueError("The stock crate visit changed")
+        outcome = frame.get("outcome")
+        if outcome is None:
+            return await self.gameplay_action("native-loot-open", operation, crate)
+        report = native_crate_outcome.report_body(epoch, crate, outcome)
+        if len(report.encode("utf-8")) > native_crate_outcome.MAX_REPORT_BYTES:
+            return await self.gameplay_action("native-loot-open", operation, crate)
+        try:
+            native_crate_outcome.decode_report(report, area)
+        except party.RuleError as error:
+            self.control.event("native_loot_outcome_local_payload_unavailable", crate=crate, reason=str(error))
+            return await self.gameplay_action("native-loot-open", operation, crate)
+        local_roll = native_crate_outcome.observed_roll(crate, area, self.invite["character_id"], operation, outcome)
+        settlement = asyncio.get_running_loop().create_future()
+        self.provisional_crate_rolls[crate] = scope, local_roll, settlement
+        self.world_loot_wake.set()
+        settled = None
+        try:
+            result = await self.gameplay_action(native_crate_outcome.REPORT, operation, report)
+            accepted = result.get("native_loot_roll")
+            if not isinstance(accepted, dict) or (accepted.get("map"), accepted.get("crate")) != (area, crate):
+                raise RuntimeError("The host returned a different crate outcome")
+            await self.cancel_gameplay_snapshot()
+            if self.stock_interaction_scope() == scope:
+                self.gameplay.setdefault(native_loot.STATE_KEY, {})[crate] = accepted
+                settled = accepted.get("id")
+            return result
+        finally:
+            settlement.set_result(settled)
+            del self.provisional_crate_rolls[crate]
+            self.world_loot_wake.set()
 
     async def service_lockpick_results(self, scope, inputs) -> None:
         if scope is None or self.stock_interaction_scope() != scope:
@@ -7058,12 +7100,17 @@ class Client:
                   and not self.stopping)
         fresh = active and time.monotonic() - self.gameplay_seen < 2
         gameplay = self.gameplay
+        rolls = gameplay.get(native_loot.STATE_KEY, {})
+        if self.provisional_crate_rolls:
+            scope = self.stock_interaction_scope()
+            rolls = {**{crate: roll for crate, (visit, roll, _) in self.provisional_crate_rolls.items()
+                        if visit == scope}, **rolls}
         motion = self.loot_motion_playback.frame(
             motion_packets, area, zone, active=active and version >= 1, now=time.monotonic(),
         )
         try:
             snapshot = await self.world_loot.sync(
-                self.bridge, game, gameplay.get(native_loot.STATE_KEY, {}),
+                self.bridge, game, rolls,
                 f"{session}:{self.stack_drop_projection.admission}", zone, active=fresh,
                 enemy_frame=gameplay.get(native_enemy_shells.FRAME_KEY) if fresh and version >= 1
                 and area in native_enemy_loot.BY_MAP else None,
@@ -7134,6 +7181,13 @@ class Client:
     async def apply_stock_interaction(self, scope, operation, target):
         if loot := native_world_loot.target_parts(target):
             action, claim = self.world_loot.claim_target(self.last_game, loot)
+            if action == native_loot.CLAIM:
+                crate = claim.partition("@")[2]
+                pending = self.provisional_crate_rolls.get(crate)
+                if pending and pending[0] == scope:
+                    _, local_roll, settlement = pending
+                    if await asyncio.shield(settlement) != local_roll["id"] or self.stock_interaction_scope() != scope:
+                        raise ValueError("The party accepted a different stock crate roll")
             result = await self.gameplay_action(action, operation, claim)
             if self.stock_interaction_scope() == scope:
                 try:

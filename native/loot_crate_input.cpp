@@ -675,6 +675,18 @@ namespace
 
 namespace silverfish::native_loot_crate_input
 {
+    bool consume_guest_open(U::UObject* crate, U::UObject* pawn, std::uint64_t requested)
+    {
+        if (!ready() || !requested) return false;
+        const auto* profile = shared_loot::authored_profile(crate);
+        if (!profile) return false;
+        auto& scope = scopes[static_cast<std::size_t>(profile - profiles.data())];
+        if (scope.host || scope.pried || scope.observed != requested || scope.pawn.Get() != pawn ||
+            scope.crate.Get() != crate || Clock::now() >= scope.receipt) return false;
+        scope.observed = 0;
+        return true;
+    }
+
     void observe_hinged_pick(U::UObject* actor)
     {
         // A guarded PickLock call during this stock attempt means the Blueprint's success roll passed.

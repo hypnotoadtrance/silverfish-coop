@@ -1101,14 +1101,13 @@ namespace
         if (!Unreal::IsInGameThreadRaw() || !installed.load(std::memory_order_acquire) || opening)
             return result(lua, false, "native_loot_scope_unavailable");
         const auto argc = lua.get_stack_size();
-        // Guest rolls stay behind the private fixture until their exact item and
-        // source outcome can be transferred and settled together.
         if constexpr (guest)
         {
-            if (!env_flag("SILVERFISH_COOP_HEADLESS") || !env_flag("SILVERFISH_COOP_TITLE_FIXTURES") || argc != 7)
-                return result(lua, false, "stock_guest_crate_fixture_unavailable");
+            if ((argc != 8 || !lua.is_integer(8)) &&
+                (argc != 7 || !env_flag("SILVERFISH_COOP_HEADLESS") || !env_flag("SILVERFISH_COOP_TITLE_FIXTURES")))
+                return result(lua, false, "stock_guest_crate_input_unavailable");
         }
-        if (argc < 7 || argc > 10 || !lua.is_string(1) || !lua.is_bool(7) || (argc >= 8 && !lua.is_bool(8)) ||
+        if (argc < 7 || argc > 10 || !lua.is_string(1) || !lua.is_bool(7) || (!guest && argc >= 8 && !lua.is_bool(8)) ||
             (argc >= 9 && !lua.is_bool(9)) || (argc == 10 && !lua.is_integer(10)))
             return result(lua, false, "native_loot_exact_open_arguments_required");
         const auto crate_path = lua.get_string();
@@ -1119,7 +1118,9 @@ namespace
         latest_roll = {};
         Context context;
         context.lucky = lua.get_bool();
-        const bool force_nonempty = argc >= 8 && lua.get_bool();
+        const auto guest_press = guest && argc == 8 ? lua.get_integer() : 0;
+        if (guest && argc == 8 && guest_press <= 0) return result(lua, false, "stock_guest_crate_input_unavailable");
+        const bool force_nonempty = !guest && argc >= 8 && lua.get_bool();
         const bool pried = argc >= 9 && lua.get_bool();
         const std::int64_t power_receipt = argc == 10 ? lua.get_integer() : 0;
         const bool powered = power_receipt > 0;
@@ -1165,6 +1166,9 @@ namespace
             if (const auto failure = fixture.bind(context, schema); !failure.empty())
                 return result(lua, false, failure);
         }
+        if (guest_press && !silverfish::native_loot_crate_input::consume_guest_open(context.crate, context.pawn,
+                static_cast<std::uint64_t>(guest_press)))
+            return result(lua, false, "stock_guest_crate_input_unavailable");
         OpenParams input;
         schema.opener->SetObjectPropertyValue(schema.opener->ContainerPtrToValuePtr<void>(&input), context.pawn);
         schema.hit_component->SetObjectPropertyValue(schema.hit_component->ContainerPtrToValuePtr<void>(&input), context.box);
