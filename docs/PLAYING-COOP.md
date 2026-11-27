@@ -194,7 +194,7 @@ At ShopKeep, use Interact at the reception and choose the cash-shop response to 
 
 At Borough, ask Mama about trade. Near her trade post, a guest can run `native-borough-mama-trade --target COPPER_WIRE_GUID` to exchange one owned Copper Wire for an exact stock stack of 25 armor-piercing rounds. The trade requires that guest's own conversation and Copper Wire.
 
-At Borough's board, use Interact to view your selected contract and press it again to accept or turn in when prompted. The prompt closes when you look away or move out of range.
+At Borough's board, use Interact to open the stock bounty board. Choose a contract and use the stock Accept or Turn In button.
 
 At the Observatory Castaway, guests can use Interact to open the stock story dialogue. Use Up and Down to select a response, then press Interact to confirm it. Each guest has a separate conversation.
 
@@ -284,7 +284,7 @@ For Pump Room, take a blank data tape to the Utility Tunnels download station. U
 
 Black Market offers `Jmr_Lake` at zero host XP. Accept it at the board, travel together to Lake, and destroy the authored jammer with stock weapons. Return to Black Market and redeem the shared contract through Interact.
 
-At Borough's board, use Up and Down to select Copper Stop, Find a Computer Board, or Dead Bridge Turret Photos. Interact checks the selected contract. Press it again to accept or redeem when the panel prompts you. At the Scientist's board, the same controls redeem Find a Computer Board for the player carrying it.
+At Borough's board, use the stock controls to select Copper Stop, Find a Computer Board, or Dead Bridge Turret Photos when offered. Use the Scientist's board to turn in Find a Computer Board as the player carrying it.
 
 The Dead Bridge photography contract unlocks on Borough's board at 4 host XP. Equip a stock camera and center a turret before pressing primary input. Either player can take either photo. For scripted actions, use `native-turret-photo-capture --target turret-13` or `--target turret-15` while framing the matching turret. The host verifies the shot in the game and records each turret once. Return to Borough and use `native-quest-turnin --target Photo_DB_Turrets` for the shared cash and personal XP.
 

@@ -50,157 +50,15 @@ local profiles = {
     [black_market] = board_profile(black_market, "Shop_BlackMarket_01", "0", 1, {brandy, pump_room, lake_jammer, lenny,
         stolen_bag, dead_drop, metro_drop, black_box, missing_contact, spratt}, true),
 }
-local titles = {[molasses] = "Get Molasses", [keycard] = "Hall Pass", [wire] = "Copper Stop", [computer] = "Find a Computer Board", [photo] = "Dead Bridge Turret Photos",
-    [report] = "Northern Passage", [depot] = "Depot Documents", [brandy] = "Fine Vintage", [readings] = "Stone Maze Readings",
-    [pocket_watch] = "Pocket Watch", [ring] = "Savlo's Ring", [pump_room] = "Pump Room", [lake_jammer] = "Signal Jammer: Black Lake",
-    [lenny] = "Lenny's House", [flood_control] = "Flood Control", [stolen_bag] = "Stolen Goods",
-    [dead_drop] = "CrossRoads Dead Drop", [metro_drop] = "Metro Dead Drop",
-    [black_box] = "Black Box", [missing_contact] = "Missing Contact",
-    [spratt] = "Kill Spratt", [prototype] = "Prototype Drill", [crossroads_jammer] = "Signal Jammer: Crossroads",
-    [flood_jammer] = "Signal Jammer: Flood Plains"}
 local board_class = "/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C"
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 local instance_class = "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C"
-local widget_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
 local quest_log_path = "/Game/Classes/GUI/Menu_QuestLog_Widget.Menu_QuestLog_Widget_C"
 local quest_details_path = "/Game/Classes/GUI/SubWidgets/Quest_DetailsWindow_Widget.Quest_DetailsWindow_Widget_C"
 local quest_turnin_path = "/Game/Classes/GUI/SubWidgets/Quest_TurnIn_Widget.Quest_TurnIn_Widget_C"
 local quest_listed_path = "/Game/Classes/GUI/SubWidgets/Quest_Listed_Widget.Quest_Listed_Widget_C"
 local max_sequence = 2 ^ 53
-local prompt = {
-    focused = "Interact to view the contract.",
-    loading = "Checking the party's contract...",
-    starting = "Accepting the party contract...",
-    redeeming = "Turning in the party contract...",
-    completed = "This party has completed the contract.",
-    unavailable = "The board could not verify this action.\nInteract to check the contract again.",
-    not_offered = "This contract is currently unavailable on this board.\nInteract to check again.",
-    elsewhere = "Deliver one Computer Board to the Scientist bounty board.",
-}
-local contract_prompt = {
-    [prototype] = {
-        missing = "Bring the Drill Head recovered in the Scientist Tunnel.\nInteract to check the contract again.",
-        ready = "Turn in the Drill Head for 10,000 shared cash and a Hazard Suit.\nInteract again to turn it in.",
-    },
-    [missing_contact] = {
-        offer = "Find the Broker's contact in CrossRoads.\nInteract again to accept.",
-        missing = "Bring the sealed package recovered in CrossRoads.\nInteract to check the contract again.",
-        ready = "Turn in the sealed package for 450 shared cash.\nInteract again to turn it in.",
-    },
-    [black_box] = {
-        offer = "Recover the flight recorder in the Gorge.\nInteract again to accept the contract.",
-        elsewhere = "Deliver the recorder to Simmi's Observatory bounty board.",
-        missing = "Bring the flight recorder in your backpack.\nInteract to check the contract again.",
-        ready = "Turn in the recorder for 12,000 shared cash.\nInteract again to turn it in.",
-    },
-    [dead_drop] = {
-        offer = "Collect the sealed bag in CrossRoads.\nInteract again to accept the contract.",
-        elsewhere = "Deliver the sealed bag to the Black Market bounty board.",
-        missing = "Bring the sealed bag in your backpack.\nInteract to check the contract again.",
-        ready = "Turn in the bag for 300 shared cash.\nInteract again to turn it in.",
-    },
-    [metro_drop] = {
-        offer = "Collect the sealed bag in Metropol.\nInteract again to accept the contract.",
-        missing = "Bring the sealed bag in your backpack.\nInteract to check the contract again.",
-        ready = "Turn in the bag for 600 shared cash.\nInteract again to turn it in.",
-    },
-    [stolen_bag] = {
-        offer = "Recover the Broker's bag from the Forest.\nInteract again to accept the contract.",
-        missing = "Bring the Broker's unopened bag in your backpack.\nInteract to check the contract again.",
-        ready = "Turn in the bag for 1,200 shared cash.\nInteract again to turn it in.",
-    },
-    [flood_control] = {
-        offer = "Close the Subway flow-control valve.\nInteract again to accept the contract.",
-        missing = "Close the flow-control valve in the Subway.\nInteract to check the contract again.",
-        ready = "The valve is closed.\nInteract again to turn in the contract.",
-    },
-    [molasses] = {
-        offer = "Find a can of molasses for Shop Keep.\nInteract again to accept the contract.",
-        missing = "Bring a can of molasses in your backpack.\nInteract to check the contract again.",
-        ready = "Turn in the molasses for 30 shared cash.\nInteract again to turn it in.",
-    },
-    [keycard] = {
-        offer = "Retrieve the Savlo keycard for Simmi.\nInteract again to accept the contract.",
-        missing = "Bring the Savlo keycard in your backpack.\nInteract to check the contract again.",
-        ready = "Turn in the keycard for 50,000 shared cash.\nInteract again to turn it in.",
-    },
-    [wire] = {
-        offer = "Bring Copper Wire to this board.\nInteract again to accept the contract.",
-        missing = "Bring one Copper Wire to this board.\nInteract to check the contract again.",
-        ready = "Turn in one Copper Wire to finish the contract.\nInteract again to turn it in.",
-    },
-    [computer] = {
-        offer = "Deliver a Computer Board to the Scientist bounty board.\nInteract again to accept the contract.",
-        missing = "Bring one Computer Board in your backpack.\nInteract to check the contract again.",
-        ready = "Turn in your Computer Board for 800 shared cash.\nInteract again to turn it in.",
-    },
-    [photo] = {
-        offer = "Use a Camera to photograph two turrets in Dead Bridge.\nInteract again to accept the contract.",
-        missing = "Photograph the two turrets in Dead Bridge.\nInteract to check the contract again.",
-        ready = "The photos are ready for review.\nInteract again to turn them in.",
-    },
-    [report] = {
-        offer = "Recover the report at Dead End.\nInteract again to accept the contract.",
-        missing = "Bring the Dead End report in your backpack.\nInteract to check the contract again.",
-        ready = "Turn in the report for 1,200 shared cash.\nInteract again to turn it in.",
-    },
-    [depot] = {
-        offer = "Recover the documents from the depot office.\nInteract again to accept the contract.",
-        missing = "Bring the depot documents in your backpack.\nInteract to check the contract again.",
-        ready = "Turn in the documents for 1,300 shared cash.\nInteract again to turn them in.",
-    },
-    [brandy] = {
-        offer = "Find the sealed Paladin Brandy in the City.\nInteract again to accept the contract.",
-        missing = "Bring the sealed bottle in your backpack.\nInteract to check the contract again.",
-        ready = "Turn in the bottle for 900 shared cash.\nInteract again to turn it in.",
-    },
-    [pocket_watch] = {
-        offer = "Find the pocket watch in the Crossroads farm cabin.\nInteract again to accept the contract.",
-        missing = "Bring the pocket watch in your backpack.\nInteract to check the contract again.",
-        ready = "Turn in the pocket watch for 1,000 shared cash.\nInteract again to turn it in.",
-    },
-    [ring] = {
-        offer = "Find Savlo's ring in the manor near Trinsdal.\nInteract again to accept the contract.",
-        missing = "Bring Savlo's ring in your backpack.\nInteract to check the contract again.",
-        ready = "Turn in the ring for 20,000 shared cash.\nInteract again to turn it in.",
-    },
-    [pump_room] = {
-        offer = "Download the pump data in the Utility Tunnels.\nInteract again to accept the contract.",
-        missing = "Bring the Eather Pump Data tape in your backpack.\nInteract to check the contract again.",
-        ready = "Turn in the tape for 3,200 shared cash.\nInteract again to turn it in.",
-    },
-    [lake_jammer] = {
-        offer = "Disable the signal jammer at Black Lake.\nInteract again to accept the contract.",
-        missing = "Disable the signal jammer at Black Lake.\nInteract to check the contract again.",
-        ready = "Turn in the contract for 400 shared cash.\nInteract again to turn it in.",
-    },
-    [crossroads_jammer] = {
-        offer = "Disable the signal jammer at Crossroads.\nInteract again to accept the contract.",
-        missing = "Disable the signal jammer at Crossroads.\nInteract to check the contract again.",
-        ready = "Turn in the contract for 200 shared cash.\nInteract again to turn it in.",
-    },
-    [flood_jammer] = {
-        offer = "Disable the signal jammer at Flood Plains.\nInteract again to accept the contract.",
-        missing = "Disable the signal jammer at Flood Plains.\nInteract to check the contract again.",
-        ready = "Turn in the contract for 350 shared cash.\nInteract again to turn it in.",
-    },
-    [lenny] = {
-        offer = "Find Lenny in the Rail Yard.\nInteract again to accept the contract.",
-        missing = "Take out Lenny in the Rail Yard.\nInteract to check the contract again.",
-        ready = "Turn in the contract for 2,500 shared cash.\nInteract again to turn it in.",
-    },
-    [spratt] = {
-        offer = "Find Spratt in the Cistern.\nInteract again to accept the contract.",
-        missing = "Take out Spratt in the Cistern.\nInteract to check the contract again.",
-        ready = "Turn in the contract for 5,000 shared cash.\nInteract again to turn it in.",
-    },
-    [readings] = {
-        not_offered = "Speak to Dr. Mosby to start this contract.",
-        missing = "Bring the Ground Saturation Data tape from Stone Maze.\nInteract to check the contract again.",
-        ready = "Turn in your Ground Saturation Data tape for 7,500 shared cash.\nInteract again to turn it in.",
-    },
-}
 local rendered_states = {
     view = { offer = true, missing = true, ready = true, completed = true, unavailable = true, not_offered = true, elsewhere = true },
     start = { offer = true, missing = true, ready = true, completed = true, unavailable = true, not_offered = true, elsewhere = true },
@@ -208,7 +66,7 @@ local rendered_states = {
 }
 
 local events, heartbeat, is_downed
-local binding, session, stock_session, stock_pending, stock_projection, widget, presented_text
+local binding, session, stock_session, stock_pending, stock_projection
 local input_armed = false
 local selection = 1
 local last_sequence = 0
@@ -347,13 +205,7 @@ local function focused(current)
     return same(current.pawn.InteractionTarget_Component, current.box)
 end
 
-local function hide()
-    if valid(widget) then widget:RemoveFromParent() end
-    widget, presented_text = nil, nil
-end
-
 local function select_board(current)
-    hide()
     binding, session, stock_session, stock_pending, stock_projection = current, nil, nil, nil, nil
     selection = 1
 end
@@ -362,42 +214,6 @@ function board_view.clear()
     select_board(nil)
     if input_armed and type(SilverfishClearNativeWireBoardScope) == "function" then SilverfishClearNativeWireBoardScope() end
     input_armed = false
-end
-
-local function show(current, text)
-    if not valid(widget) then
-        local class = StaticFindObject(widget_path)
-        if not valid(class) then
-            LoadAsset(widget_path)
-            class = StaticFindObject(widget_path)
-        end
-        local library = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary")
-        if not valid(class) or not valid(library) then error("wire_board_widget_class_unavailable", 0) end
-        local created = library:Create(current.pawn, class, current.controller)
-        if not exact(created, widget_path) or not same(created:GetOwningPlayer(), current.controller)
-            or not exact(created.TextBlock_Notes, "/Script/UMG.TextBlock") then error("wire_board_widget_unqualified", 0) end
-        widget = created
-        widget:SetVisibility(3)
-        if widget:AddToPlayerScreen(31) ~= true or not widget:IsInViewport() then error("wire_board_widget_unavailable", 0) end
-        widget:SetDesiredSizeInViewport({X = 610, Y = 280})
-        widget:SetPositionInViewport({X = 42, Y = 138}, false)
-    end
-    widget.TextBlock_Notes:SetText(FText(text))
-    if widget.TextBlock_Notes:GetText():ToString() ~= text then error("wire_board_widget_readback_unverified", 0) end
-end
-
-local function present(current, status)
-    if headless then return true end
-    local quests = current.profile.quests
-    local quest = quests[selection]
-    local lines = {titles[quest]}
-    lines[#lines + 1] = ""
-    lines[#lines + 1] = contract_prompt[quest][status] or prompt[status]
-    local text = table.concat(lines, "\n")
-    if presented_text == text and valid(widget) then return true end
-    local ok = pcall(show, current, text)
-    if ok then presented_text = text else hide() end
-    return ok
 end
 
 local function write_event(current, sequence, open_sequence, kind, quest)
@@ -449,7 +265,6 @@ local function queue_stock_view(current, sequence, now, fixture, menu)
     if stock_pending or not write_event(current, sequence, sequence, "stock-view", "-") then return false end
     stock_pending = {sequence = sequence, expires = now + 12, fixture = fixture, menu = menu}
     session = nil
-    hide()
     return true
 end
 
@@ -643,7 +458,7 @@ local function drain_fixture(current, sequence, now)
         if session.state == "offer" then kind = "start" end
         if session.state == "ready" then kind = "turnin" end
         if kind ~= "view" and (session.quest ~= current.profile.quests[selection]
-            or not session.fixture or not present(current, session.state)) then return false end
+            or not session.fixture) then return false end
     end
     return emit(current, sequence, kind, now, true)
 end
@@ -694,7 +509,6 @@ function board_view.sync(state, phase)
     local usable = can_use(current, true)
     if session and (session.expires <= now or not usable) then session = nil end
     drain_stock(current, now)
-    if session then present(current, session.state) else hide() end
     binding.status = usable and (focused(current) and "focused" or "armed") or "waiting"
 end
 
@@ -789,7 +603,6 @@ function board_view.command(fields, state, phase)
         or session.quest ~= current.profile.quests[selection] or not rendered_states[session.kind][next_state]
         or not (session.fixture or focused(current)) then error("wire_board_render_expired_or_unqualified", 0) end
     session.state, session.expires, session.pending = next_state, now + 30, false
-    present(current, next_state)
     return session.quest == wire and "authenticated Copper Stop board state rendered"
         or "authenticated bounty board state rendered"
 end
