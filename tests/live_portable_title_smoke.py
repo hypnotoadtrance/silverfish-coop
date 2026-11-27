@@ -9167,7 +9167,7 @@ if __name__ == "__main__":
     parser.add_argument("--crossroads-profile", action="store_true",
                         help="measure co-op frame and subsystem times around the stock weather travel check")
     parser.add_argument("--rendered", action="store_true",
-                        help="run the Crossroads profile with offscreen graphics and verify a world frame on both replicas")
+                        help="run with offscreen graphics and capture world frames when profiling Crossroads")
     parser.add_argument("--crossroads-gc-trial", choices=("tuned", "generational"), nargs="?", const="tuned",
                         help="compare the current and earlier Lua collection schedules while walking")
     parser.add_argument("--stock-lightning", action="store_true",
@@ -9317,8 +9317,6 @@ if __name__ == "__main__":
                                    "stock_discovered_overlap", "stock_authored_quest_placement", "rendered"))
     if args.crossroads_gc_trial and not args.crossroads_profile:
         parser.error("--crossroads-gc-trial requires --crossroads-profile")
-    if args.rendered and not args.crossroads_profile:
-        parser.error("--rendered requires --crossroads-profile")
     resident_check_options.update(("guest_stash_memory", "guest_stash_large_memory"))
     if args.crossroads_profile:
         resident_check_options.add("stock_crate_ring")

@@ -14,11 +14,11 @@ Use the same release candidate on all PCs. Builds before `rc-ad3c9da` used an ol
 
 | Issue | Current status |
 | --- | --- |
-| Steam join screens | Automated checks cover open and protected lobbies, restarting a slow Public search, and recovering a completed join when Steam misses the callback. Verify the prompt and retry behavior on two Steam accounts. |
+| Title and Steam join | Manage Characters returned to the selected save with focus restored while a lookup was pending on `rc-57a3b38`. Automated checks cover open and protected lobbies, restarting a slow Public search, and recovering a completed join when Steam misses the callback. Verify the Steam prompt and retry behavior on two accounts. |
 | Oil lantern state | `rc-5a157fb` passed ignition and extinguishing from both seats and a guest joining after the host broke a lamp in isolated Direct IP. Check gold and gray lanterns in a Steam playtest. |
 | Concurrent trader menus | On `rc-5d08fc1`, the roaming barter window stayed open and refreshed after the host bought the guest's selected item in isolated Direct IP. Verify concurrent purchases over Steam and at other trader types. |
 | Interaction delay and frame hitches | The saved cabinet pickup left saves untouched and the longest nearby frame was 23 ms. In the latest offscreen Direct IP sample, the host's slowest exit-source refresh was 0.30 ms, while the slowest instrumented host frame was 38.4 ms and coincided with a Lua heap drop. Foreground Steam timing and larger-party traffic measurements remain open. [Timing details](NATIVE-INTEGRATION.md#replication-and-travel-pacing) · [Enable the Steam report](PLAYING-COOP.md#network-timing) |
-| Crash and disconnect recovery | A previous isolated Direct IP run recovered a guest's unsaved state after a forced exit in 113 seconds. The host and second guest stayed in play. `rc-b18b26a` allows a reserved character to rejoin once Unreal confirms the old connection and pawn have retired. Automated checks cover that path. Retest the aimed weapon swap, enemy-loot pickup, rejoin after a guest exits, and singleplayer combat. |
+| Crash and disconnect recovery | A previous isolated Direct IP run recovered a guest's unsaved state after a forced exit in 113 seconds. The host and second guest stayed in play. Automated checks cover reclaiming the reserved character once Unreal retires the old connection. On `rc-57a3b38`, a real Windows file-lock regression recovered and the Simmi run saved and returned to the title successfully. Retest the aimed weapon swap, enemy-loot pickup, rejoin after a guest exits, and singleplayer combat. |
 
 <a id="current-playtest-checks"></a>
 
