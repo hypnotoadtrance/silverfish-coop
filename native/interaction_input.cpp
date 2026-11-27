@@ -1988,6 +1988,90 @@ namespace
         return 1;
     }
 
+    int read_ready_roster(const Lua& lua)
+    {
+        if (!available() || !scope.host || lua.get_stack_size() != 4 || !lua.is_integer(1) ||
+            !lua.is_integer(2) || !lua.is_integer(3) || !lua.is_integer(4)) return 0;
+        const auto expected_world = lua.get_integer();
+        const auto expected_pawn = lua.get_integer();
+        const auto expected_controller = lua.get_integer();
+        const auto expected_count = lua.get_integer();
+        auto* world = scope.world.Get();
+        auto* host = scope.pawn.Get();
+        auto* local_controller = scope.controller.Get();
+        auto* driver = scope.driver.Get();
+        if (address(world) != expected_world || address(host) != expected_pawn ||
+            address(local_controller) != expected_controller || Clock::now() >= scope.expires || !live_scope(scope))
+            return 0;
+
+        struct Participant
+        {
+            Unreal::UObject* connection{};
+            Unreal::UObject* controller{};
+            Unreal::UObject* pawn{};
+            std::string name;
+        };
+        std::array<Participant, 4> participants{};
+        auto* connections = field<Unreal::FArrayProperty>(driver, STR("ClientConnections"));
+        auto* entry = connections ? Unreal::CastField<Unreal::FObjectProperty>(connections->GetInner()) : nullptr;
+        if (!entry || expected_count < 0 || expected_count > static_cast<int>(participants.size())) return 0;
+        Unreal::FScriptArrayHelper clients(connections, connections->ContainerPtrToValuePtr<void>(driver));
+        if (clients.Num() != expected_count) return 0;
+
+        const auto identity = [](Unreal::UObject* object) -> std::string {
+            auto name = RC::to_string(object->GetFullName());
+            if (name.empty() || name.size() > 512 || name.contains("Default__") ||
+                std::ranges::any_of(name, [](unsigned char ch) { return ch < 32 || ch == 127; })) return {};
+            return name;
+        };
+        auto driver_name = identity(driver);
+        if (driver_name.empty()) return 0;
+        auto* connection_type = expected_count ? find<Unreal::UClass>(STR("/Script/Engine.NetConnection")) : nullptr;
+        for (int index = 0; index < clients.Num(); ++index)
+        {
+            auto* connection = entry->GetObjectPropertyValue(clients.GetRawPtr(index));
+            if (!connection_type || !live(connection) || !connection->IsA(connection_type) ||
+                object_field(connection, STR("Driver")) != driver) return 0;
+            auto* controller = object_field(connection, STR("PlayerController"));
+            if (!live(controller) || controller == local_controller ||
+                controller->GetClassPrivate() != local_controller->GetClassPrivate() || !live_actor(controller, world, 3) ||
+                object_field(controller, STR("Player")) != connection ||
+                object_field(connection, STR("OwningActor")) != controller) return 0;
+            auto* controller_connection = object_field(controller, STR("NetConnection"));
+            if (live(controller_connection) && controller_connection != connection) return 0;
+            auto* pawn = object_field(controller, STR("Pawn"));
+            if (!live(pawn) || pawn == host || pawn->GetClassPrivate() != host->GetClassPrivate() ||
+                !live_actor(pawn, world, 3) || object_field(pawn, STR("Controller")) != controller) return 0;
+
+            auto name = identity(connection);
+            if (name.empty() || std::any_of(participants.begin(), participants.begin() + index, [&](const auto& prior) {
+                    return prior.connection == connection || prior.name == name || prior.controller == controller ||
+                        prior.pawn == pawn;
+                })) return 0;
+            participants[index] = {connection, controller, pawn, std::move(name)};
+        }
+
+        auto* stack = lua.get_lua_state();
+        lua.set_integer(address(driver));
+        lua.set_string(driver_name);
+        lua_createtable(stack, clients.Num(), 0);
+        for (int index = 0; index < clients.Num(); ++index)
+        {
+            const auto& participant = participants[index];
+            lua_createtable(stack, 4, 0);
+            lua.set_integer(address(participant.connection));
+            lua_rawseti(stack, -2, 1);
+            lua.set_string(participant.name);
+            lua_rawseti(stack, -2, 2);
+            lua.set_integer(address(participant.controller));
+            lua_rawseti(stack, -2, 3);
+            lua.set_integer(address(participant.pawn));
+            lua_rawseti(stack, -2, 4);
+            lua_rawseti(stack, -2, index + 1);
+        }
+        return 3;
+    }
+
     int read_remote_aim(const Lua& lua)
     {
         if (!available() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_integer(2)) return 0;
@@ -2525,6 +2609,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishTakeNativeStashPress", take_stash_press);
         lua.register_function("SilverfishReadNativeLocalLean", read_local_lean);
         lua.register_function("SilverfishReadNativeRemoteAim", read_remote_aim);
+        lua.register_function("SilverfishReadNativeReadyRoster", read_ready_roster);
         lua.register_function("SilverfishReadNativeSwitchPower", read_switch_power);
         lua.register_function("SilverfishTakeNativeLanternPress", take_lantern_press);
         lua.register_function("SilverfishDispatchNativeSubwayValve", dispatch_valve);

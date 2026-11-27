@@ -16,12 +16,14 @@ local function same(first, second)
     return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
 end
 
+local function stock_identity(name)
+    return type(name) == "string" and #name > 0 and #name <= 512
+        and not name:find("[%c]") and not name:find("Default__", 1, true)
+end
+
 local function stock_name(object)
     local name = object:GetFullName()
-    if type(name) == "string" and #name > 0 and #name <= 512
-        and not name:find("[%c]") and not name:find("Default__", 1, true) then
-        return name
-    end
+    if stock_identity(name) then return name end
 end
 
 local function actor_name(actor, class, world)
@@ -108,12 +110,45 @@ local function census(state)
     return observed
 end
 
+local function ready_census(state)
+    -- Use the native census only for a fully bound roster in this observation.
+    -- Joining controllers and the exact departure check use the live Lua path.
+    local read = SilverfishReadNativeReadyRoster
+    local world, host = state.world, state.local_pawn
+    if type(read) ~= "function" or not state.guests or #state.guests ~= state.clients
+        or not valid(world) or not host or not valid(host.pawn) or not same(state.controller, host.controller_object)
+        then return end
+    local world_address = world:GetAddress()
+    local driver, driver_name, members = read(world_address, host.pawn:GetAddress(), state.controller:GetAddress(), state.clients)
+    if not driver or not stock_identity(driver_name) or type(members) ~= "table" or #members ~= state.clients then return end
+    local observed = {world = world_address, driver = driver, driver_name = driver_name, guests = {}}
+    local matched = {}
+    for _, connection in ipairs(members) do
+        local address, name, controller, pawn = table.unpack(connection)
+        local detail
+        for _, guest in ipairs(state.guests) do
+            if valid(guest.pawn) and guest.pawn:GetAddress() == pawn and valid(guest.controller_object)
+                and guest.controller_object:GetAddress() == controller then
+                detail = guest
+                break
+            end
+        end
+        if not detail or matched[detail] or not stock_identity(detail.name) or not stock_identity(detail.controller)
+            or not detail.name:match("^" .. pawn_class .. " ") or not detail.controller:match("^" .. controller_class .. " ") then return end
+        matched[detail] = true
+        observed.guests[#observed.guests + 1] = {address = address, name = name, status = "ready", controller = detail.controller,
+            pawn = detail.name, pawn_object = detail.pawn}
+    end
+    return observed
+end
+
 function native_roster.rows(state, phase, status_row)
     if phase ~= "hosting" or not state.listening or state.server then
         last_scope = nil
         return {}
     end
-    local ok, observed, reason = pcall(census, state)
+    local ok, observed, reason = pcall(ready_census, state)
+    if not ok or not observed then ok, observed, reason = pcall(census, state) end
     if not ok then observed, reason = nil, "reflection_unavailable" end
     if not observed then
         return { status_row("native-roster-state", "unavailable", "-", state.clients or 0, reason) }

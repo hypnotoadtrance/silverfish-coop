@@ -113,6 +113,31 @@ assert(spawn.command(command, state, "hosting") == "exact stock remote player re
 local receipt = observe_roster()
 assert(#receipt == 1 and receipt[1]:find("native-roster-spawn\trestarted", 1, true) == 1 and checks == 3)
 assert(observe_roster()[1] == receipt[1] and checks == 3)
+
+local guest = guest_controller.Pawn
+state.guests = {{pawn = guest, controller_object = guest_controller, name = guest:GetFullName(),
+    controller = guest_controller:GetFullName()}}
+local prior = table.concat(roster.rows(state, "hosting", row), "\n")
+local native_reads = 0
+local returned_pawn = guest:GetAddress()
+function SilverfishReadNativeReadyRoster(scope, pawn, controller, clients)
+    assert(scope == world:GetAddress() and pawn == host:GetAddress() and controller == local_controller:GetAddress())
+    if clients ~= 1 then return end
+    native_reads = native_reads + 1
+    return driver:GetAddress(), driver:GetFullName(),
+        {{connection:GetAddress(), connection:GetFullName(), guest_controller:GetAddress(), returned_pawn}}
+end
+local full_reads = 0
+function driver.ClientConnections:GetArrayNum()
+    full_reads = full_reads + 1
+    return #self
+end
+assert(table.concat(roster.rows(state, "hosting", row), "\n") == prior and native_reads == 1 and full_reads == 0)
+assert(observe_roster()[1] == receipt[1], "Native census lost the recovered pawn wrapper")
+returned_pawn = host:GetAddress()
+assert(table.concat(roster.rows(state, "hosting", row), "\n") == prior and full_reads == 1,
+    "A native row outside the current observation must use the exact census")
+state.guests = {}
 driver.ClientConnections[1], state.clients = nil, 0
 assert(#observe_roster() == 0 and checks == 3)
 print("stock player recovery capability and receipt reuse passed")

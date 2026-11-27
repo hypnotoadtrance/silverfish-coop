@@ -397,6 +397,54 @@ def instrument_spawn_context(source):
     return source.replace(anchor, 'pcall(SilverfishProfileCrossroadsCall, "roster_spawn_qualify", host_context, state, phase)')
 
 
+def instrument_ready_roster(source):
+    if "local function ready_census(" not in source:
+        return source
+    anchor = "function native_roster.rows(state, phase, status_row)\n"
+    if source.count(anchor) != 1:
+        raise ValueError("The stock roster timing anchor changed")
+    fixture = """
+local roster_sample
+
+function SilverfishProfileReadyRoster()
+    local state, stamp = assert(roster_sample), SilverfishBridgeProfileStamp
+    local fast, exact = assert(ready_census(state), "native roster was not used"), assert(census(state))
+    assert(fast.world == exact.world and fast.driver == exact.driver and fast.driver_name == exact.driver_name)
+    assert(#fast.guests == #exact.guests and #fast.guests > 0)
+    for index, guest in ipairs(fast.guests) do
+        local other = exact.guests[index]
+        assert(guest.address == other.address and guest.name == other.name and guest.status == other.status
+            and guest.pawn == other.pawn and guest.controller == other.controller
+            and same(guest.pawn_object, other.pawn_object))
+    end
+    local world, pawn, controller = fast.world, state.local_pawn.pawn:GetAddress(), state.controller:GetAddress()
+    assert(SilverfishReadNativeReadyRoster(world + 1, pawn, controller, state.clients) == nil
+        and SilverfishReadNativeReadyRoster(world, pawn + 1, controller, state.clients) == nil
+        and SilverfishReadNativeReadyRoster(world, pawn, controller, state.clients + 1) == nil)
+    local function measure(read)
+        local heap, started = collectgarbage("count"), stamp()
+        for _ = 1, 16 do assert(read(state)) end
+        return (stamp() - started) / 1000, collectgarbage("count") - heap
+    end
+    local running = collectgarbage("isrunning")
+    collectgarbage("stop")
+    local ok, answer = pcall(function()
+        local native1, native_heap1 = measure(ready_census)
+        local lua1, lua_heap1 = measure(census)
+        local lua2, lua_heap2 = measure(census)
+        local native2, native_heap2 = measure(ready_census)
+        return ("%d,%d,%.3f,%.3f,%.3f,%.3f"):format(#fast.guests, 32,
+            native1 + native2, lua1 + lua2, native_heap1 + native_heap2, lua_heap1 + lua_heap2)
+    end)
+    if running then collectgarbage("restart") end
+    assert(ok, answer)
+    return answer
+end
+
+"""
+    return source.replace(anchor, fixture + anchor + '    if phase == "hosting" then roster_sample = state end\n')
+
+
 def instrument_flashlight_scope(source):
     previous, boundary, sync = source.partition("function flashlight.sync(state, phase)")
     body, next_function, rest = sync.partition("function flashlight.command(")
@@ -861,6 +909,14 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
         calls, exact, reused = map(float, binding.split(","))
         guest_binding = {"guest_binding_comparison": {"reads_per_path": int(calls),
                          "full_qualification_ms": exact, "observed_binding_ms": reused}}
+    roster = await command(host, "readyroster")
+    ready_roster = {}
+    if roster != "unavailable":
+        assert not roster.startswith("ready roster comparison failed"), roster
+        guests, passes, native_ms, lua_ms, native_kib, lua_kib = map(float, roster.split(","))
+        ready_roster = {"ready_roster_comparison": {"guests": int(guests), "passes_per_path": int(passes),
+                        "native_ms": native_ms, "lua_ms": lua_ms, "native_heap_growth_kib": native_kib,
+                        "lua_heap_growth_kib": lua_kib, "all_observations_matched": True}}
     rows = await asyncio.gather(*(compare_rows(seat) for seat in seats.values()))
     switches = await asyncio.gather(*(compare_switch_reads(seat) for seat in seats.values()))
     lean = await asyncio.gather(*(compare_lean_reader(seat, probe) for seat in seats.values()))
@@ -897,4 +953,4 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
                            for seat, frame in zip(seats, wall_status, strict=True)},
             "guest_roster": {slot: row["name"] for slot, row in settled["game"]["pawns"].items()},
             "vitals_comparison": dict(zip(seats, comparison, strict=True)), **heartbeat, **guest_binding,
-            **coarse, **journal, **anomaly_samples}
+            **coarse, **journal, **anomaly_samples, **ready_roster}

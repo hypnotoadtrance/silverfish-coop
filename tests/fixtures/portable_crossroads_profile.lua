@@ -389,6 +389,13 @@ LoopInGameThreadWithDelay(50, function()
     elseif action == "switchreader" and not capture then
         local ok, value = pcall(compare_switch_reads)
         if ok then message = value else message = "switch comparison failed: " .. tostring(value) end
+    elseif action == "readyroster" and not capture then
+        if type(SilverfishProfileReadyRoster) == "function" then
+            local ok, value = pcall(SilverfishProfileReadyRoster)
+            if ok then message = value else message = "ready roster comparison failed: " .. tostring(value) end
+        else
+            message = "unavailable"
+        end
     elseif action == "anomalysamples" and not capture then
         local ok, value = pcall(SilverfishProfileAnomalySamples)
         if ok then message = value else message = "anomaly sample comparison failed: " .. tostring(value) end
