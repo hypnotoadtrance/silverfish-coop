@@ -40,6 +40,7 @@ local statics_path = "/Script/Engine.Default__GameplayStatics"
 local world, entries, dirty, visible_streams
 local candle_overlaps, retired_lamps = {}, {}
 local local_power = {}
+local observed_rows, observation = {}, 0
 
 local function valid(object) return object and object:IsValid() end
 local function same(left, right) return valid(left) and valid(right) and left:GetAddress() == right:GetAddress() end
@@ -186,11 +187,12 @@ local function census(state, phase)
     if (phase ~= "connected" and phase ~= "hosting") or not state.listening
         or state.server ~= (phase == "connected") or not valid(state.world) then
         world, entries, dirty, local_power = nil, nil, nil, {}
+        observed_rows = {}
         return {}
     end
     if not same(world, state.world) then
         world, entries, dirty, visible_streams = state.world, {}, {}, nil
-        local_power = {}
+        local_power, observed_rows = {}, {}
         for kind in pairs(profiles) do dirty[kind] = true end
     end
     local changed_levels = refresh_streamed_levels()
@@ -276,7 +278,7 @@ local function suppress_candle_overlap(name, sphere)
     end
 end
 
-function switches.read_row(entry, name, state, phase, row, native_world_address)
+local function read_switch(entry, name, state, phase, row, native_world_address)
     if entry.latch then
         if qualified(entry.actor, state.world, entry.level) and qualified(entry.door, state.world)
             and valid(entry.lever) then
@@ -361,13 +363,37 @@ function switches.read_row(entry, name, state, phase, row, native_world_address)
     end
 end
 
+function switches.read_row(entry, name, state, phase, row, native_world_address)
+    local encoded = read_switch(entry, name, state, phase, row, native_world_address)
+    if phase ~= "hosting" or type(encoded) ~= "string" then return encoded end
+    local previous = observed_rows[name]
+    if previous and previous.row == encoded then return previous.stamped end
+    observation = observation + 1
+    local stamped = encoded .. "\tv=" .. observation
+    observed_rows[name] = {row = encoded, stamped = stamped}
+    return stamped
+end
+
 function switches.rows(state, phase, row)
-    local rows = {}
+    local rows, visible = {}, phase == "hosting" and {}
     local discovered = census(state, phase)
     local native_world_address = next(discovered) and type(SilverfishReadNativeSwitchPower) == "function"
         and state.world:GetAddress()
     for name, entry in pairs(discovered) do
-        rows[#rows + 1] = switches.read_row(entry, name, state, phase, row, native_world_address)
+        local reading = switches.read_row(entry, name, state, phase, row, native_world_address)
+        if reading then
+            rows[#rows + 1] = reading
+            if visible then visible[name] = true end
+        end
+    end
+    if visible then
+        for name in pairs(observed_rows) do
+            if not visible[name] then
+                observed_rows[name] = nil
+                observation = observation + 1
+            end
+        end
+        rows[#rows + 1] = row("native-stock-switch-census", state.map, observation)
     end
     return rows
 end
@@ -551,10 +577,18 @@ function switches.command(fields, state, phase)
         return "stock switch interaction dispatched", entry
     end
     if action == "native-stock-switch-project" and phase == "connected" and fields[4] == state.map and #fields >= 8 then
-        local pending = local_power[fields[3]]
+        local name, cached = fields[3], entries[fields[3]]
+        local pending = local_power[name]
         local last = #fields
         local confirmed = fields[last]:match("^ack=(%d+)$")
         if confirmed then last = last - 1 end
+        local version = tonumber(fields[last]:match("^v=(%d+)$"))
+        if version then last = last - 1 end
+        if version and cached.projected_actor == entry.actor:GetAddress()
+            and version < cached.projected_version then
+            if pending and tonumber(confirmed) == pending.sequence then local_power[name] = nil end
+            return "stock switch newer state retained", entry
+        end
         if pending then
             if pending.actor == entry.actor:GetAddress() and os.clock() < pending.expires
                 and tonumber(confirmed) ~= pending.sequence and (not entry.lantern or fields[9] == "intact") then
@@ -573,26 +607,26 @@ function switches.command(fields, state, phase)
                 error("stock_switch_latch_link_unavailable", 0)
             end
             project(entry, power == "1", {Pitch = pitch, Yaw = yaw, Roll = roll}, lights, true)
-            return "stock switch state projected", entry
-        end
-        if entry.lantern then
+        elseif entry.lantern then
             local lamp = fields[9]
             if last ~= 9 or (lamp ~= "intact" and lamp ~= "broken" and lamp ~= "removed") then
                 error("stock_switch_lamp_state_unavailable", 0)
             end
             local intact = lamp == "intact"
-            local cached = entries[fields[3]]
             if intact then project_lamp(entry, cached, lamp) end
             project(entry, intact and power == "1", {Pitch = pitch, Yaw = yaw, Roll = roll}, lights, true)
             if not intact then project_lamp(entry, cached, lamp) end
-            return "stock switch state projected", entry
+        else
+            for index = 9, last do
+                local id, on, visible = fields[index]:match("^([^|]+)|([01])|([01])$")
+                if not id then error("stock_switch_light_unavailable", 0) end
+                lights[#lights + 1] = {id = id, powered = on == "1", visible = visible == "1"}
+            end
+            project(entry, power == "1", {Pitch = pitch, Yaw = yaw, Roll = roll}, lights, true)
         end
-        for index = 9, last do
-            local id, on, visible = fields[index]:match("^([^|]+)|([01])|([01])$")
-            if not id then error("stock_switch_light_unavailable", 0) end
-            lights[#lights + 1] = {id = id, powered = on == "1", visible = visible == "1"}
+        if version then
+            cached.projected_actor, cached.projected_version = entry.actor:GetAddress(), version
         end
-        project(entry, power == "1", {Pitch = pitch, Yaw = yaw, Roll = roll}, lights, true)
         return "stock switch state projected", entry
     end
     error("stock_switch_scope_unavailable", 0)

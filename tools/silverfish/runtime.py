@@ -2039,6 +2039,11 @@ class Bridge:
                 elif fields[0] == native_stock_switch.TAG:
                     data.setdefault(native_stock_switch.KEY, {})[fields[2]] = native_stock_switch.parse(
                         fields, data.get("state"), data.get("map"))
+                elif fields[0] == native_stock_switch.CENSUS_TAG:
+                    if (len(fields) != 3 or fields[1] != data.get("map") or data.get("state") != "hosting"
+                            or native_stock_switch.CENSUS in data):
+                        raise ValueError("Invalid stock switch census scope")
+                    data[native_stock_switch.CENSUS] = native_stock_switch.parse_version(fields[2])
                 elif fields[0] in (native_stock_door.TAG, native_stock_door.STATE_TAG):
                     actor, report = native_stock_door.parse_state(fields, data.get("state"), data.get("map"))
                     doors = data.setdefault(native_stock_door.KEY, {})

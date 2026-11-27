@@ -1112,8 +1112,8 @@ class Host:
             view[native_flashlight.KEY] = flashlight
         if doors := self.stock_doors.world_frame(self.last_game, self.zone_epoch):
             view[native_stock_door.KEY] = doors
-        if switches := self.last_game.get(native_stock_switch.KEY):
-            view[native_stock_switch.KEY] = {"map": self.last_game["map"], "epoch": self.zone_epoch, "switches": switches}
+        if switches := native_stock_switch.world_frame(self.last_game, self.zone_epoch):
+            view[native_stock_switch.KEY] = switches
         if rolls := self.party.get(native_enemy_loot.STATE_KEY):
             view[native_enemy_loot.STATE_KEY] = native_enemy_loot.published(rolls)
             if frame := native_enemy_loot.shell_frame(self):
@@ -5528,6 +5528,7 @@ class Client:
         self.pending_lockpick_unlocks = set()
         self.stock_door_requests = {}
         self.stock_door_view = native_stock_door.GuestView()
+        self.stock_switch_view = native_stock_switch.GuestView()
         self.stock_pickup_slots = asyncio.Semaphore(_LOCAL_STOCK_PICKUP_REQUESTS)
         self.last_broker_intent = 0
         self.wire_board = native_wire_board.WireBoardView(bridge, control) if invite.get("native_wire_board") else None
@@ -6661,6 +6662,7 @@ class Client:
                 if reply.get("ok"):
                     gameplay = self.gameplay_snapshots.read(reply)
                     self.stock_door_view.reconcile(gameplay, reply["zone"], reply["zone_epoch"])
+                    self.stock_switch_view.reconcile(gameplay, reply["zone"], reply["zone_epoch"])
                     self.gameplay = gameplay
                     viewer = reply.get("viewer_role")
                     if viewer in ("guest", "guest2", "guest3", "guest4"):

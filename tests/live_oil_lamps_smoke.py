@@ -268,7 +268,9 @@ async def verify_streamed_switch(host, guest, pawn):
     def row(frame, name):
         game = frame.get("game", {})
         if game.get("map") == OBSERVATORY:
-            return game.get(native_stock_switch.KEY, {}).get(name)
+            device = game.get(native_stock_switch.KEY, {}).get(name)
+            if device is not None:
+                return native_stock_switch.state_payload(device)
 
     async def observe(run, name, *, equal=None):
         frame = await suite.wait_resident_status(run, lambda result: (

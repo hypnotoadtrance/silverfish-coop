@@ -45,6 +45,46 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.zone_epoch, "new")
         self.assertIsNone(client.snapshot_request)
 
+    async def test_switch_receipt_keeps_inflight_snapshot_and_merges_unrelated_updates(self):
+        switch = service.native_stock_switch
+        epoch, session = "a" * 32, "b" * 32
+        area = OBSERVATORY
+        actor = f"Radio_BP_C {area}.Observitory_P:PersistentLevel.Radio_BP_C_1"
+        other = actor[:-1] + "2"
+        off = {"powered": False, "angles": [0, 0, 0], "lights": {}, switch.OBSERVED: 7}
+        on = dict(off, powered=True, observed_at=8)
+        host_frame = {"map": area, "epoch": epoch, "sequence": 9,
+                      "switches": {actor: off, other: dict(off, observed_at=9)}}
+        view = {switch.KEY: host_frame, "host_world": {"clock": 19}}
+        waiting, release = asyncio.Event(), asyncio.Event()
+
+        async def request(payload, *, timeout):
+            self.assertEqual(payload, {"action": "snapshot"})
+            waiting.set()
+            await release.wait()
+            return {"ok": True, "zone": area, "zone_epoch": epoch, "gameplay": view}
+
+        client = self.guest(AsyncMock(side_effect=request))
+        client.zone_epoch, client.host_session, client.expected_zone = epoch, session, area
+        game = {"map": area, "state": "connected", switch.KEY: {actor: switch.state_payload(off)}}
+        client.last_game = game
+        client.bridge.command = AsyncMock(return_value={**game, switch.KEY: {actor: switch.state_payload(on)}})
+        await client.refresh_gameplay(project=False, wait=False)
+        await asyncio.wait_for(waiting.wait(), .5)
+        pending = client.snapshot_request
+        receipt = {"map": area, "epoch": epoch, "switches": {actor: on}}
+        await switch.apply_interaction(client, receipt, actor, sequence="12")
+        client.bridge.command.assert_awaited_once_with(switch.PROJECT, actor, area, "1", "0", "0", "0",
+                                                       "v=8", "ack=12", timeout=2)
+        self.assertIs(client.snapshot_request, pending)
+        self.assertFalse(pending.done())
+        release.set()
+        await client.refresh_gameplay(project=False)
+        self.assertEqual(client.gameplay["host_world"]["clock"], 19)
+        self.assertEqual(client.gameplay[switch.KEY]["switches"], {**host_frame["switches"], actor: on})
+        self.assertEqual(host_frame["switches"][actor], off)
+        client.transport.request.assert_awaited_once()
+
     async def test_pending_backpack_report_allows_world_updates_without_resending(self):
         drop, record = service.native_guest_drop, service.native_guest_drop_record
         started, release = asyncio.Event(), asyncio.Event()

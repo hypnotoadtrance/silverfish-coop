@@ -1671,7 +1671,8 @@ WAREHOUSE_DEVICES = {
 
 def warehouse_device_states(frame):
     switches = frame.get("game", {}).get(native_stock_switch.KEY, {})
-    return {device: switches[name] for device, name in WAREHOUSE_DEVICES.items() if name in switches}
+    return {device: native_stock_switch.state_payload(switches[name])
+            for device, name in WAREHOUSE_DEVICES.items() if name in switches}
 
 
 async def prepare_warehouse_late_join(host):
@@ -1814,7 +1815,7 @@ async def verify_warehouse_switch(host: Seat, guest: Seat, pawn: str, *, radio: 
     fixture = f"fixture-warehouse-{device}"
 
     def switch(frame):
-        return frame.get("game", {}).get(native_stock_switch.KEY, {}).get(name, {})
+        return native_stock_switch.state_payload(frame.get("game", {}).get(native_stock_switch.KEY, {}).get(name, {}))
 
     async def playback(powered):
         expected = "playing" if powered else "silent"

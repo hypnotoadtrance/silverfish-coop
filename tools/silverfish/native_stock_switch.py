@@ -9,6 +9,9 @@ from .native_map_preflight import valid_campaign_package
 
 TAG = "native-stock-switch"
 KEY = "native_stock_switches"
+OBSERVED = "observed_at"
+CENSUS = "native_stock_switch_census"
+CENSUS_TAG = "native-stock-switch-census"
 ACTION = TAG + "-interact"
 IGNITE = TAG + "-ignite"
 REPORT = TAG + "-report"
@@ -66,7 +69,23 @@ def independent_actor(target):
     return None
 
 
+def _version(value):
+    return type(value) is int and 0 <= value < 2**53
+
+
+def parse_version(value):
+    if not re.fullmatch(r"[0-9]{1,16}", value) or not _version(version := int(value)):
+        raise ValueError("Invalid stock switch observation version")
+    return version
+
+
 def parse(fields, phase, area):
+    observed = None
+    if len(fields) > 9 and fields[-1].startswith("v="):
+        observed = parse_version(fields[-1][2:])
+        if phase != "hosting" or not observed:
+            raise ValueError("Invalid stock switch observation scope")
+        fields = fields[:-1]
     if (len(fields) not in (9, 10) or fields[1] != area or not actor_package(fields[2])
             or phase not in ("hosting", "connected") or fields[3] not in ("0", "1")):
         raise ValueError("Invalid stock switch frame")
@@ -89,7 +108,72 @@ def parse(fields, phase, area):
             state["lamp"] = fields[9]
         else:
             raise ValueError("Invalid stock switch extension")
+    if observed is not None:
+        state[OBSERVED] = observed
     return state
+
+
+def state_payload(row):
+    if OBSERVED in row:
+        return {field: value for field, value in row.items() if field != OBSERVED}
+    return row
+
+
+def world_frame(game, epoch):
+    rows, census = game.get(KEY, {}), game.get(CENSUS)
+    if not rows and census is None:
+        return {}
+    frame = {"map": game["map"], "epoch": epoch, "switches": rows}
+    if census is not None:
+        frame["sequence"] = census
+    return frame
+
+
+class GuestView:
+    def __init__(self):
+        self.scope = None
+        self.receipts = {}
+
+    def _visit(self, area, epoch):
+        if (area, epoch) != self.scope:
+            self.scope = area, epoch
+            self.receipts.clear()
+
+    def accept(self, gameplay, frame, area, epoch, actor):
+        self._visit(area, epoch)
+        row = frame["switches"][actor]
+        observed = row.get(OBSERVED)
+        current = gameplay.get(KEY, {})
+        if (current.get("map"), current.get("epoch")) != self.scope:
+            current = {"map": area, "epoch": epoch, "switches": {}}
+        rows = current["switches"]
+        known = rows.get(actor)
+        if _version(observed):
+            if known is not None and known.get(OBSERVED, 0) >= observed:
+                # A local input can still need its exact acknowledgement.
+                return {**frame, "switches": {actor: known}}
+            if known is None and current.get("sequence", -1) >= observed:
+                return None
+            self.receipts[actor] = row
+        gameplay[KEY] = {**current, "switches": rows | {actor: row}}
+        return frame
+
+    def reconcile(self, gameplay, area, epoch):
+        self._visit(area, epoch)
+        if not self.receipts:
+            return
+        frame = gameplay.get(KEY, {"map": area, "epoch": epoch, "switches": {}})
+        if (frame.get("map"), frame.get("epoch")) != self.scope:
+            return
+        rows = frame["switches"]
+        for actor, row in tuple(self.receipts.items()):
+            current = rows.get(actor)
+            observed = current.get(OBSERVED, 0) if current is not None else frame.get("sequence", -1)
+            if observed >= row[OBSERVED]:
+                del self.receipts[actor]
+        if self.receipts:
+            # The wire decoder still needs the snapshot as sent for its next delta.
+            gameplay[KEY] = {**frame, "switches": rows | self.receipts}
 
 
 def merge_readback(game, actor, row):
@@ -171,14 +255,9 @@ async def apply_interaction(client, frame, actor, *, sequence=None):
             or not actor_package(actor) or not epoch or client.needs_travel or client.server_transitioning
             or not isinstance(rows := frame.get("switches"), dict) or rows.keys() != {actor}):
         return
-    await client.cancel_gameplay_snapshot()
-    if (client.last_game.get("map"), client.zone_epoch) != (area, epoch) or client.needs_travel or client.server_transitioning:
+    frame = client.stock_switch_view.accept(client.gameplay, frame, area, epoch, actor)
+    if frame is None:
         return
-    cached = client.gameplay.get(KEY, {})
-    if (cached.get("map"), cached.get("epoch")) == (area, epoch):
-        client.gameplay[KEY] = {**frame, "switches": {**cached["switches"], **rows}}
-    else:
-        client.gameplay[KEY] = frame
     game = client.last_game
     projected = await project(client.bridge, game, frame, epoch, sequence=sequence, exact_actor=actor)
     if client.last_game is game and client.zone_epoch == epoch and not client.needs_travel and not client.server_transitioning:
@@ -196,7 +275,11 @@ async def project(bridge, game, frame, epoch, *, sequence=None, exact_actor=None
     for actor, target in rows.items():
         observed = local.get(actor)
         if (not actor_package(actor) or observed is None and actor != exact_actor or not isinstance(target, dict)
-                or (sequence is None and target == observed) or type(target.get("powered")) is not bool):
+                or type(target.get("powered")) is not bool):
+            continue
+        version = target.get(OBSERVED)
+        if (sequence is None and state_payload(target) == observed
+                and not (actor == exact_actor and _version(version))):
             continue
         angles, lights = target.get("angles"), target.get("lights")
         if (not isinstance(angles, list) or len(angles) != 3
@@ -214,6 +297,8 @@ async def project(bridge, game, frame, epoch, *, sequence=None, exact_actor=None
             if not actor_package(target["door"]) or observed and observed.get("door") != target["door"]:
                 continue
             bulbs = ["door=" + target["door"]]
+        if _version(version):
+            bulbs.append(f"v={version}")
         if sequence is not None:
             bulbs.append(f"ack={sequence}")
         try:

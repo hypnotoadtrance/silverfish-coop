@@ -34,7 +34,7 @@ class StockSwitchResponseTests(unittest.IsolatedAsyncioTestCase):
         connected = dict(game, state="connected")
         projected = dict(captured, state="connected")
         client = SimpleNamespace(last_game=connected, zone_epoch=epoch, gameplay={}, needs_travel=False,
-                                 server_transitioning=False, cancel_gameplay_snapshot=AsyncMock(),
+                                 server_transitioning=False, stock_switch_view=switches.GuestView(),
                                  bridge=SimpleNamespace(command=AsyncMock(return_value=projected)))
         await switches.apply_interaction(client, result[switches.KEY], latch)
         client.bridge.command.assert_awaited_once_with(switches.PROJECT, latch, area, "0", "90.0", "0.0", "0.0",
@@ -175,17 +175,15 @@ class StockSwitchResponseTests(unittest.IsolatedAsyncioTestCase):
         updated = dict(initial, **{switches.KEY: {radio: on, wall: off}})
         client = SimpleNamespace(
             zone_epoch=epoch, last_game=initial, gameplay={switches.KEY: cached},
-            needs_travel=False, server_transitioning=False, cancel_gameplay_snapshot=AsyncMock(),
+            needs_travel=False, server_transitioning=False, stock_switch_view=switches.GuestView(),
             bridge=SimpleNamespace(command=AsyncMock(return_value=updated)),
         )
 
         await switches.apply_interaction(client, dict(response, epoch="f" * 32), radio)
         await switches.apply_interaction(client, response, wall)
-        client.cancel_gameplay_snapshot.assert_not_awaited()
         client.bridge.command.assert_not_awaited()
 
         await switches.apply_interaction(client, response, radio)
-        client.cancel_gameplay_snapshot.assert_awaited_once()
         client.bridge.command.assert_awaited_once_with(
             switches.TAG + "-project", radio, area, "1", "0", "0", "0", timeout=2,
         )
@@ -202,6 +200,43 @@ class StockSwitchResponseTests(unittest.IsolatedAsyncioTestCase):
         client.bridge.command.side_effect = delayed_projection
         await switches.apply_interaction(client, response, radio)
         self.assertIs(client.last_game, newer)
+
+    def test_switch_receipt_retires_on_newer_readback_or_confirmed_absence(self):
+        area = "/CommunityMaps/Shelter"
+        prefix = area + ".Shelter:PersistentLevel."
+        actor = "Prop_Radio01_C " + prefix + "Radio_1"
+        lamp = "Prop_Lantern_C " + prefix + "Lamp_1"
+        epoch = "e" * 32
+        off = {"powered": False, switches.OBSERVED: 2}
+        on = {"powered": True, switches.OBSERVED: 4}
+        scope = {"map": area, "epoch": epoch}
+        receipt = {**scope, "switches": {actor: on}}
+        view = switches.GuestView()
+        gameplay = {}
+        self.assertEqual(view.accept(gameplay, receipt, area, epoch, actor), receipt)
+        self.assertEqual(gameplay[switches.KEY]["switches"], {actor: on})
+
+        stale = {**scope, "sequence": 8, "switches": {actor: off, lamp: dict(on, observed_at=8)}}
+        gameplay = {switches.KEY: stale}
+        view.reconcile(gameplay, area, epoch)
+        self.assertEqual(gameplay[switches.KEY]["switches"], {**stale["switches"], actor: on})
+        self.assertEqual(stale["switches"][actor], off)
+
+        newer = {**scope, "sequence": 10, "switches": {actor: dict(off, observed_at=10)}}
+        gameplay = {switches.KEY: newer}
+        view.reconcile(gameplay, area, epoch)
+        self.assertFalse(view.receipts)
+        self.assertEqual(view.accept(gameplay, receipt, area, epoch, actor)["switches"], newer["switches"])
+        self.assertEqual(gameplay[switches.KEY], newer)
+
+        on_again = {**scope, "switches": {actor: dict(on, observed_at=11)}}
+        self.assertEqual(view.accept(gameplay, on_again, area, epoch, actor), on_again)
+        absent = {**scope, "sequence": 12, "switches": {}}
+        gameplay = {switches.KEY: absent}
+        view.reconcile(gameplay, area, epoch)
+        self.assertFalse(view.receipts)
+        self.assertIsNone(view.accept(gameplay, on_again, area, epoch, actor))
+        self.assertEqual(gameplay[switches.KEY], absent)
 
     async def test_compact_switch_reply_merges_only_the_verified_actor(self):
         area = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"

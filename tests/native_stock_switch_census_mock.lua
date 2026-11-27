@@ -67,7 +67,7 @@ world.actors[wall_class] = {device(world, wall_class, switch_name)}
 local switches = require("native_stock_switch")
 switches.start()
 local result = switches.rows(state, "hosting", row)
-assert(#result == 1 and result[1][3] == switch_name and scans[wall_class] == 1)
+assert(#result == 2 and result[1][3] == switch_name and scans[wall_class] == 1)
 switches.rows(state, "hosting", row)
 assert(scans[wall_class] == 1, "Steady states must reuse the device census")
 
@@ -77,7 +77,7 @@ paths[radio], paths[radio_path] = radio_class, device(world, radio_class, radio_
 world.actors[radio_class] = {paths[radio_path]}
 callbacks[radio]()
 result = switches.rows(state, "hosting", row)
-assert(#result == 2 and scans[radio_class] == 1 and scans[wall_class] == 1, "Only the newly available class needs discovery")
+assert(#result == 3 and scans[radio_class] == 1 and scans[wall_class] == 1, "Only the newly available class needs discovery")
 local function radio_readback()
     for _, device_row in ipairs(switches.rows(state, "hosting", row)) do
         if device_row[3] == radio_name then return device_row end
@@ -99,7 +99,7 @@ local replacement_lookups = actor_lookups
 assert(replacement[4] == "0" and radio_readback() == replacement and actor_lookups == replacement_lookups,
     "A qualified replacement should publish its own state and be reused")
 state.world = object({PersistentLevel = object({}), actors = {}})
-assert(#switches.rows(state, "hosting", row) == 0, "A previous world's devices must not leak across travel")
+assert(#switches.rows(state, "hosting", row) == 1, "A previous world's devices must not leak across travel")
 print("Stock switch discovery enrolls both wall switch profiles and refreshes only the late class")
 
 state.map = "/CommunityMaps/Depot"
@@ -114,7 +114,7 @@ state.world.actors[radio_class] = {
 }
 callbacks[radio]()
 local target_rows = switches.rows(state, "hosting", row)
-assert(#target_rows == 1 and target_rows[1][3] == child_name, "Only the inherited stock class qualifies")
+assert(#target_rows == 2 and target_rows[1][3] == child_name, "Only the inherited stock class qualifies")
 local pawn = object({Dead = false, HasAuthority = function() return false end, GetWorld = function() return state.world end})
 assert(switches.focused_target(pawn, child_path .. ".Box") == "stock-prop-switch:" .. child_name)
 package.loaded.guest_save.exact_item_context = function(_, _, name)
@@ -128,8 +128,20 @@ end
 custom.Toggle_Power = function(self, powered) self.Powered = powered end
 assert(switches.command({"nonce", "native-stock-switch-interact", child_name, "qualified guest"}, state, "hosting")
     == "stock switch interaction dispatched" and custom.Powered)
+local function encode(...)
+    return table.concat({...}, "\t")
+end
+local first = switches.rows(state, "hosting", encode)
+local version = tonumber(first[1]:match("\tv=(%d+)$"))
+assert(version and switches.rows(state, "hosting", encode)[1] == first[1])
+custom.Powered = false
+assert(tonumber(switches.rows(state, "hosting", encode)[1]:match("\tv=(%d+)$")) > version)
 state.server = true
-assert(switches.command({"nonce", "native-stock-switch-project", child_name, state.map, "0", "0", "0", "0"},
+assert(switches.command({"nonce", "native-stock-switch-project", child_name, state.map, "1", "0", "0", "0", "v=5"},
+    state, "connected") == "stock switch state projected" and custom.Powered)
+assert(switches.command({"nonce", "native-stock-switch-project", child_name, state.map, "0", "0", "0", "0", "v=4"},
+    state, "connected") == "stock switch newer state retained" and custom.Powered)
+assert(switches.command({"nonce", "native-stock-switch-project", child_name, state.map, "0", "0", "0", "0", "v=6"},
     state, "connected") == "stock switch state projected" and not custom.Powered)
 print("Inherited radio on a mounted map passed stock focus, host dispatch, and guest projection")
 

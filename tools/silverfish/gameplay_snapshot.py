@@ -29,7 +29,7 @@ _TABLES = {
     "native_stock_switches": "switches",
     "native_explosive_canisters": "props",
 }
-_SEQUENCED_TABLES = {"native_stock_doors"}
+_SEQUENCED_TABLES = {"native_stock_doors", "native_stock_switches"}
 _FIELD_PATHS = {
     "native_guest_health": ("native_guest_health", None),
     "native_world_view": (WORLD_SECTION, "native_world_view"),
