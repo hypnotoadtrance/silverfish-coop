@@ -27,7 +27,7 @@ async def enter_crossroads(host, pawn, *, verify_wall=False):
     return blocked
 
 
-async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_trial=False):
+async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_trial=False, rendered=False):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
 
     async def weather(seat, action):
@@ -41,7 +41,7 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
     performance = {}
     if profile:
         from live_stock_creator_smoke import verify_personal_time_shift
-        from portable_crossroads_profile import profile_world
+        from portable_crossroads_profile import capture_rendered_frame, profile_world
 
         performance["observatory"] = await profile_world(host, guest, OBSERVATORY, probe)
         performance["personal_time_shift"] = await verify_personal_time_shift(host, guest)
@@ -141,6 +141,9 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
             pawn_name = settled["game"]["pawns"]["local"]["name"]
             performance["crossroads_clock"] = await verify_stock_clock(guest_run, CROSSROADS, settled["zone_epoch"], pawn_name)
             performance["crossroads"] = await profile_world(host, guest, CROSSROADS, probe, gc_trial=gc_trial)
+            if rendered:
+                performance["rendered_frames"] = dict(zip(("host", "guest"), await asyncio.gather(
+                    capture_rendered_frame(host, probe), capture_rendered_frame(guest, probe)), strict=True))
     finally:
         assert await weather(host, "resume") == "restored"
     result = {"stock_weather_travel": {"clear": clear, "wet": wet, "dry": dry,

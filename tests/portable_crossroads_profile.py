@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 import math
 import re
+import struct
 
 from portable_guest_world_start import wait_resident_status
 from tools.silverfish import native_downed_markers, native_kill_volume, native_package_handoff_journal
@@ -532,6 +533,23 @@ def read_comparison(raw):
             "heap_calls": heap_calls, "sample_status_bytes_by_tag": status_bytes_by_tag, "tick_sources": tick_sources,
             "slowest_interval": {"elapsed_ms": float(elapsed), "inclusive_calls_ms": slow_calls,
                                  "thread_cycles": int(peak_cycles), "inclusive_call_cycles": call_cycles}}
+
+
+async def capture_rendered_frame(seat, probe):
+    screenshots = seat.profile / "Saved/Screenshots"
+    existing = set(screenshots.rglob("*.png"))
+    reply = await probe(seat.bridge, "crossroads-profile", "shot", reply_end="|end")
+    assert reply == "shot|end", reply
+    async with asyncio.timeout(12):
+        while True:
+            for path in set(screenshots.rglob("*.png")) - existing:
+                with path.open("rb") as image:
+                    header = image.read(24)
+                if len(header) == 24 and header.startswith(b"\x89PNG\r\n\x1a\n"):
+                    width, height = struct.unpack(">II", header[16:24])
+                    assert width >= 320 and height >= 240, (path, width, height)
+                    return {"path": str(path), "width": width, "height": height}
+            await asyncio.sleep(.15)
 
 
 async def profile_world(host, guest, area, probe, *, gc_trial=False):

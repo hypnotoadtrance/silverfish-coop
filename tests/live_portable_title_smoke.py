@@ -643,13 +643,14 @@ async def verify_nonmirrored_startup(host, guest, proof):
                             create_character=stock_character, wait_for_host_pause=pause_from_memory)
 
 
-def launch_portable(game: Path, profile: Path) -> GameProcess:
+def launch_portable(game: Path, profile: Path, *, rendered: bool = False) -> GameProcess:
     image = game / runtime.SHIPPING
     install_stage._ordinary(image)
     env = {key: value for key, value in os.environ.items() if not key.upper().startswith("SILVERFISH_COOP_")}
     arguments = subprocess.list2cmdline([str(image)])
-    arguments += (f' -SilverfishCoopIsolated -userdir="{profile}" -unattended -NoSplash -windowed'
-                  " -nullrhi -RenderOffScreen -nosteam -nosound -ResX=640 -ResY=480"
+    renderer = "" if rendered else " -nullrhi"
+    arguments += (f' -SilverfishCoopIsolated -userdir="{profile}" -unattended -NoSplash -windowed{renderer}'
+                  " -RenderOffScreen -nosteam -nosound -ResX=640 -ResY=480"
                   " -ini:Input:[/Script/Engine.InputSettings]:DefaultViewportMouseCaptureMode=NoCapture,"
                   "[/Script/Engine.InputSettings]:DefaultViewportMouseLockMode=DoNotLock")
     info = subprocess.STARTUPINFO()
@@ -5056,6 +5057,8 @@ async def verify_stock_streamed_npc(host: Seat, guest: Seat, _pawn: str) -> dict
         return await portable_probe_command(seat.bridge, "portable-dry-fire", action)
 
     checkpoint = campaign_save_hashes(host.campaign)
+    host_run = host.campaign / "run"
+    host_before_combat = await wait_resident_status(host_run, lambda status: status.get("state") == "hosting")
     for seat in (host, guest):
         assert await weapon(seat, "arm-rusty") == "armed"
         assert await command(seat, "load") == "loading"
@@ -5119,10 +5122,21 @@ async def verify_stock_streamed_npc(host: Seat, guest: Seat, _pawn: str) -> dict
         raise AssertionError(f"Streamed NPC ragdoll did not replicate. Guest saw {observed_after}. {ownership}") from error
     after = [await command(seat, "status") for seat in (host, guest)]
     assert all(row.split(",")[1] == "false" and row.endswith(",true") for row in after), after
+    nugget = "/Game/Classes/Items/Item_GoldNugget.Item_GoldNugget_C"
+    async with asyncio.timeout(12):
+        while not (banked := next((event for event in await resident_events(host_run, host_before_combat)
+                                  if event["event"] == "native_stock_enemy_loot_banked"
+                                  and event.get("source") == path and event.get("class_path") == nugget), None)):
+            await asyncio.sleep(.08)
+    assert banked["map"] == OBSERVATORY and banked["revision"] is None, banked
+    identity = native_world_loot.stock_enemy_identity(banked["guid"], banked.get("visual_id"))
+    for run in (host_run, guest_run):
+        await wait_resident_status(run, lambda status: identity in status["game"].get(native_world_loot.KEY, {}), timeout=8)
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"actor": actor, "world_lookup": ownership, "guest_before": observed, "final_states": after,
             "guest_local_damage_denied": True, "retargeted_when_guest_downed": True,
             "guest_contact": contact, "stock_shot": receipt,
+            "streamed_stock_drop": banked,
             "campaign_checkpoint_unchanged": True}
 
 
@@ -7827,7 +7841,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_board_offers: bool = False, stock_streamed_board: bool = False, stock_quarry_photo: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
                  stock_weather_travel: bool = False, stock_lightning: bool = False, stock_storm_ambience: bool = False,
-                 crossroads_profile: bool = False, crossroads_gc_trial: bool | str = False,
+                 crossroads_profile: bool = False, crossroads_gc_trial: bool | str = False, rendered: bool = False,
                  stock_crossroads_door: bool = False, stock_dock_gate: bool = False,
                  stock_crossroads_recovery: bool = False,
                  stock_melee_family: bool = False, stock_melee_edges: bool = False,
@@ -7903,7 +7917,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     print(case, flush=True)
     workspaces = case / "first", second_legacy_work or case / "second"
     games = first_game, second_game
-    proof = {"verified": False, "native_bridges": [], "sessions": []}
+    proof = {"verified": False, "native_bridges": [], "sessions": [],
+             "render_mode": "offscreen" if rendered else "nullrhi"}
     processes, seats, baselines = [], [], []
     probes = ExitStack()
     seeded = None
@@ -8036,7 +8051,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_stock_crate_ring(host, guest, pawn, memory_positions=True, cold=True)),
         (stock_weather_travel, "crossroads", "stock_weather_travel",
          lambda host, guest, pawn: verify_weather_travel(host, guest, pawn, portable_probe_command,
-                                                        profile=crossroads_profile, gc_trial=crossroads_gc_trial)),
+                                                        profile=crossroads_profile, gc_trial=crossroads_gc_trial,
+                                                        rendered=rendered)),
         (stock_crate_ring and crossroads_profile and stock_weather_travel, "crossroads", "stock_original_crossroads_crate",
          verify_original_crossroads_crate),
         # Exercise recovery near the arrival point before world-object checks move the party.
@@ -8530,7 +8546,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             campaign = workspace / "campaigns" / ("title-host-settings-" + uuid.uuid4().hex[:8])
             if resident_cabinet_checkpoint and game == first_game:
                 seeded = copy_resident_checkpoint(resident_cabinet_checkpoint, campaign, profile)
-            process = launch_portable(game, profile)
+            process = launch_portable(game, profile, rendered=rendered)
             processes.append((game, process))
             mailbox = await discover_mailbox(mailbox_root, process)
             assert runtime.read_json(mailbox / embedded_startup.UNIFIED_FILE) == release.selection
@@ -9052,6 +9068,8 @@ if __name__ == "__main__":
                         help="verify both players recover from the stock Crossroads kill volume")
     parser.add_argument("--crossroads-profile", action="store_true",
                         help="measure co-op frame and subsystem times around the stock weather travel check")
+    parser.add_argument("--rendered", action="store_true",
+                        help="run the Crossroads profile with offscreen graphics and verify a world frame on both replicas")
     parser.add_argument("--crossroads-gc-trial", choices=("tuned", "generational"), nargs="?", const="tuned",
                         help="compare the current and earlier Lua collection schedules while walking")
     parser.add_argument("--stock-lightning", action="store_true",
@@ -9141,7 +9159,7 @@ if __name__ == "__main__":
             args.guest_world_start, args.guest_world_start_travel, args.guest_ui_memory, args.compact_crate_status,
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
-    resident_check_options = {"guest_shop_lease", "stock_unequip", "stock_split", "projected_nearby",
+    resident_check_options = {"guest_shop_lease", "stock_unequip", "stock_split", "projected_nearby", "manage_saves",
                               "stock_food", "stock_personal_consumable", "stock_wipe_chooser",
                               "stock_campfire", "stock_npc_override", "stock_dock_population", "stock_streamed_npc",
                               "stock_dead_drops",
@@ -9195,9 +9213,11 @@ if __name__ == "__main__":
     if args.stock_shovel_host_quest and not args.stock_shovel_quest:
         parser.error("Use --stock-shovel-host-quest with --stock-shovel-quest")
     resident_check_options.add("stock_cooked_meal")
-    resident_check_options.update(("crossroads_profile", "crossroads_gc_trial", "stock_crossroads_recovery"))
+    resident_check_options.update(("crossroads_profile", "crossroads_gc_trial", "stock_crossroads_recovery", "rendered"))
     if args.crossroads_gc_trial and not args.crossroads_profile:
         parser.error("--crossroads-gc-trial requires --crossroads-profile")
+    if args.rendered and not args.crossroads_profile:
+        parser.error("--rendered requires --crossroads-profile")
     resident_check_options.update(("guest_stash_memory", "guest_stash_large_memory"))
     if args.crossroads_profile:
         resident_check_options.add("stock_crate_ring")
@@ -9273,6 +9293,7 @@ if __name__ == "__main__":
                        stock_simmi_jammers=args.stock_simmi_jammers,
                        stock_weather_travel=args.stock_weather_travel,
                        crossroads_profile=args.crossroads_profile, crossroads_gc_trial=args.crossroads_gc_trial,
+                       rendered=args.rendered,
                        stock_crossroads_door=args.stock_crossroads_door,
                        stock_crossroads_recovery=args.stock_crossroads_recovery,
                        stock_dock_gate=args.stock_dock_gate,

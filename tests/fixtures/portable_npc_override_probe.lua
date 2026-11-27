@@ -1861,6 +1861,14 @@ local function streamed_npc(world, pawn, host, action)
     end
     if action == "stream-npc-stage" then
         assert(host and actor.Alive and actor:HasAuthority())
+        local reward_path = "/Game/Classes/Items/Item_GoldNugget.Item_GoldNugget_C"
+        local reward = StaticFindObject(reward_path)
+        if not valid(reward) then LoadAsset(reward_path) reward = StaticFindObject(reward_path) end
+        assert(valid(reward), "could not load the stock worker's test loot")
+        -- Keep the stock death spawn and give its ordinary loot roll one certain result.
+        actor.LootItemPool:Empty()
+        actor.LootItemPool:Add(reward, 1)
+        actor.LootChance_Mod = 1
         local point = gun_target(pawn, world)
         assert(actor:K2_SetActorLocation(point, false, {}, true))
         actor.CharacterMovement:DisableMovement()
