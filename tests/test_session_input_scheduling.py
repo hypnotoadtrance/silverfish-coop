@@ -45,6 +45,84 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.zone_epoch, "new")
         self.assertIsNone(client.snapshot_request)
 
+    async def test_pending_backpack_report_allows_world_updates_without_resending(self):
+        drop, record = service.native_guest_drop, service.native_guest_drop_record
+        started, release = asyncio.Event(), asyncio.Event()
+        epoch, session, guid = "b" * 32, "c" * 32, "A" * 32
+        pawn = f"Player_FP_C {OBSERVATORY}.Observitory_P:PersistentLevel.Player_FP_C_3"
+        view = {"area": OBSERVATORY, "pawn": pawn, "epoch": epoch, "sequence": 5, "mode": "drop",
+                "entry": "context_menu", "guid": guid, "count": 9, "expected": 0, "layout_preview": "dropped"}
+        game = {"state": "connected", "map": OBSERVATORY, "sequence": 30, "pawns": {"local": {"name": pawn}},
+                record.STOCK_ACTION_KEY: view}
+
+        async def request(payload, *, timeout):
+            if payload["action"] == "snapshot":
+                return {"ok": True, "gameplay": {"host_world": {"clock": 10}}, "zone": OBSERVATORY, "zone_epoch": epoch}
+            self.assertEqual(payload["action"], drop.DROP)
+            self.assertEqual(payload["target"], f"{guid}|9")
+            started.set()
+            await release.wait()
+            return {"ok": True, drop.RESULT: {"state": "dropped", "owner": "guest", "guid": guid, "quantity": 9,
+                                               "class_path": record.ITEM, "map": OBSERVATORY, "location": [0, 0, 0],
+                                               "drop_id": payload["operation_id"]}}
+
+        client = self.guest(AsyncMock(side_effect=request))
+        self.addAsyncCleanup(client.cancel_stock_inventory)
+        client.transport.connected = client.transport.game_access = True
+        client.zone_epoch, client.host_session, client.expected_zone = epoch, session, OBSERVATORY
+        client.last_game = game
+        client.bridge.input_namespace = uuid.NAMESPACE_DNS
+        client.bridge.command = AsyncMock(return_value={**game, "ack": {"message": "stock backpack refreshed"}})
+
+        self.assertTrue(await client.poll_stock_inventory(True, previews_only=True))
+        pending = client.stock_inventory_job[2]
+        await asyncio.wait_for(started.wait(), .5)
+        await asyncio.wait_for(client.refresh_gameplay(project=False), .5)
+        self.assertEqual(client.gameplay["host_world"]["clock"], 10)
+        self.assertTrue(await client.poll_stock_inventory(True))
+        self.assertIs(client.stock_inventory_job[2], pending)
+        self.assertFalse(pending.done())
+        self.assertEqual(client.transport.request.await_count, 2)
+        client.bridge.command.assert_not_awaited()
+
+        newer = client.last_game = {**game, "sequence": 31}
+        release.set()
+        await asyncio.wait_for(pending, .5)
+        self.assertFalse(await client.poll_stock_inventory(True, previews_only=True))
+        self.assertIs(client.last_game, newer)
+        client.bridge.command.assert_awaited_once_with("native-inventory-stock-drop-finish", epoch, "5", "0", timeout=5)
+
+    async def test_backpack_report_cannot_finish_in_another_visit(self):
+        drop, record = service.native_guest_drop, service.native_guest_drop_record
+        started = asyncio.Event()
+
+        async def request(payload, *, timeout):
+            self.assertEqual(payload["action"], drop.DROP)
+            started.set()
+            await asyncio.Future()
+
+        client = self.guest(AsyncMock(side_effect=request))
+        self.addAsyncCleanup(client.cancel_stock_inventory)
+        client.transport.connected = client.transport.game_access = True
+        client.zone_epoch, client.host_session, client.expected_zone = "b" * 32, "c" * 32, OBSERVATORY
+        pawn = f"Player_FP_C {OBSERVATORY}.Observitory_P:PersistentLevel.Player_FP_C_3"
+        client.last_game = {"state": "connected", "map": OBSERVATORY, "pawns": {"local": {"name": pawn}},
+                            record.STOCK_ACTION_KEY: {"area": OBSERVATORY, "epoch": client.zone_epoch,
+                                                      "pawn": pawn, "sequence": 5, "mode": "drop", "entry": "ctrl_click",
+                                                      "guid": "A" * 32, "count": 4, "expected": 0, "layout_preview": "dropped"}}
+        client.bridge.input_namespace = uuid.NAMESPACE_DNS
+        client.bridge.command = AsyncMock()
+        self.assertTrue(await client.poll_stock_inventory(True, previews_only=True))
+        pending = client.stock_inventory_job[2]
+        await asyncio.wait_for(started.wait(), .5)
+
+        client.zone_epoch = "d" * 32
+        self.assertFalse(await client.poll_stock_inventory(True, previews_only=True))
+        self.assertTrue(pending.cancelled())
+        self.assertIsNone(client.stock_inventory_job)
+        self.assertLess(client.last_stock_inventory_action, 5)
+        client.bridge.command.assert_not_awaited()
+
     async def test_snapshot_age_includes_time_waiting_for_the_gameplay_loop(self):
         client = self.guest(AsyncMock(return_value={
             "ok": True, "gameplay": {"players": {}}, "zone_epoch": "epoch", "zone": "CrossRoads",

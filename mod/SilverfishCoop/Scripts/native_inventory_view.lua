@@ -969,7 +969,8 @@ function inventory_view.command(fields, state, phase)
     local sealed_fixture = fields[4] == "sealed-drag" or fields[4] == "sealed-context"
         or fields[4] == "sealed-confirm" or fields[4] == "sealed-cancel" or fields[4] == "sealed-journal"
     if operation == "native-inventory-stock-use-click-fixture"
-        and (#fields == 3 or #fields == 4 and (fields[4] == "drag" or fields[4] == "take-ammo" or sealed_fixture))
+        and (#fields == 3 or #fields == 4 and (fields[4] == "drag" or fields[4] == "take-ammo"
+            or fields[4] == "drop" or sealed_fixture))
         and headless and stock_session and not stock_drop
         and (#fields == 3 or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" or fields[4] == "take-ammo"
             and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1") then
@@ -1022,6 +1023,9 @@ function inventory_view.command(fields, state, phase)
                     error("The loaded stock weapon has no Take Ammo button after opening the context menu", 0)
                 end
                 manager.ItemContextMenu:BndEvt__ItemContextMenu_Button_SplitStack_K2Node_ComponentBoundEvent_7_Pressed__DelegateSignature()
+            elseif fields[4] == "drop" then
+                manager:OpenContextMenu(card)
+                manager:ActionDrop()
             else
                 manager:OpenContextMenu(card)
                 manager:ActionUse()
@@ -1031,6 +1035,11 @@ function inventory_view.command(fields, state, phase)
             end
             sync_stock(current, state, phase, true)
             if stock_drop and stock_drop.guid == fields[3] then
+                if fields[4] == "drop" then
+                    assert(stock_drop.layout_preview == "dropped" and stock_cards(screen, stock_drop.save, fields[3], 0),
+                        "the stock backpack card did not disappear before submission")
+                    return "verified stock drop click"
+                end
                 if stock_drop.unload and stock_drop.layout_preview then
                     local equipped = stock_equipped_card(screen, stock_drop.guid)
                     local empty = equipped and equipped.Item[item_ammo] == 0

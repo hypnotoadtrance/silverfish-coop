@@ -5520,6 +5520,7 @@ class Client:
         self.prop_carry = native_prop_carry.Guest(self)
         self.last_primary_intent = 0
         self.last_stock_inventory_action = 0
+        self.stock_inventory_job = None
         self.guest_ui = native_guest_ui.GuestView()
         self.guest_wallet = native_wallet.GuestWallet()
         self.guest_grants = native_inventory_grant.GuestGrants()
@@ -5558,6 +5559,7 @@ class Client:
         self.session_stop_reason: str | None = None
 
     async def connect(self, timeout: float = 6, *, queue: bool = False) -> dict:
+        await self.cancel_stock_inventory()
         await self.cancel_gameplay_snapshot()
         self.gameplay_snapshots.clear()
         self.map_package_vote = None
@@ -5820,6 +5822,9 @@ class Client:
 
     async def leave_session(self, operation_id: str | None = None) -> dict:
         """Request an exact detached checkpoint before intentionally stopping this guest."""
+        if self.stock_inventory_job is not None and self.stock_inventory_job[0] == self.stock_interaction_scope():
+            # An intentional save-and-leave includes the pending backpack mutation.
+            await self.stock_inventory_job[2]
         if self.check_host_end() or self.stopping or not self.transport.game_access or not self.host_session or not self.zone_epoch:
             raise party.RuleError("native_session_leave_unavailable")
         if self.last_game.get("state") != "connected" or self.needs_travel or self.server_transitioning:
@@ -6343,12 +6348,53 @@ class Client:
         except (ValueError, OSError, RuntimeError) as error:
             self.control.event("native_stock_broker_interaction_rejected", operation_id=operation, sequence=sequence, reason=str(error))
 
-    async def service_inventory_view(self, active: bool) -> None:
-        requests = self.bridge.native_inventory_view_requests()
+    async def cancel_stock_inventory(self) -> None:
+        if self.stock_inventory_job is not None:
+            _, _, request = self.stock_inventory_job
+            self.stock_inventory_job = None
+            request.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await request
+
+    async def poll_stock_inventory(self, active: bool, *, previews_only=False) -> bool:
+        """Run one ordered stock backpack operation without blocking gameplay updates."""
+        visit = self.stock_interaction_scope() if active and not self.suspended and self.transport.game_access else None
+        if self.stock_inventory_job is not None:
+            source, layout, request = self.stock_inventory_job
+            if source != visit:
+                await self.cancel_stock_inventory()
+            elif request.done():
+                self.stock_inventory_job = None
+                await request
+            else:
+                return layout
+        if visit is None:
+            if not previews_only:
+                self.bridge.native_inventory_view_requests()
+            return False
+        action = native_guest_drop.pending_stock_action(self, active)
+        if action is not None and (action["area"], action["pawn"]) != visit[2:]:
+            action = None
+        layout = action is not None and action.get("layout_preview") is not None
+        if action and (layout or not previews_only):
+            work = native_guest_drop.service_stock_view(self, active, visit=visit)
+        elif not previews_only and (requests := self.bridge.native_inventory_view_requests()):
+            work = self.service_inventory_view(active, requests=requests, visit=visit)
+        else:
+            return False
+        request = asyncio.create_task(work)
+        request.add_done_callback(lambda _: self.bridge.wake_guest_update())
+        self.stock_inventory_job = visit, layout, request
+        return layout
+
+    async def service_inventory_view(self, active: bool, *, requests=None, visit=None) -> None:
+        if requests is None:
+            requests = self.bridge.native_inventory_view_requests()
         if not requests or not active or self.stopping or not self.host_session or not self.zone_epoch:
             return
         sequence, event, area, pawn = requests[-1]
-        if (event != "open" or area != self.last_game.get("map")
+        if (visit is not None and self.stock_interaction_scope() != visit
+                or event != "open" or area != self.last_game.get("map")
                 or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name")):
             return
         operation = uuid.uuid5(self.bridge.input_namespace,
@@ -6367,6 +6413,8 @@ class Client:
                   or self.guest_ui.digest == "-" or self.guest_ui.inventory_needs_refresh(self)):
                 # A local grant may arrive while the new view is being read.
                 await self.guest_ui.refresh(self, allow_local_pending=True)
+            if visit is not None and self.stock_interaction_scope() != visit:
+                return
             preview_mode = ()
             if self.gameplay.get(native_inventory.TAKE_AMMO_PREVIEW_CAPABILITY) == 1:
                 preview_mode = ("2",)
@@ -6379,12 +6427,15 @@ class Client:
                 "stock", sequence, area, pawn,
             ):
                 raise RuntimeError("The native backpack did not verify its isolated view")
-            self.last_game = snapshot
-            self.control.event("native_stock_inventory_opened", operation_id=operation, **proof)
+            native_guest_drop.install_stock_reply(self, snapshot, visit)
+            if visit is None or self.stock_interaction_scope() == visit:
+                self.control.event("native_stock_inventory_opened", operation_id=operation, **proof)
         except (KeyError, TypeError, OSError, RuntimeError, ValueError) as error:
             self.control.event("native_stock_inventory_unavailable", operation_id=operation, reason=str(error))
-            with contextlib.suppress(OSError, RuntimeError, ValueError):
-                self.last_game = await self.bridge.command("native-inventory-stock-unavailable", str(sequence), area, timeout=2)
+            if visit is None or self.stock_interaction_scope() == visit:
+                with contextlib.suppress(OSError, RuntimeError, ValueError):
+                    snapshot = await self.bridge.command("native-inventory-stock-unavailable", str(sequence), area, timeout=2)
+                    native_guest_drop.install_stock_reply(self, snapshot, visit)
 
     async def renew_native_interactions(self) -> None:
         features = (
@@ -6809,6 +6860,7 @@ class Client:
             try:
                 if action == "drop-link":
                     self.suspended = True
+                    await self.cancel_stock_inventory()
                     await self.cancel_gameplay_snapshot()
                     await self.transport.disconnect()
                     result = {"link_connected": False}
@@ -6911,7 +6963,7 @@ class Client:
                 elif action == "native-inventory-stock-use-click-fixture":
                     target = request.get("target")
                     item, separator, gesture = (target if isinstance(target, str) else "").partition("|")
-                    if (not native_gold.valid_guid(item) or separator and gesture not in ("drag", "take-ammo")
+                    if (not native_gold.valid_guid(item) or separator and gesture not in ("drag", "take-ammo", "drop")
                             or self.last_game.get("native_inventory_view", {}).get("state") != "stock"):
                         raise ValueError("Select an item on the mounted stock backpack")
                     self.last_game = await self.bridge.command(action, item, *((gesture,) if separator else ()), timeout=5)
@@ -7429,6 +7481,7 @@ class Client:
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
             await self.cancel_gameplay_snapshot()
+            await self.cancel_stock_inventory()
             await self.guest_ui.close()
             await self.guest_wallet.close()
             await self.guest_grants.close()
@@ -7467,6 +7520,8 @@ class Client:
                 break
             repair_needed = (not self.transport.connected or self.needs_travel
                              or self.last_game.get("state") in {"disconnected", "ready"})
+            if self.stock_inventory_job is not None and self.stock_inventory_job[0] != self.stock_interaction_scope():
+                await self.cancel_stock_inventory()
             if (not self.stopping and not self.suspended and repair_needed
                     and (not self.server_transitioning or not self.transport.connected)
                     and time.monotonic() >= self.next_retry):
@@ -7502,12 +7557,8 @@ class Client:
                 if self.stopping:
                     break
             # The held-item report or shot can already refer to a newly moved slot.
-            for _ in range(8):
-                inventory = self.last_game.get(native_guest_drop_record.STOCK_ACTION_KEY, {})
-                if inventory.get("layout_preview") is None or inventory["sequence"] <= self.last_stock_inventory_action:
-                    break
-                await native_guest_drop.service_stock_view(self, active)
-            await native_guest_weapon.service_equipment_selection(self, active)
+            if not await self.poll_stock_inventory(active, previews_only=True):
+                await native_guest_weapon.service_equipment_selection(self, active)
             if self.mindcore_carry:
                 await self.mindcore_carry.poll(active)
             self.prop_carry.poll(active)
@@ -7559,13 +7610,13 @@ class Client:
             if self.wipe_view:
                 draft = self.gameplay.get("wipe") if active and time.monotonic() - self.gameplay_seen < 2 else None
                 self.last_game = await self.wipe_view.sync(self.last_game, draft, frozen_items, retain)
-            await self.service_inventory_view(active)
-            await native_guest_drop.service_stock_view(self, active)
+            await self.poll_stock_inventory(active)
             barter_view = self.last_game.get(native_npc_barter.VIEW, {})
-            if barter_view.get("state") in ("opening", "ready", "confirming"):
-                await self.guest_ui.close()
-            else:
-                await self.guest_ui.sync(self, active)
+            if self.stock_inventory_job is None:
+                if barter_view.get("state") in ("opening", "ready", "confirming"):
+                    await self.guest_ui.close()
+                else:
+                    await self.guest_ui.sync(self, active)
             await native_stash.service_view(self, active)
             await native_flare.service_input(self, active)
             world_version = self.last_game.get(native_world_loot.CAPABILITY, 0)

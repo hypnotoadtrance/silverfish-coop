@@ -125,13 +125,13 @@ class GuestView:
 
     async def close(self, *, preserve_stock=False):
         pending = (self.pending_stock_refresh or self.request_for_stock) if preserve_stock else None
-        if self.request is not None:
-            self.request.cancel()
-            with contextlib.suppress(asyncio.CancelledError, OSError, ValueError, RuntimeError):
-                await self.request
-            self.request = None
+        request, self.request = self.request, None
         self.request_for_stock = None
         self.pending_stock_refresh = pending
+        if request is not None:
+            request.cancel()
+            with contextlib.suppress(asyncio.CancelledError, OSError, ValueError, RuntimeError):
+                await request
 
     @staticmethod
     def inventory_scope(client):
@@ -365,13 +365,18 @@ class GuestView:
 
     async def refresh(self, client, *, layout_sequence=None, allow_local_pending=False):
         """Project a newly committed inventory while the requesting screen is still mounted."""
+        scope = self.inventory_scope(client)
         await self.close(preserve_stock=layout_sequence is not None)
         if layout_sequence is not None:
             self.digest = "-"
         area, epoch = client.last_game.get("map"), client.zone_epoch
         character = client.invite["character_id"]
         try:
+            if scope != self.inventory_scope(client):
+                raise RuntimeError("The stock inventory refresh belongs to an earlier visit")
             reply = await client.gameplay_action(ACTION, uuid.uuid4().hex, "-")
+            if scope != self.inventory_scope(client):
+                raise RuntimeError("The stock inventory refresh belongs to an earlier visit")
             if not await self.receive(client, reply["native_guest_ui"], area, epoch, character,
                                       layout_sequence=layout_sequence, refresh_stock=layout_sequence is not None):
                 self.queue_stock_inventory(client)
@@ -379,7 +384,8 @@ class GuestView:
                     return
                 raise RuntimeError("The local inventory changed before reconciliation")
         except (KeyError, TypeError, OSError, RuntimeError, ValueError, zlib.error):
-            self.queue_stock_inventory(client)
+            if scope == self.inventory_scope(client):
+                self.queue_stock_inventory(client)
             raise
         self.identity = (client.host_session, epoch, area)
         self.next_poll = time.monotonic() + 3

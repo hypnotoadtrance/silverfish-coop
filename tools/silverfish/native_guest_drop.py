@@ -127,15 +127,32 @@ async def stock_menu_fixture(client, target, operation: str, mode: str) -> dict:
     return result
 
 
+def install_stock_reply(client, snapshot, visit):
+    if visit is None or (client.stock_interaction_scope() == visit
+                         and (snapshot.get("state"), snapshot.get("map"),
+                              snapshot.get("pawns", {}).get("local", {}).get("name")) == ("connected", *visit[2:])
+                         and snapshot.get("sequence", 0) >= client.last_game.get("sequence", 0)):
+        client.last_game = snapshot
+
+
 async def settle_stock_action(client, area, epoch, operation, mode, entry, guid, quantity, sequence, expected, split,
-                              layout_preview=None):
+                              layout_preview=None, *, visit=None):
     sorting, splitting, unloading = mode == "sort", mode == "split", mode == "unload"
     accepted = False
     local_result = None
     finish = ("native-inventory-stock-drop-finish", epoch, sequence)
+
+    def current():
+        return visit is None or client.stock_interaction_scope() == visit
+
+    def check_visit():
+        if not current():
+            raise RuntimeError("The stock inventory action belongs to an earlier visit")
+
     try:
         if layout_preview is not None:
             await client.guest_ui.close(preserve_stock=True)
+        check_visit()
         if sorting:
             if entry != "sort" or quantity != 0:
                 raise ValueError("The native action did not request a backpack sort")
@@ -184,12 +201,15 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
             if splitting:
                 local_result = created
             if unloading:
+                check_visit()
                 await client.cancel_gameplay_snapshot()
+                check_visit()
                 equipment = client.gameplay.get("native_equipped_weapon", {})
                 if (client.zone_epoch, equipment.get("map"), equipment.get("guid")) == (epoch, area, guid):
                     client.gameplay["native_equipped_weapon"] = {**equipment, "rounds": 0}
                 if layout_preview is None:
-                    client.last_game = await client.bridge.command("native-inventory-stock-project-unloaded", epoch, sequence, timeout=3)
+                    snapshot = await client.bridge.command("native-inventory-stock-project-unloaded", epoch, sequence, timeout=3)
+                    install_stock_reply(client, snapshot, visit)
         elif mode == "equip":
             if entry != "equip" or quantity != 1:
                 raise ValueError("The native action did not select one equipment item")
@@ -277,7 +297,8 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
             try:
                 reply = await client.gameplay_action(DROP, operation, target)
             except TimeoutError:
-                if layout_preview != "dropped" or client.zone_epoch != epoch or client.last_game.get("map") != area:
+                if (layout_preview != "dropped" or not current()
+                        or client.zone_epoch != epoch or client.last_game.get("map") != area):
                     raise
                 reply = await client.gameplay_action(DROP, operation, target)
             receipt = reply.get(key)
@@ -295,6 +316,7 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
         # A matching slot receipt already describes the local inventory.
         # Sorting and unloading still need the complete host rows. In particular,
         # a loaded weapon on the host can carry a different alternate ammo payload.
+        check_visit()
         if layout_preview is None or local_result != layout_preview:
             if layout_preview is None:
                 await client.guest_ui.refresh(client)
@@ -304,25 +326,38 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
     except (KeyError, TypeError, ValueError) as error:
         raise RuntimeError(f"The stock guest backpack could not refresh: {error}") from error
     finally:
-        if not accepted:
+        if not accepted and current() and not asyncio.current_task().cancelling():
             if layout_preview is not None and client.zone_epoch == epoch and client.last_game.get("map") == area:
                 if unloading:
                     client.primary_magazine = None
                     client.primary_magazine_attempt = None
                 with suppress(OSError, RuntimeError, ValueError):
                     await client.guest_ui.refresh(client, layout_sequence=sequence)
-            with suppress(OSError, RuntimeError, ValueError):
-                await client.bridge.command(*finish, "refused", timeout=3)
-    client.last_game = await client.bridge.command(*finish, *committed, timeout=5)
-    return {key: receipt, "stock_inventory_proof": client.last_game.get("ack", {}).get("message")}
+            if current():
+                with suppress(OSError, RuntimeError, ValueError):
+                    await client.bridge.command(*finish, "refused", timeout=3)
+    check_visit()
+    snapshot = await client.bridge.command(*finish, *committed, timeout=5)
+    check_visit()
+    install_stock_reply(client, snapshot, visit)
+    return {key: receipt, "stock_inventory_proof": snapshot.get("ack", {}).get("message")}
 
 
-async def service_stock_view(client, active: bool) -> None:
+def pending_stock_action(client, active: bool):
     if not active or client.stopping or client.suspended:
         return
     view = client.last_game.get(record.STOCK_ACTION_KEY)
     if (not view or view["epoch"] != client.zone_epoch or not client.transport.game_access
             or view["sequence"] <= client.last_stock_inventory_action):
+        return
+    return view
+
+
+async def service_stock_view(client, active: bool, *, visit=None) -> None:
+    if visit is not None and client.stock_interaction_scope() != visit:
+        return
+    view = pending_stock_action(client, active)
+    if not view or visit is not None and (view["area"], view["pawn"]) != visit[2:]:
         return
     client.last_stock_inventory_action = view["sequence"]
     area, epoch, sequence, mode, guid, count, expected = (
@@ -338,10 +373,15 @@ async def service_stock_view(client, active: bool) -> None:
                                  mode=mode, guid=guid, slot=expected - 1 if mode in ("equip", "unequip") else -1,
                                  result=layout_preview)
         result = await settle_stock_action(client, area, epoch, operation, mode, view["entry"],
-                                           guid, count, str(sequence), str(expected), split, layout_preview)
+                                           guid, count, str(sequence), str(expected), split, layout_preview, visit=visit)
         client.control.event("native_stock_inventory_action", operation_id=operation, **result)
     except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
         client.control.event("native_stock_inventory_rejected", operation_id=operation, reason=str(error))
+    finally:
+        if visit is not None and (client.stock_interaction_scope() != visit or asyncio.current_task().cancelling()):
+            # The same live inventory may return after a brief disconnect.
+            # Replaying this input yields the same operation ID on that visit.
+            client.last_stock_inventory_action = sequence - 1
 
 
 async def _escrow_item(host, bridge, frame: dict, guid: str, count: int, item: str) -> None:

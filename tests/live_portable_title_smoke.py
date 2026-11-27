@@ -7462,10 +7462,22 @@ async def verify_stock_inventory_fall(host: Seat, guest: Seat, pawn: str) -> dic
     async def drop_from_guest(item):
         stocked = await submit(guest_run, "native-inventory-view-fixture", target="stock")
         assert stocked["ok"], stocked
-        result = await submit(guest_run, native_guest_drop.STOCK_DROP_FIXTURE, target=item["guid"])
-        assert result["ok"] and result["stock_inventory_proof"].startswith("verified open stock backpack refresh"), result
-        assert result.get("stock_inventory_local_drop") is True, result
-        return result[native_guest_drop.RESULT]
+        frame = await wait_resident_status(guest_run, lambda row: row.get("gameplay_fresh"))
+        pressed = await submit(guest_run, "native-inventory-stock-use-click-fixture", target=item["guid"] + "|drop")
+        assert pressed["ok"] and pressed["stock_action"]["layout_preview"] == "dropped", pressed
+        while True:
+            events = await resident_events(guest_run, frame)
+            preview = next((row for row in events if row.get("event") == "native_stock_inventory_local_preview"
+                            and row.get("guid") == item["guid"] and row.get("result") == "dropped"), None)
+            if preview:
+                for row in events:
+                    if row.get("operation_id") != preview["operation_id"] or row is preview:
+                        continue
+                    assert row["event"] != "native_stock_inventory_rejected", row
+                    if row.get("event") == "native_stock_inventory_action":
+                        assert row["stock_inventory_proof"].startswith("verified open stock backpack refresh"), row
+                        return row[native_guest_drop.RESULT]
+            await asyncio.sleep(.04)
 
     async def fall(role, item, press_drop):
         actors = {seat: {} for seat in ("host", "guest")}
