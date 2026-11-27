@@ -1,11 +1,11 @@
 package.path = "mod/SilverfishCoop/Scripts/?.lua;" .. package.path
 
-local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
-local source = "crossroads-brown-mushroom"
+local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
+local source = "city-copper-wire"
 local world = {IsValid = function() return true end, GetAddress = function() return 102 end}
 local pawn = {IsValid = function() return true end, GetAddress = function() return 101 end,
     GetWorld = function() return world end}
-local state = {map = crossroads, world = world, server = false, listening = true,
+local state = {map = city, world = world, server = false, listening = true,
     local_pawn = {pawn = pawn, name = "Stock player"}}
 local env = setmetatable({
     os = {getenv = function(name) return name == "SILVERFISH_COOP_NATIVE_ZONE" and "1" or nil end,
@@ -58,7 +58,7 @@ end
 for _, shown in ipairs({"hidden", "stock-active"}) do
     reporting_drop(shown, "-")
     local rows = hosting()
-    assert(rows["native-dead-drop"][2] == shown and rows["native-dead-drop"][3] == crossroads)
+    assert(rows["native-dead-drop"][2] == shown and rows["native-dead-drop"][3] == city)
     assert(rows["native-authored-pickup"][2] == source and rows["native-authored-pickup"][6] == "available")
     assert(rows["native-authored-pickup-interaction"][2] == source
         and rows["native-authored-pickup-interaction"][6] == "stock")
@@ -87,7 +87,7 @@ env.SilverfishSampleNativeAuthoredPickups = function() return "incomplete" end
 assert(hosting()["native-authored-pickup"][6] == "available", "A refused batch must fall back to live scalar status")
 env.SilverfishSampleNativeAuthoredPickups = nil
 
-local projected_path = crossroads .. ".CrossRoads_P:PersistentLevel.ProjectedLoot_1"
+local projected_path = city .. ".City_01_P:PersistentLevel.ProjectedLoot_1"
 local actor_name = "Item_Master_BP_C " .. projected_path
 local projected = {
     IsValid = function() return true end,
@@ -131,7 +131,7 @@ env.SilverfishDiscoverLoosePickups = function(address, host)
     assert(address == pawn:GetAddress() and host == false)
     return 12, "", 5
 end
-local path = crossroads .. ".CrossRoads_P:PersistentLevel.Item_BP_C_1"
+local path = city .. ".City_01_P:PersistentLevel.Item_BP_C_1"
 local applied = 0
 env.SilverfishSetGuestLoosePickupView = function(generation, hidden, actor)
     assert(generation == 5 and hidden == true and actor == path)
@@ -139,10 +139,10 @@ env.SilverfishSetGuestLoosePickupView = function(generation, hidden, actor)
     return true
 end
 pickup.refresh_loose(function() return world end)
-local nearby = table.concat({"native-loose-pickup", crossroads, path, "Stock item", "2", "available",
+local nearby = table.concat({"native-loose-pickup", city, path, "Stock item", "2", "available",
     "10.000", "20.000", "30.000"}, "\t")
 env.SilverfishNearbyLoosePickupStatusRows = function(map)
-    assert(map == crossroads)
+    assert(map == city)
     return nearby
 end
 env.SilverfishSetNativeAuthoredPickupScope = function() return false end
@@ -158,4 +158,13 @@ assert(pickup.command(command, state, "connected") == "shared level item visibil
 command[3] = "4"
 assert(not pcall(pickup.command, command, state, "connected"))
 assert(applied == 1 and authored_binds == 0)
+
+env.SilverfishRenewNativeAuthoredQuestPlacements = function(address, visit, generation, target)
+    assert(address == pawn:GetAddress() and visit == epoch and math.type(generation) == "integer")
+    assert(generation == 5 and target == path)
+    return true, "1"
+end
+local renew = {"test", "native-quest-placement-renew", epoch, path, "5"}
+assert(pickup.command(renew, state, "connected") == "1")
+assert(not pcall(pickup.command, renew, state, "hosting"))
 print("Stock Dead Drop reporting and exact loose pickup projection passed.")

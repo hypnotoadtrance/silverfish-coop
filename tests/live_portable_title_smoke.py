@@ -7069,7 +7069,7 @@ return actions
 
 
 def instrument_crate_loot_presentation(script: str) -> str:
-    marker = "            local pickable = ok and not item.moving\n"
+    marker = "            local pickable = not entry.error and not entry.moving\n"
     assert script.count(marker) == 1
     frame_reply = "function projection.frame_reply(fields, state, phase, row)\n"
     if frame_reply in script:
