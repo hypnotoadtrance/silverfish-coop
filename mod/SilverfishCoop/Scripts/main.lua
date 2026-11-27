@@ -2142,8 +2142,9 @@ local function tick(fields, pending, periodic)
         SilverfishPublishLocalBridgeReply(pending.ticket, reply)
         return true
     end
-    if fields and pending and fields[2] == "native-guest-ui-read-memory" and not periodic and current_phase == "hosting"
-        and status_publication.compact() and status_publication.steady(state, current_phase) then
+    if fields and pending and fields[2] == "native-guest-ui-read-memory" and current_phase == "hosting"
+        and resident_title and status_publication.installed and status_publication.memory_live
+        and status_publication.steady(state, current_phase) then
         if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
         pending.dispatched = true
         local accepted, message, body = pcall(native_guest_ui.memory_command, fields, state, current_phase, pending.body)
@@ -2152,9 +2153,10 @@ local function tick(fields, pending, periodic)
             accepted and "accepted" or "error", message) .. "\n"
         if accepted then reply = reply .. "native-guest-ui-body\t" .. #body .. "\n" .. body end
         SilverfishPublishLocalBridgeReply(pending.ticket, reply)
-        return true
+        if not periodic then return true end
+        fields, pending = nil, nil
     end
-    if fields and pending and fields[2] == "native-guest-ui-project-memory" and not periodic and current_phase == "connected"
+    if fields and pending and fields[2] == "native-guest-ui-project-memory" and current_phase == "connected"
         and resident_title and status_publication.installed and status_publication.memory_live
         and status_publication.steady(state, current_phase) then
         if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
@@ -2164,7 +2166,8 @@ local function tick(fields, pending, periodic)
         local reply = status_row("native-guest-ui-project-reply", 1, fields[1], current_phase, state.map,
             native_save_scope.selected() or "-", state.local_pawn.name, accepted and "accepted" or "error", message)
         SilverfishPublishLocalBridgeReply(pending.ticket, reply .. "\n")
-        return true
+        if not periodic then return true end
+        fields, pending = nil, nil
     end
     native_mindcore_replication.sync(state, current_phase)
     native_datasilo_lift.sync(state, current_phase)
