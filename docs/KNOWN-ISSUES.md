@@ -5,7 +5,7 @@ Use the same release candidate on all PCs. Builds before `rc-ad3c9da` used an ol
 ## Current priorities
 
 1. **Menu UX.** Refine focus, back navigation, and hover and click sounds across the title, Host and Join screens, and Manage Saves. Confirm Steam password handling on two accounts.
-2. **Responsiveness and networking.** Measure the Observatory cabinet hitch and actual mod traffic in Depot and larger Steam parties. The worker targets 20 Hz and compresses eligible traffic. Aim for 100 ms or less round trip where the connection allows it. The Crossroads frame-pacing investigation is on hold.
+2. **Responsiveness and networking.** Measure the Observatory cabinet hitch and mod traffic in larger Steam parties. In `rc-689cf09`, one idle two-player Direct IP test in Depot measured 67–87 kbps per direction. The reported Steam spike still needs a capture during active play. The worker targets 20 Hz and compresses eligible traffic. Aim for 100 ms or less round trip where the connection allows it. The Crossroads frame-pacing investigation is on hold. [Network test notes](NATIVE-INTEGRATION.md#replication-and-travel-pacing)
 3. **Session stability and combat.** Give any reproduced crash or unexpected return to title first priority. Verify guest hits, NPC retaliation and death, and loot pickup in a normal Steam fight.
 4. **World and content compatibility.** Expand discovery of stock-style quests, randomized objectives, buried items, maps, transitions, and interactables. Exercise broader coverage as shared handlers mature.
 5. **Polish and optional features.** Keep avatar and weapon alignment, animation blending, lean, visual and audio effects, and the optional GitHub update check behind functional work.
