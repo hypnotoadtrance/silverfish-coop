@@ -130,6 +130,8 @@ Check guest status from another terminal. A ready gameplay session reports `stat
 
 ## Rejoin and resume
 
+If a guest unexpectedly reaches the title while the host keeps playing, the mod tries to reconnect that guest to the same character. If the host reaches the title and cleanup succeeds, the co-op menu offers **Host Game** again. Choose **Load Game** to reopen the last saved campaign, then have guests rejoin with the same characters. If the host game fully closes, relaunch it first. Changes after the last save may be lost.
+
 Leave both games running during a brief network interruption. The guest can retry automatically. The host reserves the character for 90 seconds. The reserved pawn still counts for party travel and other active-player checks. Reconnecting within that window restores control of the same pawn if Unreal still has the connection.
 
 If the guest game closes unexpectedly, reopen co-op and select the same character. Joining can take about two minutes while Unreal clears the old connection. The replacement joins close to the host and can resume from the available character state. Local automation reports `state: waiting_for_host` and `wait_reason: native_runtime_retiring` during that wait.
