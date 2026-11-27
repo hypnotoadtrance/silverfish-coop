@@ -330,6 +330,8 @@ local function run(action,id)
         local input = StaticFindObject("/Game/Classes/Player/Player_Inputs/IA_Interact.IA_Interact")
         pawn:InpActEvt_IA_Interact_K2Node_EnhancedInputActionEvent_19(library:MakeInputActionValueOfType(1,0,0,0),0,0,input)
         pawn:InpActEvt_IA_Interact_K2Node_EnhancedInputActionEvent_21(library:MakeInputActionValueOfType(0,0,0,0),.05,.05,input)
+        -- Match the native synthetic press helper when chaining another stock interaction.
+        pawn.Holding_Interact = false
         return "pressed"
     end
     error("unknown stock oil lamp fixture command")
