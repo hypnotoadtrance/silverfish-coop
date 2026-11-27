@@ -348,7 +348,8 @@ end
 
 function carry.enroll_loose(actor)
     local box = phase == "hosting" and item_box(actor)
-    if not box or not placed_item(actor) or not actor:HasAuthority()
+    local level = box and placed_item(actor)
+    if not level or not actor:HasAuthority()
         or not box:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find)) then return end
     if same(actor, enrolled[actor:GetAddress()]) then return true end
     actor.NetUpdateFrequency = math.min(actor.NetUpdateFrequency, 15)
@@ -359,7 +360,9 @@ function carry.enroll_loose(actor)
     if fixtures then
         local mass, class = box:GetMass(), actor_class(actor)
         if class and mass > 0 and mass <= 10000 then
-            loose_fixtures[actor:GetAddress()] = {actor = actor, name = actor:GetFullName(), class = class, mass = mass}
+            local name = actor:GetFullName()
+            if not same(level, world.PersistentLevel) then name = "stream:" .. name end
+            loose_fixtures[actor:GetAddress()] = {actor = actor, name = name, class = class, mass = mass}
         end
     end
     return true
