@@ -187,6 +187,19 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         await startup._run()
         self.assertIs(self.host_game.await_args.args[4], True)
 
+    async def test_offscreen_rendering_requires_the_private_no_steam_launch(self):
+        boot = self.process(self.host, SILVERFISH_COOP_HEADLESS="1")
+        argv = (*boot.argv, "-SilverfishCoopIsolated", "-RenderOffScreen")
+        self.boot.return_value = replace(boot, argv=argv)
+        startup.publish(self.path(self.host), self.request(self.host, HOST))
+        with self.assertRaisesRegex(ValueError, "expected render mode"):
+            await startup._run()
+        self.host_game.assert_not_awaited()
+
+        self.boot.return_value = replace(boot, argv=(*argv, "-NoSteam"))
+        await startup._run()
+        self.assertIs(self.host_game.await_args.args[4], True)
+
     async def test_join_pins_private_invitation_and_forwards_exact_choice(self):
         request = self.join_request()
         bridge = self.path(self.client)

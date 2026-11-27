@@ -80,7 +80,7 @@ function audio.sync(state, phase)
                 if pawn:IsLocallyControlled() then
                     save = pawn.Save
                 else
-                    local ok, _, detached = pcall(guest_save.exact_item_context, state, phase, entry.name)
+                    local ok, _, detached = pcall(guest_save.observed_item_context, state, phase, entry)
                     if ok then save = detached end
                 end
                 if valid(save) then

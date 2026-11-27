@@ -195,7 +195,7 @@ local function observe(state, phase)
                         if not pawn:HasAuthority() or not valid(save) or not valid(pawn.Save)
                             or pawn.Save:GetAddress() ~= save:GetAddress() then return end
                     else
-                        pawn, save = guest_save.exact_item_context(state, phase, details.name)
+                        pawn, save = guest_save.observed_item_context(state, phase, details)
                     end
                     if valid(pawn) and valid(save) then return worn(save.PlayerArmor), worn(save.PlayerHelmet), pawn, save end
                 end)

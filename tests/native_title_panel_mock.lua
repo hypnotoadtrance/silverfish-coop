@@ -486,7 +486,8 @@ direct_retry("", "direct_password_required")
 assert(surface.write(display, "password", "Wrong fixture"))
 direct_retry("Wrong fixture", "direct_wrong_password")
 click("back")
-assert(display.title == "Multiplayer" and files[steam_cancel] == "1\t" .. steam_nonce .. "\tcancel\n")
+assert(display.title == "Multiplayer" and display.focus == "join"
+    and files[steam_cancel] == "1\t" .. steam_nonce .. "\tcancel\n")
 
 offer("host,join", 110, generation("9"), defaults)
 click("multiplayer")
@@ -518,15 +519,76 @@ click("steam-public")
 local prefix = ("1\t%s\t%s\t"):format(browse_generation, operation_id())
 assert(files[browse_request] == prefix .. "search\n")
 files[browse_request] = nil
-files[browse_response] = ("2\t%s\t%s\tready\t1\nFixture Host\trc-abcdef0\t1\n"):format(browse_generation, operation_id())
+local function public_list(count)
+    local rows = {}
+    for index = 1, count do rows[index] = ("Fixture Host %d\trc-abcdef0\t1\n"):format(index) end
+    return ("2\t%s\t%s\tready\t%d\n%s"):format(browse_generation, operation_id(), #rows, table.concat(rows))
+end
+files[browse_response] = public_list(6)
 tick()
-assert(display.buttons["steam-pick:1"].label == "Fixture Host")
-click("steam-pick:1")
-assert(files[browse_request] == prefix .. "1\n")
+assert(display.buttons["steam-pick:1"].label == "Fixture Host 1")
+click("steam-next")
+assert(display.buttons["steam-pick:6"].label == "Fixture Host 6" and not display.buttons["steam-pick:1"])
+click("steam-pick:6")
+assert(files[browse_request] == prefix .. "6\n")
 
 files[steam_cancel], files[steam_join], files[steam_opened] = nil, nil, nil
-local abandoned_nonce = generation("b")
+local public_nonce = generation("b")
 now = 104
+files[browse_request] = nil
+files[steam_join] = ("1\t%s\t28951\t159\n"):format(public_nonce)
+tick()
+assert(display.title == "Join via Steam" and not display.fields.password)
+assert(files[steam_opened] == "1\t" .. public_nonce .. "\topened\n")
+files[join_request] = nil
+files[join_response] = ("1\t%s\t%s\terror\tdirect_password_required\t0\n"):format(browse_generation, operation_id())
+tick()
+assert(display.focus == "password")
+next_guid = next_guid + 1
+click("back")
+assert(display.title == "Public Steam Lobbies" and display.note == "Leaving the Steam lobby…")
+assert(files[steam_cancel] == "1\t" .. public_nonce .. "\tcancel\n")
+now = 105
+tick()
+assert(not files[browse_request], "Wait for Steam to leave before searching again")
+files[steam_cancel], files[steam_join], files[steam_opened] = nil, nil, nil
+now = 106
+tick()
+local refreshed_prefix = ("1\t%s\t%s\t"):format(browse_generation, operation_id())
+assert(refreshed_prefix ~= prefix and files[browse_request] == refreshed_prefix .. "search\n")
+assert(display.note == "Looking for public lobbies…")
+files[browse_request] = nil
+files[browse_response] = public_list(6)
+now = 107
+tick()
+assert(display.focus == "steam-pick:6" and display.buttons["steam-pick:6"] and not display.buttons["steam-pick:1"])
+offer("host,join", 117, browse_generation, defaults)
+click("steam-pick:6")
+assert(files[browse_request] == refreshed_prefix .. "6\n")
+files[browse_request] = nil
+local closed_nonce = generation("1")
+now = 108
+files[steam_join] = ("1\t%s\t28951\t159\n"):format(closed_nonce)
+tick()
+assert(display.title == "Join via Steam" and not display.fields.password)
+files[steam_join], files[steam_opened], files[join_request] = nil, nil, nil
+next_guid = next_guid + 1
+click("back")
+assert(display.note == "Leaving the Steam lobby…" and not files[browse_request])
+assert(files[steam_cancel] == "1\t" .. closed_nonce .. "\tcancel\n")
+now = 112
+tick()
+assert(files[browse_request] == ("1\t%s\t%s\tsearch\n"):format(browse_generation, operation_id()))
+files[browse_request], files[steam_cancel] = nil, nil
+files[browse_response] = public_list(2)
+now = 113
+tick()
+assert(display.buttons["steam-pick:1"] and display.buttons["steam-pick:2"] and not display.focus)
+click("steam-back")
+assert(display.title == "Multiplayer" and display.focus == "steam-public")
+
+local abandoned_nonce = generation("c")
+now = 114
 files[steam_join] = ("1\t%s\t28951\t159\n"):format(abandoned_nonce)
 tick()
 assert(display.title == "Join via Steam")
@@ -537,14 +599,14 @@ state.qualified = false
 sync()
 assert(not display and not files[steam_cancel])
 refuse_rename = false
-now = 105
+now = 115
 sync()
 assert(files[steam_cancel] == "1\t" .. abandoned_nonce .. "\tcancel\n")
 files[steam_cancel] = nil
 
 state.qualified = true
 local retry_generation, retry_nonce = generation("c"), generation("d")
-offer("host,join", 115, retry_generation, defaults)
+offer("host,join", 122, retry_generation, defaults)
 files[steam_join] = ("1\t%s\t28953\t159\n"):format(retry_nonce)
 tick()
 assert(display.title == "Join via Steam")
@@ -562,7 +624,7 @@ assert(files[request] and not files[steam_cancel], "Keep the route through the s
 files[request], files[descriptor] = nil, nil
 sync()
 assert(not files[steam_cancel], "Retiring a submitted panel must preserve the selected route")
-offer("host,join", 115, generation("e"), defaults)
+offer("host,join", 122, generation("e"), defaults)
 assert(files[steam_cancel] == "1\t" .. retry_nonce .. "\tcancel\n", "A fresh title offer releases an unused route")
 
 local manage_generation, campaign_id = generation("d"), generation("c")

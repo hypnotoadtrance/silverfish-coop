@@ -103,8 +103,8 @@ local function enroll_stock_spawned_props(state)
         spawned_props.sequence = sequence
         local actor = StaticFindObject(name:match("^%S+ (.+)$"))
         if valid(actor) and actor:GetFullName() == name and actor:IsA(base)
-            and same(actor:GetClass(), StaticFindObject(class)) and same(actor:GetWorld(), world)
-            and actor:HasAuthority() and not actor:IsActorBeingDestroyed() and root_mesh(actor)
+            and same(actor:GetClass(), StaticFindObject(class)) and world_path.visible_actor_level(actor, world)
+            and actor:HasAuthority() and root_mesh(actor)
             and carry.publish_motion(actor) then
             carry.enroll(actor)
         end

@@ -17,6 +17,7 @@ local singleplayer_title
 local startup_seen
 local guest_creation
 local dispatch
+local start_public_browser
 local settings_fixture, credits_fixture
 local credits_path = "/Game/Classes/GUI/Credits_MainMenu_Widget.Credits_MainMenu_Widget_C"
 local initial_port, edited_port = "7777", "28181"
@@ -485,8 +486,9 @@ local function handle_join_form(action, state, phase, context, steam_invite)
         local owner = session
         local draft = api.open(state, phase, context, bridge_path, offer.generation, request_id, direct_join,
             function(key) if session == owner then dispatch(key) end end, offer.defaults, steam_invite and steam_invite.port)
+        local browser = session.browser
         session.form = {role = "join", api = api, draft = draft, steam_nonce = steam_invite and steam_invite.nonce,
-            back_focus = steam_invite and session.browser and "steam-public" or "join"}
+            browser_selection = steam_invite and browser and browser.state == "joining" and browser.selection}
         report = {state = "ready", choices = offer.choices}
         return true
     end
@@ -519,7 +521,9 @@ local function handle_join_form(action, state, phase, context, steam_invite)
     end
     if failure == "title_join_form_back_to_title" then
         close_form(session)
-        multiplayer(offer, form.back_focus)
+        if not form.browser_selection or not start_public_browser(form.browser_selection) then
+            multiplayer(offer, form.browser_selection and "steam-public" or "join")
+        end
         return true
     end
     return accepted, failure
@@ -572,6 +576,8 @@ local function show_public_lobbies(browser)
     local rows, note = {}, browser.note
     if browser.state == "joining" then
         note = "Connecting through Steam…"
+    elseif browser.state == "returning" then
+        note = "Leaving the Steam lobby…"
     elseif browser.state == "searching" then
         note = "Looking for public lobbies…"
     elseif browser.state == "unavailable" then
@@ -591,10 +597,13 @@ local function show_public_lobbies(browser)
         if first + 3 < #browser.lobbies then pages[#pages + 1] = button("steam-next", "Next") end
         if #pages > 0 then rows[#rows + 1] = pages end
     end
-    if browser.state ~= "joining" then
+    if browser.state == "returning" then
+        rows[#rows + 1] = {button("steam-back", "Back")}
+    elseif browser.state ~= "joining" then
         rows[#rows + 1] = {button("steam-public", "Refresh"), button("steam-back", "Back")}
     end
-    present({title = "Public Steam Lobbies", note = note, rows = rows})
+    present({title = "Public Steam Lobbies", note = note, rows = rows, focus = browser.focus})
+    browser.focus = nil
 end
 
 local function browser_request(browser, action)
@@ -609,6 +618,19 @@ local function browser_request(browser, action)
     return false
 end
 
+start_public_browser = function(selection)
+    local token = request_id()
+    if not token then return end
+    local now = os.time()
+    local browser = {generation = session.offer.generation, token = token, first = 1,
+        state = selection and "returning" or "searching", lobbies = {}, expires = now + 15,
+        previous_selection = selection, release_until = now + 3}
+    session.browser = browser
+    if not selection and not browser_request(browser, "search") then browser.state = "unavailable" end
+    show_public_lobbies(browser)
+    return true
+end
+
 local function browser_action(action)
     local browser = session.browser
     if action == "steam-back" then
@@ -616,12 +638,8 @@ local function browser_action(action)
         return
     end
     if action == "steam-public" then
-        local token = request_id()
-        if not token then return end
-        browser = {generation = session.offer.generation, token = token, first = 1,
-            state = "searching", lobbies = {}, expires = os.time() + 15}
-        session.browser = browser
-        if not browser_request(browser, "search") then browser.state = "unavailable" end
+        start_public_browser()
+        return
     elseif browser and browser.state == "ready" then
         local selected = action:match("^steam%-pick:([1-9][0-9]?)$")
         local lobby = selected and session.view.buttons[action] and browser.lobbies[tonumber(selected)]
@@ -630,6 +648,9 @@ local function browser_action(action)
                 browser.note = nil
                 browser.state = browser_request(browser, selected) and "joining" or "unavailable"
                 browser.expires = os.time() + 15
+                if browser.state == "joining" then
+                    browser.selection = {first = browser.first, index = tonumber(selected), name = lobby.name, version = lobby.version}
+                end
             else
                 browser.note = "Install the same mod release as the host to join."
             end
@@ -642,7 +663,7 @@ local function browser_action(action)
 end
 
 local function poll_public_lobbies(browser)
-    if browser.state ~= "searching" and browser.state ~= "joining" then return end
+    if browser.state ~= "searching" and browser.state ~= "joining" and browser.state ~= "returning" then return end
     local now = os.time()
     if now > browser.expires then
         browser.state = "unavailable"
@@ -651,6 +672,22 @@ local function poll_public_lobbies(browser)
     end
     if browser.polled == now then return end
     browser.polled = now
+    if browser.state == "returning" then
+        -- Steam will reject a new search until the previous lobby route closes.
+        -- If the route already closed, the cancel request may never be read.
+        if now <= browser.release_until then
+            if steam_cancel_retry then return end
+            local cancel = io.open(steam_cancel_path, "rb")
+            if cancel then
+                cancel:close()
+                return
+            end
+        end
+        browser.state = browser_request(browser, "search") and "searching" or "unavailable"
+        browser.expires = now + 15
+        show_public_lobbies(browser)
+        return
+    end
     local file = io.open(bridge_path .. "/steam-coop-browser-response.tsv", "rb")
     if not file then return end
     local data = file:read(2201)
@@ -672,6 +709,15 @@ local function poll_public_lobbies(browser)
         end
         if #lobbies ~= tonumber(count) then return end
         browser.state, browser.lobbies = "ready", lobbies
+        local previous = browser.previous_selection
+        if previous then
+            browser.previous_selection = nil
+            browser.first = math.min(previous.first, math.max(1, (#lobbies - 1) // 4 * 4 + 1))
+            local lobby = lobbies[previous.index]
+            if lobby and lobby.name == previous.name and lobby.version == previous.version then
+                browser.focus = "steam-pick:" .. previous.index
+            end
+        end
     else
         return
     end

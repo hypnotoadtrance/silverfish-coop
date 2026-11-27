@@ -9,8 +9,9 @@ import uuid
 
 from . import native_pickup_audio, party
 from .authored_loot import valid_item_transform
-from .content_paths import item_class_name
+from .content_paths import item_class_name, named_actor
 from .native_gold import valid_guid
+from .native_map_preflight import valid_campaign_package
 from .travel import BLACK_MARKET
 
 
@@ -30,7 +31,8 @@ MEMORY_CAPABILITY = "native_stock_enemy_memory"
 CLAIM = "native-stock-enemy-loot-claim"
 CLAIMED = "native-stock-enemy-loot-claimed"
 CLAIM_KEY = "native_stock_enemy_loot_claim"
-_MAP = re.compile(r"/Game/Classes/Maps(?:/[A-Za-z0-9_]+)+")
+_ACTOR_PATH = re.compile(r"(/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):PersistentLevel\.[A-Za-z0-9_-]+")
+_ACTOR_TYPE = re.compile(r"[A-Za-z0-9_-]+_C")
 _SERIAL = re.compile(r"[1-9][0-9]{0,15}")
 MOTION_INTERVAL = .08
 MOTION_TTL = .75
@@ -38,9 +40,26 @@ MOTION_LIMIT = 32
 _MEMORY_BANK_TURN_SECONDS = .012
 
 
+def _actor_path(area, path):
+    match = _ACTOR_PATH.fullmatch(path) if isinstance(path, str) and len(path) <= 512 else None
+    if not match or not valid_campaign_package(match[1]):
+        return False
+    # The game-thread observer already qualified visible sublevels against area.
+    # Their World export names can differ from the asset package leaf.
+    return match[1] != area or match[2] == area.rsplit("/", 1)[-1]
+
+
+def _typed_actor(area, name, expected_type=None):
+    if not isinstance(name, str) or len(name) > 512:
+        return False
+    actor_type, _, path = name.partition(" ")
+    return ((actor_type == expected_type if expected_type else _ACTOR_TYPE.fullmatch(actor_type) is not None)
+            and _actor_path(area, path))
+
+
 def parse(fields, state, area):
-    if (len(fields) not in (9, 11, 20) or fields[:2] != [TAG, area] or state != "hosting" or not isinstance(area, str)
-            or not _MAP.fullmatch(area) or not all(_SERIAL.fullmatch(value) and int(value) < 2**53 for value in fields[2:4])
+    if (len(fields) not in (9, 11, 20) or fields[:2] != [TAG, area] or state != "hosting"
+            or not valid_campaign_package(area) or not all(_SERIAL.fullmatch(value) and int(value) < 2**53 for value in fields[2:4])
             or fields[8] not in ("0", "1")):
         raise ValueError("Invalid stock enemy drop observation")
     _, _, sequence, roll, source, killer, actor, class_path, live = fields[:9]
@@ -48,12 +67,10 @@ def parse(fields, state, area):
     height = None if first_height == "-" else float(first_height)
     if motion not in ("gone", "moving", "settled") or (height is not None and not abs(height) <= 1e7):
         raise ValueError("Invalid stock enemy drop motion")
-    prefix = re.escape(f" {area}.{area.rsplit('/', 1)[1]}:PersistentLevel.")
     item_class = item_class_name(class_path)
-    if (not item_class or any(len(name) > 512 for name in (source, killer, actor))
-            or not re.fullmatch(r"[A-Za-z0-9_]+_C" + prefix + r"[A-Za-z0-9_]+", source)
-            or (killer != "-" and not re.fullmatch(r"Player_FP_C" + prefix + r"Player_FP_C_[0-9]+", killer))
-            or not re.fullmatch(re.escape(item_class) + prefix + r"[A-Za-z0-9_-]+", actor)):
+    if (not item_class or not _typed_actor(area, source)
+            or (killer != "-" and not named_actor(area, killer, "Player_FP_C"))
+            or not _typed_actor(area, actor, item_class)):
         raise ValueError("Invalid stock enemy, killer, or item identity")
     report = dict(sequence=int(sequence), roll=int(roll), map=area, source=source,
                   killer=None if killer == "-" else killer, actor=actor, class_path=class_path, live_at_capture=live == "1",
@@ -139,19 +156,14 @@ def active_frames(data, members):
         actor = row.get("actor")
         visual_id = row.get("visual_id")
         ammo, killer, claimant = (row.get(key) for key in ("ammo", "killer", "claimed_by"))
-        if (not isinstance(area, str) or not _MAP.fullmatch(area)
-                or not item_class_name(class_path)
-                or not isinstance(source, str) or len(source) > 512
-                or not isinstance(actor, str) or len(actor) > 512
+        item_class = item_class_name(class_path)
+        if (not valid_campaign_package(area) or not item_class
+                or not _actor_path(area, source) or not _typed_actor(area, actor, item_class)
                 or (visual_id is not None and (not isinstance(visual_id, str) or not party.REQUEST_ID.fullmatch(visual_id)))
                 or not valid_item_transform(row.get("transform")) or type(ammo) is not int or not -2**31 <= ammo < 2**31
                 or any((value is not None and not isinstance(value, str)) or value not in owners
                        for value in (killer, claimant))):
             raise ValueError("Invalid stock enemy loot payload")
-        level = re.escape(f"{area}.{area.rsplit('/', 1)[1]}:PersistentLevel.")
-        if (not re.fullmatch(level + r"[A-Za-z0-9_]+", source)
-                or not re.fullmatch(re.escape(item_class_name(class_path)) + " " + level + r"[A-Za-z0-9_-]+", actor)):
-            raise ValueError("Invalid stock enemy loot source")
         if claimant is None:
             if not isinstance(frame := row.get("escrow"), dict) or frame.get("map") != area:
                 raise ValueError("Unclaimed stock enemy loot has no save generation")

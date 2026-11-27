@@ -73,6 +73,37 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(ValueError):
                     native_world_loot.parse([*row[:-1], bad_item], "connected", MAP)
 
+    def test_streamed_stock_drop_keeps_the_mounted_campaign_scope_through_checkpoint(self):
+        drops = native_stock_enemy_drops
+        area = "/ExampleContent/Maps/SunkenCamp"
+        level = "/ExampleContent/Maps/Basement_1.Basement:PersistentLevel."
+        item = "/ExampleContent/Loot/SalvageKit.SalvageKit_C"
+        source = f"BurriedItem_BP_C {level}BurriedItem_BP_1"
+        actor = f"SalvageKit_C {level}SalvageKit_C_793"
+        killer = f"Player_FP_C {area}.SunkenCamp:PersistentLevel.Player_FP_C_42"
+        fields = [drops.TAG, area, "3", "1", source, killer, actor, item, "1"]
+        observed = drops.parse(fields, "hosting", area)
+        self.assertEqual((observed["map"], observed["source"], observed["actor"]), (area, source, actor))
+
+        guid = "B" * 32
+        frame = {"map": area, "slot": "SFCoop_" + "c" * 32}
+        row = dict(map=area, source=source.split(" ", 1)[1], actor=actor, class_path=item, guid=guid,
+                   ammo=0, transform={"position": [0., 0., 10.], "rotation": [0., 0., 0.], "scale": [1., 1., 1.]},
+                   killer="scout", claimed_by=None, escrow=frame)
+        self.assertEqual(drops.active_frames({drops.STATE: {guid: row}}, {"scout"}), [frame])
+
+        for index, changed in (
+            (4, source.replace("/Maps/", "/../")),
+            (5, killer.replace(f"{area}.SunkenCamp:PersistentLevel.", level)),
+            (6, actor.replace("SalvageKit_C ", "WrongLoot_C ")),
+        ):
+            with self.subTest(index=index, path=changed), self.assertRaises(ValueError):
+                invalid = list(fields)
+                invalid[index] = changed
+                drops.parse(invalid, "hosting", area)
+        with self.assertRaises(ValueError):
+            drops.active_frames({drops.STATE: {guid: dict(row, escrow=dict(frame, map=MAP))}}, {"scout"})
+
     async def test_committed_world_pickup_is_not_recreated_by_an_older_snapshot(self):
         client, view = self.client(), native_world_loot.Projection()
         game, rows = client.last_game, client.gameplay[record.STATE]

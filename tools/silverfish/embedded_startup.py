@@ -296,7 +296,10 @@ async def _run(*, timeout: float = 15) -> None:
     headless = render_mode == "1"
     arguments = {argument.casefold() for argument in startup.argv[1:]}
     render_flags = {"-nullrhi", "-renderoffscreen"}
-    if render_mode not in (None, "1") or arguments & render_flags != (render_flags if headless else set()):
+    isolated_render = {"-silverfishcoopisolated", "-renderoffscreen", "-nosteam"} <= arguments
+    allowed = (not arguments & render_flags if not headless else
+               render_flags <= arguments or isolated_render)
+    if render_mode not in (None, "1") or not allowed:
         raise ValueError("The packaged worker did not begin with its expected render mode")
     bridge = Path(startup.environment.get(BRIDGE_ENV) or "")
     if not bridge.is_absolute() or bridge.name != nonce or len(bridge.parents) < 5:

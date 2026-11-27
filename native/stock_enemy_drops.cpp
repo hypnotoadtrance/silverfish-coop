@@ -2,7 +2,9 @@
 #include "enemy_loot.hpp"
 #include "guest_consumable.hpp"
 #include "host_dig.hpp"
+#include "interaction_input.hpp"
 #include "shared_loot.hpp"
+#include "zone_exit.hpp"
 
 #include <algorithm>
 #include <array>
@@ -155,11 +157,13 @@ namespace
 
     bool authority_in_level(U::AActor* actor, U::UWorld* world)
     {
+        if (!live(actor) || !live(world)) return false;
         auto* role = field<U::FByteProperty>(actor, STR("Role"));
         auto* destroying = field<U::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
-        return live(actor) && role && role->GetPropertyValueInContainer(actor) == 3 &&
-            destroying && !destroying->GetPropertyValueInContainer(actor) &&
-            actor->GetWorld() == world && actor->GetLevel() == object(world, STR("PersistentLevel"));
+        if (!role || role->GetPropertyValueInContainer(actor) != 3 ||
+            !destroying || destroying->GetPropertyValueInContainer(actor)) return false;
+        if (actor->GetLevel() == object(world, STR("PersistentLevel"))) return actor->GetWorld() == world;
+        return silverfish::native_zone::visible_actor_level(actor, world);
     }
 
     U::UObject* listen_instance(U::UWorld* world)
@@ -171,6 +175,17 @@ namespace
             live(driver) && object(driver, STR("World")) == world &&
             field<U::FObjectProperty>(driver, STR("ServerConnection")) && !object(driver, STR("ServerConnection")) ?
             instance : nullptr;
+    }
+
+    U::UWorld* source_world(U::AActor* actor)
+    {
+        auto* world = actor->GetWorld();
+        if (listen_instance(world) && authority_in_level(actor, world)) return world;
+        // A streamed actor can report its asset world. Resolve it against the
+        // active listen scope and verify that this exact level is visible there.
+        auto* listen_world = silverfish::native_interaction_input::current_listen_world();
+        return world != listen_world && listen_instance(listen_world) && authority_in_level(actor, listen_world)
+            ? listen_world : nullptr;
     }
 
     bool item_in_world(U::UObject* value, U::UWorld* world)
@@ -267,8 +282,8 @@ namespace
     void record_unearthed(U::UObject* receiver, U::FFrame& frame)
     {
         if (!stock_dig_frame(receiver, frame)) return;
-        auto* world = static_cast<U::AActor*>(receiver)->GetWorld();
-        if (!listen_instance(world) || !authority_in_level(static_cast<U::AActor*>(receiver), world)) return;
+        auto* world = source_world(static_cast<U::AActor*>(receiver));
+        if (!world) return;
 
         auto* actor = finished_stock_spawn(frame);
         if (!actor) return;
@@ -285,9 +300,9 @@ namespace
         if (!graph || !live(receiver) || frame.Object() != receiver || frame.Node() != graph ||
             receiver->GetClassPrivate() != graph->GetOuterPrivate()) return;
         auto* package = static_cast<U::AActor*>(receiver);
-        auto* world = package->GetWorld();
+        auto* world = source_world(package);
         auto* prop = find<U::UClass>(prop_path);
-        if (!prop || !listen_instance(world) || !authority_in_level(package, world)) return;
+        if (!prop || !world) return;
 
         // The stock package graph can resume from a latent action. Its two
         // spawn locals identify the finished actor without scanning the level.
@@ -303,12 +318,12 @@ namespace
             frame.Node() != find<U::UFunction>(package_contents_graph) ||
             !silverfish::native_guest_consumable::qualifies_mail_package(receiver->GetClassPrivate())) return;
         auto* package = static_cast<U::AActor*>(receiver);
-        auto* world = package->GetWorld();
+        auto* world = source_world(package);
         auto* deferred = field<U::FObjectProperty>(frame.Node(), STR("CallFunc_BeginDeferredActorSpawnFromClass_ReturnValue"));
         auto* to_inventory = field<U::FBoolProperty>(receiver, STR("AddToInventory"));
         if (deferred && !deferred->HasAnyPropertyFlags(U::CPF_Parm | U::CPF_OutParm | U::CPF_ReturnParm) &&
             to_inventory && !to_inventory->GetPropertyValueInContainer(receiver) &&
-            listen_instance(world) && authority_in_level(package, world))
+            world)
             mail_contents = {&frame, package, world, deferred};
     }
 
@@ -332,10 +347,10 @@ namespace
             frame.Node() != find<U::UFunction>(buried_graph) || !caller || caller->Object() != receiver ||
             caller->Node() != find<U::UFunction>(buried_dig)) return;
         auto* source = static_cast<U::AActor*>(receiver);
-        auto* world = source->GetWorld();
+        auto* world = source_world(source);
         auto* reward = field<U::FClassProperty>(source, STR("BurriedActor"));
         auto* type = reward ? reward->GetObjectPropertyValue(reward->ContainerPtrToValuePtr<void>(source)) : nullptr;
-        if (!live(type) || !listen_instance(world) || !authority_in_level(source, world)) return;
+        if (!live(type) || !world) return;
         buried = {&frame, world, type, RC::to_utf8_string(source->GetFullName()),
             silverfish::native_host_dig::manages_buried_source(receiver)};
     }
@@ -365,10 +380,10 @@ namespace
             receiver->GetClassPrivate() != find<U::UClass>(bolt_projectile) ||
             frame.Object() != receiver || frame.Node() != find<U::UFunction>(bolt_graph)) return;
         auto* projectile = static_cast<U::AActor*>(receiver);
-        auto* world = projectile->GetWorld();
+        auto* world = source_world(projectile);
         auto* deferred = field<U::FObjectProperty>(frame.Node(), STR("CallFunc_BeginDeferredActorSpawnFromClass_ReturnValue"));
         if (deferred && !deferred->HasAnyPropertyFlags(U::CPF_Parm | U::CPF_OutParm | U::CPF_ReturnParm)
-            && listen_instance(world) && authority_in_level(projectile, world))
+            && world)
             bolt_observing = {&frame, projectile, world, deferred};
     }
 
@@ -432,10 +447,10 @@ namespace
             !caller || caller->Object() != receiver || caller->Node() != find<U::UFunction>(stock_graph)) return;
 
         auto* npc = static_cast<U::AActor*>(receiver);
-        auto* world = npc->GetWorld();
+        auto* world = source_world(npc);
         auto* instance = listen_instance(world);
         auto* alive = field<U::FBoolProperty>(npc, STR("Alive"));
-        if (!instance || !authority_in_level(npc, world) || !alive || alive->GetPropertyValueInContainer(npc)) return;
+        if (!instance || !alive || alive->GetPropertyValueInContainer(npc)) return;
         auto* actor = find<U::UClass>(actor_path);
         if (!actor || !frame.Locals()) return;
 
@@ -553,7 +568,8 @@ namespace
         auto* world = static_cast<U::UWorld*>(reported_world.Get());
         auto* instance = listen_instance(world);
         auto* pawn = object(instance, STR("As Player FP"));
-        if (!host || address(pawn) != host || !authority_in_level(static_cast<U::AActor*>(pawn), world)) return 0;
+        if (!host || address(pawn) != host || !authority_in_level(static_cast<U::AActor*>(pawn), world) ||
+            static_cast<U::AActor*>(pawn)->GetLevel() != object(world, STR("PersistentLevel"))) return 0;
         for (const auto& drop : recent)
         {
             if (drop.sequence <= last || drop.physics_prop != physics_prop) continue;
@@ -589,8 +605,8 @@ namespace silverfish::stock_enemy_drops
         const auto* type = live(observer) ? observer->GetClassPrivate() : nullptr;
         if (!available() || !type || type->GetPathName() != STR("/Game/Classes/Anomalies/Observers_BP.Observers_BP_C"))
             return false;
-        auto* world = static_cast<U::AActor*>(observer)->GetWorld();
-        if (!listen_instance(world) || !authority_in_level(static_cast<U::AActor*>(observer), world) ||
+        auto* world = source_world(static_cast<U::AActor*>(observer));
+        if (!world ||
             !item_in_world(reward, world) || !begin_roll(world)) return false;
         record_drop(reward, RC::to_utf8_string(observer->GetFullName()), {});
         return true;

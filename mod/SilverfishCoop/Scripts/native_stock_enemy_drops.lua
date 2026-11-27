@@ -5,6 +5,7 @@ local world_loot = require("native_guest_drop_projection")
 local transport = require("native_transport")
 local motion = require("native_enemy_drop_motion")
 local escrow = require("native_loot_actions")
+local world_path = require("world_path")
 local world, latest, observed
 local host_pawn, host_map, next_motion_sample, sent_motion
 local proof, bank, claim, broker_defeated
@@ -22,8 +23,7 @@ end
 local function live_actor(record)
     local name = record[5]
     local actor = record.actor or StaticFindObject(name:match("^%S+ (.+)$") or "")
-    if not actor or not actor:IsValid() or actor:IsActorBeingDestroyed()
-        or actor:GetFullName() ~= name or not same(actor:GetWorld(), world) then return end
+    if not world_path.visible_actor_level(actor, world) or actor:GetFullName() ~= name then return end
     record.actor = actor
     return actor
 end

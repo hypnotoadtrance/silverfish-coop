@@ -379,13 +379,14 @@ namespace
         const CommandArguments arguments;
         if (!arguments.values) return std::nullopt;
         fs::path profile;
-        bool offscreen = false, null_renderer = false;
+        bool offscreen = false, null_renderer = false, no_steam = false;
         for (int index = 1; index < arguments.count; ++index)
         {
             const std::wstring_view argument(arguments.values[index]);
             if (windows_equal(argument, L"-SilverfishCoopIsolated")) isolated = true;
             if (windows_equal(argument, L"-RenderOffScreen")) offscreen = true;
             if (windows_equal(argument, L"-NullRHI")) null_renderer = true;
+            if (windows_equal(argument, L"-NoSteam")) no_steam = true;
             const auto equals = argument.find(L'=');
             if (equals != argument.npos && windows_equal(argument.substr(0, equals), L"-userdir"))
                 profile = argument.substr(equals + 1);
@@ -394,7 +395,7 @@ namespace
         {
             const auto title = profile.parent_path();
             const auto titles = title.parent_path();
-            if (!offscreen || !null_renderer || !exact_path(profile, true) ||
+            if (!offscreen || (!null_renderer && !no_steam) || !exact_path(profile, true) ||
                 !windows_path_equal(profile.filename(), L"game-user") ||
                 !windows_path_equal(title.filename(), L"local") ||
                 !windows_path_equal(titles.filename(), L"titles")) return std::nullopt;
