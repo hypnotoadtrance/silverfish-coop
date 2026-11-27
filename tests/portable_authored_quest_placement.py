@@ -11,6 +11,7 @@ from portable_stock_shovel import stock_inventory
 from tools.silverfish import native_board_contract as board, native_computer_board, native_host_save
 from tools.silverfish import native_loose_pickup as loose
 from tools.silverfish.control import submit
+from tools.silverfish.local_bridge import LocalCommandNotSubmitted
 from tools.silverfish.native_gold import valid_guid
 from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, LAKE, OBSERVATORY, RAIL_YARD, SCAV_BAR, SLUMS
 
@@ -56,7 +57,7 @@ async def travel_party(host, guest, reached, route_maps):
                 arguments = (participant, position, route.entrance, route.actor)
                 try:
                     await host.bridge.command("native-exit-position", *arguments)
-                except TimeoutError:
+                except (TimeoutError, LocalCommandNotSubmitted):
                     if position != "near" or any(retry["map"] == source for retry in near_retries):
                         raise
                     await wait_resident_status(host_run, lambda frame: (
@@ -112,8 +113,8 @@ async def verify_authored_quest_placement(host, guest, pawn):
         stock = native_host_save.directory(native_host_save.checkpoint_profile(host.profile, manifest))
         return campaign_save_hashes(host.campaign), saved_hashes(stock), saved_hashes(native_host_save.directory(guest.profile))
 
-    async def command(seat, operation, *args):
-        return (await seat.bridge.command(COMMAND, operation, *args))["ack"]["message"]
+    async def command(seat, operation, *args, timeout=8):
+        return (await seat.bridge.command(COMMAND, operation, *args, timeout=timeout))["ack"]["message"]
 
     def parse_stock_state(message):
         if message == "absent":
@@ -149,12 +150,19 @@ async def verify_authored_quest_placement(host, guest, pawn):
     assert (placements(guest_frame)["map"], placements(guest_frame)["epoch"]) == (SMUGGLER, epoch)
     active = placed(guest_frame)
     assert (active["quest"], active["class_path"]) == (QUEST, ITEM_CLASS), active
-    async with asyncio.timeout(8):
-        while True:
-            guest_visible = parse_stock_state(await command(guest, "stock-state"))
-            if not guest_visible.get("absent") and not guest_visible["hidden"] and guest_visible["collision"]:
-                break
-            await asyncio.sleep(.1)
+    deadline = asyncio.get_running_loop().time() + 12
+    guest_visible = None
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            guest_visible = parse_stock_state(await command(guest, "stock-state", timeout=1.25))
+        except (TimeoutError, LocalCommandNotSubmitted):
+            # The fixture uses the disk mailbox and can lose a read to resident commands.
+            continue
+        if not guest_visible.get("absent") and not guest_visible["hidden"] and guest_visible["collision"]:
+            break
+        await asyncio.sleep(.1)
+    else:
+        raise AssertionError(f"Guest briefcase did not become visible and collidable: {guest_visible!r}")
     for component in ("position", "rotation", "scale"):
         assert math.dist(guest_visible["transform"][component], after["transform"][component]) < .03, guest_visible
         assert math.dist(active["transform"][component], after["transform"][component]) < .03, active
