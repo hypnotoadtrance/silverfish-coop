@@ -3,9 +3,9 @@ from hashlib import sha256
 import secrets
 import struct
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from tools.silverfish import link
+from tools.silverfish import link, steam_transport as relay, steamworks
 from tools.silverfish.steam_transport import (
     SteamBuildMismatch,
     SteamTransport,
@@ -160,6 +160,63 @@ class Inbox(asyncio.DatagramProtocol):
 
 
 class SteamTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_full_sdk_batches_drain_promptly_with_callback_and_timer_budget(self):
+        platform = Platform()
+        api = platform.client(HOST)
+        tunnel = SteamTransport(api, build=BUILD, version=VERSION)
+        tunnel.lobby, tunnel._host, tunnel._owner = LOBBY, ("127.0.0.1", 9123), HOST
+        peers = tuple(GUEST + index for index in range(4))
+        platform.members.update((HOST, *peers))
+        batch_size = steamworks._MAX_DATAGRAMS
+        full_budget = batch_size * relay._MAX_DRAIN_BATCHES
+        burst = [(peers[index % 4], _HEADER.pack(_MAGIC, LOBBY, index % 4 + 1) + index.to_bytes(2, "big"))
+                 for index in range(full_budget + 1)]
+        burst.append((GUEST, _HEADER.pack(_MAGIC, LOBBY + 2, 1) + b"wrong lobby"))
+        arrived, delays, callbacks = [], [], []
+        now = 0.0
+
+        def forward(payload):
+            arrived.append((int.from_bytes(payload, "big"), now))
+            if len(arrived) == full_budget:
+                self.assertEqual(tunnel.pending_invites.qsize(), 1)
+
+        for token, peer in enumerate(peers, 1):
+            tunnel._host_flows[peer, token] = relay._HostFlow(Mock(sendto=Mock(side_effect=forward)), now)
+
+        def read_batch():
+            packets = burst[:batch_size]
+            del burst[:batch_size]
+            return packets
+
+        def poll_callbacks():
+            callbacks.append(len(arrived))
+            if len(arrived) == full_budget - batch_size:
+                return [(_CALLBACK_INVITE, struct.pack("<QQ", LOBBY + 1, GUEST), 0)]
+            return []
+
+        async def sleep(interval):
+            nonlocal now
+            delays.append(interval)
+            now += interval
+            if not burst:
+                tunnel.close()
+
+        with (patch.object(api, "receive_datagrams", side_effect=read_batch),
+              patch.object(api, "poll_callbacks", side_effect=poll_callbacks),
+              patch.object(tunnel, "_refresh_roster", wraps=tunnel._refresh_roster) as roster,
+              patch.object(relay.time, "monotonic", side_effect=lambda: now),
+              patch.object(relay.asyncio, "sleep", side_effect=sleep)):
+            await tunnel.run()
+
+        self.assertEqual([index for index, _ in arrived], list(range(full_budget + 1)))
+        self.assertEqual(arrived[full_budget - 1][1], 0)
+        self.assertEqual(arrived[-1][1], relay._POLL_INTERVAL)
+        self.assertEqual(delays, [0] * (relay._MAX_DRAIN_BATCHES - 1) + [relay._POLL_INTERVAL] * 2)
+        self.assertEqual(callbacks, list(range(0, full_budget + 1, batch_size)))
+        self.assertEqual(tunnel.received_messages, full_budget + 1)
+        self.assertEqual(tunnel.pending_invites.get_nowait(), LOBBY + 1)
+        roster.assert_called_once()
+
     async def test_retry_reuses_timed_out_join_and_recovers_its_missing_callback(self):
         platform = Platform()
         host = await self.start(platform.client(HOST))

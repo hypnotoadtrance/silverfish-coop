@@ -14,6 +14,7 @@ import time
 from typing import TYPE_CHECKING
 
 from .runtime import MOD_VERSION
+from .steamworks import _MAX_DATAGRAMS
 
 if TYPE_CHECKING:
     from .steamworks import Steamworks
@@ -37,6 +38,7 @@ _FLOW_IDLE = 45.0
 _LOBBY_TIMEOUT = 12.0
 _SEARCH_TIMEOUT = 21.0  # Steam gives RequestLobbyList up to 20 seconds.
 _POLL_INTERVAL = .01
+_MAX_DRAIN_BATCHES = 4
 _ROSTER_INTERVAL = .25
 _CALLBACK_INVITE = 333
 _CALLBACK_FRIEND_JOIN = 337
@@ -527,6 +529,7 @@ class SteamTransport:
         if self._running:
             raise SteamTransportError("The Steam relay is already running.")
         self._running = True
+        drained_batches = 0
         try:
             while not self._closed:
                 now = time.monotonic()
@@ -541,8 +544,17 @@ class SteamTransport:
                     for handle, call in tuple(self._calls.items()):
                         if call.callback == _CALLBACK_ENTER and (result := self.api.take_join_result(handle)) is not None:
                             self._callback(*result)
-                for peer, packet in self.api.receive_datagrams():
+                packets = self.api.receive_datagrams()
+                for peer, packet in packets:
                     await self._receive(peer, packet)
+                if (self.lobby is not None and len(packets) == _MAX_DATAGRAMS
+                        and drained_batches < _MAX_DRAIN_BATCHES - 1):
+                    drained_batches += 1
+                    # A full SDK read may leave queued messages. Yield for the
+                    # QUIC loop and poll Steam callbacks again before reading more.
+                    await asyncio.sleep(0)
+                    continue
+                drained_batches = 0
                 await asyncio.sleep(_POLL_INTERVAL)
         finally:
             self._running = False
