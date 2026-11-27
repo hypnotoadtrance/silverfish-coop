@@ -24,7 +24,7 @@ def parse(fields, phase, area):
     if len(fields) != 12 or fields[:2] != [ROW, area] or phase != "hosting":
         raise ValueError("Invalid stock critter receipt")
     _, _, number, pawn, actor, item, guid, status, inventory_guid, amount, before, after = fields
-    if (target_id(f"stock-critter:{number}") is None or native_stock_door.actor_map(actor) != area
+    if (target_id(f"stock-critter:{number}") is None or not native_stock_door.matches_area(actor, area)
             or not _ITEM.fullmatch(item) or not valid_guid(guid) or status not in {"claimed", "merged"}):
         raise ValueError("Invalid stock critter receipt")
     result = {"map": area, "number": number, "pawn": pawn, "actor": actor, "class_path": item, "guid": guid}

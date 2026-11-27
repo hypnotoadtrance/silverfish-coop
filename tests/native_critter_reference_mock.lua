@@ -10,28 +10,43 @@ local function object(fields)
     return fields
 end
 
-local world = object()
-local foreign_world = object()
+local world = object({PersistentLevel = object()})
+local foreign_world = object({PersistentLevel = object()})
+local stream_package = "/CommunityMaps/CoopMarsh_1"
+local package_object = object({GetFullName = function() return "Package " .. stream_package end})
+local asset_world = object({GetOuter = function() return package_object end})
+local stream_level = object({bIsVisible = true, GetOuter = function() return asset_world end})
+local stream = object({
+    IsLevelVisible = function() return stream_level.bIsVisible end,
+    GetLoadedLevel = function() return stream_level end,
+})
+function FName(value) return value end
 local critter_class, marker_class = object(), object()
 local paths = {
     ["/Script/Engine.TargetPoint"] = marker_class,
-    ["/Script/Engine.Default__GameplayStatics"] = object(),
+    ["/Script/Engine.Default__GameplayStatics"] = object({
+        GetAllActorsOfClass = function(_, _, _, out) out.OutActors = {} end,
+        GetStreamingLevel = function(_, current, name)
+            if current == world and name == stream_package then return stream end
+        end,
+    }),
     ["/Game/Classes/Ambiant_FX/Critter_Master_BP.Critter_Master_BP_C"] = critter_class,
 }
 function StaticFindObject(path) return paths[path] end
 local candidates = {}
 function FindAllOf(name) assert(name == "TargetPoint"); return candidates end
-local owner_changed, ended
+local owner_changed, began, ended
 function RegisterHook(path, callback)
     assert(path == "/Script/Engine.Actor:OnRep_Owner")
     owner_changed = callback
 end
-function RegisterBeginPlayPostHook() end
+function RegisterBeginPlayPostHook(callback) began = callback end
 function RegisterEndPlayPreHook(callback) ended = callback end
 
 local function critter(path)
-    local source = object({world = world, role = 1, Health = 10})
+    local source = object({world = world, outer = world.PersistentLevel, role = 1, Health = 10})
     source.GetWorld = function(self) return self.world end
+    source.GetOuter = function(self) return self.outer end
     source.GetLocalRole = function(self) return self.role end
     source.IsActorBeingDestroyed = function() return false end
     source.IsA = function(_, type) return type == critter_class end
@@ -118,6 +133,20 @@ event(owner_changed, outside)
 sync(13.4)
 assert(not focused("foreign-collision"))
 
+-- A live critter may be owned by the visible stream while reporting its asset world.
+local streamed = critter("streamed-collision")
+streamed.world, streamed.outer = asset_world, stream_level
+local mounted = marker(streamed, 43)
+event(owner_changed, mounted)
+sync(13.45)
+assert(focused("streamed-collision") == "stock-critter:43")
+stream_level.bIsVisible = false
+sync(13.51)
+assert(not focused("streamed-collision"))
+stream_level.bIsVisible = true
+sync(13.57)
+assert(focused("streamed-collision") == "stock-critter:43")
+
 -- An old marker with a valid numeric payload cannot bind in the next world.
 local sixth = critter("travel-collision")
 local departed = marker(sixth)
@@ -129,4 +158,32 @@ departed.number = 47
 sync(13.8)
 assert(not focused("travel-collision"))
 
-print("Critter marker discovery survives delayed owner, role and movement, and expires outside its visit")
+-- The host has completed its census before the mounted frog begins play.
+state.world = world
+stock.sync(state, "hosting")
+local authority = critter("host-streamed-collision")
+authority.world, authority.outer, authority.role = asset_world, stream_level, 3
+authority.HasAuthority = function() return true end
+authority.SetReplicates = function(self, value) self.bReplicates = value end
+authority.SetReplicateMovement = function(self, value) self.bReplicateMovement = value end
+local published
+require("replicated_actor_reference").spawn = function(owner_world, _, purpose, actor, number)
+    assert(owner_world == world and purpose == "critter" and actor == authority and not published)
+    published = marker(actor, number)
+    published.role = 3
+    published.K2_DestroyActor = function(self) self.destroyed = true end
+    return published
+end
+stream_level.bIsVisible = false
+now = 14
+event(began, authority)
+stock.sync(state, "hosting")
+assert(not published)
+stream_level.bIsVisible = true
+now = 14.2
+stock.sync(state, "hosting")
+assert(published and authority.bReplicates and authority.bReplicateMovement)
+ended({get = function() return authority end}, {get = function() return 3 end})
+assert(published.destroyed, "A streamed-out critter must not leave its host reference behind")
+
+print("Critter marker discovery handles delayed replication and exact visible stream ownership")

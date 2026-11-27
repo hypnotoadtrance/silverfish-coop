@@ -336,7 +336,7 @@ namespace
         return live_actor_role(actor, role) && static_cast<Unreal::AActor*>(actor)->GetWorld() == world;
     }
 
-    bool visible_switch_actor(Unreal::UObject* actor, Unreal::UObject* world)
+    bool visible_interactable_actor(Unreal::UObject* actor, Unreal::UObject* world)
     {
         return (live_actor_role(actor, 1) || live_actor_role(actor, 3)) &&
             silverfish::native_zone::visible_actor_level(static_cast<Unreal::AActor*>(actor),
@@ -1082,7 +1082,7 @@ namespace
         if (!live(world) || !live(actor) || !actor->HasAnyFlags(Unreal::RF_WasLoaded)) return false;
         auto* base = find<Unreal::UClass>(lantern_class);
         return base && actor->GetClassPrivate()->IsChildOf(base) &&
-            visible_switch_actor(actor, world);
+            visible_interactable_actor(actor, world);
     }
 
     void remember_lantern_press(ScopedInteraction& input, Unreal::UObject* pawn,
@@ -1193,7 +1193,7 @@ namespace
         const auto kind = stock_switch_kind(klass);
         if (kind == SwitchKind::Unsupported || kind == SwitchKind::Lantern) return;
         const bool candle = kind == SwitchKind::Candle;
-        if (!visible_switch_actor(actor, world)) return;
+        if (!visible_interactable_actor(actor, world)) return;
         if (name != interaction)
         {
             if (candle && function == find<Unreal::UFunction>(name == ignite ? lantern_ignite : lantern_extinguish))
@@ -1221,14 +1221,14 @@ namespace
             call.OriginalFunctionCallPrevented() || !live(actor)) return;
         auto* pawn = scope.pawn.Get();
         auto* world = scope.world.Get();
-        if (!pawn || Clock::now() >= scope.expires || !live_scope(scope) ||
-            (!live_actor(actor, world, 1) && !live_actor(actor, world, 3))) return;
+        if (!pawn || Clock::now() >= scope.expires || !live_scope(scope)) return;
         auto* klass = actor->GetClassPrivate();
         const auto path = klass->GetPathName();
         // These stock overrides create an inventory item and immediately invoke its pickup.
         if (path != STR("/Game/Classes/Ambiant_FX/Critter_Frog_BP.Critter_Frog_BP_C") &&
             path != STR("/Game/Classes/Ambiant_FX/Critter_Weta_BP.Critter_Weta_BP_C") &&
             path != STR("/Game/Classes/Ambiant_FX/Critter_Beetle_BP.Critter_Beetle_BP_C")) return;
+        if (!visible_interactable_actor(actor, world)) return;
         if (function->GetOuterPrivate() != klass || function->GetNumParms() != 2 ||
             function->GetParmsSize() != 2 * sizeof(void*) || function->GetReturnProperty() ||
             function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;

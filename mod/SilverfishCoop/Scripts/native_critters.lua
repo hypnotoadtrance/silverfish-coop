@@ -1,6 +1,7 @@
 local critters = {}
 local reference = require("replicated_actor_reference")
 local guest_save = require("guest_save")
+local world_path = require("world_path")
 
 local critter_path = "/Game/Classes/Ambiant_FX/Critter_Master_BP.Critter_Master_BP_C"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
@@ -36,10 +37,14 @@ local function is_critter(actor)
     return valid(critter_class) and valid(actor) and actor:IsA(critter_class)
 end
 
-local function exact_critter(actor)
-    if not is_critter(actor) or not live(actor) then return false end
+local function ready_critter(actor)
+    if not is_critter(actor) or actor:IsActorBeingDestroyed() or actor:GetLocalRole() == 0 then return false end
     local health = actor.Health
     return type(health) == "number" and health > 0
+end
+
+local function exact_critter(actor)
+    return ready_critter(actor) and world_path.visible_actor_level(actor, world)
 end
 
 local function cargo(actor)
@@ -47,18 +52,21 @@ local function cargo(actor)
 end
 
 local function enroll(actor)
-    if not exact_critter(actor) or not actor:HasAuthority() then return end
+    if not ready_critter(actor) or not actor:HasAuthority() then return true end
     local address = actor:GetAddress()
-    if entries[address] then return end
+    if entries[address] then return true end
+    local level = world_path.visible_actor_level(actor, world)
+    if not level then return false end
     if not actor.bReplicates then actor:SetReplicates(true) end
     if not actor.bReplicateMovement then actor:SetReplicateMovement(true) end
-    if not actor.bReplicates or not actor.bReplicateMovement then return end
+    if not actor.bReplicates or not actor.bReplicateMovement then return true end
     local number = current + 1
     local marker = reference.spawn(world, marker_class, "critter", actor, number)
-    if not live(marker) then return end
+    if not live(marker) then return true end
     current = number
-    local entry = {actor = actor, marker = marker, number = number}
+    local entry = {actor = actor, marker = marker, number = number, level = level}
     entries[address], numbered[number] = entry, entry
+    return true
 end
 
 local function observe(marker)
@@ -67,18 +75,19 @@ local function observe(marker)
     local actor = marker:GetOwner()
     if not number and not is_critter(actor) then return true end
     -- Owner, movement and the owner's simulated role can arrive separately.
-    if not number or not live(marker) or not exact_critter(actor) or actor:GetLocalRole() ~= 1 then return false end
-    entries[actor:GetAddress()] = {actor = actor, marker = marker, number = number}
+    local level = number and live(marker) and exact_critter(actor)
+    if not level or actor:GetLocalRole() ~= 1 then return false end
+    entries[actor:GetAddress()] = {actor = actor, marker = marker, number = number, level = level}
     return true
 end
 
-local function queue_marker(marker)
-    local address, now = marker:GetAddress(), os.clock()
+local function queue_registration(actor)
+    local address, now = actor:GetAddress(), os.clock()
     local registration = pending[address]
-    if registration and same(registration.marker, marker) then
+    if registration and same(registration.actor, actor) then
         registration.next_attempt = now
     else
-        pending[address] = {marker = marker, next_attempt = now, expires = now + registration_window}
+        pending[address] = {actor = actor, next_attempt = now, expires = now + registration_window}
     end
 end
 
@@ -89,12 +98,13 @@ local function install()
     RegisterBeginPlayPostHook(function(context)
         if phase ~= "hosting" then return end
         local actor = context:get()
-        if exact_critter(actor) then pending[actor:GetAddress()] = actor end
+        -- The stream can begin play before its level becomes visible.
+        if ready_critter(actor) and actor:HasAuthority() then queue_registration(actor) end
     end)
     RegisterHook("/Script/Engine.Actor:OnRep_Owner", function(context)
         if phase ~= "connected" then return end
         local actor = context:get()
-        if present(actor) and same(actor:GetClass(), marker_class) then queue_marker(actor) end
+        if present(actor) and same(actor:GetClass(), marker_class) then queue_registration(actor) end
     end)
     RegisterEndPlayPreHook(function(context, reason)
         local actor = context:get()
@@ -104,7 +114,9 @@ local function install()
         entries[address], pending[address] = nil, nil
         if entry and phase == "hosting" then
             numbered[entry.number] = nil
-            if reason:get() == 0 and valid(entry.marker) then entry.marker:K2_DestroyActor() end
+            local why = reason:get()
+            -- A marker lives in the campaign level even when its owner streams out.
+            if (why == 0 or why == 3) and live(entry.marker) then entry.marker:K2_DestroyActor() end
         end
     end)
     installed = true
@@ -130,38 +142,33 @@ function critters.sync(state, seat)
             statics:GetAllActorsOfClass(world, critter_class, output)
             for _, actor in ipairs(output.OutActors or output) do
                 if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
-                enroll(actor)
+                if not enroll(actor) then queue_registration(actor) end
             end
         else
             for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
-                if not observe(marker) then queue_marker(marker) end
+                if not observe(marker) then queue_registration(marker) end
             end
         end
         censused = true
     end
-    if phase == "hosting" then
-        for address, actor in pairs(pending) do
-            pending[address] = nil
-            enroll(actor)
-        end
-        return
-    end
     local now = os.clock()
+    local register = phase == "hosting" and enroll or observe
     for address, registration in pairs(pending) do
-        if now >= registration.expires or not present(registration.marker) then
+        local actor = registration.actor
+        if now >= registration.expires or not valid(actor) or actor:IsActorBeingDestroyed() then
             pending[address] = nil
         elseif now >= registration.next_attempt then
-            if observe(registration.marker) then pending[address] = nil
+            if register(actor) then pending[address] = nil
             else registration.next_attempt = now + retry_interval end
         end
     end
-    if now < next_view then return end
+    if phase ~= "connected" or now < next_view then return end
     next_view = now + .05
     for address, entry in pairs(entries) do
-        local actor = entry.actor
-        if not exact_critter(actor) then
+        local actor, level = entry.actor, entry.level
+        if not ready_critter(actor) or not same(actor:GetOuter(), level) then
             entries[address] = nil
-        else
+        elseif same(level, world.PersistentLevel) or level.bIsVisible == true then
             local mesh, movement = actor.StaticMesh, actor.CharacterMovement
             local asset = valid(movement) and (movement:IsFalling() and actor.Mesh_Hopping or actor.Mesh_Normal)
             if valid(mesh) and valid(asset) and not same(mesh.StaticMesh, asset) then mesh:SetStaticMesh(asset) end
@@ -196,12 +203,23 @@ function critters.command(args, state, seat)
     local number = math.tointeger(args[3])
     local entry = number and numbered[number]
     local actor = entry and entry.actor
-    local item = exact_critter(actor) and cargo(actor)
+    local level = exact_critter(actor)
+    local item = level and cargo(actor)
     local pawn, save = guest_save.exact_item_context(state, seat, args[4])
     local stock = state.world.OwningGameInstance.SaveSlot_Ref
     if not item or not actor:HasAuthority() or not valid(pawn) or pawn.Dead or not valid(save) or same(save, stock) then
         error("stock_critter_pickup_unavailable", 0)
     end
+    local name = actor:GetFullName()
+    local path = name:match("^[A-Za-z0-9_%-]+_C (.+)$")
+    local streamed = not same(level, world.PersistentLevel)
+    local package = world_path.level_actor_package(path)
+    if not package or streamed and package == state.map or not streamed and world_path.actor_package(path) ~= state.map then
+        error("stock_critter_pickup_unavailable", 0)
+    end
+    if streamed then name = "stream:" .. name end
+    if #name > 384 then error("stock_critter_pickup_unavailable", 0) end
+
     local class = StaticFindObject(item)
     if not valid(class) then LoadAsset(item) class = StaticFindObject(item) end
     local converter, save_class = StaticFindObject(inventory_path), StaticFindObject(save_path)
@@ -225,9 +243,10 @@ function critters.command(args, state, seat)
         end
         error("mutation_unverified_stock_critter_inventory", 0)
     end
-    local name = actor:GetFullName()
     actor:K2_DestroyActor()
-    if live(actor) and numbered[number] then error("mutation_unverified_stock_critter_removal", 0) end
+    if valid(actor) and not actor:IsActorBeingDestroyed() and numbered[number] then
+        error("mutation_unverified_stock_critter_removal", 0)
+    end
     proof = {number, args[4], name, item, id, outcome, inventory_guid or "-", amount or 0, before or 0, after or 0}
     return "stock critter moved into guest inventory"
 end
