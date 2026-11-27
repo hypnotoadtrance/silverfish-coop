@@ -71,7 +71,7 @@ class ShopView:
         scope = catalog[0]
         with contextlib.suppress(KeyError, TypeError, ValueError, OSError, RuntimeError):
             listing = await self._listing(client, scope, uuid.uuid4().hex)
-            return scope, listing["wallet_after"], listing["offers"]
+            return (scope, listing["wallet_after"], listing["offers"]), listing.get("stock_revision")
 
     async def _sync_stock(self, client, epoch, game, now):
         catalog = self.stock_catalog
@@ -82,12 +82,18 @@ class ShopView:
         if self.stock_poll and self.stock_poll.done():
             result = self.stock_poll.result()
             self.stock_poll = None
-            if result is not None and result[0] == catalog[0] and result != catalog:
-                self.stock_refresh_needed = True
+            if result is not None:
+                polled, revision = result
+                if polled[0] == catalog[0]:
+                    if polled != catalog:
+                        self.stock_refresh_needed = True
+                    elif valid_stock_revision(revision):
+                        self.stock_revision = revision
         current = client.gameplay.get(STOCK_REVISION)
         current = current if isinstance(current, dict) else {}
-        revision = current.get("revision")
-        scoped = (current.get("epoch"), current.get("map"), current.get("actor")) == (epoch[1], game["map"], game["actor"])
+        revisions = current.get("revisions")
+        revision = revisions.get(game["actor"]) if isinstance(revisions, dict) else None
+        scoped = (current.get("epoch"), current.get("map")) == (epoch[1], game["map"])
         revision_available = (scoped and valid_stock_revision(revision) and self.stock_revision is not None
                               and revision >= self.stock_revision)
         if revision_available and revision > self.stock_revision:

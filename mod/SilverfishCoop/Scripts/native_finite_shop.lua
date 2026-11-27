@@ -52,8 +52,7 @@ local actions = {
     ["native-finite-shop-sale-quote"] = {native = "SilverfishQuoteNativeFiniteShopSale", fields = 4, result = "sale-quote"},
     ["native-finite-shop-sell"] = {native = "SilverfishSellNativeFiniteShop", fields = 7, result = "sold"},
 }
-local last, watch, refresh_host
-local refresh_after = 0
+local last, watch
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -298,27 +297,34 @@ function shop.sync(state, phase)
     if not enabled or phase ~= "hosting" or not state.listening or state.server ~= false or not profile or not valid(state.world)
         or type(read) ~= "function" then
         if watch and type(read) == "function" then read(0) end
-        watch, refresh_host = nil, nil
+        watch = nil
         return
     end
     if not watch or watch.map ~= state.map or not same(watch.world, state.world) then
         read(0)
-        watch = {map = state.map, world = state.world, next_lookup = 0}
-        refresh_host = nil
-    end
-    if (not valid(watch.actor) or not watch.ready) and os.time() >= watch.next_lookup then
-        watch.next_lookup = os.time() + 1
-        local target = state.map .. "." .. profile.level .. ":PersistentLevel." .. profile.actor
-        local actor = StaticFindObject(target)
-        if exact(actor, shop_class) and same(actor:GetWorld(), state.world) and actor:HasAuthority() then
-            watch.actor, watch.name = actor, actor:GetFullName()
-            watch.ready = read(actor:GetAddress()) ~= nil
+        local counters = {{profile = profile, next_lookup = 0}}
+        if state.map == castaway.map then
+            counters[#counters + 1] = {profile = castaway_shop, next_lookup = 0}
         end
+        watch = {map = state.map, world = state.world, counters = counters}
     end
-    if valid(refresh_host) and os.clock() >= refresh_after and same(refresh_host:GetWorld(), state.world) then
-        refresh_after = os.clock() + .2
-        local okay, refreshed = pcall(stock_view.refresh_host, state.controller, refresh_host)
-        if okay and refreshed then refresh_host = nil end
+    local now, discovery_time = os.clock(), os.time()
+    for _, counter in ipairs(watch.counters) do
+        if (not valid(counter.actor) or not counter.ready) and discovery_time >= counter.next_lookup then
+            counter.next_lookup = discovery_time + 1
+            local target = state.map .. "." .. counter.profile.level .. ":PersistentLevel." .. counter.profile.actor
+            local actor = StaticFindObject(target)
+            if exact(actor, shop_class) and same(actor:GetWorld(), state.world) and actor:HasAuthority() then
+                if not same(counter.actor, actor) then counter.refresh_after = nil end
+                counter.actor, counter.name = actor, actor:GetFullName()
+                counter.ready = read(actor:GetAddress()) ~= nil
+            end
+        end
+        if counter.refresh_after and now >= counter.refresh_after and valid(counter.actor) then
+            counter.refresh_after = now + .2
+            local okay, refreshed = pcall(stock_view.refresh_host, state.controller, counter.actor)
+            if okay and refreshed then counter.refresh_after = nil end
+        end
     end
 end
 
@@ -372,19 +378,27 @@ function shop.command(fields, state, phase)
     last = {world = state.world, map = state.map, actor = context.name, status = status, pawn = fields[3],
         before = before, after = after,
         cash_before = cash_before, cash_after = cash_after, rows = rows}
-    if mutates then refresh_host, refresh_after = context.actor, 0 end
+    if mutates and watch and same(watch.world, state.world) then
+        for _, counter in ipairs(watch.counters) do
+            if same(counter.actor, context.actor) then counter.refresh_after = 0 end
+        end
+    end
     return "exact stock finite merchant verified"
 end
 
 function shop.rows(state, phase, status_row)
     local rows = {}
     if phase ~= "hosting" then return rows end
-    if watch and watch.ready and state.map == watch.map and same(watch.world, state.world) and valid(watch.actor) then
-        local revision = SilverfishReadNativeFiniteShopRevision(watch.actor:GetAddress())
-        if revision then
-            rows[1] = status_row("native-finite-shop-stock-revision", watch.map, watch.name, revision)
-        else
-            watch.ready = false
+    if watch and state.map == watch.map and same(watch.world, state.world) then
+        for _, counter in ipairs(watch.counters) do
+            if counter.ready and valid(counter.actor) then
+                local revision = SilverfishReadNativeFiniteShopRevision(counter.actor:GetAddress())
+                if revision then
+                    rows[#rows + 1] = status_row("native-finite-shop-stock-revision", watch.map, counter.name, revision)
+                else
+                    counter.ready = false
+                end
+            end
         end
     end
     if not last or state.map ~= last.map or not same(last.world, state.world) then return rows end

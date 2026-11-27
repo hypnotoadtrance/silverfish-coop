@@ -207,8 +207,15 @@ namespace
     };
 
     constexpr auto max_stock_revision = (1ULL << 53) - 1;
-    thread_local StockWatch stock_watch;
+    thread_local std::array<StockWatch, merchants.size()> stock_watches;
+    thread_local std::uint64_t latest_stock_revision{};
     thread_local unsigned stock_mutations{};
+
+    std::uint64_t next_stock_revision()
+    {
+        if (latest_stock_revision < max_stock_revision) ++latest_stock_revision;
+        return latest_stock_revision;
+    }
 
     struct StockMutation
     {
@@ -220,7 +227,9 @@ namespace
 
     void mark_stock_changed(Unreal::UObject* actor)
     {
-        if (actor && stock_watch.shop.Get() == actor) stock_watch.dirty = true;
+        if (!actor) return;
+        for (auto& watch : stock_watches)
+            if (watch.shop.Get() == actor) watch.dirty = true;
     }
 
     bool qualified_host_connection(const Context& context)
@@ -387,18 +396,18 @@ namespace
         const auto requested = lua.get_integer(1);
         if (requested <= 0)
         {
-            stock_watch = {};
+            stock_watches = {};
             return 0;
         }
         if (!silverfish::native_shop_view::observes_stock_saves()) return 0;
-        if (auto* current = stock_watch.shop.Get(); current && address(current) == static_cast<Address>(requested))
+        for (auto& watch : stock_watches)
         {
-            if (std::exchange(stock_watch.dirty, false) && stock_watch.revision < max_stock_revision)
-                ++stock_watch.revision;
-            lua.set_integer(stock_watch.revision);
+            auto* current = watch.shop.Get();
+            if (!current || address(current) != static_cast<Address>(requested)) continue;
+            if (std::exchange(watch.dirty, false)) watch.revision = next_stock_revision();
+            lua.set_integer(watch.revision);
             return 1;
         }
-        stock_watch = {};
         Context context;
         const auto* profile = find_merchant(static_cast<Address>(requested), context);
         if (!profile || !exact_merchant(context, *profile)) return 0;
@@ -413,8 +422,10 @@ namespace
             !capture || capture->GetOuterPrivate() != context.shop->GetClassPrivate() || capture->GetNumParms() != 0 ||
             capture->GetReturnProperty() || capture->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net))
             return 0;
-        stock_watch = {context.shop, capture, 1};
-        lua.set_integer(stock_watch.revision);
+        // A streamed/recreated counter must sort after earlier catalogs of the same identity.
+        auto& watch = stock_watches[profile - merchants.data()];
+        watch = {context.shop, capture, next_stock_revision()};
+        lua.set_integer(watch.revision);
         return 1;
     }
 
@@ -1419,7 +1430,9 @@ namespace silverfish::finite_shop
     {
         // Stock host trade has changed its actor stock before reaching the
         // canonical in-memory save hook. Native transactions mark only after readback.
-        if (stock_mutations == 0 && action && action == stock_watch.save) mark_stock_changed(shop);
+        if (stock_mutations != 0 || !shop || !action) return;
+        for (auto& watch : stock_watches)
+            if (action == watch.save && watch.shop.Get() == shop) watch.dirty = true;
     }
 
     void register_lua(Lua& lua)

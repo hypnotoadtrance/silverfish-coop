@@ -78,28 +78,33 @@ class MerchantScreenTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.assert_awaited_once_with("native-shop-view-refresh-stock", "1", GUNSMITH, timeout=2)
 
     async def test_authoritative_revision_retries_but_only_for_the_active_merchant_and_visit(self):
-        actor, pawn = MERCHANTS[GUNSMITH], "exact stock guest"
+        area = native_finite_shop.OBSERVATORY
+        actor, regular = native_finite_shop.CASTAWAY_ACTOR, MERCHANTS[area]
+        pawn = "exact stock guest"
         epoch = ("session", "current")
-        base = {"stock": True, "state": "ready", "sequence": 1, "map": GUNSMITH,
+        base = {"stock": True, "state": "ready", "sequence": 1, "map": area,
                 "actor": actor, "pawn": pawn, "wallet": 500}
         bridge = SimpleNamespace(command=AsyncMock(side_effect=[
             {"ack": {"message": "stock shop refresh deferred"}, "native_shop_view": base},
             {"ack": {"message": "stock shop refresh queued"}, "native_shop_view": dict(base, state="pending")},
         ]))
-        revision = {"map": GUNSMITH, "actor": actor, "epoch": epoch[1], "revision": 8}
-        gameplay = {"shared_wallet": 500, native_finite_shop.STOCK_REVISION: dict(revision, epoch="previous")}
+        key = native_finite_shop.STOCK_REVISION
+        revision = {"map": area, "epoch": epoch[1], "revisions": {actor: 8, regular: 9}}
+        gameplay = {"shared_wallet": 500, key: dict(revision, epoch="previous")}
         client = SimpleNamespace(bridge=bridge, gameplay=gameplay, gameplay_action=AsyncMock())
         view = ShopView()
-        view.stock_catalog = ((*epoch, 1, GUNSMITH, pawn, actor), 500, [])
+        view.stock_catalog = ((*epoch, 1, area, pawn, actor), 500, [])
         view.stock_poll_after = 60
         view.stock_revision = 7
 
         await view._sync_stock(client, epoch, base, 10.0)
+        gameplay[key] = dict(revision, revisions={actor: 7, regular: 9})
+        await view._sync_stock(client, epoch, base, 10.1)
         bridge.command.assert_not_awaited()
-        gameplay[native_finite_shop.STOCK_REVISION] = revision
+        gameplay[key] = revision
         await view._sync_stock(client, epoch, base, 10.1)
         self.assertTrue(view.stock_refresh_needed)
-        bridge.command.assert_awaited_once_with("native-shop-view-refresh-stock", "1", GUNSMITH, timeout=2)
+        bridge.command.assert_awaited_once_with("native-shop-view-refresh-stock", "1", area, timeout=2)
         await view._sync_stock(client, epoch, base, 10.3)
         self.assertEqual(bridge.command.await_count, 1)
         # A dirty result must survive a deferred native refresh and a snapshot gap.
@@ -109,6 +114,42 @@ class MerchantScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.command.await_count, 2)
         self.assertEqual(client.last_game["native_shop_view"]["state"], "pending")
         client.gameplay_action.assert_not_awaited()
+
+    async def test_catalog_opened_before_revision_stops_polling_when_stock_is_unchanged(self):
+        area = native_finite_shop.OBSERVATORY
+        actor, pawn = native_finite_shop.CASTAWAY_ACTOR, "exact stock guest"
+        epoch = ("host", "visit")
+        game = {"stock": True, "state": "ready", "sequence": 1, "map": area,
+                "actor": actor, "pawn": pawn, "wallet": 500}
+        listing = {"map": area, "actor": actor, "wallet_after": 500, "count": 0, "offers": [], "stock_revision": 3}
+        key = native_finite_shop.STOCK_REVISION
+        client = SimpleNamespace(
+            bridge=SimpleNamespace(command=AsyncMock()),
+            gameplay={key: {"map": area, "epoch": epoch[1], "revisions": {actor: 3}}},
+            gameplay_action=AsyncMock(return_value={"native_finite_shop": listing}),
+        )
+        view = ShopView()
+        view.stock_catalog = ((*epoch, 1, area, pawn, actor), 500, [])
+
+        await view._sync_stock(client, epoch, game, 10.0)
+        await view.stock_poll
+        await view._sync_stock(client, epoch, game, 15.0)
+        self.assertEqual(view.stock_revision, 3)
+        self.assertIsNone(view.stock_poll)
+        client.gameplay_action.assert_awaited_once()
+        client.bridge.command.assert_not_awaited()
+
+    def test_host_bridge_keeps_both_observatory_counter_revisions(self):
+        area = native_finite_shop.OBSERVATORY
+        regular, castaway = MERCHANTS[area], native_finite_shop.CASTAWAY_ACTOR
+        bridge = runtime.Bridge(Path("unused"), None)
+        header = f"schema\t1\nseq\t1\nsession\thost\thosting\t{area}\t1\t0\n"
+        rows = [f"native-finite-shop-stock-revision\t{area}\t{actor}\t{revision}\n"
+                for actor, revision in ((regular, 4), (castaway, 6))]
+        report = bridge._parse_status(header + "".join(rows))
+        self.assertEqual(report[native_finite_shop.STOCK_REVISION], {regular: 4, castaway: 6})
+        self.assertIsNone(bridge._parse_status(header + rows[0] + rows[0]))
+        self.assertIn("Duplicate stock merchant revision", bridge.status_error)
 
     def test_merchant_revision_requires_exact_host_actor_and_positive_bounded_sequence(self):
         fields = ["native-finite-shop-stock-revision", GUNSMITH, MERCHANTS[GUNSMITH], "1"]

@@ -2733,10 +2733,11 @@ class Bridge:
                     data["native_bag_projection_interaction"] = {"map": fields[1], "epoch": fields[2], "bag": fields[3],
                                                                  "sequence": int(fields[4]), "entry": fields[5]}
                 elif fields[0] == "native-finite-shop-stock-revision" and len(fields) == 4:
-                    key = native_finite_shop.STOCK_REVISION
-                    if key in data:
+                    revision = native_finite_shop.parse_stock_revision(fields, data.get("state"), data.get("map"))
+                    revisions = data.setdefault(native_finite_shop.STOCK_REVISION, {})
+                    if revision["actor"] in revisions:
                         raise ValueError("Duplicate stock merchant revision")
-                    data[key] = native_finite_shop.parse_stock_revision(fields, data.get("state"), data.get("map"))
+                    revisions[revision["actor"]] = revision["revision"]
                 elif fields[0] == "native-finite-shop" and len(fields) == 10:
                     data["native_finite_shop"] = parse_finite_shop_summary(fields)
                 elif fields[0] == "native-finite-shop-item" and len(fields) in {11, 12} and "native_finite_shop" in data:
