@@ -616,7 +616,7 @@ local function poll_steam_invite(context)
     end
 end
 
-local function show_public_lobbies(browser)
+local function show_public_lobbies(browser, preserve_back_focus)
     local rows, note = {}, browser.note
     if browser.state == "joining" then
         note = "Connecting through Steam…"
@@ -647,6 +647,9 @@ local function show_public_lobbies(browser)
         focus = "steam-back"
     else
         rows[#rows + 1] = {button("steam-public", "Refresh"), button("steam-back", "Back")}
+        if preserve_back_focus and surface.has_focus(session.view, "steam-back") then
+            focus = "steam-back"
+        end
     end
     present({title = "Public Steam Lobbies", note = note, rows = rows, focus = focus})
     browser.focus = nil
@@ -714,6 +717,7 @@ end
 
 local function poll_public_lobbies(browser)
     if browser.state ~= "searching" and browser.state ~= "joining" and browser.state ~= "returning" then return end
+    local was_searching = browser.state == "searching"
     local now = os.time()
     if now > browser.expires then
         if browser.state == "joining" then
@@ -721,7 +725,7 @@ local function poll_public_lobbies(browser)
             browser.selection = nil
         end
         browser.state = "unavailable"
-        show_public_lobbies(browser)
+        show_public_lobbies(browser, was_searching)
         return
     end
     if browser.polled == now then return end
@@ -781,7 +785,7 @@ local function poll_public_lobbies(browser)
     else
         return
     end
-    show_public_lobbies(browser)
+    show_public_lobbies(browser, was_searching)
 end
 
 local function resume_guest_creation(context, offer, state, phase)

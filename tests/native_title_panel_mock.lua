@@ -138,6 +138,10 @@ function surface.press_pending(view)
     return false
 end
 
+function surface.has_focus(view, key)
+    return view and view == display and view.focus == key
+end
+
 local env
 local modules = {
     native_menu_controls = controls,
@@ -857,6 +861,18 @@ drain()
 assert(display.title == "Multiplayer" and display.focus == "steam-public")
 tick()
 assert(display.title == "Multiplayer")
+
+next_guid = next_guid + 1
+click("steam-public")
+display.focus = "steam-back"
+files[browse_request] = nil
+files[browse_response] = ("2\t%s\t%s\tready\t1\nAvailable Host\trc-abcdef0\t1\n")
+    :format(recovery_generation, operation_id())
+tick()
+assert(display.buttons["steam-pick:1"] and display.focus == "steam-back",
+    "Finding a lobby must preserve keyboard focus on Back")
+click(display.focus)
+assert(display.title == "Multiplayer" and not files[browse_request], "Enter on Back must leave the browser")
 
 click("join")
 assert(join("address", "127.0.0.2") and join("port", "28952"))
