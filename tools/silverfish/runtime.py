@@ -1543,7 +1543,7 @@ class Bridge:
                 self._status_text, self._status_snapshot = text, None
                 self.status_error = None
             data = {"pawns": {}, "player_effects": {}, "loot_actors": []}
-            quest_rows, board_rows = [], []
+            quest_rows, board_rows, placement_rows = [], [], []
             dialogue_frame, dialogue_progress, dialogue_lines, dialogue_choices = None, None, [], []
             npc_barter_frame, npc_barter_reputation = None, None
             npc_barter_items, npc_barter_transfers, npc_barter_preferences = [], [], []
@@ -2773,16 +2773,8 @@ class Bridge:
                     if native_dead_drop.KEY in data:
                         raise ValueError("Repeated stock Dead Drop report")
                     data[native_dead_drop.KEY] = native_dead_drop.parse(fields, data.get("state"), data.get("map"))
-                elif fields == [native_loose_pickup.QUEST_HEADER, "1"]:
-                    if data.get("state") != "hosting" or native_loose_pickup.QUEST_SOURCES in data:
-                        raise ValueError("Repeated or misplaced stock quest placement header")
-                    data[native_loose_pickup.QUEST_SOURCES] = {}
-                elif fields[0] == native_loose_pickup.QUEST_ROW:
-                    source, placement = native_loose_pickup.parse_quest_placement(fields, data.get("state"), data.get("map"))
-                    current = data.get(native_loose_pickup.QUEST_SOURCES)
-                    if current is None or source in current or len(current) >= native_loose_pickup.QUEST_LIMIT:
-                        raise ValueError("Repeated or oversized stock quest placement census")
-                    current[source] = placement
+                elif fields[0] in (native_loose_pickup.QUEST_HEADER, native_loose_pickup.QUEST_ROW):
+                    placement_rows.append(fields)
                 elif fields[0] == "native-loose-pickup-capability" and len(fields) == 3:
                     data[native_loose_pickup.CAPABILITY] = int(fields[1])
                     data["native_loose_pickup_count"] = int(fields[2])
@@ -3720,6 +3712,13 @@ class Bridge:
                             "native_mosby_readings", "native_mosby_reward"):
                     if key in data and (data.get("state"), data.get("map")) != ("hosting", data[key]["map"]):
                         raise ValueError("Stock tape proof is outside its authoritative map")
+                if placement_rows:
+                    try:
+                        data[native_loose_pickup.QUEST_SOURCES] = native_loose_pickup.parse_quest_census(
+                            placement_rows, data.get("state"), data.get("map"))
+                    except ValueError:
+                        # An incomplete census cannot retire guest placements or invalidate unrelated status.
+                        pass
                 if quest_rows:
                     try:
                         data["native_quest_catalog"] = parse_quest_catalog(quest_rows, sequence=data.get("sequence"))

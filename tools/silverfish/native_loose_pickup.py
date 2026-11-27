@@ -92,6 +92,21 @@ def parse_quest_placement(fields, phase, area):
     return source, {"quest": quest, "class_path": class_path, "transform": pose}
 
 
+def parse_quest_census(rows, phase, area):
+    header, *placements = rows
+    if phase != "hosting" or not area or header != [QUEST_HEADER, "1"] or len(placements) > QUEST_LIMIT:
+        raise ValueError("Invalid stock quest placement census")
+    items = {}
+    for fields in placements:
+        if fields[0] != QUEST_ROW:
+            raise ValueError("Repeated stock quest placement header")
+        source, placement = parse_quest_placement(fields, phase, area)
+        if source in items:
+            raise ValueError("Repeated stock quest placement source")
+        items[source] = placement
+    return items
+
+
 def parse_quest_reply(raw, request):
     fields = raw[:-1].split("\t") if len(raw) <= 1536 and raw.endswith("\n") and "\n" not in raw[:-1] else []
     if (len(request) < 4 or len(fields) != 9 or fields[:4] != [QUEST_REPLY, "1", request[0], "connected"]

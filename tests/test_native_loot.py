@@ -133,6 +133,29 @@ class AuthoredCrateRegistryTests(unittest.TestCase):
 
 
 class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
+    def test_unusable_quest_census_keeps_the_listen_world_and_other_pickups(self):
+        loose = native_loose_pickup
+        area = OBSERVATORY
+        world = f"{area}.Observitory_P"
+        source = world + ":PersistentLevel.Item_Bandage_C_1"
+        item_class = ITEM["class_path"]
+        header = [loose.QUEST_HEADER, "1"]
+        valid = [loose.QUEST_ROW, world, source, "Collect_Test", item_class,
+                 "12", "15", "17", "0", "90", "0", "1", "1", "1"]
+        bad = [*valid[:-1], "0"]
+        stock = [loose.ROW, area, source, item_class, "1", "available", "12", "15", "17"]
+        bridge = runtime.Bridge(None, None)
+        preamble = [["schema", "1"], ["session", "host", "hosting", area, "1", "0"]]
+
+        for rows in ([header, valid, bad], [header, valid, valid], [valid], [header, header]):
+            with self.subTest(rows=rows):
+                text = "".join("\t".join(row) + "\n" for row in (*preamble, *rows, stock))
+                report = bridge._parse_status(text)
+                self.assertIsNotNone(report)
+                self.assertEqual((report["state"], report["map"]), ("hosting", area))
+                self.assertEqual(report[loose.KEY][source]["state"], "available")
+                self.assertNotIn(loose.QUEST_SOURCES, report)
+
     async def test_quest_placement_renews_only_fresh_frames_and_honors_an_empty_census(self):
         loose = native_loose_pickup
         area, epoch = OBSERVATORY, "1" * 32
