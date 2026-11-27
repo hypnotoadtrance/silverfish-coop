@@ -141,9 +141,8 @@ async def project(bridge, game, frame, epoch):
                 or not all(type(value) in (int, float) and -360 <= value <= 360 for value in angles)
                 or not isinstance(lights, dict)):
             continue
-        known = local[actor]["lights"]
         bulbs = [f"{name}|{int(state[0])}|{int(state[1])}" for name, state in lights.items()
-                 if name in known and isinstance(state, list) and len(state) == 2 and all(type(bit) is bool for bit in state)]
+                 if actor_package(name) and isinstance(state, list) and len(state) == 2 and all(type(bit) is bool for bit in state)]
         if "lamp" in target or "lamp" in local[actor]:
             lamp = target.get("lamp")
             if not isinstance(lamp, str) or lamp not in _LAMP_STATES or "lamp" not in local[actor]:

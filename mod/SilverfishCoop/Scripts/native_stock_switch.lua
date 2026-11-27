@@ -86,16 +86,15 @@ local function parts(actor, scope, level)
     return {actor = actor, level = level, lever = lever, panel = panel, box = box}
 end
 
-local function light_links(actor, scope)
+local function light_links(linked, count, scope)
     local lights = {}
-    local linked = actor.ActorsToPower
-    if not linked then return lights end
+    if count == 0 then return lights end
     local bases = {}
     for path, component in pairs(bulb_profiles) do
         local base = StaticFindObject(path)
         if valid(base) then bases[#bases + 1] = {base, component} end
     end
-    for index = 1, linked:GetArrayNum() do
+    for index = 1, count do
         local target = linked[index]
         local level = valid(target) and type(target.Powered) == "boolean" and qualified(target, scope)
         if level then
@@ -112,6 +111,14 @@ local function light_links(actor, scope)
         end
     end
     return lights
+end
+
+local function refresh_lights(entry, scope, powered, force)
+    local linked = entry.actor.ActorsToPower
+    local count = linked and linked:GetArrayNum() or 0
+    if not force and entry.link_count == count and entry.link_power == powered then return end
+    entry.lights = light_links(linked, count, scope)
+    entry.link_count, entry.link_power = count, powered
 end
 
 function switches.start()
@@ -173,12 +180,12 @@ local function census(state, phase)
                                     class = actor:GetClass(), power = entry.power,
                                     path = path, candle = entry.candle, lantern = entry.lantern, light = entry.light}
                             else
-                                entry.lights = light_links(actor, world)
+                                refresh_lights(entry, world, actor.Powered)
                                 entries[name] = entry
                             end
                         end
                     elseif changed_levels and previous and previous.lights then
-                        previous.lights = light_links(actor, world)
+                        refresh_lights(previous, world, actor.Powered, true)
                     end
                 end
             end
@@ -282,6 +289,8 @@ function switches.read_row(entry, name, state, phase, row, native_world_address)
         end
     elseif level_visible(entry.level, state.world) and valid(entry.actor) and not entry.actor:IsActorBeingDestroyed()
         and valid(entry.lever) then
+        local powered = entry.actor.Powered
+        refresh_lights(entry, state.world, powered)
         local angles = entry.lever.RelativeRotation
         local panel = entry.panel:GetMaterial(0)
         local lights = {}
@@ -296,7 +305,7 @@ function switches.read_row(entry, name, state, phase, row, native_world_address)
             end
         end
         table.sort(lights)
-        return row("native-stock-switch", state.map, name, bit(entry.actor.Powered),
+        return row("native-stock-switch", state.map, name, bit(powered),
             angles.Pitch, angles.Yaw, angles.Roll, valid(panel) and panel:GetFullName() or "-",
             #lights > 0 and table.concat(lights, ";") or "-")
     end
@@ -368,6 +377,8 @@ local function project(entry, powered, angles, lights)
     actor.Powered = powered
     actor:Toggle_Visuals()
     lever:K2_SetRelativeRotation(angles, false, {}, true)
+    -- Stock scripts can change ActorsToPower after the initial device census.
+    refresh_lights(entry, world, powered, true)
     for _, state in ipairs(lights) do
         local link = entry.lights[state.id]
         if link and qualified(link.target, world, link.level) and valid(link.bulb) then

@@ -171,3 +171,64 @@ assert(has_stream_row())
 assert(switches.command({"nonce", "native-stock-switch-project", stream_name, state.map, "1", "0", "0", "0"},
     state, "connected") == "stock switch state projected" and radio_in_stream.Powered)
 print("Streamed device census follows visibility and rejects projection against a hidden level")
+
+local bulb_class = object({})
+paths["/Game/Classes/DynamicLights/DynamicLight_Master_BP.DynamicLight_Master_BP_C"] = bulb_class
+local light_prefix = "DynamicLight_Master_BP_C " .. state.map .. ".Depot:PersistentLevel.Lamp_"
+local function bulb(world, suffix)
+    local actor = object({Powered = false})
+    actor.GetOuter = function() return world.PersistentLevel end
+    actor.GetWorld = function() return world end
+    actor.IsActorBeingDestroyed = function() return false end
+    actor.GetFullName = function() return light_prefix .. suffix end
+    actor.IsA = function(_, class) return class == bulb_class end
+    actor.TogglePower = function(self) self.toggles = (self.toggles or 0) + 1 end
+    actor.PointLight = object({
+        visible = false, GetOwner = function() return actor end,
+        IsVisible = function(self) return self.visible end,
+        SetVisibility = function(self, visible) self.visible = visible end,
+    })
+    return actor
+end
+
+local connected_world = state.world
+local panel_name = "LightSwitch_02_BP_C " .. state.map .. ".Depot:PersistentLevel.DelayedSwitch"
+local panel = device(connected_world, wall_class, panel_name)
+panel.Toggle_Visuals = function() end
+panel.Switch_Mesh.K2_SetRelativeRotation = function(self, angles) self.RelativeRotation = angles end
+connected_world.actors[wall_class] = {panel}
+local links = {}
+links.GetArrayNum = function(self) return #self end
+panel.ActorsToPower = links
+callbacks[wall]()
+local function switch_row(phase)
+    for _, device_row in ipairs(switches.rows(state, phase, row)) do
+        if device_row[3] == panel_name then return device_row end
+    end
+end
+
+state.server = false
+assert(switch_row("hosting")[9] == "-")
+local searches = scans[wall_class]
+local earlier, changed = bulb(connected_world, "1"), bulb(connected_world, "2")
+links[1] = earlier
+assert(switch_row("hosting")[9] == earlier:GetFullName() .. "|0|0")
+links[1], panel.Powered = changed, true
+changed.Powered, changed.PointLight.visible = true, true
+assert(switch_row("hosting")[9] == changed:GetFullName() .. "|1|1")
+assert(scans[wall_class] == searches, "Rebinding a light link must not rescan switches")
+
+state.server = true
+local later = bulb(connected_world, "3")
+local foreign = bulb(object({PersistentLevel = object({})}), "4")
+foreign.GetOuter = function() return level end
+local statics_lookup = statics.GetStreamingLevel
+statics.GetStreamingLevel = function() return nil end
+links[1], links[2] = later, foreign
+local request = {"nonce", "native-stock-switch-project", panel_name, state.map, "1", "0", "0", "0",
+    earlier:GetFullName() .. "|1|1", later:GetFullName() .. "|1|1", foreign:GetFullName() .. "|1|1"}
+assert(switches.command(request, state, "connected") == "stock switch state projected")
+assert(later.Powered and later.PointLight.visible and later.toggles == 1)
+assert(not earlier.Powered and not earlier.PointLight.visible and not foreign.Powered and not foreign.PointLight.visible)
+statics.GetStreamingLevel = statics_lookup
+print("Live switch links refresh without a device rescan and projection uses only current owned lights")
