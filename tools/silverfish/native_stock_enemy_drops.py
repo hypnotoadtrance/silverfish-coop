@@ -38,6 +38,18 @@ MOTION_INTERVAL = .08
 MOTION_TTL = .75
 MOTION_LIMIT = 32
 _MEMORY_BANK_TURN_SECONDS = .012
+_BANK_REFUSALS_BEFORE_RETIREMENT = frozenset({
+    "stock_enemy_escrow_actor_unavailable", "stock_enemy_escrow_actor_unverified",
+    "stock_enemy_escrow_host_not_ready", "stock_enemy_escrow_drop_settling",
+    "stock_enemy_escrow_scope_unavailable", "stock_enemy_escrow_transform_unavailable",
+    "stock_enemy_escrow_fixture_save_unavailable", "stock_enemy_escrow_capture_unavailable",
+    "native_loot_escrow_slot_unavailable", "native_loot_escrow_could_not_create_save",
+    "native_loot_inventory_schema_unavailable", "native_loot_save_attachment_schema_unavailable",
+    "native_loot_escrow_save_attached_to_owner", "native_loot_live_stock_escrow_save_missing",
+    "native_loot_escrow_save_outer_unqualified", "native_loot_blank_escrow_required",
+    "native_loot_stock_actor_conversion_unverified", "native_loot_escrow_append_unverified",
+    "native_loot_escrow_payload_unverified",
+})
 
 
 def _actor_path(area, path):
@@ -398,10 +410,9 @@ async def observe(host, bridge, *, interaction_ready=None):
                 snapshot = await bridge.command(BANK, str(seq), slot, *options, timeout=7)
             except RuntimeError as error:
                 reason = str(error)
-                if reason not in {"stock_enemy_escrow_actor_unavailable", "stock_enemy_escrow_actor_unverified",
-                                  "stock_enemy_escrow_host_not_ready", "stock_enemy_escrow_drop_settling",
-                                  "stock_enemy_escrow_scope_unavailable", "stock_enemy_escrow_transform_unavailable",
-                                  "stock_enemy_escrow_fixture_save_unavailable", "stock_enemy_escrow_capture_unavailable"}:
+                # Native capture only reads the world drop and writes to detached scratch escrow.
+                # The Lua command releases that escrow on a refusal before hiding or destroying the actor.
+                if reason not in _BANK_REFUSALS_BEFORE_RETIREMENT:
                     raise
                 host.native_checkpoint_unsafe = bool(committed)
                 if reason in {"stock_enemy_escrow_host_not_ready", "stock_enemy_escrow_scope_unavailable"}:
