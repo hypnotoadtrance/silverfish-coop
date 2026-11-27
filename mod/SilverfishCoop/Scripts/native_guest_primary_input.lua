@@ -422,6 +422,7 @@ function primary.command(fields, state, phase)
 end
 
 function primary.rows(state, phase, status_row)
+    if not binding then return {} end
     local current = context(state, phase)
     if not same_context(current, binding) then return {} end
     local trigger = type(SilverfishReadNativeGuestPumpTrigger) == "function"

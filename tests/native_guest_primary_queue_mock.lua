@@ -17,7 +17,11 @@ for _, memory in ipairs({true, false}) do
     local world, pawn, controller = object(1), object(2), object(3)
     local pawn_class, controller_class = object(4), object(5)
     world.GetFullName = function() return "World " .. area .. ".Observitory_P" end
-    pawn.GetFullName = function() return pawn_name end
+    local name_reads = 0
+    pawn.GetFullName = function()
+        name_reads = name_reads + 1
+        return pawn_name
+    end
     pawn.Controller, controller.Pawn = controller, pawn
     pawn.GetWorld, controller.GetWorld = function() return world end, function() return world end
     pawn.GetClass, controller.GetClass = function() return pawn_class end, function() return controller_class end
@@ -63,6 +67,8 @@ for _, memory in ipairs({true, false}) do
 
     local input = assert(loadfile("mod/SilverfishCoop/Scripts/native_guest_primary_input.lua", "t", env))()
     input.start("isolated", function() return false end)
+    assert(#input.rows(state, "connected", table.pack) == 0 and name_reads == 0,
+        "An unarmed guest must not read the reflected pawn context to publish no rows")
     assert(input.command({"1", "native-guest-primary-scope", area, pawn_name, guid, kind}, state, "connected"))
     if memory then
         drain()

@@ -19,7 +19,9 @@ local seed_profiles = {
 }
 local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
-local projected, observation, disguise_observation = {body = {}, head = {}}, nil, nil
+local empty_projection = {body = {}, head = {}}
+local projected, observation, disguise_observation = empty_projection, nil, nil
+local slots = {"body", "head"}
 local disguise_probe = "native-guest-disguise-probe-fixture"
 local dead_bridge = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 
@@ -130,39 +132,41 @@ local function worn_guid(row, profile)
     return guid_text(row[guid_field])
 end
 
-local function exact_worn(state, phase, name)
-    local pawn, save = guest_save.exact_item_context(state, phase, name)
+local function observed_worn(state, phase, detail)
+    local pawn, save = guest_save.observed_item_context(state, phase, detail)
     if not pawn or not save then return end
     return pawn:GetAddress(), save:GetAddress(),
         {body = worn_guid(save.PlayerArmor, armor.is_body_path), head = worn_guid(save.PlayerHelmet, armor.is_helmet_path)}
 end
 
 function armor.sync(state, phase)
+    if not enabled or phase ~= "hosting" or type(SilverfishProjectNativeGuestArmor) ~= "function" or #state.guests == 0 then
+        projected = empty_projection
+        return
+    end
     local current = {body = {}, head = {}}
     local project = {body = SilverfishProjectNativeGuestArmor, head = SilverfishProjectNativeGuestHelmet}
-    if enabled and phase == "hosting" and type(SilverfishProjectNativeGuestArmor) == "function" then
-        for _, detail in ipairs(state.guests) do
-            local name = detail.name
-            local ok, pawn, save, worn = pcall(exact_worn, state, phase, name)
-            if ok and pawn and save and worn then
-                for _, slot in ipairs({"body", "head"}) do
-                    local guid = worn[slot]
-                    local invoke = project[slot]
-                    local companion = worn[slot == "body" and "head" or "body"]
-                    if guid and type(invoke) == "function" then
-                        local prior = projected[slot][name]
-                        if prior and prior.map == state.map and prior.pawn_address == pawn and prior.save_address == save
-                            and prior.guid == guid and prior.companion == companion and (prior.ok or os.time() < prior.retry) then
-                            current[slot][name] = prior
-                        else
-                            local called, result = pcall(function()
-                                return native_report(state.map, name, guid, "project", invoke(pawn, save, guid))
-                            end)
-                            if called then
-                                result.pawn_address, result.save_address = pawn, save
-                                result.companion, result.retry, result.head = companion, os.time() + 1, slot == "head"
-                                current[slot][name] = result
-                            end
+    for _, detail in ipairs(state.guests) do
+        local name = detail.name
+        local ok, pawn, save, worn = pcall(observed_worn, state, phase, detail)
+        if ok and pawn and save and worn then
+            for _, slot in ipairs(slots) do
+                local guid = worn[slot]
+                local invoke = project[slot]
+                local companion = worn[slot == "body" and "head" or "body"]
+                if guid and type(invoke) == "function" then
+                    local prior = projected[slot][name]
+                    if prior and prior.map == state.map and prior.pawn_address == pawn and prior.save_address == save
+                        and prior.guid == guid and prior.companion == companion and (prior.ok or os.time() < prior.retry) then
+                        current[slot][name] = prior
+                    else
+                        local called, result = pcall(function()
+                            return native_report(state.map, name, guid, "project", invoke(pawn, save, guid))
+                        end)
+                        if called then
+                            result.pawn_address, result.save_address = pawn, save
+                            result.companion, result.retry, result.head = companion, os.time() + 1, slot == "head"
+                            current[slot][name] = result
                         end
                     end
                 end
