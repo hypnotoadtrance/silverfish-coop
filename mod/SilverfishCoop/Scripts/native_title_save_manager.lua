@@ -71,10 +71,12 @@ local function draw(state, note, focus)
     elseif state.screen == "confirm" then
         local character = state.confirm == "delete-character"
         heading = character and "Delete Character?" or "Delete Save?"
-        note = (character and clip(state.character.name, 32) .. " and their progress will be permanently deleted."
-            or clip(save_label(save), 32) .. " and all of its characters will be permanently deleted.")
-            .. " This cannot be undone."
+        local name = character and state.character.name or save_label(save)
+        local warning = "Permanently deletes " .. clip(name, 32)
+            .. (character and " and their progress." or " and all its characters.")
+        note = note and note .. "\n" .. warning or warning .. " This cannot be undone."
         rows = {{button("back", "Cancel"), button("confirm", character and "Delete Character" or "Delete Save")}}
+        focus = "back"
     else
         note = note or "Updating co-op saves…"
         if loading_characters(state) then
@@ -186,7 +188,6 @@ function manager.press(state, action)
         state.character, state.screen = entry, "character"
     elseif screen == "save" and action == "delete-save" or screen == "character" and action == "delete-character" then
         state.confirm, state.screen = action, "confirm"
-        focus = "back"
     elseif screen == "confirm" and action == "confirm" then
         start_request(state, state.confirm)
         return

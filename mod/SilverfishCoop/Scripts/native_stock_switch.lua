@@ -86,7 +86,7 @@ local function parts(actor, scope, level)
     return {actor = actor, level = level, lever = lever, panel = panel, box = box}
 end
 
-local function light_links(linked, count, scope)
+local function light_links(linked, count, scope, previous)
     local lights = {}
     if count == 0 then return lights end
     local bases = {}
@@ -103,7 +103,11 @@ local function light_links(linked, count, scope)
                     local bulb = target[base[2]]
                     if valid(bulb) and same(bulb:GetOwner(), target) then
                         local name = target:GetFullName()
-                        if placed_actor(name) then lights[name] = {target = target, bulb = bulb, level = level} end
+                        if placed_actor(name) then
+                            local old = previous and previous[name]
+                            lights[name] = old and same(old.target, target) and same(old.bulb, bulb)
+                                and same(old.level, level) and old or {target = target, bulb = bulb, level = level}
+                        end
                     end
                     break
                 end
@@ -116,9 +120,12 @@ end
 local function refresh_lights(entry, scope, powered, force)
     local linked = entry.actor.ActorsToPower
     local count = linked and linked:GetArrayNum() or 0
-    if not force and entry.link_count == count and entry.link_power == powered then return end
-    entry.lights = light_links(linked, count, scope)
-    entry.link_count, entry.link_power = count, powered
+    local now = os.clock()
+    -- Stock script can replace a reference in place without toggling the switch or changing the array length.
+    if not force and entry.link_count == count and entry.link_power == powered
+        and (count == 0 or now < entry.next_link_check) then return end
+    entry.lights = light_links(linked, count, scope, entry.lights)
+    entry.link_count, entry.link_power, entry.next_link_check = count, powered, now + 0.75
 end
 
 function switches.start()

@@ -724,6 +724,14 @@ local pending_lookup = files[save_request]
 assert(display.note == "Loading guest characters…" and display.buttons.back and display.focus == "back")
 click("back")
 assert(display.title == "Expedition" and display.focus == "characters" and files[save_request] == pending_lookup)
+click("delete-save")
+click("confirm")
+assert(display.title == "Delete Save?" and display.note:find("could not be submitted", 1, true),
+    "A busy mailbox must show why the confirmed deletion did not start")
+assert(display.note:find("Permanently deletes Expedition and all its characters.", 1, true)
+    and display.focus == "back" and files[save_request] == pending_lookup,
+    "Keep the warning and Cancel available without replacing the pending character lookup")
+click("back")
 local returned_save = display
 files[save_request] = nil
 files[save_response] = ("2\t%s\t%s\tok\t0\n"):format(manage_generation, cancelled_lookup)

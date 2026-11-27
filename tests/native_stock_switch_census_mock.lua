@@ -213,8 +213,14 @@ local searches = scans[wall_class]
 local earlier, changed = bulb(connected_world, "1"), bulb(connected_world, "2")
 links[1] = earlier
 assert(switch_row("hosting")[9] == earlier:GetFullName() .. "|0|0")
-links[1], panel.Powered = changed, true
+links[1] = changed
 changed.Powered, changed.PointLight.visible = true, true
+now = now + 1
+assert(switch_row("hosting")[9] == changed:GetFullName() .. "|1|1",
+    "A stock switch must observe a replacement target even if its power and link count stay the same")
+links[1], panel.Powered = earlier, true
+assert(switch_row("hosting")[9] == earlier:GetFullName() .. "|0|0", "A power edge refreshes the links immediately")
+links[1], panel.Powered = changed, false
 assert(switch_row("hosting")[9] == changed:GetFullName() .. "|1|1")
 assert(scans[wall_class] == searches, "Rebinding a light link must not rescan switches")
 
