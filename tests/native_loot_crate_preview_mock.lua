@@ -57,7 +57,7 @@ local view = require("native_loot_crate_preview")
 local current = {crate = actor, profile = {name = "crate"}}
 local goal = {{Pitch = 0, Yaw = 0, Roll = -95}}
 view.start(current, 1, {panel}, goal, {})
-assert(#created == 1 and created[1].RelativeRotation.Roll < -1)
+assert(#created == 1 and created[1].RelativeRotation.Roll < 0)
 now = .04
 view.tick(world)
 assert(#created == 1 and created[1].collision == 0 and created[1].RelativeRotation.Roll < -1)
@@ -91,5 +91,21 @@ view.tick(world)
 assert(motion.RelativeRotation.Roll < preview_roll and motion.RelativeRotation.Roll > -95 and not panel.visible)
 now = 1.13
 view.tick(world)
+assert(motion.valid and not panel.visible and motion.RelativeRotation.Roll > -95)
+now = 1.29
+view.tick(world)
 assert(not motion.valid and panel.visible and panel.RelativeRotation.Roll == -95)
+
+actor.Looted = false
+panel.RelativeRotation = {Pitch = 0, Yaw = 0, Roll = 0}
+local other = component(root)
+other.StaticMesh = panel.StaticMesh
+local another = {crate = actor, profile = {name = "another"}}
+view.start(current, 6, {panel}, goal, {})
+view.start(another, 7, {other}, goal, {})
+assert(not panel.visible and not other.visible)
+view.resolve("crate", 6)
+assert(panel.visible and not other.visible)
+view.clear()
+assert(other.visible)
 print("Stock crate preview moves a collision-free copy and eases into the verified stock pose")

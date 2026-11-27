@@ -3,6 +3,7 @@ local input = {}
 local alarm = require("native_loot_alarm")
 local lid_preview = require("native_loot_crate_preview")
 local stock_door = require("native_stock_door")
+local stock_alert = require("native_cash_popup")
 local guest_save = require("guest_save")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_LOOT") == "1"
@@ -329,7 +330,7 @@ local function exhausted(crate, door, box, second, opened, locations, profile)
     return matches_pose(door, opened[1], locations[1]) and (not second or matches_pose(second, opened[2], locations[2]))
 end
 
-local function project(current, angle)
+local function project(current, angle, animate)
     local crate = current.crate
     local profile = current.profile
     local door, box, second = scene(current)
@@ -366,7 +367,14 @@ local function project(current, angle)
         error("native_loot_crate_lid_collision_unavailable", 0)
     end
 
-    -- Replicate only the spent door pose and disable the query Box.
+    if animate and not original_looted then
+        local from, pos = current.pawn:K2_GetActorLocation(), door:K2_GetComponentLocation()
+        if (from.X - pos.X)^2 + (from.Y - pos.Y)^2 + (from.Z - pos.Z)^2 <= 1200^2 then
+            lid_preview.start(current, nil, doors, opened, locations)
+        end
+    end
+
+    -- Commit the spent pose and collision immediately. The visual copy can keep moving independently.
     local invoked, verified = pcall(function()
         if box then box:SetCollisionEnabled(0) end
         if ignored_channel then door:SetCollisionResponseToChannel(ignored_channel, 0) end
@@ -376,6 +384,7 @@ local function project(current, angle)
         return exhausted(crate, door, box, second, opened, locations, profile)
     end)
     if not invoked or not verified then
+        lid_preview.resolve(profile.name)
         local restored, matches = pcall(function()
             crate.Looted = original_looted
             if profile.lockable then crate.Locked = original_locked end
@@ -544,6 +553,12 @@ end
 
 function input.command(fields, state, phase)
     local command = fields[2]
+    if command == "native-loot-lockpick-feedback" then
+        local profile = phase == "connected" and #fields == 4 and loot.profile(state.map, fields[3])
+        local current = profile and profile.lockable and input.update(state, phase, profile)
+        if not current then error("stock_lockpick_feedback_unavailable", 0) end
+        return stock_alert.lockpick(state, fields[4])
+    end
     if command == "native-loot-crate-preview-cancel" then
         local sequence = math.tointeger(tonumber(fields[4]))
         if enabled and phase == "connected" and #fields == 4 and sequence and sequence > 0
@@ -727,10 +742,10 @@ function input.command(fields, state, phase)
     if not current then error("native_loot_crate_input_scope_unavailable", 0) end
     if command == "native-loot-crate-fixture" and (#fields == 2 or #fields == 3) then return fixture(current) end
     if command == "native-loot-crate-project" and fields[3] == "exhausted" then
-        local result
-        if current.profile.random_lid and #fields == 5 then result = project(current, tonumber(fields[5])) end
-        if not current.profile.random_lid and (#fields == 3 or #fields == 4) then result = project(current) end
-        if result then return result end
+        local animate = not current.host and fields[#fields] == "animate"
+        local size = animate and #fields - 1 or #fields
+        if current.profile.random_lid and size == 5 then return project(current, tonumber(fields[5]), animate) end
+        if not current.profile.random_lid and size == 4 then return project(current, nil, animate) end
     end
     error("native_loot_crate_input_arguments", 0)
 end

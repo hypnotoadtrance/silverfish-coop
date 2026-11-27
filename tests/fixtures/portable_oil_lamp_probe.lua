@@ -7,23 +7,71 @@ local maps = {
     ["/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"] = true,
     ["/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"] = true,
 }
-local class = "BlueprintGeneratedClass /Game/Assets/StaticMeshes/Mesh_Props/Prop_Lantern_01.Prop_Lantern_01_C"
+local prop_path = "BlueprintGeneratedClass /Game/Assets/StaticMeshes/Mesh_Props/"
 local lighter_class = "/Game/Classes/Equipment/Eqp_Lighter.Eqp_Lighter_C"
 local equip_factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_payload = "DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"
 local clear = {R=0,G=0,B=0,A=0}
 local dirs = {{1,0},{0,1},{-1,0},{0,-1},{.707,.707},{-.707,.707},{-.707,-.707},{.707,-.707}}
-local last
 local function valid(o) return o and o:IsValid() end
 local function same(a,b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
+local last, observed_lid
+local crate_types = {LootCrate_Small_BP_C_1 = "Roll", Loot_Dumpster_BP_C_1 = "Pitch"}
+
+local function watch_lid(action, id)
+    if action == "watch-lid" then
+        local viewport = FindFirstOf("GameViewportClient")
+        local world = valid(viewport) and viewport.World
+        local package = valid(world) and world:GetFullName():match("^World (.+)$")
+        local crate = package and StaticFindObject(package .. ":PersistentLevel." .. id)
+        local panel = valid(crate) and crate.SM_Prop_Cabinet_Small_Door_01
+        local mesh_class = StaticFindObject("/Script/Engine.StaticMeshComponent")
+        assert(valid(panel) and valid(mesh_class) and crate.Looted == false, "container lid probe unavailable")
+        local state = {crate = crate, panel = panel, mesh_class = mesh_class, axis = crate_types[id],
+            start = panel.RelativeRotation[crate_types[id]], samples = {}}
+        observed_lid = state
+        return "watching"
+    end
+    local state = assert(observed_lid, "container lid probe unavailable")
+    if not state.done then return "pending" end
+    return ("%d;%s;%.3f"):format(#state.samples, tostring(state.safe), state.panel.RelativeRotation[state.axis])
+end
+
+LoopInGameThreadWithDelay(16, function()
+    local state = observed_lid
+    if not state or state.done or not valid(state.crate) or not valid(state.panel) or not state.crate.Looted then return end
+    if state.panel:IsVisible() then
+        state.done = true
+        return
+    end
+    local mesh = state.panel.StaticMesh
+    for _, part in ipairs(state.crate:K2_GetComponentsByClass(state.mesh_class)) do
+        if part and type(part.type) == "function" and part:type() == "RemoteUnrealParam" then part = part:get() end
+        if valid(part) and not same(part, state.panel) and same(part.StaticMesh, mesh) and part:IsVisible() then
+            local value, final = part.RelativeRotation[state.axis], state.panel.RelativeRotation[state.axis]
+            local previous = state.samples[#state.samples] or state.start
+            local function difference(x,y) return math.abs((x-y+180)%360-180) end
+            if difference(value, previous) > 1 and difference(value, final) > 1 then
+                state.samples[#state.samples + 1] = value
+                state.safe = state.safe ~= false and part:GetCollisionEnabled() == 0
+            end
+            break
+        end
+    end
+end)
+
 
 local function scene(id, allow_absent)
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
     local package = valid(world) and world:GetFullName():match("^World (.+)$")
     assert(maps[package], "no stock oil-lamp verification map")
-    assert(id:match("^Prop_Lantern_01_C_%d+$"), "invalid authored oil lamp")
+    local name = id:match("^(Prop_Lantern_01)_C_%d+$") or id:match("^(Prop_GassLight_0[12])_C_1$")
+    local latch = id == "DoorLatch_BP_C_2"
+    assert(name or latch, "invalid authored lamp or latch")
+    local class = latch and "BlueprintGeneratedClass /Game/Assets/StaticMeshes/Doors/DoorLatch_BP.DoorLatch_BP_C"
+        or prop_path .. name .. "." .. name .. "_C"
     local lamp = StaticFindObject(package .. ":PersistentLevel." .. id)
     if allow_absent and (not valid(lamp) or lamp:IsActorBeingDestroyed()) then return end
     assert(valid(lamp) and same(lamp:GetWorld(), world) and same(lamp:GetOuter(), world.PersistentLevel)
@@ -34,9 +82,9 @@ local function scene(id, allow_absent)
     return lamp, pawn, world
 end
 
-local function focus(pawn, lamp)
+local function focus(pawn, lamp, mesh, box)
     local eye = pawn.Camera:K2_GetComponentLocation()
-    for _, target in ipairs({lamp.PropMesh:K2_GetComponentLocation(), lamp.Sphere:K2_GetComponentLocation()}) do
+    for _, target in ipairs({mesh:K2_GetComponentLocation(), box:K2_GetComponentLocation()}) do
         local x,y,z = target.X-eye.X, target.Y-eye.Y, target.Z-eye.Z
         local angle={Pitch=math.deg(math.atan(z, math.sqrt(x*x+y*y))),Yaw=math.deg(math.atan(y,x)),Roll=0}
         pawn.Controller:SetControlRotation(angle)
@@ -60,10 +108,10 @@ local function remote_seat(pawn, world)
     return assert(guest, "remote seat not found")
 end
 
-local function stage(lamp, pawn, participant)
+local function stage(lamp, pawn, participant, mesh, box)
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
-    local lamp_pos = lamp.PropMesh:K2_GetComponentLocation()
-    local origin, sphere = lamp:K2_GetActorLocation(), lamp.Sphere:K2_GetComponentLocation()
+    local lamp_pos = mesh:K2_GetComponentLocation()
+    local origin, sphere = lamp:K2_GetActorLocation(), box:K2_GetComponentLocation()
     local reach = participant.InteractionRange - 5
     for _, offset in ipairs({80, 105, 145}) do
         for _, dir in ipairs(dirs) do
@@ -162,6 +210,7 @@ local function lighter_input(pawn, lamp, pressed)
 end
 
 local function run(action,id)
+    if crate_types[id] and (action == "watch-lid" or action == "lid-result") then return watch_lid(action,id) end
     if action == "break-state" then
         local lamp = scene(id, true)
         if not valid(lamp) or lamp.bHidden and not lamp:GetActorEnableCollision() then return "removed" end
@@ -178,6 +227,7 @@ local function run(action,id)
         assert(not pawn:HasAuthority() and lamp.Lit == true and lamp.PointLight:IsVisible(),
             "fixture requires a lit guest oil lamp")
         lamp.PointLight:SetVisibility(false, false)
+        if id:match("^Prop_GassLight_") then lamp.FX_CandleFlame_01_Converted:Deactivate() end
         assert(lamp.Lit == true and not lamp.PointLight:IsVisible(), "fixture did not isolate the lamp visuals")
         return "visual drift"
     end
@@ -196,17 +246,24 @@ local function run(action,id)
     if action == "use-lighter" or action == "lower-lighter" then
         return lighter_input(pawn,lamp,action == "use-lighter")
     end
+    local latch = id == "DoorLatch_BP_C_2"
+    if action == "latch-state" then
+        assert(latch and valid(lamp.Door))
+        return tostring(lamp.Door.Locked) .. ";" .. tostring(lamp.Door.Open)
+    end
     if action == "stage" or action == "stage-host" then
         assert(pawn:HasAuthority())
-        return stage(lamp,pawn,action == "stage" and remote_seat(pawn,world) or pawn)
+        return stage(lamp,pawn,action == "stage" and remote_seat(pawn,world) or pawn,
+            latch and lamp.Box_Knob or lamp.PropMesh, latch and lamp.Box_Knob or lamp.Sphere)
     end
-    if action == "host-off" then
+    if action == "host-toggle" then
         assert(pawn:HasAuthority())
         lamp:SendInteractionToActor(pawn,lamp.PropMesh)
         return tostring(lamp.Lit)
     end
-    if action == "guest-off" then
-        assert(not pawn:HasAuthority() and lamp.Lit and focus(pawn,lamp), "guest did not focus the lit oil lamp")
+    if action == "guest-toggle" then
+        assert(not pawn:HasAuthority() and focus(pawn, lamp, latch and lamp.Box_Knob or lamp.PropMesh,
+            latch and lamp.Box_Knob or lamp.Sphere), "guest did not focus the lamp or latch")
         local library = StaticFindObject("/Script/EnhancedInput.Default__EnhancedInputLibrary")
         local input = StaticFindObject("/Game/Classes/Player/Player_Inputs/IA_Interact.IA_Interact")
         pawn:InpActEvt_IA_Interact_K2Node_EnhancedInputActionEvent_19(library:MakeInputActionValueOfType(1,0,0,0),0,0,input)

@@ -73,6 +73,8 @@ namespace
     constexpr auto valve_interaction = STR("/Game/Classes/ScriptingActors/ValveSwitch_BP.ValveSwitch_BP_C:SendInteractionToActor");
     constexpr auto stash_class = STR("/Game/Classes/Actors/Stash_Master_BP.Stash_Master_BP_C");
     constexpr auto lantern_class = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Lantern_01.Prop_Lantern_01_C");
+    constexpr auto door_latch_class = STR("/Game/Assets/StaticMeshes/Doors/DoorLatch_BP.DoorLatch_BP_C");
+    constexpr auto gas_lamp_class = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_GassLight_01.Prop_GassLight_01_C");
     constexpr auto lantern_interaction = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_01.Prop_Candle_01_C:SendInteractionToActor");
     constexpr auto lantern_ignite = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_01.Prop_Candle_01_C:SetOnFire");
     constexpr auto lantern_extinguish = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_01.Prop_Candle_01_C:Extinguish");
@@ -1164,7 +1166,7 @@ namespace
 
     void intercept_npc_barter(Iteration&, Unreal::UObject*, Unreal::UFunction*);
 
-    enum class SwitchKind { Unsupported, Lantern, Candle, Power };
+    enum class SwitchKind { Unsupported, Lantern, Candle, GasLamp, DoorLatch, Power };
 
     SwitchKind stock_switch_kind(const Unreal::UClass* klass)
     {
@@ -1172,6 +1174,8 @@ namespace
         {
             const auto path = klass->GetPathName();
             if (path == lantern_class) return SwitchKind::Lantern;
+            if (path == gas_lamp_class) return SwitchKind::GasLamp;
+            if (path == door_latch_class) return SwitchKind::DoorLatch;
             if (std::ranges::find(candles, path) != candles.end()) return SwitchKind::Candle;
             if (std::ranges::find(power_switches, path) != power_switches.end()) return SwitchKind::Power;
         }
@@ -1194,6 +1198,7 @@ namespace
         const auto kind = stock_switch_kind(klass);
         if (kind == SwitchKind::Unsupported || kind == SwitchKind::Lantern) return;
         const bool candle = kind == SwitchKind::Candle;
+        const bool flame_prop = candle || kind == SwitchKind::GasLamp;
         if (!visible_interactable_actor(actor, world)) return;
         if (name != interaction)
         {
@@ -1209,9 +1214,10 @@ namespace
         auto* target = input<Unreal::FObjectProperty>(function, STR("HitComponent"), sizeof(void*));
         if (!player || !target || player->GetObjectPropertyValue(player->ContainerPtrToValuePtr<void>(args)) != pawn) return;
         auto* hit = target->GetObjectPropertyValue(target->ContainerPtrToValuePtr<void>(args));
+        const auto* component = flame_prop ? STR("Sphere") : kind == SwitchKind::DoorLatch ? STR("Box_Knob") : STR("Box");
         if (live(hit) && hit->GetOuterPrivate() == actor &&
-            (hit == object_field(actor, candle ? STR("Sphere") : STR("Box")) ||
-                (candle && hit == object_field(actor, STR("PropMesh")))))
+            (hit == object_field(actor, component) ||
+                (flame_prop && hit == object_field(actor, STR("PropMesh")))))
             call.PreventOriginalFunctionCall();
     }
 

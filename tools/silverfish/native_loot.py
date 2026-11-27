@@ -326,6 +326,7 @@ class GuestCrateProjection:
     attempts_per_turn = 2
     turn_seconds = .150
     retry_seconds = .750
+    animate_seconds = .750
 
     def __init__(self):
         self.confirmed = {}
@@ -364,6 +365,8 @@ class GuestCrateProjection:
         self.last_attempt = None
         self.prioritized_sequence = 0
         self.deferred = {}
+        self.known_rolls = None
+        self.fresh_openings = {}
 
     def _defer(self, client, crate, desired, error) -> None:
         reason = str(error)[:200] or "stock lid readback timed out"
@@ -396,6 +399,19 @@ class GuestCrateProjection:
             return
 
         rolls = rolls_in_area(client.gameplay.get(STATE_KEY, {}), area)
+        identities = {crate: roll["id"] for crate, roll in rolls.items()}
+        # Existing rolls are restored immediately when joining or entering a zone.
+        recent = self.fresh_openings
+        for crate in list(recent):
+            if crate not in identities or now >= recent[crate]:
+                del recent[crate]
+        if self.known_rolls is not None:
+            for crate, identity in identities.items():
+                if self.known_rolls.get(crate) != identity:
+                    recent[crate] = now + self.animate_seconds
+        self.known_rolls = identities
+        if confirmed_crate in rolls:
+            recent[confirmed_crate] = now + self.animate_seconds
         for crate in self.deferred.keys() - rolls.keys():
             del self.deferred[crate]
         order = list(rolls)
@@ -430,6 +446,8 @@ class GuestCrateProjection:
                 if arguments is None:
                     self.deferred.pop(crate, None)
                     continue
+                if now < recent.get(crate, 0):
+                    arguments += ("animate",)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
@@ -447,6 +465,7 @@ class GuestCrateProjection:
                     client.last_game = snapshot
                 game = client.last_game
                 self.deferred.pop(crate, None)
+                recent.pop(crate, None)
             except (OSError, RuntimeError) as error:
                 if self._scope(client, client.last_game) != scope:
                     self.reset()

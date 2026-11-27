@@ -47,6 +47,20 @@ function popup.show(controller, message)
     return widget:IsInViewport() and widget or nil
 end
 
+function popup.lockpick(state, outcome)
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    local message = outcome == "picked" and "You picked the lock!" or outcome == "broken" and "Lock Pick broke..."
+    if not message or not valid(pawn) or pawn:HasAuthority() or not pawn:IsLocallyControlled()
+        or not same(pawn:GetWorld(), state.world) or not same(pawn.Controller, state.controller) then
+        error("stock_lockpick_feedback_unavailable", 0)
+    end
+    local widget = popup.show(state.controller, message)
+    if not valid(widget) or widget.Messaage:ToString() ~= message then
+        error("stock_lockpick_feedback_unavailable", 0)
+    end
+    return message
+end
+
 function popup.update(state, phase)
     if not current then return end
     local pawn = state.local_pawn and state.local_pawn.pawn

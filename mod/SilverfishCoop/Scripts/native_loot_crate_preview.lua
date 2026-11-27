@@ -1,13 +1,14 @@
 local add_component = require("native_preview_component")
 
 local view = {}
-local preview, clock, math_api
+local previews, clock, math_api = {}, nil, nil
+local open_seconds, max_previews = .28, 4
 
 local function valid(object) return object and object:IsValid() end
 
-local function clear()
-    local prior = preview
-    preview = nil
+local function clear(name)
+    local prior = previews[name]
+    previews[name] = nil
     if not prior or not valid(prior.actor) or prior.actor:IsActorBeingDestroyed() then return end
     for _, part in ipairs(prior.parts) do
         if part.hidden and valid(part.source) then pcall(part.source.SetVisibility, part.source, true, false) end
@@ -16,10 +17,13 @@ local function clear()
     end
 end
 
-view.clear = clear
+function view.clear()
+    for name in pairs(previews) do clear(name) end
+end
 
 function view.resolve(name, sequence)
-    if preview and preview.name == name and (not sequence or preview.sequence == sequence) then clear() end
+    local entry = previews[name]
+    if entry and (not sequence or entry.sequence == sequence) then clear(name) end
 end
 
 local function angle(start, finish, fraction)
@@ -59,19 +63,22 @@ end
 
 local function start(current, sequence, panels, opened, locations)
     local actor, profile = current.crate, current.profile
-    if preview and preview.name == profile.name then
-        preview.sequence = sequence
+    local existing = previews[profile.name]
+    if existing then
+        existing.sequence = sequence or existing.sequence
         return true
     end
-    clear()
+    local count = 0
+    for _ in pairs(previews) do count = count + 1 end
+    if count >= max_previews then return end
     if not valid(clock) then clock = StaticFindObject("/Script/Engine.Default__GameplayStatics") end
     if not valid(math_api) then math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary") end
     if not valid(clock) or not valid(math_api) then return end
     local world = actor:GetWorld()
     -- Start one short step into the easing curve before the request can settle.
     local start_at = clock:GetRealTimeSeconds(world) - .008
-    local entry = {actor = actor, world = world, name = profile.name, sequence = sequence, start_at = start_at, parts = {}}
-    preview = entry
+    local entry = {actor = actor, world = world, sequence = sequence, start_at = start_at, parts = {}}
+    previews[profile.name] = entry
     for index, panel in ipairs(panels) do
         local mesh_source = profile.hinge_arrow and actor.SM_Lid or panel
         if not add_part(entry, actor, panel, mesh_source, opened[index], locations[index]) then return end
@@ -81,16 +88,16 @@ end
 
 function view.start(current, sequence, panels, opened, locations)
     local ok, shown = pcall(start, current, sequence, panels, opened, locations)
-    if ok and shown then view.tick(current.crate:GetWorld()) else clear() end
+    if ok and shown then view.tick(current.crate:GetWorld()) else clear(current.profile.name) end
 end
 
 function view.confirm(name, opened, locations)
-    local entry = preview
-    if not entry or entry.name ~= name or entry.confirmed then return end
+    local entry = previews[name]
+    if not entry or entry.confirmed then return end
     for index, part in ipairs(entry.parts) do
-        if not valid(part.moving) or not opened[index] then return clear() end
+        if not valid(part.moving) or not opened[index] then return clear(name) end
         local rotation, point = part.moving.RelativeRotation, part.moving.RelativeLocation
-        if not rotation or (locations[index] and not point) then return clear() end
+        if not rotation or (locations[index] and not point) then return clear(name) end
         part.rotation = {Pitch = rotation.Pitch, Yaw = rotation.Yaw, Roll = rotation.Roll}
         part.goal = opened[index]
         part.end_location = locations[index]
@@ -100,16 +107,15 @@ function view.confirm(name, opened, locations)
     entry.confirmed, entry.paused = true, false
 end
 
-local function animate(world)
-    local entry = preview
+local function animate(entry, world)
     if not valid(world) or not valid(entry.world) or world:GetAddress() ~= entry.world:GetAddress()
         or not valid(entry.actor) or entry.actor:IsActorBeingDestroyed()
         or entry.actor.Looted ~= (entry.confirmed == true) then return false end
     local elapsed = clock:GetRealTimeSeconds(world) - entry.start_at
     if elapsed >= .75 then return false end
     if entry.paused then return true end
-    local alpha = math.min(1, math.max(0, elapsed / .12))
-    local fraction = (entry.confirmed and 1 or .32) * alpha * (2 - alpha)
+    local alpha = math.min(1, math.max(0, elapsed / open_seconds))
+    local fraction = (entry.confirmed and 1 or .32) * alpha * alpha * (3 - 2 * alpha)
     for _, part in ipairs(entry.parts) do
         if not valid(part.moving) then return false end
         local start, stop = part.rotation, part.goal
@@ -132,9 +138,10 @@ local function animate(world)
 end
 
 function view.tick(world)
-    if not preview then return end
-    local ok, alive = pcall(animate, world)
-    if not ok or not alive then clear() end
+    for name, entry in pairs(previews) do
+        local ok, alive = pcall(animate, entry, world)
+        if not ok or not alive then clear(name) end
+    end
 end
 
 return view

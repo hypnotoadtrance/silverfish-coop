@@ -3866,6 +3866,9 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str, hinged=None
             for seat in (host, guest):
                 lock = await seat.bridge.command("fixture-stock-lockpick-locker", "read")
                 assert lock["ack"]["message"] == "unlocked", lock["ack"]
+            assert any(row["time_unix"] >= started_at and row["actor"] == crate
+                       and row["message"] == "You picked the lock!" for row in await resident_events(guest_run, frame)
+                       if row["event"] == "native_loot_lockpick_feedback_played")
         rows = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
         expected = [result["remaining"]] if result["remaining"] else []
         assert [row["quantity"] for row in rows if row["guid"] == guid] == expected, rows

@@ -1,4 +1,4 @@
-"""Check oil lamp state and stock ignition on one muted portable pair."""
+"""Check stock oil and gas lamps on one muted portable pair."""
 
 import argparse
 import asyncio
@@ -9,7 +9,7 @@ import time
 
 import live_portable_title_smoke as suite
 from portable_weather_travel import enter_crossroads
-from tools.silverfish import native_stock_switch
+from tools.silverfish import native_loot, native_stock_switch
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
 
@@ -39,6 +39,28 @@ async def verify_oil_lamps(host, guest, pawn):
         assert readings[1].split(";")[3] == "false", readings
         return replica, readings
 
+    async def verify_observer_open(area, suffix):
+        crate, = [name for name, map_name in native_loot.CRATES.items()
+                  if map_name == area and name.endswith(":PersistentLevel." + suffix)]
+        host_frame = await suite.wait_resident_status(host_run, lambda f: f.get("game", {}).get("map") == area)
+        host_pawn = host_frame["game"]["pawns"]["local"]["name"]
+        approached = await host.bridge.command("native-loot-approach", pawn, crate)
+        position, = [row["location"] for row in approached["pawns"].values() if row["name"] == pawn]
+        await suite.wait_resident_status(guest_run, lambda frame:
+            (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
+            and dist(point, position) < 60, timeout=5)
+        await host.bridge.command("native-loot-approach", host_pawn, crate)
+        assert await probe(guest, "watch-lid", crate) == "watching"
+        result = await suite.submit(host_run, "native-loot-open", target=crate)
+        assert result["ok"], result
+        async with asyncio.timeout(5):
+            while (motion := await probe(guest, "lid-result", crate)) == "pending":
+                await asyncio.sleep(.05)
+        samples, safe, angle = motion.split(";")
+        assert int(samples) >= 3 and safe == "true", motion
+        return {"actor": crate, "intermediate_angles": int(samples), "collision_free_copy": True,
+                "final_angle": float(angle)}
+
     async def verify_one(actor):
         checkpoint = suite.campaign_save_hashes(host.campaign)
         await verify_state(actor, False)
@@ -61,7 +83,7 @@ async def verify_oil_lamps(host, guest, pawn):
             (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
             and dist(point, place) < 60, timeout=5)
         started = time.time()
-        await probe(guest, "guest-off", actor)
+        await probe(guest, "guest-toggle", actor)
         _, guest_extinguished = await verify_state(actor, False)
         assert (await probe(guest, "use-lighter", actor)).split(";")[0] == "true"
         try:
@@ -78,14 +100,51 @@ async def verify_oil_lamps(host, guest, pawn):
         power = [row["native_stock_switch_interaction"]["powered"] for row in receipts]
         # A held lighter can emit another ignition callback before the reply.
         assert len(power) >= 2 and power[0] is False and all(value is True for value in power[1:]), receipts
-        assert await probe(host, "host-off", actor) == "false"
+        assert await probe(host, "host-toggle", actor) == "false"
         _, host_extinguished = await verify_state(actor, False)
         assert suite.campaign_save_hashes(host.campaign) == checkpoint
         evidence[actor] = dict(host_lit=host_lit, guest_lit_after_visual_repair=repaired, guest_extinguished=guest_extinguished,
                                guest_lit=guest_lit, guest_lit_after_refresh=guest_lit_after_refresh,
                                host_extinguished=host_extinguished, receipts=receipts)
 
+    gas_lamps = [
+        f"Prop_GassLight_{variant}_C {OBSERVATORY}.{OBSERVATORY.rsplit('/', 1)[1]}"
+        f":PersistentLevel.Prop_GassLight_{variant}_C_1" for variant in ("01", "02")
+    ]
+    checkpoint = suite.campaign_save_hashes(host.campaign)
+    gas_evidence = {}
+    for actor, other in zip(gas_lamps, reversed(gas_lamps), strict=True):
+        _, initial = await verify_state(actor, False)
+        assert await probe(host, "host-toggle", actor) == "true"
+        _, host_lit = await verify_state(actor, True)
+        assert all(row.split(";")[2] == "true" for row in host_lit), host_lit
+        await verify_state(other, False)
+        assert await probe(guest, "visual-drift", actor) == "visual drift"
+        async with asyncio.timeout(5):
+            while (repaired := await probe(guest, "state", actor)).split(";")[:3] != ["true"] * 3:
+                await asyncio.sleep(.05)
+        position = tuple(map(float, (await probe(host, "stage", actor)).split(",")))
+        await suite.wait_resident_status(guest_run, lambda frame:
+            (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
+            and dist(point, position) < 60, timeout=5)
+        started = time.time()
+        assert await probe(guest, "guest-toggle", actor) == "pressed"
+        _, off = await verify_state(actor, False)
+        assert await probe(guest, "guest-toggle", actor) == "pressed"
+        replica, on = await verify_state(actor, True)
+        assert all(row.split(";")[2] == "true" for row in on), on
+        receipts = [row["native_stock_switch_interaction"]["powered"]
+                    for row in await suite.resident_events(guest_run, replica)
+                    if row.get("time_unix", 0) >= started
+                    and row.get("native_stock_switch_interaction", {}).get("actor") == actor]
+        assert receipts == [False, True], receipts
+        assert await probe(host, "host-toggle", actor) == "false"
+        _, host_off = await verify_state(actor, False)
+        gas_evidence[actor] = dict(initial=initial, host_lit=host_lit, guest_visual_repair=repaired,
+                                   guest_off=off, guest_on=on, host_off=host_off, receipts=receipts)
+    assert suite.campaign_save_hashes(host.campaign) == checkpoint
     await verify_one(lamp_id(OBSERVATORY, 1))
+    cabinet = await verify_observer_open(OBSERVATORY, "LootCrate_Small_BP_C_1")
     await enter_crossroads(host, pawn)
     await suite.wait_resident_status(host_run, lambda frame:
         frame.get("game", {}).get("map") == CROSSROADS and not frame.get("awaiting_zone_guest")
@@ -95,7 +154,22 @@ async def verify_oil_lamps(host, guest, pawn):
     await verify_state(adjacent, False)
     await verify_one(lamp_id(CROSSROADS, 1))
     await verify_state(adjacent, False)
-    return {"lamps": evidence, "other_lamp_stayed_unlit": adjacent}
+    latch = f"DoorLatch_BP_C {CROSSROADS}.CrossRoads_P:PersistentLevel.DoorLatch_BP_C_2"
+    position = tuple(map(float, (await probe(host, "stage", latch)).split(",")))
+    await suite.wait_resident_status(guest_run, lambda frame:
+        (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
+        and dist(point, position) < 60, timeout=5)
+    before = await probe(host, "latch-state", latch)
+    assert before in ("true;false", "false;false"), before
+    after = "false;false" if before == "true;false" else "true;false"
+    for expected in (after, before):
+        assert await probe(guest, "guest-toggle", latch) == "pressed"
+        async with asyncio.timeout(5):
+            while await asyncio.gather(*(probe(seat, "latch-state", latch) for seat in (host, guest))) != [expected] * 2:
+                await asyncio.sleep(.05)
+    dumpster = await verify_observer_open(CROSSROADS, "Loot_Dumpster_BP_C_1")
+    return {"cabinet": cabinet, "dumpster": dumpster, "gas_lamps": gas_evidence, "lamps": evidence,
+            "other_lamp_stayed_unlit": adjacent, "latch": {"actor": latch, "initial": before, "toggled": after}}
 
 
 async def verify_streamed_switch(host, guest, pawn):
@@ -192,7 +266,7 @@ async def exercise(work, first, second, saved, streamed_switch=False, crossroads
             fixtures.enter_context(suite.installed_probe(game, mod="SilverfishPortableOilLampProbe",
                                                          fixture="portable_oil_lamp_probe.lua"))
         await suite.verify(work, first, second, saved, stock_warehouse_switch=True,
-                           crossroads_profile=crossroads_profile,
+                           crossroads_profile=crossroads_profile, stock_interaction_feedback=True,
                            oil_lamps_check=verify_oil_lamps,
                            streamed_switch_check=verify_streamed_switch if streamed_switch else None)
 

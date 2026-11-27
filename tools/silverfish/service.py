@@ -6228,16 +6228,16 @@ class Client:
                         await self.cancel_gameplay_snapshot()
                         if self.stock_interaction_scope() == scope:
                             self.gameplay.setdefault(native_loot.VEHICLE_LOCKS, {})[crate] = False
-                    if hinged and self.stock_interaction_scope() == scope:
+                    if self.stock_interaction_scope() == scope:
                         feedback = "picked" if row["unlocked"] == "1" else "broken"
+                        command = "native-stock-door-lockpick-feedback" if hinged else "native-loot-lockpick-feedback"
+                        event = "native_stock_door_lockpick_feedback" if hinged else "native_loot_lockpick_feedback"
                         try:
-                            view = await self.bridge.command("native-stock-door-lockpick-feedback", crate, feedback,
-                                                             timeout=1, update_status=False)
+                            view = await self.bridge.command(command, crate, feedback, timeout=1, update_status=False)
                         except (OSError, RuntimeError, TimeoutError) as error:
-                            self.control.event("native_stock_door_lockpick_feedback_unavailable", reason=str(error))
+                            self.control.event(event + "_unavailable", actor=crate, reason=str(error))
                         else:
-                            self.control.event("native_stock_door_lockpick_feedback_played", actor=crate,
-                                               message=view["ack"]["message"])
+                            self.control.event(event + "_played", actor=crate, message=view["ack"]["message"])
                 self.control.event("native_guest_lockpick", sequence=sequence, milliseconds=elapsed, **result)
             except (ValueError, OSError, RuntimeError) as error:
                 self.control.event("native_guest_lockpick_rejected", sequence=sequence, reason=str(error))

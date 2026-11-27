@@ -19,6 +19,13 @@ end
 profiles.Prop_Lantern_01_C = {
     path = props .. "Prop_Lantern_01.Prop_Lantern_01_C", power = "Lit", candle = true, lantern = true,
 }
+profiles.Prop_GassLight_01_C = {
+    path = props .. "Prop_GassLight_01.Prop_GassLight_01_C", power = "Lit", candle = true, gas_lamp = true,
+}
+profiles.DoorLatch_BP_C = {
+    path = "/Game/Assets/StaticMeshes/Doors/DoorLatch_BP.DoorLatch_BP_C", latch = true,
+}
+local linked_door_class = "/Game/Assets/StaticMeshes/Doors/BasicDoor_Master.BasicDoor_Master_C"
 local profiles_by_class = {}
 for kind, profile in pairs(profiles) do
     profile.path = profile.path or root .. kind:sub(1, -3) .. "." .. kind
@@ -66,7 +73,16 @@ local function parts(actor, scope, level)
     if not level then return end
     local class = actor:GetClass()
     local profile = inherited_profile(class)
-    if not profile or type(actor[profile.power or "Powered"]) ~= "boolean" then return end
+    if not profile then return end
+    if profile.latch then
+        local door, box, dial = actor.Door, actor.Box_Knob, actor.SM_Prop_Kitchen_Grill_01_Dial_01
+        local base = StaticFindObject(linked_door_class)
+        if not valid(base) or not qualified(door, scope) or not door:IsA(base)
+            or type(door.Locked) ~= "boolean" or type(door.Open) ~= "boolean" or type(door.LockBroken) ~= "boolean"
+            or not valid(box) or not same(box:GetOwner(), actor) or not valid(dial) or not same(dial:GetOwner(), actor) then return end
+        return {actor = actor, level = level, box = box, latch = true, door = door, lever = dial}
+    end
+    if type(actor[profile.power or "Powered"]) ~= "boolean" then return end
     local box = profile.candle and actor.Sphere or actor.Box
     if not valid(box) or not same(box:GetOwner(), actor) then return end
     if profile.candle then
@@ -75,7 +91,7 @@ local function parts(actor, scope, level)
             or not valid(light) or not same(light:GetOwner(), actor)
             or not valid(flame) or not same(flame:GetOwner(), actor) then return end
         return {actor = actor, level = level, box = box, mesh = mesh, light = light, flame = flame, power = profile.power,
-            candle = true, lantern = profile.lantern}
+            candle = true, lantern = profile.lantern, gas_lamp = profile.gas_lamp}
     end
     if profile.power then return {actor = actor, level = level, box = box, power = profile.power, television = profile.television} end
     local lever, panel = actor[profile[1]], actor[profile[2]]
@@ -185,9 +201,10 @@ local function census(state, phase)
                             if entry.power then
                                 entries[name] = {actor = actor, address = actor:GetAddress(), level = level,
                                     class = actor:GetClass(), power = entry.power,
-                                    path = path, candle = entry.candle, lantern = entry.lantern, light = entry.light}
+                                    path = path, candle = entry.candle, lantern = entry.lantern, gas_lamp = entry.gas_lamp,
+                                    light = entry.light, flame = entry.flame}
                             else
-                                refresh_lights(entry, world, actor.Powered)
+                                if not entry.latch then refresh_lights(entry, world, actor.Powered) end
                                 entries[name] = entry
                             end
                         end
@@ -205,7 +222,10 @@ local function find_switch(state, phase, name)
     local entry = census(state, phase)[name]
     if not entry then return end
     if not entry.power then
-        if qualified(entry.actor, state.world) then return entry end
+        if qualified(entry.actor, state.world) then
+            if entry.latch then return parts(entry.actor, state.world) end
+            return entry
+        end
         return
     end
     local actor = StaticFindObject(entry.path)
@@ -240,8 +260,19 @@ local function suppress_candle_overlap(name, sphere)
     end
 end
 
+local function gas_flame_missing(entry, powered)
+    return powered and valid(entry.flame) and not entry.flame:IsActive()
+end
+
 function switches.read_row(entry, name, state, phase, row, native_world_address)
-    if entry.power then
+    if entry.latch then
+        if qualified(entry.actor, state.world, entry.level) and qualified(entry.door, state.world)
+            and valid(entry.lever) then
+            local angles = entry.lever.RelativeRotation
+            return row("native-stock-switch", state.map, name, bit(entry.door.Locked),
+                angles.Pitch, angles.Yaw, angles.Roll, "-", "-")
+        end
+    elseif entry.power then
         local actor = entry.actor
         local powered, broken
         if native_world_address then
@@ -261,7 +292,8 @@ function switches.read_row(entry, name, state, phase, row, native_world_address)
             end
             local replacement = parts(actor, state.world)
             if not replacement then return end
-            entry.actor, entry.address, entry.light = actor, actor:GetAddress(), replacement.light
+            entry.actor, entry.address = actor, actor:GetAddress()
+            entry.light, entry.flame = replacement.light, replacement.flame
         end
         if powered == nil then
             powered = actor[entry.power]
@@ -277,17 +309,17 @@ function switches.read_row(entry, name, state, phase, row, native_world_address)
             if entry.lantern then
                 lamp_state = entry.retired and "removed" or broken and "broken" or "intact"
                 if lamp_state ~= "intact" then powered = false end
-                if phase == "connected" and lamp_state == "intact" and valid(entry.light)
-                    and entry.light:IsVisible() ~= powered then
-                    panel = "lamp-visual-mismatch"
-                end
+            end
+            if phase == "connected" and (entry.gas_lamp or lamp_state == "intact") and valid(entry.light)
+                and (entry.light:IsVisible() ~= powered or entry.gas_lamp and gas_flame_missing(entry, powered)) then
+                panel = "lamp-visual-mismatch"
             end
             if entry.row_power ~= powered or entry.row_lamp ~= lamp_state or entry.row_panel ~= panel
                 or entry.row_encoder ~= row or entry.row_map ~= state.map then
                 if lamp_state then
                     entry.status_row = row("native-stock-switch", state.map, name, bit(powered), 0, 0, 0, panel, "-", lamp_state)
                 else
-                    entry.status_row = row("native-stock-switch", state.map, name, bit(powered), 0, 0, 0, "-", "-")
+                    entry.status_row = row("native-stock-switch", state.map, name, bit(powered), 0, 0, 0, panel, "-")
                 end
                 entry.row_power, entry.row_lamp, entry.row_panel = powered, lamp_state, panel
                 entry.row_encoder, entry.row_map = row, state.map
@@ -369,11 +401,20 @@ end
 local function project(entry, powered, angles, lights)
     local actor, lever = entry.actor, entry.lever
     if entry.candle then
-        if actor.Lit ~= powered or entry.lantern and entry.light:IsVisible() ~= powered then
+        if entry.gas_lamp then
+            if actor.Lit ~= powered or entry.light:IsVisible() ~= powered or gas_flame_missing(entry, powered) then
+                actor:Set_LitUnlit(powered, false)
+            end
+        elseif actor.Lit ~= powered or entry.lantern and entry.light:IsVisible() ~= powered then
             actor:SetLitUnlit(powered, false)
         end
         suppress_candle_overlap(actor:GetFullName(), entry.box)
         if actor.Lit ~= powered or entry.light:IsVisible() ~= powered then error("stock_switch_candle_unverified", 0) end
+        return
+    end
+    if entry.latch then
+        -- The hinged door publisher owns lock state. The latch projects its dial here.
+        lever:K2_SetRelativeRotation(angles, false, {}, true)
         return
     end
     if entry.power then
@@ -410,18 +451,29 @@ function switches.command(fields, state, phase)
         if entry.lantern and entry.actor.Broken_0 == true then error("stock_switch_lamp_broken", 0) end
         local pawn = guest_save.exact_item_context(state, phase, fields[4])
         if not valid(pawn) or pawn.Dead ~= false then error("stock_switch_guest_unavailable", 0) end
+        if entry.latch then
+            local door = entry.door
+            if ignite or not door:HasAuthority() then error("stock_switch_unavailable", 0) end
+            local before = door.Locked
+            local expected = before
+            if not door.Open and not door.LockBroken then expected = not before end
+            entry.actor:SendInteractionToActor(pawn, entry.box)
+            if not valid(door) or door.Locked ~= expected then error("stock_switch_toggle_unverified", 0) end
+            return "stock switch interaction dispatched", entry
+        end
         local power = entry.power or "Powered"
         local before = entry.actor[power]
+        local toggles = not entry.candle or entry.gas_lamp
         -- The guest routes the exact stock interaction component it just hit.
         if not valid(entry.box) or not same(entry.box:GetOwner(), entry.actor) then error("stock_switch_unavailable", 0) end
         if entry.television and entry.actor.Working ~= true then error("stock_switch_unavailable", 0) end
         if ignite then
             if not entry.lantern then error("stock_switch_unavailable", 0) end
             if not before then entry.actor:SetOnFire(5, 0.2, pawn) end
-        elseif not entry.candle or before then
+        elseif toggles or before then
             entry.actor:SendInteractionToActor(pawn, entry.box)
         end
-        local expected = ignite or not entry.candle and not before
+        local expected = ignite or toggles and not before
         if not valid(entry.actor) or entry.actor[power] ~= expected then error("stock_switch_toggle_unverified", 0) end
         return "stock switch interaction dispatched", entry
     end
