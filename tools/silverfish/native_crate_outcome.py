@@ -22,7 +22,7 @@ class Refused(RuntimeError):
 
 
 def supported(crate, area):
-    return (isinstance(crate, str) and native_loot.CRATES.get(crate) == area
+    return (isinstance(crate, str) and isinstance(area, str) and native_loot.CRATES.get(crate) == area
             and not native_loot.lockable_container(crate, area) and not native_loot.random_lid(crate)
             and not crate.startswith("ElectronicLocker_01_BP_C "))
 
@@ -106,7 +106,10 @@ async def accept(host, bridge, character, target, operation):
                       for value in (item["guid"], item["class_path"], text))
     host.native_checkpoint_unsafe = True
     try:
-        proof = await bridge.command(ADOPT, pawn, crate, slot, *arguments, timeout=4, update_status=False)
+        try:
+            proof = await bridge.command(ADOPT, pawn, crate, slot, *arguments, timeout=2, update_status=False)
+        except TimeoutError:
+            proof = await bridge.command(ADOPT, pawn, crate, slot, *arguments, timeout=2, update_status=False)
     except Refused as error:
         if not str(error).startswith("mutation_unverified_"):
             host.native_checkpoint_unsafe = False

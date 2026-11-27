@@ -7195,7 +7195,7 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
         while (motion := await portable_probe_command(guest.bridge, "portable-crate", "motion")) == "pending":
             await asyncio.sleep(.05)
     motion_ms, collision_safe, stage = motion.split(",")
-    assert 0 < float(motion_ms) < 200 and collision_safe == "true" and stage in {"preview", "confirmed"}, motion
+    assert 0 < float(motion_ms) < 200 and collision_safe == "true" and stage in {"preview", "confirmed", "stock"}, motion
     await asyncio.sleep(.65)  # Let the compatible status copies arrive after the ring receipt.
 
     async def events(run, state, name):
@@ -8869,8 +8869,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             }
         if stock_crate_ring and not crossroads_profile or compact_crate_status:
             crate_probe = (Path(__file__).with_name("fixtures") / "portable_crate_input_probe.lua").read_text(encoding="utf-8")
-            probes.enter_context(portable_main_overlay(second_game, lambda script:
-                script + "\n;(function()\n" + crate_probe + "\nend)()\n"))
+            for game in games:
+                probes.enter_context(portable_main_overlay(game, lambda script:
+                    script + "\n;(function()\n" + crate_probe + "\nend)()\n"))
         if (stock_use or stock_drop or stock_inventory_fall or stock_split or stock_equip or stock_nearby or container_nearby
                 or guest_stash_memory or nonmirrored_startup or manage_saves):
             for game in games:

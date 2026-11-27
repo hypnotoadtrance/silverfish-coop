@@ -32,14 +32,23 @@ local function sample_motion()
         end
     end
     local confirmed = crate.Looted == true
+    local function difference(value, previous) return math.abs((value - previous + 180) % 360 - 180) end
     if confirmed and not duplicate then
-        track.done = panel:IsVisible() and valid(box) and box:GetCollisionEnabled() == 0
+        local pose = panel.RelativeRotation
+        local age = (track.statics:GetRealTimeSeconds(track.world) - track.pressed) * 1000
+        local moved = math.max(difference(pose.Pitch, track.rotation.Pitch), difference(pose.Yaw, track.rotation.Yaw),
+            difference(pose.Roll, track.rotation.Roll)) > 1
+        if panel:IsVisible() and (not valid(box) or box:GetCollisionEnabled() == 0) and moved then
+            if not track.elapsed then
+                track.stage, track.safe, track.elapsed = "stock", true, age
+            end
+            track.done = true
+        end
         return
     end
     if not duplicate or track.elapsed then return end
     local point = duplicate.RelativeRotation
     local before = track.rotation
-    local function difference(value, previous) return math.abs((value - previous + 180) % 360 - 180) end
     if math.max(difference(point.Pitch, before.Pitch), difference(point.Yaw, before.Yaw),
         difference(point.Roll, before.Roll)) <= 1 then return end
     local original = panel.RelativeRotation

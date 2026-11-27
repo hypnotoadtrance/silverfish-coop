@@ -6220,16 +6220,24 @@ class Client:
         settlement = asyncio.get_running_loop().create_future()
         self.provisional_crate_rolls[crate] = scope, local_roll, settlement
         self.world_loot_wake.set()
+        self.control.event("native_loot_locally_rolled", crate=crate, operation_id=operation,
+                           item_count=len(local_roll["items"]))
         settled = None
         try:
-            result = await self.gameplay_action(native_crate_outcome.REPORT, operation, report)
+            try:
+                result = await self.gameplay_action(native_crate_outcome.REPORT, operation, report)
+            except ValueError as error:
+                if (not str(error).startswith("native_loot_import_") or self.stock_interaction_scope() != scope):
+                    raise
+                result = await self.gameplay_action("native-loot-open", operation, crate)
             accepted = result.get("native_loot_roll")
             if not isinstance(accepted, dict) or (accepted.get("map"), accepted.get("crate")) != (area, crate):
                 raise RuntimeError("The host returned a different crate outcome")
             await self.cancel_gameplay_snapshot()
             if self.stock_interaction_scope() == scope:
                 self.gameplay.setdefault(native_loot.STATE_KEY, {})[crate] = accepted
-                settled = accepted.get("id")
+                if accepted.get("id") == local_roll["id"] and accepted.get("items") == local_roll["items"]:
+                    settled = local_roll["id"]
             return result
         finally:
             settlement.set_result(settled)

@@ -446,14 +446,10 @@ local function item_row(item, status_row)
         table.unpack(item.transform))
 end
 
-local function supports_outcome(profile)
-    return profile and not profile.lockable and not profile.random_lid and not profile.electronic
-end
-
 local function local_outcome(fields, state, phase)
     local profile = loot.profile(state.map, fields[3])
     local sequence = math.tointeger(fields[4])
-    if not enabled or phase ~= "connected" or #fields ~= 4 or not supports_outcome(profile) or
+    if not enabled or phase ~= "connected" or #fields ~= 4 or not loot.supports_outcome(profile) or
         not sequence or sequence <= 0 or type(SilverfishOpenNativeGuestLootCrate) ~= "function" or
         type(SilverfishExportNativeLootEscrow) ~= "function" then return "unavailable" end
     local local_save, pawn = require("native_save_scope").bind_guest(state, phase)
@@ -472,9 +468,10 @@ local function local_outcome(fields, state, phase)
         if reply[7] then error(reply[2], 0) end
         return "unavailable"
     end
-    local outputs, items = verified_products({crate = crate, world = state.world}, reply)
+    local scope = {crate = crate, world = state.world, profile = profile}
+    local outputs, items = verified_products(scope, reply)
     local exported, rows = pcall(function()
-        capture_rows({crate = crate}, pool, outputs, items)
+        capture_rows(scope, pool, outputs, items)
         local ok, reason, rows = SilverfishExportNativeLootEscrow(pool:GetAddress())
         if not ok or #rows ~= #items then error(reason, 0) end
         for index, row in ipairs(rows) do
@@ -491,9 +488,15 @@ end
 
 local function adopt_outcome(fields, state, phase)
     local pawn, crate, slot = fields[3], fields[4], fields[5]
-    if not enabled or phase ~= "hosting" or not valid_slot(slot) or not supports_outcome(loot.profile(state.map, crate))
+    if not enabled or phase ~= "hosting" or not valid_slot(slot) or not loot.supports_outcome(loot.profile(state.map, crate))
         or #fields < 5 or (#fields - 5) % 3 ~= 0 or type(SilverfishImportNativeLootEscrow) ~= "function" then
         error("native_loot_outcome_scope_unavailable", 0)
+    end
+    local prior = pending_escrows[slot]
+    if prior then
+        if not prior.retired and prior.outcome_crate == crate and prior.outcome_pawn == pawn and
+            actions.pending_escrow(state.world, slot) then return "adopted" end
+        error("native_loot_outcome_escrow_conflict", 0)
     end
     local scope = loot.qualify(state, phase, pawn, crate, true)
     if (#fields - 5) / 3 > scope.profile.capacity then error("native_loot_outcome_capacity", 0) end
@@ -520,6 +523,7 @@ local function adopt_outcome(fields, state, phase)
         error("mutation_unverified_native_loot_outcome: " .. tostring(failure), 0)
     end
     pending_escrows[slot].cache_after_commit = #fields > 5
+    pending_escrows[slot].outcome_crate, pending_escrows[slot].outcome_pawn = crate, pawn
     return "adopted"
 end
 

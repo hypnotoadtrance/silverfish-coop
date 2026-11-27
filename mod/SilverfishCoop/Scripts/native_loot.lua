@@ -47,6 +47,10 @@ function loot.profile(map, name)
     return profile and profile.map == map and profile or nil
 end
 
+function loot.supports_outcome(profile)
+    return profile and not profile.lockable and not profile.random_lid and not profile.electronic
+end
+
 local function valid(value)
     return value ~= nil and value ~= false and value:IsValid()
 end

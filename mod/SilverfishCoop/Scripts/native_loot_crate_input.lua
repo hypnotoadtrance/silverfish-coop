@@ -921,7 +921,9 @@ end
 local function publish_stock_press(state, status_row, index, profile, pawn, sequence, pried, guest)
     if pried or guest ~= 0 or sequence == fixture_sequences[index] or sequence == published[index] then return end
     published[index] = sequence
-    pcall(preview_open, state, profile, sequence)
+    if not state.server or not loot.supports_outcome(profile) or type(SilverfishOpenNativeGuestLootCrate) ~= "function" then
+        pcall(preview_open, state, profile, sequence)
+    end
     if type(SilverfishEnqueueLocalBridgeInput) == "function" then
         -- Status remains the fallback if the in-process input ring is detached or full.
         SilverfishEnqueueLocalBridgeInput(status_row("loot-crate-open", state.map, profile.name, pawn, sequence) .. "\n")
