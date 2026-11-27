@@ -72,6 +72,8 @@ The Long Dark's Sky Co-Op Reborn publishes door state after the local stock inte
 
 Use the same player-facing checks when moving an action to the acting seat. The player should get stock feedback at input time. A nearby teammate should see the resulting state during play. A returning player should receive the current world state without replaying the original animation or sound. For a shared reward, have both players try to claim it and check that the accepted result appears once. Keep these checks in the same campaign when the test can reuse the existing host and guest.
 
+Use a delayed reply in the interaction checks to measure two distinct intervals. Measure from input to the acting player's stock response, then measure from the recorded result to the teammate's update. For doors and switches, check whether the actor can keep interacting while the first report is in flight. For loot, retry a settled claim and verify that exactly one character received the item and that it was removed from the world on both seats.
+
 ## Compatibility with game updates and other mods
 
 - Discover quest offers, objective items, progress, and reward data from the host’s active stock boards and journal. Use stock acceptance and completion paths for quests with the same recipe. Publish the resulting journal and campaign changes to the party.
