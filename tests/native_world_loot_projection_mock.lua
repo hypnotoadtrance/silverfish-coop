@@ -111,6 +111,26 @@ assert(play_count == 1 and loads == 1)
 assert(projection.command(frame, state, "connected") == "stock world loot synchronized")
 assert(present(other_operation, "connected") == "retired|" .. other_operation)
 assert(play_count == 2 and loads == 1)
+local grant = require("native_inventory_grant")
+local apply = grant.project_pickup
+local guid = string.rep("A", 32)
+local imported = 0
+grant.project_pickup = function(_, phase, revision, received_guid, class, text, previous)
+    assert(phase == "connected" and revision == epoch and received_guid == guid)
+    assert(class == ammo and text == "(Item=1)" and previous == "-")
+    imported = imported + 1
+    return "added"
+end
+local receipt = {"request", "native-world-loot-present-claim", epoch, good, area, epoch, "-", guid, ammo, "(Item=1)", "-"}
+assert(projection.command(receipt, state, "connected") == "retired||added")
+assert(imported == 1)
+assert(projection.command(frame, state, "connected") == "stock world loot synchronized")
+receipt[3] = other_operation
+assert(projection.command(receipt, state, "connected") == "world_loot_retirement_scope_unavailable||deferred")
+assert(imported == 1)
+grant.project_pickup = apply
+assert(projection.command({"request", "native-world-loot-retire", epoch, good}, state, "connected")
+    == "stock world loot retired")
 local cash = require("authored_cash_catalog")[1]
 local cash_operation = string.rep("2", 32)
 pawn.HasAuthority = function() return false end

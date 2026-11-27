@@ -783,6 +783,48 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
             f"{operation}|{class_path}|1|2|3", timeout=3)
         client.control.event.assert_any_call("native_pickup_sound_played", operation_id=operation, map=OBSERVATORY)
 
+    async def test_projected_pickup_applies_exact_item_after_world_snapshot_retires_replica(self):
+        epoch, projection_epoch, identity, operation = (letter * 32 for letter in "abcd")
+        guid = "A" * 32
+        character = uuid.UUID(int=1)
+        class_path = "/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C"
+        roll = {"guid": guid, "class_path": class_path, "claimed_by": str(character)}
+        inventory = {"guid": guid, "text": "(Item=1)", "map": OBSERVATORY, "epoch": epoch,
+                     "owner": str(character), "revision": 1}
+        request_sent, reply_ready = asyncio.Event(), asyncio.Event()
+
+        async def request(payload, *, timeout):
+            self.assertEqual(payload["target"], guid)
+            request_sent.set()
+            await reply_ready.wait()
+            return {"ok": True, service.native_stock_enemy_drops.CLAIM_KEY: roll,
+                    service.native_inventory_grant.PICKUP: inventory}
+
+        client = self.guest(AsyncMock(side_effect=request))
+        client.transport.connected = True
+        client.host_session, client.zone_epoch, client.expected_zone = "session", epoch, OBSERVATORY
+        client.invite["character_id"] = str(character)
+        client.last_game = {"state": "connected", "map": OBSERVATORY, native_world_loot.PRESENTATION: True,
+                            "save_scope": character.hex, "pawns": {"local": {"name": "guest pawn"}}}
+        client.world_loot.epoch = projection_epoch
+        client.world_loot.seat = "connected", OBSERVATORY, "guest pawn"
+        client.world_loot.items[identity] = native_world_loot.Item(
+            identity, class_path, {}, service.native_stock_enemy_drops.CLAIM, guid, 1)
+        client.bridge.command = AsyncMock(return_value={"ack": {"message": "retired||added"}})
+
+        async with asyncio.TaskGroup() as tasks:
+            target = f"world-loot:{projection_epoch}:{identity}:2"
+            claimed = tasks.create_task(client.apply_stock_interaction(client.stock_interaction_scope(), operation, target))
+            await asyncio.wait_for(request_sent.wait(), .5)
+            # The claim is visible to the snapshot stream before the interaction reply arrives.
+            client.world_loot.items.clear()
+            reply_ready.set()
+        self.assertEqual(claimed.result(), {service.native_stock_enemy_drops.CLAIM_KEY: roll})
+        client.bridge.command.assert_awaited_once_with(
+            native_world_loot.PRESENT_CLAIM, projection_epoch, identity, OBSERVATORY, epoch,
+            "-", guid, class_path, "(Item=1)", "-", timeout=3)
+        self.assertIsNone(client.guest_ui.pending_stock_refresh)
+
     async def test_queued_stock_interactions_dispatch_before_delayed_flashlight_projection(self):
         session, epoch, operation = "a" * 32, "b" * 32, "c" * 32
         pawn = f"Player_FP_C {OBSERVATORY}.Observitory_P:PersistentLevel.Player_FP_C_0"

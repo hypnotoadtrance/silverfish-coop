@@ -497,10 +497,13 @@ class Projection:
         presented = await self.present_claim(host, bridge, target, operation, cue, generation=host.control.generation)
         return await self.retire_claim(bridge, game, target) if presented is None else presented
 
-    async def present_claim(self, seat, bridge, target, operation, cue, *, generation, inventory=()):
+    async def present_claim(self, seat, bridge, target, operation, cue, *, generation, inventory=(), source=None):
         game, playback, control, audio_epoch = seat.last_game, seat.pickup_playback, seat.control, seat.zone_epoch
         epoch, identity = target[:2]
+        # A snapshot can remove the replica while this guest's claim reply is still in flight.
         item = self.items.get(identity)
+        if item is None and inventory and source is not None and source.identity == identity:
+            item = source
         if (bridge.local_bridge is None or game.get(PRESENTATION) is not True or epoch != self.epoch
                 or not item or identity in self.moving or (not isinstance(cue, dict) and not inventory)):
             return None

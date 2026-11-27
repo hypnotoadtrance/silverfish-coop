@@ -474,7 +474,9 @@ local function present_claim(fields, state, phase)
     local reply = status .. "|" .. heard
     if typed then
         local ok, inventory
-        if visible then
+        -- The worker verifies the typed receipt against the original pickup and visit.
+        -- A completed world frame may already have removed its replica.
+        if visible or (removed and not entry) then
             ok, inventory = pcall(inventory_grant.project_pickup, state, phase, audio_epoch, table.unpack(fields, 8, 11))
         end
         reply = reply .. "|" .. (ok and inventory or "deferred")

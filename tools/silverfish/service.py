@@ -7368,6 +7368,7 @@ class Client:
     async def apply_stock_interaction(self, scope, operation, target):
         if loot := native_world_loot.target_parts(target):
             action, claim = self.world_loot.claim_target(self.last_game, loot)
+            source = self.world_loot.items.get(loot[1])
             if action == native_loot.CLAIM:
                 crate = claim.partition("@")[2]
                 pending = self.provisional_crate_rolls.get(crate)
@@ -7389,9 +7390,13 @@ class Client:
                     game = self.last_game
                     projected = None
                     claimed = result.get("native_loot_claim") or result.get(native_stock_enemy_drops.CLAIM_KEY)
-                    if isinstance(inventory, dict) and isinstance(claimed, dict):
+                    if isinstance(inventory, dict) and isinstance(claimed, dict) and source is not None:
+                        guid = claimed.get("guid")
+                        reported = f"{guid}@{result.get('native_loot_crate')}" if action == native_loot.CLAIM else guid
+                        if reported != claim or claimed.get("class_path") != source.class_path:
+                            raise RuntimeError("The confirmed pickup did not match the requested world item")
                         present = partial(self.world_loot.present_claim, self, self.bridge, loot, operation, cue,
-                                          generation=scope[0])
+                                          generation=scope[0], source=source)
                         projected, applied = await self.guest_ui.present_pickup(
                             self, scope, operation, claimed, inventory, present)
                     if projected is None and self.stock_interaction_scope() == scope:
