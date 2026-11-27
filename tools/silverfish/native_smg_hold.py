@@ -8,6 +8,7 @@ import uuid
 
 from . import native_inventory, party
 from .guest_weapon_profiles import HELD_FIRE_PROJECTILE_COUNTS, MAX_HELD_FIRE_ROUNDS, STOCK_HELD_FIRE_MAGAZINES
+from .local_bridge import LocalCommandNotSubmitted
 from .native_gold import valid_guid
 from .native_guest_weapon import valid_shot_view
 from .travel import OBSERVATORY
@@ -71,6 +72,7 @@ class Authority:
         self.strokes: dict[str, Stroke] = {}
         self.frames: dict[int, dict] = {}
         self.used: dict[str, None] = {}
+        self.pending_stops: set[str] = set()
 
     async def authenticated(self, guest_id: str, target: str | None) -> dict:
         await self.lock.acquire()
@@ -184,14 +186,19 @@ class Authority:
             if edge in {"release", "cancel"} or token in self.used:
                 return {KEY: {"status": "inactive"}}
             raise party.RuleError("native_guest_held_fire_exact_stroke_required")
+        renew = (edge == "renew" and character not in self.pending_stops
+                 and self._eligible(character, current.area, current.pawn, guid))
         try:
             proof = self._observed(current)
             if proof["status"] in FINISHED:
                 return {KEY: proof}
-            renew = edge == "renew" and self._eligible(character, current.area, current.pawn, guid)
             snapshot = await self.bridge.held_fire_command("renew" if renew else "stop", str(current.serial),
                                                            *((str(LEASE_MS),) if renew else ()))
             return {KEY: self._update(current, snapshot)}
+        except LocalCommandNotSubmitted as error:
+            if not renew:
+                self.pending_stops.add(character)
+            raise party.RuleError(str(error)) from error
         except (OSError, RuntimeError, ValueError):
             self._fail_closed()
             raise
@@ -203,6 +210,8 @@ class Authority:
             raise party.RuleError("native_guest_held_fire_scope_unavailable")
         try:
             snapshot = await self.bridge.held_fire_command("start", pawn, guid, str(LEASE_MS), *view)
+        except LocalCommandNotSubmitted as error:
+            raise party.RuleError(str(error)) from error
         except RuntimeError as error:
             if str(error) in {"authoritative_guest_pawn_required", "detached_guest_save_required",
                               "authenticated_guest_detached_save_required", "native_guest_smg_hold_ineligible",
@@ -242,8 +251,15 @@ class Authority:
                     return
                 for character, stroke in self.strokes.items():
                     frame = self._observed(stroke)
-                    if frame["status"] in LIVE and (stop_all or not self._eligible(character, stroke.area, stroke.pawn, stroke.guid)):
-                        frame = self._update(stroke, await self.bridge.held_fire_command("stop", str(stroke.serial)))
+                    if frame["status"] in LIVE and (stop_all or character in self.pending_stops
+                                                     or not self._eligible(character, stroke.area, stroke.pawn, stroke.guid)):
+                        try:
+                            snapshot = await self.bridge.held_fire_command("stop", str(stroke.serial))
+                        except LocalCommandNotSubmitted:
+                            if stop_all:
+                                raise
+                            continue
+                        frame = self._update(stroke, snapshot)
                     if frame["status"] in FINISHED:
                         finished[character] = frame
                     elif stop_all:
@@ -255,6 +271,7 @@ class Authority:
             for character, frame in finished.items():
                 del self.strokes[character]
                 del self.frames[frame["serial"]]
+                self.pending_stops.discard(character)
                 event = "native_guest_smg_hold_committed" if character in durable else "native_guest_smg_hold_accepted"
                 self.host.control.event(event, character_id=character, revision=revision, **frame)
         except (OSError, RuntimeError, ValueError):

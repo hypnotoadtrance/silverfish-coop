@@ -5,6 +5,7 @@ import time
 import uuid
 
 from . import guest_weapon_profiles, native_guest_melee, native_inventory, party
+from .local_bridge import LocalCommandNotSubmitted
 
 GUEST_ACTIONS = ("native-guest-weapon-inspect", "native-guest-weapon-equip", "native-guest-weapon-fire",
                  "native-guest-weapon-reload")
@@ -112,7 +113,7 @@ async def select_equipment(host, bridge, character: str, target: str | None) -> 
             snapshot = await bridge.command(SELECT_EQUIPMENT, pawn, guid, timeout=3)
         except RuntimeError as error:
             reason = str(error)
-            if reason not in _PREFLIGHT_REFUSALS:
+            if not isinstance(error, LocalCommandNotSubmitted) and reason not in _PREFLIGHT_REFUSALS:
                 raise
             host.native_checkpoint_unsafe = False
             host.control.event("native_guest_weapon_preflight_refused", action=SELECT_EQUIPMENT, map=area, reason=reason)
@@ -297,7 +298,7 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
                 snapshot = await bridge.command(action, pawn, guid, *extra, timeout=5)
             except RuntimeError as error:
                 reason = str(error)
-                if reason not in _PREFLIGHT_REFUSALS:
+                if not isinstance(error, LocalCommandNotSubmitted) and reason not in _PREFLIGHT_REFUSALS:
                     raise
                 if mutates:
                     host.native_checkpoint_unsafe = False
@@ -306,6 +307,9 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
         else:
             try:
                 snapshot = await bridge.command("native-bandit-shot-fixture", bandit_fixture, pawn, guid, timeout=5)
+            except LocalCommandNotSubmitted as error:
+                host.native_checkpoint_unsafe = False
+                raise party.RuleError(str(error)) from error
             except RuntimeError as error:
                 reason = str(error)
                 if reason.startswith(("native_bandit_shot_", "guest_weapon_", "Stock Bandit aim could not be verified")) or reason in {

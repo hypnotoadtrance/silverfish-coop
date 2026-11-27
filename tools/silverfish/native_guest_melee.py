@@ -8,6 +8,7 @@ import uuid
 
 from . import native_authored_pickup, native_inventory, party
 from .enemy_loot_profiles import BY_ACTOR, BY_MAP
+from .local_bridge import LocalCommandNotSubmitted
 from .native_gold import valid_guid
 from .travel import CROSSROADS, DEAD_BRIDGE
 
@@ -303,7 +304,7 @@ class AuthorityInput:
         try:
             snapshot = await bridge.command(*command, timeout=3)
         except RuntimeError as error:
-            if str(error).startswith("native_guest_melee_"):
+            if isinstance(error, LocalCommandNotSubmitted) or str(error).startswith("native_guest_melee_"):
                 raise party.RuleError(str(error)) from error
             self._fail(str(error))
         except (OSError, ValueError, TimeoutError) as error:
@@ -432,7 +433,7 @@ async def perform(host, bridge, action: str, character: str, guid: str, operatio
         try:
             snapshot = await bridge.command(action if action == EQUIP else action + "-start", pawn, guid, timeout=5)
         except RuntimeError as error:
-            if str(error).startswith("native_guest_melee_"):
+            if isinstance(error, LocalCommandNotSubmitted) or str(error).startswith("native_guest_melee_"):
                 host.native_checkpoint_unsafe = False
                 raise party.RuleError(str(error)) from error
             raise

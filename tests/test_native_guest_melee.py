@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import native_authored_pickup as pickup, native_guest_melee as melee, party
+from tools.silverfish.local_bridge import LocalCommandNotSubmitted
 from tools.silverfish.runtime import Bridge
 from tools.silverfish.service import Client
 from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, OBSERVATORY, REFINERY
@@ -313,6 +314,29 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
             (melee.INPUT + "-start", "exact pawn", GUID, "tap"),
             (melee.INPUT + "-edge", "3", "tap"),
         ])
+        host.checkpoint_native.assert_not_awaited()
+
+    async def test_unsubmitted_melee_press_can_be_retried_without_mutation_or_receipt(self):
+        host = self.host()
+        host.zone_epoch = "epoch"
+        pawn = "exact pawn"
+        host.last_game["native_guest_equipped_weapons"] = {pawn: {"kind": "old-pipe", "guid": GUID}}
+        handler = melee.AuthorityInput(host)
+        press = dict(map=CROSSROADS, pawn=pawn, guid=GUID, serial=3, status="pending", presses=1, releases=0,
+                     contacts=0, hits=0, charged=0, combo=0)
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[LocalCommandNotSubmitted("queue busy"),
+                                                                 dict(host.last_game, **{melee.INPUT_KEY: press})]))
+        target = f"epoch@{GUID}@{'1' * 32}@press"
+        with patch.object(melee.native_inventory, "retain_guest_save", new=AsyncMock(return_value=True)):
+            with self.assertRaisesRegex(party.RuleError, "queue busy"):
+                await handler.request(bridge, "guest", target, OPERATION)
+            self.assertIsNone(handler.scope)
+            self.assertFalse(handler.receipts)
+            self.assertFalse(host.native_checkpoint_unsafe)
+            self.assertFalse(host.stopping)
+            self.assertEqual((await handler.request(bridge, "guest", target, OPERATION))[melee.INPUT_KEY], press)
+
+        self.assertEqual(bridge.command.await_count, 2)
         host.checkpoint_native.assert_not_awaited()
 
     async def test_exact_stroke_remains_bound_across_stock_combo_edges_without_checkpoint(self):

@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 import uuid
 
+from tools.silverfish.local_bridge import LocalCommandNotSubmitted
 from tools.silverfish.native_smg_hold import ACTION, AIM_ACTION, ALL, KEY, Authority, GuestInput, parse
 from tools.silverfish.runtime import Bridge, MAP
 
@@ -143,18 +144,56 @@ class GuestHeldInputBridgeTests(unittest.TestCase):
 
 
 class HeldFireAuthorityTests(unittest.IsolatedAsyncioTestCase):
-    async def test_cancelled_network_reply_keeps_the_host_trigger_receipt(self):
-        epoch, token = "d" * 32, "e" * 32
-        member = {"connected": True, "pawn": PAWN}
-        host = SimpleNamespace(
+    def host(self, member):
+        return SimpleNamespace(
             authenticated_guest=lambda _: ("guest-id", "guest-character"),
             native_recipients=lambda: {"guest-character": member},
             stopping=False, transitioning=False, native_checkpoint_unsafe=False, session_stop_reason=None,
-            zone_epoch=epoch, allowed_maps={MAP}, party={"wipe": None, "players": {}},
+            zone_epoch="d" * 32, allowed_maps={MAP}, party={"wipe": None, "players": {}},
             last_game={"state": "hosting", "map": MAP,
                        "native_guest_equipped_weapons": {PAWN: {"guid": GUID, "kind": "light-ar-01"}}},
             control=Mock(), checkpoint_native=AsyncMock(),
         )
+
+    async def test_unsubmitted_held_edges_keep_the_host_and_retry_an_exact_release(self):
+        host = self.host({"connected": True, "pawn": PAWN})
+        authority = Authority(host)
+        proof = {"map": MAP, "pawn": PAWN, "serial": 1, "guid": GUID, "rounds": 1,
+                 "projectiles": 1, "before": 3, "after": 2, "status": "active"}
+        active = {"map": MAP, ALL: {PAWN: proof}}
+        released = {"map": MAP, ALL: {PAWN: dict(proof, status="released")}}
+        authority.bridge = SimpleNamespace(held_fire_command=AsyncMock(side_effect=[
+            LocalCommandNotSubmitted("queue busy"), active, LocalCommandNotSubmitted("queue busy"),
+            LocalCommandNotSubmitted("queue still busy"), released,
+        ]))
+        target = "@".join((host.zone_epoch, GUID, "e" * 32))
+
+        with patch("tools.silverfish.native_smg_hold.native_inventory.retain_guest_save",
+                   new_callable=AsyncMock, return_value=True):
+            refused = await authority.authenticated("guest-id", target + "@press")
+            self.assertFalse(refused["ok"])
+            self.assertFalse(authority.strokes)
+            self.assertFalse(host.stopping)
+            self.assertTrue((await authority.authenticated("guest-id", target + "@press"))["ok"])
+
+        refused = await authority.authenticated("guest-id", target + "@release")
+        self.assertFalse(refused["ok"])
+        self.assertIn("guest-character", authority.strokes)
+        await authority.settle(authority.bridge)
+        self.assertIn("guest-character", authority.strokes)
+        await authority.settle(authority.bridge)
+
+        self.assertFalse(authority.strokes)
+        self.assertFalse(host.stopping)
+        self.assertFalse(host.native_checkpoint_unsafe)
+        self.assertEqual([call.args[0] for call in authority.bridge.held_fire_command.await_args_list],
+                         ["start", "start", "stop", "stop", "stop"])
+        host.checkpoint_native.assert_not_awaited()
+
+    async def test_cancelled_network_reply_keeps_the_host_trigger_receipt(self):
+        token = "e" * 32
+        member = {"connected": True, "pawn": PAWN}
+        host = self.host(member)
         authority = Authority(host)
         started = asyncio.Event()
         acknowledge = asyncio.Event()
@@ -171,7 +210,7 @@ class HeldFireAuthorityTests(unittest.IsolatedAsyncioTestCase):
             return {"map": MAP, ALL: {PAWN: proof}}
 
         authority.bridge = SimpleNamespace(held_fire_command=AsyncMock(side_effect=held_fire_command))
-        target = "@".join((epoch, GUID, token, "press"))
+        target = "@".join((host.zone_epoch, GUID, token, "press"))
         with patch("tools.silverfish.native_smg_hold.native_inventory.retain_guest_save",
                    new_callable=AsyncMock, return_value=True):
             request = asyncio.create_task(authority.authenticated("guest-id", target))

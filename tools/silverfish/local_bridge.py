@@ -25,6 +25,10 @@ def spatial_cue_matches(game: dict, receipt: dict) -> bool:
         game.get("state"), game.get("map"), pawn)
 
 
+class LocalCommandNotSubmitted(RuntimeError):
+    """The command was refused before receiving a native ticket."""
+
+
 class LocalBridge:
     def __init__(self, library):
         self._open = library.SilverfishBridgeOpenV1
@@ -204,11 +208,11 @@ class LocalBridge:
 
     async def command(self, payload: bytes, timeout: float, *, skip_if_busy: bool = False) -> str:
         if skip_if_busy and self._lock.locked():
-            raise RuntimeError("The local co-op command lane is busy")
+            raise LocalCommandNotSubmitted("The local co-op command lane is busy")
         async with self._lock:
             ticket = self._submit(payload, len(payload))
             if not ticket:
-                raise RuntimeError("The game could not queue the local co-op command")
+                raise LocalCommandNotSubmitted("The game could not queue the local co-op command")
             try:
                 delay = max(1, min(120000, int(timeout * 1000)))
                 size = await asyncio.to_thread(self._wait, ticket, delay)
