@@ -60,7 +60,7 @@ The public list shows the host’s mod version. Incompatible or unknown builds a
 
 Steam relay carries the connection without a publicly reachable UDP port. The host remains the authority for the same campaign and character roster. The lobby ends when the host closes the campaign. Direct IP remains available through the title menu.
 
-The group uses Steam joining for its playtests and reports that ordinary joining works. Automated tests cover the new lobby choices, the friend join callback, and selection from the public browser. A later two-PC test found that the Public browser missed a lobby the guest could join by invite. The discovery fix passed an automated check and needs a two-account Steam retest. Friends Only joining through Steam, reconnect, and longer sessions also need live retests. If Steam is unavailable, check the `steam-coop-status.json` file in the current game bridge for the initialization result.
+The group confirms Steam joining and Public lobby discovery in its playtests. Automated tests also cover the lobby modes and Steam's Join Game callback. The password prompt is queued for the UI pass. Rejoining after a guest crash still needs a two-PC Steam retest. If Steam is unavailable, check the `steam-coop-status.json` file in the current game bridge for the initialization result.
 
 ### Network timing
 

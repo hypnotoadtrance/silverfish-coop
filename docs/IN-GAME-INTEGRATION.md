@@ -380,7 +380,7 @@ RC `2e36efe` follows the actual stock fire attached to that turret. In the muted
 
 - The in-game Host flow offers a transport choice. Direct IP uses the configured port and address. Steam Networking opens a Steam lobby when the campaign is ready.
 - Steam Networking offers Invite Only, Friends Only, and Public. The stock pause menu displays **Invite Steam Friends** when ready. If the overlay cannot open, the same retry button shows **Steam friends can join** when Join Game is available, or **Steam invites unavailable** when it is unavailable. Tests cover the labels, lobby types, **Join Game** callback, and public lobby browser with a simulated Steam client. [Steam lobby modes](https://partner.steamgames.com/doc/api/ISteamMatchmaking#ELobbyType)
-- Check the updated invite control in the game window. Verify lobby access, public discovery, optional passwords, role changes, and reconnect on two separately signed-in Steam accounts.
+- Check the updated invite control in the game window. Public lobby discovery has passed the group's Steam playtests. Check the password prompt in the UI pass and verify rejoining after a guest crash on two separately signed-in Steam accounts.
 
 ### GitHub release
 
