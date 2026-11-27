@@ -5143,6 +5143,7 @@ async def verify_stock_streamed_npc(host: Seat, guest: Seat, _pawn: str) -> dict
     assert await command(guest, "plank-break") == "stock plank break requested"
     assert await command(guest, "plank") == initial_planks[1]
     assert await command(host, "plank-break") == "stock plank break requested"
+    host_plank = None
     try:
         async with asyncio.timeout(8):
             while (host_plank := await command(host, "plank")) != "removed":
