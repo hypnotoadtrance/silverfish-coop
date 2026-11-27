@@ -8,6 +8,15 @@ if TYPE_CHECKING:
     from .service import Client
 
 
+def preserves_private_scope(client: "Client", snapshot: dict | None) -> bool:
+    """An existing resident visit may only recover the guest who owns the current save scope."""
+    if (getattr(client.bridge, "local_bridge", None) is None or not client.invite.get("native_zones")
+            or client.game_visit is None):
+        return True
+    scope = client.invite["character_id"].replace("-", "")
+    return bool(len(scope) == 32 and snapshot and snapshot.get("save_scope") == scope)
+
+
 class EmptyZoneRetry:
     def __init__(self) -> None:
         self._target: tuple[str, str, str] | None = None
@@ -49,6 +58,7 @@ class EmptyZoneRetry:
         return bool(snapshot and snapshot.get("map") == MENU and snapshot.get("state") == phase
                     and snapshot.get("mode") == mode and snapshot.get("server_connection") is False
                     and snapshot.get("remote_clients") == 0
+                    and preserves_private_scope(client, snapshot)
                     and (self._ejected_scope is None or snapshot.get("save_scope") == self._ejected_scope)
                     and (client.transport.game_packets_sent, client.transport.game_packets_received) == (0, 0))
 

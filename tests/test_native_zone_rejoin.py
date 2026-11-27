@@ -66,6 +66,7 @@ class EmptyZoneRetryTests(IsolatedAsyncioTestCase):
         client.allowed_maps = {CITY}
         client.needs_travel = False
         client.empty_zone_retry = self.retry
+        client.bridge.local_bridge = object()
         client.bridge.snapshot.return_value = ejected
         self.retry.clear()
 
@@ -117,6 +118,30 @@ class EmptyZoneRetryTests(IsolatedAsyncioTestCase):
         self.joining["save_scope"] = "d" * 32
         self.assertFalse(await self.retry.after_timeout(client, client.zone_epoch))
         client.refresh_gameplay.assert_not_awaited()
+        client.open_game_link.assert_not_awaited()
+
+    async def test_resident_reconcile_yields_to_a_released_or_replaced_save_scope(self):
+        client = self.client
+        client.invite = {"character_id": "cccccccc-cccc-cccc-cccc-cccccccccccc", "native_zones": True}
+        client.game_visit = (client.host_session, client.zone_epoch, CITY)
+        client.allowed_maps = {CITY}
+        client.needs_travel = False
+        client.empty_zone_retry = self.retry
+        client.bridge.local_bridge = object()
+        client.leave_for_rejoin.side_effect = None
+
+        for state in (
+            dict(self.ready, state="disconnected", mode="client", save_scope="d" * 32),
+            dict(self.ready, save_scope=None),
+            dict(self.ready, map=BOROUGH, save_scope=None),
+            self.ready,
+        ):
+            with self.subTest(state=state):
+                client.bridge.snapshot.return_value = state
+                await Client.reconcile_game(client)
+                self.assertIs(client.last_game, state)
+
+        client.leave_for_rejoin.assert_not_awaited()
         client.open_game_link.assert_not_awaited()
 
     async def test_timeout_without_exact_empty_title_does_not_rotate(self):
@@ -183,6 +208,30 @@ class EmptyZoneRetryTests(IsolatedAsyncioTestCase):
 
 
 class ZoneRejoinIntegrationTests(IsolatedAsyncioTestCase):
+    async def test_resident_rejoin_rechecks_save_scope_after_requesting_world_start(self):
+        session, visit, scope = "a" * 32, "b" * 32, "c" * 32
+        character = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        game = {"state": "ready", "map": MENU, "save_scope": scope}
+        bridge = SimpleNamespace(local_bridge=object(), snapshot=lambda: dict(game),
+                                 command=AsyncMock(return_value={"state": "joining"}),
+                                 wait_for=AsyncMock(return_value={"state": "connected", "map": CITY}))
+
+        async def change_scope(*args, **kwargs):
+            game["save_scope"] = None
+            return {"ok": False}
+
+        transport = SimpleNamespace(address=("127.0.0.1", 31000), game_access=True,
+                                    reset_game_endpoint=Mock(), request=AsyncMock(side_effect=change_scope))
+        client = Client(SimpleNamespace(event=Mock()), transport, {"character_id": character, "native_zones": True},
+                        bridge, allowed_maps=frozenset({CITY}))
+        client.host_session, client.zone_epoch, client.expected_zone = client.game_visit = (session, visit, CITY)
+
+        with self.assertRaisesRegex(RuntimeError, "private guest save scope changed"):
+            await client.open_game_link()
+        transport.request.assert_awaited_once()
+        bridge.command.assert_not_awaited()
+        bridge.wait_for.assert_not_awaited()
+
     async def test_embedded_join_uses_only_a_matching_authenticated_destination_time(self):
         session, visit, scope = "a" * 32, "b" * 32, "c" * 32
         character = "cccccccc-cccc-cccc-cccc-cccccccccccc"
@@ -230,9 +279,10 @@ class ZoneRejoinIntegrationTests(IsolatedAsyncioTestCase):
         bridge.command.reset_mock()
         transport.request.reset_mock()
         game["save_scope"] = "e" * 32
-        await client.open_game_link()
+        with self.assertRaisesRegex(RuntimeError, "private guest save scope changed"):
+            await client.open_game_link()
         transport.request.assert_not_awaited()
-        bridge.command.assert_awaited_once_with(*expected)
+        bridge.command.assert_not_awaited()
 
     def test_host_omits_world_start_from_a_stale_scene_for_the_same_authenticated_visit(self):
         session, visit = "a" * 32, "b" * 32

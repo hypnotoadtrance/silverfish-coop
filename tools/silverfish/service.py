@@ -5634,6 +5634,8 @@ class Client:
                 raise RuntimeError("The native client requires an authenticated host and zone")
             visit = (self.host_session, self.zone_epoch, self.expected_zone)
         world_start = await self.guest_world_start(visit) if visit else ()
+        if visit and not native_zone_rejoin.preserves_private_scope(self, self.bridge.snapshot()):
+            raise RuntimeError("The private guest save scope changed before native rejoin")
         self.last_game = await self.bridge.command("join", self.endpoint, *visit, *world_start)
         await self.wait_game_link(timeout)
 
@@ -5673,6 +5675,8 @@ class Client:
         self.last_game = state
         if not self.needs_travel and state.get("state") not in {"disconnected", "ready"}:
             return
+        if not native_zone_rejoin.preserves_private_scope(self, state):
+            return
         self.empty_zone_retry.note_title_ejection(self, state)
         previous = self.game_visit
         if (previous and self.needs_travel and self.host_session == previous[0] and self.zone_epoch != previous[1]
@@ -5692,7 +5696,10 @@ class Client:
                         await asyncio.sleep(remaining)
                 if self.stopping or self.check_host_end() or visit != (self.host_session, self.zone_epoch, self.expected_zone):
                     return
-                state = self.bridge.snapshot() or state
+                current = self.bridge.snapshot()
+                if not native_zone_rejoin.preserves_private_scope(self, current):
+                    return
+                state = current or state
             await self.leave_for_rejoin(state, destination)
         else:
             await self.leave_for_rejoin(state)
