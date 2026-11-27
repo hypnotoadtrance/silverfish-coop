@@ -5218,12 +5218,69 @@ async def verify_stock_streamed_npc(host: Seat, guest: Seat, _pawn: str) -> dict
             raise AssertionError(f"Streamed plank destruction and projection did not agree. See {diagnostics}") from error
     finally:
         runtime.write_text(diagnostics, json.dumps(plank_proof, indent=2))
+    frog = await verify_mounted_dock_critter(host, guest, path.rsplit(".", 1)[0] + ".Critter_Frog_BP_C_1")
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"actor": actor, "world_lookup": ownership, "guest_before": observed, "final_states": after,
             "guest_local_damage_denied": True, "retargeted_when_guest_downed": True,
             "guest_contact": contact, "stock_shot": receipt,
-            "streamed_stock_drop": banked, "streamed_plank": plank_proof,
+            "streamed_stock_drop": banked, "streamed_plank": plank_proof, "streamed_stock_critter": frog,
             "campaign_checkpoint_unchanged": True}
+
+
+async def verify_mounted_dock_critter(host: Seat, guest: Seat, path: str) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+
+    async def probe(seat, mode, argument):
+        reply = await seat.bridge.command("fixture-stock-critter", mode, argument, update_status=False)
+        return reply["ack"]["message"]
+
+    async with asyncio.timeout(8):
+        while (source := await probe(host, "find", path)) == "waiting":
+            await asyncio.sleep(.08)
+    number, actor = source.split(";", 1)
+    assert actor == f"Critter_Frog_BP_C {path}", actor
+    authority = await wait_resident_status(host_run, lambda frame: frame.get("state") == "hosting")
+    failed_looks = []
+    focus = None
+    started = time.time()
+    async with asyncio.timeout(18):
+        for _ in range(12):
+            try:
+                stance = tuple(map(float, (await probe(host, "stage", number)).split(",")))
+            except RuntimeError as error:
+                if str(error) != "no clear stock interaction focus on the frog":
+                    raise
+                break
+            origin = tuple(map(float, (await probe(host, "view", number)).split(",")[-3:]))
+            await wait_resident_status(guest_run, lambda frame: (
+                (point := frame["game"].get("pawns", {}).get("local", {}).get("location"))
+                and math.dist(point, stance) < 65), timeout=5)
+            async with asyncio.timeout(6):
+                while True:
+                    view = await probe(guest, "view", number)
+                    if view.startswith("1,false,") and math.dist(tuple(map(float, view.split(",")[-3:])), origin) < 30:
+                        break
+                    await asyncio.sleep(.06)
+            focus = await probe(guest, "press", number)
+            if focus == "stock Interact dispatched":
+                break
+            assert focus.startswith("stock Interact focus unavailable:"), focus
+            failed_looks.append(focus)
+    assert focus == "stock Interact dispatched", failed_looks
+    async with asyncio.timeout(8):
+        while not (settled := [event for event in await resident_events(host_run, authority)
+                              if event.get("event") == "native_stock_critter_claimed" and event.get("time_unix", 0) >= started]):
+            await asyncio.sleep(.06)
+    claim, = settled
+    assert (claim["actor"], claim["number"], claim["map"]) == (f"stream:{actor}", number, OBSERVATORY), claim
+    for seat in (host, guest):
+        async with asyncio.timeout(7):
+            while await probe(seat, "view", number) != "absent":
+                await asyncio.sleep(.06)
+    items = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
+    assert sum(item["guid"] == claim.get("inventory_guid", claim["guid"])
+               and item["class_path"].endswith(".Item_LiveFrog_C") for item in items) == 1, claim
+    return {"guest_pose": view, "claim": claim, "removed_on_both_peers": True, "focus_failures_before_pickup": failed_looks}
 
 
 async def verify_stock_host_corpse_carry(host: Seat, guest: Seat, _pawn: str) -> dict:
@@ -8466,7 +8523,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableCastawayProbe",
                                                      fixture="portable_castaway_probe.lua"))
-        if stock_critters:
+        if stock_critters or stock_streamed_npc:
             proof["stock_critter_overlays"] = [probes.enter_context(stock_critter_overlay(game)) for game in games]
         projected_drops = stock_shovel_host_quest or tutorial_dock_combat
         if stock_placed_item or projected_drops:

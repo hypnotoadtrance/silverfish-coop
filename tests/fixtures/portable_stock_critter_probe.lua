@@ -3,19 +3,25 @@
         local mode, number = args[3], math.tointeger(args[4])
         local host = seat == "hosting"
         local pawn = assert(state.local_pawn.pawn)
-        assert((host or seat == "connected") and state.map == "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P")
+        local mounted = state.map == "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+        assert((host or seat == "connected") and (mounted or state.map == "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"))
         if mode == "find" and host then
             local closest, range
             local origin = pawn:K2_GetActorLocation()
+            local expected = mounted and args[4]
+            assert(not mounted or expected and expected:find("CoopNpcSublevel", 1, true)
+                and expected:match(":PersistentLevel%.Critter_Frog_BP_C_1$"))
             for _, entry in pairs(entries) do
                 local actor = entry.actor
                 if exact_critter(actor) and actor:GetClass():GetFName():ToString() == "Critter_Frog_BP_C"
-                    and actor:HasAnyFlags(EObjectFlags.RF_WasLoaded) then
+                    and actor:HasAnyFlags(EObjectFlags.RF_WasLoaded)
+                    and (not expected or actor:GetFullName() == "Critter_Frog_BP_C " .. expected) then
                     local point = actor:K2_GetActorLocation()
                     local dist = (point.X-origin.X)^2 + (point.Y-origin.Y)^2 + (point.Z-origin.Z)^2
                     if not range or dist < range then closest, range = entry, dist end
                 end
             end
+            if mounted and not closest then return "waiting" end
             assert(closest, "no enrolled stock Crossroads frog")
             return ("%d;%s"):format(closest.number, closest.actor:GetFullName())
         end
@@ -53,19 +59,36 @@
             if valid(controller) then controller:StopMovement() controller:SetActorTickEnabled(false) end
             local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
             local color = {R=0,G=0,B=0,A=0}
-            local function ground_at(player, x, y)
+            local function ground_at(player, x, y, z)
                 local hit = {}
-                if trace:LineTraceSingle(player, {X=x,Y=y,Z=point.Z+120}, {X=x,Y=y,Z=point.Z-300}, 0, true,
+                if trace:LineTraceSingle(pawn, {X=x,Y=y,Z=z+120}, {X=x,Y=y,Z=z-300}, 0, true,
                     {actor, pawn, remote}, 0, hit, true, color, color, 0) then
                     local floor = (hit.OutHit or hit).ImpactPoint
                     if floor then return {X=x,Y=y,Z=floor.Z+player.CapsuleComponent:GetScaledCapsuleHalfHeight()+3} end
                 end
             end
+            if mounted and not entry.fixture_mounted_staged then
+                -- Keep the Dock actor in its streaming level and place it on nearby stock Observatory floor.
+                local origin = remote:K2_GetActorLocation()
+                actor.CharacterMovement:DisableMovement()
+                for index = 0, 7 do
+                    local angle = index * math.pi / 4
+                    local floor = ground_at(actor, origin.X + 180 * math.cos(angle),
+                        origin.Y + 180 * math.sin(angle), origin.Z)
+                    if floor and actor:K2_SetActorLocation(floor, false, {}, true) then
+                        entry.fixture_mounted_staged = true
+                        point = actor:K2_GetActorLocation()
+                        actor:ForceNetUpdate()
+                        break
+                    end
+                end
+                assert(entry.fixture_mounted_staged, "no stock floor for the mounted Dock frog")
+            end
             for step = entry.fixture_next_stance or 0, 11 do
                 local angle = step * math.pi / 6
                 local x, y = point.X + 125 * math.cos(angle), point.Y + 125 * math.sin(angle)
-                local target = ground_at(remote, x, y)
-                local host_target = ground_at(pawn, 2 * x - point.X, 2 * y - point.Y)
+                local target = ground_at(remote, x, y, point.Z)
+                local host_target = ground_at(pawn, 2 * x - point.X, 2 * y - point.Y, point.Z)
                 if target and host_target and remote:K2_TeleportTo(target, remote:K2_GetActorRotation())
                     and pawn:K2_TeleportTo(host_target, pawn:K2_GetActorRotation()) and focus(remote, point, true) then
                     entry.fixture_next_stance = step + 1
