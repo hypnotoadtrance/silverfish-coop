@@ -1,6 +1,6 @@
 # Known Issues
 
-Use the same release candidate on all PCs. **`rc-ad3c9da` requires a fresh co-op campaign.** [Release index](RELEASES.md) · [Co-op save reset](PLAYING-COOP.md#reset-co-op-campaigns)
+Use the same release candidate on all PCs. Builds before `rc-ad3c9da` used an older co-op save format. Start a fresh campaign when upgrading from one of those builds. [Release index](RELEASES.md) · [Co-op save reset](PLAYING-COOP.md#reset-co-op-campaigns)
 
 ## Current priorities
 
@@ -14,7 +14,7 @@ Use the same release candidate on all PCs. **`rc-ad3c9da` requires a fresh co-op
 
 | Issue | Current status |
 | --- | --- |
-| Steam password prompt | A passwordless Public lobby should proceed directly to joining. Queued with menu UX. |
+| Steam password prompt | `rc-479ae08` separates connection retry from the dedicated password screen. Automated checks cover passwordless join, retry, and protected lobbies. Confirm the behavior in a two-account Steam session. |
 | Oil lantern state | Still reported out of sync. Check gold and gray lanterns, lighting and extinguishing from either seat, and a lantern broken before a guest joins. |
 | Concurrent trader menus | When one player completes a trade, the other player's menu can close. Ordinary stock and barter are confirmed. Refreshing the second player's offers in place is a low-priority UX improvement. |
 | Interaction delay and frame hitches | Players reported cabinet pickup freezes, occasional Crossroads hitches, and high adapter receive traffic. Later isolated runs improved several paths. A comparable rendered Steam measurement of input delay, frame time, and co-op traffic remains open. |
@@ -26,6 +26,7 @@ Use the same release candidate on all PCs. **`rc-ad3c9da` requires a fresh co-op
 
 | Route | Check |
 | --- | --- |
+| Title and Steam join | Check passwordless and protected Public lobbies, and confirm an edited guest character name appears in the save menu. The name and Manage Saves passed in one isolated Direct IP pair. |
 | Observatory | Take several items from the cabinet in the shed by the campfire and watch for hitches. Try head and chest gear, Contractor Vest, Land Mine, and manual stack merge and split. Those inventory paths passed isolated checks. |
 | Crossroads excavation | Dig between the two rocks by the scarecrow. The post-crash fix is in `rc-ad3c9da`. In isolated Direct IP, the host dug up and dropped the package, and the guest reclaimed and opened it. Check the original route in Steam co-op. [Fix source](https://github.com/hypnotoadtrance/silverfish-coop/commit/2b6e90b8748c433ac2538587fbc25f9a9dcd1604) |
 | Intro warehouse | Let the guest fight moving enemies with melee and ranged weapons, including a shot under the garage door. Check repeat swings, damage and death on both seats, then loot an enemy drop. Spot-check guest reload, alternate ammo, and magazine counts across weapon swaps and travel. |
