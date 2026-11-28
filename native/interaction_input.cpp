@@ -2354,14 +2354,8 @@ namespace
         return 2;
     }
 
-    int read_avatar_seconds(const Lua& lua)
+    double read_stock_real_time(Unreal::UObject* context)
     {
-        auto* stack = lua.get_lua_state();
-        if (!available() || lua_gettop(stack) != 1 || !lua_isinteger(stack, 1)) return 0;
-        auto* world = scope.world.Get();
-        if (!live(world) || address(world) != lua_tointeger(stack, 1) || Clock::now() >= scope.expires ||
-            scope.generation != generation.load(std::memory_order_acquire)) return 0;
-
         struct ClockParams
         {
             Unreal::UObject* context;
@@ -2381,14 +2375,47 @@ namespace
                 function->GetOuterPrivate() != defaults->GetClassPrivate() || function->GetNumParms() != 2 ||
                 function->GetParmsSize() != sizeof(ClockParams) || output->GetArrayDim() != 1 ||
                 input->GetOffset_Internal() != offsetof(ClockParams, context) ||
-                output->GetOffset_Internal() != offsetof(ClockParams, seconds)) return 0;
+                output->GetOffset_Internal() != offsetof(ClockParams, seconds)) return -1.0;
             cached_function = function;
             cached_defaults = defaults;
         }
-        ClockParams params{world, -1.0};
+        ClockParams params{context, -1.0};
         defaults->ProcessEvent(function, &params);
-        if (!std::isfinite(params.seconds) || params.seconds < 0) return 0;
-        lua_pushnumber(stack, params.seconds);
+        return params.seconds;
+    }
+
+    int read_avatar_seconds(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        if (!available() || lua_gettop(stack) != 1 || !lua_isinteger(stack, 1)) return 0;
+        auto* world = scope.world.Get();
+        if (!live(world) || address(world) != lua_tointeger(stack, 1) || Clock::now() >= scope.expires ||
+            scope.generation != generation.load(std::memory_order_acquire)) return 0;
+        const double seconds = read_stock_real_time(world);
+        if (!std::isfinite(seconds) || seconds < 0) return 0;
+        lua_pushnumber(stack, seconds);
+        return 1;
+    }
+
+    int read_weather_lease_time(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        if (!available() || lua_gettop(stack) != 6 || scope.host) return 0;
+        for (int index = 1; index <= 6; ++index)
+            if (!lua_isinteger(stack, index)) return 0;
+
+        if (address(scope.world.Get()) != lua_tointeger(stack, 1) ||
+            address(scope.driver.Get()) != lua_tointeger(stack, 3) ||
+            address(scope.server.Get()) != lua_tointeger(stack, 4)) return 0;
+        auto* pawn = silverfish::native_interaction_input::current_guest_pawn(lua_tointeger(stack, 2));
+        auto* instance = scope.instance.Get();
+        if (!pawn || address(instance) != lua_tointeger(stack, 5)) return 0;
+        auto* save = object_field(instance, STR("SaveSlot_Ref"));
+        if (!live(save) || address(save) != lua_tointeger(stack, 6) || object_field(pawn, STR("Save")) != save) return 0;
+
+        const double seconds = read_stock_real_time(pawn);
+        if (!std::isfinite(seconds) || seconds < 0.0) return 0;
+        lua_pushnumber(stack, seconds);
         return 1;
     }
 
@@ -2450,13 +2477,24 @@ namespace
     struct AvatarAppearance
     {
         Unreal::FWeakObjectPtr save_class{}, character_type{}, color_type{};
+        Unreal::FWeakObjectPtr item_type{};
         Unreal::FStructProperty* character{};
+        std::array<Unreal::FStructProperty*, 2> worn{};
+        Unreal::FClassProperty* item_class{};
         std::array<Unreal::FObjectProperty*, 6> assets{};
         std::array<Unreal::FStructProperty*, 3> colors{};
         std::array<Unreal::FFloatProperty*, 4> channels{};
         Unreal::FIntProperty* eye{};
         std::string_view binding_error{};
         std::uint64_t bound_generation{};
+
+        struct WornPath
+        {
+            Unreal::FWeakObjectPtr type{};
+            std::string path;
+        };
+        std::array<WornPath, 16> worn_paths{};
+        std::size_t next_worn_path{};
 
         static bool within(Unreal::FProperty* property, int size)
         {
@@ -2513,9 +2551,67 @@ namespace
             }
             eye = field<Unreal::FIntProperty>(appearance, STR("EyeType_83_470E782541AF25166B548AA28A834625"));
             if (!within(eye, character->GetSize()) || eye->GetSize() != sizeof(std::int32_t)) return "appearance eye layout";
+            constexpr std::array worn_names{STR("PlayerArmor"), STR("PlayerHelmet")};
+            for (std::size_t i = 0; i < worn.size(); ++i)
+                worn[i] = field<Unreal::FStructProperty>(stock, worn_names[i]);
+            auto* item = worn.front() ? worn.front()->GetStruct().Get() : nullptr;
+            if (item && item->GetPathName() ==
+                STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct"))
+            {
+                item_class = field<Unreal::FClassProperty>(item, STR("Item_Class_3_2813641E42AA35FC0693029E4EE49F81"));
+                for (auto*& row : worn)
+                    if (!within(row, stock->GetPropertiesSize()) || row->GetStruct().Get() != item ||
+                        !within(item_class, row->GetSize()))
+                        row = nullptr;
+                if (item_class && item_class->GetSize() == sizeof(Unreal::UObject*)) item_type = item;
+            }
             character_type = appearance;
             color_type = linear_color;
             return {};
+        }
+
+        void push_worn(lua_State* stack, Unreal::UObject* save, Unreal::FStructProperty* row)
+        {
+            if (!row || !item_type.Get())
+            {
+                lua_pushnil(stack);
+                return;
+            }
+            const auto* value = row->ContainerPtrToValuePtr<void>(save);
+            auto* item = item_class->GetObjectPropertyValue(item_class->ContainerPtrToValuePtr<void>(value));
+            if (!item)
+            {
+                lua_pushliteral(stack, "-");
+                return;
+            }
+            if (!live(item))
+            {
+                lua_pushnil(stack);
+                return;
+            }
+            for (const auto& cached : worn_paths)
+                if (cached.type.Get() == item)
+                {
+                    lua_pushlstring(stack, cached.path.data(), cached.path.size());
+                    return;
+                }
+            auto path = RC::to_string(item->GetPathName());
+            constexpr std::string_view root = "/Game/Classes/Armor_Items/";
+            const auto separator = path.find('.', root.size());
+            const auto name = separator == std::string::npos ? std::string_view{} :
+                std::string_view(path).substr(root.size(), separator - root.size());
+            const auto type = name.empty() ? std::string_view{} : std::string_view(path).substr(separator + 1);
+            if (path.size() > 160 || !path.starts_with(root) || !type.ends_with("_C") ||
+                type.substr(0, type.size() - 2) != name ||
+                !std::ranges::all_of(name, [](char ch) {
+                    return ch == '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
+                }))
+            {
+                lua_pushnil(stack);
+                return;
+            }
+            lua_pushlstring(stack, path.data(), path.size());
+            worn_paths[next_worn_path++ % worn_paths.size()] = {item, std::move(path)};
         }
     };
 
@@ -2524,21 +2620,16 @@ namespace
         auto* stack = lua.get_lua_state();
         constexpr int sample_index = 4;
         const auto arguments = lua_gettop(stack);
+        const bool outfit = arguments == sample_index + 1 && lua_type(stack, sample_index + 1) == LUA_TSTRING &&
+            std::string_view(lua_tostring(stack, sample_index + 1), lua_rawlen(stack, sample_index + 1)) == "outfit";
         const bool diagnostic = arguments == sample_index + 1 && lua_isboolean(stack, sample_index + 1) &&
             lua_toboolean(stack, sample_index + 1) && env_flag("SILVERFISH_COOP_HEADLESS") &&
             env_flag("SILVERFISH_COOP_TITLE_FIXTURES");
-        if ((arguments != sample_index && !diagnostic) || !lua_checkstack(stack, 3)) return 0;
+        if ((arguments != sample_index && !outfit && !diagnostic) || !lua_checkstack(stack, outfit ? 4 : 3)) return 0;
         const auto refuse = [&](std::string_view reason) {
             if (!diagnostic) return 0;
             lua_settop(stack, arguments);
             lua_pushnil(stack);
-            lua_pushlstring(stack, reason.data(), reason.size());
-            return 2;
-        };
-        const auto respond = [&](bool matches, std::string_view reason) {
-            lua_settop(stack, arguments);
-            lua_pushboolean(stack, matches);
-            if (!diagnostic || matches) return 1;
             lua_pushlstring(stack, reason.data(), reason.size());
             return 2;
         };
@@ -2567,6 +2658,22 @@ namespace
         }
         if (!schema.binding_error.empty()) return refuse(schema.binding_error);
         if (!schema.character_type.Get() || !schema.color_type.Get()) return refuse("appearance type expired");
+        const auto respond = [&](bool matches, std::string_view reason) {
+            lua_settop(stack, arguments);
+            lua_pushboolean(stack, matches);
+            if (outfit && matches)
+            {
+                schema.push_worn(stack, save, schema.worn[0]);
+                schema.push_worn(stack, save, schema.worn[1]);
+                auto* equipped = field<Unreal::FObjectProperty>(pawn, STR("EquipedItem"));
+                lua_pushboolean(stack, equipped &&
+                    !equipped->GetObjectPropertyValue(equipped->ContainerPtrToValuePtr<void>(pawn)));
+                return 4;
+            }
+            if (!diagnostic || matches) return 1;
+            lua_pushlstring(stack, reason.data(), reason.size());
+            return 2;
+        };
         auto* appearance = schema.character->ContainerPtrToValuePtr<void>(save);
         lua_pushliteral(stack, "addresses");
         if (lua_rawget(stack, sample_index) != LUA_TTABLE) return refuse("appearance asset sample");
@@ -3375,6 +3482,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishReadNativeLocalLean", read_local_lean);
         lua.register_function("SilverfishReadNativeRemoteAim", read_remote_aim);
         lua.register_function("SilverfishReadNativeAvatarSeconds", read_avatar_seconds);
+        lua.register_function("SilverfishReadNativeWeatherLeaseTime", read_weather_lease_time);
         lua.register_function("SilverfishReadNativeAvatarMotion", read_avatar_motion);
         lua.register_function("SilverfishNativeAvatarAppearanceMatches", avatar_appearance_matches);
         lua.register_function("SilverfishWriteNativeRemoteHeadRotation", write_remote_head_rotation);

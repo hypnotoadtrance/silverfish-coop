@@ -150,3 +150,27 @@ assert(not update() and dispatches == 1 and guest.teleports == 4 and observed_re
 assert(rows()[1][4] == "fault" and rows()[1][7] == "crossing_owner_unavailable")
 state.map, world_is_nothing = "/Game/Classes/Maps/Dreams/Nothing_P", true
 assert(not update() and #rows() == 0)
+
+state.map, world_is_nothing, exposed = area, false, false
+local native_calls, legacy_calls, path_reads = 0, 0, 0
+local accepts_visit = true
+env.SilverfishReadNativeKillVolumeVisit = function(address, hosting)
+    assert(address == world:GetAddress() and hosting == (not state.server))
+    native_calls = native_calls + 1
+    if accepts_visit then return world.NetDriver:GetAddress(), hits, 1 end
+end
+env.SilverfishReadNativeKillVolume = function()
+    legacy_calls = legacy_calls + 1
+    return true, hits, 0
+end
+env.SilverfishFindObjectByPath = function(key)
+    path_reads = path_reads + 1
+    return registry[key]
+end
+assert(not update() and rows()[1][6] == 1 and native_calls == 1 and legacy_calls == 0 and path_reads == 1)
+assert(not update() and native_calls == 2 and legacy_calls == 0 and path_reads == 1)
+accepts_visit = false
+assert(not update() and rows()[1][6] == 0 and legacy_calls == 1)
+state.server, accepts_visit = true, true
+assert(not guard.sync(state, "connected") and guard.rows(state, "connected", table.pack)[1][6] == 1)
+assert(native_calls == 4 and legacy_calls == 1)

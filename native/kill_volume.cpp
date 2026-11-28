@@ -15,6 +15,7 @@
 #include <Unreal/Hooks.hpp>
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/UObjectGlobals.hpp>
+#include <Unreal/UObjectHashTables.hpp>
 #include <Unreal/World.hpp>
 
 namespace
@@ -239,10 +240,37 @@ namespace
         enqueue(world, context, pawn, controller);
     }
 
+    Unreal::UWorld* loaded_crossroads()
+    {
+        if (!Unreal::UnrealInitializer::ShouldUseHashTables()) return nullptr;
+        return Unreal::Cast<Unreal::UWorld>(Unreal::FUObjectHashTables::StaticFindObjectByPath(nullptr, world_path, false, true));
+    }
+
+    int visit_status(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || !installed() || lua.get_stack_size() != 2 ||
+            !lua.is_integer(1) || !lua.is_bool(2)) return 0;
+        const auto expected_world = static_cast<std::uintptr_t>(lua.get_integer());
+        const bool hosting = lua.get_bool();
+        if (!expected_world) return 0;
+        auto* world = static_cast<Unreal::UWorld*>(visit.world.Get());
+        if (reinterpret_cast<std::uintptr_t>(world) != expected_world) world = loaded_crossroads();
+        if (reinterpret_cast<std::uintptr_t>(world) != expected_world) return 0;
+        auto* driver = listen_or_client_driver(world);
+        if (!driver) return 0;
+        auto* connection = object(driver, STR("ServerConnection"));
+        if (hosting ? connection != nullptr : !live(connection)) return 0;
+        reset_visit(world, driver);
+        lua.set_integer(reinterpret_cast<std::uintptr_t>(driver));
+        lua.set_integer(visit.overlaps);
+        lua.set_integer(visit.reloads);
+        return 3;
+    }
+
     int status(const Lua& lua)
     {
         const bool ready = Unreal::IsInGameThreadRaw() && installed() && lua.get_stack_size() == 0;
-        auto* world = ready ? find<Unreal::UWorld>(world_path) : nullptr;
+        auto* world = ready ? loaded_crossroads() : nullptr;
         auto* driver = world ? listen_or_client_driver(world) : nullptr;
         if (driver) reset_visit(world, driver);
         lua.set_bool(driver != nullptr);
@@ -326,6 +354,7 @@ namespace silverfish::native_kill_volume
     void register_lua(RC::LuaMadeSimple::Lua& lua)
     {
         if (!enabled()) return;
+        lua.register_function("SilverfishReadNativeKillVolumeVisit", visit_status);
         lua.register_function("SilverfishReadNativeKillVolume", status);
         lua.register_function("SilverfishNextNativeKillVolumeCrossing", next_crossing);
         lua.register_function("SilverfishFinishNativeKillVolumeCrossing", finish_crossing);

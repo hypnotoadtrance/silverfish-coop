@@ -1,4 +1,3 @@
-import asyncio
 from pathlib import Path
 import uuid
 import time
@@ -470,10 +469,9 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 host = self.host()
                 host.native_zones, host.zone_epoch = True, "epoch"
                 bridge = runtime.Bridge(Path("."), None)
-                local = bridge.local_bridge = LocalBridge.__new__(LocalBridge)
-                local._lock = asyncio.Lock()
-                local._submit = Mock(return_value=0)
-                local._wait, local._cancel = Mock(), Mock()
+                library = Mock()
+                library.SilverfishBridgeSubmitV1.return_value = 0
+                bridge.local_bridge = LocalBridge(library)
                 guid = "1" * 32
 
                 with self.assertRaisesRegex(party.RuleError, "could not queue the local co-op command"):
@@ -482,9 +480,9 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         await native_guest_weapon.perform(host, bridge, "character", "a" * 32, action, guid)
 
-                local._submit.assert_called_once()
-                local._wait.assert_not_called()
-                local._cancel.assert_not_called()
+                library.SilverfishBridgeSubmitV1.assert_called_once()
+                library.SilverfishBridgeWaitV1.assert_not_called()
+                library.SilverfishBridgeCancelV1.assert_not_called()
                 self.assertFalse(host.stopping)
                 self.assertFalse(host.native_checkpoint_unsafe)
                 self.assertEqual(host.party["receipts"], {})

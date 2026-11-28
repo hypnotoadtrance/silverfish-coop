@@ -961,9 +961,46 @@ def instrument_weather_status(source):
     anchor = "local actual = readback(current, frame, lease.saved_seconds)"
     if not boundary or status.count(anchor) != 1:
         raise ValueError("The guest weather status timing anchor changed")
-    return previous + boundary + status.replace(
+    source = previous + boundary + status.replace(
         anchor, 'local actual = SilverfishProfileCrossroadsCall('
         '"weather_status_readback", readback, current, frame, lease.saved_seconds)')
+    if "local function lease_time_lua(" not in source:
+        return source
+    stop = "\nreturn view\n"
+    assert source.count(stop) == 1
+    return source.replace(stop, """
+function SilverfishProfileCrossroadsWeatherLease(state, phase)
+    local read = SilverfishReadNativeWeatherLeaseTime
+    assert(type(read) == "function", "missing native weather lease reader")
+    assert(lease and lease.native_clock_args and phase == "connected", "no applied guest weather lease")
+    local current = lease.context
+    local args = lease.native_clock_args
+    local function native()
+        local ok, seconds = pcall(read, table.unpack(args))
+        if ok and bounded(seconds, 0, max_seconds) then return seconds end
+    end
+    local function stock() return lease_time_lua(current) end
+    local expected = stock()
+    assert(type(expected) == "number" and native() == expected and lease_time(state, phase) == expected,
+        "native guest weather lease differs from the current stock clock")
+    local wrong = {table.unpack(args)}
+    for index, address in ipairs(args) do
+        wrong[index] = address + 1
+        assert(read(table.unpack(wrong)) == nil, "native weather lease accepted another identity: " .. index)
+        wrong[index] = address
+    end
+    local expires = lease.expires
+    lease.expires = expected
+    local ok, expired = pcall(lease_time, state, phase)
+    lease.expires = expires
+    assert(ok and expired == nil, "weather wrapper accepted an expired render lease")
+    local count = 64
+    local native_ms, lua_ms, native_kib, lua_kib = SilverfishProfileCrossroadsCompare(count, native, stock)
+    return ("%d,%.3f,%.3f,%.3f,%.3f"):format(count, native_ms, lua_ms, native_kib, lua_kib)
+end
+
+return view
+""", 1)
 
 
 def instrument_death_poll(source):
@@ -1173,7 +1210,8 @@ def instrument_avatar_observer(source):
             raise ValueError(f"The remote avatar sync call changed: {call}")
         sync = sync.replace(anchor, f'SilverfishProfileCrossroadsCall("avatar.{call}", {call}, ')
     source = start + boundary + sync + end + after
-    return source.replace("\nreturn avatar\n", """
+    outfit_expected = 'sample, "outfit")' in source
+    fixture = ('local profile_outfit_expected = ' + ('true' if outfit_expected else 'false') + '\n' + """
 function SilverfishProfileAvatarAppearance()
     local matches, stamp = SilverfishNativeAvatarAppearanceMatches, SilverfishBridgeProfileStamp
     local state = avatar_motion_sample
@@ -1210,7 +1248,26 @@ function SilverfishProfileAvatarAppearance()
         assert(matches(world, address, save_address, sample) == true, "Appearance edits were not restored")
         local native_ms, native_kib = measure(fast, expected)
         local lua_ms, lua_kib = measure(stock, expected)
-        return ("%s,%.3f,%.3f,%.3f,%.3f"):format(seat, native_ms, lua_ms, native_kib, lua_kib)
+        local appearance = ("%s,%.3f,%.3f,%.3f,%.3f"):format(seat, native_ms, lua_ms, native_kib, lua_kib)
+        if not profile_outfit_expected then return appearance end
+        local function native_outfit() return matches(world, address, save:GetAddress(), sample, "outfit") end
+        local function stock_outfit()
+            return matches(world, address, save:GetAddress(), sample),
+                worn(save.PlayerArmor), worn(save.PlayerHelmet), not valid(pawn.EquipedItem)
+        end
+        local outfit_matches, native_body, native_helmet, unarmed = native_outfit()
+        local stock_matches, body, helmet, stock_unarmed = stock_outfit()
+        assert(outfit_matches == stock_matches and body == native_body and helmet == native_helmet
+            and type(unarmed) == "boolean" and (not unarmed or stock_unarmed),
+            "native avatar outfit or positive unarmed proof differs from stock")
+        assert(matches(world + 1, address, save_address, sample, "outfit") == nil
+            and matches(world, address, save_address + 1, sample, "outfit") == nil,
+            "native avatar outfit accepted another world or save")
+        local count = 128
+        local outfit_ms, old_ms, outfit_kib, old_kib =
+            SilverfishProfileCrossroadsCompare(count, native_outfit, stock_outfit)
+        return appearance .. (",%d,%.3f,%.3f,%.3f,%.3f,%s,%s,%d"):format(count, outfit_ms, old_ms,
+            outfit_kib, old_kib, body, helmet, unarmed and 1 or 0)
     end
     local running = collectgarbage("isrunning")
     collectgarbage("stop")
@@ -1361,7 +1418,8 @@ function SilverfishProfileRemoteHeadRotation()
 end
 
 return avatar
-""", 1)
+""")
+    return source.replace("\nreturn avatar\n", "\n" + fixture, 1)
 
 
 def instrument_switch_reads(source):
@@ -2329,13 +2387,35 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     zone_wall_sources = {}
     save_clock = {}
     save_clock_continuity = {}
+    weather_lease = None
+    kill_volume_visits = {}
     host_stash = None
     avatar_clock = {}
     avatar_motion = {}
     avatar_appearance = {}
+    avatar_outfit_observation = {}
     avatar_gait = None
     standing_mapping = {}
     if area == CROSSROADS:
+        visit_replies = await asyncio.gather(*(command(seat, "killvolumevisit") for seat in seats.values()))
+        for seat, reply in zip(seats, visit_replies, strict=True):
+            if reply == "unavailable":
+                continue
+            assert not reply.startswith("kill-volume visit comparison failed"), (seat, reply)
+            count, overlaps, reloads, native_ms, lua_ms, native_kib, lua_kib = map(float, reply.split(","))
+            kill_volume_visits[seat] = {"reads_per_path": int(count), "overlaps_vetoed": int(overlaps),
+                                       "reloads_vetoed": int(reloads), "native_ms": native_ms, "lua_ms": lua_ms,
+                                       "native_heap_growth_kib": native_kib, "lua_heap_growth_kib": lua_kib,
+                                       "matched_current_driver_and_counters": True, "wrong_world_and_role_refused": True}
+        assert not kill_volume_visits or set(kill_volume_visits) == set(seats)
+        weather_reply = await command(guest, "weatherlease")
+        if weather_reply != "unavailable":
+            assert not weather_reply.startswith("weather lease comparison failed"), weather_reply
+            count, native_ms, lua_ms, native_kib, lua_kib = map(float, weather_reply.split(","))
+            weather_lease = {"reads_per_path": int(count), "native_ms": native_ms, "lua_ms": lua_ms,
+                             "native_heap_growth_kib": native_kib, "lua_heap_growth_kib": lua_kib,
+                             "matched_stock_clock": True, "expired_render_lease_refused": True,
+                             "wrong_world_pawn_driver_connection_instance_and_save_refused": True}
         stash_reply = await command(host, "hoststash")
         if stash_reply != "unavailable":
             assert not stash_reply.startswith("host stash comparison failed"), stash_reply
@@ -2389,12 +2469,19 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
         appearance = await command(host, "avatarappearance")
         assert appearance != "unavailable" and not appearance.startswith("avatar appearance comparison failed"), appearance
         for row in appearance.split(";"):
-            seat, native_ms, lua_ms, native_kib, lua_kib = row.split(",")
+            seat, native_ms, lua_ms, native_kib, lua_kib, *outfit = row.split(",")
             avatar_appearance[seat] = {"reads_per_path": 128, "native_ms": float(native_ms), "lua_ms": float(lua_ms),
                                        "native_heap_growth_kib": float(native_kib), "lua_heap_growth_kib": float(lua_kib),
                                        "unchanged_models_matched": True, "in_place_edits": ["color", "eye", "head"],
                                        "wrong_scope_refused": True}
+            if outfit:
+                count, outfit_ms, previous_ms, outfit_kib, previous_kib, body, helmet, unarmed = outfit
+                avatar_outfit_observation[seat] = {"passes_per_path": int(count), "native_ms": float(outfit_ms),
+                    "previous_ms": float(previous_ms), "native_heap_growth_kib": float(outfit_kib),
+                    "previous_heap_growth_kib": float(previous_kib), "body": body, "helmet": helmet,
+                    "definitely_unarmed": unarmed == "1", "stock_outfit_matched": True, "wrong_scope_refused": True}
         assert set(avatar_appearance) == {"host", "guest"}, avatar_appearance
+        assert not avatar_outfit_observation or set(avatar_outfit_observation) == set(avatar_appearance)
         clock_replies = await asyncio.gather(*(command(seat, "avatarclock") for seat in seats.values()))
         for seat, reply in zip(seats, clock_replies, strict=True):
             assert reply != "unavailable" and not reply.startswith("avatar clock comparison failed"), reply
@@ -2533,6 +2620,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             "avatar_clock_comparison": avatar_clock,
             "avatar_motion_comparison": avatar_motion,
             "avatar_appearance_comparison": avatar_appearance,
+            "avatar_outfit_observation_comparison": avatar_outfit_observation,
             "avatar_gait_comparison": avatar_gait,
             "standing_mapping_comparison": standing_mapping,
             "local_bridge_scheduler": scheduler,
@@ -2540,4 +2628,6 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             "zone_wall_source_comparison": zone_wall_sources,
             "save_game_clock_comparison": save_clock,
             "save_game_clock_continuity": save_clock_continuity,
+            "guest_weather_lease_comparison": weather_lease,
+            "kill_volume_visit_comparison": kill_volume_visits,
             "host_stash_status_comparison": host_stash}

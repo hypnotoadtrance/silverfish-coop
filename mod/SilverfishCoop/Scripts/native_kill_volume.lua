@@ -33,13 +33,18 @@ local function vector(value) return value and finite(value.X) and finite(value.Y
 local function rotation(value) return value and finite(value.Pitch) and finite(value.Yaw) and finite(value.Roll) end
 local function squared(a, b) return (a.X-b.X)^2 + (a.Y-b.Y)^2 + (a.Z-b.Z)^2 end
 
-local function active(state, phase)
-    return enabled and state.map == area and valid(state.world) and state.world:GetFullName() == "World " .. world_path
+local function requested(state, phase)
+    return enabled and state.map == area and valid(state.world)
         and (phase == "hosting" and state.listening and not state.server or phase == "connected" and state.server)
 end
 
+local function active(state, phase)
+    return requested(state, phase) and state.world:GetFullName() == "World " .. world_path
+end
+
 local function placed(state, path, class)
-    local actor = StaticFindObject(path)
+    local resolve = type(SilverfishFindObjectByPath) == "function" and SilverfishFindObjectByPath or StaticFindObject
+    local actor = resolve(path)
     if exact(actor, class) and same(actor:GetWorld(), state.world) and same(actor:GetOuter(), state.world.PersistentLevel)
         and actor:GetFullName():match("^%S+ (.+)$") == path and not actor:IsActorBeingDestroyed() then return actor end
 end
@@ -239,15 +244,28 @@ local function awaiting_downed_projection()
 end
 
 function volume_guard.sync(state, phase)
-    if not active(state, phase) then current = nil; return false end
-    local driver = state.world.NetDriver
-    if not current or not same(current.world, state.world) or not same(driver, current.driver) or phase ~= current.phase then
-        current = {world = state.world, driver = driver, phase = phase, ground = {}, recovered = {}, next_ground = 0}
+    if not requested(state, phase) then current = nil; return false end
+    local driver_address, overlaps, reloads
+    if type(SilverfishReadNativeKillVolumeVisit) == "function" then
+        driver_address, overlaps, reloads = SilverfishReadNativeKillVolumeVisit(state.world:GetAddress(), phase == "hosting")
+    end
+    local native_visit = driver_address ~= nil
+    if not native_visit then
+        if state.world:GetFullName() ~= "World " .. world_path then current = nil; return false end
+        local driver = state.world.NetDriver
+        driver_address = valid(driver) and driver:GetAddress() or 0
+    end
+    if not current or driver_address == 0 or not same(current.world, state.world)
+        or driver_address ~= current.driver_address or phase ~= current.phase then
+        current = {world = state.world, driver_address = driver_address, phase = phase, ground = {}, recovered = {}, next_ground = 0}
     end
     if current.fault then return false end
-    if type(SilverfishReadNativeKillVolume) ~= "function" then return false end
-    local read, armed, overlaps, reloads = pcall(SilverfishReadNativeKillVolume)
-    if not read or not armed then return false end
+    if not native_visit then
+        if type(SilverfishReadNativeKillVolume) ~= "function" then return false end
+        local read, armed
+        read, armed, overlaps, reloads = pcall(SilverfishReadNativeKillVolume)
+        if not read or not armed then return false end
+    end
     current.overlaps, current.reloads = overlaps, reloads
     if phase ~= "hosting" then current.armed = true; return false end
     local ok, moved = pcall(function()

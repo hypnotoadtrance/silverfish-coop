@@ -1,4 +1,3 @@
-import asyncio
 import time
 import unittest
 import uuid
@@ -410,11 +409,10 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
         handler = melee.AuthorityInput(host)
         press = dict(map=CROSSROADS, pawn=pawn, guid=GUID, serial=3, status="pending", presses=1, releases=0,
                      contacts=0, hits=0, charged=0, combo=0)
-        memory = LocalBridge.__new__(LocalBridge)
-        memory._lock = asyncio.Lock()
-        memory._submit = Mock(return_value=37)
-        memory._wait = Mock(return_value=-2)
-        memory._cancel = Mock()
+        library = Mock()
+        library.SilverfishBridgeSubmitV1.return_value = 37
+        library.SilverfishBridgeWaitV1.return_value = -2
+        memory = LocalBridge(library)
 
         async def expire_unclaimed(*_fields, timeout):
             await memory.command(b"test press", timeout)
@@ -433,7 +431,7 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await handler.request(bridge, "guest", target, OPERATION))[melee.INPUT_KEY], press)
 
         self.assertEqual(bridge.command.await_count, 2)
-        memory._cancel.assert_called_once_with(37)
+        library.SilverfishBridgeCancelV1.assert_called_once_with(37)
         host.checkpoint_native.assert_not_awaited()
 
     async def test_lost_local_melee_reply_retries_the_same_operation(self):

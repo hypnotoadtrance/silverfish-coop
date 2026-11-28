@@ -411,15 +411,24 @@ function view.clear()
     return ok, failure
 end
 
+local function lease_time_lua(current)
+    if same(current.world.NetDriver, current.driver) and same(current.driver.ServerConnection, current.connection)
+        and same(current.instance.SaveSlot_Ref, current.save) and same(current.pawn.Save, current.save) then
+        return real_time(current)
+    end
+end
+
 local function lease_time(state, phase)
     local current = lease.context
-    if phase == "connected" and state.server and state.map == current.profile.map and same(state.world, current.world)
-        and state.local_pawn and same(state.local_pawn.pawn, current.pawn)
-        and same(current.world.NetDriver, current.driver) and same(current.driver.ServerConnection, current.connection)
-        and same(current.instance.SaveSlot_Ref, current.save) and same(current.pawn.Save, current.save) then
-        local now = real_time(current)
-        if now < lease.expires then return now end
+    if phase ~= "connected" or not state.server or state.map ~= current.profile.map or not same(state.world, current.world)
+        or not state.local_pawn or not same(state.local_pawn.pawn, current.pawn) then return end
+    local now
+    if lease.native_clock_args and type(SilverfishReadNativeWeatherLeaseTime) == "function" then
+        local ok, seconds = pcall(SilverfishReadNativeWeatherLeaseTime, table.unpack(lease.native_clock_args))
+        if ok and bounded(seconds, 0, max_seconds) then now = seconds end
     end
+    if not now then now = lease_time_lua(current) end
+    if now and now < lease.expires then return now end
 end
 
 local function lease_components_current()
@@ -488,6 +497,10 @@ function view.apply(state, phase, frame)
     end
     lease.context, lease.frame, lease.expires, lease.saved_seconds = current, frame, now + lease_seconds, saved_seconds
     local ok, report = pcall(function()
+        lease.native_clock_args = type(SilverfishReadNativeWeatherLeaseTime) == "function" and {
+            current.world:GetAddress(), current.pawn:GetAddress(), current.driver:GetAddress(),
+            current.connection:GetAddress(), current.instance:GetAddress(), current.save:GetAddress(),
+        } or nil
         current.day.UpdateInRealTime = false
         project_visuals(current, frame)
         lease.local_rain = weather_view.bind_local_rain(current, lease.local_rain)

@@ -56,3 +56,59 @@ avatar.eye_material = nil
 view.update_eye_direction(avatar)
 assert(#updates == 2)
 print("Appearance sampling reuses unchanged values and reports live mesh, color and eye changes")
+
+package.loaded.guest_save = {}
+local player_avatar = require("native_player_avatar")
+local weapon_view = require("native_avatar_weapon_view")
+local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
+local outfit_root = "/Game/Classes/Armor_Items/"
+local body_path = outfit_root .. "TestArmor.TestArmor_C"
+local helmet_path = outfit_root .. "TestHelmet.TestHelmet_C"
+local worn_reads, weapon_reads = 0, 0
+local function stock_worn(path)
+    return {[item_class] = {
+        IsValid = function() return true end,
+        GetFullName = function()
+            worn_reads = worn_reads + 1
+            return "BlueprintGeneratedClass " .. path
+        end,
+    }}
+end
+local save = {Character = character, PlayerArmor = stock_worn(body_path), PlayerHelmet = stock_worn(helmet_path),
+    IsValid = function() return true end, GetAddress = function() return 11 end}
+local pawn = {Save = save, IsValid = function() return true end, GetAddress = function() return 12 end,
+    IsLocallyControlled = function() return true end, HasAuthority = function() return true end,
+    PlayerState = {IsValid = function() return true end, GetPlayerId = function() return 1 end}}
+local world = {OwningGameInstance = {SaveSlot_Ref = save}, IsValid = function() return true end,
+    GetAddress = function() return 13 end}
+local details = {pawn = pawn, name = "Player_FP_C host"}
+local state = {world = world, map = "test", pawns = {details}, local_pawn = details, guests = {}}
+SilverfishReadNativeAvatarMotion = function() return false, false, false end
+weapon_view.observe = function()
+    weapon_reads = weapon_reads + 1
+    return "-"
+end
+local function sync_outfit()
+    player_avatar.sync(state, "hosting")
+    local rows = player_avatar.rows(function(...) return {...} end)
+    return rows[1]
+end
+local baseline = sync_outfit()
+assert(baseline[4] == body_path and baseline[5] == helmet_path and worn_reads == 2 and weapon_reads == 1)
+
+SilverfishNativeAvatarAppearanceMatches = function(w, p, s, cached, mode)
+    assert(w == 13 and p == 12 and s == 11 and cached.model and mode == "outfit")
+    return true, body_path, helmet_path, true
+end
+local native = sync_outfit()
+assert(table.concat(native, "|") == table.concat(baseline, "|") and worn_reads == 2 and weapon_reads == 1)
+
+-- A cleared head slot uses "-" while an unavailable body read uses Lua.
+save.PlayerHelmet = nil
+SilverfishNativeAvatarAppearanceMatches = function() return true, nil, "-", false end
+local mixed = sync_outfit()
+assert(mixed[4] == body_path and mixed[5] == "-" and worn_reads == 3 and weapon_reads == 2)
+
+SilverfishNativeAvatarAppearanceMatches = function() return nil end
+sync_outfit()
+assert(worn_reads == 4 and weapon_reads == 3, "declined outfit samples still use stock observation")

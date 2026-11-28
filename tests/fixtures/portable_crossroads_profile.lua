@@ -403,6 +403,33 @@ local function compare_paths(count, native, stock)
     return native_ms, lua_ms, native_kib, lua_kib
 end
 
+local function compare_kill_volume_visit()
+    local read, read_stock = SilverfishReadNativeKillVolumeVisit, SilverfishReadNativeKillVolume
+    if type(read) ~= "function" then return "unavailable" end
+    local state = inspect()
+    local current_phase = phase(state)
+    assert(current_phase == "hosting" or current_phase == "connected", "missing active kill-volume seat")
+    local hosting = current_phase == "hosting"
+    local world, driver = state.world, state.world.NetDriver
+    local world_address = world:GetAddress()
+    local function stock()
+        local current = world.NetDriver
+        local armed, overlaps, reloads = read_stock()
+        if armed and valid(current) then return current:GetAddress(), overlaps, reloads end
+    end
+    local function native() return read(world:GetAddress(), hosting) end
+    local expected, stock_overlaps, stock_reloads = stock()
+    local current, overlaps, reloads = native()
+    assert(valid(driver) and current == driver:GetAddress() and current == expected
+        and overlaps == stock_overlaps and reloads == stock_reloads, "kill-volume visit differs from stock")
+    assert(read(world_address + 1, hosting) == nil and read(world_address, not hosting) == nil,
+        "native kill-volume visit accepted another world or role")
+    local count = 64
+    local native_ms, lua_ms, native_kib, lua_kib = compare_paths(count, native, stock)
+    return ("%d,%d,%d,%.3f,%.3f,%.3f,%.3f"):format(count, overlaps, reloads,
+        native_ms, lua_ms, native_kib, lua_kib)
+end
+
 local function compare_save_game_clock()
     local read, stock = SilverfishReadNativeSavedGameSeconds, native_world_view.read_game_seconds_lua
     if type(read) ~= "function" then return "unavailable" end
@@ -855,6 +882,19 @@ LoopInGameThreadWithDelay(50, function()
             return SilverfishProfileCrossroadsWallSources(state.world, state.map)
         end)
         if ok then message = value else message = "zone wall comparison failed: " .. tostring(value) end
+    elseif action == "killvolumevisit" and not capture then
+        local ok, value = pcall(compare_kill_volume_visit)
+        if ok then message = value else message = "kill-volume visit comparison failed: " .. tostring(value) end
+    elseif action == "weatherlease" and not capture then
+        if type(SilverfishProfileCrossroadsWeatherLease) == "function" then
+            local ok, value = pcall(function()
+                local state = inspect()
+                return SilverfishProfileCrossroadsWeatherLease(state, phase(state))
+            end)
+            if ok then message = value else message = "weather lease comparison failed: " .. tostring(value) end
+        else
+            message = "unavailable"
+        end
     elseif action == "hoststash" and not capture then
         if type(SilverfishProfileCrossroadsHostStash) == "function" then
             local ok, value = pcall(function()

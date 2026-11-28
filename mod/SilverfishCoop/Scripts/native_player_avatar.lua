@@ -194,9 +194,10 @@ local function observe_motion(world_address, pawn, address)
 end
 
 local function observe_appearance(world_address, pawn_address, save, sample)
-    if sample and sample.model and type(SilverfishNativeAvatarAppearanceMatches) == "function"
-        and SilverfishNativeAvatarAppearanceMatches(world_address, pawn_address, save:GetAddress(), sample) then
-        return sample.model, sample
+    if sample and sample.model and type(SilverfishNativeAvatarAppearanceMatches) == "function" then
+        local matches, body, head, unarmed =
+            SilverfishNativeAvatarAppearanceMatches(world_address, pawn_address, save:GetAddress(), sample, "outfit")
+        if matches then return sample.model, sample, body, head, unarmed end
     end
     return character_view.observe(save.Character, sample)
 end
@@ -220,7 +221,7 @@ local function observe(state, phase)
                 observations[id] = nil
             else
                 known[id] = true
-                local read, body, head, pawn, save, local_pawn = pcall(function()
+                local read, pawn, save, local_pawn = pcall(function()
                     local pawn, save = details.pawn
                     local local_pawn = pawn:IsLocallyControlled()
                     if local_pawn then
@@ -231,33 +232,44 @@ local function observe(state, phase)
                         pawn, save = guest_save.observed_item_context(state, phase, details)
                     end
                     if valid(pawn) and valid(save) then
-                        return worn(save.PlayerArmor), worn(save.PlayerHelmet), pawn, save, local_pawn
+                        return pawn, save, local_pawn
                     end
                 end)
-                if read and body then
+                if read and pawn then
                     local address = pawn:GetAddress()
-                    local read_weapon, weapon, cached = pcall(weapon_view.observe, pawn, save, observed_weapons[address])
                     local previous = observed_characters[address]
                     local sample = previous and same(previous.save, save) and previous or nil
-                    local read_appearance, appearance, appearance_sample =
+                    local read_appearance, appearance, appearance_sample, body, head, unarmed =
                         pcall(observe_appearance, world_address, address, save, sample)
-                    if read_appearance and appearance_sample then
-                        appearance_sample.save = save
-                        characters[address] = appearance_sample
+                    local read_worn = true
+                    if body == nil or head == nil then
+                        read_worn, body, head = pcall(function()
+                            return body or worn(save.PlayerArmor), head or worn(save.PlayerHelmet)
+                        end)
                     end
-                    if read_weapon then weapons[address] = cached end
-                    local gun = aim_kind(read_weapon and cached and cached.actor or nil)
-                    local firearm = gun ~= "-" and cached.actor:GetClass():GetFullName():match("^BlueprintGeneratedClass (.+)$")
-                    if not firearm or not firearm_path(firearm) then firearm = "-" end
-                    local read_visor, powered = false, false
-                    if local_pawn and head ~= "-" then
-                        read_visor, powered = pcall(visor.powered, pawn, state.world, false)
+                    if read_worn then
+                        local read_weapon, weapon, cached = true, "-", nil
+                        if not unarmed then
+                            read_weapon, weapon, cached = pcall(weapon_view.observe, pawn, save, observed_weapons[address])
+                        end
+                        if read_appearance and appearance_sample then
+                            appearance_sample.save = save
+                            characters[address] = appearance_sample
+                        end
+                        if read_weapon then weapons[address] = cached end
+                        local gun = aim_kind(read_weapon and cached and cached.actor or nil)
+                        local firearm = gun ~= "-" and cached.actor:GetClass():GetFullName():match("^BlueprintGeneratedClass (.+)$")
+                        if not firearm or not firearm_path(firearm) then firearm = "-" end
+                        local read_visor, powered = false, false
+                        if local_pawn and head ~= "-" then
+                            read_visor, powered = pcall(visor.powered, pawn, state.world, false)
+                        end
+                        local aiming, sprinting, moving = observe_motion(world_address, pawn, address)
+                        observations[id] = { pawn = details.name, body = body, head = head, weapon = read_weapon and weapon or "-",
+                            appearance = read_appearance and appearance or "-", gun = gun, aim = aiming and gun or "-",
+                            firearm = firearm, sprinting = sprinting, moving = moving,
+                            visor = read_visor and powered == true }
                     end
-                    local aiming, sprinting, moving = observe_motion(world_address, pawn, address)
-                    observations[id] = { pawn = details.name, body = body, head = head, weapon = read_weapon and weapon or "-",
-                        appearance = read_appearance and appearance or "-", gun = gun, aim = aiming and gun or "-",
-                        firearm = firearm, sprinting = sprinting, moving = moving,
-                        visor = read_visor and powered == true }
                 end
             end
         end
