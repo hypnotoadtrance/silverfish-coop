@@ -620,6 +620,9 @@ local function project_health(fields, state, phase, reply)
         local info = stock_player_info(state)
         if valid(info) then info:UpdateStats() end
     end
+    if type(SilverfishBindNativeGuestHealth) == "function" then
+        pcall(SilverfishBindNativeGuestHealth, pawn:GetAddress(), save:GetAddress(), area, session, epoch, token, name)
+    end
     if reply then
         reply[1], reply[2] = current_health, current_maximum
         if #fields >= 11 then reply[3], reply[4] = current_food or "-", current_regen or "-" end

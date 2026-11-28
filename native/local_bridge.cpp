@@ -1,7 +1,9 @@
 #include "local_bridge.hpp"
 #include "guest_clock.hpp"
+#include "guest_health.hpp"
 #include "local_catalog_ticket.hpp"
 #include "session_observation.hpp"
+#include "world_scene.hpp"
 
 #include <algorithm>
 #include <array>
@@ -20,6 +22,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -66,10 +69,12 @@ namespace
     constexpr std::uint32_t guest_interaction_features = 0x0f;
     constexpr std::uint32_t guest_interaction_area_limit = 160;
     constexpr std::uint32_t guest_interaction_pawn_limit = 512;
-    constexpr std::size_t guest_clock_command_limit = 1024;
+    constexpr std::size_t native_command_limit = 1536;
     constexpr std::string_view guest_clock_action = "native-guest-clock-apply";
+    constexpr std::string_view guest_health_action = "native-guest-health-project";
 
     enum class State { idle, queued, taken, running, replied, too_large };
+    enum class NativeCommand { none, clock, health };
     std::mutex mutex;
     std::mutex status_mutex;
     std::condition_variable changed;
@@ -87,7 +92,7 @@ namespace
     FastHeader fast_header;
     std::vector<std::string> fast_actions;
     std::atomic<bool> fast_queued{};
-    std::atomic<bool> native_clock_queued{};
+    std::atomic<NativeCommand> native_queued{};
     std::atomic<bool> native_dispatch_installed{};
     Hooks::GlobalCallbackId native_dispatch_hook = Hooks::ERROR_ID;
     struct FastBridgeProfile
@@ -102,6 +107,7 @@ namespace
         std::string id, map, pawn, epoch;
     };
     thread_local ClockDispatchProfile clock_profile;
+    thread_local std::deque<std::shared_ptr<const std::string>> health_profile;
     std::shared_ptr<const std::string> reply;
     bool status_enabled{};
     std::shared_ptr<const std::string> status_frame;
@@ -153,15 +159,19 @@ namespace
         });
     }
 
-    bool native_clock_command(std::string_view payload)
+    NativeCommand classify_native_command(std::string_view payload)
     {
-        if (payload.size() > guest_clock_command_limit ||
-            !native_dispatch_installed.load(std::memory_order_acquire)) return false;
+        if (payload.size() > native_command_limit ||
+            !native_dispatch_installed.load(std::memory_order_acquire)) return NativeCommand::none;
         const auto id_end = payload.find('\t');
-        if (id_end == payload.npos) return false;
-        const auto fields = payload.substr(id_end + 1);
-        return fields.size() > guest_clock_action.size() && fields.starts_with(guest_clock_action) &&
-            fields[guest_clock_action.size()] == '\t';
+        if (id_end == payload.npos) return NativeCommand::none;
+        payload.remove_prefix(id_end + 1);
+        const auto action_end = payload.find('\t');
+        if (action_end == payload.npos) return NativeCommand::none;
+        const auto action = payload.substr(0, action_end);
+        if (action == guest_clock_action) return NativeCommand::clock;
+        if (action == guest_health_action) return NativeCommand::health;
+        return NativeCommand::none;
     }
 
     FastHeader classify_fast_header(std::string_view payload)
@@ -456,7 +466,7 @@ namespace
         state = State::idle;
         fast_header = {};
         fast_queued.store(false, std::memory_order_release);
-        native_clock_queued.store(false, std::memory_order_release);
+        native_queued.store(NativeCommand::none, std::memory_order_release);
         command.clear();
         reply.reset();
         changed.notify_all();
@@ -471,9 +481,8 @@ namespace
             std::lock_guard lock(mutex);
             ready = true;
             active = attached;
-            // The C++ engine hook gets one admission attempt for a reserved
-            // clock ticket before the Lua dispatcher can take it.
-            if (state == State::queued && !native_clock_queued.load(std::memory_order_relaxed))
+            // The native tick gets one admission attempt before Lua may take the ticket.
+            if (state == State::queued && native_queued.load(std::memory_order_relaxed) == NativeCommand::none)
             {
                 state = State::taken;
                 fast_queued.store(false, std::memory_order_release);
@@ -497,7 +506,8 @@ namespace
         std::int64_t ticket{};
         {
             std::lock_guard lock(mutex);
-            if (state != State::queued || !fast_header.fields || native_clock_queued.load(std::memory_order_relaxed))
+            if (state != State::queued || !fast_header.fields ||
+                native_queued.load(std::memory_order_relaxed) != NativeCommand::none)
                 return 0;
             state = State::taken;
             fast_queued.store(false, std::memory_order_release);
@@ -966,22 +976,33 @@ namespace
         std::int64_t sequence, milliseconds;
     };
 
-    std::optional<ClockCommand> parse_clock_command(std::string_view payload)
+    struct NativeFields
+    {
+        std::array<std::string_view, 16> values;
+        std::size_t count{};
+    };
+
+    std::optional<NativeFields> parse_native_command(std::string_view payload)
     {
         const auto last = payload.find_last_not_of("\r\n");
         if (last == payload.npos) return {};
         payload = payload.substr(0, last + 1);
         if (payload.find_first_of(std::string_view{"\r\n\0", 3}) != payload.npos) return {};
-        std::array<std::string_view, 6> fields{};
-        for (std::size_t index = 0; index < fields.size(); ++index)
+        NativeFields fields{};
+        while (fields.count < fields.values.size())
         {
             const auto separator = payload.find('\t');
-            const bool final = index + 1 == fields.size();
-            if (final != (separator == payload.npos)) return {};
-            fields[index] = payload.substr(0, separator);
-            if (!final) payload.remove_prefix(separator + 1);
+            fields.values[fields.count++] = payload.substr(0, separator);
+            if (separator == payload.npos)
+                return plain_bridge_token(fields.values[0]) ? std::optional{fields} : std::nullopt;
+            payload.remove_prefix(separator + 1);
         }
-        if (!plain_bridge_token(fields[0]) || fields[1] != guest_clock_action || fields[2].empty() ||
+        return {};
+    }
+
+    std::optional<ClockCommand> parse_clock_command(std::span<const std::string_view> fields)
+    {
+        if (fields.size() != 6 || fields[1] != guest_clock_action || fields[2].empty() ||
             fields[2].size() > 128 || fields[4].empty()) return {};
         const auto sequence = unsigned_field(fields[3]);
         const auto milliseconds = unsigned_field(fields[5]);
@@ -989,7 +1010,7 @@ namespace
         return ClockCommand{fields[0], fields[2], fields[4], *sequence, *milliseconds};
     }
 
-    std::int64_t clock_status_sequence(std::string_view frame, std::string_view map)
+    std::int64_t guest_status_sequence(std::string_view frame, std::string_view map, std::string_view character = {})
     {
         constexpr std::string_view prefix = "schema\t1\nseq\t";
         if (!frame.starts_with(prefix)) return 0;
@@ -1006,46 +1027,39 @@ namespace
         constexpr std::string_view connected = "session\tclient\tconnected\t";
         if (!frame.starts_with(connected)) return 0;
         frame.remove_prefix(connected.size());
-        return frame.substr(0, frame.find('\t')) == map ? *sequence : 0;
+        if (frame.substr(0, frame.find('\t')) != map) return 0;
+        if (character.empty()) return *sequence;
+        const auto session_end = frame.find('\n');
+        if (session_end == frame.npos) return 0;
+        frame.remove_prefix(session_end + 1);
+        constexpr std::string_view save_scope = "native-save-scope\t";
+        if (!frame.starts_with(save_scope)) return 0;
+        frame.remove_prefix(save_scope.size());
+        return frame.substr(0, frame.find('\n')) == character ? *sequence : 0;
     }
 
-    void dispatch_native_clock()
+    bool claim_native_command(std::int64_t ticket, NativeCommand action, bool prepared)
     {
-        if (!native_clock_queued.load(std::memory_order_acquire) || !RC::Unreal::IsInGameThreadRaw()) return;
-        std::array<char, guest_clock_command_limit> buffer;
-        std::size_t length{};
-        std::int64_t ticket{};
-        {
-            std::unique_lock lock(mutex, std::try_to_lock);
-            if (!lock || !attached || state != State::queued ||
-                !native_clock_queued.load(std::memory_order_relaxed) || command.size() > buffer.size()) return;
-            length = command.size();
-            std::memcpy(buffer.data(), command.data(), length);
-            ticket = active_ticket;
-        }
+        // WaitV1 and CloseV1 can retire an unclaimed ticket while we qualify
+        // the seat. Claim only the exact ticket still waiting to run.
+        std::unique_lock lock(mutex, std::try_to_lock);
+        if (!lock || !attached || state != State::queued || active_ticket != ticket ||
+            native_queued.load(std::memory_order_relaxed) != action) return false;
+        native_queued.store(NativeCommand::none, std::memory_order_release);
+        if (!prepared) return false;
+        state = State::running;
+        fast_queued.store(false, std::memory_order_release);
+        return true;
+    }
 
-        const auto request = parse_clock_command({buffer.data(), length});
-        std::shared_ptr<const std::string> snapshot;
-        {
-            std::unique_lock lock(status_mutex, std::try_to_lock);
-            if (!lock) return;
-            snapshot = status_frame;
-        }
-        const auto sequence = request && snapshot ? clock_status_sequence(*snapshot, request->map) : 0;
+    void dispatch_native_clock(std::int64_t ticket, std::span<const std::string_view> fields, std::string_view snapshot)
+    {
+        const auto request = parse_clock_command(fields);
+        const auto sequence = request ? guest_status_sequence(snapshot, request->map) : 0;
         namespace clock = silverfish::native_guest_clock;
         const auto prepared = sequence ? clock::prepare_refresh(request->epoch, request->map, request->sequence,
             request->milliseconds) : std::nullopt;
-        {
-            // WaitV1 and CloseV1 can retire an unclaimed ticket while we qualify
-            // the seat. Claim only the exact ticket still waiting to run.
-            std::unique_lock lock(mutex, std::try_to_lock);
-            if (!lock || !attached || state != State::queued || active_ticket != ticket ||
-                !native_clock_queued.load(std::memory_order_relaxed)) return;
-            native_clock_queued.store(false, std::memory_order_release);
-            if (!prepared) return;
-            state = State::running;
-            fast_queued.store(false, std::memory_order_release);
-        }
+        if (!claim_native_command(ticket, NativeCommand::clock, prepared.has_value())) return;
 
         auto refusal = prepared->refusal;
         if (refusal.empty() && !clock::apply_refresh(*prepared))
@@ -1074,6 +1088,98 @@ namespace
         clock_profile.epoch = prepared->epoch;
         clock_profile.clock_sequence = prepared->sequence;
         clock_profile.status_sequence = sequence;
+    }
+
+    std::int64_t health_status_sequence(std::span<const std::string_view> fields, std::string_view snapshot)
+    {
+        return fields.size() >= 9 && fields[1] == guest_health_action && !fields[5].empty()
+            ? guest_status_sequence(snapshot, fields[2], fields[5]) : 0;
+    }
+
+    void dispatch_native_health(std::int64_t ticket, std::span<const std::string_view> fields, std::string_view snapshot)
+    {
+        const auto sequence = health_status_sequence(fields, snapshot);
+        namespace health = silverfish::native_guest_health;
+        const auto prepared = sequence ? health::prepare(fields) : std::nullopt;
+        if (!claim_native_command(ticket, NativeCommand::health, prepared.has_value())) return;
+
+        const auto result = health::apply(*prepared);
+        std::string output{"native-guest-health-reply\t1\t"};
+        output.append(fields[0]).append("\t").append(std::to_string(sequence));
+        for (const auto value : fields.subspan(2, 5)) output.append("\t").append(value);
+        if (result) output.append("\taccepted\tstock co-op guest health projected").append(*result);
+        else output.append("\terror\tThe stock health view failed readback\n");
+        const auto receipt = std::make_shared<const std::string>(std::move(output));
+        const bool published = publish_reply_frame(ticket, receipt);
+        if (published && result && fast_profile_enabled())
+        {
+            constexpr std::size_t samples = 24;
+            if (health_profile.size() >= samples) health_profile.pop_front();
+            health_profile.push_back(receipt);
+        }
+    }
+
+    void dispatch_native_command()
+    {
+        if (native_queued.load(std::memory_order_acquire) == NativeCommand::none ||
+            !RC::Unreal::IsInGameThreadRaw()) return;
+        std::array<char, native_command_limit> buffer;
+        std::size_t length{};
+        std::int64_t ticket{};
+        NativeCommand action{};
+        {
+            std::unique_lock lock(mutex, std::try_to_lock);
+            if (!lock || !attached || state != State::queued || command.size() > buffer.size()) return;
+            action = native_queued.load(std::memory_order_relaxed);
+            if (action == NativeCommand::none) return;
+            length = command.size();
+            std::memcpy(buffer.data(), command.data(), length);
+            ticket = active_ticket;
+        }
+        std::shared_ptr<const std::string> snapshot;
+        {
+            std::unique_lock lock(status_mutex, std::try_to_lock);
+            if (!lock) return;
+            snapshot = status_frame;
+        }
+        const auto command_fields = parse_native_command({buffer.data(), length});
+        if (!command_fields || !snapshot)
+        {
+            claim_native_command(ticket, action, false);
+            return;
+        }
+        const std::span<const std::string_view> fields{command_fields->values.data(), command_fields->count};
+        if (action == NativeCommand::clock) dispatch_native_clock(ticket, fields, *snapshot);
+        if (action == NativeCommand::health) dispatch_native_health(ticket, fields, *snapshot);
+    }
+
+    int read_health_dispatch_profile(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 0 || !RC::Unreal::IsInGameThreadRaw()) return 0;
+        std::string lines;
+        for (const auto& receipt : health_profile) lines.append(*receipt);
+        lua.set_string(lines);
+        return 1;
+    }
+
+    int probe_native_health_dispatch(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 1 || !lua.is_string() || !RC::Unreal::IsInGameThreadRaw()) return 0;
+        const auto line = lua.get_string();
+        const auto command_fields = line.size() <= native_command_limit ? parse_native_command(line) : std::nullopt;
+        std::shared_ptr<const std::string> snapshot;
+        {
+            std::lock_guard lock(status_mutex);
+            snapshot = status_frame;
+        }
+        bool qualified = false;
+        if (command_fields && snapshot)
+        {
+            const std::span<const std::string_view> fields{command_fields->values.data(), command_fields->count};
+            qualified = health_status_sequence(fields, *snapshot) && silverfish::native_guest_health::prepare(fields);
+        }
+        lua.set_bool(qualified);
+        return 1;
     }
 
     int read_clock_dispatch_profile(const Lua& lua)
@@ -1735,7 +1841,7 @@ extern "C" __declspec(dllexport) std::int64_t SilverfishBridgeSubmitV1(const cha
     state = State::queued;
     fast_header = classify_fast_header(command);
     fast_queued.store(fast_header.fields != 0, std::memory_order_release);
-    native_clock_queued.store(native_clock_command(command), std::memory_order_release);
+    native_queued.store(classify_native_command(command), std::memory_order_release);
     return active_ticket;
 }
 
@@ -1778,6 +1884,17 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCancelV1(std::int64_t tick
 
 namespace silverfish::local_bridge
 {
+    void append_status_text(std::string& row, std::string_view text)
+    {
+        append_status_field(row, text);
+    }
+
+    void append_status_number(std::string& row, double value)
+    {
+        std::array<char, 64> buffer;
+        row.append(number_field(value, buffer));
+    }
+
     void install_native_dispatch()
     {
         const auto enabled = [](const wchar_t* name) {
@@ -1786,10 +1903,10 @@ namespace silverfish::local_bridge
         };
         if (native_dispatch_hook != Hooks::ERROR_ID ||
             !enabled(L"SILVERFISH_COOP_RESIDENT_TITLE") || !enabled(L"SILVERFISH_COOP_INSTALLED_TITLE") ||
-            !enabled(L"SILVERFISH_COOP_NATIVE_GUEST_CLOCK") || !enabled(L"SILVERFISH_COOP_NATIVE_ZONE")) return;
+            !enabled(L"SILVERFISH_COOP_NATIVE_ZONE")) return;
         native_dispatch_hook = Hooks::RegisterEngineTickPreCallback(
-            [](auto&, RC::Unreal::UEngine*, float, bool) { dispatch_native_clock(); },
-            {false, false, STR("SilverfishCoopNative"), STR("Dispatch qualified local clock commands")});
+            [](auto&, RC::Unreal::UEngine*, float, bool) { dispatch_native_command(); },
+            {false, false, STR("SilverfishCoopNative"), STR("Dispatch qualified local gameplay commands")});
         native_dispatch_installed.store(native_dispatch_hook != Hooks::ERROR_ID, std::memory_order_release);
     }
 
@@ -1798,7 +1915,7 @@ namespace silverfish::local_bridge
         native_dispatch_installed.store(false, std::memory_order_release);
         {
             std::lock_guard lock(mutex);
-            native_clock_queued.store(false, std::memory_order_release);
+            native_queued.store(NativeCommand::none, std::memory_order_release);
         }
         if (native_dispatch_hook != Hooks::ERROR_ID) Hooks::UnregisterCallback(native_dispatch_hook);
         native_dispatch_hook = Hooks::ERROR_ID;
@@ -1816,6 +1933,7 @@ namespace silverfish::local_bridge
 
     void register_lua(RC::LuaMadeSimple::Lua& lua)
     {
+        silverfish::native_world_scene::register_lua(lua);
         lua.register_function("SilverfishFindObjectByPath", find_object_by_path);
         lua.register_function("SilverfishReadNativeSessionPawn", read_session_pawn);
         lua.register_function("SilverfishObserveNativeSession", observe_native_session);
@@ -1848,6 +1966,8 @@ namespace silverfish::local_bridge
         {
             lua.register_function("SilverfishReadFastLocalBridgeProfile", read_fast_profile);
             lua.register_function("SilverfishReadNativeClockDispatchProfile", read_clock_dispatch_profile);
+            lua.register_function("SilverfishReadNativeHealthDispatchProfile", read_health_dispatch_profile);
+            lua.register_function("SilverfishProbeNativeHealthDispatch", probe_native_health_dispatch);
             lua.register_function("SilverfishFormatNativeSessionStatusRows", format_native_session_status_rows);
             lua.register_function("SilverfishBridgeProfileStamp", profile_stamp);
             register_early_engine_tick_profile();

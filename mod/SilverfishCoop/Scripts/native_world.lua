@@ -399,8 +399,9 @@ local function world_rows(state, phase, status_row)
             end
         end
     end
-    local loaded, instance = pcall(game_instance, pawn)
+    local loaded, instance
     if staged then
+        loaded, instance = pcall(game_instance, pawn)
         local read, quest = false, instance
         if loaded then read, quest = pcall(live_quest, instance, FName(quest_id)) end
         if read then
@@ -410,13 +411,20 @@ local function world_rows(state, phase, status_row)
             rows[#rows + 1] = status_row("native-quest", quest_id, "error", "-", "-", "-", brief(quest))
         end
     end
-    local scene_read, scene_error = false, instance
-    if loaded then
-        scene_read, scene_error = pcall(append_scene, rows, status_row, state.map, instance)
-    end
-    if not scene_read then
-        rows[#rows + 1] = status_row("native-scene", state.map, "-", "-", "-", "-", "-", "-", "-", "-",
-            "-", "-", "-", "-", "-", "-", "error", brief(scene_error))
+    local read_native = SilverfishReadNativeWorldSceneRows
+    local scene = type(read_native) == "function" and read_native(pawn:GetAddress(), state.map)
+    if type(scene) == "string" and scene ~= "" then
+        rows[#rows + 1] = scene
+    else
+        if loaded == nil then loaded, instance = pcall(game_instance, pawn) end
+        local scene_read, scene_error = false, instance
+        if loaded then
+            scene_read, scene_error = pcall(append_scene, rows, status_row, state.map, instance)
+        end
+        if not scene_read then
+            rows[#rows + 1] = status_row("native-scene", state.map, "-", "-", "-", "-", "-", "-", "-", "-",
+                "-", "-", "-", "-", "-", "-", "error", brief(scene_error))
+        end
     end
     cached_rows, cached_time, cached_world = rows, now, world_address
     return rows

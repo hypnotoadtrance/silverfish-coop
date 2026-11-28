@@ -56,6 +56,7 @@
 #include "flood_jammer.hpp"
 #include "lenny_quest.hpp"
 #include "guest_clock.hpp"
+#include "guest_health.hpp"
 #include "guest_primary_input.hpp"
 #include "guest_consumable.hpp"
 #include "guest_regen.hpp"
@@ -1791,6 +1792,7 @@ namespace
             silverfish::native_flood_jammer::register_lua(lua);
             silverfish::native_lenny_quest::register_lua(lua);
             silverfish::native_guest_clock::register_lua(lua);
+            silverfish::native_guest_health::register_lua(lua);
             silverfish::native_guest_primary_input::register_lua(lua);
             silverfish::native_guest_consumable::register_lua(lua);
             silverfish::native_guest_regen::register_lua(lua);
@@ -1885,6 +1887,15 @@ namespace
         Unreal::UFunction* jump_shake{};
         std::pair<int, int> jump_shake_hook{};
     };
+}
+
+std::optional<silverfish::native_guest_health::ClientSeat> silverfish::native_guest_health::client_damage_seat(
+    std::string_view session, std::string_view epoch)
+{
+    if (!Unreal::IsInGameThreadRaw() || client_damage_scope.session != session ||
+        client_damage_scope.epoch != epoch || !qualified_client_damage(client_damage_scope)) return {};
+    return ClientSeat{client_damage_scope.pawn.object.Get(), client_damage_scope.owner.controller.Get(),
+        client_damage_scope.world.Get(), client_damage_scope.instance.Get()};
 }
 
 bool silverfish::native_death::friendly_fire_pair(RC::Unreal::UObject* attacker, RC::Unreal::UObject* target)
