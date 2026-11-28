@@ -1,4 +1,5 @@
 #include "guest_primary_input.hpp"
+#include "host_dig.hpp"
 #include "guest_item.hpp"
 #include "guest_melee.hpp"
 #include "guest_weapon_registry.hpp"
@@ -240,6 +241,7 @@ namespace
     {
         silverfish::native_guest_item::ShotView view{};
         bool underbarrel{};
+        bool local_dig{};
     };
     enum class HeldEdge { press, release, cancel };
     enum class HeldProof { none, mapped_key, edge_window, stock_melee_edges, fixture };
@@ -875,6 +877,9 @@ namespace
             != silverfish::guest_weapon_profiles::firearms.end())
             receipt.view = silverfish::native_guest_item::capture_shot_view(scope.seat.pawn.Get(), scope.seat.held.Get(), underbarrel);
         ++count;
+        if (scope.item == &spade)
+            receipt.local_dig = silverfish::native_host_dig::present_guest_input(
+                scope.seat.pawn.Get(), scope.seat.held.Get(), receipt.sequence);
     }
 
     void intercept(Iteration& iteration, U::UObject* pawn, U::UFunction* function, const void* arguments)
@@ -1036,26 +1041,45 @@ namespace
         const auto pawn = lua.get_integer();
         const auto now = Clock::now();
         if (pawn != address(scope.seat.pawn.Get()) || !qualified(scope, now)) return 0;
-        if (!can_act(scope.seat))
+        discard_expired(now);
+        if (!count) return 0;
+        const auto advance = [] {
+            head = (head + 1) % receipt_limit;
+            --count;
+        };
+        silverfish::native_host_dig::GuestContact contact;
+        using silverfish::native_host_dig::GuestContactState;
+        while (count && receipts[head].local_dig)
+        {
+            const auto outcome = silverfish::native_host_dig::read_guest_contact(
+                scope.seat.pawn.Get(), receipts[head].sequence, contact);
+            if (outcome == GuestContactState::waiting) return 0;
+            if (outcome == GuestContactState::found) break;
+            advance();
+        }
+        if (!count) return 0;
+        const auto& receipt = receipts[head];
+        if (!receipt.local_dig && !can_act(scope.seat))
         {
             // Pending taps cannot fire when a temporary weapon lock expires.
             head = count = 0;
             return 0;
         }
-        discard_expired(now);
-        if (!count) return 0;
-        const auto& receipt = receipts[head];
         lua.set_integer(static_cast<std::int64_t>(receipt.sequence));
         lua.set_integer(pawn);
         lua.set_string(scope.text);
         lua.set_string(scope.item->kind);
         if (!host) lua.set_bool(receipt.underbarrel);
-        const int fields = (host ? 4 : 5) + push_shot_view(lua, receipt.view);
-        if (!peek)
+        int fields = host ? 4 : 5;
+        if (receipt.local_dig)
         {
-            head = (head + 1) % receipt_limit;
-            --count;
+            for (const auto axis : contact.point) lua.set_number(axis);
+            for (const auto axis : contact.normal) lua.set_number(axis);
+            lua.set_string(contact.material);
+            fields += 7;
         }
+        else fields += push_shot_view(lua, receipt.view);
+        if (!peek) advance();
         return fields;
     }
 

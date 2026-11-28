@@ -80,6 +80,26 @@ class GuestDigTests(unittest.IsolatedAsyncioTestCase):
                 dig.request_target(f"{SPADE}@0.00000,0.00000,0.00000{position}", self.epoch)
 
 
+    async def test_exact_contact_settles_once_and_is_sequenced_by_operation(self):
+        material = MATERIAL.split(" ", 1)[1]
+        hit = f"contact:11.5000,-333.1000,22.0000,0.000000,0.000000,1.000000:{material}"
+        target = dig.request_target(f"{SPADE}@{hit}", self.epoch)
+        self.bridge.command.return_value["ack"]["message"] = "stock_guest_dig_contact_applied"
+        settled = await dig.guest_dig(self.host, self.bridge, GUEST_ID, target, self.operation)
+        self.assertEqual(settled[dig.GUEST_RESULT], {
+            "map": CROSSROADS, "pawn": PAWN, "guid": SPADE, "state": "settled",
+            "contact": [11.5, -333.1, 22.0], "normal": [0.0, 0.0, 1.0], "material": material})
+        self.assertEqual(await dig.guest_dig(self.host, self.bridge, GUEST_ID, target, self.operation), settled)
+        self.bridge.command.assert_awaited_once_with(dig.GUEST_ACTION, PAWN, SPADE, hit, self.operation, timeout=3)
+
+        with self.assertRaisesRegex(party.RuleError, "operation_id_conflict"):
+            await dig.guest_dig(self.host, self.bridge, GUEST_ID, target.replace("11.5000", "11.6000"), self.operation)
+        for invalid in (hit.replace("1.000000", "0.000000"), hit.replace(material, "bad"),
+                        hit.replace("22.0000", "100000000.0001")):
+            with self.assertRaisesRegex(ValueError, "stock_guest_dig_contact_unqualified"):
+                dig.request_target(f"{SPADE}@{invalid}", self.epoch)
+
+
 class DigReportTests(unittest.TestCase):
     def test_diagnostic_belongs_to_the_current_listen_host(self):
         fields = [dig.DIAGNOSTIC, CROSSROADS, PAWN, "qualified", "fresh", "inactive_interned", "armed", "ready"]

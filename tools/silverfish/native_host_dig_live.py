@@ -38,6 +38,9 @@ _STATUS = re.compile(r"[a-z][a-z0-9_]{0,80}|-")
 _ANGLE = r"-?[0-9]{1,3}\.[0-9]{5}"
 _POSITION = r"-?[0-9]{1,9}\.[0-9]{4}"
 _CAMERA_POSE = re.compile(rf"{_ANGLE},{_ANGLE},{_ANGLE}(?:,{_POSITION},{_POSITION},{_POSITION})?")
+_NORMAL = r"-?[01]\.[0-9]{6}"
+_MATERIAL_PATH = r"/(?:[A-Za-z0-9_\-]+/)*[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+"
+_CONTACT = re.compile(rf"contact:({_POSITION},{_POSITION},{_POSITION},{_NORMAL},{_NORMAL},{_NORMAL}):({_MATERIAL_PATH})")
 _CUSTODY_FIELDS = {"state", "map", "source", "flag", "flag_value", "spade_guid", "contact", "material", "package_guid"}
 
 
@@ -50,6 +53,20 @@ def camera_pose(value):
     return pose
 
 
+def ground_contact(value):
+    if not isinstance(value, str) or len(value) > 360 or not (match := _CONTACT.fullmatch(value)):
+        return None
+    values = tuple(map(float, match[1].split(",")))
+    if (any(abs(axis) > 100_000_000 for axis in values[:3])
+            or not 0.98 < sum(axis * axis for axis in values[3:]) < 1.02 or len(match[2]) > 240):
+        return None
+    return values[:3], values[3:], match[2]
+
+
+def qualified_input(value):
+    return ground_contact(value) is not None or camera_pose(value) is not None
+
+
 def request_target(value, epoch):
     from . import native_guest_melee
 
@@ -57,8 +74,9 @@ def request_target(value, epoch):
     scoped = native_guest_melee.request_target(guid, epoch)
     if not separator:
         return scoped
-    if camera_pose(aim) is None:
-        raise ValueError("stock_guest_dig_camera_unqualified")
+    if not qualified_input(aim):
+        raise ValueError("stock_guest_dig_contact_unqualified" if aim.startswith("contact:")
+                         else "stock_guest_dig_camera_unqualified")
     return f"{scoped}@{aim}"
 
 
@@ -67,11 +85,13 @@ async def guest_dig(host, bridge, character, target, operation):
 
     if isinstance(target, str) and target.count("@") >= 2:
         identity, _, aim = target.rpartition("@")
-        pose = camera_pose(aim)
-        if pose is None:
-            raise party.RuleError("stock_guest_dig_camera_unqualified")
+        contact = ground_contact(aim)
+        pose = None if contact else camera_pose(aim)
+        if contact is None and pose is None:
+            raise party.RuleError("stock_guest_dig_contact_unqualified" if aim.startswith("contact:")
+                                  else "stock_guest_dig_camera_unqualified")
     else:
-        identity, aim, pose = target, None, None
+        identity, aim, pose, contact = target, None, None, None
     guid = native_guest_melee.current_guid(identity, host.zone_epoch)
     if not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
         raise party.RuleError("stock_guest_dig_operation_unqualified")
@@ -97,14 +117,15 @@ async def guest_dig(host, bridge, character, target, operation):
         raise party.RuleError("stock_guest_dig_equipment_changed")
     options = {"update_status": False} if getattr(bridge, "local_bridge", None) is not None else {}
     try:
-        args = (aim,) if aim is not None else ()
+        args = (aim, operation) if contact else (aim,) if aim is not None else ()
         snapshot = await bridge.command(GUEST_ACTION, pawn, guid, *args, timeout=3, **options)
     except RuntimeError as error:
         if str(error).startswith("stock_guest_dig_"):
             raise party.RuleError(str(error)) from error
         raise
+    expected = "stock_guest_dig_contact_applied" if contact else "stock_guest_dig_dispatched"
     if (snapshot.get("map"), snapshot.get("state"), snapshot.get("ack", {}).get("message")) != (
-            area, "hosting", "stock_guest_dig_dispatched"):
+            area, "hosting", expected):
         raise RuntimeError("The stock guest shovel dispatch did not verify")
     if COMPACT_SCOPE in snapshot:
         if snapshot[COMPACT_SCOPE] != pawn:
@@ -113,6 +134,9 @@ async def guest_dig(host, bridge, character, target, operation):
         host.last_game = snapshot
     host.last_seen = time.monotonic()
     result = {GUEST_RESULT: {"map": area, "pawn": pawn, "guid": guid, "state": "dispatched"}}
+    if contact is not None:
+        point, normal, material = contact
+        result[GUEST_RESULT].update(state="settled", contact=list(point), normal=list(normal), material=material)
     if pose is not None:
         result[GUEST_RESULT]["aim_source"] = "guest_camera"
         if len(pose) == 6:

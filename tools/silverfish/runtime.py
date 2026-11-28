@@ -1221,7 +1221,7 @@ class Bridge:
                 if target is not None and (len(target) > 180 or not target.startswith("camera:")):
                     continue
             elif fields[5] == native_host_dig_live.GUEST_KIND:
-                if target is not None and native_host_dig_live.camera_pose(target) is None:
+                if target is not None and not native_host_dig_live.qualified_input(target):
                     continue
             elif target is not None and (fields[5] not in FIRE_CLASSES or not valid_primary_shot(fields[5], target)):
                 continue
@@ -2505,7 +2505,7 @@ class Bridge:
                 elif (fields[0] == "native-guest-spade-intent" and len(fields) in (5, 6) and valid_guid(fields[3])
                       and fields[1] == data.get("map") and data.get("state") == "connected" and len(fields[2]) <= 512
                       and (sequence := _held_input_sequence(fields[4]))
-                      and (len(fields) == 5 or native_host_dig_live.camera_pose(fields[5]) is not None)):
+                      and (len(fields) == 5 or native_host_dig_live.qualified_input(fields[5]))):
                     data[native_host_dig_live.GUEST_INTENT] = (sequence, fields[1], fields[2], fields[3], "spade", *fields[5:])
                 elif fields[0] == "native-guest-primary-scope" and len(fields) in {6, 7}:
                     data["native_guest_primary_scope"] = dict(zip(("map", "pawn", "guid", "kind", "mode"), fields[1:6]))

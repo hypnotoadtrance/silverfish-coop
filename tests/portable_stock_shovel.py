@@ -231,7 +231,7 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
         report = await seat.bridge.command("fixture-spade-" + action, *args, update_status=False)
         return report["ack"]["message"]
 
-    async def dig_once(stock_choice=None, *, advance=False, host_dig=False, quest_dig=False):
+    async def dig_once(stock_choice=None, *, advance=False, host_dig=False, quest_dig=False, hold_report=False):
         previous = await asyncio.gather(observe(host, "holes"), observe(guest, "holes"))
         previous = [set(text.split(";")) - {"none"} for text in previous]
         digger = "local" if host_dig else pawn
@@ -259,13 +259,31 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
             contacts = await asyncio.gather(observe(host, "aim", digger), observe(guest, "aim"))
         if stock_choice:
             await observe(host, "loot", stock_choice)
+        preview = None
         if host_dig:
             dispatch = await observe(host, "host-press", digger, *(["keep-aim", site] if quest_dig else []))
             assert dispatch == ("pressed" if quest_dig else "pressed and released"), dispatch
         else:
             assert await observe(host, "aim-away", digger) == "aimed away from soil"
-            tap = await submit(guest_run, "native-guest-primary-input-fixture")
-            assert tap["ok"], tap
+            if hold_report:
+                assert await observe(guest, "hold-report", "hold") == "hold"
+            try:
+                tap = await submit(guest_run, "native-guest-primary-input-fixture")
+                assert tap["ok"], tap
+                if hold_report:
+                    async with asyncio.timeout(4):
+                        while True:
+                            local_holes = set((await observe(guest, "holes")).split(";")) - previous[1] - {"none"}
+                            if local_holes:
+                                break
+                            await asyncio.sleep(.025)
+                    preview, = local_holes
+                    assert preview.startswith("3,"), local_holes
+                    authority_holes = set((await observe(host, "holes")).split(";")) - previous[0] - {"none"}
+                    assert not authority_holes, authority_holes
+            finally:
+                if hold_report:
+                    assert await observe(guest, "hold-report", "release") == "release"
             sequence = tap["native_guest_primary_fixture"]["sequence"]
             async with asyncio.timeout(8):
                 while True:
@@ -277,9 +295,10 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
             event, = events
             assert event["event"] == "native_guest_dig_input", event
             dispatch = event[dig.GUEST_RESULT]
-            assert dispatch.get("aim_source") == "guest_camera", dispatch
-            origin = dispatch.get("trace_origin")
-            assert origin and math.dist(origin, expected) < 200, (origin, expected)
+            assert dispatch["state"] == "settled", dispatch
+            point = dispatch.get("contact")
+            guest_contact = tuple(map(float, contacts[-1].split(",")))
+            assert point and math.dist(point, guest_contact) < 10, (point, guest_contact)
         if quest_dig:
             # The buried-item branch can emit its package without leaving an ordinary terrain hole.
             return {"contact": contacts, "dispatch": dispatch}
@@ -289,7 +308,7 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
                 while True:
                     observed = await asyncio.gather(observe(host, "holes"), observe(guest, "holes"))
                     additions = [set(text.split(";")) - base - {"none"} for text, base in zip(observed, previous)]
-                    if all(additions):
+                    if len(additions[0]) == len(additions[1]) == 1 and next(iter(additions[1])).startswith("1,"):
                         break
                     await asyncio.sleep(.1)
         except TimeoutError as error:
@@ -300,6 +319,8 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
         result = {"holes": [host_hole, guest_hole], "contact": contacts, "dispatch": dispatch}
         if not host_dig:
             result["guid"] = item["guid"]
+        if hold_report:
+            result["guest_hole_before_report"] = preview
         return result
 
     async def verify_host_dig():
@@ -436,7 +457,7 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
                                                      "host_inventory_preserved": True, "second_pickup_refused": True}}
 
     if not loot:
-        return {"stock_shovel": await dig_once(), "stock_host_shovel": await verify_host_dig()}
+        return {"stock_shovel": await dig_once(hold_report=True), "stock_host_shovel": await verify_host_dig()}
 
     checkpoint = campaign_save_hashes(host.campaign)
     host_status = await wait_resident_status(host_run, lambda f: f.get("state") == "hosting")
@@ -446,7 +467,7 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
         return [entry for entry in frame.get("game", {}).get(native_stock_enemy_drops.KEY, {}).values()
                 if entry["source"].startswith("DigHole_BP_C ") and entry["class_path"] == NUGGET]
 
-    dig_result = await dig_once("item")
+    dig_result = await dig_once("item", hold_report=True)
     found = await wait_resident_status(host_run, nuggets, timeout=8)
     nugget, = nuggets(found)
     async with asyncio.timeout(12):

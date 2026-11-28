@@ -306,6 +306,7 @@ def loose_revisit_overlay(game: Path):
     return portable_script_overlay(game, "native_authored_pickup.lua", add_loose_observation)
 
 
+@contextmanager
 def stock_shovel_overlay(game: Path):
     fixture = (Path(__file__).with_name("fixtures") / "portable_stock_shovel_probe.lua").read_text(encoding="utf-8")
 
@@ -315,7 +316,15 @@ def stock_shovel_overlay(game: Path):
             raise ValueError("The replica lacks the stock dig command")
         return script.replace(marker, marker + fixture, 1)
 
-    return portable_script_overlay(game, "native_host_dig_live.lua", add_shovel_fixture)
+    def hold_shovel_report(script):
+        marker = '                report = ("contact:'
+        if script.count(marker) != 1:
+            raise ValueError("The replica lacks the local shovel report")
+        return script.replace(marker, "                if _G.SilverfishShovelFixtureHoldReport then return emitted end\n" + marker)
+
+    with (portable_script_overlay(game, "native_host_dig_live.lua", add_shovel_fixture) as shovel,
+          portable_script_overlay(game, "native_guest_primary_input.lua", hold_shovel_report) as report):
+        yield {"stock_shovel": shovel, "hold_report": report}
 
 
 def stock_board_approach_overlay(game: Path):

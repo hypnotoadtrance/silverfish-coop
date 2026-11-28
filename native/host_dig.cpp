@@ -30,6 +30,7 @@
 #include <Unreal/FWeakObjectPtr.hpp>
 #include <Unreal/Hooks.hpp>
 #include <Unreal/Rotator.hpp>
+#include <Unreal/Script.hpp>
 #include <Unreal/UnrealCoreStructs.hpp>
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/UObjectGlobals.hpp>
@@ -421,6 +422,12 @@ namespace
 
     using silverfish::native_guest_melee::StockCameraPose;
 
+    struct DigContact
+    {
+        Point point, normal;
+        U::FWeakObjectPtr material;
+    };
+
     struct GuestDigAttempt
     {
         U::FWeakObjectPtr pawn, save, spade, camera;
@@ -429,9 +436,113 @@ namespace
         StockCameraPose relative;
         std::optional<StockCameraPose> aim;
         std::string guid;
+        std::optional<DigContact> contact;
+        bool contact_applied{};
     };
 
     std::array<GuestDigAttempt, 8> guest_digs;
+
+    struct LocalGuestDig
+    {
+        U::FWeakObjectPtr world, pawn, spade;
+        std::uint64_t sequence{};
+        Clock::time_point expires{};
+        U::FFrame* frame{};
+        std::optional<DigContact> contact;
+    } local_guest_dig;
+
+    struct HolePreview
+    {
+        U::FWeakObjectPtr actor;
+        Point point{};
+    };
+    std::array<HolePreview, 8> hole_previews;
+
+    U::UObject* guest_connection(U::UWorld* world)
+    {
+        auto* driver = object(world, STR("NetDriver"));
+        if (!live(driver) || object(driver, STR("World")) != world) return nullptr;
+        auto* connection = object(driver, STR("ServerConnection"));
+        return live(connection) && object(connection, STR("Driver")) == driver ? connection : nullptr;
+    }
+
+    std::optional<Point> dig_frame_vector(U::FFrame& frame, const U::TCHAR* name)
+    {
+        auto* vector = field<U::FStructProperty>(frame.Node(), name);
+        if (!frame.Locals() || !vector || vector->GetSize() != sizeof(Point) ||
+            vector->GetStruct().Get() != find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector"))) return {};
+        const auto* axes = vector->ContainerPtrToValuePtr<double>(frame.Locals());
+        const Point point{axes[0], axes[1], axes[2]};
+        return std::ranges::all_of(point, [](double axis) { return std::isfinite(axis); }) ? std::optional{point} : std::nullopt;
+    }
+
+    std::optional<DigContact> local_contact(U::FFrame& frame)
+    {
+        auto* blocked = field<U::FBoolProperty>(frame.Node(), STR("CallFunc_BreakHitResult_bBlockingHit"));
+        auto* material = field<U::FObjectProperty>(frame.Node(), STR("CallFunc_BreakHitResult_PhysMat"));
+        if (!frame.Locals() || !blocked || !material || !blocked->GetPropertyValueInContainer(frame.Locals())) return {};
+        auto* physical = material->GetObjectPropertyValue(material->ContainerPtrToValuePtr<void>(frame.Locals()));
+        const auto impact = dig_frame_vector(frame, STR("CallFunc_BreakHitResult_ImpactPoint"));
+        const auto normal = dig_frame_vector(frame, STR("CallFunc_BreakHitResult_ImpactNormal"));
+        if (!impact || !normal || !exact(physical, STR("/Script/PhysicsCore.PhysicalMaterial"))) return {};
+        return DigContact{*impact, *normal, physical};
+    }
+
+    constexpr int stock_contact_entry = 15;
+
+    struct StockDigContact
+    {
+        U::FStructProperty* hit{};
+        U::FStructProperty* position{};
+        U::FStructProperty* impact{};
+        U::FStructProperty* normal{};
+        U::FStructProperty* impact_normal{};
+        U::FBoolProperty* blocking{};
+        U::FWeakObjectProperty* material{};
+
+        bool bind(U::UFunction* graph)
+        {
+            if (!graph) return false;
+            const auto& script = graph->GetScript();
+            auto* entry = field<U::FIntProperty>(graph, STR("EntryPoint"));
+            // This is the cooked stock branch that consumes the completed hit,
+            // before it looks for buried actors and starts the hole's loot roll.
+            if (!entry || !entry->HasAnyPropertyFlags(U::CPF_Parm) || entry->GetOffset_Internal() != 0 ||
+                graph->GetNumParms() != 1 || graph->GetParmsSize() != sizeof(std::int32_t) ||
+                script.Num() != 3059 || script[0] != U::EX_PushExecutionFlow ||
+                script[5] != U::EX_ComputedJump || script[stock_contact_entry] != U::EX_PushExecutionFlow ||
+                script[20] != U::EX_SetArray || script[33] != U::EX_CallMath) return false;
+
+            hit = field<U::FStructProperty>(graph, STR("CallFunc_LineTraceSingle_OutHit"));
+            auto* type = find<U::UScriptStruct>(STR("/Script/Engine.HitResult"));
+            if (!hit || !type || hit->GetStruct().Get() != type) return false;
+            auto* vector = find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector"));
+            const auto point = [type, vector](const U::TCHAR* name) -> U::FStructProperty* {
+                auto* member = field<U::FStructProperty>(type, name);
+                return member && vector && member->GetStruct().Get() == vector && member->GetSize() == sizeof(Point)
+                    ? member : nullptr;
+            };
+            position = point(STR("Location"));
+            impact = point(STR("ImpactPoint"));
+            normal = point(STR("Normal"));
+            impact_normal = point(STR("ImpactNormal"));
+            blocking = field<U::FBoolProperty>(type, STR("bBlockingHit"));
+            material = field<U::FWeakObjectProperty>(type, STR("PhysMaterial"));
+            return position && impact && normal && impact_normal && blocking && material;
+        }
+
+        void apply(void* locals, const DigContact& report) const
+        {
+            auto* value = hit->ContainerPtrToValuePtr<void>(locals);
+            hit->ClearValue(value);
+            for (auto* member : {position, impact})
+                std::ranges::copy(report.point, member->ContainerPtrToValuePtr<double>(value));
+            for (auto* member : {normal, impact_normal})
+                std::ranges::copy(report.normal, member->ContainerPtrToValuePtr<double>(value));
+            blocking->SetPropertyValueInContainer(value, true);
+            material->SetObjectPropertyValue(material->ContainerPtrToValuePtr<void>(value), report.material.Get());
+        }
+    };
 
     bool apply_dig_aim(U::UObject* camera, U::UObject* pawn, const std::optional<StockCameraPose>& aim,
                        StockCameraPose& previous)
@@ -450,9 +561,26 @@ namespace
     void aim_guest_dig_frame(Iteration& call, U::UObject* receiver, U::FFrame& frame, void*)
     {
         if (call.OriginalFunctionCallPrevented() || !guest_dig_graph(receiver, frame)) return;
+        if (receiver == local_guest_dig.spade.Get() && guest_connection(static_cast<U::AActor*>(receiver)->GetWorld()))
+        {
+            if (!local_guest_dig.frame) local_guest_dig.frame = &frame;
+            return;
+        }
         auto found = std::ranges::find_if(guest_digs, [receiver](const auto& attempt) { return attempt.spade.Get() == receiver; });
         if (found == guest_digs.end() || found->frame) return;
         auto* pawn = found->pawn.Get();
+        if (found->contact)
+        {
+            StockDigContact stock;
+            if (frame.Locals() && found->contact->material.Get() && stock.bind(frame.Node()))
+            {
+                stock.apply(frame.Locals(), *found->contact);
+                found->frame = &frame;
+                found->contact_applied = true;
+            }
+            else call.PreventOriginalFunctionCall();
+            return;
+        }
         auto* camera = found->camera.Get();
         if (Clock::now() >= found->expires || !authority(pawn) || !boolean(pawn, STR("Dead"), false) ||
             object(pawn, STR("Save")) != found->save.Get() || object(pawn, STR("EquipedItem")) != receiver ||
@@ -469,11 +597,17 @@ namespace
 
     void restore_guest_dig_frame(Iteration&, U::UObject* receiver, U::FFrame& frame, void*)
     {
+        if (local_guest_dig.frame == &frame)
+        {
+            local_guest_dig.frame = nullptr;
+            return;
+        }
         if (!guest_dig_graph(receiver, frame)) return;
         for (auto& attempt : guest_digs)
         {
             if (attempt.frame != &frame || attempt.spade.Get() != receiver) continue;
-            silverfish::native_guest_melee::restore_stock_camera_pose(attempt.camera.Get(), attempt.relative);
+            if (!attempt.contact)
+                silverfish::native_guest_melee::restore_stock_camera_pose(attempt.camera.Get(), attempt.relative);
             attempt.frame = nullptr;
             return;
         }
@@ -482,7 +616,8 @@ namespace
     int start_guest_dig(const Lua& lua)
     {
         const auto arguments = lua.get_stack_size();
-        if (!ready() || !ordinary || (arguments != 3 && arguments != 6 && arguments != 9) || !lua.is_string(1) ||
+        if (!ready() || !ordinary || (arguments != 3 && arguments != 6 && arguments != 9 && arguments != 10) ||
+            !lua.is_string(1) ||
             !lua.is_integer(2) || !lua.is_string(3))
             return result(lua, false, "stock_guest_dig_arguments");
         const std::string path{lua.get_string()};
@@ -490,8 +625,26 @@ namespace
         const std::string expected{lua.get_string()};
         if (!path.starts_with("/Game/Classes/Maps/") || path.size() > 512 || save_address <= 0 || expected.size() != 32)
             return result(lua, false, "stock_guest_dig_arguments");
+        std::optional<DigContact> contact;
+        if (arguments == 10)
+        {
+            for (int axis = 1; axis <= 6; ++axis)
+                if (!lua.is_number(axis)) return result(lua, false, "stock_guest_dig_contact_unqualified");
+            if (!lua.is_string(7)) return result(lua, false, "stock_guest_dig_contact_unqualified");
+            const Point point{lua.get_number(), lua.get_number(), lua.get_number()};
+            const Point normal{lua.get_number(), lua.get_number(), lua.get_number()};
+            const std::string path{lua.get_string()};
+            const auto length = squared_distance(normal, {});
+            if (!std::ranges::all_of(point, [](double axis) { return std::isfinite(axis) && std::abs(axis) <= 100'000'000; }) ||
+                !(length > 0.98 && length < 1.02) || !path.starts_with('/') || path.size() > 240)
+                return result(lua, false, "stock_guest_dig_contact_unqualified");
+            auto* material = find<U::UObject>(RC::to_wstring(path).c_str());
+            if (!exact(material, STR("/Script/PhysicsCore.PhysicalMaterial")))
+                return result(lua, false, "stock_guest_dig_contact_unqualified");
+            contact = DigContact{point, normal, material};
+        }
         std::optional<StockCameraPose> aim;
-        if (arguments >= 6)
+        if (arguments == 6 || arguments == 9)
         {
             if (!lua.is_number(1) || !lua.is_number(2) || !lua.is_number(3))
                 return result(lua, false, "stock_guest_dig_camera_unqualified");
@@ -511,8 +664,8 @@ namespace
 
         auto* pawn = find<U::AActor>(RC::to_wstring(path).c_str());
         if (!exact(pawn, pawn_class) || !authority(pawn) || !boolean(pawn, STR("Dead"), false) ||
-            !boolean(pawn, STR("IsWeaponBlocked"), false) || !boolean(pawn, STR("UsingItem"), false) ||
-            object(pawn, STR("HeldObject"))) return result(lua, false, "stock_guest_dig_pawn_unavailable");
+            (!contact && (!boolean(pawn, STR("IsWeaponBlocked"), false) || !boolean(pawn, STR("UsingItem"), false) ||
+            object(pawn, STR("HeldObject"))))) return result(lua, false, "stock_guest_dig_pawn_unavailable");
         auto* world = pawn->GetWorld();
         auto* instance = object(world, STR("OwningGameInstance"));
         auto* driver = object(world, STR("NetDriver"));
@@ -541,6 +694,17 @@ namespace
         if (found == guest_digs.end())
             found = std::ranges::find_if(guest_digs, [now](const auto& attempt) { return !attempt.frame && now >= attempt.expires; });
         if (found == guest_digs.end() || found->frame) return result(lua, false, "stock_guest_dig_busy");
+        if (contact)
+        {
+            auto* graph = find<U::UFunction>(spade_graph);
+            if (!StockDigContact{}.bind(graph)) return result(lua, false, "stock_guest_dig_contact_graph_unavailable");
+            *found = {pawn, save, spade, {}, now + std::chrono::seconds(2), nullptr, {}, {}, std::move(guid), contact};
+            std::int32_t entry{stock_contact_entry};
+            spade->ProcessEvent(graph, &entry);
+            const bool applied = found->contact_applied;
+            *found = {};
+            return result(lua, applied, applied ? "stock_guest_dig_contact_applied" : "stock_guest_dig_contact_unverified");
+        }
         auto* camera = object(pawn, STR("Camera"));
         StockCameraPose relative;
         if (!exact(camera, STR("/Script/Engine.CameraComponent")) || camera->GetOuterPrivate() != pawn ||
@@ -728,6 +892,37 @@ namespace
         else if (Clock::now() >= live_dig.pickup_until) fail_live(problem);
     }
 
+    void retire_preview(HolePreview& preview)
+    {
+        auto* actor = preview.actor.Get();
+        preview = {};
+        if (authority(actor)) static_cast<U::AActor*>(actor)->K2_DestroyActor();
+    }
+
+    void preview_hole(U::AActor* actor)
+    {
+        if (!local_guest_dig.frame || local_guest_dig.world.Get() != actor->GetWorld() ||
+            Clock::now() >= local_guest_dig.expires) return;
+        const auto contact = local_contact(*local_guest_dig.frame);
+        if (!contact || squared_distance(contact->point, location(actor)) > 25.0) return;
+        local_guest_dig.contact = contact;
+        actor->SetActorEnableCollision(false);
+        auto preview = std::ranges::find_if(hole_previews, [actor](const auto& entry) {
+            return entry.actor.Get() == actor;
+        });
+        if (preview != hole_previews.end()) return;
+        preview = std::ranges::find_if(hole_previews, [](const auto& entry) { return !entry.actor.Get(); });
+        if (preview == hole_previews.end()) return;
+        // An absent shared result must not leave a permanent guest-only hole.
+        auto* lifespan = find<U::UFunction>(STR("/Script/Engine.Actor:SetLifeSpan"));
+        auto* seconds = field<U::FFloatProperty>(lifespan, STR("InLifespan"));
+        if (!lifespan || lifespan->GetNumParms() != 1 || lifespan->GetParmsSize() != sizeof(float) ||
+            !seconds || seconds->GetOffset_Internal() != 0 || !lifespan->HasAnyFunctionFlags(U::FUNC_Native)) return;
+        float lifetime{4.0f};
+        actor->ProcessEvent(lifespan, &lifetime);
+        *preview = {actor, contact->point};
+    }
+
     void sync_hole_begin_play(Iteration& call, U::UObject* receiver, U::UFunction* function)
     {
         static const U::FName begin_play{STR("ReceiveBeginPlay")};
@@ -745,10 +940,22 @@ namespace
         if (connection)
         {
             auto* role = field<U::FByteProperty>(actor, STR("Role"));
-            // The stock begin event runs the weighted loot roll. A network replica only shows the hole.
-            if (live(connection) && object(connection, STR("Driver")) == driver &&
-                role && role->GetPropertyValueInContainer(actor) == 1)
-                call.PreventOriginalFunctionCall();
+            if (!live(connection) || object(connection, STR("Driver")) != driver || !role) return;
+            const auto current_role = role->GetPropertyValueInContainer(actor);
+            const bool local_hole = current_role == 3 && local_guest_dig.frame && local_guest_dig.world.Get() == world;
+            if (current_role != 1 && !local_hole) return;
+            // Only the listen host executes the stock weighted loot roll.
+            call.PreventOriginalFunctionCall();
+            if (local_hole)
+                preview_hole(actor);
+            else
+            {
+                const auto settled = location(actor);
+                for (auto& preview : hole_previews)
+                    if (auto* local = preview.actor.Get(); live(local) &&
+                        static_cast<U::AActor*>(local)->GetWorld() == world &&
+                        squared_distance(preview.point, settled) <= 25.0) retire_preview(preview);
+            }
             return;
         }
         if (!authority(actor) || boolean(actor, STR("bReplicates"), true)) return;
@@ -824,7 +1031,15 @@ namespace
         aim_guest_dig_frame(call, receiver, frame, nullptr);
         observe_live_event(call, receiver, frame.Node(), frame.Locals());
         static const U::FName dig_name{STR("DigForItem")};
-        if (frame.Node()->GetFName() == dig_name) begin_live_contact(call, receiver, frame);
+        if (frame.Node()->GetFName() == dig_name)
+        {
+            if (local_guest_dig.frame && frame.PreviousFrame() == local_guest_dig.frame)
+            {
+                call.PreventOriginalFunctionCall();
+                return;
+            }
+            begin_live_contact(call, receiver, frame);
+        }
         auto* package = live_dig.package.Get();
         if (!package || !frame.Locals()) return;
         static const U::FName add_name{STR("AddItemToInventory")};
@@ -1578,12 +1793,49 @@ namespace silverfish::native_host_dig
         clear_scope();
     }
 
+    GuestContactState read_guest_contact(U::UObject* pawn, std::uint64_t sequence, GuestContact& result)
+    {
+        if (!ready() || local_guest_dig.pawn.Get() != pawn || local_guest_dig.sequence != sequence)
+            return GuestContactState::missed;
+        if (!local_guest_dig.contact)
+            return Clock::now() < local_guest_dig.expires ? GuestContactState::waiting : GuestContactState::missed;
+        const auto& contact = *local_guest_dig.contact;
+        auto* material = contact.material.Get();
+        if (!live(material)) return GuestContactState::missed;
+        result = {contact.point, contact.normal, RC::to_utf8_string(material->GetPathName())};
+        return GuestContactState::found;
+    }
+
+    bool present_guest_input(U::UObject* pawn, U::UObject* spade, std::uint64_t sequence)
+    {
+        if (!ready() || !ordinary || !exact(pawn, pawn_class) || !exact(spade, spade_class) ||
+            object(pawn, STR("EquipedItem")) != spade || object(spade, STR("Player_Ref")) != pawn ||
+            object(spade, STR("User")) != pawn || !boolean(spade, STR("HeldByPlayer"), true)) return false;
+        auto* world = static_cast<U::AActor*>(pawn)->GetWorld();
+        auto* role = field<U::FByteProperty>(pawn, STR("Role"));
+        if (!guest_connection(world) || static_cast<U::AActor*>(spade)->GetWorld() != world ||
+            !role || role->GetPropertyValueInContainer(pawn) != 2) return false;
+        auto* primary = find<U::UFunction>(spade_primary);
+        if (!primary || primary->GetOuterPrivate() != spade->GetClassPrivate() || primary->GetNumParms() != 0 ||
+            primary->GetParmsSize() != 0 || primary->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return false;
+        if (!StockDigContact{}.bind(find<U::UFunction>(spade_graph))) return false;
+        const auto now = Clock::now();
+        if (local_guest_dig.frame || (local_guest_dig.spade.Get() == spade && !local_guest_dig.contact &&
+            now < local_guest_dig.expires)) return true;
+        local_guest_dig = {world, pawn, spade, sequence, now + std::chrono::milliseconds(1200)};
+        std::uint8_t args{};
+        spade->ProcessEvent(primary, &args);
+        return true;
+    }
+
     void clear_scope()
     {
         if (!U::IsInGameThreadRaw()) return;
         watch = {};
         live_dig = {};
         guest_digs = {};
+        local_guest_dig = {};
+        for (auto& preview : hole_previews) retire_preview(preview);
     }
 
     void register_lua(Lua& lua)

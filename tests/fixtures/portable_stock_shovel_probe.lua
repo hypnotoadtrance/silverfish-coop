@@ -1,5 +1,10 @@
     if fields[2]:match("^fixture%-spade%-") and
         os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
+        if fields[2] == "fixture-spade-hold-report" then
+            assert(phase == "connected" and (fields[3] == "hold" or fields[3] == "release"))
+            _G.SilverfishShovelFixtureHoldReport = fields[3] == "hold"
+            return fields[3]
+        end
         if fields[2] == "fixture-spade-authored-buried" then
             assert(phase == "hosting" and state.listening == true and (#fields == 3 or #fields == 4))
             local sources = {}

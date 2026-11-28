@@ -30,6 +30,7 @@ for _, name in ipairs({"Dirt", "Debris", "Grass", "MossyDirt", "Mud", "Sand"}) d
 end
 
 local heartbeat, observed, captured, diagnostic
+local contact_world, contact_receipts, contact_order = nil, {}, {}
 local memory_heartbeat_seen = false
 
 local function valid(object) return object and object:IsValid() end
@@ -186,7 +187,7 @@ function dig.command(fields, state, phase)
     if fields[2] == "native-missing-contact-collect" then return collect(fields, state, phase) end
     if fields[2] == "native-guest-dig" then
         local name, identity = fields[3], fields[4]
-        require_true(enabled and phase == "hosting" and (#fields == 4 or #fields == 5) and guid(identity) and
+        require_true(enabled and phase == "hosting" and (#fields == 4 or #fields == 5 or #fields == 6) and guid(identity) and
             type(SilverfishDispatchNativeGuestDig) == "function", "stock_guest_dig_unavailable")
         local ok, pawn, save = pcall(guest_save.exact_item_context, state, phase, name)
         require_true(ok and valid(pawn) and valid(save) and players.is_standing_guest(pawn, name),
@@ -194,11 +195,34 @@ function dig.command(fields, state, phase)
         local path = pawn:GetFullName():match("^Player_FP_C (%S+)$")
         require_true(path, "stock_guest_dig_owner_unqualified")
         local aim = {}
+        local component = "(%-?%d+%.%d+)"
+        local triple = component .. "," .. component .. "," .. component
+        if fields[6] then
+            local report, operation = fields[5], fields[6]
+            require_true(type(operation) == "string" and #operation == 32 and operation:match("^[0-9a-f]+$"),
+                "stock_guest_dig_operation_unqualified")
+            if not same(contact_world, state.world) then
+                contact_world, contact_receipts, contact_order = state.world, {}, {}
+            end
+            local prior = contact_receipts[operation]
+            if prior then
+                require_true(prior.pawn == pawn:GetAddress() and prior.identity == identity and prior.report == report,
+                    "stock_guest_dig_operation_conflict")
+                return prior.status
+            end
+            local x, y, z, nx, ny, nz, material = report:match("^contact:" .. triple .. "," .. triple .. ":(/[%w_/%.-]+)$")
+            require_true(x, "stock_guest_dig_contact_unqualified")
+            local accepted, status = SilverfishDispatchNativeGuestDig(path, save:GetAddress(), identity,
+                tonumber(x), tonumber(y), tonumber(z), tonumber(nx), tonumber(ny), tonumber(nz), material)
+            require_true(accepted == true, status or "stock_guest_dig_unavailable")
+            contact_receipts[operation] = {pawn = pawn:GetAddress(), identity = identity, report = report, status = status}
+            contact_order[#contact_order + 1] = operation
+            if #contact_order > 128 then contact_receipts[table.remove(contact_order, 1)] = nil end
+            return status
+        end
         if fields[5] then
-            local component = "(%-?%d+%.%d+)"
-            local angles = component .. "," .. component .. "," .. component
-            local pitch, yaw, roll, x, y, z = fields[5]:match("^" .. angles .. "," .. angles .. "$")
-            if not pitch then pitch, yaw, roll = fields[5]:match("^" .. angles .. "$") end
+            local pitch, yaw, roll, x, y, z = fields[5]:match("^" .. triple .. "," .. triple .. "$")
+            if not pitch then pitch, yaw, roll = fields[5]:match("^" .. triple .. "$") end
             require_true(pitch, "stock_guest_dig_camera_unqualified")
             aim = {tonumber(pitch), tonumber(yaw), tonumber(roll), tonumber(x), tonumber(y), tonumber(z)}
         end

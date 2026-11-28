@@ -213,7 +213,7 @@ local function drain_taps(current, address)
     for _ = 1, 8 do
         local sequence, owner, guid, kind, underbarrel, x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz, actor, hx, hy, hz = take(address)
         if not valid_sequence(sequence) or owner ~= address or guid ~= binding.guid or kind ~= binding.kind then break end
-        if not can_use(current) then break end
+        if not can_use(current) and not (kind == "spade" and type(tx) == "string") then break end
         if kind == "blowtorch" or kind == "crowbar" then
             local name = pending_pry and pending_pry.sequence == sequence and pending_pry.name or pry_name(current, kind)
             if not name then
@@ -228,11 +228,16 @@ local function drain_taps(current, address)
             end
             pending_pry = nil
         elseif kind == "spade" then
-            local sampled, aim = pcall(shovel_aim, current)
-            aim = sampled and aim or nil
+            local report
+            if type(tx) == "string" then
+                report = ("contact:%.4f,%.4f,%.4f,%.6f,%.6f,%.6f:%s"):format(x, y, z, ex, ey, ez, tx)
+            else
+                local sampled, aim = pcall(shovel_aim, current)
+                report = sampled and aim or nil
+            end
             if not embedded or not publish("tap", event_path, current, address, sequence,
-                {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind, aim}) then
-                shovel_intent = {sequence = sequence, expires = os.clock() + 1.5, aim = aim}
+                {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind, report}) then
+                shovel_intent = {sequence = sequence, expires = os.clock() + 1.5, report = report}
                 commit("tap", address, sequence)
             end
         else
@@ -451,9 +456,9 @@ function primary.rows(state, phase, status_row)
         and SilverfishReadNativeGuestPumpTrigger(current.pawn:GetAddress()) == true
     local rows = { status_row("native-guest-primary-scope", current.map, current.name, binding.guid,
         binding.kind, binding.mode, trigger and 1 or 0) }
-    if binding.kind == "spade" and shovel_intent and os.clock() < shovel_intent.expires and can_use(current) then
+    if binding.kind == "spade" and shovel_intent and os.clock() < shovel_intent.expires and standing(current) then
         rows[#rows + 1] = status_row("native-guest-spade-intent", current.map, current.name, binding.guid,
-            shovel_intent.sequence, shovel_intent.aim)
+            shovel_intent.sequence, shovel_intent.report)
     end
     if fixture_proof and same_context(current, fixture_proof.context) and fixture_proof.guid == binding.guid then
         rows[#rows + 1] = status_row("native-guest-primary-fixture", current.map, current.name, fixture_proof.guid,
