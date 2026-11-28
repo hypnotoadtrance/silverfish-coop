@@ -33,10 +33,10 @@ async def verify_postures(command, host, guest, baseline):
                 while True:
                     report = await command(host, "posed")
                     if not report.startswith("pending"):
-                        b, i, h, asset, x, y, z, crouch, air, neck, tail, samples = report.split(";")
+                        b, i, h, asset, x, y, z, crouch, air, neck, tail, tail_limit, samples = report.split(";")
                         if asset.endswith("." + destination) and (crouch == "1", air == "1") == (crouched, falling):
                             assert (int(b), int(i), int(h)) == (body, instance, hand), report
-                            assert 0 <= float(neck) < .2 and 0 <= float(tail) < .2, report
+                            assert 0 <= float(neck) < .2 and 0 <= float(tail) < float(tail_limit), report
                             rows = [row.split(",") for row in samples.split("/") if row]
                             observed = [[tuple(map(float, row[1:])) for row in series]
                                         for _, series in groupby(rows, key=lambda row: row[0])]

@@ -1116,7 +1116,8 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     async def transport():
         async def sample(run):
             frame = await current_status(run)
-            return frame.get("transport", {}), asyncio.get_running_loop().time()
+            # The worker snapshots these counters before serving the diagnostic request.
+            return frame.get("transport", {}), frame["updated_unix"]
 
         return dict(zip(runs, await asyncio.gather(*(sample(run) for run in runs.values())), strict=True))
 
@@ -1134,6 +1135,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
         for seat in runs:
             first, started = before[seat]
             last, finished = after[seat]
+            assert finished > started, (seat, "transport samples did not advance", started, finished)
             measurements[seat] = {key: last[key] - first[key] for key in counters
                                   if key in first and key in last and first[key] <= last[key]}
             measurements[seat].update(sample_seconds=round(finished - started, 6),

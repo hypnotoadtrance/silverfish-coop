@@ -8,6 +8,8 @@ local pistol = "/Game/Classes/Weapons/Wep_RustyPistol.Wep_RustyPistol_C"
 local blend = "BlendSpace1D /Game/Classes/NPCs/NPC_Assets/Animations/HandGun_Lowered_BlendSpace.HandGun_Lowered_BlendSpace"
 local anim_class = "Class /Script/Engine.AnimSingleNodeInstance"
 local mesh_class = "/Script/Engine.StaticMeshComponent"
+local skeletal_class = "/Script/Engine.SkeletalMeshComponent"
+local long_tail = "/Game/Classes/NPCs/NPC_Assets/NPC_Tails/SK_Tail_01.SK_Tail_01"
 local clock_path = "/Script/Engine.Default__GameplayStatics"
 local trace_path = "/Script/Engine.Default__KismetSystemLibrary"
 local color = {R=0,G=0,B=0,A=0}
@@ -110,7 +112,9 @@ local function position_row(pawn)
 end
 
 local function attachment_gaps(pawn, body)
-    local head, tail
+    local head, tail, hip_tail
+    local skinned = StaticFindObject(skeletal_class)
+    local stock_tail = StaticFindObject(long_tail)
     local components = pawn:K2_GetComponentsByClass(StaticFindObject("/Script/Engine.SceneComponent"))
     for index = 1, #components do
         local component = components[index]
@@ -121,20 +125,31 @@ local function attachment_gaps(pawn, body)
             local socket = component:GetAttachSocketName():ToString()
             if socket == "Head" then head = component end
             if socket == "TailSocket_01" then tail = component end
+            if socket == "Hips" and component:IsA(skinned) and same(component.SkinnedAsset, stock_tail) then
+                tail, hip_tail = component, true
+            end
         end
     end
     if not valid(head) or not valid(tail) then return end
+    local function distance(a, b)
+        return math.sqrt((a.X - b.X)^2 + (a.Y - b.Y)^2 + (a.Z - b.Z)^2)
+    end
+    local neck = distance(head:K2_GetComponentLocation(), body:GetSocketLocation(FName("Head")))
+    if hip_tail then
+        local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+        if not valid(math_api) then return end
+        local hip = body:GetSocketTransform(FName("Hips", EFindName.FNAME_Find), 0)
+        local seam = math_api:TransformLocation(tail:K2_GetComponentToWorld(), {X = -44, Y = 0, Z = 82})
+        local rear = math_api:TransformLocation(hip, {X = -15, Y = 9, Z = 0})
+        return neck, distance(seam, rear), 5
+    end
     local origin = tail:K2_GetComponentLocation()
-    if tail:IsA(StaticFindObject("/Script/Engine.SkeletalMeshComponent")) then
+    if tail:IsA(skinned) then
         local bone = FName("Tail_01", EFindName.FNAME_Find)
         if tail:GetBoneIndex(bone) < 0 then bone = tail:GetBoneName(0) end
         origin = tail:GetSocketLocation(bone)
     end
-    local function distance(a, b)
-        return math.sqrt((a.X - b.X)^2 + (a.Y - b.Y)^2 + (a.Z - b.Z)^2)
-    end
-    return distance(head:K2_GetComponentLocation(), body:GetSocketLocation(FName("Head"))),
-        distance(origin, body:GetSocketLocation(FName("TailSocket_01")))
+    return neck, distance(origin, body:GetSocketLocation(FName("TailSocket_01"))), .2
 end
 
 local function observe(action, world, pawn, weapon)
@@ -149,12 +164,12 @@ local function observe(action, world, pawn, weapon)
         local instance = body:GetAnimInstance()
         local asset = valid(instance) and instance.CurrentAsset
         if not valid(asset) then return "pending animation asset" end
-        local neck_gap, tail_gap = attachment_gaps(pawn, body)
+        local neck_gap, tail_gap, tail_limit = attachment_gaps(pawn, body)
         if not neck_gap then return "pending head or tail attachment " .. asset:GetFullName() end
         local point = body:GetSocketTransform(socket, 2).Translation
         return table.concat({body:GetAddress(), instance:GetAddress(), hand:GetAddress(), asset:GetFullName(),
             point.X, point.Y, point.Z, bit(pawn.bIsCrouched), bit(pawn.CharacterMovement:IsFalling()),
-            neck_gap, tail_gap,
+            neck_gap, tail_gap, tail_limit,
             table.concat(observer.posture, "/")}, ";")
     end
     assert(action == "arm" or action == "read")
