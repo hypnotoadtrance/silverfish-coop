@@ -763,6 +763,11 @@ end
 
 local function read_base_aim(entry, address)
     local pitch, yaw
+    if entry.head_pivot_path and type(SilverfishReadNativeRemoteHeadAim) == "function" then
+        pitch, yaw = SilverfishReadNativeRemoteHeadAim(entry.world, address, entry.head_pivot_path)
+        if pitch then return pitch, yaw end
+    end
+    if not valid(entry.head_pivot) or not valid(entry.pawn) then return end
     if type(SilverfishReadNativeRemoteAim) == "function" then
         pitch, yaw = SilverfishReadNativeRemoteAim(entry.world, address)
     end
@@ -822,7 +827,7 @@ function avatar.animate_head(get_world)
     if not now then return end
     local math_api
     for address, entry in pairs(avatars) do
-        if entry.world == scope and valid(entry.head_pivot) and valid(entry.pawn) then
+        if entry.world == scope then
             local aim_pitch, aim_yaw = read_base_aim(entry, address)
             if not aim_pitch then goto next_avatar end
             local lean_changed = false

@@ -316,7 +316,10 @@ local function entrance_name(actor)
     return name
 end
 
-local function qualified_source(fixture, world, plan)
+local function qualified_source(fixture, world, plan, native_world_address)
+    if native_world_address and plan.kind == "overlap" and valid(fixture)
+        and SilverfishCertifyNativeAuthoredOverlapWall(native_world_address, fixture:GetAddress(),
+            plan.actor, plan.entrance) == true then return fixture end
     if not in_world(fixture, world) then return nil, "placed actor not observed" end
     local entrance = entrance_name(fixture)
     if entrance ~= plan.entrance then return nil, "stock tag " .. tostring(entrance) .. " differs" end
@@ -385,9 +388,10 @@ local function wall_sources(world, map, route, fixture, secondary)
     local plans = authored_routes[map]
     if plans then
         scan_authored(world, plans)
+        local native_world_address = type(SilverfishCertifyNativeAuthoredOverlapWall) == "function" and world:GetAddress()
         for _, plan in ipairs(plans) do
             local source = sources[plan.actor] or {}
-            source.fixture, source.problem = qualified_source(scanned_actors[plan.actor], world, plan)
+            source.fixture, source.problem = qualified_source(scanned_actors[plan.actor], world, plan, native_world_address)
             source.tag, source.kind = plan.entrance, plan.kind
             sources[plan.actor] = source
         end
@@ -466,7 +470,7 @@ local function sync_geometry(scope, route)
     end
 end
 
-function wall.sync(state, phase, fixture, accepting, secondary)
+function wall.sync(state, phase, fixture, accepting, secondary, native_clearance)
     if not enabled then return end
     local hosting = phase == "hosting"
     local local_pawn = state.local_pawn and state.local_pawn.pawn
@@ -483,8 +487,8 @@ function wall.sync(state, phase, fixture, accepting, secondary)
         status, failure = "arming", "Waiting for a compatible pawn capsule and exit Box"
         return
     end
-    local permitted, blockers
-    if hosting then permitted, blockers = host_can_pass(state, local_pawn, world, accepting) end
+    local permitted, blockers = hosting and accepting and native_clearance == true
+    if hosting and not permitted then permitted, blockers = host_can_pass(state, local_pawn, world, accepting) end
     local manages_overlap = hosting and type(SilverfishSetNativeExitApproach) == "function"
     approach_scope = manages_overlap and accepting and {pawn = local_pawn, capsule = local_capsule, world = world,
         pawn_address = local_pawn:GetAddress(), world_address = world:GetAddress()} or nil

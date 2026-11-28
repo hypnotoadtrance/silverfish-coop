@@ -107,7 +107,7 @@ local function context(state, phase)
         instance = instance, save = save, day = day, north = north, sun = sun, light = light }
 end
 
-local function game_seconds(save)
+function view.read_game_seconds_lua(save)
     local maths = StaticFindObject(math_path)
     if not valid(maths) then error("native_world_clock_unavailable", 0) end
     local parts = {}
@@ -124,6 +124,14 @@ local function game_seconds(save)
         + parts.Seconds + parts.Milliseconds / 1000
     if not bounded(seconds, 0, max_seconds) then error("native_world_clock_out_of_range", 0) end
     return seconds
+end
+
+local function game_seconds(save)
+    if type(SilverfishReadNativeSavedGameSeconds) == "function" then
+        local seconds = SilverfishReadNativeSavedGameSeconds(save)
+        if seconds ~= nil then return seconds end
+    end
+    return view.read_game_seconds_lua(save)
 end
 
 local function clock_text(seconds)

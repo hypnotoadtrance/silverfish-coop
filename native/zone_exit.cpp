@@ -31,6 +31,7 @@
 #include <Unreal/SoftObjectPtr.hpp>
 #include <Unreal/UAssetRegistryHelpers.hpp>
 #include <Unreal/UObjectGlobals.hpp>
+#include <Unreal/UObjectHashTables.hpp>
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/World.hpp>
 
@@ -387,6 +388,13 @@ namespace
         constexpr auto excluded = static_cast<Unreal::EObjectFlags>(
             Unreal::RF_ClassDefaultObject | Unreal::RF_ArchetypeObject | Unreal::RF_BeginDestroyed | Unreal::RF_FinishDestroyed);
         return object && !object->HasAnyFlags(excluded) && !object->IsUnreachable();
+    }
+
+    bool live_actor_for_wall(Unreal::UObject* actor)
+    {
+        if (!live_object(actor)) return false;
+        auto* destroying = field<Unreal::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
+        return destroying && !destroying->GetPropertyValueInContainer(actor);
     }
 
     template <typename Object>
@@ -1192,6 +1200,34 @@ namespace
         return 3;
     }
 
+    int lua_certify_authored_overlap_wall(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || !installed.load(std::memory_order_acquire) ||
+            !Unreal::UnrealInitializer::ShouldUseHashTables() || scope.authored_world.empty() ||
+            scope.generation != generation.load(std::memory_order_acquire) || Clock::now() >= scope.expires ||
+            lua.get_stack_size() != 4 || !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3) ||
+            !lua.is_string(4)) return 0;
+        const auto world_address = static_cast<Address>(lua.get_integer());
+        const auto actor_address = static_cast<Address>(lua.get_integer());
+        auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
+        auto* driver = scope.roster.driver.Get();
+        if (!live_object(world) || address(world) != world_address || !live_object(driver) ||
+            read_object(scope.roster.world_driver, world) != driver) return 0;
+
+        const auto name = RC::to_wstring(lua.get_string());
+        const auto entrance = RC::to_wstring(lua.get_string());
+        const auto* route = Authored::find(scope.authored_world, name);
+        if (!route || route->mode != Authored::Mode::overlap || route->entrance != entrance) return 0;
+        const auto path = scope.authored_world + STR(":PersistentLevel.") + name;
+        auto* actor = Unreal::FUObjectHashTables::StaticFindObjectByPath(nullptr, path.c_str(), false, true);
+        if (address(actor) != actor_address || !live_actor_for_wall(actor) ||
+            !is_expanded_exit(scope, actor, world, *route) || actor_world(actor) != world) return 0;
+        auto* tag = field<Unreal::FStrProperty>(actor, STR("Entrance Tag"));
+        if (!tag || RC::StringViewType{*tag->GetPropertyValueInContainer(actor)} != route->entrance) return 0;
+        lua.set_bool(true);
+        return 1;
+    }
+
     int lua_exit_approach(const Lua& lua)
     {
         bool allowed{};
@@ -1609,6 +1645,7 @@ namespace
     {
         const auto count = lua.get_stack_size();
         const char* failure = "The native zone hook is unavailable or received invalid arguments";
+        bool clear_wall{};
         if (Unreal::IsInGameThreadRaw() && installed.load(std::memory_order_acquire) &&
             count >= 4 && count <= 4 + static_cast<int>(max_remote_players) &&
             lua.is_integer(1) && lua.is_integer(2) && lua.is_bool(3) && lua.is_bool(4))
@@ -1633,10 +1670,28 @@ namespace
                     remote = static_cast<Address>(value);
                 }
                 if (valid && local > 0 && fixture >= 0)
+                {
                     failure = configure(static_cast<Address>(local), static_cast<Address>(fixture), host, accepting, remotes);
+                    static const bool walls_enabled = env_flag("SILVERFISH_COOP_NATIVE_ZONE_WALLS");
+                    if (!failure && host && accepting && walls_enabled)
+                    {
+                        auto* pawn = scope.local.Get();
+                        clear_wall = live_actor_for_wall(pawn) && scope.role &&
+                            scope.role->GetPropertyValueInContainer(pawn) == 3 &&
+                            std::ranges::all_of(scope.roster.players(), [](const RemotePlayer& remote) {
+                                return live_actor_for_wall(remote.pawn.Get());
+                            }) && allows_distance(scope, pawn);
+                    }
+                }
             }
         }
         lua.set_bool(!failure);
+        if (clear_wall)
+        {
+            lua.set_nil();
+            lua.set_bool(true);
+            return 3;
+        }
         if (!failure) return 1;
         lua.set_string(failure);
         return 2;
@@ -1810,6 +1865,7 @@ namespace silverfish::native_zone
         lua.register_function("SilverfishPauseNativeZoneScope", lua_pause);
         lua.register_function("SilverfishSetNativeExitApproach", lua_exit_approach);
         lua.register_function("SilverfishReadNativeExitApproachPosition", lua_exit_approach_position);
+        lua.register_function("SilverfishCertifyNativeAuthoredOverlapWall", lua_certify_authored_overlap_wall);
         lua.register_function("SilverfishSnapshotDiscoveredOverlaps", lua_snapshot_discovered_overlaps);
         lua.register_function("SilverfishInspectMapPackage", lua_inspect_map_package);
         lua.register_function("SilverfishSnapshotNativeWorldActorPaths", lua_snapshot_world_actor_paths);

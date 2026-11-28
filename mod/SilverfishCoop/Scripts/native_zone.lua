@@ -233,8 +233,8 @@ function zone.sync(state, phase)
     elseif not valid(secondary_fixture) or not same(secondary_fixture:GetWorld(), world) then
         secondary_fixture = wall.placed_actor(world, "Level_Exit_BP_C", route.secondary.fixture)
     end
-    local refreshed, reason = qualify(valid(exit) and exit:GetAddress() or 0, accepting)
-    wall.sync(state, phase, exit, accepting and refreshed, secondary_fixture)
+    local refreshed, reason, native_clearance = qualify(valid(exit) and exit:GetAddress() or 0, accepting)
+    wall.sync(state, phase, exit, accepting and refreshed, secondary_fixture, native_clearance)
     if not refreshed then
         fixture = nil
         secondary_fixture = nil

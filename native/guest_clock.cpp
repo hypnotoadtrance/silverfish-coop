@@ -13,12 +13,14 @@
 #include <utility>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
+#include <LuaType/LuaUObject.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/FFrame.hpp>
 #include <Unreal/FWeakObjectPtr.hpp>
 #include <Unreal/Hooks.hpp>
+#include <Unreal/UObjectHashTables.hpp>
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/World.hpp>
@@ -254,6 +256,55 @@ namespace
 
     bool available() { return U::IsInGameThreadRaw() && installed.load(std::memory_order_acquire); }
 
+    int saved_game_seconds(const Lua& lua)
+    {
+        if (!U::IsInGameThreadRaw() || !U::UnrealInitializer::ShouldUseHashTables()) return 0;
+        auto* stack = lua.get_lua_state();
+        if (lua_gettop(stack) != 1 || !luaL_testudata(stack, 1, "UObject")) return 0;
+        lua_getfield(stack, 1, "IsValid");
+        if (!lua_iscfunction(stack, -1)) return 0;
+        lua_pushvalue(stack, 1);
+        if (lua_pcall(stack, 1, 1, 0) != LUA_OK || !lua_toboolean(stack, -1)) return 0;
+        lua_pop(stack, 1);
+        auto* save = lua.get_userdata<RC::LuaType::UObject>(1, true).get_remote_cpp_object();
+        if (!live(save)) return 0;
+
+        static U::FWeakObjectPtr cached_class;
+        static U::FStructProperty* saved_time{};
+        auto* save_class = cached_class.Get();
+        if (!save_class)
+        {
+            save_class = U::Cast<U::UClass>(U::FUObjectHashTables::StaticFindObjectByPath(nullptr, save_path, false, true));
+            auto* timespan = U::Cast<U::UScriptStruct>(
+                U::FUObjectHashTables::StaticFindObjectByPath(nullptr, timespan_path, false, true));
+            auto* property = field<U::FStructProperty>(save_class, STR("GameTime"));
+            if (!save_class || !timespan || !property || property->GetStruct().Get() != timespan ||
+                property->GetSize() != sizeof(std::int64_t)) return 0;
+            cached_class = save_class;
+            saved_time = property;
+        }
+        if (save->GetClassPrivate() != save_class) return 0;
+        const auto raw = ticks(saved_time->ContainerPtrToValuePtr<void>(save));
+        if (raw < 0) return 0;
+        const auto milliseconds = raw / ticks_per_ms;
+        const auto seconds = static_cast<double>(milliseconds / 1000) + static_cast<double>(milliseconds % 1000) / 1000;
+        if (seconds > 922337203685.0) return 0;
+        lua.set_number(seconds);
+        return 1;
+    }
+
+    int verify_clock_seat(const Lua& lua)
+    {
+        if (!available() || lua.get_stack_size() != 6 || !scope.sequence ||
+            scope.generation != generation.load(std::memory_order_acquire)) return 0;
+        const auto& seat = scope.seat;
+        for (auto* object : {seat.world.Get(), seat.pawn.Get(), seat.controller.Get(), seat.instance.Get(), seat.connection.Get()})
+            if (!object || !lua.is_integer() || static_cast<Address>(lua.get_integer()) != address(object)) return 0;
+        if (!lua.is_integer() || lua.get_integer() != scope.sequence || !seat.current()) return 0;
+        lua.set_bool(true);
+        return 1;
+    }
+
     bool active()
     {
         return scope.sequence && scope.generation == generation.load(std::memory_order_acquire) &&
@@ -406,9 +457,11 @@ void silverfish::native_guest_clock::clear_scope()
 
 void silverfish::native_guest_clock::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
+    lua.register_function("SilverfishReadNativeSavedGameSeconds", saved_game_seconds);
     if (!enabled()) return;
     clear_scope();
     lua.register_function("SilverfishSetNativeGuestClock", set_scope);
+    lua.register_function("SilverfishVerifyNativeGuestClockSeat", verify_clock_seat);
     lua.register_function("SilverfishReadNativeGuestClock", read);
     lua.register_function("SilverfishClearNativeGuestClock", clear);
     if (fixtures()) lua.register_function("SilverfishProbeNativeGuestClock", probe);

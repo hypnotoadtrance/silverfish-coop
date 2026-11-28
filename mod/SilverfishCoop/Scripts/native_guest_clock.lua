@@ -68,8 +68,22 @@ function clock.clear()
     lease, fixture = nil, nil
 end
 
+local function observed_seat(state, phase, current)
+    local local_player = state.local_pawn
+    return phase == "connected" and state.listening == true and state.server == true
+        and current.map == state.map and local_player and local_player.name == current.name
+        and same(local_player.pawn, current.pawn) and same(state.world, current.world)
+        and same(state.controller, current.controller)
+end
+
 function clock.sync(state, phase)
-    if lease and not same_context(context(state, phase), lease) then clock.clear() end
+    if not lease then return end
+    if type(SilverfishVerifyNativeGuestClockSeat) == "function" and observed_seat(state, phase, lease)
+        and SilverfishVerifyNativeGuestClockSeat(lease.world:GetAddress(), lease.pawn:GetAddress(),
+            lease.controller:GetAddress(), lease.instance:GetAddress(), lease.connection:GetAddress(), lease.sequence) == true then
+        return
+    end
+    if not same_context(context(state, phase), lease) then clock.clear() end
 end
 
 local function load_widget()
@@ -156,11 +170,8 @@ function clock.command_reply(fields, state, phase, sequence, status_row)
 end
 
 function clock.rows(state, phase, status_row)
-    local current, local_player = lease, state.local_pawn
-    if not current or phase ~= "connected" or state.listening ~= true or state.server ~= true
-        or current.map ~= state.map or not local_player or local_player.name ~= current.name
-        or not same(local_player.pawn, current.pawn) or not same(state.world, current.world)
-        or not same(state.controller, current.controller) then return {} end
+    local current = lease
+    if not current or not observed_seat(state, phase, current) then return {} end
     -- The native read also validates the connection, possession, save,
     -- loading state and lease before returning a row for this seat.
     local checked, report = pcall(read, current)

@@ -131,6 +131,28 @@ wall.sync(state, "hosting", nil, true)
 local after_host_setup = shape_reads
 wall.sync(state, "hosting", nil, true)
 assert(shape_reads == after_host_setup, "A settled host should reuse verified geometry")
+
+local certificates, certified = 0, true
+SilverfishCertifyNativeAuthoredOverlapWall = function(world_address, actor_address, name, entrance)
+    assert(world_address == world:GetAddress())
+    local expected = name == first and exits[1] or name == second and exits[2]
+    assert(expected and actor_address == expected:GetAddress()
+        and entrance == (name == first and "One" or "Two"))
+    certificates = certificates + 1
+    if certified then return true end
+end
+local before_clearance = lua_position_reads
+now = now + .6
+wall.sync(state, "hosting", nil, true, nil, true)
+assert(certificates == 2 and shape_reads == after_host_setup and lua_position_reads == before_clearance,
+    "Certified source and party observations skip Lua tag and position reads")
+certified = false
+now = now + .6
+wall.sync(state, "hosting", nil, true)
+assert(certificates == 4 and shape_reads > after_host_setup and lua_position_reads == before_clearance + 2,
+    "A declined source or roster observation uses the exact Lua checks")
+SilverfishCertifyNativeAuthoredOverlapWall = nil
+
 auth = true
 local stock_reads_before = lua_position_reads
 tick(900)

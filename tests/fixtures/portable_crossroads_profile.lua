@@ -378,6 +378,64 @@ local function compare_acid_reads(dynamic)
     return result
 end
 
+-- Equal alternating blocks avoid attributing warmup to one path.
+local function compare_paths(count, native, stock)
+    local function measure(reader)
+        local heap, started = collectgarbage("count"), stamp()
+        for _ = 1, count // 2 do reader() end
+        return (stamp() - started) / 1000, collectgarbage("count") - heap
+    end
+    local running = collectgarbage("isrunning")
+    collectgarbage("stop")
+    local ok, native_ms, lua_ms, native_kib, lua_kib = pcall(function()
+        local n1, nk1 = measure(native)
+        local s1, sk1 = measure(stock)
+        local s2, sk2 = measure(stock)
+        local n2, nk2 = measure(native)
+        return n1 + n2, s1 + s2, nk1 + nk2, sk1 + sk2
+    end)
+    if running then collectgarbage("restart") end
+    if not ok then error(native_ms, 0) end
+    return native_ms, lua_ms, native_kib, lua_kib
+end
+
+local function compare_save_game_clock()
+    local read, stock = SilverfishReadNativeSavedGameSeconds, native_world_view.read_game_seconds_lua
+    if type(read) ~= "function" then return "unavailable" end
+    assert(type(stock) == "function", "missing legacy stock save clock")
+    local state = inspect()
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    local world, current_phase = state.world, phase(state)
+    assert(valid(world) and valid(pawn), "missing active local pawn or world")
+    local save, instance = pawn.Save, world.OwningGameInstance
+    assert(valid(instance) and same_object(save, instance.SaveSlot_Ref), "missing active canonical save")
+    local verified_sequence = 0
+    if current_phase == "connected" then
+        local verify = SilverfishVerifyNativeGuestClockSeat
+        local row = native_guest_clock.rows(state, current_phase, table.pack)[1]
+        assert(type(verify) == "function" and row and row[1] == "native-guest-clock"
+            and row[2] == state.map and row[3] == state.local_pawn.name,
+            "active guest clock lease unavailable")
+        local connection = world.NetDriver.ServerConnection
+        local w, a, c, i, n = world:GetAddress(), pawn:GetAddress(), state.controller:GetAddress(),
+            instance:GetAddress(), connection:GetAddress()
+        verified_sequence = row[5]
+        assert(verify(w, a, c, i, n, verified_sequence) == true, "warm native clock seat was not accepted")
+        assert(verify(w, a, c, i, n, 0) == nil and verify(w, a, c, i, n + 1, verified_sequence) == nil,
+            "native clock seat accepted the wrong connection or sequence")
+    end
+    local function legacy() return stock(save) end
+    local function qualified() return read(save) end
+    local seconds = legacy()
+    assert(type(seconds) == "number" and qualified() == seconds, "native clock differed from stock save time")
+    assert(read(pawn) == nil and read(state.world) == nil and read(nil) == nil,
+        "native clock accepted an object outside its save scope")
+    local count = 64
+    local native_ms, lua_ms, native_kib, lua_kib = compare_paths(count, qualified, legacy)
+    return ("%.3f,%d,%d,%.3f,%.3f,%.3f,%.3f"):format(seconds, verified_sequence, count,
+        native_ms, lua_ms, native_kib, lua_kib)
+end
+
 local function compare_pawn_values()
     local native, legacy = SilverfishReadNativeSessionPawn, status_publication.read_pawn_values_lua
     if type(native) ~= "function" or type(legacy) ~= "function" then return "unavailable" end
@@ -787,6 +845,21 @@ LoopInGameThreadWithDelay(50, function()
         else
             message = "unavailable"
         end
+    elseif action == "wallsources" and not capture then
+        local ok, value = pcall(function()
+            local state = inspect()
+            return SilverfishProfileCrossroadsWallSources(state.world, state.map)
+        end)
+        if ok then message = value else message = "zone wall comparison failed: " .. tostring(value) end
+    elseif action == "headscope" and not capture then
+        local ok, value = pcall(function()
+            local state = inspect()
+            return SilverfishProfileRemoteHeadScope(state.local_pawn and state.local_pawn.pawn)
+        end)
+        if ok then message = value else message = "remote head scope comparison failed: " .. tostring(value) end
+    elseif action == "gameclock" and not capture then
+        local ok, value = pcall(compare_save_game_clock)
+        if ok then message = value else message = "stock save clock comparison failed: " .. tostring(value) end
     elseif action == "headrotation" and not capture then
         local ok, value = pcall(SilverfishProfileRemoteHeadRotation)
         if ok then message = value else message = "head rotation comparison failed: " .. tostring(value) end
@@ -863,4 +936,5 @@ LoopInGameThreadWithDelay(50, function()
 end)
 
 SilverfishProfileCrossroadsCall = probe.call
+SilverfishProfileCrossroadsCompare = compare_paths
 return probe
