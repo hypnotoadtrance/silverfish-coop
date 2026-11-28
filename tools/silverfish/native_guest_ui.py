@@ -15,8 +15,8 @@ from . import native_inventory_grant, party, runtime
 
 ACTION = "native-guest-ui-read"
 HEALTH = "native_guest_health"
-HEALTH_PROJECT = "native-guest-health-project"
-VITALS = "native_guest_vitals"
+HEALTH_PROJECT = runtime.GUEST_HEALTH_PROJECT
+VITALS = runtime.GUEST_VITALS
 MAX_BYTES = runtime.GUEST_UI_MAX_BYTES
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _READY = re.compile(r"stock co-op inventory and Journal projected (\d+) (\d+) (\d+) (\d+) (\d+)"
@@ -264,23 +264,32 @@ class GuestView:
                 and all(_matches_vital(current_vitals.get(field), value) for field, value in vitals.items())):
             return
         if "rads" in vitals:
-            fields = ("food", "regen", "stim", "fatigue", "intox", "sickness", "rads")
+            fields = runtime.GUEST_VITAL_FIELDS
         elif "sickness" in vitals:
-            fields = ("food", "regen", "stim", "fatigue", "intox", "sickness")
+            fields = runtime.GUEST_VITAL_FIELDS[:6]
         elif "fatigue" in vitals or "intox" in vitals:
-            fields = ("food", "regen", "stim", "fatigue", "intox")
+            fields = runtime.GUEST_VITAL_FIELDS[:5]
         else:
             fields = ("food", "regen", "stim") if "stim" in vitals else ("food", "regen") if vitals else ()
         try:
             updated = await client.bridge.command(HEALTH_PROJECT, area, session, epoch, token, name,
                                                   str(health), str(maximum),
                                                   *(str(vitals.get(field, "-")) for field in fields), timeout=1.5)
-            projected = updated.get(VITALS, {}).get(name, {})
-            if ((updated.get("state"), updated.get("map"), updated.get("save_scope")) != ("connected", area, token)
-                    or updated.get("pawns", {}).get("local", {}).get("name") != name
-                    or updated.get("ack", {}).get("message") != "stock co-op guest health projected"
-                    or not all(_matches_vital(projected.get(field), value) for field, value in vitals.items())):
-                raise RuntimeError("The isolated stock health view did not verify")
+            current_game = client.last_game
+            if ((client.host_session, client.invite["character_id"], client.expected_zone, client.zone_epoch)
+                    != (session, character, area, epoch)
+                    or (current_game.get("state"), current_game.get("map"), current_game.get("save_scope"),
+                        current_game.get("pawns", {}).get("local", {}).get("name")) != ("connected", area, token, name)):
+                return
+            if updated.get(runtime.GUEST_HEALTH_REPLY) is True:
+                updated = client.bridge.remember_local_guest_health(current_game, updated)
+            else:
+                projected = updated.get(VITALS, {}).get(name, {})
+                if ((updated.get("state"), updated.get("map"), updated.get("save_scope")) != ("connected", area, token)
+                        or updated.get("pawns", {}).get("local", {}).get("name") != name
+                        or updated.get("ack", {}).get("message") != runtime.GUEST_HEALTH_PROJECTED
+                        or not all(_matches_vital(projected.get(field), value) for field, value in vitals.items())):
+                    raise RuntimeError("The isolated stock health view did not verify")
         except (OSError, RuntimeError) as error:
             reason = str(error)
             if self.health_error != reason:

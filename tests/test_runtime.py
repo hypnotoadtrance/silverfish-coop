@@ -132,6 +132,43 @@ class BridgeWalkTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_compact_guest_health_changes_only_its_current_live_view(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        area = "/Game/Maps/Camp"
+        session, epoch, token = "a" * 32, "b" * 32, "c" * 32
+        pawn = f"Player_FP_C {area}.Camp:PersistentLevel.Player_FP_C_3"
+        frame = (f"schema\t1\nseq\t7\nsession\tclient\tconnected\t{area}\t1\t0\n"
+                 f"native-save-scope\t{token}\npawn\tlocal\t{pawn}\t250\t1\t2\t3\tController\t250\n"
+                 f"native-client-damage\t{area}\t{pawn}\t0\t0\t0\t0\t0\n"
+                 f"native-guest-vitals\t{pawn}\t19\t230\t30\n")
+        values = ["75", "250", "54.2", "210.75", "-", "40", "0", "-3", "1.7"]
+
+        async def reply(payload, _timeout):
+            nonce, action, *arguments = payload.decode().rstrip("\n").split("\t")
+            self.assertEqual(action, runtime.GUEST_HEALTH_PROJECT)
+            self.assertEqual(arguments, [area, session, epoch, token, pawn, *values])
+            return "\t".join([runtime.GUEST_HEALTH_REPLY, "1", nonce, "7", area, session, returned_epoch, token, pawn,
+                              "accepted", runtime.GUEST_HEALTH_PROJECTED, *readback]) + "\n"
+
+        bridge.local_bridge = Mock(command=AsyncMock(side_effect=reply), read_status=Mock(return_value=frame))
+        original = bridge.snapshot()
+        returned_epoch, readback = epoch, values.copy()
+        receipt = await bridge.command(runtime.GUEST_HEALTH_PROJECT, area, session, epoch, token, pawn, *values)
+        self.assertIs(bridge.snapshot(), original)
+        self.assertIs(bridge.remember_local_guest_health({**original, "sequence": 8}, receipt)["pawns"], original["pawns"])
+        merged = bridge.remember_local_guest_health(original, receipt)
+        self.assertEqual(bridge.snapshot(), merged)
+        self.assertEqual(merged["pawns"]["local"], {**original["pawns"]["local"], "health": 75})
+        self.assertEqual(merged[runtime.GUEST_VITALS][pawn], {
+            "food": 54.2, "regen": 210.75, "stim": 30, "fatigue": 40, "intox": 0, "sickness": -3, "rads": 1.7})
+        bridge.local_bridge.read_status.return_value = frame.replace("seq\t7", "seq\t8")
+        self.assertEqual(bridge.snapshot()["pawns"]["local"]["health"], 250)
+        self.assertIsNone(bridge._local_guest_health)
+        for returned_epoch, bad_health in (("d" * 32, "75"), (epoch, "nan"), (epoch, "75.001")):
+            readback[0] = bad_health
+            with self.assertRaisesRegex(RuntimeError, "receipt"):
+                await bridge.command(runtime.GUEST_HEALTH_PROJECT, area, session, epoch, token, pawn, *values)
+
     async def test_compact_guest_save_retention_keeps_a_newer_world_sample(self):
         bridge = runtime.Bridge(Path("unused"), None)
         area, pawn, guest = "/Game/Maps/Camp", "Player_FP_C guest", "a" * 32

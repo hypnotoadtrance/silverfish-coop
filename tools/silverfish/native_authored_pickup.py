@@ -135,7 +135,7 @@ def fixture_proof(game: dict, source: str, entry: str = "fixture") -> dict:
     return {"native_authored_pickup_interaction": row}
 
 
-async def project(service, bridge, pickups: dict, *, gold_bag=None) -> None:
+async def project(service, bridge, pickups: dict, *, gold_bag=None, scope=None) -> None:
     area, phase = service.last_game.get("map"), service.last_game.get("state")
     if phase == "connected" and area == SCAV_BAR and type(gold_bag) is bool:
         shown = _displayed(service.last_game, GOLD_BAG).get("state") == "available"
@@ -146,14 +146,20 @@ async def project(service, bridge, pickups: dict, *, gold_bag=None) -> None:
                 raise RuntimeError("Scav Bar gold bag projection did not verify")
             service.last_game = snapshot
     for source in MAP_SOURCES.get(area, ()):
+        if scope is not None and service.stock_interaction_scope() != scope:
+            return
         if (source in native_dead_drop.BY_SOURCE or source == GOLD_BAG) and phase == "connected":
             continue
         if source not in pickups or _displayed(service.last_game, source).get("state") != "available":
             continue
+        game = service.last_game
         snapshot = await bridge.command("native-authored-pickup-project", "claimed", source, timeout=5)
+        if scope is not None and service.stock_interaction_scope() != scope:
+            return
         if (snapshot.get("map"), snapshot.get("state"), _displayed(snapshot, source).get("state")) != (area, phase, "claimed"):
             raise RuntimeError("The game did not verify the exact consumed placed pickup projection")
-        service.last_game = snapshot
+        if scope is None or service.last_game is game or snapshot.get("sequence", 0) >= service.last_game.get("sequence", 0):
+            service.last_game = snapshot
 
 
 def _needs_epoch(source: str) -> bool:

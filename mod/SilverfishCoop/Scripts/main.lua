@@ -2093,6 +2093,15 @@ local function tick(fields, pending, periodic)
             native_guest_clock.command_reply(fields, state, current_phase, sequence, status_row))
         return true
     end
+    if fields and pending and fields[2] == "native-guest-health-project" and current_phase == "connected"
+        and status_publication.compact() and status_publication.steady(state, current_phase) then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        SilverfishPublishLocalBridgeReply(pending.ticket,
+            native_guest_ui.health_reply(fields, state, current_phase, sequence, status_row))
+        if not periodic then return true end
+        fields, pending = nil, nil
+    end
     if fields and pending and fields[2] == "native-avatar-outfits" and not periodic
         and current_phase == "connected" and status_publication.compact() and status_publication.steady(state, current_phase)
         and os.clock() < status_publication.next_frame then

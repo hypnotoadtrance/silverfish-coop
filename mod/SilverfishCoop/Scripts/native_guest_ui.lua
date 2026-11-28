@@ -559,7 +559,7 @@ local function matches_health(current, expected)
     return type(current) == "number" and math.abs(current - expected) <= 0.0001
 end
 
-local function project_health(fields, state, phase)
+local function project_health(fields, state, phase, reply)
     local area, session, epoch, token, name = fields[3], fields[4], fields[5], fields[6], fields[7]
     local health, maximum = tonumber(fields[8]), tonumber(fields[9])
     local food, regen, stim = tonumber(fields[10]), tonumber(fields[11]), tonumber(fields[12])
@@ -603,11 +603,14 @@ local function project_health(fields, state, phase)
     if stim ~= nil and not matches_health(save.PlayerStim, stim) then save.PlayerStim = stim end
     local radiation_changed = rads ~= nil and not matches_health(save.PlayerRads, rads)
     if radiation_changed then save.PlayerRads = rads end
-    if not matches_health(pawn.MaxHealth, maximum) or not matches_health(save.PlayerHealth, health)
-        or food ~= nil and not matches_health(save.PlayerFood, food)
-        or regen ~= nil and not matches_health(save.PlayerRegen, regen)
-        or stim ~= nil and not matches_health(save.PlayerStim, stim)
-        or rads ~= nil and not matches_health(save.PlayerRads, rads)
+    local current_health, current_maximum = save.PlayerHealth, pawn.MaxHealth
+    local current_food, current_regen = food and save.PlayerFood, regen and save.PlayerRegen
+    local current_stim, current_rads = stim and save.PlayerStim, rads and save.PlayerRads
+    if not matches_health(current_maximum, maximum) or not matches_health(current_health, health)
+        or food ~= nil and not matches_health(current_food, food)
+        or regen ~= nil and not matches_health(current_regen, regen)
+        or stim ~= nil and not matches_health(current_stim, stim)
+        or rads ~= nil and not matches_health(current_rads, rads)
         or fatigue ~= nil and current_fatigue ~= fatigue
         or sickness ~= nil and current_sickness ~= sickness
         or intox ~= nil and (current_intox ~= intox or pawn.Intoxication ~= intox) then
@@ -617,7 +620,25 @@ local function project_health(fields, state, phase)
         local info = stock_player_info(state)
         if valid(info) then info:UpdateStats() end
     end
+    if reply then
+        reply[1], reply[2] = current_health, current_maximum
+        if #fields >= 11 then reply[3], reply[4] = current_food or "-", current_regen or "-" end
+        if #fields >= 12 then reply[5] = current_stim or "-" end
+        if #fields >= 14 then
+            reply[6], reply[7] = fatigue and current_fatigue or "-", intox and current_intox or "-"
+        end
+        if #fields >= 15 then reply[8] = sickness and current_sickness or "-" end
+        if #fields >= 16 then reply[9] = current_rads or "-" end
+    end
     return "stock co-op guest health projected"
+end
+
+function guest_ui.health_reply(fields, state, phase, sequence, row)
+    local proof = {}
+    local accepted, message = pcall(project_health, fields, state, phase, proof)
+    return row("native-guest-health-reply", 1, fields[1], sequence, state.map,
+        fields[4] or "-", fields[5] or "-", fields[6] or "-", state.local_pawn.name,
+        accepted and "accepted" or "error", message, table.unpack(proof)) .. "\n"
 end
 
 function guest_ui.command(fields, state, phase, bridge)

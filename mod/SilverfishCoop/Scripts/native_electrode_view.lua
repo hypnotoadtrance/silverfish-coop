@@ -1,5 +1,6 @@
 local electrodes = {}
 local retired = {}
+local read_native_sample = SilverfishReadNativeElectrodeSample
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -28,14 +29,23 @@ function electrodes.clear()
     retired = {}
 end
 
-function electrodes.observe(entry, phase, row, point)
-    local actor = entry.actor
-    if entry.placed then entry.last_position = point end
-    local sparks = idle_components(actor)
-    local center = valid(actor.Sphere) and actor.Sphere:K2_GetComponentLocation() or point
-    local armed = phase == "hosting" and actor.Triggered == false or phase == "connected" and entry.armed == true
-    return row("native-electrode-phase", entry.placed or "-", point.X, point.Y, point.Z,
-        armed and 1 or 0, sparks and sparks:IsActive() and 1 or 0, center.X, center.Y, center.Z)
+function electrodes.observe(entry, phase, row, x, y, z, address, world_address)
+    if entry.placed then entry.last_position = {X = x, Y = y, Z = z} end
+    local triggered, active, cx, cy, cz
+    if read_native_sample then
+        triggered, active, cx, cy, cz = read_native_sample(address, world_address)
+    end
+    if triggered == nil then
+        local actor = entry.actor
+        local sparks = idle_components(actor)
+        local sphere = actor.Sphere
+        local center = valid(sphere) and sphere:K2_GetComponentLocation()
+        if center then cx, cy, cz = center.X, center.Y, center.Z else cx, cy, cz = x, y, z end
+        triggered = phase == "hosting" and actor.Triggered
+        active = sparks and sparks:IsActive()
+    end
+    local armed = phase == "hosting" and triggered == false or phase == "connected" and entry.armed == true
+    return row("native-electrode-phase", entry.placed or "-", x, y, z, armed and 1 or 0, active and 1 or 0, cx, cy, cz)
 end
 
 function electrodes.retire(entry)

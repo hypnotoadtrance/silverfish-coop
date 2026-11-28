@@ -910,6 +910,112 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await worker
 
+    async def test_authored_pickups_bypass_older_input_with_bounded_per_source_requests(self):
+        pickup = service.native_authored_pickup
+        area, epoch, pawn = CROSSROADS, "a" * 32, "Player_FP_C guest"
+        picked = {
+            "watch": pickup.POCKET_WATCH,
+            "cash": "crossroads-small-stack-1",
+            "pipe": pickup.OLD_PIPE,
+        }
+        sent = asyncio.Queue()
+        release = {operation: asyncio.Event() for operation in picked}
+        older_sent = asyncio.Event()
+        stale_finished = asyncio.Event()
+        finished = set()
+
+        async def request(body, *, timeout):
+            operation = body["operation_id"]
+            if operation == "older":
+                older_sent.set()
+                await asyncio.Future()
+            self.assertEqual(body["action"], pickup.ACTION)
+            sent.put_nowait((operation, body["target"]))
+            await release[operation].wait()
+            source = picked[operation]
+            return {"ok": True, "native_authored_pickup_claim": {
+                "source": source, "map": area, "actor": pickup.SOURCES[source][1], "owner": "guest",
+            }}
+
+        def record(event, **fields):
+            if event == "local_interaction":
+                finished.add(fields["operation_id"])
+                if {"watch", "pipe"}.issubset(finished):
+                    stale_finished.set()
+
+        client = self.guest(AsyncMock(side_effect=request))
+        client.control.event.side_effect = record
+        client.transport.connected = True
+        client.host_session, client.zone_epoch, client.expected_zone = "session", epoch, area
+        client.last_game = {"state": "connected", "map": area, "pawns": {"local": {"name": pawn}}}
+        scope = client.stock_interaction_scope()
+        client.bridge.command = AsyncMock()
+        inputs = [("older", None)]
+
+        def read_inputs():
+            batch = inputs.copy()
+            inputs.clear()
+            return batch
+
+        client.bridge.stock_interaction_ready.side_effect = lambda **_: bool(inputs)
+        client.bridge.interactions.side_effect = read_inputs
+        projected = AsyncMock()
+        with patch.object(pickup, "project", projected):
+            worker = asyncio.create_task(client.run_stock_interactions())
+            try:
+                await asyncio.wait_for(older_sent.wait(), .5)
+                inputs.extend((("watch", picked["watch"]), ("duplicate", picked["watch"]),
+                               ("cash", picked["cash"]), ("pipe", picked["pipe"])))
+                self.assertEqual(await asyncio.wait_for(sent.get(), .5), ("watch", picked["watch"]))
+                self.assertEqual(await asyncio.wait_for(sent.get(), .5), ("cash", f"{picked['cash']}@{epoch}"))
+                self.assertTrue(sent.empty())
+
+                release["cash"].set()
+                self.assertEqual(await asyncio.wait_for(sent.get(), .5), ("pipe", picked["pipe"]))
+                cash_claim = client.gameplay[pickup.STATE_KEY][picked["cash"]]
+                projected.assert_awaited_once_with(client, client.bridge, {picked["cash"]: cash_claim}, scope=scope)
+                self.assertFalse(release["watch"].is_set())
+
+                client.zone_epoch = "b" * 32
+                client.gameplay = {}
+                release["watch"].set()
+                release["pipe"].set()
+                await asyncio.wait_for(stale_finished.wait(), .5)
+                self.assertNotIn(pickup.STATE_KEY, client.gameplay)
+                self.assertEqual(projected.await_count, 1)
+                self.assertTrue(sent.empty())
+            finally:
+                worker.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await worker
+
+    async def test_authored_pickup_projection_keeps_newer_game_status(self):
+        pickup = service.native_authored_pickup
+        source = pickup.POCKET_WATCH
+        area, actor, item_class = pickup.SOURCES[source]
+        scope = ("session", "visit", area, "Player_FP_C guest")
+        source_row = {"source": source, "map": area, "actor": actor, "class_path": item_class, "state": "available"}
+        game = {"state": "connected", "map": area, "sequence": 1, pickup.SOURCES_KEY: {source: source_row}}
+        reply = {**game, "sequence": 2, pickup.SOURCES_KEY: {source: {**source_row, "state": "claimed"}}}
+        for travel in (False, True):
+            with self.subTest(travel=travel):
+                client = self.guest(AsyncMock())
+                client.last_game = game
+                client.stock_interaction_scope = Mock(return_value=scope)
+                newest = {**game, "sequence": 3}
+
+                async def project(*_args, **_kwargs):
+                    client.last_game = newest
+                    if travel:
+                        client.stock_interaction_scope.return_value = None
+                    return reply
+
+                client.bridge.command = AsyncMock(side_effect=project)
+                await pickup.project(client, client.bridge, {source: {}}, scope=scope)
+                client.bridge.command.assert_awaited_once_with("native-authored-pickup-project", "claimed", source,
+                                                             timeout=5)
+                self.assertIs(client.last_game, newest)
+
     async def test_loose_and_projected_pickups_send_independently_of_a_pending_crate_roll(self):
         client = self.guest(AsyncMock())
         epoch = "a" * 32

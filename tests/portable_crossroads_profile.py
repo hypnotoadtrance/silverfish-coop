@@ -88,6 +88,21 @@ def instrument_profile(source, *, stock_receipts=False):
         rest = rest.replace(gate, admission)
         rest = rest.replace(publish, "        if accepted then status_publication.profile.stock_receipt("
                             "fields[2], #reply + (readback and #readback or 0)) end\n" + publish)
+        health_call = (f'{wrapper}("native_guest_ui.health_reply", native_guest_ui.health_reply, '
+                       'fields, state, current_phase, sequence, status_row)')
+        health_publish = f"        SilverfishPublishLocalBridgeReply(pending.ticket,\n            {health_call})"
+        if health_publish in rest:
+            health_gate = ('if fields and pending and fields[2] == "native-guest-health-project" and current_phase == "connected"\n'
+                           '        and status_publication.compact() and status_publication.steady(state, current_phase) then')
+            assert rest.count(health_gate) == 1
+            rest = rest.replace(health_gate, health_gate.replace(
+                "status_publication.compact()", "resident_title and status_publication.installed "
+                "and status_publication.memory_live"))
+            rest = rest.replace(health_publish,
+                f"        local reply = {health_call}\n"
+                '        if reply:find("\\taccepted\\tstock co-op guest health projected\\t", 1, true) then\n'
+                "            status_publication.profile.stock_receipt(fields[2], #reply)\n"
+                "        end\n        SilverfishPublishLocalBridgeReply(pending.ticket, reply)")
         host_control = ('and not periodic and current_phase == "hosting" and status_publication.compact()\n'
                         '        and status_publication.steady(state, current_phase) and os.clock() < status_publication.next_frame')
         if 'status_row("native-host-control-reply"' in rest:
@@ -648,6 +663,45 @@ function SilverfishProfileAnomalySamples()
     return answer
 end
 
+function SilverfishProfileElectrodeSamples()
+    local native, stamp = SilverfishReadNativeElectrodeSample, SilverfishBridgeProfileStamp
+    if type(native) ~= "function" or not valid(world) then return "unavailable" end
+    local address, tracked = world:GetAddress(), {}
+    local function stock(actor)
+        local sparks, loop = actor.NI_Sparks, actor.SparkLoop_Cue
+        local sparks_owner, loop_owner = sparks:GetOwner(), loop:GetOwner()
+        assert(sparks_owner:GetAddress() == actor:GetAddress() and loop_owner:GetAddress() == actor:GetAddress())
+        local center = actor.Sphere:K2_GetComponentLocation()
+        return actor.Triggered, sparks:IsActive(), center.X, center.Y, center.Z
+    end
+    for key, entry in pairs(active) do
+        if entry.kind == "electrode" and valid(entry.actor) then
+            local expected = table.pack(stock(entry.actor))
+            local actual = table.pack(native(key, address))
+            assert(actual.n == 5, "a tracked stock Electrode fell back to Lua: " .. tostring(key))
+            for index = 1, 5 do assert(actual[index] == expected[index], "Electrode sample diverged at " .. index) end
+            assert(native(key, address + 1) == nil and native(0, address) == nil, "unqualified Electrode sample")
+            tracked[#tracked + 1] = {key = key, actor = entry.actor}
+        end
+    end
+    if #tracked == 0 then return "unavailable" end
+    local function measure(read)
+        local heap, started = collectgarbage("count"), stamp()
+        for _ = 1, 32 do for _, entry in ipairs(tracked) do read(entry) end end
+        return (stamp() - started) / 1000, collectgarbage("count") - heap
+    end
+    local running = collectgarbage("isrunning")
+    collectgarbage("stop")
+    local ok, result = pcall(function()
+        local native_ms, native_kib = measure(function(entry) return native(entry.key, address) end)
+        local lua_ms, lua_kib = measure(function(entry) return stock(entry.actor) end)
+        return ("%d,%.3f,%.3f,%.3f,%.3f"):format(#tracked, native_ms, lua_ms, native_kib, lua_kib)
+    end)
+    if running then collectgarbage("restart") end
+    assert(ok, result)
+    return result
+end
+
 return fields
 """, 1)
 
@@ -1189,6 +1243,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     lean = await asyncio.gather(*(compare_lean_reader(seat, probe) for seat in seats.values()))
     journal = {}
     anomaly_samples = {}
+    electrode_samples = {}
     dynamic_acid_samples = {}
     controller_inspection = {}
     remote_head_rotation = {}
@@ -1218,6 +1273,13 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             anomaly_samples = {"anomaly_sample_comparison": {"actors": int(count), "passes_per_reader": 32,
                                 "native_ms": native_ms, "lua_ms": lua_ms, "native_heap_growth_kib": native_kib,
                                 "lua_heap_growth_kib": lua_kib, "all_samples_matched": True}}
+        reply = await command(host, "electrodesamples")
+        if reply != "unavailable":
+            assert not reply.startswith("Electrode sample comparison failed"), reply
+            count, native_ms, lua_ms, native_kib, lua_kib = map(float, reply.split(","))
+            electrode_samples = {"electrode_sample_comparison": {"actors": int(count), "passes_per_reader": 32,
+                                 "native_ms": native_ms, "lua_ms": lua_ms, "native_heap_growth_kib": native_kib,
+                                 "lua_heap_growth_kib": lua_kib, "all_samples_matched": True, "wrong_scope_refused": True}}
         dynamic_acid_samples = {"dynamic_acid_sample_comparison": await compare_acid_reader(host, probe, dynamic=True)}
         async def journal_action(action, receipt):
             reply = await host.bridge.command("native-host-invite-fixture", action)
@@ -1244,6 +1306,6 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
                            for seat, frame in zip(seats, wall_status, strict=True)},
             "guest_roster": {slot: row["name"] for slot, row in settled["game"]["pawns"].items()},
             "vitals_comparison": dict(zip(seats, comparison, strict=True)), **heartbeat, **guest_binding,
-            **coarse, **journal, **anomaly_samples, **dynamic_acid_samples, **ready_roster,
+            **coarse, **journal, **anomaly_samples, **electrode_samples, **dynamic_acid_samples, **ready_roster,
             "controller_inspection_comparison": controller_inspection,
             "remote_head_rotation_comparison": remote_head_rotation}

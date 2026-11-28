@@ -5959,7 +5959,10 @@ class Client:
         if not self.transport.connected or (action != "keep" and self.last_game.get("state") != "connected"):
             raise RuntimeError("game_connection_unavailable")
         area, epoch, session = self.last_game.get("map"), self.zone_epoch, self.host_session
+        authored_visit = None
         if action == native_authored_pickup.ACTION:
+            if pawn := self.last_game.get("pawns", {}).get("local", {}).get("name"):
+                authored_visit = session, epoch, area, pawn
             target = native_authored_pickup.request_target(target, self.zone_epoch)
         elif ((action == native_loose_pickup.CLAIM and native_loose_pickup.target_path(target))
               or (action == native_mushrooms.CLAIM and isinstance(target, str) and party.REQUEST_ID.fullmatch(target))):
@@ -6007,19 +6010,22 @@ class Client:
                     self.gameplay, (session, epoch, area), reply):
                 self.world_loot_wake.set()
             placed = reply.get("native_authored_pickup_claim")
-            if action == native_authored_pickup.ACTION and isinstance(placed, dict):
+            if (authored_visit is not None and isinstance(placed, dict)
+                    and self.stock_interaction_scope() == authored_visit):
                 source = target.partition("@")[0] if target else None
                 profile = native_authored_pickup.SOURCES.get(source)
                 if profile and (placed.get("source"), placed.get("map"), placed.get("actor"), placed.get("owner")) == (
                         source, area, profile[1], self.invite["character_id"]):
                     await self.cancel_gameplay_snapshot()
-                    claims = self.gameplay.setdefault(native_authored_pickup.STATE_KEY, {})
-                    claims[source] = placed
-                    try:
-                        await native_authored_pickup.project(self, self.bridge, {source: placed})
-                    except (OSError, RuntimeError) as error:
-                        self.control.event("native_authored_pickup_projection_deferred", reason=str(error))
-                    self.guest_ui.queue_stock_inventory(self)
+                    if self.stock_interaction_scope() == authored_visit:
+                        claims = self.gameplay.setdefault(native_authored_pickup.STATE_KEY, {})
+                        claims[source] = placed
+                        try:
+                            await native_authored_pickup.project(self, self.bridge, {source: placed}, scope=authored_visit)
+                        except (OSError, RuntimeError) as error:
+                            self.control.event("native_authored_pickup_projection_deferred", reason=str(error))
+                        if self.stock_interaction_scope() == authored_visit:
+                            self.guest_ui.queue_stock_inventory(self)
             claimed = reply.get(native_loose_pickup.PROOF)
             if action == native_loose_pickup.CLAIM and isinstance(claimed, dict):
                 path = native_loose_pickup.target_path(target.partition("@")[0]) if target else None
@@ -6048,13 +6054,19 @@ class Client:
                 except (OSError, RuntimeError, TimeoutError) as error:
                     self.control.event("native_stock_switch_projection_deferred", reason=str(error))
         cue = reply.pop(native_pickup_audio.KEY, None)
+        if action == native_authored_pickup.ACTION and (
+                authored_visit is None or self.stock_interaction_scope() != authored_visit):
+            cue = None
         if isinstance(cue, dict) and isinstance(rows := cue.get("cues"), list) and len(rows) == 1:
             if isinstance(rows[0], list) and len(rows[0]) == 3 and rows[0][0] == operation_id:
                 if defer_pickup_cue:
                     reply[native_pickup_audio.KEY] = cue
                 else:
-                    self.last_game = await self.pickup_playback.sync(
-                        self.bridge, self.control, self.last_game, cue, self.zone_epoch, self.host_session)
+                    game = self.last_game
+                    heard = await self.pickup_playback.sync(
+                        self.bridge, self.control, game, cue, self.zone_epoch, self.host_session)
+                    if self.last_game is game and (authored_visit is None or self.stock_interaction_scope() == authored_visit):
+                        self.last_game = heard
         return {key: value for key, value in reply.items() if key != "ok"}
 
     async def service_reload_input(self, active: bool, game: dict | None = None) -> None:
@@ -7337,8 +7349,8 @@ class Client:
                     for operation, target in inputs:
                         loot = native_world_loot.target_parts(target)
                         loose = native_loose_pickup.target_path(target)
-                        if loot or loose:
-                            item = scope, loot[:2] if loot else loose
+                        if loot or loose or target in native_authored_pickup.SOURCES:
+                            item = scope, loot[:2] if loot else (loose or target)
                             if item in pickups:
                                 continue
                             if len(pickups) >= _LOCAL_STOCK_INPUT_BACKLOG:
@@ -7647,8 +7659,12 @@ class Client:
         if switch := native_stock_switch.input_target(target):
             action, actor = switch
             return await self.gameplay_action(action, operation, actor)
-        action = (native_authored_pickup.ACTION if target in native_authored_pickup.SOURCES
-                  else native_loose_pickup.CLAIM if native_loose_pickup.target_path(target)
+        if target in native_authored_pickup.SOURCES:
+            async with self.stock_pickup_slots:
+                if self.stock_interaction_scope() != scope:
+                    raise ValueError("The stock pickup visit changed")
+                return await self.gameplay_action(native_authored_pickup.ACTION, operation, target)
+        action = (native_loose_pickup.CLAIM if native_loose_pickup.target_path(target)
                   else native_subway_valve.ACTIVATE if target == native_subway_valve.INPUT
                   else native_enemy_loot.CLAIM if native_enemy_shells.target_parts(target)
                   else "native-wipe-recover" if target else "interact")

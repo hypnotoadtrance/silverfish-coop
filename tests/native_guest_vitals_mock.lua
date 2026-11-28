@@ -67,4 +67,15 @@ assert(not pcall(project, 75, "120", "190", epoch, "hosting"))
 assert(guest_view.PlayerHealth == 25 and guest_view.PlayerFood == 0 and guest_view.PlayerRegen == 200.75)
 assert(solo_save.PlayerHealth == 250 and solo_save.PlayerFood == 175 and solo_save.PlayerRegen == 250)
 assert(refreshes == 2)
+
+state.local_pawn.name = name
+local function row(...) return table.concat({...}, "\t") end
+local header = "native-guest-health-reply\t1\trequest\t23\t" .. map .. "\t" .. session .. "\t"
+local args = {"request", "native-guest-health-project", map, session, epoch, token, name, "54", "250", "-", "170.5"}
+assert(ui.health_reply(args, state, "connected", 23, row) == header .. epoch .. "\t" .. token .. "\t" .. name
+    .. "\taccepted\tstock co-op guest health projected\t54\t250\t-\t170.5\n")
+args[5] = string.rep("d", 32)
+assert(ui.health_reply(args, state, "connected", 23, row) == header .. args[5] .. "\t" .. token .. "\t" .. name
+    .. "\terror\tThe stock health view belongs to another guest or visit\n")
+assert(guest_view.PlayerHealth == 54 and guest_view.PlayerRegen == 170.5 and guest_view.PlayerFood == 0)
 print("guest stock vitals update only the qualified isolated in-memory view")

@@ -8774,7 +8774,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
 
             def crossroads_overlay(source):
                 profiled = instrument_profile(source, stock_receipts=bool(
-                    stock_crossroads_door or stock_warehouse_switch or oil_lamps_check or tutorial_dock_gait))
+                    stock_crossroads_door or stock_warehouse_switch or oil_lamps_check or tutorial_dock_gait or stock_campfire))
                 # Native globals are registered on the co-op Lua state.
                 return (profiled + "\nstatus_publication.cold_crate_probe = function()\n" + crate_probe
                         + "\nend\nstatus_publication.cold_crate_probe()\n") if crate_probe else profiled
@@ -9275,6 +9275,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     if crossroads_profile and ((campaign == "crossroads" and stock_crossroads_door)
                                                or (campaign == "tutorial_dock" and stock_warehouse_switch)
                                                or (campaign == "tutorial_dock_combat" and tutorial_dock_gait)
+                                               or (campaign == "observatory" and stock_campfire)
                                                or (campaign == "oil_lamps" and oil_lamps_check)):
                         from portable_crossroads_profile import read_stock_receipts
 
@@ -9292,6 +9293,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                 assert host_receipts.get(action, {}).get("count", 0) > 0, evidence
                         if campaign == "oil_lamps" and results["stock_oil_lamps"]["passed"]:
                             assert host_receipts.get(native_stock_switch.IGNITE, {}).get("count", 0) > 0, evidence
+                        if campaign == "observatory" and results["stock_campfire"]["passed"]:
+                            health_receipts = guest_receipts.get(runtime.GUEST_HEALTH_PROJECT, {})
+                            assert health_receipts.get("count", 0) >= 2, evidence
+                            assert 0 < health_receipts["maximum_bytes"] <= 1024, evidence
                     return gameplay
 
                 async def check_shovel_reconnect(guest, _started):

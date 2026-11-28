@@ -113,6 +113,11 @@ CPP_ADDON_DLL = Path(f"ue4ss/Mods/{CPP_MOD_NAME}/dlls/main.dll")
 GUEST_UI_MEMORY = "native_guest_ui_memory"
 GUEST_UI_PROJECTION_BYTES = "native_guest_ui_projection_reply_bytes"
 GUEST_UI_MAX_BYTES = 20_000
+GUEST_HEALTH_PROJECT = "native-guest-health-project"
+GUEST_HEALTH_REPLY = "native-guest-health-reply"
+GUEST_HEALTH_PROJECTED = "stock co-op guest health projected"
+GUEST_VITALS = "native_guest_vitals"
+GUEST_VITAL_FIELDS = ("food", "regen", "stim", "fatigue", "intox", "sickness", "rads")
 _GUEST_UI_MAX_ROWS = 128
 _GUEST_UI_REPLY = "\nnative-guest-ui-body\t"
 _GUEST_UI_READ_REPLY = "native-guest-ui-read-reply"
@@ -998,6 +1003,7 @@ class Bridge:
         self._local_status = None
         self._file_command_lock = asyncio.Lock()
         self._local_world_view = None
+        self._local_guest_health = None
         self._local_avatar_receipt = None
         self._local_wallet = None
         self._local_guest_weapon = None
@@ -1586,6 +1592,13 @@ class Bridge:
                 frame = {**frame, key: receipt}
             else:
                 self._local_avatar_receipt = None
+        if self._local_guest_health is not None and frame is not None:
+            projected = (self._with_local_guest_health(frame, self._local_guest_health)
+                         if self.local_bridge is not None else None)
+            if projected is None:
+                self._local_guest_health = None
+            else:
+                frame = projected
         if self._local_world_view is not None and frame is not None:
             at_sequence, pawn, proof = self._local_world_view
             if (self.local_bridge is not None and frame.get("sequence", 0) <= at_sequence
@@ -3900,6 +3913,54 @@ class Bridge:
         return {**game, "native_world_view": proof}
 
     @staticmethod
+    def _local_guest_health_reply(raw: str, fields: tuple[str, ...]) -> dict:
+        row = raw[:-1].split("\t") if len(raw) <= 2048 and raw.endswith("\n") and "\n" not in raw[:-1] else []
+        if (len(row) < 11 or len(fields) not in (9, 11, 12, 14, 15, 16)
+                or row[:3] != [GUEST_HEALTH_REPLY, "1", fields[0]] or "\r" in raw
+                or not (sequence := _held_input_sequence(row[3])) or row[4:9] != list(fields[2:7])):
+            raise RuntimeError("The resident guest health receipt did not match the request")
+        if row[9] != "accepted" or row[10] != GUEST_HEALTH_PROJECTED:
+            raise RuntimeError(row[10] or "The resident guest health update was refused")
+        if len(row) != len(fields) + 4:
+            raise RuntimeError("The resident guest health receipt had incomplete readback")
+        proof = {}
+        for key, observed, requested in zip(("health", "max_health", *GUEST_VITAL_FIELDS), row[11:], fields[7:]):
+            if requested == "-" and observed == "-" and key in GUEST_VITAL_FIELDS:
+                continue
+            try:
+                actual, expected = _finite(observed), _finite(requested)
+            except ValueError as error:
+                raise RuntimeError("The resident guest health receipt contained a malformed value") from error
+            integer = key in ("fatigue", "intox", "sickness")
+            if (actual is None or expected is None or abs(actual - expected) > .0001
+                    or integer and (not actual.is_integer() or actual != expected)):
+                raise RuntimeError("The resident guest health receipt did not verify the stock values")
+            proof[key] = int(actual) if integer else actual
+        return {GUEST_HEALTH_REPLY: True, "sequence": sequence, "map": row[4], "save_scope": row[7], "pawn": row[8],
+                "health": proof.pop("health"), "max_health": proof.pop("max_health"), GUEST_VITALS: proof,
+                "ack": {"id": row[2], "result": row[9], "message": row[10]}}
+
+    @staticmethod
+    def _with_local_guest_health(game: dict, receipt: dict) -> dict | None:
+        pawn = game.get("pawns", {}).get("local", {})
+        guard = game.get("native_client_damage", {})
+        name = receipt["pawn"]
+        if (game.get("sequence", 0) > receipt["sequence"]
+                or (game.get("state"), game.get("map"), game.get("save_scope"), pawn.get("name"), guard.get("pawn"))
+                != ("connected", receipt["map"], receipt["save_scope"], name, name) or guard.get("dead") is not False):
+            return None
+        projected_pawn = {**pawn, "health": receipt["health"], "max_health": receipt["max_health"]}
+        vitals = game.get(GUEST_VITALS, {})
+        return {**game, "pawns": {**game["pawns"], "local": projected_pawn},
+                GUEST_VITALS: {**vitals, name: {**vitals.get(name, {}), **receipt[GUEST_VITALS]}}}
+
+    def remember_local_guest_health(self, game: dict, receipt: dict) -> dict:
+        updated = self._with_local_guest_health(game, receipt)
+        if updated is not None:
+            self._local_guest_health = receipt
+        return updated if updated is not None else game
+
+    @staticmethod
     def _local_avatar_outfit_reply(raw: str, fields: tuple[str, ...]) -> dict:
         row = raw[:-1].split("\t") if len(raw) <= 2048 and raw.endswith("\n") and "\n" not in raw[:-1] else []
         tag = native_player_avatar.REPLY
@@ -4284,6 +4345,8 @@ class Bridge:
                 return native_world_loot.parse_frame_reply(raw, fields)
             if action == native_weather_view.LOCAL_APPLY and raw.startswith("native-world-view-reply\t"):
                 return self._local_world_view_reply(raw, fields)
+            if action == GUEST_HEALTH_PROJECT and raw.startswith(GUEST_HEALTH_REPLY + "\t"):
+                return self._local_guest_health_reply(raw, fields)
             if action == native_player_avatar.PROJECT and raw.startswith(native_player_avatar.REPLY + "\t"):
                 return self._local_avatar_outfit_reply(raw, fields)
             if (action in (native_player_avatar.HOST_AIM, native_player_avatar.GUEST_SPRINTS)

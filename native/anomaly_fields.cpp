@@ -354,11 +354,76 @@ namespace
             std::ranges::find(replicated_classes, std::wstring_view{path}) != replicated_classes.end();
     }
 
+    template <typename ResultProperty>
+    U::UFunction* stock_getter(U::UClass* type, const U::TCHAR* name, const U::TCHAR* owner_path, std::size_t size)
+    {
+        auto* method = type->GetFunctionByNameInChain(U::FName{name, U::FNAME_Find});
+        auto* result = method ? U::CastField<ResultProperty>(method->GetReturnProperty()) : nullptr;
+        auto* declaring_type = method ? method->GetOuterPrivate() : nullptr;
+        if (!declaring_type || declaring_type->GetPathName() != owner_path ||
+            !method->HasAnyFunctionFlags(U::FUNC_Native) || method->GetNumParms() != 1 ||
+            method->GetParmsSize() != size || !result || result->GetArrayDim() != 1 ||
+            result->GetElementSize() != size || result->GetOffset_Internal() != 0) return nullptr;
+        return method;
+    }
+
+    bool struct_return_type_is(U::UFunction* method, const U::TCHAR* expected)
+    {
+        auto* result = method ? U::CastField<U::FStructProperty>(method->GetReturnProperty()) : nullptr;
+        auto* type = result ? result->GetStruct().Get() : nullptr;
+        return type && type->GetPathName() == expected;
+    }
+
+    using ComponentLocation = std::array<double, 3>;
+    struct ElectrodeSample
+    {
+        U::FWeakObjectPtr type;
+        U::FBoolProperty* triggered{};
+        U::FObjectProperty* sparks{};
+        U::FObjectProperty* loop{};
+        U::FObjectProperty* sphere{};
+        U::UFunction* sparks_owner{};
+        U::UFunction* loop_owner{};
+        U::UFunction* is_active{};
+        U::UFunction* location{};
+    };
+    thread_local ElectrodeSample electrode_sample;
+
+    void bind_electrode_sample(U::AActor* actor)
+    {
+        auto* type = actor->GetClassPrivate();
+        if (electrode_sample.type.Get() == type) return;
+        electrode_sample = {};
+        auto* triggered = property<U::FBoolProperty>(actor, STR("Triggered"));
+        auto* sparks = property<U::FObjectProperty>(actor, STR("NI_Sparks"));
+        auto* loop = property<U::FObjectProperty>(actor, STR("SparkLoop_Cue"));
+        auto* sphere = property<U::FObjectProperty>(actor, STR("Sphere"));
+        if (!triggered || triggered->GetArrayDim() != 1 || !sparks || sparks->GetArrayDim() != 1 ||
+            !loop || loop->GetArrayDim() != 1 || !sphere || sphere->GetArrayDim() != 1) return;
+        auto* sparks_type = sparks->GetPropertyClass().Get();
+        auto* loop_type = loop->GetPropertyClass().Get();
+        auto* sphere_type = sphere->GetPropertyClass().Get();
+        if (!sparks_type || !loop_type || !sphere_type) return;
+        auto* sparks_owner = stock_getter<U::FObjectProperty>(sparks_type, STR("GetOwner"),
+            STR("/Script/Engine.ActorComponent"), sizeof(U::UObject*));
+        auto* loop_owner = stock_getter<U::FObjectProperty>(loop_type, STR("GetOwner"),
+            STR("/Script/Engine.ActorComponent"), sizeof(U::UObject*));
+        auto* is_active = stock_getter<U::FBoolProperty>(sparks_type, STR("IsActive"),
+            STR("/Script/Engine.ActorComponent"), sizeof(bool));
+        auto* active_result = is_active ? U::CastField<U::FBoolProperty>(is_active->GetReturnProperty()) : nullptr;
+        auto* location = stock_getter<U::FStructProperty>(sphere_type, STR("K2_GetComponentLocation"),
+            STR("/Script/Engine.SceneComponent"), sizeof(ComponentLocation));
+        if (!sparks_owner || !loop_owner || !active_result || !active_result->IsNativeBool() ||
+            !struct_return_type_is(location, STR("/Script/CoreUObject.Vector"))) return;
+        electrode_sample = {type, triggered, sparks, loop, sphere, sparks_owner, loop_owner, is_active, location};
+    }
+
     struct AnomalySample
     {
         U::FWeakObjectPtr actor;
         U::FObjectProperty* root;
         U::FBoolProperty* destroying;
+        bool electrode;
     };
     thread_local std::unordered_map<std::uintptr_t, AnomalySample> anomaly_samples;
 
@@ -383,8 +448,22 @@ namespace
         if (anomaly_samples.size() >= limit)
             std::erase_if(anomaly_samples, [](const auto& entry) { return !entry.second.actor.Get(); });
         if (anomaly_samples.size() < limit)
-            anomaly_samples.insert_or_assign(address, AnomalySample{actor, root, destroying});
+        {
+            const bool electrode_actor = type == electrode_class;
+            if (electrode_actor) bind_electrode_sample(actor);
+            anomaly_samples.insert_or_assign(address, AnomalySample{actor, root, destroying, electrode_actor});
+        }
         return 0;
+    }
+
+    U::AActor* live_anomaly_sample(const AnomalySample& sample, std::uintptr_t world)
+    {
+        auto* actor = static_cast<U::AActor*>(sample.actor.Get());
+        if (!actor || !world || reinterpret_cast<std::uintptr_t>(actor->GetWorld()) != world) return nullptr;
+        auto* root = sample.root->GetObjectPropertyValue(sample.root->ContainerPtrToValuePtr<void>(actor));
+        constexpr auto destroyed = static_cast<U::EObjectFlags>(U::RF_BeginDestroyed | U::RF_FinishDestroyed);
+        if (!root || root->HasAnyFlags(destroyed) || sample.destroying->GetPropertyValueInContainer(actor)) return nullptr;
+        return actor;
     }
 
     int read_anomaly_sample(const Lua& lua)
@@ -393,18 +472,51 @@ namespace
         const auto world = static_cast<std::uintptr_t>(lua.get_integer(2));
         const auto tracked = anomaly_samples.find(static_cast<std::uintptr_t>(lua.get_integer(1)));
         if (tracked == anomaly_samples.end()) return 0;
-        auto* actor = static_cast<U::AActor*>(tracked->second.actor.Get());
-        if (!actor || !world || reinterpret_cast<std::uintptr_t>(actor->GetWorld()) != world) return 0;
-        const auto& sample = tracked->second;
-        auto* root = sample.root->GetObjectPropertyValue(sample.root->ContainerPtrToValuePtr<void>(actor));
-        constexpr auto destroyed = static_cast<U::EObjectFlags>(U::RF_BeginDestroyed | U::RF_FinishDestroyed);
-        if (!root || root->HasAnyFlags(destroyed) || sample.destroying->GetPropertyValueInContainer(actor)) return 0;
+        auto* actor = live_anomaly_sample(tracked->second, world);
+        if (!actor) return 0;
         const auto location = actor->K2_GetActorLocation();
         lua.set_number(location.X());
         lua.set_number(location.Y());
         lua.set_number(location.Z());
         lua.set_bool(actor->GetActorEnableCollision());
         return 4;
+    }
+
+    int read_electrode_sample(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        if (!U::IsInGameThreadRaw() || lua_gettop(stack) != 2 ||
+            !lua_isinteger(stack, 1) || !lua_isinteger(stack, 2)) return 0;
+        const auto world = static_cast<std::uintptr_t>(lua_tointeger(stack, 2));
+        const auto tracked = anomaly_samples.find(static_cast<std::uintptr_t>(lua_tointeger(stack, 1)));
+        if (tracked == anomaly_samples.end() || !tracked->second.electrode) return 0;
+        auto* actor = live_anomaly_sample(tracked->second, world);
+        auto* type = electrode_sample.type.Get();
+        constexpr auto destroyed = static_cast<U::EObjectFlags>(U::RF_BeginDestroyed | U::RF_FinishDestroyed);
+        if (!actor || !type || actor->GetClassPrivate() != type || actor->HasAnyFlags(destroyed)) return 0;
+        const auto component = [&](U::FObjectProperty* member) -> U::UObject* {
+            auto* value = member->GetObjectPropertyValue(member->ContainerPtrToValuePtr<void>(actor));
+            return value && !value->IsUnreachable() && !value->HasAnyFlags(destroyed) &&
+                value->GetClassPrivate() == member->GetPropertyClass().Get() ? value : nullptr;
+        };
+        auto* sparks = component(electrode_sample.sparks);
+        auto* loop = component(electrode_sample.loop);
+        auto* sphere = component(electrode_sample.sphere);
+        if (!sparks || !loop || !sphere || sphere->GetOuterPrivate() != actor) return 0;
+        U::UObject* sparks_owner{};
+        U::UObject* loop_owner{};
+        sparks->ProcessEvent(electrode_sample.sparks_owner, &sparks_owner);
+        loop->ProcessEvent(electrode_sample.loop_owner, &loop_owner);
+        if (sparks_owner != actor || loop_owner != actor) return 0;
+
+        bool active{};
+        ComponentLocation center{};
+        sparks->ProcessEvent(electrode_sample.is_active, &active);
+        sphere->ProcessEvent(electrode_sample.location, center.data());
+        lua_pushboolean(stack, electrode_sample.triggered->GetPropertyValueInContainer(actor));
+        lua_pushboolean(stack, active);
+        for (auto axis : center) lua_pushnumber(stack, axis);
+        return 5;
     }
 
     bool canister_class(U::UObject* type)
@@ -606,19 +718,6 @@ namespace
         return 0;
     }
 
-    template <typename ResultProperty>
-    U::UFunction* particle_getter(U::UClass* type, const U::TCHAR* name, const U::TCHAR* owner_path, std::size_t size)
-    {
-        auto* method = type->GetFunctionByNameInChain(U::FName{name, U::FNAME_Find});
-        auto* result = method ? U::CastField<ResultProperty>(method->GetReturnProperty()) : nullptr;
-        auto* declaring_type = method ? method->GetOuterPrivate() : nullptr;
-        if (!declaring_type || declaring_type->GetPathName() != owner_path ||
-            !method->HasAnyFunctionFlags(U::FUNC_Native) || method->GetNumParms() != 1 ||
-            method->GetParmsSize() != size || !result || result->GetArrayDim() != 1 ||
-            result->GetElementSize() != size || result->GetOffset_Internal() != 0) return nullptr;
-        return method;
-    }
-
     int read_drum_fire_particles(const Lua& lua)
     {
         auto* stack = lua.get_lua_state();
@@ -661,19 +760,14 @@ namespace
         if (!asset || asset->IsUnreachable() || asset->HasAnyFlags(destroyed) ||
             !asset_type || asset->GetClassPrivate() != asset_type ||
             asset_type->GetPathName() != STR("/Script/Niagara.NiagaraSystem")) return 0;
-        auto* owner_getter = particle_getter<U::FObjectProperty>(component_type, STR("GetOwner"),
+        auto* owner_getter = stock_getter<U::FObjectProperty>(component_type, STR("GetOwner"),
             STR("/Script/Engine.ActorComponent"), sizeof(U::UObject*));
-        auto* to_world = particle_getter<U::FStructProperty>(component_type, STR("K2_GetComponentToWorld"),
+        auto* to_world = stock_getter<U::FStructProperty>(component_type, STR("K2_GetComponentToWorld"),
             STR("/Script/Engine.SceneComponent"), sizeof(U::FTransform_As500Plus));
-        auto* get_rotation = particle_getter<U::FStructProperty>(component_type, STR("K2_GetComponentRotation"),
+        auto* get_rotation = stock_getter<U::FStructProperty>(component_type, STR("K2_GetComponentRotation"),
             STR("/Script/Engine.SceneComponent"), sizeof(U::FRotator::As500Plus));
-        const auto return_type_is = [](U::UFunction* method, const U::TCHAR* expected) {
-            auto* result = method ? U::CastField<U::FStructProperty>(method->GetReturnProperty()) : nullptr;
-            auto* type = result ? result->GetStruct().Get() : nullptr;
-            return type && type->GetPathName() == expected;
-        };
-        if (!owner_getter || !return_type_is(to_world, STR("/Script/CoreUObject.Transform")) ||
-            !return_type_is(get_rotation, STR("/Script/CoreUObject.Rotator"))) return 0;
+        if (!owner_getter || !struct_return_type_is(to_world, STR("/Script/CoreUObject.Transform")) ||
+            !struct_return_type_is(get_rotation, STR("/Script/CoreUObject.Rotator"))) return 0;
 
         lua_createtable(stack, components.Num() * sample_width, 0);
         int output = 0;
@@ -1887,6 +1981,7 @@ namespace silverfish::native_anomaly_fields
     void uninstall_hooks()
     {
         anomaly_samples.clear();
+        electrode_sample = {};
         travel_spawn = {};
         lingering_spawns = {};
         drum_fires = {};
@@ -1913,6 +2008,7 @@ namespace silverfish::native_anomaly_fields
         lua.register_function("SilverfishReadNativeAnomalySkips", count);
         lua.register_function("SilverfishRememberNativeAnomalySample", remember_anomaly_sample);
         lua.register_function("SilverfishReadNativeAnomalySample", read_anomaly_sample);
+        lua.register_function("SilverfishReadNativeElectrodeSample", read_electrode_sample);
         lua.register_function("SilverfishReadNativeGuestStormGuard", [](const Lua& current) {
             if (!U::IsInGameThreadRaw() || !guest_session || current.get_stack_size() != 0) return 0;
             auto* world = storm_world.Get();

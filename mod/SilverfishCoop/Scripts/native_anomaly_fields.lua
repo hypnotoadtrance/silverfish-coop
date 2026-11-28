@@ -832,7 +832,7 @@ function fields.rows(state, phase, row, compact)
                     end
                 end
             elseif entry.kind == "electrode" then
-                rows[#rows + 1] = electrodes.observe(entry, phase, row, {X = x, Y = y, Z = z})
+                rows[#rows + 1] = electrodes.observe(entry, phase, row, x, y, z, address, world_address)
             elseif entry.kind == "angler-lamp" then
                 rows[#rows + 1] = lamps.color_row(actor, row)
             elseif entry.kind == "observer" then
