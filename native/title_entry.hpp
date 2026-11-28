@@ -38,6 +38,14 @@ namespace silverfish::native_title_entry
         std::optional<std::string> startup;
     };
 
+    struct SaveRoutingPaths
+    {
+        std::string raw_root;
+        std::string absolute_root;
+        std::string directory;
+    };
+
+    std::optional<SaveRoutingPaths> resolve_save_routing_paths(std::string_view id, std::string_view& error);
     std::optional<Observation> observe(const Input& input);
     std::optional<Rows> rows(const Input& input, std::optional<std::uint64_t> startup_sequence);
     void register_lua(RC::LuaMadeSimple::Lua& lua);

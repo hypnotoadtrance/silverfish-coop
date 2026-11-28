@@ -115,12 +115,17 @@ namespace
         });
     }
 
+    bool path_slash(char byte) { return byte == '/' || byte == '\\'; }
+
+    bool drive_absolute_path(std::string_view path)
+    {
+        return path.size() >= 3 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
+            path[1] == ':' && path_slash(path[2]);
+    }
+
     bool absolute_path(std::string_view path)
     {
-        const auto slash = [](char c) { return c == '/' || c == '\\'; };
-        return (path.size() >= 2 && slash(path[0]) && slash(path[1])) ||
-            (path.size() >= 3 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
-                path[1] == ':' && slash(path[2]));
+        return drive_absolute_path(path) || (path.size() >= 2 && path_slash(path[0]) && path_slash(path[1]));
     }
 
     std::string path_text(const U::FString& path)
@@ -158,7 +163,7 @@ namespace
         return std::move(parameters.result);
     }
 
-    std::optional<std::string> saved_directory()
+    std::optional<U::FString> raw_saved_directory()
     {
         static U::FWeakObjectPtr function_cache, receiver_cache;
         auto* function = loaded<U::UFunction>(function_cache, STR("/Script/Engine.KismetSystemLibrary:GetProjectSavedDirectory"));
@@ -170,16 +175,47 @@ namespace
             result->GetArrayDim() != 1 || result->GetOffset_Internal() != 0) return {};
         U::FString path;
         receiver->ProcessEvent(function, &path);
-        auto text = path_text(path);
-        if (!text_path(text)) return {};
+        if (!text_path(path_text(path))) return {};
+        return path;
+    }
+
+    std::optional<std::string> saved_directory()
+    {
+        auto path = raw_saved_directory();
+        if (!path) return {};
+        auto text = path_text(*path);
         if (!absolute_path(text))
         {
-            const auto full = absolute_saved_path(std::move(path));
+            const auto full = absolute_saved_path(std::move(*path));
             if (!full) return {};
             text = path_text(*full);
         }
         if (!text_path(text) || !absolute_path(text)) return {};
         return text;
+    }
+
+    bool directory_exists(std::string_view path)
+    {
+        static U::FWeakObjectPtr function_cache, receiver_cache;
+        auto* function = loaded<U::UFunction>(function_cache, STR("/Script/Engine.BlueprintPathsLibrary:DirectoryExists"));
+        auto* receiver = loaded<U::UObject>(receiver_cache, STR("/Script/Engine.Default__BlueprintPathsLibrary"));
+        struct Parameters { U::FString path; std::uint8_t result{}; };
+        if (!function || !receiver || function->GetOuterPrivate() != receiver->GetClassPrivate() ||
+            !function->HasAllFunctionFlags(U::FUNC_Native | U::FUNC_Static) || function->GetNumParms() != 2 ||
+            function->GetParmsSize() < sizeof(U::FString) + 1 || function->GetParmsSize() > sizeof(Parameters)) return false;
+        auto* result = U::CastField<U::FBoolProperty>(function->GetReturnProperty());
+        if (!result || result->GetArrayDim() != 1 || result->GetSize() != 1 ||
+            result->GetOffset_Internal() != sizeof(U::FString)) return false;
+        for (auto* parameter : U::TFieldRange<U::FProperty>(function, U::EFieldIterationFlags::None))
+        {
+            if (!parameter->HasAnyPropertyFlags(U::CPF_Parm) || parameter == result) continue;
+            if (!U::CastField<U::FStrProperty>(parameter) || parameter->GetOffset_Internal() != 0 ||
+                parameter->GetArrayDim() != 1 || parameter->GetSize() != sizeof(U::FString)) return false;
+            Parameters parameters{U::FString{RC::to_wstring(path)}};
+            receiver->ProcessEvent(function, &parameters);
+            return result->GetPropertyValueInContainer(&parameters);
+        }
+        return false;
     }
 
     bool valid_wrapper(lua_State* stack, int index, const char* metatable)
@@ -275,6 +311,30 @@ namespace
         lua.set_string(*rows->startup);
         return 2;
     }
+}
+
+std::optional<title::SaveRoutingPaths> title::resolve_save_routing_paths(std::string_view id, std::string_view& error)
+{
+    error = "The game save directory is unavailable";
+    if (!U::IsInGameThreadRaw() || !U::UnrealInitializer::ShouldUseHashTables()) return {};
+    const auto saved = raw_saved_directory();
+    if (!saved) return {};
+    auto root = path_text(*saved);
+    while (!root.empty() && path_slash(root.back())) root.pop_back();
+    root.append("/SaveGames");
+    const auto full = absolute_saved_path(U::FString{RC::to_wstring(root)});
+    if (!full) return {};
+    auto absolute_root = path_text(*full);
+    if (!text_path(absolute_root) || !drive_absolute_path(absolute_root)) return {};
+    auto directory = absolute_root + "/SilverfishCoop/";
+    directory.append(id);
+    if (!directory_exists(directory))
+    {
+        error = "The private co-op save directory is unavailable";
+        return {};
+    }
+    error = {};
+    return SaveRoutingPaths{std::move(root), std::move(absolute_root), std::move(directory)};
 }
 
 std::optional<title::Observation> title::observe(const Input& input)

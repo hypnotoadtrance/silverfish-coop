@@ -81,6 +81,7 @@
 #include "pickup.hpp"
 #include "transport_items.hpp"
 #include "save_copy.hpp"
+#include "save_scope.hpp"
 #include "shared_loot.hpp"
 #include "stock_rest.hpp"
 #include "title_entry.hpp"
@@ -1601,6 +1602,7 @@ namespace
             silverfish::native_title_startup::uninstall_hooks();
             silverfish::session_observation::reset_phase();
             silverfish::local_bridge::stop();
+            silverfish::native_save_scope::uninstall_hooks();
             silverfish::local_bridge::uninstall_native_dispatch();
             if (jump_shake) Unreal::UObjectGlobals::UnregisterHook(jump_shake, jump_shake_hook);
             silverfish::native_guest_item::shutdown();
@@ -1791,6 +1793,7 @@ namespace
             silverfish::local_bridge::register_lua(lua);
             silverfish::session_observation::register_phase_lua(lua);
             silverfish::native_title_entry::register_lua(lua);
+            silverfish::native_save_scope::register_lua(lua);
             silverfish::native_host_weather::register_lua(lua);
             silverfish::native_authored_pickup::register_lua(lua);
             silverfish::native_mindcore::register_lua(lua);
@@ -1858,6 +1861,7 @@ namespace
             {
                 silverfish::session_observation::reset_phase();
                 silverfish::local_bridge::release_script_driver();
+                silverfish::native_save_scope::clear();
                 silverfish::native_zone::clear_scope();
                 silverfish::native_transport::clear_scope();
                 silverfish::native_stock_rest::clear_scope();

@@ -16,7 +16,7 @@ add_library(SilverfishCoopNative SHARED
     interaction_input.cpp critter_view.cpp inventory_census.cpp inventory_wipe.cpp local_bridge.cpp session_observation.cpp
     guest_stack_drop.cpp guest_drop_projection.cpp
     inventory_view.cpp item_roundtrip.cpp kill_volume.cpp electronic_locker.cpp loot_crate_input.cpp loot_escrow.cpp mindcore_input.cpp mosby_station_input.cpp
-    mindcore.cpp mindcore_carry.cpp datasilo_lift.cpp datasilo_door.cpp nothing_return.cpp pickup.cpp save_copy.cpp shared_loot.cpp shop_view.cpp
+    mindcore.cpp mindcore_carry.cpp datasilo_lift.cpp datasilo_door.cpp nothing_return.cpp pickup.cpp save_copy.cpp save_scope.cpp shared_loot.cpp shop_view.cpp
     host_landmine.cpp host_dig.cpp host_invitation_clipboard.cpp host_weather.cpp session_exit_input.cpp listener_bind.cpp
     stock_rest.cpp title_entry.cpp title_startup.cpp transport_items.cpp world_scene.cpp zone_exit.cpp)
 target_compile_features(SilverfishCoopNative PRIVATE cxx_std_23)

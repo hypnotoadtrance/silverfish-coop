@@ -201,6 +201,15 @@ local function install()
 end
 
 function scope.select(id)
+    if type(SilverfishSelectNativeSaveScope) == "function" then
+        local result = SilverfishSelectNativeSaveScope(id)
+        if result ~= "selected" then error(result or "Stock co-op save routing is unavailable", 0) end
+        active = {id = id, native = true}
+        return
+    end
+    if os.getenv("SILVERFISH_COOP_INSTALLED_TITLE") == "1" then error("Stock co-op save routing is unavailable", 0) end
+
+    -- Preserve the file-based developer stage that runs without the native add-on.
     if type(id) ~= "string" or #id ~= 32 or not id:match("^[a-f0-9]+$") or not id:find("[1-9a-f]") then
         error("Expected a co-op save scope ID", 0)
     end
@@ -230,7 +239,9 @@ function scope.select(id)
 end
 
 function scope.release(id)
-    if not active or active.id ~= id then error("The co-op save scope did not match", 0) end
+    if not active or active.id ~= id or (active.native and SilverfishSelectedNativeSaveScope() ~= id) then
+        error("The co-op save scope did not match", 0)
+    end
     local guest = active.guest
     if guest and valid(guest.instance) then
         local instance = guest.instance
@@ -243,10 +254,14 @@ function scope.release(id)
             instance.Travel_TimeStep = guest.previous_travel_step
         end
     end
+    if active.native and SilverfishReleaseNativeSaveScope(id) ~= true then
+        error("The co-op save scope did not match", 0)
+    end
     active = nil
 end
 
 function scope.selected()
+    if type(SilverfishSelectedNativeSaveScope) == "function" then return SilverfishSelectedNativeSaveScope() end
     return active and active.id
 end
 
