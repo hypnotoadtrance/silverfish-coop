@@ -228,15 +228,16 @@ function stack_drop.command(fields, state, phase)
     local count = math.tointeger(tonumber(raw_count))
     local memory = command == birth and fields[8] == "memory"
     local expected_map = command == action and observatory or fields[7]
-    local expected_count = command == action and 6 or 7
-    if #fields ~= expected_count + (memory and 1 or 0) or (memory and not memory_available())
+    local reported = memory and #fields == 11
+    local expected_count = command == action and 6 or reported and 11 or memory and 8 or 7
+    if #fields ~= expected_count or (memory and not memory_available())
         or not hosting_map(state, phase) or expected_map ~= state.map
         or type(name) ~= "string" or name == "" or not slot_name(slot) or not item_guid(guid)
         or not count or count < 1 or count > 200 or tostring(count) ~= raw_count
         or type(SilverfishProbeNativeGuestStackDrop) ~= "function" then
         error("native_guest_stack_drop_fixture_unavailable", 0)
     end
-    local qualify = command == action and qualified_owner or qualified_participant
+    local qualify = (command == action or reported) and qualified_owner or qualified_participant
     local pawn, save = qualify(state, phase, name)
     if not pawn then error("native_guest_stack_drop_exact_dropper_unavailable", 0) end
     local statics = StaticFindObject(settings)
@@ -248,6 +249,17 @@ function stack_drop.command(fields, state, phase)
     if memory then
         expected_class, kept, kept_count, equipment_slot = exact_row(frozen, guid, count, nil, false)
         if not expected_class then error("native_guest_stack_drop_stock_item_row_unqualified", 0) end
+    end
+    if reported then
+        local x, y, z = tonumber(fields[9]), tonumber(fields[10]), tonumber(fields[11])
+        if equipment_slot or not coordinate(x) or not coordinate(y) or not coordinate(z) then
+            error("native_guest_stack_drop_reported_origin_unavailable", 0)
+        end
+        debit_pending(state, phase, pawn, save, frozen, slot, guid, count, expected_class, kept, kept_count)
+        observation = {command = command, map = state.map, pawn = name, slot = slot, guid = guid, count = count, ok = true,
+            status = "stock_drop_origin_debited", actor = "-", new_guid = "-", location = {fields[9], fields[10], fields[11]},
+            class = expected_class}
+        return "guest stock drop origin adopted"
     end
     local arguments = {pawn:GetAddress(), save:GetAddress(), frozen:GetAddress(), guid, count, equipment_slot}
     local called, ok, status, actor, new_guid, actual_count, x, y, z, class, ammo = pcall(SilverfishProbeNativeGuestStackDrop,
@@ -294,18 +306,24 @@ local function settlement_row(proof, row)
         proof.replacement, proof.ok and 1 or 0, proof.status, proof.count, table.unpack(evidence))
 end
 
-function stack_drop.compact(fields)
+local function compact_count(fields)
+    local count = #fields
+    if fields[count] == "readback" then count = count - 1 end
     if fields[2] == birth then
-        return fields[8] == "memory" and (#fields == 8 or #fields == 9 and fields[9] == "readback")
+        if fields[8] == "memory" and (count == 8 or count == 11) then return count end
+    elseif fields[2] == settle and (fields[15] == "memory" or fields[15] == "pending") and count == 15 then
+        return count
     end
-    return fields[2] == settle and (fields[15] == "memory" or fields[15] == "pending")
-        and (#fields == 15 or #fields == 16 and fields[16] == "readback")
+end
+
+function stack_drop.compact(fields)
+    return compact_count(fields) ~= nil
 end
 
 function stack_drop.reply(fields, state, phase, row)
     local command = fields[2]
-    local count = command == settle and 15 or 8
-    local readback = #fields == count + 1 and fields[count + 1] == "readback"
+    local count = compact_count(fields)
+    local readback = #fields > count
     local key = table.concat(fields, "\t", 2, count)
     local previous = compact_receipts[command]
     local same_command = previous and previous.key == key and previous.map == state.map

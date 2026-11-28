@@ -21,6 +21,7 @@ REPLY = "native-guest-stack-drop-reply"
 REPLY_BYTES = "native_guest_stack_drop_reply_bytes"
 REPLY_RECOVERED = "native_guest_stack_drop_reply_recovered"
 SUCCESS = "stock_spawn_verified_and_retired"
+ORIGIN_DEBITED = "stock_drop_origin_debited"
 REFUSAL = "native_guest_stack_drop_"
 UNSAFE = "mutation_unverified_native_guest_stack_drop_"
 _COMPACT_REPLY_WAIT = 1.0
@@ -67,15 +68,18 @@ def parse(fields: list[str], state: str, area: str) -> dict:
             or flag not in ("0", "1") or not _STATUS.fullmatch(status)):
         raise ValueError("Invalid stock stack drop identity or quantity")
     ok = flag == "1"
-    item = (fields[13] if len(fields) == 14 and native_guest_drop_record.actor_matches(area, actor, fields[13])
+    adopted = status == ORIGIN_DEBITED
+    if adopted and (not ok or fields[0] != BIRTH or len(fields) != 14 or (actor, new_guid) != ("-", "-")):
+        raise ValueError("The reported stock drop origin was not verified")
+    item = (fields[13] if len(fields) == 14 and (adopted or native_guest_drop_record.actor_matches(area, actor, fields[13]))
             else native_guest_drop_record.actor_class_path(area, actor) if len(fields) != 14 else None)
-    if ok and (status != SUCCESS or not native_guest_drop_record.valid_quantity(item, int(raw_count))
-               or not valid_guid(new_guid) or new_guid == guid):
+    if ok and (not native_guest_drop_record.valid_quantity(item, int(raw_count))
+               or not adopted and (status != SUCCESS or not valid_guid(new_guid) or new_guid == guid)):
         raise ValueError("The stock actor or stock-converted GUID was not verified")
     if not ok and (not status.startswith((REFUSAL, UNSAFE)) or (actor, new_guid) != ("-", "-")):
         raise ValueError("Invalid isolated stock stack drop refusal")
     proof = dict(map=map_name, pawn=pawn, slot=slot, guid=guid, quantity=int(raw_count), ok=ok, status=status,
-                 actor=actor if ok else None, new_guid=new_guid if ok else None)
+                 actor=actor if ok and not adopted else None, new_guid=new_guid if ok and not adopted else None)
     if ok and (fields[0] == BIRTH or len(fields) == 14):
         proof["class_path"] = item
     if len(fields) >= 13:
@@ -112,7 +116,7 @@ def parse_memory_reply(raw, request):
     action = request[1]
     birth = action == BIRTH
     readback = request[-1] == "readback"
-    if not rows or len(request) != (8 if birth else 15) + readback:
+    if not rows or len(request) - readback not in ((8, 11) if birth else (15,)):
         raise RuntimeError("The local stock drop receipt was malformed")
     area = request[6 if birth else 10]
     header = rows[0].split("\t")
@@ -150,7 +154,7 @@ async def memory_command(bridge, action, *arguments, timeout):
 
 
 async def perform(host, bridge, character: str, guid: str, count: int, *, fixture: bool = True,
-                  memory_slot: str | None = None) -> dict:
+                  memory_slot: str | None = None, origin: list[float] | None = None) -> dict:
     if not valid_guid(guid) or type(count) is not int or not 1 <= count <= 200:
         raise party.RuleError("native_guest_stack_drop_exact_guid_and_quantity_required")
     game = host.last_game
@@ -164,6 +168,9 @@ async def perform(host, bridge, character: str, guid: str, count: int, *, fixtur
         raise party.RuleError("native_guest_stack_drop_fixture_unavailable")
     pawn = standing_pawn(host, character)
 
+    if origin is not None and (memory_slot is None or character == "host"
+                               or not native_guest_drop_record.valid_position(origin)):
+        raise party.RuleError("native_guest_stack_drop_reported_origin_unavailable")
     if memory_slot is not None:
         if fixture or game.get(MEMORY_CAPABILITY) is not True or not native_host_save.SLOT.fullmatch(memory_slot):
             raise party.RuleError("native_guest_stack_drop_memory_unavailable")
@@ -182,6 +189,8 @@ async def perform(host, bridge, character: str, guid: str, count: int, *, fixtur
     arguments = (pawn, slot, guid, str(count)) if fixture else (pawn, slot, guid, str(count), area)
     if memory_slot is not None:
         arguments += ("memory",)
+        if origin is not None:
+            arguments += tuple(map(str, origin))
     host.native_checkpoint_unsafe = True
     try:
         try:
@@ -215,10 +224,14 @@ async def perform(host, bridge, character: str, guid: str, count: int, *, fixtur
             raise RuntimeError(reason or "The stock stack drop actor retirement was unverified")
         actor = proof.get("actor")
         item = proof.get("class_path") or (native_guest_drop_record.actor_class_path(area, actor) if fixture else None)
-        if (proof.get("status") != SUCCESS or not native_guest_drop_record.valid_quantity(item, count)
-                or not native_guest_drop_record.actor_matches(area, actor, item)
-                or not valid_guid(proof.get("new_guid")) or proof["new_guid"] == guid
-                or (memory_slot is not None and not native_guest_drop_record.valid_position(proof.get("location")))):
+        if origin is not None:
+            confirmed = (proof.get("status") == ORIGIN_DEBITED and proof.get("location") == origin
+                         and actor is None and proof.get("new_guid") is None)
+        else:
+            confirmed = (proof.get("status") == SUCCESS and native_guest_drop_record.actor_matches(area, actor, item)
+                         and valid_guid(proof.get("new_guid")) and proof["new_guid"] != guid
+                         and (memory_slot is None or native_guest_drop_record.valid_position(proof.get("location"))))
+        if not confirmed or not native_guest_drop_record.valid_quantity(item, count):
             raise RuntimeError("The stock stack drop actor and typed conversion did not verify")
         if frame:
             await asyncio.to_thread(native_host_save.verify_record, host.native_profile, frame)

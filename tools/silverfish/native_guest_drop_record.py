@@ -81,6 +81,13 @@ def parse_stock_action(fields, game):
             result["layout_preview"] = int(preview)
         else:
             raise ValueError("Invalid local backpack result")
+    if len(layout) > 1:
+        if result.get("layout_preview") != "dropped" or len(layout) != 4:
+            raise ValueError("Invalid local drop origin")
+        position = list(map(float, layout[1:]))
+        if not valid_position(position):
+            raise ValueError("Invalid local drop origin")
+        result["drop_origin"] = position
     return result
 
 

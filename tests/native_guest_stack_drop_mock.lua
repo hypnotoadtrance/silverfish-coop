@@ -261,3 +261,18 @@ live_claim[5] = ("a"):rep(32)
 assert(readback(live_claim):find("receipt_unavailable") and recovered == 4)
 stack_drop.reset()
 assert(readback(live_drop):find("receipt_unavailable") and debits == 1)
+
+function SilverfishProbeNativeGuestStackDrop()
+    error("adopting a reported drop must not spawn and retire a stock probe")
+end
+function SilverfishApplyPreparedNativeInventory(_, _, target, recipient)
+    assert(target == 2 and recipient == 1)
+    debits = debits + 1
+    return true, "applied"
+end
+stock_class(detached, "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C")
+local reported_drop = {"guest drop", birth, guest, slot_live, guid, "9", game.map, "memory", "31.125", "-20", "30"}
+assert(readback(reported_drop):find("receipt_unavailable") and debits == 1)
+local adopted = compact(reported_drop)
+assert(adopted:find("stock_drop_origin_debited	-	-	31.125	-20	30	", 1, true) and debits == 2 and funded)
+assert(readback(reported_drop):find("stock_drop_origin_debited") and debits == 2)

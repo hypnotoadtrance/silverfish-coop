@@ -485,8 +485,19 @@ preview_stock_layout = function(action)
         slot, receipt = SilverfishPreviewLocalGuestGear(pawn, save, action.guid, target, action.entry == "unequip")
     elseif (action.entry == "context_menu" or action.entry == "ctrl_click") and #stock_layout == 0
         and type(SilverfishPreviewLocalBackpackDrop) == "function" then
+        local arrow = action.context.pawn.Arrow_Lower
+        local position = valid(arrow) and same(arrow:GetOwner(), action.context.pawn) and arrow:K2_GetComponentLocation()
+        local origin
+        if position then
+            local x, y, z = position.X, position.Y, position.Z
+            if type(x) == "number" and type(y) == "number" and type(z) == "number"
+                and math.abs(x) <= 1e7 and math.abs(y) <= 1e7 and math.abs(z) <= 1e7 then
+                origin = {string.format("%.17g", x), string.format("%.17g", y), string.format("%.17g", z)}
+            end
+        end
         if SilverfishPreviewLocalBackpackDrop(pawn, save, action.guid, action.quantity) then
             receipt = "dropped"
+            action.drop_origin = origin
         end
     end
     if not receipt then return end
@@ -1084,7 +1095,7 @@ function inventory_view.rows(state, phase, status_row)
     if pending and pending.live and (not pending.merge or pending.layout_preview) and same_context(current, pending.context) then
         rows[#rows + 1] = status_row("native-inventory-stock-action", current.map, current.name, pending.epoch,
             pending.sequence, pending.entry, pending.guid, pending.quantity, pending.expected or 0,
-            pending.layout_preview or "")
+            pending.layout_preview or "", table.unpack(pending.drop_origin or {}))
         if pending.preview then
             rows[#rows + 1] = status_row("native-guest-personal-consumable-preview", current.map, current.name,
                 pending.guid, table.unpack(pending.preview))

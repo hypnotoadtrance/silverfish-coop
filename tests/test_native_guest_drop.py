@@ -104,6 +104,29 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.assert_awaited_once()
         host.checkpoint_native.assert_not_awaited()
 
+    async def test_reported_origin_is_retained_and_replayed_only_for_its_visit(self):
+        host, _, _, _, _, _ = self.make_world()
+        epoch = host.zone_epoch
+        host.last_game[probe.MEMORY_CAPABILITY] = True
+        bridge = SimpleNamespace(command=AsyncMock())
+        origin = [41.25, -30., 109.]
+        target = f"{GUID}|9|{epoch}|41.25|-30|109"
+        proof = {probe.KEY: {"location": origin, "class_path": record.ITEM}}
+        with (patch.object(probe, "perform", AsyncMock(return_value=proof)) as perform_birth,
+              patch.object(drop.native_inventory, "retain_guest_save", AsyncMock(return_value=True))):
+            result = await drop.perform(host, bridge, OWNER, drop.DROP, target, DROP)
+            self.assertEqual(result[drop.RESULT]["location"], origin)
+            self.assertEqual(perform_birth.await_args.kwargs["origin"], origin)
+            host.party["receipts"].clear()
+            self.assertEqual(await drop.perform(host, bridge, OWNER, drop.DROP, target, DROP), result)
+            with self.assertRaisesRegex(party.RuleError, "operation_id_conflict"):
+                await drop.perform(host, bridge, OWNER, drop.DROP, target.replace("41.25", "42.25"), DROP)
+            host.zone_epoch = "f" * 32 if epoch != "f" * 32 else "e" * 32
+            with self.assertRaisesRegex(party.RuleError, "scope_changed"):
+                await drop.perform(host, bridge, OWNER, drop.DROP, target, "b" * 32)
+        perform_birth.assert_awaited_once()
+        host.checkpoint_native.assert_not_awaited()
+
     async def test_reclaim_transfers_exact_sealed_package_custody_without_a_save(self):
         host, _, _, _, _, _ = self.make_world()
         host.last_game[probe.MEMORY_CAPABILITY] = True

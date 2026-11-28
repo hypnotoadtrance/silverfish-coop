@@ -136,7 +136,7 @@ def install_stock_reply(client, snapshot, visit):
 
 
 async def settle_stock_action(client, area, epoch, operation, mode, entry, guid, quantity, sequence, expected, split,
-                              layout_preview=None, *, visit=None):
+                              layout_preview=None, *, visit=None, drop_origin=None):
     sorting, splitting, unloading = mode == "sort", mode == "split", mode == "unload"
     accepted = False
     local_result = None
@@ -296,6 +296,8 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                 raise ValueError("The native action did not select an inventory drop")
             key, remaining = RESULT, 0
             target = f"{guid}|{quantity}"
+            if layout_preview == "dropped" and record.valid_position(drop_origin):
+                target = "|".join((target, epoch, *map(str, drop_origin)))
             try:
                 reply = await client.gameplay_action(DROP, operation, target)
             except TimeoutError:
@@ -310,7 +312,8 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                     or not record.valid_quantity(receipt.get("class_path"), quantity)
                     or worn and native_guest_armor.equip_action(receipt.get("class_path")) != (
                         native_guest_armor.HELMET_ACTION if int(expected) == 9 else native_guest_armor.ACTION)
-                    or not record.valid_position(receipt.get("location"))):
+                    or not record.valid_position(receipt.get("location"))
+                    or drop_origin is not None and receipt["location"] != drop_origin):
                 raise RuntimeError("The host did not settle the stock guest inventory drop")
             if layout_preview == "dropped":
                 local_result = "dropped"
@@ -375,7 +378,8 @@ async def service_stock_view(client, active: bool, *, visit=None) -> None:
                                  mode=mode, guid=guid, slot=expected - 1 if mode in ("equip", "unequip") else -1,
                                  result=layout_preview)
         result = await settle_stock_action(client, area, epoch, operation, mode, view["entry"],
-                                           guid, count, str(sequence), str(expected), split, layout_preview, visit=visit)
+                                           guid, count, str(sequence), str(expected), split, layout_preview,
+                                           visit=visit, drop_origin=view.get("drop_origin"))
         client.control.event("native_stock_inventory_action", operation_id=operation, **result)
     except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
         client.control.event("native_stock_inventory_rejected", operation_id=operation, reason=str(error))
@@ -481,6 +485,25 @@ async def _retain_drop_inventory(host, bridge, character: str, pawn: str):
         raise party.RuleError("native_guest_save_retention_unavailable")
 
 
+def _drop_selection(target):
+    fields = target.split("|") if isinstance(target, str) else ()
+    selected = _SELECTION.fullmatch("|".join(fields[:2]))
+    if not selected or not valid_guid(selected[1]) or int(selected[2]) > record.MAX_QUANTITY:
+        raise party.RuleError("native_guest_stack_drop_exact_guid_and_quantity_required")
+    epoch, origin = None, None
+    if len(fields) != 2:
+        if len(fields) != 6 or not record.valid_id(fields[2]):
+            raise party.RuleError("native_guest_stack_drop_reported_origin_unavailable")
+        try:
+            origin = list(map(float, fields[3:]))
+        except ValueError as error:
+            raise party.RuleError("native_guest_stack_drop_reported_origin_unavailable") from error
+        if not record.valid_position(origin):
+            raise party.RuleError("native_guest_stack_drop_reported_origin_unavailable")
+        epoch = fields[2]
+    return selected[1], int(selected[2]), epoch, origin
+
+
 async def perform(host, bridge, character: str, action: str, target: str | None, operation: str) -> dict:
     from .native_world_loot import CAPABILITY, SHARED_PICKUPS_VERSION
 
@@ -490,6 +513,10 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
     area, epoch = host.last_game["map"], host.zone_epoch
     scope = area, epoch, pawn
     defer = host.last_game.get(probe.MEMORY_CAPABILITY) is True
+    if action == DROP:
+        guid, count, source_epoch, origin = _drop_selection(target)
+        if origin is not None and (not defer or character == "host" or source_epoch != epoch):
+            raise party.RuleError("native_guest_stack_drop_scope_changed")
     drops = host.party.get(record.STATE, {})
     for receipt in host.party["receipts"].get(character, ()):
         if receipt["id"] == operation:
@@ -507,8 +534,11 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         reclaim = row["claim_id"] == operation and record.claimed_by(row) == character
         if debit or reclaim:
             old_action = DROP if debit else RECLAIM
-            old_target = f"{row['guid']}|{row['quantity']}" if old_action == DROP else drop_id
-            if (action, target) != (old_action, old_target):
+            if action != old_action:
+                raise party.RuleError("operation_id_conflict")
+            same_target = (target == drop_id if reclaim else (guid, count) == (row["guid"], row["quantity"])
+                           and (origin is None or origin == row["location"]))
+            if not same_target:
                 raise party.RuleError("operation_id_conflict")
             return _result(row, drop_id, old_action)
 
@@ -539,10 +569,6 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         advance_dropped_package_owner(candidate, row, character)
         return await _settle(host, bridge, character, action, target, target, operation, escrow, None, candidate, scope, defer=defer)
 
-    selected = _SELECTION.fullmatch(target) if isinstance(target, str) else None
-    if not selected or not valid_guid(selected[1]) or int(selected[2]) > record.MAX_QUANTITY:
-        raise party.RuleError("native_guest_stack_drop_exact_guid_and_quantity_required")
-    guid, count = selected[1], int(selected[2])
     if operation in drops:
         raise party.RuleError("operation_id_conflict")
     active = [row for row in drops.values() if row["claim_id"] is None]
@@ -557,7 +583,8 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         if host.zone_epoch != epoch or host.last_game.get("map") != area or _participant(host, character) != pawn:
             raise party.RuleError("native_guest_stack_drop_scope_changed")
         candidate = party.load_party(host.party)
-        birth = (await probe.perform(host, bridge, character, guid, count, fixture=False, memory_slot=slot))[probe.KEY]
+        birth = (await probe.perform(host, bridge, character, guid, count, fixture=False,
+                                     memory_slot=slot, origin=origin))[probe.KEY]
         row = dict(owner=character, guid=guid, quantity=count, class_path=birth["class_path"], map=area,
                    location=birth["location"], claim_id=None, escrow={"slot": slot, "map": area, "pending": True})
         candidate.setdefault(record.STATE, {})[operation] = row

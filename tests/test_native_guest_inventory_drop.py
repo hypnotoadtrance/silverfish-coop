@@ -89,6 +89,23 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
                 for request in client.gameplay_action.await_args_list:
                     self.assertEqual(request.args, (drop.DROP, operation, f"{GUID}|9"))
 
+    async def test_live_stock_drop_reports_the_origin_captured_with_its_preview(self):
+        client = self.client()
+        client.guest_ui = SimpleNamespace(close=AsyncMock(), refresh=AsyncMock())
+        operation = uuid.uuid5(client.bridge.input_namespace,
+                               f"{client.host_session}:{client.zone_epoch}:{PAWN}:stock-inventory:5").hex
+        fields = [record.STOCK_ACTION_ROW, MAP, PAWN, client.zone_epoch, "5", "context_menu", GUID, "9", "0", "dropped"]
+        view = record.parse_stock_action([*fields, "5.125", "-20", "30"], client.last_game)
+        client.last_game[record.STOCK_ACTION_KEY] = view
+        client.gameplay_action.return_value = {drop.RESULT: dict(
+            state="dropped", drop_id=operation, owner="exact-owner", guid=GUID, quantity=9,
+            class_path=record.ITEM, map=MAP, location=[5.125, -20., 30.])}
+        await drop.service_stock_view(client, True)
+        client.gameplay_action.assert_awaited_once_with(drop.DROP, operation, f"{GUID}|9|{client.zone_epoch}|5.125|-20.0|30.0")
+        client.guest_ui.refresh.assert_not_awaited()
+        with self.assertRaisesRegex(ValueError, "Invalid local drop origin"):
+            record.parse_stock_action([*fields, "nan", "-20", "30"], self.client().last_game)
+
     async def test_cancelled_backpack_preview_sends_no_action_or_screen_command(self):
         started = asyncio.Event()
 
