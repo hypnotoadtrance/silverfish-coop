@@ -1,5 +1,6 @@
 #include "interaction_input.hpp"
 #include "content_paths.hpp"
+#include "critter_view.hpp"
 #include "mosby_station_input.hpp"
 #include "mindcore_input.hpp"
 #include "npc_barter.hpp"
@@ -3298,6 +3299,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishDispatchNativeSubwayValve", dispatch_valve);
         mosby_station_input::register_lua(lua);
         mindcore_input::register_lua(lua);
+        silverfish::native_critter_view::register_lua(lua);
         if (lean_fixture_enabled())
         {
             lua.register_function("SilverfishProbeNativeRadioPlayback", probe_radio_playback);

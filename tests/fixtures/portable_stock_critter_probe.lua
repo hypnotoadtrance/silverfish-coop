@@ -42,6 +42,47 @@
                 point.X, point.Y, point.Z)
         end
         assert(exact_critter(actor), "the selected frog is not available")
+        if mode == "native-view" and not host then
+            local native = assert(SilverfishUpdateNativeCritterMesh)
+            local address, scope = actor:GetAddress(), world:GetAddress()
+            local path, level = assert(entry.marker_path), assert(entry.level_address)
+            local component, expected = actor.StaticMesh, actor.Mesh_Normal
+            local original = component.StaticMesh
+            assert(not actor.CharacterMovement:IsFalling() and same(original, expected)
+                and not same(actor.Mesh_Hopping, expected), "the native critter fixture needs a settled frog")
+            assert(native(scope + 1, address, path, level) == nil
+                and native(scope, address + 1, path, level) == nil
+                and native(scope, address, path .. "_missing", level) == nil
+                and native(scope, address, path, level + 1) == nil, "the native critter view accepted a mismatched scope")
+            assert(component:SetStaticMesh(actor.Mesh_Hopping), "the critter fixture could not stage the opposite mesh")
+            local running = collectgarbage("isrunning")
+            local ok, result = pcall(function()
+                local handled, changed, native_used = update_view(entry, address, scope, native)
+                assert(handled and changed and native_used and same(component.StaticMesh, expected),
+                    "the native critter view did not restore the stock idle mesh")
+                local stamp = SilverfishBridgeProfileStamp or function() return os.clock() * 1000000 end
+                local function measure(reader)
+                    local heap, started = collectgarbage("count"), stamp()
+                    for _ = 1, 32 do
+                        local kept, wrote, used = update_view(entry, address, scope, reader)
+                        assert(kept and not wrote and (used == true) == (reader ~= nil))
+                    end
+                    return stamp() - started, collectgarbage("count") - heap
+                end
+                collectgarbage("stop")
+                local native_one, native_heap_one = measure(native)
+                local stock_one, stock_heap_one = measure(nil)
+                local stock_two, stock_heap_two = measure(nil)
+                local native_two, native_heap_two = measure(native)
+                return ("native critter idle verified;64,%.3f,%.3f,%.3f,%.3f"):format(
+                    (native_one + native_two) / 1000, (stock_one + stock_two) / 1000,
+                    native_heap_one + native_heap_two, stock_heap_one + stock_heap_two)
+            end)
+            if running then collectgarbage("restart") end
+            if not same(component.StaticMesh, original) then component:SetStaticMesh(original) end
+            if not ok then error(result, 0) end
+            return result
+        end
         local point = actor:K2_GetActorLocation()
         local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
         local function focus(player, target, remote)

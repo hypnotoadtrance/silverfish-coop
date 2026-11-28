@@ -77,7 +77,12 @@ local function observe(marker)
     -- Owner, movement and the owner's simulated role can arrive separately.
     local level = number and live(marker) and exact_critter(actor)
     if not level or actor:GetLocalRole() ~= 1 then return false end
-    entries[actor:GetAddress()] = {actor = actor, marker = marker, number = number, level = level}
+    local entry = {actor = actor, marker = marker, number = number, level = level}
+    if type(SilverfishUpdateNativeCritterMesh) == "function" then
+        entry.marker_path = marker:GetFullName():match("^TargetPoint (%S+)$")
+        entry.level_address = level:GetAddress()
+    end
+    entries[actor:GetAddress()] = entry
     return true
 end
 
@@ -122,6 +127,25 @@ local function install()
     installed = true
 end
 
+local function stock_view(entry)
+    local actor, level = entry.actor, entry.level
+    if not ready_critter(actor) or not same(actor:GetOuter(), level) then return false end
+    if same(level, world.PersistentLevel) or level.bIsVisible == true then
+        local mesh, movement = actor.StaticMesh, actor.CharacterMovement
+        local asset = valid(movement) and (movement:IsFalling() and actor.Mesh_Hopping or actor.Mesh_Normal)
+        if valid(mesh) and valid(asset) and not same(mesh.StaticMesh, asset) then mesh:SetStaticMesh(asset) end
+    end
+    return true
+end
+
+local function update_view(entry, address, world_address, native)
+    if native and entry.marker_path then
+        local keep, changed = native(world_address, address, entry.marker_path, entry.level_address)
+        if keep ~= nil then return keep, changed, true end
+    end
+    return stock_view(entry)
+end
+
 function critters.sync(state, seat)
     if seat ~= "hosting" and seat ~= "connected" or not valid(state.world) then
         phase = nil
@@ -164,15 +188,10 @@ function critters.sync(state, seat)
     end
     if phase ~= "connected" or now < next_view then return end
     next_view = now + .05
+    local native = type(SilverfishUpdateNativeCritterMesh) == "function" and SilverfishUpdateNativeCritterMesh
+    local address_of_world = native and world:GetAddress()
     for address, entry in pairs(entries) do
-        local actor, level = entry.actor, entry.level
-        if not ready_critter(actor) or not same(actor:GetOuter(), level) then
-            entries[address] = nil
-        elseif same(level, world.PersistentLevel) or level.bIsVisible == true then
-            local mesh, movement = actor.StaticMesh, actor.CharacterMovement
-            local asset = valid(movement) and (movement:IsFalling() and actor.Mesh_Hopping or actor.Mesh_Normal)
-            if valid(mesh) and valid(asset) and not same(mesh.StaticMesh, asset) then mesh:SetStaticMesh(asset) end
-        end
+        if not update_view(entry, address, address_of_world, native) then entries[address] = nil end
     end
 end
 

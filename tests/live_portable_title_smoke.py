@@ -2879,6 +2879,13 @@ async def verify_stock_critters(host: Seat, guest: Seat, pawn: str) -> dict:
                     tuple(map(float, guest_rest.split(",")[-3:])), settled) < 30:
                 break
             await asyncio.sleep(.05)
+    verified, readings = (await probe(guest, "native-view", number)).split(";", 1)
+    assert verified == "native critter idle verified", verified
+    reads, native_ms, lua_ms, native_kib, lua_kib = map(float, readings.split(","))
+    assert reads == 64
+    mesh_comparison = {"reads_per_path": int(reads), "native_ms": native_ms, "lua_ms": lua_ms,
+                       "native_heap_growth_kib": native_kib, "lua_heap_growth_kib": lua_kib,
+                       "native_mesh_write_verified": True, "mismatched_scope_refused": True}
 
     checkpoint = campaign_save_hashes(host.campaign)
     host_pack = (await submit(host_run, "native-inventory-list"))["native_inventory"]
@@ -2919,7 +2926,8 @@ async def verify_stock_critters(host: Seat, guest: Seat, pawn: str) -> dict:
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"stock_critters": {"actor": actor, "idle": guest_idle, "hop": guest_hop, "settled": guest_rest,
                                "focus_failures_before_pickup": focus_failures, "claim": claim,
-                               "removed_on_both_peers": True, "checkpoint_unchanged": True}}
+                               "mesh_comparison": mesh_comparison, "removed_on_both_peers": True,
+                               "checkpoint_unchanged": True}}
 
 
 async def travel_pair_to_dock(host: Seat, guest: Seat, pawn: str) -> dict:
@@ -7353,6 +7361,14 @@ async def crate_projection_timing(guest, guest_state, crate, operation, sequence
                "input_enqueue_start", "worker_input_drained", "worker_projection_wake", "worker_frame_start",
                "worker_frame_ready", "lane_enter", "lane_acquired", "native_frame_start", "first_pickable")
     assert all(stamps[left] <= stamps[right] for left, right in zip(ordered, ordered[1:])), stamps
+    if press[4:] == ["1"]:
+        row, = [row for row in rows if row[0] == "native-open" and row[2:4] == [crate, str(sequence)]]
+        qualify_start, qualified, stock_start, stock_returned, verified = map(int, row[4:])
+        assert (stamps["stock_roll_start"] <= qualify_start <= qualified <= stock_start <= stock_returned <= verified
+                <= stamps["stock_roll_return"]), row
+        stamps.update(native_qualify_start=qualify_start, native_qualified=qualified,
+                      native_blueprint_start=stock_start, native_blueprint_return=stock_returned,
+                      native_verification_done=verified)
     return {"press_to_stage_ms": {label: round((stamp - pressed_us) / 1000, 3) for label, stamp in stamps.items()},
             "lane_wait_ms": round((stamps["lane_acquired"] - stamps["lane_enter"]) / 1000, 3),
             "game_dispatch_ms": round((stamps["native_frame_start"] - stamps["native_submit_return"]) / 1000, 3),

@@ -186,4 +186,31 @@ assert(published and authority.bReplicates and authority.bReplicateMovement)
 ended({get = function() return authority end}, {get = function() return 3 end})
 assert(published.destroyed, "A streamed-out critter must not leave its host reference behind")
 
-print("Critter marker discovery handles delayed replication and exact visible stream ownership")
+local frog = critter("visual-collision")
+frog.Mesh_Normal, frog.Mesh_Hopping = object(), object()
+local stock_writes = 0
+frog.StaticMesh = object({StaticMesh = frog.Mesh_Normal, SetStaticMesh = function(self, mesh)
+    stock_writes = stock_writes + 1
+    self.StaticMesh = mesh
+end})
+frog.CharacterMovement = object({IsFalling = function() return true end})
+local visual_marker = marker(frog, 53)
+visual_marker.GetFullName = function() return "TargetPoint /Game/Marsh.Marsh:PersistentLevel.TargetPoint_53" end
+candidates = {visual_marker}
+local keep, samples = true, 0
+SilverfishUpdateNativeCritterMesh = function(scope, actor, path, level)
+    assert(scope == world and actor == frog and level == world.PersistentLevel)
+    assert(path == "/Game/Marsh.Marsh:PersistentLevel.TargetPoint_53")
+    samples = samples + 1
+    return keep
+end
+sync(15)
+assert(samples == 1 and stock_writes == 0 and focused("visual-collision") == "stock-critter:53")
+keep = nil
+sync(15.1)
+assert(samples == 2 and stock_writes == 1 and frog.StaticMesh.StaticMesh == frog.Mesh_Hopping)
+keep = false
+sync(15.2)
+assert(samples == 3 and stock_writes == 1 and not focused("visual-collision"))
+
+print("Critter discovery preserves stream ownership and projected visuals use native or stock paths as qualified")

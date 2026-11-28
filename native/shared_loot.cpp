@@ -770,6 +770,47 @@ namespace
 
     using Clock = std::chrono::steady_clock;
 
+    struct GuestOpenTiming
+    {
+        std::int64_t sequence{};
+        std::int64_t qualify_started{}, qualified{}, stock_started{}, stock_returned{}, verified{};
+    };
+
+    thread_local bool guest_open_timing_armed{};
+    thread_local GuestOpenTiming guest_open_timing;
+
+    std::int64_t timing_us()
+    {
+        return std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch()).count();
+    }
+
+    int arm_guest_open_timing(const Lua& lua)
+    {
+        const bool armed = Unreal::IsInGameThreadRaw() && lua.get_stack_size() == 0;
+        if (armed)
+        {
+            guest_open_timing = {};
+            guest_open_timing_armed = true;
+        }
+        lua.set_bool(armed);
+        return 1;
+    }
+
+    int take_guest_open_timing(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || !guest_open_timing.sequence ||
+            lua.get_stack_size() != 1 || !lua.is_integer(1) || lua.get_integer() != guest_open_timing.sequence)
+            return 0;
+        const auto timing = guest_open_timing;
+        guest_open_timing = {};
+        lua.set_integer(timing.qualify_started);
+        lua.set_integer(timing.qualified);
+        lua.set_integer(timing.stock_started);
+        lua.set_integer(timing.stock_returned);
+        lua.set_integer(timing.verified);
+        return 5;
+    }
+
     struct VerifiedRoll
     {
         Unreal::FWeakObjectPtr crate{};
@@ -1144,10 +1185,21 @@ namespace
         if (force_nonempty && pried) return result(lua, false, "stock_loot_pry_fixture_scope_unavailable");
         if (force_nonempty && !seeded_fixture_enabled())
             return result(lua, false, "stock_loot_fixture_seed_unavailable");
+        GuestOpenTiming* timing{};
+        if constexpr (guest)
+        {
+            if (guest_press && guest_open_timing_armed)
+            {
+                guest_open_timing_armed = false;
+                guest_open_timing = {guest_press, timing_us()};
+                timing = &guest_open_timing;
+            }
+        }
         const auto stock_path = RC::to_generic_string(crate_path);
         if (const auto failure = qualify(stock_path.c_str(), addresses[0], addresses[1], addresses[2],
                                          addresses[3], addresses[4], context, guest); !failure.empty())
             return result(lua, false, failure);
+        if (timing) timing->qualified = timing_us();
         Unreal::UClass* key{};
         if (!pried && !powered && context.profile->stock_class->pry_entry && read_bool(context.crate, STR("Locked"), true))
         {
@@ -1192,6 +1244,7 @@ namespace
             return result(lua, false, "stock_armor_locker_stream_unavailable");
         if (force_nonempty) scope.fixture = &fixture;
         bool restored = true;
+        if (timing) timing->stock_started = timing_us();
         {
             ActiveOpen guard(scope);
             if (pried || powered)
@@ -1204,6 +1257,7 @@ namespace
             else context.crate->ProcessEvent(schema.open, &input);
             if (force_nonempty) restored = fixture.restore();
         }
+        if (timing) timing->stock_returned = timing_us();
 
         const bool looted = crate_on_seat(context.crate, context.world, guest) && read_bool(context.crate, STR("Looted"), true);
         const bool opener_unchanged = object_field(context.crate, STR("Player")) == context.pawn;
@@ -1269,6 +1323,7 @@ namespace
             latest_roll.expires = Clock::now() + std::chrono::seconds(2);
             latest_roll.guest = guest;
         }
+        if (timing) timing->verified = timing_us();
         const std::string_view detail = force_nonempty ? "opened_fixture_seeded" : "opened";
         const auto extra = slots > 2 ? std::span<Unreal::UObject* const>{items}.subspan(2, slots - 2) :
                                       std::span<Unreal::UObject* const>{};
@@ -2019,6 +2074,11 @@ namespace silverfish::shared_loot
         lua.register_function("SilverfishOpenNativeLootCrate", open_crate<false>);
         lua.register_function("SilverfishOpenNativeGuestLootCrate", open_crate<true>);
         lua.register_function("SilverfishDescribeNativeLootRoll", describe_loot_roll);
+        if (env_flag("SILVERFISH_COOP_HEADLESS") && env_flag("SILVERFISH_COOP_TITLE_FIXTURES"))
+        {
+            lua.register_function("SilverfishArmNativeGuestLootOpenTiming", arm_guest_open_timing);
+            lua.register_function("SilverfishTakeNativeGuestLootOpenTiming", take_guest_open_timing);
+        }
         if (env_flag("SILVERFISH_COOP_NATIVE_FIXTURES"))
             lua.register_function("SilverfishSeedNativeLootLuckyLooter", seed_lucky_looter);
     }

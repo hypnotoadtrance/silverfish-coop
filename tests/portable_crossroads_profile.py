@@ -429,6 +429,11 @@ def instrument_crate_input_timing(source):
             if stamp then
                 timing.push("input", state.map, profile.name, sequence, prepare_start, prepare_return,
                     enqueue_start or 0, stamp(), enqueued and "inline" or reply and "inline_refused" or "no_outcome")
+                if timing.native_open then
+                    local marks = table.pack(SilverfishTakeNativeGuestLootOpenTiming(sequence))
+                    if marks.n == 5 then timing.push("native-open", state.map, profile.name, sequence,
+                        table.unpack(marks, 1, marks.n)) end
+                end
             end
             if enqueued then return end
 """),
@@ -512,10 +517,13 @@ def instrument_crate_probe_timing(source):
             local function push(...)
                 if #rows < 128 then rows[#rows + 1] = table.concat({...}, "\t") end
             end
+            local native_open = type(SilverfishArmNativeGuestLootOpenTiming) == "function"
+            if native_open then assert(SilverfishArmNativeGuestLootOpenTiming()) end
             SilverfishPortableCrateTiming = {
                 map = package_name, crate = crate:GetFullName(), rows = rows, push = push, last_receipt = 0,
+                native_open = native_open,
             }
-            push("press", package_name, crate:GetFullName(), pressed_us)
+            push("press", package_name, crate:GetFullName(), pressed_us, native_open and 1 or 0)
         end
 '''),
         (motion, r'''    if mode == "timing" then

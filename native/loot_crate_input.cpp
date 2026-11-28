@@ -417,9 +417,24 @@ namespace
         const auto name = method->GetFName();
         const bool script = std::ranges::find(scripts, name) != scripts.end();
         if (name != open_name && !script) return;
+        // The active loot transaction already qualified this exact stock call.
+        if (script && silverfish::shared_loot::permits_stock_script(crate, method)) return;
         const auto* profile = silverfish::shared_loot::authored_profile(crate);
         if (!profile || method != find<U::UFunction>(script ? profile->stock_class->script : profile->stock_class->input)) return;
         auto* owner = find<U::UClass>(profile->stock_class->actor_class);
+        U::UObject* pawn{};
+        U::UObject* hit{};
+        if (!script)
+        {
+            auto* player = parameter<U::FObjectProperty>(method, STR("Player"), 0);
+            auto* component = parameter<U::FObjectProperty>(method, STR("HitComponent"), sizeof(void*));
+            if (!stock_function(owner, method, 2, 2 * sizeof(void*)) || !player || !component ||
+                player->GetPropertyClass().Get() != find<U::UClass>(pawn_path) ||
+                component->GetPropertyClass().Get() != find<U::UClass>(STR("/Script/Engine.SceneComponent"))) return;
+            pawn = read(player, args);
+            hit = read(component, args);
+            if (silverfish::shared_loot::permits_stock_interaction(crate, pawn, hit, method)) return;
+        }
         auto* world = silverfish::shared_loot::authored_crate_world(crate);
         if (!world) return;
         const auto local = local_owner(world);
@@ -433,8 +448,7 @@ namespace
         if (script)
         {
             auto* entry = parameter<U::FIntProperty>(method, STR("EntryPoint"), 0);
-            if (!stock_function(owner, method, 1, sizeof(std::int32_t)) || !entry ||
-                silverfish::shared_loot::permits_stock_script(crate, method)) return;
+            if (!stock_function(owner, method, 1, sizeof(std::int32_t)) || !entry) return;
             arm_scope(active, crate, world, local, now);
             const auto point = entry->GetPropertyValueInContainer(args);
             const auto& stock = *profile->stock_class;
@@ -475,15 +489,6 @@ namespace
             else if (point == profile->stock_class->input_entry) call.PreventOriginalFunctionCall();
             return;
         }
-        auto* player = parameter<U::FObjectProperty>(method, STR("Player"), 0);
-        auto* component = parameter<U::FObjectProperty>(method, STR("HitComponent"), sizeof(void*));
-        if (!stock_function(owner, method, 2, 2 * sizeof(void*)) || !player || !component ||
-            player->GetPropertyClass().Get() != find<U::UClass>(pawn_path) ||
-            component->GetPropertyClass().Get() != find<U::UClass>(STR("/Script/Engine.SceneComponent"))) return;
-        auto* pawn = read(player, args);
-        auto* hit = read(component, args);
-        if (silverfish::shared_loot::permits_stock_interaction(crate, pawn, hit, method)) return;
-
         call.PreventOriginalFunctionCall();
         if (!call.OriginalFunctionCallPrevented() || pawn != local.pawn || sequence == max_sequence ||
             !boolean(crate, STR("Looted"), false) || !boolean(pawn, STR("Holding_Interact"), true) ||
