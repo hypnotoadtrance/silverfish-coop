@@ -2514,6 +2514,9 @@ function status_publication.get_observer_world()
 end
 
 LoopInGameThreadWithDelay(25, function()
+    if not status_publication.bridge_driver_ready and type(SilverfishActivateLocalBridgeDriver) == "function" then
+        status_publication.bridge_driver_ready = SilverfishActivateLocalBridgeDriver()
+    end
     -- Keep delayed observers off the source world until the native listen handoff finishes.
     if status_publication.listen_departing() then return end
     pcall(native_zone_loading.refresh, current_world)

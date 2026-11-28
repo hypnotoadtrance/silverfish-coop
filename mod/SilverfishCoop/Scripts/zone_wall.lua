@@ -335,14 +335,16 @@ local function qualified_source(fixture, world, plan, native_world_address)
     return fixture
 end
 
-local function scan_authored(world, plans)
+local function scan_authored(world, plans, certified, now)
     if not same(scanned_world, world) then
         scanned_world, scanned_actors, scan_after = world, {}, 0
     end
-    local now = os.time()
     if now < scan_after then return end
     for _, plan in ipairs(plans) do
-        if not in_world(scanned_actors[plan.actor], world) then
+        local actor = certified and certified[plan.actor]
+        if actor then
+            scanned_actors[plan.actor] = actor
+        elseif not in_world(scanned_actors[plan.actor], world) then
             local class = plan.kind == "door" and door_class or exit_class
             scanned_actors[plan.actor] = wall.placed_actor(world, class, plan.actor)
         end
@@ -350,14 +352,20 @@ local function scan_authored(world, plans)
     scan_after = now + 1
 end
 
-local function discovered_walls(world, known)
-    if not expanded or type(SilverfishSnapshotDiscoveredOverlaps) ~= "function" then return {} end
+local function discovered_walls(world, known, certified, now)
+    if not expanded or (not certified and type(SilverfishSnapshotDiscoveredOverlaps) ~= "function") then return {} end
     if not same(discovered_world, world) then
         discovered_world, discovered_sources, discover_after = world, {}, 0
     end
-    local now = os.time()
     if now < discover_after then return discovered_sources end
     discover_after = now + 1
+    if certified then
+        for path, source in pairs(certified) do
+            if source.persistent and known[source.name] then certified[path] = nil end
+        end
+        discovered_sources = certified
+        return discovered_sources
+    end
     local census = SilverfishSnapshotDiscoveredOverlaps(world:GetAddress())
     if type(census) ~= "string" then return discovered_sources end
     local sources = {}
@@ -386,17 +394,31 @@ local function wall_sources(world, map, route, fixture, secondary)
             approach = route.secondary }
     end
     local plans = authored_routes[map]
+    local now = os.time()
+    local refresh_discovered = expanded and (now >= discover_after or not same(discovered_world, world))
+    local certified, discovered
+    local world_address
+    if type(SilverfishSnapshotNativeWallOverlapSources) == "function" and (plans or refresh_discovered) then
+        world_address = world:GetAddress()
+        certified, discovered = SilverfishSnapshotNativeWallOverlapSources(world_address, refresh_discovered)
+    end
     if plans then
-        scan_authored(world, plans)
-        local native_world_address = type(SilverfishCertifyNativeAuthoredOverlapWall) == "function" and world:GetAddress()
+        scan_authored(world, plans, certified, now)
+        local native_world_address = type(SilverfishCertifyNativeAuthoredOverlapWall) == "function"
+            and (world_address or world:GetAddress())
         for _, plan in ipairs(plans) do
             local source = sources[plan.actor] or {}
-            source.fixture, source.problem = qualified_source(scanned_actors[plan.actor], world, plan, native_world_address)
+            local actor = plan.kind == "overlap" and certified and certified[plan.actor]
+            if actor then
+                source.fixture = actor
+            else
+                source.fixture, source.problem = qualified_source(scanned_actors[plan.actor], world, plan, native_world_address)
+            end
             source.tag, source.kind = plan.entrance, plan.kind
             sources[plan.actor] = source
         end
     end
-    for key, source in pairs(discovered_walls(world, sources)) do sources[key] = source end
+    for key, source in pairs(discovered_walls(world, sources, discovered, now)) do sources[key] = source end
     return sources
 end
 

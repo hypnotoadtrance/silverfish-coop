@@ -78,7 +78,9 @@ namespace
     std::mutex mutex;
     std::mutex status_mutex;
     std::condition_variable changed;
-    bool ready{};
+    bool runtime_initialized{};
+    // Installing the native hooks and attaching a command consumer are separate startup steps.
+    bool script_driver_ready{};
     bool attached{};
     std::int64_t last_ticket{};
     std::int64_t active_ticket{};
@@ -472,6 +474,57 @@ namespace
         changed.notify_all();
     }
 
+    void clear_weapon_cues();
+
+    void detach_worker()
+    {
+        // Caller holds both bridge locks. Retire any outstanding ticket before releasing them.
+        attached = false;
+        status_enabled = false;
+        status_frame.reset();
+        input.clear();
+        crate_outcome_input_enabled = false;
+        prop_poses.clear();
+        local_prop_pose.clear();
+        stock_loot_motion.clear();
+        local_avatar_pose.clear();
+        remote_avatar_poses.clear();
+        remote_footsteps.clear();
+        weapon_cues_enabled = false;
+        clear_weapon_cues();
+        native_events_heartbeat = stock_board_heartbeat = host_dig_heartbeat = 0;
+        guest_interaction_lease = {};
+        zone_heartbeat = 0;
+        zone_roster.clear();
+        clear();
+    }
+
+    int activate_script_driver(const Lua& lua)
+    {
+        bool active{};
+        if (lua.get_stack_size() == 0 && RC::Unreal::IsInGameThreadRaw())
+        {
+            std::lock_guard lock(mutex);
+            active = script_driver_ready = runtime_initialized;
+        }
+        lua.set_bool(active);
+        return 1;
+    }
+
+    int read_runtime_lifecycle(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 0) return 0;
+        const char* lifecycle;
+        {
+            std::lock_guard lock(mutex);
+            if (!runtime_initialized) lifecycle = "stopped";
+            else if (attached) lifecycle = "attached";
+            else lifecycle = script_driver_ready ? "ready" : "initialized";
+        }
+        lua.set_string(lifecycle);
+        return 1;
+    }
+
     int take(const Lua& lua)
     {
         std::string pending;
@@ -479,7 +532,6 @@ namespace
         bool active{};
         {
             std::lock_guard lock(mutex);
-            ready = true;
             active = attached;
             // The native tick gets one admission attempt before Lua may take the ticket.
             if (state == State::queued && native_queued.load(std::memory_order_relaxed) == NativeCommand::none)
@@ -1579,7 +1631,7 @@ namespace
 extern "C" __declspec(dllexport) int SilverfishBridgeOpenV1()
 {
     std::lock_guard lock(mutex);
-    if (!ready || attached) return 0;
+    if (!runtime_initialized || !script_driver_ready || attached) return 0;
     attached = true;
     return 1;
 }
@@ -1587,24 +1639,7 @@ extern "C" __declspec(dllexport) int SilverfishBridgeOpenV1()
 extern "C" __declspec(dllexport) void SilverfishBridgeCloseV1()
 {
     std::scoped_lock lock(mutex, status_mutex);
-    attached = false;
-    status_enabled = false;
-    status_frame.reset();
-    input.clear();
-    crate_outcome_input_enabled = false;
-    prop_poses.clear();
-    local_prop_pose.clear();
-    stock_loot_motion.clear();
-    local_avatar_pose.clear();
-    remote_avatar_poses.clear();
-    remote_footsteps.clear();
-    weapon_cues_enabled = false;
-    clear_weapon_cues();
-    native_events_heartbeat = stock_board_heartbeat = host_dig_heartbeat = 0;
-    guest_interaction_lease = {};
-    zone_heartbeat = 0;
-    zone_roster.clear();
-    clear();
+    detach_worker();
 }
 
 extern "C" __declspec(dllexport) int SilverfishBridgeEnableStatusV1()
@@ -1884,6 +1919,12 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCancelV1(std::int64_t tick
 
 namespace silverfish::local_bridge
 {
+    void initialize()
+    {
+        std::lock_guard lock(mutex);
+        runtime_initialized = true;
+    }
+
     void append_status_text(std::string& row, std::string_view text)
     {
         append_status_field(row, text);
@@ -1937,6 +1978,7 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishFindObjectByPath", find_object_by_path);
         lua.register_function("SilverfishReadNativeSessionPawn", read_session_pawn);
         lua.register_function("SilverfishObserveNativeSession", observe_native_session);
+        lua.register_function("SilverfishActivateLocalBridgeDriver", activate_script_driver);
         lua.register_function("SilverfishTakeLocalBridgeCommand", take);
         lua.register_function("SilverfishClaimLocalBridgeCommand", claim_command);
         lua.register_function("SilverfishMakeFastLocalBridgeCallback", make_fast_command_callback);
@@ -1965,6 +2007,7 @@ namespace silverfish::local_bridge
         if (timing_fixture_enabled())
         {
             lua.register_function("SilverfishReadFastLocalBridgeProfile", read_fast_profile);
+            lua.register_function("SilverfishReadNativeBridgeLifecycle", read_runtime_lifecycle);
             lua.register_function("SilverfishReadNativeClockDispatchProfile", read_clock_dispatch_profile);
             lua.register_function("SilverfishReadNativeHealthDispatchProfile", read_health_dispatch_profile);
             lua.register_function("SilverfishProbeNativeHealthDispatch", probe_native_health_dispatch);
@@ -1979,29 +2022,26 @@ namespace silverfish::local_bridge
         }
     }
 
+    void release_script_driver()
+    {
+        {
+            std::scoped_lock lock(mutex, status_mutex);
+            script_driver_ready = false;
+            detach_worker();
+            fast_actions.clear();
+        }
+        stop_engine_tick_profile();
+    }
+
     void stop()
     {
+        {
+            std::scoped_lock lock(mutex, status_mutex);
+            runtime_initialized = false;
+            script_driver_ready = false;
+            detach_worker();
+            fast_actions.clear();
+        }
         stop_engine_tick_profile();
-        std::scoped_lock lock(mutex, status_mutex);
-        ready = false;
-        attached = false;
-        status_enabled = false;
-        status_frame.reset();
-        input.clear();
-        crate_outcome_input_enabled = false;
-        prop_poses.clear();
-        local_prop_pose.clear();
-        stock_loot_motion.clear();
-        local_avatar_pose.clear();
-        remote_avatar_poses.clear();
-        remote_footsteps.clear();
-        weapon_cues_enabled = false;
-        clear_weapon_cues();
-        native_events_heartbeat = stock_board_heartbeat = host_dig_heartbeat = 0;
-        guest_interaction_lease = {};
-        zone_heartbeat = 0;
-        zone_roster.clear();
-        fast_actions.clear();
-        clear();
     }
 }

@@ -216,3 +216,50 @@ local previous = #receipts
 tick(-35)
 assert(#receipts == previous and next(guest.ignores) == nil, "guest never requests or receives an open wall")
 wall.clear()
+
+local seconds, batch_calls, legacy_calls, spawns = 300, 0, 0, 0
+os.time = function() return seconds end
+local spawn = world.SpawnActor
+world.SpawnActor = function(...)
+    spawns = spawns + 1
+    return spawn(...)
+end
+world.PersistentLevel = object({})
+local sublevel = object({bIsVisible = true})
+local streamed = exit(first, "Streamed", 4000)
+streamed.GetOuter = function() return sublevel end
+streamed.GetParentComponent = function() end
+streamed.Box.GetGenerateOverlapEvents = function() return true end
+local stream_path = "/Game/Classes/Maps/Stream.Stream:PersistentLevel." .. first
+local placed_path = map .. ".Test:PersistentLevel." .. first
+local lookup = StaticFindObject
+StaticFindObject = function(path)
+    return path == stream_path and streamed or lookup(path)
+end
+SilverfishSnapshotDiscoveredOverlaps = function(address)
+    assert(address == world)
+    legacy_calls = legacy_calls + 1
+    return stream_path .. "\tStreamed\n"
+end
+SilverfishSnapshotNativeWallOverlapSources = function(address, discover)
+    assert(address == world)
+    batch_calls = batch_calls + 1
+    return {[first] = exits[1]}, discover and {
+        [placed_path] = {fixture = exits[1], tag = "One", name = first, persistent = true, kind = "overlap", discovered = true},
+        [stream_path] = {fixture = streamed, tag = "Streamed", name = first, kind = "overlap", discovered = true},
+    } or nil
+end
+wall.sync(state, "connected", nil, true)
+assert(batch_calls == 1 and legacy_calls == 0 and spawns == 3 and not walls[4000].destroyed,
+    "A qualified batch uses two authored walls and one same-named streamed wall without duplicating the persistent source")
+local original_stream_wall = walls[4000]
+sublevel.bIsVisible = false
+wall.sync(state, "connected", nil, true)
+assert(original_stream_wall.destroyed and legacy_calls == 0,
+    "The wall revokes as soon as its streamed source hides, even inside the discovery cache window")
+sublevel.bIsVisible, seconds = true, 301
+SilverfishSnapshotNativeWallOverlapSources = function() return {[first] = exits[1]} end
+wall.sync(state, "connected", nil, true)
+assert(legacy_calls == 1 and walls[4000] ~= original_stream_wall and not walls[4000].destroyed,
+    "A declined native discovery uses the stock Lua route for the streamed source")
+wall.clear()

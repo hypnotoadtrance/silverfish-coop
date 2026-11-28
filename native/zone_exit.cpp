@@ -20,6 +20,7 @@
 
 #include <Helpers/String.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
+#include <LuaType/LuaUObject.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/FStrProperty.hpp>
@@ -1148,16 +1149,11 @@ namespace
         return discover_exit(exit, read_object(field<Unreal::FObjectProperty>(exit, STR("Box")), exit), world);
     }
 
-    int lua_snapshot_discovered_overlaps(const Lua& lua)
+    template <typename Visit>
+    bool visit_discovered_overlaps(Unreal::UWorld* world, Visit&& visit)
     {
-        if (!Unreal::IsInGameThreadRaw() || scope.generation != generation.load(std::memory_order_acquire) ||
-            Clock::now() >= scope.expires || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
-        auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
-        if (!live_object(world) || !scope.exit_class || address(world) != static_cast<Address>(lua.get_integer())) return 0;
-
         std::vector<Unreal::AActor*> actors;
         Unreal::UGameplayStatics::GetAllActorsOfClass(world, scope.exit_class, actors);
-        std::string rows;
         constexpr std::size_t candidate_limit = 128;
         for (auto* actor : std::span{actors}.first(std::min(actors.size(), candidate_limit)))
         {
@@ -1168,9 +1164,23 @@ namespace
             if (!route) continue;
             const auto path = RC::to_utf8_string(actor->GetPathName());
             if (!path.starts_with('/') || path.size() > 512 || path.find_first_of("\r\n\t") != std::string::npos) continue;
-            rows.append(path).push_back('\t');
-            rows.append(RC::to_utf8_string(route->entrance)).push_back('\n');
+            if (!visit(actor, path, route->entrance, parent != nullptr)) return false;
         }
+        return true;
+    }
+
+    int lua_snapshot_discovered_overlaps(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || scope.generation != generation.load(std::memory_order_acquire) ||
+            Clock::now() >= scope.expires || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
+        if (!live_object(world) || !scope.exit_class || address(world) != static_cast<Address>(lua.get_integer())) return 0;
+        std::string rows;
+        visit_discovered_overlaps(world, [&](Unreal::AActor*, const std::string& path, const RC::StringType& entrance, bool) {
+            rows.append(path).push_back('\t');
+            rows.append(RC::to_utf8_string(entrance)).push_back('\n');
+            return true;
+        });
         lua.set_string(rows);
         return 1;
     }
@@ -1200,32 +1210,110 @@ namespace
         return 3;
     }
 
-    int lua_certify_authored_overlap_wall(const Lua& lua)
+    Unreal::UWorld* qualified_wall_world(Address expected)
     {
         if (!Unreal::IsInGameThreadRaw() || !installed.load(std::memory_order_acquire) ||
             !Unreal::UnrealInitializer::ShouldUseHashTables() || scope.authored_world.empty() ||
-            scope.generation != generation.load(std::memory_order_acquire) || Clock::now() >= scope.expires ||
-            lua.get_stack_size() != 4 || !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3) ||
-            !lua.is_string(4)) return 0;
-        const auto world_address = static_cast<Address>(lua.get_integer());
-        const auto actor_address = static_cast<Address>(lua.get_integer());
+            scope.generation != generation.load(std::memory_order_acquire) || Clock::now() >= scope.expires) return nullptr;
         auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
         auto* driver = scope.roster.driver.Get();
-        if (!live_object(world) || address(world) != world_address || !live_object(driver) ||
-            read_object(scope.roster.world_driver, world) != driver) return 0;
+        return live_object(world) && address(world) == expected && live_object(driver) &&
+            read_object(scope.roster.world_driver, world) == driver ? world : nullptr;
+    }
 
+    Unreal::UObject* qualified_authored_wall(Unreal::UWorld* world, const Authored::Route& route)
+    {
+        if (route.mode != Authored::Mode::overlap) return nullptr;
+        auto path = scope.authored_world + STR(":PersistentLevel.");
+        path.append(route.source_actor);
+        auto* actor = Unreal::FUObjectHashTables::StaticFindObjectByPath(nullptr, path.c_str(), false, true);
+        if (!live_actor_for_wall(actor) || !is_expanded_exit(scope, actor, world, route) ||
+            actor_world(actor) != world || actor->GetPathName() != path) return nullptr;
+        auto* tag = field<Unreal::FStrProperty>(actor, STR("Entrance Tag"));
+        return tag && RC::StringViewType{*tag->GetPropertyValueInContainer(actor)} == route.entrance ? actor : nullptr;
+    }
+
+    int lua_certify_authored_overlap_wall(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 4 || !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3) ||
+            !lua.is_string(4)) return 0;
+        auto* world = qualified_wall_world(static_cast<Address>(lua.get_integer()));
+        if (!world) return 0;
+        const auto actor_address = static_cast<Address>(lua.get_integer());
         const auto name = RC::to_wstring(lua.get_string());
         const auto entrance = RC::to_wstring(lua.get_string());
         const auto* route = Authored::find(scope.authored_world, name);
-        if (!route || route->mode != Authored::Mode::overlap || route->entrance != entrance) return 0;
-        const auto path = scope.authored_world + STR(":PersistentLevel.") + name;
-        auto* actor = Unreal::FUObjectHashTables::StaticFindObjectByPath(nullptr, path.c_str(), false, true);
-        if (address(actor) != actor_address || !live_actor_for_wall(actor) ||
-            !is_expanded_exit(scope, actor, world, *route) || actor_world(actor) != world) return 0;
-        auto* tag = field<Unreal::FStrProperty>(actor, STR("Entrance Tag"));
-        if (!tag || RC::StringViewType{*tag->GetPropertyValueInContainer(actor)} != route->entrance) return 0;
+        if (!route || route->entrance != entrance || !actor_address ||
+            address(qualified_authored_wall(world, *route)) != actor_address) return 0;
         lua.set_bool(true);
         return 1;
+    }
+
+    bool wall_actor_token(std::string_view name)
+    {
+        return !name.empty() && std::ranges::all_of(name, [](char c) {
+            return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                (c >= '0' && c <= '9') || c == '_' || c == '-';
+        });
+    }
+
+    int lua_snapshot_wall_overlap_sources(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_bool(2)) return 0;
+        auto* world = qualified_wall_world(static_cast<Address>(lua.get_integer()));
+        if (!world || !scope.exit_class) return 0;
+        const bool discover = lua.get_bool();
+        auto* stack = lua.get_lua_state();
+        if (!lua_checkstack(stack, 8)) return 0;
+        const auto routes = Authored::for_world(scope.authored_world);
+        lua_createtable(stack, 0, static_cast<int>(routes.size()));
+        const auto authored_index = lua_gettop(stack);
+        for (const auto& route : routes)
+        {
+            if (auto* actor = qualified_authored_wall(world, route))
+            {
+                lua.set_string(RC::to_utf8_string(route.source_actor));
+                RC::LuaType::auto_construct_object(lua, actor);
+                lua_rawset(stack, authored_index);
+            }
+        }
+        if (!discover) return 1;
+        lua_newtable(stack);
+        const auto discovered_index = lua_gettop(stack);
+        const bool complete = visit_discovered_overlaps(world, [&](Unreal::AActor* actor, const std::string& path,
+            const RC::StringType& entrance, bool parent_known) {
+            constexpr std::string_view separator = ":PersistentLevel.";
+            const auto level = path.rfind(separator);
+            const auto name = level != path.npos ? std::string_view{path}.substr(level + separator.size()) : std::string_view{};
+            if (!wall_actor_token(name) || !live_actor_for_wall(actor)) return true;
+            auto* box = read_object(field<Unreal::FObjectProperty>(actor, STR("Box")), actor);
+            auto* overlaps = field<Unreal::FBoolProperty>(box, STR("bGenerateOverlapEvents"));
+            // Let UE4SS's stock getters decide if this engine schema differs.
+            if (!parent_known || !overlaps) return false;
+            if (!overlaps->GetPropertyValueInContainer(box)) return true;
+            lua.set_string(path);
+            lua_createtable(stack, 0, 6);
+            RC::LuaType::auto_construct_object(lua, actor);
+            lua_setfield(stack, -2, "fixture");
+            lua.set_string(RC::to_utf8_string(entrance));
+            lua_setfield(stack, -2, "tag");
+            lua.set_string(name);
+            lua_setfield(stack, -2, "name");
+            lua_pushboolean(stack, in_persistent_level(actor, world));
+            lua_setfield(stack, -2, "persistent");
+            lua_pushliteral(stack, "overlap");
+            lua_setfield(stack, -2, "kind");
+            lua_pushboolean(stack, true);
+            lua_setfield(stack, -2, "discovered");
+            lua_rawset(stack, discovered_index);
+            return true;
+        });
+        if (!complete)
+        {
+            lua_pop(stack, 1);
+            return 1;
+        }
+        return 2;
     }
 
     int lua_exit_approach(const Lua& lua)
@@ -1867,6 +1955,7 @@ namespace silverfish::native_zone
         lua.register_function("SilverfishReadNativeExitApproachPosition", lua_exit_approach_position);
         lua.register_function("SilverfishCertifyNativeAuthoredOverlapWall", lua_certify_authored_overlap_wall);
         lua.register_function("SilverfishSnapshotDiscoveredOverlaps", lua_snapshot_discovered_overlaps);
+        lua.register_function("SilverfishSnapshotNativeWallOverlapSources", lua_snapshot_wall_overlap_sources);
         lua.register_function("SilverfishInspectMapPackage", lua_inspect_map_package);
         lua.register_function("SilverfishSnapshotNativeWorldActorPaths", lua_snapshot_world_actor_paths);
         lua.register_function("SilverfishCheckNativeExitCrossing", lua_exit_crossing);

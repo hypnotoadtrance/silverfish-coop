@@ -1594,9 +1594,9 @@ namespace
 
         ~SilverfishNativeMod() override
         {
+            silverfish::local_bridge::stop();
             silverfish::local_bridge::uninstall_native_dispatch();
             if (jump_shake) Unreal::UObjectGlobals::UnregisterHook(jump_shake, jump_shake_hook);
-            silverfish::local_bridge::stop();
             silverfish::native_guest_item::shutdown();
             silverfish::native_zone::uninstall_hooks();
             silverfish::native_transport::uninstall_hooks();
@@ -1693,6 +1693,7 @@ namespace
             silverfish::native_anomaly_fields::install_hooks();
             silverfish::shared_loot::install_hooks();
             silverfish::native_black_stone::install_hooks();
+            silverfish::local_bridge::initialize();
             if (!enabled)
             {
                 return;
@@ -1845,6 +1846,7 @@ namespace
         {
             if (name == lua_mod_name)
             {
+                silverfish::local_bridge::release_script_driver();
                 silverfish::native_zone::clear_scope();
                 silverfish::native_transport::clear_scope();
                 silverfish::native_stock_rest::clear_scope();
@@ -1853,7 +1855,6 @@ namespace
                 silverfish::native_bag_projection::clear_scope();
                 silverfish::native_guest_drop_projection::clear_scope();
                 silverfish::native_interaction_input::clear_scope();
-                silverfish::local_bridge::stop();
                 silverfish::native_authored_pickup::clear_scope();
                 silverfish::native_broker_menu::clear_scope();
                 silverfish::native_broker_input::clear_scope();
