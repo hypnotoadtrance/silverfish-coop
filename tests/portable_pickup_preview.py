@@ -22,25 +22,30 @@ def pickup_preview_overlay(game, overlay, *, projected_drops, track_drop_motion=
 
 def instrument_drop_press(source):
     module = "local projection = {}\n"
-    press = "            local ok, status = SilverfishProbeNativeInteractInput(pawn:GetAddress(), true)"
-    taken = '            return "world-loot:" .. epoch .. ":" .. id .. ":" .. tostring(sequence)'
-    assert all(source.count(anchor) == 1 for anchor in (module, press, taken))
+    press = ("        return pickup_fixture.press_world_loot(state, pawn, actor, actor.Box, function()\n"
+             "            local ok, status = SilverfishProbeNativeInteractInput(pawn:GetAddress(), true)")
+    target = '            local target = "world-loot:" .. epoch .. ":" .. id .. ":" .. tostring(sequence)\n'
+    for anchor in (module, press, target):
+        if source.count(anchor) != 1:
+            raise ValueError(f"The stock world-loot preview anchor changed: {anchor}")
+    begin, probe = press.rsplit("\n", 1)
     return (source.replace(module, module + "local preview_fixture\n")
-            .replace(press, """            preview_fixture = {id = id, started = os.clock(), collision = actor:GetActorEnableCollision()}
-""" + press)
-            .replace(taken, """            if preview_fixture and preview_fixture.id == id then
+            .replace(press, begin + """
+            preview_fixture = {epoch = epoch, id = id, started = os.clock(), collision = actor:GetActorEnableCollision()}
+""" + probe)
+            .replace(target, target + """            if preview_fixture and preview_fixture.epoch == epoch and preview_fixture.id == id then
+                local recorded = preview_fixture
+                preview_fixture = nil
                 local active, seen_epoch, seen_id, name = SilverfishReadNativeGuestDropProjection(item.slot)
                 local path = active and seen_epoch == epoch and seen_id == id and name:match("^%S+ (.+)$")
                 local actor = path and StaticFindObject(path)
                 if valid(actor) and actor:GetFullName() == name then
                     SilverfishPickupPreviewFixtureProjected(id, actor.bHidden,
-                        preview_fixture.collision and actor:GetActorEnableCollision(),
-                        (os.clock() - preview_fixture.started) * 1000)
+                        recorded.collision and actor:GetActorEnableCollision(),
+                        (os.clock() - recorded.started) * 1000)
                 end
-                preview_fixture = nil
             end
-""" + taken))
-
+"""))
 
 def instrument_drop_motion(source):
     anchor = "            local was_pickable = previous ~= nil and not previous.error and not previous.moving\n"
