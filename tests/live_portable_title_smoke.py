@@ -8771,7 +8771,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 ))
         if crossroads_profile:
             from portable_crossroads_profile import (
-                instrument_anomaly_work, instrument_avatar_lean, instrument_avatar_observer, instrument_death_poll,
+                instrument_anomaly_work, instrument_avatar_gait, instrument_avatar_lean, instrument_avatar_observer,
+                instrument_death_poll,
                 instrument_flashlight_scope,
                 instrument_guest_status_binding, instrument_host_drop_context, instrument_inline_crate_scan,
                 instrument_input_mappings, instrument_journal_context,
@@ -8804,6 +8805,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(portable_script_overlay(game, "native_stash_view.lua", instrument_stash_binding))
                 probes.enter_context(portable_script_overlay(game, "native_avatar_lean_bridge.lua", instrument_avatar_lean))
                 probes.enter_context(portable_script_overlay(game, "native_player_avatar.lua", instrument_avatar_observer))
+                probes.enter_context(portable_script_overlay(game, "native_avatar_gait.lua", instrument_avatar_gait))
                 probes.enter_context(portable_script_overlay(game, "native_roster.lua", instrument_ready_roster))
             proof["crossroads_input_overlays"] = [
                 probes.enter_context(portable_script_overlay(game, "players.lua", instrument_input_mappings))
@@ -9307,6 +9309,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                         if campaign == "tutorial_dock_combat" and results["stock_grounded_gait"]["passed"]:
                             for action in (native_player_avatar.HOST_AIM, native_player_avatar.GUEST_SPRINTS):
                                 assert host_receipts.get(action, {}).get("count", 0) > 0, evidence
+                            raw = await portable_probe_command(host.bridge, "crossroads-profile", "avatargaitcounts",
+                                                               reply_end="|end")
+                            _, posture, _, _ = map(int, raw.removesuffix("|end").split(","))
+                            assert posture > 0, "No native posture writes during the stock Dock check"
+                            evidence["native_posture_writes"] = posture
                         if campaign == "oil_lamps" and results["stock_oil_lamps"]["passed"]:
                             assert host_receipts.get(native_stock_switch.IGNITE, {}).get("count", 0) > 0, evidence
                         if campaign == "observatory" and results["stock_campfire"]["passed"]:

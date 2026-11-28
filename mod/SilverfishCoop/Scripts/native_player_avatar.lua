@@ -176,9 +176,13 @@ local function sync_local_aim(state, phase)
     end
 end
 
-local function stock_motion(pawn)
+local function has_horizontal_motion(pawn)
     local velocity = pawn:GetVelocity()
-    return pawn.Aiming == true, pawn.Sprinting == true, velocity.X^2 + velocity.Y^2 > 20^2
+    return velocity.X^2 + velocity.Y^2 > 20^2
+end
+
+local function stock_motion(pawn)
+    return pawn.Aiming == true, pawn.Sprinting == true, has_horizontal_motion(pawn)
 end
 
 local function observe_motion(world_address, pawn, address)

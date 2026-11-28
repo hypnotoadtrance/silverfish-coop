@@ -539,6 +539,72 @@ def instrument_flashlight_scope(source):
         anchor, 'SilverfishProfileCrossroadsCall("flashlight_sync_scope", scope, state, phase)') + next_function + rest
 
 
+def instrument_avatar_gait(source):
+    advance = "current = SilverfishAdvanceNativeRemoteGait("
+    boundary = "\nreturn gait\n"
+    if source.count(advance) != 1 or source.count(boundary) != 1:
+        raise ValueError("The native gait timing anchors changed")
+    witness = """
+local gait_writes, posture_writes, refused, fallback = 0, 0, 0, 0
+local function profile_advance(world, pawn, pivot, instance, asset, ground, value)
+    local result = SilverfishProfileCrossroadsCall("avatar.gait.native", SilverfishAdvanceNativeRemoteGait,
+        world, pawn, pivot, instance, asset, ground, value)
+    if result == nil then
+        fallback = fallback + 1
+    elseif result == false then
+        refused = refused + 1
+    elseif value ~= nil then
+        if ground then gait_writes = gait_writes + 1 else posture_writes = posture_writes + 1 end
+    end
+    return result
+end
+
+function SilverfishProfileAvatarGaitCounts()
+    return ("%d,%d,%d,%d"):format(gait_writes, posture_writes, refused, fallback)
+end
+
+"""
+    source = source.replace("function gait.advance(entry, now)", witness + "function gait.advance(entry, now)")
+    source = source.replace(advance, "current = profile_advance(")
+    return source.replace(boundary, """
+function SilverfishProfileAvatarGaitWrite(entry)
+    local state = entry.gait_blend
+    local native, stamp = SilverfishAdvanceNativeRemoteGait, SilverfishBridgeProfileStamp
+    if not state or not entry.head_pivot_path or entry.pose_transition or state.from or type(native) ~= "function" then
+        return
+    end
+    local world, pawn, pivot, instance, asset = entry.world, entry.pawn_address, entry.head_pivot_path,
+        state.instance, state.asset
+    local value = state.value
+    local function stock() return advance_stock(entry, state, true, value) end
+    local function scoped() return native(world, pawn, pivot, instance, asset, true, value) end
+    assert(stock() and scoped() == true, "native gait could not advance the installed blend")
+    assert(native(world + 1, pawn, pivot, instance, asset, true, value) == nil,
+        "native gait accepted the wrong world")
+    assert(native(world, pawn, pivot, instance + 1, asset, true, value) == false
+        and native(world, pawn, pivot, instance, asset + 1, true, value) == false,
+        "native gait accepted a replaced animation driver")
+    local function measure(write)
+        local heap, started = collectgarbage("count"), stamp()
+        for _ = 1, 64 do assert(write()) end
+        return (stamp() - started) / 1000, collectgarbage("count") - heap
+    end
+    local running = collectgarbage("isrunning")
+    collectgarbage("stop")
+    local ok, result = pcall(function()
+        local native_ms, native_kib = measure(scoped)
+        local lua_ms, lua_kib = measure(stock)
+        return ("%.3f,%.3f,%.3f,%.3f"):format(native_ms, lua_ms, native_kib, lua_kib)
+    end)
+    if running then collectgarbage("restart") end
+    assert(ok, result)
+    return result
+end
+
+return gait
+""")
+
+
 def instrument_avatar_observer(source):
     front, boundary, rest = source.partition("local function observe(state, phase)\n")
     observe, following, after = rest.partition("local function attach_component(")
@@ -579,6 +645,14 @@ def instrument_avatar_observer(source):
         sync = sync.replace(anchor, f'SilverfishProfileCrossroadsCall("avatar.{call}", {call}, ')
     source = start + boundary + sync + end + after
     return source.replace("\nreturn avatar\n", """
+function SilverfishProfileAvatarGait()
+    for _, entry in pairs(avatars) do
+        local result = SilverfishProfileAvatarGaitWrite(entry)
+        if result then return result end
+    end
+    return "unavailable"
+end
+
 function SilverfishProfileAvatarMotion()
     local native, stamp = SilverfishReadNativeAvatarMotion, SilverfishBridgeProfileStamp
     local state = avatar_motion_sample
@@ -1028,8 +1102,11 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     guest_run = guest.client / "run"
     seats = {"host": host, "guest": guest}
     runs = {"host": host.campaign / "run", "guest": guest_run}
-    counters = ("quic_datagrams_sent", "quic_payload_bytes_sent", "quic_payload_bytes_received", "game_packets_queued",
-                "game_packets_delivered", "game_payload_bytes_queued", "game_wire_payload_bytes_queued", "game_packets_compressed",
+    counters = ("quic_datagrams_sent", "quic_datagrams_received", "quic_payload_bytes_sent", "quic_payload_bytes_received",
+                "game_packets_queued", "game_packets_delivered", "game_packets_compressed",
+                "game_payload_bytes_queued", "game_wire_payload_bytes_queued", "game_wire_payload_bytes_received",
+                "game_payload_bytes_delivered", "loot_motion_datagrams_queued", "loot_motion_datagrams_received",
+                "loot_motion_bytes_queued", "loot_motion_bytes_received",
                 "keepalive_probes_queued", "keepalive_probes_acked", "keepalive_ticks_congested",
                 "relay_queue_evicted_frames", "relay_queue_expired_frames", "interaction_priority_passes",
                 "snapshot_responses_encoded", "snapshot_delta_responses",
@@ -1067,6 +1144,9 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     async def command(seat, action):
         response = await probe(seat.bridge, "crossroads-profile", action, reply_end="|end")
         return response.removesuffix("|end")
+
+    async def gait_counts():
+        return tuple(map(int, (await command(host, "avatargaitcounts")).split(",")))
 
     async def arm(action="arm"):
         assert await asyncio.gather(*(command(seat, action) for seat in seats.values())) == ["armed", "armed"]
@@ -1193,6 +1273,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
         assert movement and max(movement) >= 40, movement
         return max(movement)
 
+    gait_before = await gait_counts() if area == CROSSROADS else ()
     before_movement = await transport()
     await arm()
     displacement = await walk(1)
@@ -1200,6 +1281,8 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     after_movement = await transport()
     coarse = {}
     if area == CROSSROADS:
+        gait_delta = tuple(after - before for before, after in zip(gait_before, await gait_counts(), strict=True))
+        assert gait_delta[0] > 0, ("No native grounded gait writes during the stock walk", gait_delta)
         await arm("coarse")
         coarse_displacement = await walk(2)
         samples = await asyncio.gather(*(read(seat) for seat in seats.values()))
@@ -1402,7 +1485,16 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     remote_head_rotation = {}
     avatar_clock = {}
     avatar_motion = {}
+    avatar_gait = None
     if area == CROSSROADS:
+        gait = await command(host, "avatargait")
+        assert gait != "unavailable" and not gait.startswith("avatar gait comparison failed"), gait
+        native_ms, lua_ms, native_kib, lua_kib = map(float, gait.split(","))
+        avatar_gait = {"writes_per_path": 64, "native_ms": native_ms, "lua_ms": lua_ms,
+                       "native_heap_growth_kib": native_kib, "lua_heap_growth_kib": lua_kib,
+                       "wrong_world_and_stale_binding_refused": True,
+                       **dict(zip(("stock_walk_gait_writes", "stock_walk_posture_writes", "stock_walk_refused",
+                                   "stock_walk_fallback"), gait_delta, strict=True))}
         motion = await command(host, "avatarmotion")
         assert motion != "unavailable" and not motion.startswith("avatar motion comparison failed"), motion
         for row in motion.split(";"):
@@ -1481,4 +1573,5 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             "controller_inspection_comparison": controller_inspection,
             "avatar_clock_comparison": avatar_clock,
             "avatar_motion_comparison": avatar_motion,
+            "avatar_gait_comparison": avatar_gait,
             "remote_head_rotation_comparison": remote_head_rotation}

@@ -167,41 +167,45 @@ function gait.apply(entry, mesh, pace, load_asset, prepare_body)
     return true
 end
 
+local function advance_stock(entry, state, grounded, value)
+    local pawn, body = entry.pawn, entry.body
+    local instance = valid(body) and body.AnimScriptInstance
+    if pawn.Dead or not is_current(instance, state) or body:IsAnySimulatingPhysics() then return false end
+    if grounded then
+        local movement = pawn.CharacterMovement
+        if pawn.bIsCrouched or not valid(movement) or not movement:IsMovingOnGround() then return false end
+    end
+    if value ~= nil then move_axis(instance, state, value) end
+    return true
+end
+
 function gait.advance(entry, now)
     local transition = entry.pose_transition
-    if transition then
-        local body = entry.body
-        local instance = valid(body) and body.AnimScriptInstance
-        if entry.pawn.Dead or not is_current(instance, transition) or body:IsAnySimulatingPhysics() then
-            entry.pose_transition = nil
-            return
-        end
-        transition.started = transition.started or now
-        local distance = math.abs(transition.goal - transition.start_value)
-        local duration = math.max(.025, posture_duration * distance)
-        local progress = math.min(1, math.max(0, (now - transition.started) / duration))
-        local alpha = progress * progress * (3 - 2 * progress)
-        local value = transition.start_value + (transition.goal - transition.start_value) * alpha
-        if value ~= transition.value then move_axis(instance, transition, value) end
-        if progress == 1 then entry.pose_transition = nil end
-        return
-    end
-    local state = entry.gait_blend
-    if not state or not state.from then return end
-    local pawn, body = entry.pawn, entry.body
-    local movement = pawn.CharacterMovement
-    local instance = valid(body) and body.AnimScriptInstance
-    if pawn.Dead or pawn.bIsCrouched or not valid(movement) or not movement:IsMovingOnGround()
-        or not is_current(instance, state) or body:IsAnySimulatingPhysics() then
-        entry.gait_blend = nil
-        return
-    end
+    local state = transition or entry.gait_blend
+    if not state or not transition and not state.from then return end
 
-    state.started = state.started or now
-    local progress = math.min(1, math.max(0, (now - state.started) / ramp_duration))
+    local from, goal, duration = state.from, state.target, ramp_duration
+    if transition then
+        from, goal = transition.start_value, transition.goal
+        duration = math.max(.025, posture_duration * math.abs(goal - from))
+    end
+    local started = state.started or now
+    local progress = math.min(1, math.max(0, (now - started) / duration))
     local alpha = progress * progress * (3 - 2 * progress)
-    local value = state.from + (state.target - state.from) * alpha
-    if value ~= state.value then move_axis(instance, state, value) end
+    local value = from + (goal - from) * alpha
+    local write = value ~= state.value and value or nil
+    local current
+    if entry.head_pivot_path and type(SilverfishAdvanceNativeRemoteGait) == "function" then
+        current = SilverfishAdvanceNativeRemoteGait(entry.world, entry.pawn_address, entry.head_pivot_path,
+            state.instance, state.asset, transition == nil, write)
+    end
+    if current == nil then current = advance_stock(entry, state, transition == nil, write) end
+
+    if not current or progress == 1 and transition then
+        if transition then entry.pose_transition = nil else entry.gait_blend = nil end
+        return
+    end
+    state.value, state.started = value, started
     if progress == 1 then state.from, state.started = nil, nil end
 end
 

@@ -2425,17 +2425,17 @@ namespace
             return parent->GetObjectPropertyValue(parent->ContainerPtrToValuePtr<void>(component));
         }
 
-        bool attached_head(Unreal::UObject* pawn, Unreal::UObject* pivot) const
+        Unreal::UObject* display_body(Unreal::UObject* pawn, Unreal::UObject* pivot) const
         {
             if (!live(pivot) || pivot->GetClassPrivate() != scene.Get() || pivot->GetOuterPrivate() != pawn ||
                 socket->GetPropertyValueInContainer(pivot) != head || !absolute->GetPropertyValueInContainer(pivot) ||
-                replicated->GetPropertyValueInContainer(pivot)) return false;
+                replicated->GetPropertyValueInContainer(pivot)) return nullptr;
 
             auto* body = attachment(pivot);
             auto* stock = object_field(pawn, STR("Mesh"));
             return live(body) && body->GetClassPrivate() == skeletal_mesh.Get() && body->GetOuterPrivate() == pawn &&
                 !replicated->GetPropertyValueInContainer(body) && live(stock) && stock->GetOuterPrivate() == pawn &&
-                body != stock && attachment(body) == stock;
+                body != stock && attachment(body) == stock ? body : nullptr;
         }
 
         void apply(Unreal::UObject* pivot, const AimRotation& angles) const
@@ -2450,28 +2450,18 @@ namespace
         }
     };
 
-    int write_remote_head_rotation(const Lua& lua)
+    struct RemoteHead
+    {
+        Unreal::UObject* pivot{};
+        Unreal::UObject* body{};
+        const HeadRotationWriter* writer{};
+    };
+
+    RemoteHead remote_head(Unreal::UObject* pawn, std::string_view path)
     {
         constexpr std::size_t max_path_size = 512;
-        if (!available() || lua.get_stack_size() != 6 || !lua.is_integer(1) || !lua.is_integer(2) ||
-            lua_type(lua.get_lua_state(), 3) != LUA_TSTRING || !lua.is_number(4) ||
-            !lua.is_number(5) || !lua.is_number(6)) return 0;
-
-        auto* stack = lua.get_lua_state();
-        const auto world_address = lua_tointeger(stack, 1);
-        const auto pawn_address = lua_tointeger(stack, 2);
-        std::size_t path_size{};
-        const auto* path_chars = lua_tolstring(stack, 3, &path_size);
-        const std::string_view path{path_chars, path_size};
-        const AimRotation angles{lua_tonumber(stack, 4), lua_tonumber(stack, 5), lua_tonumber(stack, 6)};
-        if (path.empty() || path.size() > max_path_size || path.find('\0') != std::string_view::npos ||
-            std::any_of(angles.begin(), angles.end(), [](double angle) {
-                return !std::isfinite(angle) || std::abs(angle) > 360;
-            })) return 0;
-
-        auto* pawn = remote_avatar_pawn(world_address, pawn_address);
-        if (!pawn) return 0;
-
+        if (!pawn || path.empty() || path.size() > max_path_size || path.find('\0') != std::string_view::npos)
+            return {};
         struct Binding
         {
             Unreal::FWeakObjectPtr pawn{}, pivot{};
@@ -2488,7 +2478,7 @@ namespace
             bindings = {};
             binding_generation = scope.generation;
         }
-        if (!writer.setter.Get() || !writer.scene.Get() || !writer.skeletal_mesh.Get()) return 0;
+        if (!writer.setter.Get() || !writer.scene.Get() || !writer.skeletal_mesh.Get()) return {};
         Binding* binding = nullptr;
         for (auto& candidate : bindings)
         {
@@ -2499,27 +2489,184 @@ namespace
             }
             if (!binding && !candidate.pawn.Get()) binding = &candidate;
         }
-        if (!binding) return 0;
+        if (!binding) return {};
 
         auto* pivot = binding->path == path ? binding->pivot.Get() : nullptr;
+        Unreal::UObject* body = nullptr;
         if (!pivot)
         {
             const auto now = Clock::now();
-            if (now < binding->next_lookup) return 0;
+            if (now < binding->next_lookup) return {};
             binding->pawn = pawn;
             binding->next_lookup = now + std::chrono::milliseconds(250);
             const auto outer_path = RC::to_string(pawn->GetPathName());
             if (!path.starts_with(outer_path) || path.size() <= outer_path.size() || path[outer_path.size()] != '.')
-                return 0;
+                return {};
             pivot = find<Unreal::UObject>(RC::to_wstring(path).c_str());
-            if (!writer.attached_head(pawn, pivot)) return 0;
+            body = writer.display_body(pawn, pivot);
+            if (!body) return {};
             *binding = Binding{pawn, pivot, std::string(path), {}};
         }
-        else if (!writer.attached_head(pawn, pivot)) return 0;
+        else body = writer.display_body(pawn, pivot);
+        return body ? RemoteHead{pivot, body, &writer} : RemoteHead{};
+    }
 
-        writer.apply(pivot, angles);
+    int write_remote_head_rotation(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        if (!available() || lua_gettop(stack) != 6 || !lua_isinteger(stack, 1) || !lua_isinteger(stack, 2) ||
+            lua_type(stack, 3) != LUA_TSTRING || !lua.is_number(4) || !lua.is_number(5) || !lua.is_number(6))
+            return 0;
+        const AimRotation angles{lua_tonumber(stack, 4), lua_tonumber(stack, 5), lua_tonumber(stack, 6)};
+        if (std::any_of(angles.begin(), angles.end(), [](double angle) {
+                return !std::isfinite(angle) || std::abs(angle) > 360;
+            })) return 0;
+        std::size_t path_size{};
+        const auto* path = lua_tolstring(stack, 3, &path_size);
+        const auto head = remote_head(remote_avatar_pawn(lua_tointeger(stack, 1), lua_tointeger(stack, 2)),
+                                      {path, path_size});
+        if (!head.pivot) return 0;
+        head.writer->apply(head.pivot, angles);
         lua.set_bool(true);
         return 1;
+    }
+
+    struct GaitBoolCall
+    {
+        Unreal::FWeakObjectPtr function{};
+        Unreal::FBoolProperty* result{};
+
+        static GaitBoolCall bind(Unreal::UFunction* function)
+        {
+            auto* result = function ? Unreal::CastField<Unreal::FBoolProperty>(function->GetReturnProperty()) : nullptr;
+            if (!result || result->GetArrayDim() != 1 || result->GetOffset_Internal() != 0 ||
+                result->GetByteOffset() != 0 || function->GetNumParms() != 1 || function->GetParmsSize() != 1 ||
+                !result->HasAnyPropertyFlags(Unreal::CPF_ReturnParm) || !function->HasAnyFunctionFlags(Unreal::FUNC_Native))
+                return {};
+            return {function, result};
+        }
+
+        bool read(Unreal::UObject* object) const
+        {
+            std::uint8_t buffer{};
+            object->ProcessEvent(static_cast<Unreal::UFunction*>(function.Get()), &buffer);
+            return result->GetPropertyValueInContainer(&buffer);
+        }
+    };
+
+    struct GaitWriter
+    {
+        using Axis = std::array<double, 3>;
+        Unreal::FWeakObjectPtr pawn_class{}, body_class{}, node_class{}, movement_class{}, setter{};
+        Unreal::FObjectProperty *instance{}, *asset{}, *movement{};
+        Unreal::FBoolProperty *dead{}, *crouch{};
+        GaitBoolCall simulating, grounded;
+
+        void bind(Unreal::UClass* pawn_type, Unreal::UClass* body_type)
+        {
+            pawn_class = pawn_type;
+            body_class = body_type;
+            auto* node = find<Unreal::UClass>(STR("/Script/Engine.AnimSingleNodeInstance"));
+            auto* vector = find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.Vector"));
+            auto* write = find<Unreal::UFunction>(STR("/Script/Engine.AnimSingleNodeInstance:SetBlendSpacePosition"));
+            if (!node || !vector || !write || write->GetOuterPrivate() != node || write->GetReturnProperty() ||
+                !write->HasAnyFunctionFlags(Unreal::FUNC_Native) || write->GetNumParms() != 1 ||
+                write->GetParmsSize() != sizeof(Axis) || vector->GetMinAlignment() != alignof(Axis)) return;
+            Unreal::FStructProperty* position = nullptr;
+            for (auto* property : Unreal::TFieldRange<Unreal::FProperty>(write, Unreal::EFieldIterationFlags::None))
+                if (property->HasAnyPropertyFlags(Unreal::CPF_Parm))
+                    position = Unreal::CastField<Unreal::FStructProperty>(property);
+            if (!position || position->GetArrayDim() != 1 || position->GetOffset_Internal() != 0 ||
+                position->GetSize() != sizeof(Axis) || position->GetStruct().Get() != vector ||
+                (position->HasAnyPropertyFlags(Unreal::CPF_OutParm) &&
+                    !position->HasAnyPropertyFlags(Unreal::CPF_ConstParm))) return;
+            constexpr std::array axes{STR("X"), STR("Y"), STR("Z")};
+            for (std::size_t i = 0; i < axes.size(); ++i)
+            {
+                auto* axis = field<Unreal::FDoubleProperty>(vector, axes[i]);
+                if (!axis || axis->GetOffset_Internal() != static_cast<int>(i * sizeof(double))) return;
+            }
+            instance = field<Unreal::FObjectProperty>(body_type, STR("AnimScriptInstance"));
+            asset = field<Unreal::FObjectProperty>(node, STR("CurrentAsset"));
+            dead = field<Unreal::FBoolProperty>(pawn_type, STR("Dead"));
+            auto* physics = find<Unreal::UFunction>(STR("/Script/Engine.SceneComponent:IsAnySimulatingPhysics"));
+            if (!instance || !asset || !dead || !physics ||
+                physics != body_type->GetFunctionByNameInChain(physics->GetFName())) return;
+            simulating = GaitBoolCall::bind(physics);
+            if (!simulating.function.Get()) return;
+            node_class = node;
+            setter = write;
+
+            movement = field<Unreal::FObjectProperty>(pawn_type, STR("CharacterMovement"));
+            crouch = field<Unreal::FBoolProperty>(pawn_type, STR("bIsCrouched"));
+            auto* type = movement ? movement->GetPropertyClass().Get() : nullptr;
+            if (type && crouch)
+            {
+                grounded = GaitBoolCall::bind(type->GetFunctionByNameInChain(
+                    Unreal::FName{STR("IsMovingOnGround"), Unreal::FNAME_Find}));
+                if (grounded.function.Get()) movement_class = type;
+            }
+        }
+
+        static Unreal::UObject* reference(Unreal::FObjectProperty* property, Unreal::UObject* object)
+        {
+            return property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(object));
+        }
+    };
+
+    int advance_remote_gait(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        if (!available() || lua_gettop(stack) != 7 || !lua_isinteger(stack, 1) || !lua_isinteger(stack, 2) ||
+            lua_type(stack, 3) != LUA_TSTRING || !lua_isinteger(stack, 4) || !lua_isinteger(stack, 5) ||
+            !lua_isboolean(stack, 6) || (!lua_isnil(stack, 7) && lua_type(stack, 7) != LUA_TNUMBER)) return 0;
+        const auto expected_instance = lua_tointeger(stack, 4);
+        const auto expected_asset = lua_tointeger(stack, 5);
+        const bool require_ground = lua_toboolean(stack, 6);
+        const bool write = !lua_isnil(stack, 7);
+        const double axis = lua_tonumber(stack, 7);
+        if (expected_instance <= 0 || expected_asset <= 0 || (write && (!std::isfinite(axis) || axis < 0 || axis > 2)))
+            return 0;
+        auto* pawn = remote_avatar_pawn(lua_tointeger(stack, 1), lua_tointeger(stack, 2));
+        std::size_t path_size{};
+        const auto* path = lua_tolstring(stack, 3, &path_size);
+        const auto head = remote_head(pawn, {path, path_size});
+        if (!head.body) return 0;
+
+        static GaitWriter gait;
+        auto* pawn_type = pawn->GetClassPrivate();
+        auto* body_type = head.body->GetClassPrivate();
+        if (gait.pawn_class.Get() != pawn_type || gait.body_class.Get() != body_type)
+        {
+            if (pawn_type != find<Unreal::UClass>(pawn_path)) return 0;
+            gait = {};
+            gait.bind(pawn_type, body_type);
+        }
+        auto* setter = static_cast<Unreal::UFunction*>(gait.setter.Get());
+        auto* node_class = gait.node_class.Get();
+        if (!setter || !node_class || !gait.simulating.function.Get() ||
+            (require_ground && (!gait.movement_class.Get() || !gait.grounded.function.Get()))) return 0;
+        const auto respond = [&](bool value) { lua_pushboolean(stack, value); return 1; };
+        if (gait.dead->GetPropertyValueInContainer(pawn)) return respond(false);
+        if (require_ground)
+        {
+            if (gait.crouch->GetPropertyValueInContainer(pawn)) return respond(false);
+            auto* movement = GaitWriter::reference(gait.movement, pawn);
+            if (!live(movement)) return respond(false);
+            if (movement->GetClassPrivate() != gait.movement_class.Get() || movement->GetOuterPrivate() != pawn) return 0;
+            if (!gait.grounded.read(movement)) return respond(false);
+        }
+        auto* instance = GaitWriter::reference(gait.instance, head.body);
+        if (address(instance) != expected_instance || !live(instance)) return respond(false);
+        if (instance->GetClassPrivate() != node_class || instance->GetOuterPrivate() != head.body) return 0;
+        auto* asset = GaitWriter::reference(gait.asset, instance);
+        if (address(asset) != expected_asset || !live(asset) || gait.simulating.read(head.body)) return respond(false);
+        if (write)
+        {
+            GaitWriter::Axis parameter{axis, 0.0, 0.0};
+            instance->ProcessEvent(setter, parameter.data());
+        }
+        return respond(true);
     }
 
     int dispatch_valve(const Lua& lua)
@@ -2978,6 +3125,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishReadNativeAvatarSeconds", read_avatar_seconds);
         lua.register_function("SilverfishReadNativeAvatarMotion", read_avatar_motion);
         lua.register_function("SilverfishWriteNativeRemoteHeadRotation", write_remote_head_rotation);
+        lua.register_function("SilverfishAdvanceNativeRemoteGait", advance_remote_gait);
         lua.register_function("SilverfishReadNativeReadyRoster", read_ready_roster);
         lua.register_function("SilverfishReadNativeSwitchPower", read_switch_power);
         lua.register_function("SilverfishReadNativeDoorLatch", read_door_latch);

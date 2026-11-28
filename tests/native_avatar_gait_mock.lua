@@ -156,4 +156,33 @@ assert(body.inputs[#body.inputs] == returning and body.AnimScriptInstance.Curren
 gait.advance(blend_entry, 20.35)
 assert(body.inputs[#body.inputs] == 1 and not blend_entry.pose_transition and clones == 1)
 assert(template.SampleData[1].Animation == nil, "The stock blend space must stay intact")
+
+local native_entry, native_mesh = seat()
+assert(gait.apply(native_entry, native_mesh, 0, unarmed, prepared))
+assert(gait.apply(native_entry, native_mesh, 1, unarmed, prepared))
+native_entry.world, native_entry.pawn_address, native_entry.head_pivot_path = 1, 2, "pivot"
+local native_result, native_writes, expected_ground = true, {}, true
+SilverfishAdvanceNativeRemoteGait = function(world, pawn, pivot, instance, asset, ground, write)
+    assert(world == 1 and pawn == 2 and pivot == "pivot" and ground == expected_ground)
+    local expected = native_entry.pose_transition or native_entry.gait_blend
+    assert(instance == expected.instance and asset == expected.asset)
+    if native_result and write ~= nil then native_writes[#native_writes + 1] = write end
+    return native_result
+end
+gait.advance(native_entry, 30)
+assert(#native_writes == 0 and #native_entry.body.inputs == 1)
+gait.advance(native_entry, 30.1)
+assert(math.abs(native_writes[1] - .5) < .001 and #native_entry.body.inputs == 1)
+native_result = nil
+gait.advance(native_entry, 30.25)
+assert(native_entry.body.inputs[2] == 1 and not native_entry.gait_blend.from)
+assert(gait.apply(native_entry, native_mesh, 2, unarmed, prepared))
+native_result = false
+gait.advance(native_entry, 31)
+assert(not native_entry.gait_blend and #native_entry.body.inputs == 2)
+native_entry.pose_transition = {start_value = 0, goal = 1, value = 0, started = 32, instance = 4, asset = 5}
+native_result, expected_ground = true, false
+gait.advance(native_entry, 32.2)
+assert(native_writes[2] == 1 and not native_entry.pose_transition)
+SilverfishAdvanceNativeRemoteGait = nil
 print("Grounded gait and pose reversals preserve their animation driver and refuse incompatible assets")
