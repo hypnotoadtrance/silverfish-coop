@@ -146,13 +146,17 @@ local function projected_item(actor)
     end
 end
 
-function projection.carry_actor(id)
-    local entry = world_items[id]
-    if not carry_physics or not entry or not entry.carryable or entry.moving then return end
+local function current_world_item(id, entry)
     local active, epoch, exact, name = SilverfishReadNativeGuestDropProjection(entry.slot)
     local path = active and epoch == entry.epoch and exact == id and name:match("^%S+ (.+)$")
     local actor = path and StaticFindObject(path)
     if valid(actor) and actor:GetFullName() == name and same(actor:GetWorld(), entry.world) then return actor end
+end
+
+function projection.carry_actor(id)
+    local entry = world_items[id]
+    if not carry_physics or not entry or not entry.carryable or entry.moving then return end
+    return current_world_item(id, entry)
 end
 
 function projection.arm_carry(pawn, actor)
@@ -236,10 +240,11 @@ local function same_pose(first, second)
     return true
 end
 
-local function start_drop_fall(id, entry)
-    local actor = projection.carry_actor(id)
+local function start_drop_fall(id, entry, preview)
+    if not carry_physics then return end
+    local actor = current_world_item(id, entry)
     local pose = valid(actor) and motion_pose(actor)
-    if not pose or SilverfishSetNativeWorldLootPhysics(entry.slot, entry.epoch, id, true) ~= true then
+    if not pose or SilverfishSetNativeWorldLootPhysics(entry.slot, entry.epoch, id, true, preview) ~= true then
         return
     end
     entry.motion = {actor = actor, pose = pose, quiet = 0, released = os.clock()}
@@ -303,7 +308,8 @@ local function item_frame(fields, state, phase)
         for value in fields[index]:gmatch("[^|]+") do values[#values + 1] = value end
         local id, class = values[1], values[2]
         local mode = #values == 13 and values[3]
-        local snap, moving = mode == "ground" or mode == "carry-ground", mode == "moving"
+        local preview = mode == "preview-fall" and phase == "connected"
+        local snap, moving = mode == "ground" or mode == "carry-ground", mode == "moving" or preview
         local fall = mode == "fall" and phase == "hosting"
         local carryable = mode == "carry" or mode == "carry-ground" or fall
         local stack_count = math.tointeger(values[#values])
@@ -316,7 +322,7 @@ local function item_frame(fields, state, phase)
             if not coordinate(value) then error("world_loot_item_transform_invalid", 0) end
             transform[#transform + 1] = value
         end
-        incoming[id] = { class = class, transform = transform, snap = snap, moving = moving, fall = fall,
+        incoming[id] = { class = class, transform = transform, snap = snap, moving = moving, fall = fall, preview = preview,
             carryable = carryable, stack_count = stack_count }
     end
     local changed = false
@@ -344,6 +350,12 @@ local function item_frame(fields, state, phase)
                 pcall(LoadAsset, item.class)
             end
             local motion = previous and previous.motion
+            if motion and previous.preview and not item.preview then
+                if not SilverfishSetNativeWorldLootPhysics(slot, epoch, id, false) then
+                    SilverfishClearNativeGuestDropProjection(slot)
+                end
+                motion = nil
+            end
             if motion and motion.settled and not item.fall and not item.snap
                 and same_pose(motion.pose, item.transform) then motion = nil end
             local t = motion and motion.pose or item.transform
@@ -357,12 +369,12 @@ local function item_frame(fields, state, phase)
                 not item.moving, slot)
             local entry = { map = area, epoch = epoch, pawn = pawn, world = state.world,
                 class = item.class, slot = slot, visual_z = visual_z, x = t[1], y = t[2], z = t[3],
-                stack_count = item.stack_count, moving = item.moving, carryable = item.carryable, motion = motion,
+                stack_count = item.stack_count, moving = item.moving, carryable = item.carryable, motion = motion, preview = item.preview,
                 actor_name = previous and previous.actor_name,
                 error = not ok and (reason or "stock_drop_projection_unavailable") or nil }
             world_items[id] = entry
-            if ok and item.fall and not motion then
-                pcall(start_drop_fall, id, entry)
+            if ok and (item.fall or item.preview) and not motion then
+                pcall(start_drop_fall, id, entry, item.preview)
                 if not entry.motion then entry.error = "stock_drop_projection_fall_unavailable" end
             end
             if item.fall and entry.motion and not entry.motion.settled then entry.moving = true end

@@ -195,6 +195,14 @@ def item_is_moving(host, identity):
             or world_loot is not None and identity in world_loot.moving_ids(game.get("map"), host.zone_epoch))
 
 
+@dataclass
+class _DropPreview:
+    visit: tuple
+    row: dict
+    expires: float
+    observed: bool = False
+
+
 def _player_items(drops, area):
     if not isinstance(drops, dict):
         return
@@ -313,6 +321,38 @@ class Projection:
         self.settled = {}
         self._fall_scope = None
         self._falling = {}
+        self._drop_previews = {}
+
+    def preview_player_drop(self, visit, operation, action):
+        row = {"drop_id": operation, "map": visit[2], "guid": action["guid"], "class_path": action["drop_class"],
+               "quantity": action["count"], "location": action["drop_origin"]}
+        self._drop_previews[operation] = _DropPreview(visit, row, time.monotonic() + 4)
+
+    def discard_drop_preview(self, operation):
+        self._drop_previews.pop(operation, None)
+
+    def _merge_drop_previews(self, visit, player_drops, moving, now):
+        if not self._drop_previews:
+            return player_drops, set()
+        rows = dict(player_drops or {})
+        moving = set(moving or ())
+        preview_ids = set()
+        for operation, preview in tuple(self._drop_previews.items()):
+            identity = player_drop_identity(operation)
+            published = rows.get(operation)
+            obsolete = (preview.visit != visit or now >= preview.expires
+                        or preview.observed and published is None
+                        or published is not None and (
+                            published.get("class_path") != preview.row["class_path"]
+                            or "transform" in published and identity not in moving
+                        ))
+            if obsolete:
+                del self._drop_previews[operation]
+                continue
+            preview.observed |= published is not None
+            rows[operation] = preview.row
+            preview_ids.add(identity)
+        return rows, preview_ids
 
     def note_player_drop(self, scope, drop_id):
         """Simulate a newly committed drop on the host for this visit only."""
@@ -368,7 +408,7 @@ class Projection:
 
     async def sync(self, bridge, game, rolls, generation, zone, *, active, enemy_frame=None, enemy_rolls=None,
                    player_drops=None, stock_enemy_drops=None, mushroom_frame=None, enemy_motion=None, carried=None,
-                   quest_package=None):
+                   quest_package=None, preview_visit=None):
         phase = game.get("state")
         if phase not in {"hosting", "connected"} or not isinstance(zone, str):
             self.previous = None
@@ -377,6 +417,7 @@ class Projection:
             self.moving.clear()
             self._falling.clear()
             self._fall_scope = None
+            self._drop_previews.clear()
             return game
         area = game.get("map")
         epoch = uuid.uuid5(uuid.NAMESPACE_OID, f"{generation}:{zone}:{area}:world-loot").hex
@@ -392,6 +433,8 @@ class Projection:
             drops = player_drops or {}
             self._falling = {identity: drop_id for identity, drop_id in self._falling.items()
                              if drop_id in drops and "transform" not in drops[drop_id]}
+        now = time.monotonic()
+        player_drops, preview_ids = self._merge_drop_previews(preview_visit, player_drops, carried, now)
         self.items = nearby(game, rolls, zone, enemy_frame=enemy_frame, enemy_rolls=enemy_rolls,
                             player_drops=player_drops, stock_enemy_drops=stock_enemy_drops,
                             mushroom_frame=mushroom_frame, enemy_motion=enemy_motion, carried=carried,
@@ -399,8 +442,12 @@ class Projection:
                             pinned=self.moving_ids(area, zone)) if active else {}
         for identity in self.retired:
             self.items.pop(identity, None)
+        for identity in preview_ids & self.items.keys():
+            self.items[identity] = replace(self.items[identity], claim_action=None, claim_target=None)
         def encode(identity, item):
-            if item.claim_action is None:
+            if identity in preview_ids:
+                mode = ("preview-fall",)
+            elif item.claim_action is None:
                 mode = ("moving",)
             elif identity in self._falling:
                 mode = ("fall",)
@@ -414,7 +461,6 @@ class Projection:
         args = tuple(encode(identity, item) for identity, item in sorted(self.items.items()))
         seat = (phase, area, game.get("pawns", {}).get("local", {}).get("name"))
         signature = (epoch, seat, args)
-        now = time.monotonic()
         if not args and not game.get(KEY) and self.previous in (None, signature):
             return game
         if signature == self.previous and now < self.next_sync:

@@ -2800,7 +2800,7 @@ class Bridge:
                         map=fields[1], pawn=fields[2], source_guid=fields[3], new_guid=fields[4], class_path=fields[5],
                         quantity_before=int(fields[6]), remaining=int(fields[7]), split=int(fields[8]), weapon_class=fields[9],
                     )
-                elif fields[0] == native_guest_drop_record.STOCK_ACTION_ROW and len(fields) in (9, 10, 13):
+                elif fields[0] == native_guest_drop_record.STOCK_ACTION_ROW and len(fields) in (9, 10, 13, 14):
                     data[native_guest_drop_record.STOCK_ACTION_KEY] = native_guest_drop_record.parse_stock_action(fields, data)
                 elif (fields[0] == "native-inventory-view-binding" and len(fields) == 2
                       and fields[1] in {"ready", "blocked", "hooks_unavailable", "class_unavailable", "scope_unavailable"}):

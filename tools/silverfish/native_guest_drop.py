@@ -136,7 +136,7 @@ def install_stock_reply(client, snapshot, visit):
 
 
 async def settle_stock_action(client, area, epoch, operation, mode, entry, guid, quantity, sequence, expected, split,
-                              layout_preview=None, *, visit=None, drop_origin=None):
+                              layout_preview=None, *, visit=None, drop_origin=None, drop_class=None):
     sorting, splitting, unloading = mode == "sort", mode == "split", mode == "unload"
     accepted = False
     local_result = None
@@ -313,6 +313,7 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                     or worn and native_guest_armor.equip_action(receipt.get("class_path")) != (
                         native_guest_armor.HELMET_ACTION if int(expected) == 9 else native_guest_armor.ACTION)
                     or not record.valid_position(receipt.get("location"))
+                    or drop_class is not None and receipt["class_path"] != drop_class
                     or drop_origin is not None and receipt["location"] != drop_origin):
                 raise RuntimeError("The host did not settle the stock guest inventory drop")
             if layout_preview == "dropped":
@@ -371,6 +372,11 @@ async def service_stock_view(client, active: bool, *, visit=None) -> None:
     operation = uuid.uuid5(client.bridge.input_namespace,
                            f"{client.host_session}:{epoch}:{view['pawn']}:stock-inventory:{sequence}").hex
     split = (guid, count, expected) if mode in ("split", "unload") else None
+    preview = visit is not None and mode == "drop" and "drop_class" in view
+    if preview:
+        client.world_loot.preview_player_drop(visit, operation, view)
+        client.world_loot_wake.set()
+    accepted = False
     try:
         layout_preview = view.get("layout_preview")
         if layout_preview is not None:
@@ -379,11 +385,15 @@ async def service_stock_view(client, active: bool, *, visit=None) -> None:
                                  result=layout_preview)
         result = await settle_stock_action(client, area, epoch, operation, mode, view["entry"],
                                            guid, count, str(sequence), str(expected), split, layout_preview,
-                                           visit=visit, drop_origin=view.get("drop_origin"))
+                                           visit=visit, drop_origin=view.get("drop_origin"), drop_class=view.get("drop_class"))
+        accepted = True
         client.control.event("native_stock_inventory_action", operation_id=operation, **result)
     except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
         client.control.event("native_stock_inventory_rejected", operation_id=operation, reason=str(error))
     finally:
+        if preview and not accepted:
+            client.world_loot.discard_drop_preview(operation)
+            client.world_loot_wake.set()
         if visit is not None and (client.stock_interaction_scope() != visit or asyncio.current_task().cancelling()):
             # The same live inventory may return after a brief disconnect.
             # Replaying this input yields the same operation ID on that visit.

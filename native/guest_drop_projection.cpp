@@ -94,7 +94,7 @@ namespace
         std::int64_t intent{}, last_press{};
         Clock::time_point intent_expiry{}, preview_until{};
         std::int64_t preview_press{};
-        bool visible{}, claimable{true}, simulating{};
+        bool visible{}, claimable{true}, simulating{}, preview_fall{};
         std::optional<Motion> motion;
     };
 
@@ -640,21 +640,25 @@ namespace
             return arguments[1];
         }
 
-        bool world_body(U::UObject* box, bool enabled_physics) const
+        bool world_body(U::UObject* box, bool enabled_physics, bool static_only = false) const
         {
-            constexpr std::uint8_t world_static = 0, world_dynamic = 1, ignore = 0, block = 2;
+            constexpr std::uint8_t world_static = 0, world_dynamic = 1, interactable = 16, ignore = 0, block = 2;
             constexpr std::uint8_t query_only = 1, query_and_physics = 3;
             const auto mode = enabled_physics ? query_and_physics : query_only;
             const auto effect = enabled_physics ? block : ignore;
+            const auto dynamic_effect = static_only ? ignore : effect;
+            const auto interactable_effect = enabled_physics ? ignore : block;
             if (!enabled_physics) byte_call(box, simulate, 0);
             channel(box, set_channel, world_static, effect);
-            channel(box, set_channel, world_dynamic, effect);
+            channel(box, set_channel, world_dynamic, dynamic_effect);
+            if (static_only) channel(box, set_channel, interactable, interactable_effect);
             byte_call(box, set_enabled, mode);
             if (enabled_physics) byte_call(box, simulate, 1);
             return byte_call(box, enabled, 0xff) == mode &&
                 (byte_call(box, simulating, 0) != 0) == enabled_physics &&
                 channel(box, response, world_static, 0xff) == effect &&
-                channel(box, response, world_dynamic, 0xff) == effect;
+                channel(box, response, world_dynamic, 0xff) == dynamic_effect &&
+                (!static_only || channel(box, response, interactable, 0xff) == interactable_effect);
         }
 
         const char* configure(U::AActor* actor, U::UObject* box, std::span<U::UObject* const> components, bool stock_ammo)
@@ -1028,11 +1032,14 @@ namespace
 
     int set_world_item_physics(const Lua& lua)
     {
-        if (!ready() || lua.get_stack_size() != 4 || !lua.is_string(2) || !lua.is_string(3) || !lua.is_bool(4))
+        const auto arguments = lua.get_stack_size();
+        if (!ready() || (arguments != 4 && arguments != 5) || !lua.is_string(2) || !lua.is_string(3) ||
+            !lua.is_bool(4) || (arguments == 5 && !lua.is_bool(5)))
             return report(lua, false, "stock_world_loot_physics_arguments");
         auto* entry = requested_projection(lua, 1);
         const std::string epoch{lua.get_string()}, id{lua.get_string()};
         const bool simulate = lua.get_bool();
+        const bool preview = arguments == 5 && lua.get_bool();
         if (!entry || entry == &projections.front())
             return report(lua, false, "stock_world_loot_physics_slot_unqualified");
         auto& [projection, lease] = *entry;
@@ -1040,21 +1047,30 @@ namespace
         auto* box = projection.box.Get();
         if (lease.epoch != epoch || lease.id != id || !lease.visible || !scope_current(lease) ||
             !mutable_actor(actor) || !live(box) || object(actor, STR("RootComponent")) != box ||
-            object(actor, STR("Box")) != box || (simulate && !lease.simulating && (!lease.claimable || !inert(actor))))
+            object(actor, STR("Box")) != box || (preview && (!simulate || lease.host || lease.claimable)) ||
+            (simulate && !lease.simulating && ((!lease.claimable && !preview) || !inert(actor))))
             return report(lua, false, "stock_world_loot_physics_scope_unqualified");
         if (lease.simulating == simulate) return report(lua, true, "stock_world_loot_physics_unchanged");
 
         Collision collision;
         auto* physics = field<U::FBoolProperty>(actor, STR("Physics"));
         if (!physics || !collision.bind()) return report(lua, false, "stock_world_loot_physics_schema");
-        if (!collision.world_body(box, simulate))
+        if (preview)
         {
-            if (!collision.world_body(box, lease.simulating)) clear(*entry);
+            actor->SetActorEnableCollision(true);
+            if (!actor->GetActorEnableCollision()) return report(lua, false, "stock_world_loot_physics_collision_unavailable");
+        }
+        if (!collision.world_body(box, simulate, preview || lease.preview_fall))
+        {
+            if (preview) actor->SetActorEnableCollision(false);
+            if (!collision.world_body(box, lease.simulating, preview || lease.preview_fall)) clear(*entry);
             return report(lua, false, "stock_world_loot_physics_body_unverified");
         }
         physics->SetPropertyValueInContainer(actor, simulate);
         restore_pickup_preview(*entry);
+        if (!simulate && lease.preview_fall) actor->SetActorEnableCollision(lease.claimable);
         lease.simulating = simulate;
+        lease.preview_fall = preview;
         lease.motion.reset();
         lease.intent = 0;
         if (!simulate)

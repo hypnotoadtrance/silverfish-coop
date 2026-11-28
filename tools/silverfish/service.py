@@ -7319,6 +7319,7 @@ class Client:
                 if version >= native_world_loot.SHARED_PICKUPS_VERSION else None,
                 mushroom_frame=gameplay.get(native_mushrooms.KEY),
                 quest_package=gameplay.get(native_host_dig_live.PACKAGE_FRAME),
+                preview_visit=self.stock_interaction_scope() if active else None,
             )
         except (OSError, RuntimeError, TimeoutError) as error:
             if self.world_loot.last_error != str(error):

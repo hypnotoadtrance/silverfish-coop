@@ -26,7 +26,11 @@ SilverfishSyncNativeWorldLootItem = function(_, item_epoch, id, _, _, _, _, _, _
     return true
 end
 SilverfishReadNativeGuestDropProjection = function(slot) return table.unpack(active[slot] or {}) end
-SilverfishTakeNativeGuestDropProjectionPress = function() return epoch, good end
+SilverfishTakeNativeGuestDropProjectionPress = function()
+    for _, item in pairs(active) do
+        if item[3] == good then return epoch, good, item[5] end
+    end
+end
 
 local projection = require("native_guest_drop_projection")
 local placement = "|1|2|3|0|0|0|1|1|1"
@@ -92,7 +96,7 @@ end
 local blocked = false
 SilverfishClearNativeGuestDropProjection = function(slot)
     if blocked then return false end
-    active[slot] = nil
+    active[slot or 0] = nil
     return true
 end
 local function cue(id)
@@ -175,15 +179,17 @@ os.clock = function() return now end
 FName = function(value) return value end
 EFindName = { FNAME_Find = 0 }
 
-local poses, physics = {}, {}
+local poses, physics, claimable = {}, {}, true
 SilverfishSyncNativeWorldLootItem = function(_, item_epoch, id, _, _, z, visual_z, class, _, _, _, _, _, _, count, pickable, slot)
-    assert(item_epoch == epoch and id == fall_id and class == ammo and count == 12 and pickable and z == visual_z)
+    assert(item_epoch == epoch and id == fall_id and class == ammo and count == 12 and pickable == claimable and z == visual_z)
     poses[#poses + 1] = visual_z
     active[slot] = {true, epoch, fall_id, name, 0}
     return true
 end
-set_physics = function(slot, item_epoch, id, simulate)
+local preview_physics = 0
+set_physics = function(slot, item_epoch, id, simulate, preview)
     assert(active[slot][3] == id and id == fall_id and item_epoch == epoch)
+    if preview then preview_physics = preview_physics + 1 end
     physics[#physics + 1] = simulate
     return true
 end
@@ -215,3 +221,17 @@ assert(settled[6] == "settled" and settled[9] == 3 and #physics == 2 and physics
 assert(projection.command(fall, state, "hosting") == "stock world loot synchronized")
 assert(#physics == 2 and poses[3] == 3)
 print("A committed drop falls from its release position once and reports its settled transform")
+
+assert(projection.clear())
+state.server, claimable, drop_z = true, false, 95
+local preview = {"request", "native-world-loot-frame", area, epoch,
+    fall_id .. "|" .. ammo .. "|preview-fall|1|2|95|0|0|0|1|1|1|12"}
+local projected = projection.frame_reply(preview, state, "connected", function(...) return table.concat({...}, "	") end)
+assert(projected:find(ammo .. "	moving", 1, true) and preview_physics == 1 and #physics == 3 and physics[3])
+assert(projection.command(preview, state, "connected") == "stock world loot synchronized")
+assert(preview_physics == 1 and #physics == 3 and wakes == 2)
+claimable = true
+local committed = {"request", "native-world-loot-frame", area, epoch, fall_id .. "|" .. ammo .. "|carry|1|2|3|0|0|0|1|1|1|12"}
+assert(projection.command(committed, state, "connected") == "stock world loot synchronized")
+assert(#physics == 4 and not physics[4] and poses[#poses] == 3 and wakes == 2)
+print("A guest preview falls without pickup and adopts the shared pose on the same projection")

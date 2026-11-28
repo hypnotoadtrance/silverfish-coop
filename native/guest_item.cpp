@@ -4064,17 +4064,20 @@ namespace
 
         Inventory inventory;
         if (!locate(context, inventory).empty() || !inventory.item || inventory.backpack_index < 0) return 0;
-        const auto stack = silverfish::drop_item_class::stacks(Unreal::Cast<Unreal::UClass>(inventory.row_class(inventory.item)));
+        auto* item_class = Unreal::Cast<Unreal::UClass>(inventory.row_class(inventory.item));
+        const auto stack = silverfish::drop_item_class::stacks(item_class);
         auto* never_drop = field<Unreal::FBoolProperty>(inventory.type->GetStruct().Get(),
             STR("NeverDrop_21_57B44A714ED0B2B1776A5DA7627B4A8D"));
         if (!stack || !never_drop || never_drop->GetPropertyValueInContainer(inventory.item) ||
             quantity != (*stack ? inventory.ammo->GetPropertyValueInContainer(inventory.item) : 1) ||
             !local_inventory_current(context)) return 0;
 
+        const auto class_path = RC::to_utf8_string(item_class->GetPathName());
         Unreal::FScriptArrayHelper bag(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(context.save));
         bag.RemoveValues(inventory.backpack_index, 1);
         lua.set_bool(true);
-        return 1;
+        lua.set_string(class_path);
+        return 2;
     }
 
     struct RemoveEquipmentCall

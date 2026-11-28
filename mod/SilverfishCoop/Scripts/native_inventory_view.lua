@@ -495,9 +495,11 @@ preview_stock_layout = function(action)
                 origin = {string.format("%.17g", x), string.format("%.17g", y), string.format("%.17g", z)}
             end
         end
-        if SilverfishPreviewLocalBackpackDrop(pawn, save, action.guid, action.quantity) then
+        local dropped, class = SilverfishPreviewLocalBackpackDrop(pawn, save, action.guid, action.quantity)
+        if dropped then
             receipt = "dropped"
-            action.drop_origin = origin
+            action.drop_report = origin
+            if origin and type(class) == "string" then origin[4] = class end
         end
     end
     if not receipt then return end
@@ -1095,7 +1097,7 @@ function inventory_view.rows(state, phase, status_row)
     if pending and pending.live and (not pending.merge or pending.layout_preview) and same_context(current, pending.context) then
         rows[#rows + 1] = status_row("native-inventory-stock-action", current.map, current.name, pending.epoch,
             pending.sequence, pending.entry, pending.guid, pending.quantity, pending.expected or 0,
-            pending.layout_preview or "", table.unpack(pending.drop_origin or {}))
+            pending.layout_preview or "", table.unpack(pending.drop_report or {}))
         if pending.preview then
             rows[#rows + 1] = status_row("native-guest-personal-consumable-preview", current.map, current.name,
                 pending.guid, table.unpack(pending.preview))
