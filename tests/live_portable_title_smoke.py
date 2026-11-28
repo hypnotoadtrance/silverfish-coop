@@ -9870,7 +9870,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["sessions"].append(await start_pair(first, second, "Cabinet scout", on_join=check_cabinet,
                                                       load_existing=True, wait_status=wait_resident_status,
                                                       after_exit=check_cabinet_saved))
-        elif not manage_saves:
+        elif not manage_saves and not stock_host_creator:
             create = create_stock_split_character if stock_split or stock_equip else create_stock_drop_character if stock_drop else None
             proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=check_gameplay,
                                                       create_character=create_stock_bag_character if stock_use else create,

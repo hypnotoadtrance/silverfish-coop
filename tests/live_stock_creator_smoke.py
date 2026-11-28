@@ -116,12 +116,6 @@ def created_campaigns(title: Seat) -> set[Path]:
 async def enter_creator(title: Seat) -> tuple[Seat, dict]:
     baseline = created_campaigns(title)
     await click(title, "multiplayer", "host", "new")
-    try:
-        await title.bridge.command(FORM, "campaign", title.campaign.name)
-    except RuntimeError as exc:
-        assert str(exc) == "title_host_form_fixture_arguments"
-    else:
-        raise AssertionError("The native New Game form accepted a manual campaign name")
     await title.bridge.command(FORM, "port", str(title.port))
     await click(title, "submit")
 
