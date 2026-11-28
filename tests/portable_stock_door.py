@@ -28,7 +28,7 @@ async def verify_stock_crossroads_latch(host, guest, probe):
     position = tuple(map(float, (await action(host, "stage")).split(",")))
     await wait_resident_status(guest_run, lambda frame:
         (point := frame["game"].get("pawns", {}).get("local", {}).get("location"))
-        and math.dist(point, position) < 60, timeout=5)
+        and math.dist(point[:2], position[:2]) < 60 and abs(point[2] - position[2]) < 120, timeout=5)
     before = await action(host, "latch-state")
     assert before in ("true;false", "false;false"), before
     after = "false;false" if before == "true;false" else "true;false"
