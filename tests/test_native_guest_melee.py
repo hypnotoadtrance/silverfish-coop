@@ -276,7 +276,8 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
             [(6, *scope, "release", 5, 49)],
             [(7, *scope, "press", 7, 0), (8, *scope, "cancel", 7, 2)],
         ]
-        bridge = Mock(input_namespace=uuid.uuid4(), native_melee_input_requests=Mock(side_effect=batches))
+        bridge = Mock(input_namespace=uuid.uuid4(), native_melee_input_requests=Mock(side_effect=batches),
+                      native_melee_contacts=Mock(return_value=[]))
         client = SimpleNamespace(host_session="session", zone_epoch="epoch", bridge=bridge,
                                  gameplay_action=AsyncMock(return_value={}), control=Mock())
         controller = melee.GuestInput(client)
@@ -316,6 +317,34 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
             (melee.INPUT + "-edge", "3", "tap"),
         ])
         host.checkpoint_native.assert_not_awaited()
+
+    async def test_npc_contact_requires_a_report_enabled_swing_in_the_same_visit(self):
+        host = self.host()
+        host.zone_epoch = "epoch"
+        pawn = "exact pawn"
+        host.last_game["native_guest_equipped_weapons"] = {pawn: {"kind": "old-pipe", "guid": GUID}}
+        handler = melee.AuthorityInput(host)
+        press = dict(map=CROSSROADS, pawn=pawn, guid=GUID, serial=3, status="pending", presses=1, releases=1,
+                     contacts=0, hits=0, charged=0, combo=0)
+        settled = dict(map=CROSSROADS, pawn=pawn, target="npc:4", before=100, after=59.5, damage=40.5, lethal=False)
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+            dict(host.last_game, **{melee.INPUT_KEY: press}), dict(host.last_game, **{melee.CONTACT_RESULT: settled}),
+        ]))
+        payload = ";".join(("npc:4", "CharacterMesh0", "18", "0", "0", "1", "0", "0", "3000", "0", *["0"] * 11))
+        requested = f"epoch@{GUID}@{payload}"
+        with self.assertRaisesRegex(party.RuleError, "contact_unavailable"):
+            await handler.report(bridge, "guest", requested, OPERATION)
+        bridge.command.assert_not_awaited()
+        with patch.object(melee.native_inventory, "retain_guest_save", new=AsyncMock(return_value=True)):
+            await handler.request(bridge, "guest", f"epoch@{GUID}@{'1' * 32}@tap@reports-npc", OPERATION)
+        self.assertEqual(await handler.report(bridge, "guest", requested, "2" * 32), {melee.CONTACT_RESULT: settled})
+        host.zone_epoch = "next-visit"
+        with self.assertRaisesRegex(party.RuleError, "contact_unavailable"):
+            await handler.report(bridge, "guest", requested, "3" * 32)
+        self.assertEqual([call.args for call in bridge.command.await_args_list], [
+            (melee.INPUT + "-start", pawn, GUID, "tap", "reports-npc"),
+            (melee.CONTACT_REPORT, pawn, payload),
+        ])
 
     async def test_unsubmitted_melee_press_can_be_retried_without_mutation_or_receipt(self):
         host = self.host()

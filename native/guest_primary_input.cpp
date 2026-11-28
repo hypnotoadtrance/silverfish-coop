@@ -253,6 +253,7 @@ namespace
         HeldEdge edge{};
         std::int64_t duration_ms{};
         silverfish::native_guest_item::ShotView view{};
+        bool reports_melee{};
     };
     struct HeldStroke
     {
@@ -770,7 +771,8 @@ namespace
         if (!held.id) return;
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - held.started);
         const auto duration = std::clamp(elapsed, std::chrono::milliseconds{0}, std::chrono::milliseconds{9000});
-        queue_held(edge, held.id, now, duration.count());
+        if (queue_held(edge, held.id, now, duration.count()) && press.stroke == held.id)
+            held_receipts[(held_head + held_count - 1) % receipt_limit].reports_melee = press.local_melee;
         if (press.stroke == held.id && press.local_melee)
         {
             silverfish::native_guest_melee::present_local_input(press.seat.pawn.Get(), press.seat.held.Get(), false);
@@ -808,8 +810,11 @@ namespace
         held = {held_sequence, proof, now, until, now + held_probe_period};
         press.stroke = held.id;
         if (scoped_melee_edges() && scope.seat.mirrored)
+        {
             press.local_melee = silverfish::native_guest_melee::present_local_input(
-                scope.seat.pawn.Get(), scope.seat.held.Get(), true);
+                scope.seat.pawn.Get(), scope.seat.held.Get(), true, scope.text);
+            held_receipts[(held_head + held_count - 1) % receipt_limit].reports_melee = press.local_melee;
+        }
         return true;
     }
 
@@ -1123,8 +1128,12 @@ namespace
         lua.set_string(scope.text);
         lua.set_string(event.edge == HeldEdge::press ? "press" : event.edge == HeldEdge::release ? "release" : "cancel");
         lua.set_integer(static_cast<std::int64_t>(event.stroke));
-        if (melee_edges) lua.set_integer(event.duration_ms);
-        const int fields = melee_edges ? 6 : 5 + push_shot_view(lua, event.view);
+        if (melee_edges)
+        {
+            lua.set_integer(event.duration_ms);
+            lua.set_bool(event.reports_melee);
+        }
+        const int fields = melee_edges ? 7 : 5 + push_shot_view(lua, event.view);
         if (!peek)
         {
             held_head = (held_head + 1) % receipt_limit;

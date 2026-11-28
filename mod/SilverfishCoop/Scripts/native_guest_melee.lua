@@ -10,6 +10,7 @@ local swing_start = "native-guest-melee-swing-start"
 local input_start = "native-guest-melee-input-start"
 local input_edge = "native-guest-melee-input-edge"
 local input_state = "native-guest-melee-input-state"
+local contact_report = "native-guest-melee-contact"
 local fixture_aim = "native-guest-melee-aim-fixture"
 local fixture_contact = "native-guest-melee-contact-fixture"
 local actions = {
@@ -78,13 +79,19 @@ local function command_input(fields, state, phase, standing)
     end
     if fields[2] == input_start then
         local name, guid = fields[3], fields[4]
-        local tap = #fields == 5 and fields[5] == "tap"
-        if (#fields ~= 4 and not tap) or not valid_guid(guid) then error("native_guest_melee_exact_guid_required", 0) end
+        local edge, mode = fields[5], fields[6]
+        local reports_npc = #fields == 6 and mode == "reports-npc"
+        if ((#fields ~= 4 and (#fields ~= 5 or edge ~= "tap") and not reports_npc)
+            or (reports_npc and edge ~= "press" and edge ~= "tap") or not valid_guid(guid)) then
+            error("native_guest_melee_exact_guid_required", 0)
+        end
         local pawn, save = exact_guest(state, phase, name, standing)
         if not pawn then error("native_guest_melee_exact_owner_required", 0) end
         local proof
-        if tap then
-            proof = melee_input_proof(SilverfishStartNativeGuestMeleeInput(pawn:GetAddress(), save:GetAddress(), guid, "tap"))
+        if reports_npc then
+            proof = melee_input_proof(SilverfishStartNativeGuestMeleeInput(pawn:GetAddress(), save:GetAddress(), guid, edge, mode))
+        elseif edge == "tap" then
+            proof = melee_input_proof(SilverfishStartNativeGuestMeleeInput(pawn:GetAddress(), save:GetAddress(), guid, edge))
         else
             proof = melee_input_proof(SilverfishStartNativeGuestMeleeInput(pawn:GetAddress(), save:GetAddress(), guid))
         end
@@ -422,7 +429,33 @@ local function swing_row(swing, status_row)
     return status_row(table.unpack(fields))
 end
 
+local function reported_contact(fields, state, phase, status_row, standing)
+    if #fields ~= 4 or not qualified_host(state, phase, false) or type(SilverfishApplyGuestMeleeResult) ~= "function" then
+        return {accepted = false, message = "native_guest_melee_contact_unavailable"}
+    end
+    local name = fields[3]
+    local pawn, save = exact_guest(state, phase, name, standing)
+    if not pawn then return {accepted = false, message = "native_guest_melee_exact_owner_required"} end
+    local payload = {}
+    for token in fields[4]:gmatch("[^;]+") do
+        local index = #payload + 1
+        payload[index] = index <= 2 and token or tonumber(token)
+        if not payload[index] then return {accepted = false, message = "native_guest_melee_invalid_contact"} end
+    end
+    if #payload ~= 21 then return {accepted = false, message = "native_guest_melee_invalid_contact"} end
+    payload[10] = math.tointeger(payload[10])
+    local ok, status, before, after, total, lethal = pcall(SilverfishApplyGuestMeleeResult,
+        pawn:GetAddress(), save:GetAddress(), table.unpack(payload, 1, 21))
+    if not ok then return {accepted = false, message = "native_guest_melee_contact_handler_failed"} end
+    if status ~= "reported_contact_applied" then
+        return {accepted = false, message = status or "native_guest_melee_contact_unavailable"}
+    end
+    return {accepted = true, message = status, report = status_row(contact_report, state.map, name, payload[1],
+        before, after, total, lethal and 1 or 0)}
+end
+
 local function observe_command(fields, state, phase, status_row, standing)
+    if fields[2] == contact_report then return reported_contact(fields, state, phase, status_row, standing) end
     local accepted, message = pcall(melee.command, fields, state, phase, standing)
     local report
     if accepted then

@@ -20,7 +20,10 @@ SWING = "native-guest-melee-swing"
 INPUT = "native-guest-melee-input"
 INPUT_RECORD = "native-guest-melee-edge"
 INPUT_STATE = "native-guest-melee-input-state"
-COMPACT_ACTIONS = frozenset((INPUT + "-start", INPUT + "-edge", SWING + "-start"))
+CONTACT_REPORT = "native-guest-melee-contact"
+CONTACT_RESULT = "native_guest_melee_contact"
+REPORTS_NPC = "reports-npc"
+COMPACT_ACTIONS = frozenset((INPUT + "-start", INPUT + "-edge", SWING + "-start", CONTACT_REPORT))
 REPLY_HEADER = "native-guest-melee-reply\t1\n"
 REPLY_BYTES = "native_guest_melee_reply_bytes"
 INPUT_KEY = "native_guest_melee_input_state"
@@ -72,10 +75,11 @@ def pawn_in_map(area, pawn) -> bool:
 
 def input_record(raw: bytes):
     try:
-        marker, sequence, area, pawn, guid, kind, edge, stroke, duration = raw.decode("utf-8").split("\t")
+        marker, sequence, area, pawn, guid, kind, edge, stroke, duration, *mode = raw.decode("utf-8").strip().split("\t")
     except (UnicodeError, ValueError):
         return None
-    if (marker != INPUT_RECORD or not pawn_in_map(area, pawn) or not valid_guid(guid) or kind not in KINDS
+    if (mode not in ([], [REPORTS_NPC]) or marker != INPUT_RECORD or not pawn_in_map(area, pawn)
+            or not valid_guid(guid) or kind not in KINDS
             or edge not in EDGES or any(not (number.isascii() and number.isdecimal() and len(number) <= 16)
                                        for number in (sequence, stroke, duration))):
         return None
@@ -83,7 +87,51 @@ def input_record(raw: bytes):
     if (not 0 < stroke <= sequence < 2**53 or (edge == "press") != (sequence == stroke)
             or not 0 <= duration <= 9000 or edge == "press" and duration != 0):
         return None
-    return sequence, area, pawn, guid, kind, edge, stroke, duration
+    return sequence, area, pawn, guid, kind, edge, stroke, duration, *mode
+
+
+def contact_identity(value):
+    if re.fullmatch(r"npc:[1-9][0-9]{0,4}", value) and int(value[4:]) <= 65535:
+        return True
+    # A streamed actor can belong to a different level package in the same
+    # visit. Native resolution verifies the actor's live world and level.
+    return len(value) <= 256 and re.fullmatch(r"/[\w]+/[\w./]+:PersistentLevel\.[\w]+", value, re.ASCII) is not None
+
+
+def contact_payload(payload):
+    fields = payload.split(";")
+    if len(fields) != 21 or not contact_identity(fields[0]) or not re.fullmatch(r"[A-Za-z0-9_]{1,127}", fields[1]):
+        return False
+    if any(not re.fullmatch(r"-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?", value) for value in fields[2:]):
+        return False
+    values = tuple(map(float, fields[2:]))
+    return all(math.isfinite(value) for value in values) and fields[9] in ("0", "1")
+
+
+def contact_record(raw):
+    try:
+        marker, sequence, area, pawn, guid, payload = raw.decode("utf-8").strip().split("\t")
+    except (UnicodeError, ValueError):
+        return None
+    if (marker != CONTACT_REPORT or not re.fullmatch(r"[1-9][0-9]{0,15}", sequence) or int(sequence) >= 2**53
+            or not pawn_in_map(area, pawn) or not valid_guid(guid) or not contact_payload(payload)):
+        return None
+    return int(sequence), area, pawn, guid, payload
+
+
+def parse_contact_result(fields):
+    if len(fields) != 8:
+        return None
+    _, area, pawn, target, before, after, damage, lethal = fields
+    if not pawn_in_map(area, pawn) or not contact_identity(target) or lethal not in ("0", "1"):
+        return None
+    try:
+        before, after, damage = map(float, (before, after, damage))
+    except ValueError:
+        return None
+    if not all(math.isfinite(value) for value in (before, after, damage)) or not (before > 0 and 0 <= after <= before and damage >= 0):
+        return None
+    return dict(map=area, pawn=pawn, target=target, before=before, after=after, damage=damage, lethal=lethal == "1")
 
 
 def parse_input_state(fields):
@@ -213,6 +261,7 @@ class InputScope:
     frame: dict
     held: str | None = None
     reply_sequence: int | None = None
+    reports_npc: bool = False
 
     def observes(self, frame: dict) -> bool:
         return (frame.get("map"), frame.get("pawn"), frame.get("guid"), frame.get("serial")) == (
@@ -226,6 +275,7 @@ class AuthorityInput:
         self.host = host
         self.scope: InputScope | None = None
         self.receipts: dict[tuple[str, str, str, str, str], dict] = {}
+        self.report_scopes: dict[tuple[str, str, str, str], float] = {}
 
     def _fail(self, reason):
         self.host.native_checkpoint_unsafe = self.host.stopping = True
@@ -264,9 +314,10 @@ class AuthorityInput:
 
     async def request(self, bridge, character, target, operation):
         parts = target.split("@") if isinstance(target, str) else []
-        if len(parts) != 4:
+        if len(parts) not in (4, 5) or parts[4:] not in ([], [REPORTS_NPC]):
             raise party.RuleError("native_guest_melee_exact_edge_required")
-        epoch, guid, stroke, edge = parts
+        epoch, guid, stroke, edge, *mode = parts
+        reports_npc = bool(mode)
         host = self.host
         if (not epoch or epoch != host.zone_epoch or not valid_guid(guid) or edge not in {*EDGES, TAP}
                 or not party.REQUEST_ID.fullmatch(stroke)
@@ -280,8 +331,8 @@ class AuthorityInput:
         scope = self.scope
         owner = host.native_recipients().get(character) or {}
         area, pawn = host.last_game.get("map"), owner.get("pawn")
-        if scope and (character, epoch, area, pawn, guid) != (
-                scope.character, scope.epoch, scope.area, scope.pawn, scope.guid):
+        if scope and (character, epoch, area, pawn, guid, reports_npc) != (
+                scope.character, scope.epoch, scope.area, scope.pawn, scope.guid, scope.reports_npc):
             raise party.RuleError("native_guest_melee_combat_busy")
         if not host.native_guest_controls or host.stopping or host.native_checkpoint_unsafe or not pawn:
             raise party.RuleError("native_guest_melee_swing_unavailable")
@@ -303,7 +354,8 @@ class AuthorityInput:
         if scope:
             command = INPUT + "-edge", str(scope.frame["serial"]), edge
         else:
-            command = (INPUT + "-start", pawn, guid, TAP) if edge == TAP else (INPUT + "-start", pawn, guid)
+            options = (edge, REPORTS_NPC) if reports_npc else (TAP,) if edge == TAP else ()
+            command = INPUT + "-start", pawn, guid, *options
         try:
             snapshot = await combat_command(bridge, command, operation, timeout=3)
         except LocalCommandReplyUnavailable as error:
@@ -322,7 +374,13 @@ class AuthorityInput:
                                                          prior_releases + (edge != "press")):
             self._fail("The stock melee input did not execute the exact edge")
         if scope is None:
-            scope = self.scope = InputScope(character, epoch, area, pawn, guid, frame)
+            scope = self.scope = InputScope(character, epoch, area, pawn, guid, frame, reports_npc=reports_npc)
+        if reports_npc:
+            now = time.monotonic()
+            self.report_scopes = {key: until for key, until in self.report_scopes.items() if until > now and key[1] == epoch}
+            self.report_scopes[(character, epoch, pawn, guid)] = now + 12
+            if len(self.report_scopes) > 64:
+                self.report_scopes.pop(next(iter(self.report_scopes)))
         scope.held = stroke if edge == "press" else None
         result = {INPUT_KEY: frame}
         if snapshot.get(REPLY_RECOVERED):
@@ -339,24 +397,51 @@ class AuthorityInput:
             self.receipts.pop(next(iter(self.receipts)))
         return result
 
+    async def report(self, bridge, character, target, operation):
+        host = self.host
+        epoch, guid, payload = (target.split("@", 2) if isinstance(target, str) and target.count("@") == 2 else ("", "", ""))
+        area = host.last_game.get("map")
+        owner = host.native_recipients().get(character) or {}
+        pawn = owner.get("pawn")
+        if (not host.native_guest_controls or not pawn or epoch != host.zone_epoch or not owner.get("connected")
+                or host.stopping or host.transitioning or host.native_checkpoint_unsafe or host.party.get("wipe") is not None
+                or host.last_game.get("state") != "hosting" or not isinstance(operation, str)
+                or not party.REQUEST_ID.fullmatch(operation) or not contact_payload(payload)
+                or self.report_scopes.get((character, epoch, pawn, guid), 0) <= time.monotonic()):
+            raise party.RuleError("native_guest_melee_contact_unavailable")
+        try:
+            snapshot = await combat_command(bridge, (CONTACT_REPORT, pawn, payload), operation, timeout=3)
+        except (OSError, RuntimeError, TimeoutError) as error:
+            raise party.RuleError(str(error)) from error
+        settled = snapshot.get(CONTACT_RESULT, {})
+        if (snapshot.get("state"), settled.get("map"), settled.get("pawn"), settled.get("target")) != (
+                "hosting", area, pawn, payload.partition(";")[0]):
+            raise party.RuleError("native_guest_melee_contact_readback_unavailable")
+        result = {CONTACT_RESULT: settled}
+        if snapshot.get(REPLY_RECOVERED):
+            result[REPLY_RECOVERED] = True
+        return result
+
 
 class GuestInput:
     def __init__(self, client):
         self.client = client
         self.sequence = 0
+        self.contact_sequence = 0
 
     async def service(self, scope) -> None:
         client = self.client
         session, epoch = client.host_session, client.zone_epoch
         inputs = client.bridge.native_melee_input_requests()
-        for index, (sequence, area, pawn, guid, kind, edge, number, _) in enumerate(inputs):
+        for index, (sequence, area, pawn, guid, kind, edge, number, _, *mode) in enumerate(inputs):
             if sequence <= self.sequence:
                 continue
             if edge == "press" and index + 1 < len(inputs):
                 following = inputs[index + 1]
                 # The native clock measures the actual input interval. A stalled
                 # worker can drain a long hold and its release together.
-                if following[:7] == (sequence + 1, area, pawn, guid, kind, "release", number) and following[7] <= MAX_TAP_MS:
+                if (following[:7] == (sequence + 1, area, pawn, guid, kind, "release", number)
+                        and following[7] <= MAX_TAP_MS and tuple(mode) == following[8:]):
                     sequence, edge = following[0], TAP
             self.sequence = sequence
             if not session or not epoch or (area, pawn, guid, kind) != scope or (
@@ -365,11 +450,24 @@ class GuestInput:
             token = uuid.uuid5(client.bridge.input_namespace, f"{session}:{epoch}:melee:{number}").hex
             operation = uuid.uuid5(client.bridge.input_namespace, f"{token}:{edge}:{sequence}").hex
             try:
-                result = await client.gameplay_action(INPUT, operation, f"{epoch}@{guid}@{token}@{edge}")
+                result = await client.gameplay_action(INPUT, operation, "@".join((epoch, guid, token, edge, *mode)))
                 client.control.event("native_guest_melee_edge", operation_id=operation, sequence=sequence, edge=edge, **result)
             except (OSError, RuntimeError, ValueError) as error:
                 client.control.event("native_guest_melee_edge_rejected", operation_id=operation, sequence=sequence,
                                      edge=edge, reason=str(error))
+
+        for sequence, area, pawn, guid, payload in client.bridge.native_melee_contacts():
+            if sequence <= self.contact_sequence:
+                continue
+            self.contact_sequence = sequence
+            if not session or not epoch or client.stock_interaction_scope() != (session, epoch, area, pawn):
+                continue
+            operation = uuid.uuid5(client.bridge.input_namespace, f"{session}:{epoch}:{pawn}:melee-contact:{sequence}").hex
+            try:
+                result = await client.gameplay_action(CONTACT_REPORT, operation, f"{epoch}@{guid}@{payload}")
+                client.control.event(CONTACT_RESULT, operation_id=operation, sequence=sequence, **result)
+            except (OSError, RuntimeError, ValueError) as error:
+                client.control.event(CONTACT_RESULT + "_rejected", operation_id=operation, sequence=sequence, reason=str(error))
 
 
 async def perform(host, bridge, action: str, character: str, guid: str, operation_id: str, *, fixture_lane: int | None = None) -> dict:

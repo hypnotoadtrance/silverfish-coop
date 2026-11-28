@@ -121,6 +121,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         *native_guest_weapon.GUEST_ACTIONS, native_guest_weapon.SELECT_EQUIPMENT,
                         native_guest_weapon.SET_FIRE_MODE,
                         *native_guest_consumable.RESULT, native_guest_consumable.COOKED_MEAL, native_guest_melee.SWING, native_guest_melee.INPUT,
+                        native_guest_melee.CONTACT_REPORT,
                         native_host_dig_live.GUEST_ACTION,
                         native_host_dig_live.COLLECT,
                         native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION)
@@ -2499,6 +2500,8 @@ class Host:
             elif action == native_guest_melee.INPUT and self.melee_input:
                 async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                     result = await self.melee_input.request(bridge, character, target, request["operation_id"])
+            elif action == native_guest_melee.CONTACT_REPORT and self.melee_input:
+                result = await self.melee_input.report(bridge, character, target, request["operation_id"])
             elif action == native_host_dig_live.GUEST_ACTION:
                 result = await native_host_dig_live.guest_dig(self, bridge, character, target, request["operation_id"])
             elif action == native_host_dig_live.COLLECT:

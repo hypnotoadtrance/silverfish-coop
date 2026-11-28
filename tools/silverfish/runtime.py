@@ -984,6 +984,7 @@ class Bridge:
         self._local_stardust_records = deque(maxlen=64)
         self._local_fruiting_stardust_records = deque(maxlen=64)
         self._local_melee_records = deque(maxlen=64)
+        self._local_melee_contacts = deque(maxlen=64)
         self._local_cooked_meals = deque(maxlen=16)
         self._local_prop_carry_records = deque(maxlen=64)
         self._local_primary_records = deque(maxlen=64)
@@ -1090,6 +1091,8 @@ class Bridge:
                     self._local_fruiting_stardust_records.append(record)
                 elif record.startswith(b"native-guest-melee-edge\t"):
                     self._local_melee_records.append(record)
+                elif record.startswith(b"native-guest-melee-contact\t"):
+                    self._local_melee_contacts.append(record)
                 elif record.startswith(b"native-guest-cooked-meal\t"):
                     self._local_cooked_meals.append(record)
                 elif record.startswith(b"native-prop-carry-input\t"):
@@ -1126,6 +1129,10 @@ class Bridge:
     def native_melee_input_requests(self):
         return [edge for raw in self._take_local_inputs(self._local_melee_records)
                 if (edge := native_guest_melee.input_record(raw)) is not None]
+
+    def native_melee_contacts(self):
+        return [contact for raw in self._take_local_inputs(self._local_melee_contacts)
+                if (contact := native_guest_melee.contact_record(raw)) is not None]
 
     def native_cooked_meals(self) -> list[bytes]:
         return self._take_local_inputs(self._local_cooked_meals)
@@ -1700,6 +1707,9 @@ class Bridge:
                         if (fields[0] != "native-guest-melee-contact-fixture"
                                 or (data.get("state"), data.get("map")) == ("hosting", row["map"])):
                             data[key] = row
+                elif fields[0] == native_guest_melee.CONTACT_REPORT:
+                    if row := native_guest_melee.parse_contact_result(fields):
+                        data[native_guest_melee.CONTACT_RESULT] = row
                 elif fields[0] == native_guest_melee.INPUT_STATE:
                     row = native_guest_melee.parse_input_state(fields)
                     if row and (data.get("state"), data.get("map")) == ("hosting", row["map"]):

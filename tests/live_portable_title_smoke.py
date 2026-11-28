@@ -327,7 +327,7 @@ def stock_shovel_overlay(game: Path):
         yield {"stock_shovel": shovel, "hold_report": report}
 
 
-def suppress_combat_replies(game: Path, *, melee: bool, weapon: bool):
+def suppress_combat_replies(game: Path, *, melee: bool, weapon: bool, contact: bool = False):
     original = (
         "        SilverfishPublishLocalBridgeReply(pending.ticket,\n"
         "            guest_combat(fields, state, current_phase, sequence, status_row, players.is_standing_guest))"
@@ -342,13 +342,15 @@ def suppress_combat_replies(game: Path, *, melee: bool, weapon: bool):
         local weapon = TEST_WEAPON and (action == "native-guest-weapon-select"
             or action == "native-guest-weapon-fire" or action == "native-guest-weapon-reload")
         status_publication.test_combat_replies_dropped = status_publication.test_combat_replies_dropped or {}
-        if (release or weapon) and fields[#fields]:match("^op:")
+        local contact = TEST_CONTACT and action == "native-guest-melee-contact"
+        if (release or weapon or contact) and fields[#fields]:match("^op:")
             and not status_publication.test_combat_replies_dropped[action] and reply:find("\\taccepted\\t", 1, true) then
             status_publication.test_combat_replies_dropped[action] = true
         else
             SilverfishPublishLocalBridgeReply(pending.ticket, reply)
         end'''
         injected = injected.replace("TEST_MELEE", str(melee).lower()).replace("TEST_WEAPON", str(weapon).lower())
+        injected = injected.replace("TEST_CONTACT", str(contact).lower())
         return script.replace(original, injected, 1)
 
     return portable_main_overlay(game, patch)
@@ -1269,36 +1271,52 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
             while not (await command(guest, f"melee-state\t{center}")).startswith("true;false;"):
                 await asyncio.sleep(.05)
         if inspect_guest_contact and attempt == 1:
-            try:
-                assert await command(guest, f"face-melee\t{center}") == "ready"
-                assert await command(guest, "melee-contact-probe-arm") == "armed"
-                assert await command(host, "melee-contact-probe-health") == "ready"
-                async with asyncio.timeout(5):
-                    while (reference := await command(host, "melee-contact-probe-target")) == "waiting":
-                        await asyncio.sleep(.05)
-                assert await command(host, f"face-away-melee\t{center}") == "ready"
-                guid = frame["game"]["native_guest_primary_scope"]["guid"]
-                tap = await stock_melee_edge(guest_run, guid, "tap")
-                ack, = await stock_melee_edge_receipts(guest_run, frame, tap)
-                host_contact = await stock_melee_terminal(host_run, ack)
-                local_contact = await read_guest_melee_contact(command, guest)
-                assert host_contact["contacts"] == 1 and host_contact["hits"] == 0, (host_contact, local_contact)
-                assert (local_contact["serial"], local_contact["status"], local_contact.get("attack"),
-                        local_contact.get("identity")) == (1, "ready", 0, reference), local_contact
-                assert (await command(host, f"melee-state\t{center}")).startswith("true;false;100.000;")
-                report = await command(guest, "melee-contact-probe-result")
-                assert report.startswith(reference + ";"), (report, local_contact)
-                applied = (await command(host, f"melee-contact-probe-apply\t{report}")).split(";")
-                assert len(applied) == 5 and applied[0] == "reported_contact_applied", (report, applied)
-                before, after, damage = map(float, applied[1:4])
-                assert before == 100 and 0 < after < before and math.isclose(before - after, damage, abs_tol=.001), applied
-                assert applied[4] == "false" and (await command(host, f"melee-state\t{center}")).startswith(f"true;false;{after:.3f};")
-                local_contact.update(host_hits=host_contact["hits"], expected_target=name, shared_target=reference,
-                                     reported_component=report.split(";")[1], health_before=before,
-                                     health_after=after, stock_damage=damage)
-            finally:
-                await asyncio.gather(*(command(seat, "clear-melee-aim") for seat in (host, guest)))
-            center, name = (await command(host, f"stage-melee\t{attempt}")).split(";", 1)
+            variants = {}
+            for aligned in (False, True):
+                try:
+                    assert await command(guest, f"face-melee\t{center}") == "ready"
+                    assert await command(guest, "melee-contact-probe-arm") == "armed"
+                    assert await command(host, "melee-contact-probe-health") == "ready"
+                    async with asyncio.timeout(5):
+                        while (reference := await command(host, "melee-contact-probe-target")) == "waiting":
+                            await asyncio.sleep(.05)
+                    if aligned:
+                        assert await command(host, f"align-melee\t{center}") == "true"
+                    else:
+                        assert await command(host, f"face-away-melee\t{center}") == "ready"
+                    guid = frame["game"]["native_guest_primary_scope"]["guid"]
+                    began = time.time()
+                    tap = await stock_melee_edge(guest_run, guid, "tap")
+                    ack, = await stock_melee_edge_receipts(guest_run, frame, tap)
+                    host_contact = await stock_melee_terminal(host_run, ack)
+                    local_contact = await read_guest_melee_contact(command, guest)
+                    assert host_contact["contacts"] == 1 and host_contact["hits"] == 0, (host_contact, local_contact)
+                    assert (local_contact["serial"], local_contact["status"], local_contact.get("attack"),
+                            local_contact.get("identity")) == (1, "ready", 0, reference), local_contact
+                    async with asyncio.timeout(6):
+                        while True:
+                            events = [entry for entry in await resident_events(guest_run, frame)
+                                      if entry["time_unix"] >= began and entry["event"] in
+                                      (native_guest_melee.CONTACT_RESULT, native_guest_melee.CONTACT_RESULT + "_rejected")]
+                            if events:
+                                break
+                            await asyncio.sleep(.05)
+                    entry, = events
+                    reply_recovered = entry.get(native_guest_melee.REPLY_RECOVERED) is True
+                    assert reply_recovered == (not aligned), entry
+                    assert entry["event"] == native_guest_melee.CONTACT_RESULT, entry
+                    applied = entry[native_guest_melee.CONTACT_RESULT]
+                    before, after, damage = applied["before"], applied["after"], applied["damage"]
+                    assert applied["target"] == reference and not applied["lethal"]
+                    assert before == 100 and 0 < after < before and math.isclose(before - after, damage, abs_tol=.001), applied
+                    assert (await command(host, f"melee-state\t{center}")).startswith(f"true;false;{after:.3f};")
+                    local_contact.update(host_hits=host_contact["hits"], expected_target=name, shared_target=reference,
+                                         health_before=before, health_after=after, stock_damage=damage, reply_recovered=reply_recovered)
+                    variants["aligned" if aligned else "divergent"] = local_contact
+                finally:
+                    await asyncio.gather(*(command(seat, "clear-melee-aim") for seat in (host, guest)))
+                center, name = (await command(host, f"stage-melee\t{attempt}")).split(";", 1)
+            local_contact = variants
         try:
             watching = await asyncio.gather(*(command(seat, "watch-melee-motion") for seat in (host, guest)))
             assert watching == ["watching", "watching"], watching
@@ -1356,7 +1374,7 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
     assert proof["target"] == name and proof["enemy_health_after"] <= 0 and native_guest_melee.verified_damage(proof), (
         proof, contact, before, after, result.get("host_observer_swing"), misses, geometry)
     if local_contact is not None:
-        result["divergent_guest_contact"] = local_contact
+        result["networked_guest_contacts"] = local_contact
     if misses:
         result["fixture_misses"] = misses
     if grip_error is not None:
@@ -8866,9 +8884,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["stock_nearby_overlays"] = [probes.enter_context(stock_nearby_overlay(game)) for game in games]
         if stock_bandage_revisit:
             proof["loose_revisit_overlays"] = [probes.enter_context(loose_revisit_overlay(game)) for game in games]
-        if stock_melee_edges or rusty_pistol:
+        contact_fault = stock_melee_family and os.getenv("SILVERFISH_TEST_GUEST_MELEE_CONTACT") == "1"
+        if stock_melee_edges or rusty_pistol or contact_fault:
             proof["combat_reply_overlays"] = [probes.enter_context(suppress_combat_replies(
-                game, melee=stock_melee_edges, weapon=rusty_pistol)) for game in games]
+                game, melee=stock_melee_edges, weapon=rusty_pistol, contact=contact_fault)) for game in games]
         if stock_shovel or stock_buried_placements:
             proof["stock_shovel_overlays"] = [probes.enter_context(stock_shovel_overlay(game)) for game in games]
         if stock_shovel_quest or stock_dead_drops or stock_authored_quest_placement:

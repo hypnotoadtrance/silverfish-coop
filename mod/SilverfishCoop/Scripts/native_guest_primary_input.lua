@@ -134,17 +134,31 @@ local function drain_melee(current, address)
         or type(SilverfishEnqueueLocalBridgeInput) ~= "function" then return end
     local emitted, last = 0, nil
     for _ = 1, 8 do
-        local sequence, owner, guid, edge, stroke, duration = SilverfishTakeNativeGuestMeleeInput(address)
+        local sequence, owner, guid, edge, stroke, duration, reports_melee = SilverfishTakeNativeGuestMeleeInput(address)
         if not valid_sequence(sequence) or not valid_sequence(stroke) or owner ~= address or guid ~= current.guid
             or not held_edges[edge] or (edge == "press" and stroke ~= sequence)
             or (edge ~= "press" and stroke >= sequence) or math.type(duration) ~= "integer"
             or duration < 0 or duration > 9000 or (edge == "press" and duration ~= 0) then break end
         local record = table.concat({"native-guest-melee-edge", sequence, current.map, current.name, guid,
-            current.kind, edge, stroke, duration}, "\t") .. "\n"
+            current.kind, edge, stroke, duration, reports_melee and "reports-npc" or nil}, "\t") .. "\n"
         if not SilverfishEnqueueLocalBridgeInput(record) then break end
         emitted, last = emitted + 1, sequence
     end
     return emitted, last
+end
+
+local function drain_melee_contacts(current, address)
+    if type(SilverfishTakeGuestMeleeContact) ~= "function" or type(SilverfishEnqueueLocalBridgeInput) ~= "function" then return end
+    for _ = 1, 8 do
+        local contact = {SilverfishTakeGuestMeleeContact(address)}
+        if #contact ~= 23 then return end
+        local sequence, guid = contact[1], contact[2]
+        if valid_sequence(sequence) and valid_guid(guid) then
+            local fields = {"native-guest-melee-contact", sequence, current.map, current.name, guid,
+                table.concat(contact, ";", 3)}
+            if not SilverfishEnqueueLocalBridgeInput(table.concat(fields, "\t") .. "\n") then return end
+        end
+    end
 end
 
 function primary.reset()
@@ -507,6 +521,7 @@ function primary.start(bridge, downed)
         local ok, failure = pcall(function()
             local address = current.pawn:GetAddress()
             drain_melee(current, address)
+            drain_melee_contacts(current, address)
             drain_taps(current, address)
             if embedded and binding == current then
                 drain_held(current, address)

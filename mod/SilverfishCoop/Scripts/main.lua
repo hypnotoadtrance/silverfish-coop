@@ -1847,6 +1847,7 @@ status_publication.guest_combat_actions = {
     ["native-guest-melee-input-start"] = native_guest_melee.local_reply,
     ["native-guest-melee-input-edge"] = native_guest_melee.local_reply,
     ["native-guest-melee-swing-start"] = native_guest_melee.local_reply,
+    ["native-guest-melee-contact"] = native_guest_melee.local_reply,
 }
 
 status_publication.pickup_actions = {

@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -543,7 +544,7 @@ namespace
         }
     };
 
-    bool selected_melee_item(U::UObject* save, U::UClass* weapon_class, const Guid& wanted, const Passives& passives)
+    bool selected_melee_item(U::UObject* save, U::UClass* weapon_class, const Guid& wanted, const Passives* passives)
     {
         auto* row = find<U::UScriptStruct>(row_path);
         auto* type = find<U::UScriptStruct>(STR("/Script/CoreUObject.Guid"));
@@ -562,7 +563,7 @@ namespace
         int matches = 0;
         const auto check_row = [&](const void* record, bool selected) {
             auto* item = klass->GetObjectPropertyValue(klass->ContainerPtrToValuePtr<void>(record));
-            if (!passives.gear(item)) return false;
+            if (passives && !passives->gear(item)) return false;
             Guid identity{};
             const auto* canary_guid = id->ContainerPtrToValuePtr<void>(record);
             for (std::size_t index = 0; index < words.size(); ++index)
@@ -631,7 +632,7 @@ namespace
         int presses{}, releases{}, contacts{}, qualified{};
         double host_health{}, guest_health{}, range{sweep_range};
         float radius{sweep_radius};
-        bool pending{}, settled{}, passive_free{};
+        bool pending{}, settled{}, passive_free{}, reports_npc{};
         SwingMode mode{SwingMode::surface_fixture};
         struct Input
         {
@@ -688,10 +689,23 @@ namespace
         std::string identity;
         std::string_view status{"awaiting_contact"};
         std::optional<TraceProof> trace;
-        std::optional<GuestMeleeContact> contact;
     };
 
     GuestContactProbe guest_contact_probe;
+    U::FWeakObjectPtr local_contact_pawn, local_contact_weapon;
+    std::string local_contact_guid;
+    std::int64_t local_contact_serial{};
+    struct LocalContact
+    {
+        U::FWeakObjectPtr pawn;
+        std::string guid;
+        std::int64_t serial;
+        Clock::time_point expires;
+        GuestMeleeContact result;
+    };
+    std::deque<LocalContact> local_contacts;
+    std::array<U::FWeakObjectPtr, 8> host_contact_pawns{};
+    std::size_t host_contact_cursor{};
     std::int64_t serial{};
     std::array callbacks{H::ERROR_ID, H::ERROR_ID, H::ERROR_ID};
 
@@ -1045,7 +1059,7 @@ namespace
         auto* weapon = current.pipe.Get();
         return weapon && passives.canonical(current.game.Get(), cache) && cache == current.cache &&
             passives.character(current.save.Get()) &&
-            selected_melee_item(current.save.Get(), weapon->GetClassPrivate(), current.guid, passives);
+            selected_melee_item(current.save.Get(), weapon->GetClassPrivate(), current.guid, &passives);
     }
 
     void tick()
@@ -1063,8 +1077,8 @@ namespace
             if (!harvest_input_contact()) return finish("mutation_unverified_guest_melee_contact_readback");
             if (!swing.input.held && idle(swing))
             {
-                swing.passive_free = passives_unchanged(swing);
-                finish(swing.passive_free ? "settled" : "mutation_unverified_guest_melee_passive_readback", swing.passive_free);
+                const bool settled = (swing.reports_npc && !swing.input.hits) || passives_unchanged(swing);
+                finish(settled ? "settled" : "mutation_unverified_guest_melee_passive_readback", settled);
             }
             return;
         }
@@ -1136,7 +1150,15 @@ namespace
         const bool ordinary = swing.mode == SwingMode::ordinary;
         auto* world = static_cast<U::UWorld*>(swing.world.Get());
         auto* enemy = swing.damage.target.Get();
-        if (!passives_unchanged(swing) || (!ordinary && (!qualified_enemy(enemy, world) ||
+        const bool same_passives = swing.passive_free && passives_unchanged(swing);
+        if (swing.reports_npc && !same_passives)
+        {
+            call.PreventOriginalFunctionCall();
+            ++swing.qualified;
+            swing.damage.fenced_miss = true;
+            return;
+        }
+        if (!same_passives || (!ordinary && (!qualified_enemy(enemy, world) ||
                 !nonlethal_health(enemy_health(enemy)) ||
                 health(swing.canonical.Get()) != swing.host_health || health(swing.save.Get()) != swing.guest_health)))
             return refuse("mutation_unverified_guest_melee_damage_scope");
@@ -1149,6 +1171,15 @@ namespace
         if (trace) swing.damage.contact_candidate = enemy;
         bool allowed = trace && (!ordinary || combat_target(enemy, world, true, swing.pawn.Get(),
                                                             &swing.damage.contact_status));
+        if (allowed && swing.reports_npc)
+        {
+            auto* npc = find<U::UClass>(npc_class);
+            if (npc && enemy->IsA(npc))
+            {
+                swing.damage.contact_status = "guest_reports_npc";
+                allowed = false;
+            }
+        }
         if (swing.fixture)
         {
             auto& staged = *swing.fixture;
@@ -1309,10 +1340,12 @@ namespace
     void sample_guest_contact(U::UObject* weapon, U::FFrame& frame)
     {
         auto& probe = guest_contact_probe;
-        auto* pawn = probe.pawn.Get();
-        if (!live(pawn) || probe.weapon.Get() != weapon || object(pawn, STR("EquipedItem")) != weapon ||
-            object(weapon, STR("User")) != pawn || object(weapon, STR("Player_Ref")) != pawn ||
-            probe.sequence >= (std::int64_t{1} << 53) - 1) return;
+        const bool local = local_contact_weapon.Get() == weapon && local_contact_serial < (std::int64_t{1} << 53) - 1;
+        const bool diagnostic = probe.weapon.Get() == weapon && probe.sequence < (std::int64_t{1} << 53) - 1;
+        if (!local && !diagnostic) return;
+        auto* pawn = local ? local_contact_pawn.Get() : probe.pawn.Get();
+        if (!live(pawn) || object(pawn, STR("EquipedItem")) != weapon ||
+            object(weapon, STR("User")) != pawn || object(weapon, STR("Player_Ref")) != pawn) return;
         auto* animation = object(weapon, STR("As Melee Wep Anim BP"));
         auto* graph = frame.PreviousFrame();
         auto* notify = graph ? graph->PreviousFrame() : nullptr;
@@ -1320,35 +1353,47 @@ namespace
             notify->Object() != animation || !notify->Node() ||
             notify->Node()->GetFName() != U::FName{STR("AnimNotify_Hit"), U::FNAME_Find} || !frame.Locals()) return;
 
-        ++probe.sequence;
-        probe.identity.clear();
-        probe.trace.reset();
-        probe.contact.reset();
+        if (diagnostic)
+        {
+            ++probe.sequence;
+            probe.identity.clear();
+            probe.trace.reset();
+        }
+        std::string_view status = "attack_row_unqualified";
         Swing attack;
         attack.mode = SwingMode::ordinary;
         attack.input.active = true;
         attack.pipe = weapon;
         attack.animation = animation;
         attack.contact = frame.Node();
-        if (!stock_attack(attack, frame.Locals()))
+        auto selected = stock_attack(attack, frame.Locals()) ?
+            stock_trace(weapon, pawn, nullptr, &status, nullptr, attack.range, attack.radius) : std::nullopt;
+        std::string identity;
+        std::optional<GuestMeleeContact> contact;
+        if (selected)
         {
-            probe.status = "attack_row_unqualified";
-            return;
+            auto* receiver = selected->first->GetOuterPrivate();
+            identity = silverfish::native_guest_item::shared_contact_identity(receiver);
+            if (identity.empty()) status = "contact_identity_unavailable";
+            auto* base = find<U::UClass>(npc_class);
+            if (local && !identity.empty() && base && receiver->IsA(base) && boolean(receiver, STR("Alive"), true))
+                contact = guest_stock_damage(pawn, weapon, frame, *selected, identity);
+            // The reflected component is only valid in this call.
+            selected->first = nullptr;
         }
-        probe.attack = attack.input.attack_row;
-        auto selected = stock_trace(weapon, pawn, nullptr, &probe.status, nullptr, attack.range, attack.radius);
-        if (!selected) return;
-        probe.identity = silverfish::native_guest_item::shared_contact_identity(selected->first->GetOuterPrivate());
-        if (probe.identity.empty())
+        if (local && contact)
         {
-            probe.status = "contact_identity_unavailable";
-            return;
+            if (local_contacts.size() == 32) local_contacts.pop_front();
+            local_contacts.push_back({pawn, local_contact_guid, ++local_contact_serial,
+                Clock::now() + attack_timeout, *contact});
         }
-        if (auto* receiver = selected->first->GetOuterPrivate(); field<U::FBoolProperty>(receiver, STR("Alive")))
-            probe.contact = guest_stock_damage(pawn, weapon, frame, *selected, probe.identity);
-        // The reflected component is only valid in this call.
-        selected->first = nullptr;
-        probe.trace = std::move(selected);
+        if (diagnostic)
+        {
+            probe.status = status;
+            probe.attack = attack.input.attack_row;
+            probe.identity = std::move(identity);
+            probe.trace = std::move(selected);
+        }
     }
 
     void observe_pre(Iteration& call, U::UObject* receiver, U::FFrame& frame, void* result)
@@ -1364,7 +1409,7 @@ namespace
             if (!call.OriginalFunctionCallPrevented())
             {
                 call.PreventOriginalFunctionCall();
-                if (receiver == guest_contact_probe.weapon.Get()) sample_guest_contact(receiver, frame);
+                sample_guest_contact(receiver, frame);
             }
             return;
         }
@@ -1620,8 +1665,9 @@ namespace
         constexpr bool ordinary = mode == SwingMode::ordinary;
         const auto argc = lua.get_stack_size();
         const bool fixture = ordinary && !input && argc == 4 && fixture_enabled() && lua.is_integer(4);
-        const bool tap = input && argc == 4 && lua.is_string(4);
-        if (!(ordinary ? enabled() : fixture_enabled()) || !U::IsInGameThreadRaw() || (argc != 3 && !fixture && !tap) ||
+        const bool input_options = input && (argc == 4 || argc == 5) && lua.is_string(4) &&
+            (argc == 4 || lua.is_string(5));
+        if (!(ordinary ? enabled() : fixture_enabled()) || !U::IsInGameThreadRaw() || (argc != 3 && !fixture && !input_options) ||
             !lua.is_integer(1) || !lua.is_integer(2) ||
             !lua.is_string(3)) return proof(lua, false, "native_guest_melee_arguments_unqualified");
         if (swing.pending || (swing.input.active && swing.status.starts_with("mutation_unverified_")) ||
@@ -1631,10 +1677,14 @@ namespace
         const auto save_address = lua.get_integer();
         const auto guid = lua.get_string();
         const auto target_address = fixture ? lua.get_integer() : 0;
-        if (tap && lua.get_string() != "tap") return proof(lua, false, "native_guest_melee_exact_edge_required");
+        const auto edge = input_options ? lua.get_string() : std::string_view{"press"};
+        const bool tap = edge == "tap";
+        if ((edge != "press" && !tap) || (argc == 5 && lua.get_string() != "reports-npc"))
+            return proof(lua, false, "native_guest_melee_exact_edge_required");
         Swing candidate;
         candidate.mode = mode;
         candidate.input.active = input;
+        candidate.reports_npc = input && argc == 5;
         if (pawn_address <= 0 || save_address <= 0 || !guid_from(guid, candidate.guid))
             return proof(lua, false, "native_guest_melee_arguments_unqualified");
         auto* pawn = pawn_at(pawn_address);
@@ -1703,8 +1753,10 @@ namespace
             return proof(lua, false, "native_guest_melee_stock_health_unqualified");
         Passives passives;
         candidate.passive_free = passives.canonical(game, candidate.cache) && passives.character(save) &&
-            selected_melee_item(save, pipe->GetClassPrivate(), candidate.guid, passives);
-        if (!candidate.passive_free) return proof(lua, false, "native_guest_melee_guid_or_passives_unqualified");
+            selected_melee_item(save, pipe->GetClassPrivate(), candidate.guid, &passives);
+        if (!candidate.passive_free &&
+            (!candidate.reports_npc || !selected_melee_item(save, pipe->GetClassPrivate(), candidate.guid, nullptr)))
+            return proof(lua, false, "native_guest_melee_guid_or_passives_unqualified");
         if constexpr (damage)
         {
             auto* enemy = ordinary ? nullptr : placed_enemy(world);
@@ -1761,6 +1813,11 @@ namespace
         candidate.status = "pending";
         candidate.pending = true;
         swing = std::move(candidate);
+        if constexpr (input)
+        {
+            if (std::ranges::none_of(host_contact_pawns, [pawn](const auto& prior) { return prior.Get() == pawn; }))
+                host_contact_pawns[host_contact_cursor++ % host_contact_pawns.size()] = pawn;
+        }
         headless_contact.reset();
         if constexpr (input)
         {
@@ -1868,10 +1925,8 @@ namespace
         return 13;
     }
 
-    int read_guest_melee_result(const Lua& lua)
+    int push_contact(const Lua& lua, const GuestMeleeContact& report)
     {
-        if (!U::IsInGameThreadRaw() || !guest_contact_probe.contact) return 0;
-        const auto& report = *guest_contact_probe.contact;
         lua.set_string(report.identity);
         lua.set_string(report.component);
         for (const auto& vector : {report.offset, report.direction})
@@ -1880,6 +1935,25 @@ namespace
         lua.set_integer(report.breach ? 1 : 0);
         for (double value : report.damage) lua.set_number(value);
         return 10 + static_cast<int>(report.damage.size());
+    }
+
+    int take_guest_melee_contact(const Lua& lua)
+    {
+        if (!U::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto address = lua.get_integer();
+        const auto now = Clock::now();
+        while (!local_contacts.empty())
+        {
+            auto pending = std::move(local_contacts.front());
+            local_contacts.pop_front();
+            auto* pawn = pending.pawn.Get();
+            if (!live(pawn) || reinterpret_cast<std::uintptr_t>(pawn) != static_cast<std::uintptr_t>(address) ||
+                now >= pending.expires) continue;
+            lua.set_integer(pending.serial);
+            lua.set_string(pending.guid);
+            return 2 + push_contact(lua, pending.result);
+        }
+        return 0;
     }
 
     bool copy_reported_melee_hit(U::UObject* target, const GuestMeleeContact& report,
@@ -1972,8 +2046,11 @@ namespace
         report.breach = breach == 1;
         for (auto& value : report.damage) if (!read(value, 100000.0)) return reply("reported_contact_damage");
 
-        auto* pawn = pawn_at(pawn_address);
-        if (!pawn) return reply("reported_contact_guest");
+        const auto bound = std::ranges::find_if(host_contact_pawns, [&](const auto& prior) {
+            return reinterpret_cast<std::uintptr_t>(prior.Get()) == static_cast<std::uintptr_t>(pawn_address);
+        });
+        auto* pawn = bound == host_contact_pawns.end() ? nullptr : bound->Get();
+        if (!live(pawn)) return reply("reported_contact_guest");
         auto* save = object(pawn, STR("Save"));
         auto* game = object(pawn, STR("As Game Instance FP"));
         auto* world = static_cast<U::AActor*>(pawn)->GetWorld();
@@ -2088,7 +2165,7 @@ bool silverfish::native_guest_melee::ordinary_weapon(RC::Unreal::UObject* weapon
         local_function(weapon, master, STR("Contact"), 1);
 }
 
-bool silverfish::native_guest_melee::present_local_input(U::UObject* pawn, U::UObject* weapon, bool down)
+bool silverfish::native_guest_melee::present_local_input(U::UObject* pawn, U::UObject* weapon, bool down, std::string_view guid)
 {
     if (!U::IsInGameThreadRaw() || !live(pawn) || !live(weapon) || object(weapon, STR("Player_Ref")) != pawn ||
         object(weapon, STR("User")) != pawn || object(pawn, STR("EquipedItem")) != weapon) return false;
@@ -2113,6 +2190,14 @@ bool silverfish::native_guest_melee::present_local_input(U::UObject* pawn, U::UO
     }
     else if (!known()) return false;
 
+    if (down)
+    {
+        Guid parsed{};
+        if (!guid_from(guid, parsed)) return false;
+        local_contact_pawn = pawn;
+        local_contact_weapon = weapon;
+        local_contact_guid = guid;
+    }
     Primary parameters{};
     held->SetPropertyValueInContainer(&parameters, down);
     weapon->ProcessEvent(primary, &parameters);
@@ -2126,12 +2211,12 @@ void silverfish::native_guest_melee::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishStartNativeGuestMeleeInput", start<SwingMode::ordinary, true>);
     lua.register_function("SilverfishApplyNativeGuestMeleeInputEdge", input_edge);
     lua.register_function("SilverfishReadNativeGuestMeleeInput", read_input);
+    lua.register_function("SilverfishTakeGuestMeleeContact", take_guest_melee_contact);
+    lua.register_function("SilverfishApplyGuestMeleeResult", apply_reported_melee);
     if (headless_contact_enabled())
     {
         lua.register_function("SilverfishArmGuestMeleeContactProbe", arm_guest_contact_probe);
         lua.register_function("SilverfishReadGuestMeleeContactProbe", read_guest_contact_probe);
-        lua.register_function("SilverfishReadGuestMeleeResult", read_guest_melee_result);
-        lua.register_function("SilverfishApplyGuestMeleeResult", apply_reported_melee);
         lua.register_function("SilverfishReadNativeGuestMeleeContactGeometry", [](const Lua& state) {
             if (!headless_contact || !headless_contact->origin || !headless_contact->direction) return 0;
             for (auto axis : *headless_contact->origin) state.set_number(axis);
@@ -2168,5 +2253,9 @@ void silverfish::native_guest_melee::uninstall_hooks()
     }
     swing = {};
     guest_contact_probe = {};
+    local_contact_pawn = U::FWeakObjectPtr{};
+    local_contact_weapon = U::FWeakObjectPtr{};
+    local_contacts.clear();
+    host_contact_pawns = {};
     fenced_pipes.clear();
 }
