@@ -4,7 +4,7 @@ Use the same ZIP on both PCs. These builds are for coordinated testing and bug r
 
 ## Latest test build
 
-[Download Silverfish-Coop-RC-cfa0ac0.zip](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/v20261128.065339.0-rc.gcfa0ac0/Silverfish-Coop-RC-cfa0ac0.zip) · [Silverfish Co-op RC · 2026-11-28 06:53 UTC · cfa0ac0](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/v20261128.065339.0-rc.gcfa0ac0)
+[Download Silverfish-Coop-RC-b6ddda5.zip](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/v20261128.071206.0-rc.gb6ddda5/Silverfish-Coop-RC-b6ddda5.zip) · [Silverfish Co-op RC · 2026-11-28 07:12 UTC · b6ddda5](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/v20261128.071206.0-rc.gb6ddda5)
 
 ## Download history
 
@@ -12,9 +12,8 @@ Candidates are listed by publication time, newest first. When older candidates a
 
 | Published (UTC) | Release notes | ZIP |
 | --- | --- | --- |
+| 2026-11-28 07:12:13 | [Silverfish Co-op RC · 2026-11-28 07:12 UTC · b6ddda5](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/v20261128.071206.0-rc.gb6ddda5) | [Download](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/v20261128.071206.0-rc.gb6ddda5/Silverfish-Coop-RC-b6ddda5.zip) |
 | 2026-11-28 06:53:46 | [Silverfish Co-op RC · 2026-11-28 06:53 UTC · cfa0ac0](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/v20261128.065339.0-rc.gcfa0ac0) | [Download](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/v20261128.065339.0-rc.gcfa0ac0/Silverfish-Coop-RC-cfa0ac0.zip) |
-| 2026-11-28 06:34:21 | [Silverfish Co-op RC · 2026-11-28 06:34 UTC · a5cf5ef](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/v20261128.063414.0-rc.ga5cf5ef) | [Download](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/v20261128.063414.0-rc.ga5cf5ef/Silverfish-Coop-RC-a5cf5ef.zip) |
-| 2026-11-28 06:09:12 | [Silverfish Co-op RC · 2026-11-28 06:09 UTC · 59d5500](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/v20261128.060905.0-rc.g59d5500) | [Download](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/v20261128.060905.0-rc.g59d5500/Silverfish-Coop-RC-59d5500.zip) |
 | 2026-11-27 06:58:48 | [Silverfish Co-op RC 2026-11-27 (8bf1ded)](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-8bf1ded) | [Download](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/rc-8bf1ded/Silverfish-Coop-RC-8bf1ded.zip) |
 | 2026-11-26 06:52:30 | [2026-11-26 RC 3429efb](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-3429efb) | [Download](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/rc-3429efb/Silverfish-Coop-RC-3429efb.zip) |
 | 2026-11-25 02:08:05 | [2026-11-25 Silverfish Co-op RC 161145a](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-161145a) | [Download](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/rc-161145a/Silverfish-Coop-RC-161145a.zip) |
